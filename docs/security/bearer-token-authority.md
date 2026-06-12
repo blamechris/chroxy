@@ -82,6 +82,24 @@ Two host-level mutations are gated against bound tokens even though they arrive 
 
 Both gates branch on `client.boundSessionId` and reject via `sendError` (a generic `error` message) — the canonical pattern for "this operation requires host-level authority" on the WS path. New credential-touching or config-mutating handlers should follow it (see §9).
 
+### HTTP endpoints a bound token must NOT reach (`_validatePrimaryBearerAuth`, #5533)
+
+The WS path distinguishes a bound token via `client.boundSessionId`. HTTP requests are stateless, so the equivalent gate is **`_validatePrimaryBearerAuth(req, res)`** ([`ws-server.js`](../../packages/server/src/ws-server.js)): it accepts a token only if it validates **and** is NOT a `PairingManager`-issued session token, rejecting bound tokens with `403 { "error": "primary_token_required" }`. This is the HTTP analog of the WS host-authority gate — `403` (not `401`) because the token IS valid, just an insufficient class.
+
+The following HTTP routes ([`http-routes.js`](../../packages/server/src/http-routes.js)) are gated on the primary token class. Each one either **mints/exposes live pairing material** (a bound device could otherwise transitively onboard further peers — "pairing-bound tokens can transitively mint peers") or **discloses the primary token itself**:
+
+| Route | Why primary-only |
+|---|---|
+| `GET /qr` | Returns the linking-mode QR encoding a live pairing URL; scanning it onboards a new peer. |
+| `GET /qr/session/:sessionId` | MINTS a fresh **bound** pairing id (`generateBoundPairing`) — the share-a-session QR. |
+| `GET /pairing-code` | Returns the current typeable linking code (#5512) and extends its grace window. |
+| `GET /connect` | Returns `connection.json`, which carries the **raw primary `apiToken`** and a `connectionUrl` embedding it whenever auth is required. A bound token reaching this escalates straight to the primary token. The body's redaction branch only fires when auth is *disabled*, so it is NOT the boundary. |
+| `POST /pair-discord` | Mints a fresh approval-gated pairing id and posts its `chroxy://` link to Discord (#5513) — gated from day one. |
+
+All five are exercised only by the daemon's **own dashboard** (`getAuthToken()` → the host's primary token via `?token=`/cookie) or the local **CLI** (`chroxy pair-code` → `connection.json` apiToken). The desktop LAN client's "Have a code?" flow (#5512) does NOT fetch these over HTTP — it takes a code typed off the host's screen and drives the WebSocket `pair` handshake directly, so no legitimate caller relies on a pairing-bound token reaching these endpoints.
+
+The remaining bearer-gated HTTP routes (`/version`, `/metrics`, `/diagnostics`, `/api/snapshots*`, `/api/pool/stats`) are read-only operational telemetry that exposes no pairing or credential material, so they stay on `_validateBearerAuth` (any valid token).
+
 ## 5. Per-Session Hook Secrets
 
 Each `CliSession` mints a 32-byte hex secret in its constructor ([`cli-session.js`](../../packages/server/src/cli-session.js) ~line 193) and exports it to the spawned `claude` CLI subprocess as `CHROXY_HOOK_SECRET`. The CLI uses it on outbound `POST /permission` callbacks.
@@ -131,6 +149,7 @@ Each step here tightened a real bug. Read the PRs in order if extending any of t
 - **#4798** — unified `SESSION_TOKEN_MISMATCH` payload across WS and HTTP error surfaces
 - **#4820** — P0 fix for cross-session `permission_response` hijack on the WS path; the review of that PR is what motivated this doc (issue #4830)
 - **#5155** — gated provider-credential WRITES (set/delete/clear, both the #3855 generalized and #4052 BYOK paths) behind host-level authority; bound tokens can read masked status but not overwrite or clear keys
+- **#5533** — scoped the pairing-material / token-disclosing HTTP routes (`/qr`, `/qr/session/:id`, `/pairing-code`, `/connect`; `/pair-discord` was primary-only from day one) to the primary token class via `_validatePrimaryBearerAuth`, closing the transitive peer-minting path (a once-paired device could read the live QR/code) and the `/connect` primary-token disclosure
 
 ## 9. Adding a New Endpoint or Message Type — Checklist
 
@@ -138,7 +157,7 @@ Before merging any PR that adds a new HTTP route or WebSocket message handler th
 
 1. **Decide which token classes you accept.** Most HTTP endpoints accept the primary token only. `/permission` accepts hook secrets. `/api/events` accepts the daemon-level ingest secret only (never the primary token). WS handlers accept primary + pairing-bound.
 2. **If the operation is session-scoped**, branch on `client.boundSessionId` (WS) or call the equivalent of `pairingManager.getSessionIdForToken(token)` (HTTP) and reject mismatches with 403 + `buildSessionTokenMismatchPayload()`.
-3. **If the operation is global** (e.g. listing all sessions, changing config), explicitly reject bound tokens — do not let them silently see everything.
+3. **If the operation is global** (e.g. listing all sessions, changing config) or **mints/exposes pairing material or the primary token**, explicitly reject bound tokens — do not let them silently see everything. On HTTP, use **`_validatePrimaryBearerAuth(req, res)`** (403 + `primary_token_required`); see §4's HTTP table. `_validateBearerAuth` accepts ANY valid token, including pairing-bound ones, so it is only for read-only operational routes that leak no pairing/credential material.
 4. **Never log raw tokens.** `maskToken()` exists for a reason.
 5. **Use `safeTokenCompare()`** for any byte-equality check against a token.
 
