@@ -173,6 +173,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
   const dictationStartRef = useRef(0)
+  // #5610 — text that sat *after* the dictation anchor when capture began.
+  // The transcript is spliced between the prefix and this suffix so caret-
+  // anchored dictation (push-to-talk mid-draft) doesn't truncate everything
+  // past the caret. For the mic button the anchor is the end of the value, so
+  // the suffix is empty and behaviour is unchanged.
+  const dictationSuffixRef = useRef('')
   // #5610 — push-to-talk (hold Space). `pttStateRef` tracks arming/recording
   // so repeated keydown events (browser key-repeat while Space is held) don't
   // re-arm or restart the timer. `pttTimerRef` holds the pending hold timer
@@ -507,7 +513,11 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     // the dictation anchor, and start the hold timer.
     e.preventDefault()
     const el = textareaRef.current
-    dictationStartRef.current = el?.selectionStart ?? value.length
+    const anchor = el?.selectionStart ?? value.length
+    dictationStartRef.current = anchor
+    // Capture the text after the caret so the transcript splices in place when
+    // recording starts (rather than truncating the rest of the draft).
+    dictationSuffixRef.current = value.slice(el?.selectionEnd ?? anchor)
     pttStateRef.current = 'arming'
     clearPttTimer()
     pttTimerRef.current = setTimeout(() => {
@@ -519,7 +529,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       }
     }, PTT_HOLD_MS)
     return true
-  }, [voiceInput, disabled, value.length, clearPttTimer])
+  }, [voiceInput, disabled, value, clearPttTimer])
 
   // Cancel an in-progress arm because the user pressed some *other* key — they
   // were typing, not holding to talk. Re-inserts the space we suppressed so no
@@ -829,7 +839,11 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       prevTranscriptRef.current = voiceInput.transcript
       const prefix = value.slice(0, dictationStartRef.current)
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : ''
-      setValue(prefix + separator + voiceInput.transcript)
+      // #5610 — preserve any text that followed the anchor so caret-anchored
+      // dictation splices in place instead of truncating the rest of the draft.
+      const suffix = dictationSuffixRef.current
+      const trailing = suffix.length > 0 && !suffix.startsWith(' ') ? ' ' : ''
+      setValue(prefix + separator + voiceInput.transcript + trailing + suffix)
     }
     if (!voiceInput?.isRecording && prevTranscriptRef.current) {
       prevTranscriptRef.current = ''
@@ -842,6 +856,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       voiceInput.stop()
     } else {
       dictationStartRef.current = value.length
+      dictationSuffixRef.current = ''
       voiceInput.start()
     }
   }, [voiceInput, value.length])

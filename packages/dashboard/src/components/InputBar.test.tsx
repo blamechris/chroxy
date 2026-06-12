@@ -2558,8 +2558,9 @@ describe('InputBar push-to-talk (#5610)', () => {
       />,
     )
 
-    // The transcript is spliced at the anchor (index 3), not appended at the end.
-    expect(captured).toBe('foo hello world')
+    // The transcript is spliced *in place* at the anchor (index 3): the prefix
+    // "foo" and the suffix "bar" both survive, with the transcript in between.
+    expect(captured).toBe('foo hello world bar')
   })
 
   it('cleans up the open mic when the input loses focus mid-recording', () => {
