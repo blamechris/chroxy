@@ -196,6 +196,11 @@ export function setStore(store: StoreApi): void {
   _store = store;
 }
 
+/** @internal Exposed for testing only — resets the store reference to null. */
+export function _testResetStore(): void {
+  _store = null;
+}
+
 function getStore(): StoreApi {
   if (!_store) throw new Error('Store not initialized — call setStore() first');
   return _store;
@@ -407,6 +412,10 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
  * return a status on the closed path read the boolean.
  */
 export function sendIfOpen(payload: Record<string, unknown>): boolean {
+  // Treat an uninitialized store the same as "socket not open": the store
+  // hasn't been wired yet (file-operations.ts imports this directly, so it
+  // can be called before setStore() runs).  Return false — no send, no throw.
+  if (!_store) return false;
   const socket = getStore().getState().socket;
   if (socket && socket.readyState === WebSocket.OPEN) {
     wsSend(socket, payload);
