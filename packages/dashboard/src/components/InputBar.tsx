@@ -573,6 +573,14 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     }
   }, [clearPttTimer, voiceInput])
 
+  // #5610 — keep the live `stop` in a ref so the unmount cleanup below (which
+  // runs only on true unmount, hence the empty deps) doesn't fire a stale
+  // closure. `useVoiceInput` re-memoises start/stop when the engine is selected
+  // after mount, so a cleanup pinned to the first render would otherwise call
+  // the engine==='none' no-op stop and leave the mic open.
+  const voiceStopRef = useRef<(() => void) | undefined>(undefined)
+  voiceStopRef.current = voiceInput?.stop
+
   // Unmount cleanup — never leave a timer or an open mic behind.
   useEffect(() => {
     return () => {
@@ -581,7 +589,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         pttTimerRef.current = null
       }
       if (pttStateRef.current === 'recording') {
-        voiceInput?.stop()
+        voiceStopRef.current?.()
       }
       pttStateRef.current = 'idle'
     }

@@ -2577,6 +2577,45 @@ describe('InputBar push-to-talk (#5610)', () => {
     expect(voice.stop).toHaveBeenCalledTimes(1)
   })
 
+  it('stops the mic on unmount mid-recording using the latest stop (not a stale closure)', () => {
+    vi.useFakeTimers()
+    // The engine — and therefore the memoised stop — is selected after mount,
+    // so the unmount cleanup must call the *current* stop, not the one captured
+    // on the first render. Re-render with a fresh stop before unmounting and
+    // assert that one is invoked.
+    const firstStop = vi.fn()
+    const start = vi.fn()
+    const { rerender, unmount } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', start, stop: firstStop }}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    // Engine selected → a new memoised stop replaces the original.
+    const latestStop = vi.fn()
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: true, isAvailable: true, transcript: '', start, stop: latestStop }}
+      />,
+    )
+
+    unmount()
+    expect(firstStop).not.toHaveBeenCalled()
+    expect(latestStop).toHaveBeenCalledTimes(1)
+  })
+
   it('does not arm PTT when voice is unavailable (Space types normally)', () => {
     vi.useFakeTimers()
     const voice = makeVoice({ isAvailable: false })
