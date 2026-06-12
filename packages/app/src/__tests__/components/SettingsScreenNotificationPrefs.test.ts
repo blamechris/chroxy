@@ -154,27 +154,32 @@ describe('connection.ts — notification prefs actions (#4542)', () => {
   });
 });
 
-describe('message-handler.ts — notification_prefs WS message (#4542)', () => {
-  it('imports ServerNotificationPrefsSchema from @chroxy/protocol/schemas', () => {
-    expect(messageHandlerSource).toMatch(/import\s*\{\s*ServerNotificationPrefsSchema\s*\}\s*from\s*'@chroxy\/protocol\/schemas'/);
+describe('message-handler.ts — notification_prefs WS message (#4542 / #5556 slice 2)', () => {
+  // #5556 slice 2: the app's previously-inline notification_prefs case was a
+  // byte-identical copy of store-core's `handleNotificationPrefs` (same
+  // ServerNotificationPrefsSchema parse + #4544 bypassCategories spread). It
+  // now routes through the shared dispatch table like the dashboard, killing
+  // the C1 drift the epic exists to remove. The parse/bypassCategories/
+  // invalid-payload behaviour is pinned by store-core/src/dispatch-table.test.ts;
+  // here we assert the app no longer carries the divergent inline copy.
+  it('no longer hand-imports ServerNotificationPrefsSchema (parse moved to store-core)', () => {
+    expect(messageHandlerSource).not.toMatch(/import\s*\{\s*ServerNotificationPrefsSchema\s*\}\s*from\s*'@chroxy\/protocol\/schemas'/);
   });
 
-  it('handles the notification_prefs case and stores the parsed snapshot', () => {
-    expect(messageHandlerSource).toMatch(/case 'notification_prefs'[\s\S]{0,1500}ServerNotificationPrefsSchema\.safeParse[\s\S]{0,800}notificationPrefs:/);
+  it('no longer has an inline notification_prefs switch case', () => {
+    // Reject any reintroduced `case 'notification_prefs':` regardless of
+    // whether it opens a block on the same line (this file mixes braced and
+    // unbraced switch-case styles, so an unbraced reintroduction must also
+    // fail). The migration marker comment doesn't contain the quoted
+    // `case '...'` form, so it can't trigger a false positive.
+    expect(messageHandlerSource).not.toMatch(/case 'notification_prefs'\s*:/);
   });
 
-  it('logs and skips when the payload fails schema validation', () => {
-    expect(messageHandlerSource).toMatch(
-      /case 'notification_prefs'[\s\S]{0,600}!parsed\.success[\s\S]{0,200}console\.warn\(\s*'notification_prefs:/,
-    );
-  });
-
-  // #4544: the wire snapshot now carries an optional bypassCategories
-  // array. The handler must forward it when present so the UI sees the
-  // current gate state; absent means "use documented defaults".
-  it('forwards bypassCategories from the parsed snapshot when present (#4544)', () => {
-    expect(messageHandlerSource).toMatch(/bypassCategories\s*=\s*\(prefs\s*as[\s\S]{0,150}\.bypassCategories/);
-    expect(messageHandlerSource).toMatch(/Array\.isArray\(bypassCategories\)/);
+  it('routes notification_prefs through the shared dispatch table', () => {
+    // The shared table runs before the switch (runDispatch); a hit returns
+    // early. The marker comment records the migration at the old case site.
+    expect(messageHandlerSource).toMatch(/runDispatch\(_dispatchTable/);
+    expect(messageHandlerSource).toMatch(/notification_prefs.*migrated to the shared dispatch table/);
   });
 });
 

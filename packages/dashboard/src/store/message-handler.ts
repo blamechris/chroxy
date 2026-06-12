@@ -26,14 +26,12 @@ import {
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
-  handlePlanStarted as sharedPlanStarted,
+  // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
+  // migrated to the shared dispatch table (#5556 slice 2)
   handlePlanReady as sharedPlanReady,
-  handleInactivityWarning as sharedInactivityWarning,
   // #4653: chroxy-side multi-question deny intervention surfaced to the user
   handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
   applyInterventionBuilder,
-  handleDevPreview as sharedDevPreview,
-  handleDevPreviewStopped as sharedDevPreviewStopped,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
   handleToolInputDelta as sharedToolInputDelta,
@@ -76,8 +74,8 @@ import {
   handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
-  handleSessionCostThresholdCrossed as sharedSessionCostThresholdCrossed,
-  handleNotificationPrefs as sharedNotificationPrefs,
+  // session_cost_threshold_crossed / notification_prefs migrated to the shared
+  // dispatch table (#5556 slice 2)
   // #5454 — pure core of the #554 stream-split block (permission_request)
   resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
@@ -97,27 +95,21 @@ import {
   handleFileList as sharedFileList,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
-  handleAgentSpawned as sharedAgentSpawned,
-  handleAgentCompleted as sharedAgentCompleted,
-  // #5016 — Task subagent nested progress (one wire event per child
-  // `tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`,
-  // attached to the parent Task tool_use bubble's `childAgentEvents[]`).
-  handleAgentEvent as sharedAgentEvent,
-  handleBackgroundWorkChanged as sharedBackgroundWorkChanged,
+  // agent_spawned / agent_completed / agent_event / background_work_changed
+  // migrated to the shared dispatch table (#5556 slice 2)
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
   handleAvailableModels as sharedAvailableModels,
-  handleMcpServers as sharedMcpServers,
+  // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
   handleCostUpdate as sharedCostUpdate,
-  handleSessionUsage as sharedSessionUsage,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   handleWebTaskUpsert as sharedWebTaskUpsert,
   handleWebTaskError as sharedWebTaskError,
-  handleWebTaskList as sharedWebTaskList,
-  handleWebFeatureStatus as sharedWebFeatureStatus,
+  // web_task_list / web_feature_status migrated to the shared dispatch table
+  // (#5556 slice 2)
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
@@ -172,7 +164,6 @@ import type {
   EnvironmentInfo,
   EvaluatorRewriteMeta,
   FileEntry,
-  McpServer,
   PendingCommunitySkill,
   PendingEvaluatorClarify,
   QueuedMessage,
@@ -182,7 +173,6 @@ import type {
   SlashCommand,
   FilePickerItem,
   ProviderInfo,
-  WebTask,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -1001,14 +991,8 @@ function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set
   set(state => ({ pairingRefreshedCount: (state.pairingRefreshedCount ?? 0) + 1 }));
 }
 
-function handleWebFeatureStatus(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  set(sharedWebFeatureStatus(msg));
-}
-
-function handleWebTaskList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const { tasks } = sharedWebTaskList(msg);
-  set({ webTasks: tasks as WebTask[] });
-}
+// web_feature_status + web_task_list migrated to the shared dispatch table
+// (#5556 slice 2)
 
 function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   // Parser shared via store-core (#5454); the dashboard intentionally has no
@@ -2323,8 +2307,8 @@ const HANDLERS: Record<string, Handler> = {
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
   checkpoint_restored: handleCheckpointRestored,
-  web_feature_status: handleWebFeatureStatus,
-  web_task_list: handleWebTaskList,
+  // web_feature_status / web_task_list migrated to the shared dispatch table
+  // (#5556 slice 2)
   conversations_list: handleConversationsList,
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
@@ -3373,68 +3357,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 
 
-    case 'agent_spawned': {
-      const builder = sharedAgentSpawned(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.activeAgents);
-          return next === ss.activeAgents ? {} : { activeAgents: next };
-        });
-      }
-      break;
-    }
-
-    case 'agent_completed': {
-      const builder = sharedAgentCompleted(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.activeAgents);
-          return next === ss.activeAgents ? {} : { activeAgents: next };
-        });
-      }
-      break;
-    }
-
-    case 'agent_event': {
-      // #5016 — Task subagent intermediate progress. Builder appends one
-      // entry to the parent Task tool_use bubble's `childAgentEvents[]`.
-      // Same-reference no-op when the parent bubble isn't found (event
-      // arrived before tool_start, which should not happen given the
-      // server's ordering guarantee but is defended).
-      const builder = sharedAgentEvent(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.messages);
-          return next === ss.messages ? {} : { messages: next };
-        });
-      }
-      break;
-    }
-
-    case 'background_work_changed': {
-      // #4307 — pending-background-shells snapshot updated for a
-      // session. Full-snapshot protocol, so the builder replaces the
-      // slot wholesale; the shared handler returns the same reference
-      // when next == current to suppress no-op renders.
-      const builder = sharedBackgroundWorkChanged(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.pendingBackgroundShells);
-          return next === ss.pendingBackgroundShells
-            ? {}
-            : { pendingBackgroundShells: next };
-        });
-      }
-      break;
-    }
-
-    case 'plan_started': {
-      const planStarted = sharedPlanStarted(msg, get().activeSessionId);
-      if (planStarted.sessionId && get().sessionStates[planStarted.sessionId]) {
-        updateSession(planStarted.sessionId, () => planStarted.patch);
-      }
-      break;
-    }
+    // agent_spawned / agent_completed / agent_event / background_work_changed /
+    // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'plan_ready': {
       const planReady = sharedPlanReady(msg, get().activeSessionId);
@@ -3444,18 +3368,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'inactivity_warning': {
-      // #3899 — server fired the soft check-in prompt. Store on the
-      // targeted session so the CheckInChip can render the prefab
-      // button. Activity event handler above clears this on the next
-      // stream_*/tool_*/result/message; sendInput clears it locally
-      // when the user actually sends a follow-up.
-      const warning = sharedInactivityWarning(msg, get().activeSessionId);
-      if (warning && warning.sessionId && get().sessionStates[warning.sessionId]) {
-        updateSession(warning.sessionId, () => warning.patch);
-      }
-      break;
-    }
+    // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'multi_question_intervention': {
       // #4653 — chroxy's permission-hook (#4648) just denied a multi-question
@@ -3957,23 +3870,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'notification_prefs': {
-      // #4542: notification-prefs snapshot. Emitted in response to
-      // `notification_prefs_get` and broadcast after every
-      // `notification_prefs_set`. The wire schema is permissive
-      // (z.record(string, boolean) for categories) — adding a category
-      // server-side does not require a client rebuild. Zod validation +
-      // #4544 bypassCategories handling are shared via store-core (#5454);
-      // a failed parse logs and leaves existing state alone, as before.
-      const { notificationPrefs, issues } = sharedNotificationPrefs(msg);
-      if (!notificationPrefs) {
-        // eslint-disable-next-line no-console
-        console.warn('notification_prefs: invalid payload from server', issues);
-        break;
-      }
-      set({ notificationPrefs });
-      break;
-    }
+    // notification_prefs — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'checkpoint_created': {
       const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
@@ -4008,15 +3905,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'mcp_servers': {
-      const result = sharedMcpServers(msg, get().activeSessionId);
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => ({
-          mcpServers: result.patch.mcpServers as McpServer[],
-        }));
-      }
-      break;
-    }
+    // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'cost_update': {
       const result = sharedCostUpdate(msg, get().activeSessionId);
@@ -4026,47 +3915,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_usage': {
-      // #4073: per-session cumulative tokens + cost. Drives the sidebar
-      // badge + hover breakdown. Emitted after every result event.
-      const result = sharedSessionUsage(msg, get().activeSessionId);
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => result.patch);
-      }
-      break;
-    }
-
-    case 'session_cost_threshold_crossed': {
-      // #4075: soft "you've spent $X" warning. Fires ONCE per session.
-      // The dashboard owns the dismissible banner state per-session; the
-      // server doesn't re-fire even if costs continue rising, so a
-      // missed banner stays missed (don't store-and-replay). Parse shared
-      // via store-core (#5454) — explicit sessionId only, no fallback.
-      const { sessionId: thresholdSid, patch: thresholdPatch } =
-        sharedSessionCostThresholdCrossed(msg);
-      if (thresholdSid && get().sessionStates[thresholdSid]) {
-        updateSession(thresholdSid, () => thresholdPatch);
-      }
-      break;
-    }
-
-    case 'dev_preview': {
-      const builder = sharedDevPreview(msg, get().activeSessionId);
-      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
-      if (builder.sessionId && target) {
-        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
-      }
-      break;
-    }
-
-    case 'dev_preview_stopped': {
-      const builder = sharedDevPreviewStopped(msg, get().activeSessionId);
-      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
-      if (builder.sessionId && target) {
-        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
-      }
-      break;
-    }
+    // session_usage / session_cost_threshold_crossed / dev_preview /
+    // dev_preview_stopped — migrated to the shared dispatch table (#5556 slice 2)
 
     // -- Web tasks (Claude Code Web) --
 
