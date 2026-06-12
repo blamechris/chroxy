@@ -8,10 +8,19 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const settingsSource = fs.readFileSync(
-  path.resolve(__dirname, '../../screens/SettingsScreen.tsx'),
-  'utf-8',
-);
+// #5655: the notification-prefs / quiet-hours / per-device UI was extracted
+// from SettingsScreen.tsx into `src/components/settings/*`. These static-
+// source tests assert against the rendered JSX + constants, so we read the
+// screen plus every extracted settings component and search the combined
+// string. Every prior assertion keeps matching without per-line edits.
+const settingsDir = path.resolve(__dirname, '../../components/settings');
+const settingsSource = [
+  fs.readFileSync(path.resolve(__dirname, '../../screens/SettingsScreen.tsx'), 'utf-8'),
+  ...fs
+    .readdirSync(settingsDir)
+    .filter((f) => f.endsWith('.ts') || f.endsWith('.tsx'))
+    .map((f) => fs.readFileSync(path.resolve(settingsDir, f), 'utf-8')),
+].join('\n');
 
 const typesSource = fs.readFileSync(
   path.resolve(__dirname, '../../store/types.ts'),

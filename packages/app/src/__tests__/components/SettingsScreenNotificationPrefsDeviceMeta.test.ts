@@ -18,10 +18,20 @@
 import * as fs from 'fs';
 import * as path from 'path';
 
-const settingsSource = fs.readFileSync(
-  path.resolve(__dirname, '../../screens/SettingsScreen.tsx'),
-  'utf-8',
-);
+// #5655: the per-device list (KnownDevicesList) was extracted from
+// SettingsScreen.tsx into `src/components/settings/*`. Read the screen plus
+// every extracted settings component so the static-source assertions keep
+// matching. The "no local formatPlatform/formatRelativeTime copy" regression
+// guards (#4591) still hold — neither helper is redeclared in any of these
+// files; both surfaces import from @chroxy/store-core.
+const settingsDir = path.resolve(__dirname, '../../components/settings');
+const settingsSource = [
+  fs.readFileSync(path.resolve(__dirname, '../../screens/SettingsScreen.tsx'), 'utf-8'),
+  ...fs
+    .readdirSync(settingsDir)
+    .filter((f) => f.endsWith('.ts') || f.endsWith('.tsx'))
+    .map((f) => fs.readFileSync(path.resolve(settingsDir, f), 'utf-8')),
+].join('\n');
 
 describe('SettingsScreen — per-device meta surface (#4587)', () => {
   it('declares the optional lastSeenAt + platform fields on the KnownDevicesList devices prop', () => {
