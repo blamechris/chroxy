@@ -105,6 +105,7 @@ import {
   setDisconnectedAttemptId,
   lastConnectedUrl,
   setLastConnectedUrl,
+  nextReconnectAttempt,
   pendingPairingId,
   setPendingPairingId,
   setPendingSwitchSessionId,
@@ -174,10 +175,10 @@ import {
 
 const STORAGE_KEY_INPUT_SETTINGS = 'chroxy_input_settings';
 
-/** Delay before auto-reconnecting after an unexpected socket close (ms) */
-const AUTO_RECONNECT_DELAY = 1500;
-/** Delay before reconnecting after a WebSocket error (ms) */
-const ERROR_RECONNECT_DELAY = 2000;
+// #5555.5 — the close/error-path reconnect delay is no longer a fixed
+// constant. Both handlers now climb the RETRY_DELAYS ladder (defined in
+// connect()) via the module-level reconnectAttempt counter, which resets on
+// `auth_ok`. See scheduleReconnect() below.
 
 // #4771: getWsCloseMessage and getHealthCheckErrorMessage are now
 // defined in `packages/store-core/src/ws-errors.ts` and exported from
@@ -923,22 +924,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // #3624 (ported from dashboard) — shared reconnect scheduler for both
     // onclose and onerror. A single transport drop fires `error` → `close` on
     // most WebSocket implementations, so without dedupe we'd queue two
-    // setTimeouts for one underlying failure. Previously mobile only avoided the
-    // double-reconnect by accident: the staggered AUTO_RECONNECT_DELAY (1500ms)
-    // vs ERROR_RECONNECT_DELAY (2000ms) delays plus the connectionAttemptId
-    // bump on the first-firing timer cancelled the second — timing-dependent,
-    // not a design guarantee.
+    // setTimeouts for one underlying failure.
     //
     // A per-socket flag (not phase-only dedupe) is correct here: each new socket
     // gets a fresh scheduler with `reconnectScheduled = false`, so a *new*
     // socket's failure mid-reconnect (when the global phase is already
     // 'reconnecting') can still arm its own retry timer. The flag is bounded to
-    // this socket's lifetime. Delay semantics are preserved by passing each
-    // handler's original delay; first-write-wins on the reconnecting phase.
+    // this socket's lifetime; first-write-wins on the reconnecting phase.
+    //
+    // #5555.5 — the close/error path no longer uses a FIXED delay (was
+    // 1.5s/2s). A flapping tunnel would hammer the full handshake at that
+    // fixed cadence. Instead we climb the same RETRY_DELAYS ladder used by the
+    // pre-WS health-check retries: each scheduled reconnect advances one rung
+    // (1s → 2s → 3s → 5s → 8s, capped). The ladder is module-level and only
+    // resets on `auth_ok` (proof the link is healthy), so a socket that opens
+    // but never authenticates keeps backing off. The per-socket dedupe means a
+    // paired error → close drop advances the ladder exactly once.
     let reconnectScheduled = false;
-    const scheduleReconnect = (delayMs: number): void => {
+    const scheduleReconnect = (): void => {
       if (reconnectScheduled) return;
       reconnectScheduled = true;
+      const rung = nextReconnectAttempt();
+      const delayMs = withJitter(RETRY_DELAYS[Math.min(rung, RETRY_DELAYS.length - 1)]);
       setTimeout(() => {
         if (myAttemptId !== connectionAttemptId) return;
         get().connect(url, token);
@@ -1059,8 +1066,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           useConnectionLifecycleStore.getState().setConnectionError(closeMsg, 0);
         }
         // #3624 — dedup via the per-socket guard so a paired error → close
-        // sequence arms exactly one retry. Preserves the AUTO_RECONNECT_DELAY.
-        scheduleReconnect(AUTO_RECONNECT_DELAY);
+        // sequence arms exactly one retry. #5555.5 — delay comes from the
+        // RETRY_DELAYS ladder, not a fixed constant.
+        scheduleReconnect();
       } else {
         // Connection dropped before it ever reached "connected" state. Previously
         // we silently marked as disconnected, swallowing the real close reason
@@ -1102,7 +1110,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
           useConnectionLifecycleStore.getState().setConnectionError(errorMsg, 0);
         }
-        scheduleReconnect(ERROR_RECONNECT_DELAY);
+        scheduleReconnect();
       }
     };
     } // end _connectWebSocket
