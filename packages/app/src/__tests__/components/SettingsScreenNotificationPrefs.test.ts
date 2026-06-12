@@ -298,8 +298,14 @@ describe('connection.ts — notification-prefs WS-closed return values (#4559)',
   });
 
   it('refreshNotificationPrefs returns true on send and false on closed socket', () => {
+    // #5652: refreshNotificationPrefs now routes through the canonical
+    // `sendIfOpen` helper, which returns `true` when the frame was sent
+    // (socket open) and `false` on the closed-socket no-op — the same
+    // boolean contract the inline `return true`/`return false` guard
+    // encoded pre-#5652. SettingsScreen still drives its inline
+    // "server disconnected" banner off this boolean.
     expect(connectionSource).toMatch(
-      /refreshNotificationPrefs[\s\S]{0,400}wsSend\(socket,[\s\S]{0,150}notification_prefs_get[\s\S]{0,80}return true[\s\S]{0,80}return false/,
+      /refreshNotificationPrefs[\s\S]{0,200}return sendIfOpen\(\{[\s\S]{0,80}notification_prefs_get/,
     );
   });
 

@@ -9,7 +9,7 @@
  */
 import { create } from 'zustand';
 import { setCallback } from './imperative-callbacks';
-import { wsSend } from './message-handler';
+import { sendIfOpen } from './message-handler';
 import type {
   DirectoryListing,
   FileListing,
@@ -21,19 +21,6 @@ import type {
   GitStageResult,
   GitCommitResult,
 } from './types';
-
-// Lazy import to avoid circular dependency — connection.ts imports from message-handler.ts
-// which this module also imports from. We break the cycle by deferring the import.
-let _getSocket: (() => WebSocket | null) | null = null;
-
-function getSocket(): WebSocket | null {
-  if (!_getSocket) {
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    const { useConnectionStore } = require('./connection');
-    _getSocket = () => useConnectionStore.getState().socket;
-  }
-  return _getSocket();
-}
 
 interface FileOperationsActions {
   // Callback setters
@@ -58,13 +45,6 @@ interface FileOperationsActions {
   requestGitStage: (paths: string[]) => void;
   requestGitUnstage: (paths: string[]) => void;
   requestGitCommit: (message: string) => void;
-}
-
-function sendIfOpen(payload: Record<string, unknown>): void {
-  const socket = getSocket();
-  if (socket && socket.readyState === WebSocket.OPEN) {
-    wsSend(socket, payload);
-  }
 }
 
 export const useFileOperationsStore = create<FileOperationsActions>(() => ({

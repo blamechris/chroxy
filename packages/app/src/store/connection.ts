@@ -91,6 +91,7 @@ import { selectConnectEndpoint, deriveTunnelUrl, isLanWsUrl } from '../utils/end
 import {
   setStore,
   wsSend,
+  sendIfOpen,
   sendClientVisible,
   handleMessage,
   setConnectionContext,
@@ -499,10 +500,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   terminalRawBuffer: '',
 
   closeDevPreview: (port: number) => {
-    const { socket, activeSessionId } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'close_dev_preview', port, sessionId: activeSessionId });
-    }
+    const { activeSessionId } = get();
+    sendIfOpen({ type: 'close_dev_preview', port, sessionId: activeSessionId });
   },
 
   // Web tasks (Claude Code Web)
@@ -510,28 +509,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   webTasks: [],
 
   launchWebTask: (prompt: string, cwd?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'launch_web_task', prompt };
-      if (cwd) payload.cwd = cwd;
-      wsSend(socket, payload);
-      return 'sent';
-    }
-    return false;
+    const payload: Record<string, unknown> = { type: 'launch_web_task', prompt };
+    if (cwd) payload.cwd = cwd;
+    return sendIfOpen(payload) ? 'sent' : false;
   },
 
   listWebTasks: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'list_web_tasks' });
-    }
+    sendIfOpen({ type: 'list_web_tasks' });
   },
 
   teleportWebTask: (taskId: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'teleport_web_task', taskId });
-    }
+    sendIfOpen({ type: 'teleport_web_task', taskId });
   },
 
   viewCachedSession: () => {
@@ -559,12 +547,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // error on `false` so the user knows their change did not reach the
   // server — pre-#4559 the silent-drop made the Switch look unresponsive.
   refreshNotificationPrefs: (): boolean => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'notification_prefs_get' });
-      return true;
-    }
-    return false;
+    return sendIfOpen({ type: 'notification_prefs_get' });
   },
 
   // #4558: optimistic update. The Switch should flip the moment the user
@@ -1702,12 +1685,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setModel: (model: string) => {
-    const { socket, activeSessionId } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_model', model };
-      if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
-    }
+    const { activeSessionId } = get();
+    const payload: Record<string, unknown> = { type: 'set_model', model };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    sendIfOpen(payload);
   },
 
   setPermissionMode: (mode: string) => {
@@ -1741,12 +1722,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   setPermissionRules: (rules) => {
-    const { socket, activeSessionId } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_permission_rules', rules };
-      if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
-    }
+    const { activeSessionId } = get();
+    const payload: Record<string, unknown> = { type: 'set_permission_rules', rules };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    sendIfOpen(payload);
   },
 
   confirmPermissionMode: (mode: string) => {
@@ -1785,12 +1764,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   resize: (cols, rows) => {
-    const { socket, activeSessionId } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'resize', cols, rows };
-      if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
-    }
+    const { activeSessionId } = get();
+    const payload: Record<string, unknown> = { type: 'resize', cols, rows };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    sendIfOpen(payload);
   },
 
   // Directory listing
@@ -1800,12 +1777,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestDirectoryListing: (path?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'list_directory' };
-      if (path) msg.path = path;
-      wsSend(socket, msg);
-    }
+    const msg: Record<string, string> = { type: 'list_directory' };
+    if (path) msg.path = path;
+    sendIfOpen(msg);
   },
 
   // File browser
@@ -1819,19 +1793,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestFileListing: (path?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'browse_files' };
-      if (path) msg.path = path;
-      wsSend(socket, msg);
-    }
+    const msg: Record<string, string> = { type: 'browse_files' };
+    if (path) msg.path = path;
+    sendIfOpen(msg);
   },
 
   requestFileContent: (path: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'read_file', path });
-    }
+    sendIfOpen({ type: 'read_file', path });
   },
 
   setFileWriteCallback: (cb) => {
@@ -1839,10 +1807,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestFileWrite: (path: string, content: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'write_file', path, content });
-    }
+    sendIfOpen({ type: 'write_file', path, content });
   },
 
   // Diff viewer
@@ -1852,12 +1817,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestDiff: (base?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'get_diff' };
-      if (base) msg.base = base;
-      wsSend(socket, msg);
-    }
+    const msg: Record<string, string> = { type: 'get_diff' };
+    if (base) msg.base = base;
+    sendIfOpen(msg);
   },
 
   // Git operations
@@ -1868,59 +1830,35 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setGitCommitCallback: (cb) => { setImperativeCallback('gitCommit', cb); },
 
   requestGitStatus: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_status' });
-    }
+    sendIfOpen({ type: 'git_status' });
   },
 
   requestGitBranches: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_branches' });
-    }
+    sendIfOpen({ type: 'git_branches' });
   },
 
   requestGitStage: (paths: string[]) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_stage', files: paths });
-    }
+    sendIfOpen({ type: 'git_stage', files: paths });
   },
 
   requestGitUnstage: (paths: string[]) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_unstage', files: paths });
-    }
+    sendIfOpen({ type: 'git_unstage', files: paths });
   },
 
   requestGitCommit: (message: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'git_commit', message });
-    }
+    sendIfOpen({ type: 'git_commit', message });
   },
 
   fetchProviders: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'list_providers' });
-    }
+    sendIfOpen({ type: 'list_providers' });
   },
 
   fetchSlashCommands: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'list_slash_commands' });
-    }
+    sendIfOpen({ type: 'list_slash_commands' });
   },
 
   fetchCustomAgents: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'list_agents' });
-    }
+    sendIfOpen({ type: 'list_agents' });
   },
 
   // Session actions
@@ -1931,18 +1869,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // PRIMARY_HELD `session_error` (input_conflict), surfaced as a calm notice.
   // The authoritative role lands via the resulting `session_role` broadcast.
   claimPrimary: (sessionId: string, options?: { force?: boolean }) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, {
-        type: 'claim_primary',
-        sessionId,
-        ...(options?.force ? { force: true } : {}),
-      });
-    }
+    sendIfOpen({
+      type: 'claim_primary',
+      sessionId,
+      ...(options?.force ? { force: true } : {}),
+    });
   },
 
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => {
-    const { socket, activeSessionId, sessionStates } = get();
+    const { activeSessionId } = get();
     const serverNotify = options?.serverNotify ?? true;
     const haptic = options?.haptic ?? true;
 
@@ -1958,8 +1893,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     );
     set({ activeSessionId: sessionId, sessionNotifications: filteredNotifications });
 
-    if (serverNotify && socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'switch_session', sessionId });
+    if (serverNotify) {
+      sendIfOpen({ type: 'switch_session', sessionId });
     }
   },
 
@@ -1969,32 +1904,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // accepts these fields plus others (e.g. `sandbox`) — see
   // packages/server/src/handlers/session-handlers.js for the full set.
   createSession: ({ name, cwd, worktree, provider, model, permissionMode, environmentId }) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, unknown> = { type: 'create_session' };
-      if (name) msg.name = name;
-      if (cwd) msg.cwd = cwd;
-      if (worktree) msg.worktree = true;
-      if (provider) msg.provider = provider;
-      if (model) msg.model = model;
-      if (permissionMode) msg.permissionMode = permissionMode;
-      if (environmentId) msg.environmentId = environmentId;
-      wsSend(socket, msg);
-    }
+    const msg: Record<string, unknown> = { type: 'create_session' };
+    if (name) msg.name = name;
+    if (cwd) msg.cwd = cwd;
+    if (worktree) msg.worktree = true;
+    if (provider) msg.provider = provider;
+    if (model) msg.model = model;
+    if (permissionMode) msg.permissionMode = permissionMode;
+    if (environmentId) msg.environmentId = environmentId;
+    sendIfOpen(msg);
   },
 
   destroySession: (sessionId: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'destroy_session', sessionId });
-    }
+    sendIfOpen({ type: 'destroy_session', sessionId });
   },
 
   renameSession: (sessionId: string, name: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'rename_session', sessionId, name });
-    }
+    sendIfOpen({ type: 'rename_session', sessionId, name });
   },
 
   fetchConversationHistory: () => {
@@ -2015,12 +1941,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   resumeConversation: (conversationId: string, cwd?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'resume_conversation', conversationId };
-      if (cwd) payload.cwd = cwd;
-      wsSend(socket, payload);
-    }
+    const payload: Record<string, unknown> = { type: 'resume_conversation', conversationId };
+    if (cwd) payload.cwd = cwd;
+    sendIfOpen(payload);
   },
 
   searchConversations: (query: string) => {
@@ -2054,42 +1977,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestFullHistory: (sessionId?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'request_full_history' };
-      if (sessionId) msg.sessionId = sessionId;
-      wsSend(socket, msg);
-    }
+    const msg: Record<string, string> = { type: 'request_full_history' };
+    if (sessionId) msg.sessionId = sessionId;
+    sendIfOpen(msg);
   },
 
   createCheckpoint: (name?: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const msg: Record<string, string> = { type: 'create_checkpoint' };
-      if (name) msg.name = name;
-      wsSend(socket, msg);
-    }
+    const msg: Record<string, string> = { type: 'create_checkpoint' };
+    if (name) msg.name = name;
+    sendIfOpen(msg);
   },
 
   listCheckpoints: () => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'list_checkpoints' });
-    }
+    sendIfOpen({ type: 'list_checkpoints' });
   },
 
   restoreCheckpoint: (checkpointId: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'restore_checkpoint', checkpointId });
-    }
+    sendIfOpen({ type: 'restore_checkpoint', checkpointId });
   },
 
   deleteCheckpoint: (checkpointId: string) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'delete_checkpoint', checkpointId });
-    }
+    sendIfOpen({ type: 'delete_checkpoint', checkpointId });
   },
 
   clearPlanState: () => {
@@ -2100,11 +2008,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   sendPlanResponse: (sessionId: string, approve: boolean) => {
-    const { socket } = get();
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      const data = approve ? 'Go ahead with the plan' : 'n';
-      wsSend(socket, { type: 'input', data, sessionId });
-    }
+    const data = approve ? 'Go ahead with the plan' : 'n';
+    sendIfOpen({ type: 'input', data, sessionId });
     // Clear plan state for the target session
     if (get().sessionStates[sessionId]) {
       const store = get();

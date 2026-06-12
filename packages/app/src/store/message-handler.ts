@@ -392,6 +392,29 @@ export function wsSend(socket: WebSocket, payload: Record<string, unknown>): voi
   }
 }
 
+/**
+ * Canonical "send a WS frame iff the socket is open" helper.
+ *
+ * Collapses the `const { socket } = get(); if (socket && socket.readyState ===
+ * WebSocket.OPEN) { wsSend(socket, payload) }` boilerplate repeated across the
+ * connection store and file-operations store into one place (#5652). Reads the
+ * live socket from the connection store (set via setStore), so callers never
+ * have to thread it through.
+ *
+ * Returns `true` when the frame was sent (socket open), `false` when it was a
+ * no-op (no socket / not OPEN). Most callers ignore the result (a silent no-op
+ * on a closed socket is the existing behavior); the few that surface an error or
+ * return a status on the closed path read the boolean.
+ */
+export function sendIfOpen(payload: Record<string, unknown>): boolean {
+  const socket = getStore().getState().socket;
+  if (socket && socket.readyState === WebSocket.OPEN) {
+    wsSend(socket, payload);
+    return true;
+  }
+  return false;
+}
+
 // #3672: treat iOS `inactive` as visible. `inactive` is a transient state for
 // app-switcher gesture, control-center pulldown, biometric prompt, incoming
 // call, and the brief moment between unlock and foreground promotion — the

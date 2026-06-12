@@ -4,18 +4,28 @@ import { getCallback, clearAllCallbacks } from '../../store/imperative-callbacks
 // Track wsSend calls
 const wsSendCalls = []
 
-// Mock message-handler's wsSend
-jest.mock('../../store/message-handler', () => ({
-  wsSend: (socket, payload) => {
-    wsSendCalls.push({ socket, payload })
-  },
-}))
-
 // Mock useConnectionStore to provide a fake socket
 const mockSocket = { readyState: 1 }
 jest.mock('../../store/connection', () => ({
   useConnectionStore: {
     getState: () => ({ socket: mockSocket }),
+  },
+}))
+
+// Mock message-handler's wsSend + sendIfOpen. sendIfOpen mirrors the real
+// "send iff the live socket is open" semantics against the mocked socket so the
+// store's request methods (which now route through sendIfOpen) behave as in
+// production: send the payload when open, no-op (and report false) when closed.
+jest.mock('../../store/message-handler', () => ({
+  wsSend: (socket, payload) => {
+    wsSendCalls.push({ socket, payload })
+  },
+  sendIfOpen: (payload) => {
+    if (mockSocket && mockSocket.readyState === 1) {
+      wsSendCalls.push({ socket: mockSocket, payload })
+      return true
+    }
+    return false
   },
 }))
 
