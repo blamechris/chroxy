@@ -11,6 +11,15 @@ const sessionScreenSrc = fs.readFileSync(
   'utf-8',
 )
 
+// #5654 — the CheckpointView (and the other secondary modal panels) is now
+// wired into the session UI via the extracted SessionPanels component. The
+// checkpoint import + <CheckpointView> render live there; SessionScreen owns
+// the show/hide flag and renders <SessionPanels>.
+const sessionPanelsSrc = fs.readFileSync(
+  path.resolve(__dirname, '../src/components/SessionPanels.tsx'),
+  'utf-8',
+)
+
 describe('CheckpointView component structure', () => {
   test('imports useConnectionStore and Checkpoint type', () => {
     expect(componentSrc).toMatch(/import.*useConnectionStore/)
@@ -83,12 +92,17 @@ describe('CheckpointView component structure', () => {
 })
 
 describe('SessionScreen checkpoint integration', () => {
-  test('imports CheckpointView', () => {
-    expect(sessionScreenSrc).toMatch(/import.*CheckpointView/)
+  test('imports CheckpointView (via SessionPanels)', () => {
+    expect(sessionPanelsSrc).toMatch(/import.*CheckpointView/)
   })
 
-  test('renders CheckpointView component', () => {
-    expect(sessionScreenSrc).toMatch(/<CheckpointView/)
+  test('renders CheckpointView component (via SessionPanels)', () => {
+    expect(sessionPanelsSrc).toMatch(/<CheckpointView/)
+  })
+
+  test('wires the panels into SessionScreen', () => {
+    expect(sessionScreenSrc).toMatch(/import.*SessionPanels/)
+    expect(sessionScreenSrc).toMatch(/<SessionPanels/)
   })
 
   test('has checkpoint toggle state', () => {
