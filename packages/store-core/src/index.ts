@@ -187,8 +187,10 @@ export type {
 
 export {
   KEY_PIN_MISMATCH_MESSAGE,
+  KEY_PIN_DOWNGRADE_MESSAGE,
   decideKeyPin,
   decideKeyPinWithPairingIdentity,
+  decodeEncryptionGate,
 } from './key-pinning'
 
 export {

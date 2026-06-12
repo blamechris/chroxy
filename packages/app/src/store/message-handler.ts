@@ -1085,7 +1085,7 @@ import * as SecureStore from 'expo-secure-store';
 import type { SavedConnection } from '@chroxy/store-core';
 import {
   decideKeyPinWithPairingIdentity,
-  KEY_PIN_MISMATCH_MESSAGE,
+  decodeEncryptionGate,
 } from '@chroxy/store-core';
 
 const STORAGE_KEY_URL = 'chroxy_last_url';
@@ -1298,21 +1298,7 @@ function verifyServerIdentityOrRefuse(
     serverKeySig,
   });
   if (decision.action === 'refuse') {
-    console.error(`[crypto] Server identity verification failed (${decision.reason}) — refusing connection`);
-    // Loud, specific, terminal error state. setConnectionError(…, 0) clears the
-    // retry countdown so the banner reads as a hard refusal, not a transient
-    // drop. We do NOT clear the saved connection — the user re-pairs to adopt
-    // the new identity, which overwrites the pin.
-    useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
-    useConnectionLifecycleStore.getState().setConnectionError(KEY_PIN_MISMATCH_MESSAGE, 0);
-    useConnectionLifecycleStore.getState().setUserDisconnected(true);
-    if (!ctx.silent) {
-      Alert.alert('Server Identity Changed', KEY_PIN_MISMATCH_MESSAGE);
-    }
-    try { ctx.socket.close(); } catch { /* already closing */ }
-    getStore().setState({ socket: null });
-    // Consume the pairing identity so a subsequent dial doesn't reuse it.
-    pendingPairingIdentityKey = null;
+    applyIdentityRefusal(ctx, decision.reason, decision.message);
     return { refused: true };
   }
   // Connect — capture the pin to persist on first use; clear the pairing
@@ -1320,6 +1306,51 @@ function verifyServerIdentityOrRefuse(
   const pinToPersist = decision.action === 'pin-and-connect' ? decision.identityKey : null;
   pendingPairingIdentityKey = null;
   return { refused: false, pinToPersist };
+}
+
+/**
+ * #5614/#5536 — apply the loud, terminal "server identity refused" effects.
+ * Shared by the signature/unsigned mismatch path and the plaintext-downgrade
+ * gate so both surface identically (no silent retry, no fall-through to an
+ * unencrypted session). setConnectionError(…, 0) clears the retry countdown so
+ * the banner reads as a hard refusal. We do NOT clear the saved connection — the
+ * user re-pairs to adopt the new identity, which overwrites the pin.
+ */
+function applyIdentityRefusal(ctx: ConnectionContext, reason: string, message: string): void {
+  console.error(`[crypto] Server identity verification failed (${reason}) — refusing connection`);
+  useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+  useConnectionLifecycleStore.getState().setConnectionError(message, 0);
+  useConnectionLifecycleStore.getState().setUserDisconnected(true);
+  if (!ctx.silent) {
+    Alert.alert('Server Identity Changed', message);
+  }
+  try { ctx.socket.close(); } catch { /* already closing */ }
+  getStore().setState({ socket: null });
+  // Consume the pairing identity so a subsequent dial doesn't reuse it.
+  pendingPairingIdentityKey = null;
+}
+
+/**
+ * #5614 — the plaintext-downgrade gate, run at the TOP of the `auth_ok` handler
+ * BEFORE the `encryption === 'required'` branch (where the pin check lives). If
+ * this connection is pinned (committed pin or pairing-time identity) and the
+ * server did not negotiate encryption, refuse — a MITM cannot otherwise be
+ * stopped from forging a plaintext `auth_ok` that skips verification entirely.
+ *
+ * @returns true to PROCEED, false when the connection was refused (caller breaks).
+ */
+function enforceEncryptionGateOrRefuse(ctx: ConnectionContext, encryptionMode: string | null | undefined): boolean {
+  const saved = useConnectionLifecycleStore.getState().savedConnection;
+  const gate = decodeEncryptionGate({
+    pinnedIdentityKey: saved?.pinnedIdentityKey ?? null,
+    pairingIdentityKey: pendingPairingIdentityKey,
+    encryptionMode,
+  });
+  if (gate.action === 'refuse') {
+    applyIdentityRefusal(ctx, gate.reason, gate.message);
+    return false;
+  }
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -1511,6 +1542,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // persistVerifiedConnection call below (outside the encryption branch) can
       // read it. null = keep the existing record's pin (discrete path / reconnect).
       let eagerPinToPersist: string | null = null;
+      // #5614 — close the plaintext-auth_ok downgrade cell. If this connection is
+      // PINNED, a non-`required` auth_ok is a downgrade attempt (a MITM forging a
+      // plaintext auth_ok would otherwise skip the pin check that lives inside the
+      // encryption branch below). Refuse BEFORE that branch — fail closed, same
+      // terminal "identity refused" path as a signature mismatch. Unpinned
+      // connections fall through and keep TOFU (encryption optional) as before.
+      if (!enforceEncryptionGateOrRefuse(ctx, auth.encryption)) {
+        _ctx.pendingKeyPair = null;
+        _ctx.pendingSalt = null;
+        break;
+      }
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: true });

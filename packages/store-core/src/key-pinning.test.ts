@@ -6,6 +6,8 @@ import { createKeyPair, createSigningKeyPair, signExchangeKey } from './crypto'
 import {
   decideKeyPin,
   decideKeyPinWithPairingIdentity,
+  decodeEncryptionGate,
+  KEY_PIN_DOWNGRADE_MESSAGE,
   KEY_PIN_MISMATCH_MESSAGE,
 } from './key-pinning'
 
@@ -158,5 +160,82 @@ describe('decideKeyPinWithPairingIdentity — pin-on-first-use', () => {
       serverKeySig: sigA,
     })
     expect(d).toEqual({ action: 'connect', reason: 'verified' })
+  })
+})
+
+describe('decodeEncryptionGate — plaintext-auth_ok downgrade cell (#5614)', () => {
+  const identity = createSigningKeyPair().publicKey
+
+  // The downgrade matrix: {pinned?} × {encryptionMode}. A pinned connection must
+  // REFUSE anything that is not encryption:'required'; unpinned stays TOFU.
+  it('REFUSEs a committed-pin connection whose auth_ok is encryption:none', () => {
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: identity,
+      pairingIdentityKey: null,
+      encryptionMode: 'none',
+    })
+    expect(g.action).toBe('refuse')
+    if (g.action === 'refuse') {
+      expect(g.reason).toBe('pinned-but-unencrypted')
+      expect(g.message).toBe(KEY_PIN_DOWNGRADE_MESSAGE)
+    }
+  })
+
+  it('REFUSEs a committed-pin connection whose auth_ok OMITS the encryption field (null)', () => {
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: identity,
+      pairingIdentityKey: null,
+      encryptionMode: null,
+    })
+    expect(g.action).toBe('refuse')
+    if (g.action === 'refuse') expect(g.reason).toBe('pinned-but-unencrypted')
+  })
+
+  it('REFUSEs a committed-pin connection whose auth_ok encryption is undefined', () => {
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: identity,
+      pairingIdentityKey: null,
+      encryptionMode: undefined,
+    })
+    expect(g.action).toBe('refuse')
+  })
+
+  it('REFUSEs a PAIRING-time-pinned connection (first connect) that arrives unencrypted', () => {
+    // Pin not yet committed, but a pairing identity was captured this dial — a
+    // plaintext auth_ok here is still a downgrade and must fail closed.
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: null,
+      pairingIdentityKey: identity,
+      encryptionMode: 'none',
+    })
+    expect(g.action).toBe('refuse')
+    if (g.action === 'refuse') expect(g.reason).toBe('pinned-but-unencrypted')
+  })
+
+  it('PROCEEDs a pinned connection when encryption is required (real pin check runs next)', () => {
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: identity,
+      pairingIdentityKey: null,
+      encryptionMode: 'required',
+    })
+    expect(g).toEqual({ action: 'connect', reason: 'verified' })
+  })
+
+  it('PROCEEDs (TOFU) an UNPINNED connection with encryption:none — plaintext still allowed', () => {
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: null,
+      pairingIdentityKey: null,
+      encryptionMode: 'none',
+    })
+    expect(g).toEqual({ action: 'connect', reason: 'verified' })
+  })
+
+  it('PROCEEDs (TOFU) an UNPINNED connection with no encryption field', () => {
+    const g = decodeEncryptionGate({
+      pinnedIdentityKey: null,
+      pairingIdentityKey: null,
+      encryptionMode: null,
+    })
+    expect(g).toEqual({ action: 'connect', reason: 'verified' })
   })
 })

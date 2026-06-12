@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   IDENTITY_KEY_SERVICE,
+  IdentityUnavailableError,
   getOrCreateServerIdentity,
   loadServerIdentity,
   persistServerIdentity,
@@ -21,11 +22,20 @@ import {
  * dir so the real ~/.chroxy/ tree is never written (per the test-state rule).
  */
 
-function fakeKeychain({ available = true } = {}) {
+function fakeKeychain({ available = true, readError = null } = {}) {
   const store = new Map()
   return {
     isKeychainAvailable: () => available,
     getToken: (service) => store.get(service) ?? null,
+    // #5615 — distinguishes absent from a read failure. When `readError` is set
+    // the read FAILS (simulating a locked keychain) rather than reporting absence.
+    getTokenStatus: (service) => {
+      if (readError) return { status: 'error', value: null, error: readError }
+      const value = store.get(service) ?? null
+      return value
+        ? { status: 'found', value, error: null }
+        : { status: 'absent', value: null, error: null }
+    },
     setToken: (token, service) => { store.set(service, token) },
     deleteToken: (service) => { store.delete(service) },
     _store: store,
@@ -103,6 +113,66 @@ describe('server identity (#5536)', () => {
       const id = getOrCreateServerIdentity({ keychain: kc, filePath })
       assert.equal(id.created, true)
       assert.equal(id.secretKey.length, 64)
+    })
+  })
+
+  // #5615 — three distinct keychain cases on the identity read.
+  describe('#5615 — keychain read failure must not silently rotate', () => {
+    it('(a) keychain absent / nothing stored → FIRST RUN mints (correct)', () => {
+      withTempDir((filePath) => {
+        const kc = fakeKeychain({ available: true }) // present, but empty store
+        const id = getOrCreateServerIdentity({ keychain: kc, filePath })
+        assert.equal(id.created, true, 'an empty keychain is first-run; minting is correct')
+        assert.equal(id.secretKey.length, 64)
+      })
+    })
+
+    it('(b) keychain present but READ FAILED (locked) → throws IdentityUnavailableError, does NOT mint', () => {
+      withTempDir((filePath) => {
+        const kc = fakeKeychain({ available: true, readError: 'keychain locked' })
+        // loadServerIdentity surfaces the failure distinctly...
+        assert.throws(
+          () => loadServerIdentity({ keychain: kc, filePath }),
+          (err) => err instanceof IdentityUnavailableError && err.code === 'IDENTITY_UNAVAILABLE',
+        )
+        // ...and getOrCreate propagates it WITHOUT minting a replacement (which
+        // would silently rotate the identity and brick every pinned client).
+        assert.throws(
+          () => getOrCreateServerIdentity({ keychain: kc, filePath }),
+          IdentityUnavailableError,
+        )
+        // Nothing was written anywhere — no rotation occurred.
+        assert.equal(kc._store.size, 0, 'must not write a fresh key to the keychain')
+        assert.equal(existsSync(filePath), false, 'must not write a fresh key to the fallback file')
+      })
+    })
+
+    it('(b) a transient lock that later clears loads the SAME pre-existing identity (no rotation)', () => {
+      withTempDir((filePath) => {
+        // Mint + persist under a healthy keychain.
+        const healthy = fakeKeychain({ available: true })
+        const original = getOrCreateServerIdentity({ keychain: healthy, filePath })
+        // Now the keychain is locked: read fails → refuse, never re-mint.
+        const locked = fakeKeychain({ available: true, readError: 'interaction not allowed' })
+        locked._store.set(IDENTITY_KEY_SERVICE, healthy._store.get(IDENTITY_KEY_SERVICE))
+        assert.throws(() => getOrCreateServerIdentity({ keychain: locked, filePath }), IdentityUnavailableError)
+        // Lock clears: the SAME identity loads — pinned clients keep verifying.
+        const recovered = getOrCreateServerIdentity({ keychain: healthy, filePath })
+        assert.equal(recovered.created, false)
+        assert.equal(recovered.publicKey, original.publicKey)
+      })
+    })
+
+    it('(c) malformed stored value is distinguishable from (b): re-mints, does NOT throw', () => {
+      withTempDir((filePath) => {
+        const kc = fakeKeychain({ available: true })
+        kc.setToken(Buffer.from('garbage').toString('base64'), IDENTITY_KEY_SERVICE)
+        // No throw — a malformed value is treated as absent (re-mint), NOT as a
+        // read failure. This is the key (b)-vs-(c) distinction.
+        const id = getOrCreateServerIdentity({ keychain: kc, filePath })
+        assert.equal(id.created, true)
+        assert.equal(id.secretKey.length, 64)
+      })
     })
   })
 

@@ -41,6 +41,7 @@ import {
 } from '../crypto'
 import {
   decideKeyPinWithPairingIdentity,
+  decodeEncryptionGate,
   type KeyPinDecision,
 } from '../key-pinning'
 import {
@@ -283,6 +284,27 @@ export class FakeHandshakeClient {
     this.phases.push('auth_ok')
     const exchangePublicKey = authOk.serverPublicKey as string
     const serverKeySig = (authOk.serverKeySig as string | undefined) ?? null
+
+    // #5614 — the plaintext-downgrade gate runs FIRST, exactly as production does
+    // (before the encryption branch / pin check). A pinned connection whose
+    // auth_ok is not encryption:'required' is refused here, so a MITM can't forge
+    // a plaintext auth_ok to skip the pin check below. We read the field exactly
+    // as production's parser would: an explicit value passes through; a field that
+    // is truly ABSENT arrives as `null` (production's parseRawStringField maps a
+    // missing/empty field to null), which is NOT 'required' and so is refused when
+    // pinned — faithfully modelling the "MITM omits the field" downgrade shape
+    // rather than papering over it with a 'required' default.
+    const encryptionMode = (authOk.encryption as string | null | undefined) ?? null
+    const gate = decodeEncryptionGate({
+      pinnedIdentityKey: this.opts.pinnedIdentityKey ?? null,
+      pairingIdentityKey: this.opts.pairingIdentityKey ?? null,
+      encryptionMode,
+    })
+    if (gate.action === 'refuse') {
+      this.phases.push('refused')
+      this.store.refuse(gate)
+      return gate
+    }
 
     const decision = decideKeyPinWithPairingIdentity({
       pinnedIdentityKey: this.opts.pinnedIdentityKey ?? null,

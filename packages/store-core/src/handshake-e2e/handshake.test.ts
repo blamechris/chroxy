@@ -297,6 +297,89 @@ describe('encrypted handshake — pinned-key verification matrix (#5556.6)', () 
 })
 
 // ---------------------------------------------------------------------------
+// #5614 — plaintext-auth_ok downgrade cell (pinned × non-required encryption)
+// ---------------------------------------------------------------------------
+
+describe('encrypted handshake — plaintext-downgrade cell (#5614)', () => {
+  it('a PINNED client receiving a plaintext (encryption:none) auth_ok is REFUSED — no key derived', () => {
+    // The MITM forges a fully plausible auth_ok (even with a valid-looking sig)
+    // but flips encryption to 'none' to skip the encryption branch + pin check.
+    const server = new FakeHandshakeServer()
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: server.identityPublicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+    const decision = client.handleAuthOk(server.authOk({ encryption: 'none' }))
+    expect(decision.action).toBe('refuse')
+    if (decision.action === 'refuse') expect(decision.reason).toBe('pinned-but-unencrypted')
+    // Fail closed: no shared key, never falls through to an unencrypted session.
+    expect(store.state.encryptionActive).toBe(false)
+    expect(store.state.refusal?.reason).toBe('pinned-but-unencrypted')
+  })
+
+  it('a PINNED client receiving an auth_ok with NO encryption field (null) is REFUSED', () => {
+    const server = new FakeHandshakeServer()
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: server.identityPublicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+    const decision = client.handleAuthOk(server.authOk({ encryption: null }))
+    expect(decision.action).toBe('refuse')
+    if (decision.action === 'refuse') expect(decision.reason).toBe('pinned-but-unencrypted')
+    expect(store.state.encryptionActive).toBe(false)
+  })
+
+  it('a PINNED client receiving an auth_ok with encryption:undefined is REFUSED', () => {
+    // The forged frame carries an explicit `undefined` (or, equivalently, the
+    // field truly omitted) — the harness now reads either as the parsed `null`
+    // shape, so this exercises the same end-to-end refusal as the null case but
+    // proves the `undefined` rung of the matrix end-to-end, not just at the unit
+    // level (closes the #5614 coverage gap).
+    const server = new FakeHandshakeServer()
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: server.identityPublicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+    const decision = client.handleAuthOk(server.authOk({ encryption: undefined }))
+    expect(decision.action).toBe('refuse')
+    if (decision.action === 'refuse') expect(decision.reason).toBe('pinned-but-unencrypted')
+    expect(store.state.encryptionActive).toBe(false)
+  })
+
+  it('a PAIRING-time-pinned client (first connect) is REFUSED on a plaintext auth_ok', () => {
+    // Pin not committed yet, but the trusted pairing channel conveyed an
+    // identity — a plaintext first connect is still a downgrade.
+    const server = new FakeHandshakeServer()
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, {
+      pinnedIdentityKey: null,
+      pairingIdentityKey: server.identityPublicKey,
+    })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+    const decision = client.handleAuthOk(server.authOk({ encryption: 'none' }))
+    expect(decision.action).toBe('refuse')
+    if (decision.action === 'refuse') expect(decision.reason).toBe('pinned-but-unencrypted')
+    expect(store.state.encryptionActive).toBe(false)
+    // First-connect downgrade must NOT pin the (unverified) identity.
+    expect(store.state.pinnedIdentity).toBeNull()
+  })
+
+  it('an UNPINNED client still accepts a plaintext (encryption:none) auth_ok — TOFU preserved', () => {
+    const server = new FakeHandshakeServer({ omitSignature: true })
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store)
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+    // An unpinned client has no pin to protect; plaintext stays allowed. The
+    // fake derives a key regardless, but the decision must be a plain connect.
+    const decision = client.handleAuthOk(server.authOk({ encryption: 'none' }))
+    expect(decision.action).toBe('connect')
+    expect(store.state.refusal).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // Replay-vs-live dedup across the boundary
 // ---------------------------------------------------------------------------
 

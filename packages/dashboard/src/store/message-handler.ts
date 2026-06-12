@@ -43,7 +43,7 @@ import {
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   decideKeyPinWithPairingIdentity,
-  KEY_PIN_MISMATCH_MESSAGE,
+  decodeEncryptionGate,
   handleServerMode as sharedServerMode,
   handleCheckpointCreated as sharedCheckpointCreated,
   handleCheckpointList as sharedCheckpointList,
@@ -975,23 +975,7 @@ function verifyServerIdentityOrRefuse(
     serverKeySig,
   });
   if (decision.action === 'refuse') {
-    console.error(`[crypto] Server identity verification failed (${decision.reason}) — refusing connection`);
-    try { ctx.socket.close(); } catch { /* already closing */ }
-    // Loud, terminal error state. We do NOT remove the registry entry — the user
-    // re-pairs to adopt the new identity (which overwrites the pin). Mark
-    // userDisconnected so the auto-reconnect loop doesn't immediately re-dial a
-    // box we just refused.
-    getStore().setState({
-      connectionPhase: 'disconnected',
-      socket: null,
-      connectionError: KEY_PIN_MISMATCH_MESSAGE,
-      userDisconnected: true,
-    });
-    if (!ctx.silent) {
-      _adapters.alert.alert('Server Identity Changed', KEY_PIN_MISMATCH_MESSAGE);
-    }
-    // Consume the pairing identity so a later dial doesn't reuse it.
-    setPendingPairingIdentityKey(null);
+    applyIdentityRefusal(ctx, decision.reason, decision.message);
     return false;
   }
   // Connect — pin on first use, then clear the pairing identity.
@@ -999,6 +983,63 @@ function verifyServerIdentityOrRefuse(
     getStore().getState().updateServer(activeServerId, { pinnedIdentityKey: decision.identityKey });
   }
   setPendingPairingIdentityKey(null);
+  return true;
+}
+
+/**
+ * #5614/#5536 — apply the loud, terminal "server identity refused" effects.
+ * Shared by the signature/unsigned mismatch path and the plaintext-downgrade
+ * gate so both surface identically (no silent retry, no fall-through to an
+ * unencrypted session). We do NOT remove the registry entry — the user re-pairs
+ * to adopt the new identity (which overwrites the pin). userDisconnected stops
+ * the auto-reconnect loop from immediately re-dialing a box we just refused.
+ */
+function applyIdentityRefusal(
+  ctx: { socket: WebSocket; silent: boolean },
+  reason: string,
+  message: string,
+): void {
+  console.error(`[crypto] Server identity verification failed (${reason}) — refusing connection`);
+  try { ctx.socket.close(); } catch { /* already closing */ }
+  getStore().setState({
+    connectionPhase: 'disconnected',
+    socket: null,
+    connectionError: message,
+    userDisconnected: true,
+  });
+  if (!ctx.silent) {
+    _adapters.alert.alert('Server Identity Changed', message);
+  }
+  // Consume the pairing identity so a later dial doesn't reuse it.
+  setPendingPairingIdentityKey(null);
+}
+
+/**
+ * #5614 — the plaintext-downgrade gate, run at the TOP of the `auth_ok` handler
+ * BEFORE the `encryption === 'required'` branch (where the pin check lives). If
+ * this connection is pinned (committed pin or pairing-time identity) and the
+ * server did not negotiate encryption, refuse — a MITM cannot otherwise be
+ * stopped from forging a plaintext `auth_ok` that skips verification entirely.
+ *
+ * @returns true to PROCEED, false when the connection was refused (caller breaks).
+ */
+function enforceEncryptionGateOrRefuse(
+  ctx: { socket: WebSocket; silent: boolean },
+  encryptionMode: string | null | undefined,
+): boolean {
+  const state = getStore().getState();
+  const activeEntry = state.activeServerId
+    ? state.serverRegistry.find((s) => s.id === state.activeServerId)
+    : undefined;
+  const gate = decodeEncryptionGate({
+    pinnedIdentityKey: activeEntry?.pinnedIdentityKey ?? null,
+    pairingIdentityKey: getPendingPairingIdentityKey(),
+    encryptionMode,
+  });
+  if (gate.action === 'refuse') {
+    applyIdentityRefusal(ctx, gate.reason, gate.message);
+    return false;
+  }
   return true;
 }
 
@@ -2679,6 +2720,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
       // Start client-side heartbeat for dead connection detection
       startHeartbeat(ctx.socket);
+
+      // #5614 — close the plaintext-auth_ok downgrade cell. If this connection is
+      // PINNED, a non-`required` auth_ok is a downgrade attempt (a MITM forging a
+      // plaintext auth_ok would otherwise skip the pin check that lives inside the
+      // encryption branch below). Refuse BEFORE that branch — fail closed, same
+      // terminal "identity refused" path as a signature mismatch. Unpinned
+      // connections fall through and keep TOFU (encryption optional) as before.
+      if (!enforceEncryptionGateOrRefuse(ctx, auth.encryption)) {
+        _pendingKeyPair = null;
+        _pendingSalt = null;
+        break;
+      }
 
       // Initiate key exchange if server requires encryption
       if (auth.encryption === 'required') {
