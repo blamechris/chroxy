@@ -105,6 +105,7 @@ export function ConnectScreen() {
 
   const [scanning, setScanning] = useState(false);
   const [scanCompleted, setScanCompleted] = useState(false);
+  const [scanError, setScanError] = useState(false);
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [scanProgress, setScanProgress] = useState(0);
   const [scanPort, setScanPort] = useState(String(DEFAULT_PORT));
@@ -285,6 +286,7 @@ export function ConnectScreen() {
 
     setScanning(true);
     setScanCompleted(false);
+    setScanError(false);
     setDiscoveredServers([]);
     setScanProgress(0);
 
@@ -311,11 +313,9 @@ export function ConnectScreen() {
         onProgress: (p) => setScanProgress(p),
         onFound: (found) => setDiscoveredServers((prev) => [...prev, ...found]),
       });
-    } catch {
-      Alert.alert(
-        'Network Error',
-        'Could not scan the local network. Make sure you are connected to WiFi and your phone and computer are on the same network.',
-      );
+    } catch (err) {
+      console.warn('[LAN scan] scan threw unexpectedly:', err);
+      setScanError(true);
     }
 
     if (!abort.signal.aborted) {
@@ -504,8 +504,34 @@ export function ConnectScreen() {
       )}
 
       {scanCompleted && discoveredServers.length === 0 && !scanning && (
-        <View style={styles.discoveredSection}>
-          <Text style={styles.scanEmptyText}>No servers found on LAN (port {scanPort})</Text>
+        <View
+          style={styles.discoveredSection}
+          testID="lan-scan-empty-state"
+          accessibilityLabel="LAN scan result: no servers found"
+        >
+          {scanError ? (
+            <>
+              <Text style={styles.scanEmptyTitle} testID="lan-scan-error-title">
+                Scan failed (port {scanPort})
+              </Text>
+              <Text style={styles.scanEmptyHint} testID="lan-scan-error-hint">
+                Could not scan the network. Make sure WiFi is on and your phone and computer are on the same network.{'\n'}
+                If Chroxy is running but not visible, open Chroxy on your computer, go to Settings, and enable{' '}
+                <Text style={styles.scanEmptyHighlight}>"Expose on local network"</Text>, then scan again.
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.scanEmptyTitle} testID="lan-scan-empty-title">
+                No servers found on port {scanPort}
+              </Text>
+              <Text style={styles.scanEmptyHint} testID="lan-scan-empty-hint">
+                Chroxy binds to loopback by default and won't appear in a LAN scan.{'\n'}
+                On your computer, open Chroxy {'→'} Settings and enable{' '}
+                <Text style={styles.scanEmptyHighlight}>"Expose on local network"</Text>, then scan again.
+              </Text>
+            </>
+          )}
         </View>
       )}
 
@@ -798,6 +824,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     paddingVertical: 8,
+  },
+  scanEmptyTitle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  scanEmptyHint: {
+    color: COLORS.textDim,
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+  scanEmptyHighlight: {
+    color: COLORS.textMuted,
+    fontWeight: '600',
   },
   discoveredItem: {
     flexDirection: 'row',

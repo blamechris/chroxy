@@ -86,6 +86,26 @@ describe('ConnectScreen component structure', () => {
     expect(src).toMatch(/discoveredHostname/)
   })
 
+  test('shows actionable empty-state guidance after scan finds nothing', () => {
+    expect(src).toMatch(/No servers found on port/)
+    expect(src).toMatch(/loopback by default/)
+    expect(src).toMatch(/Expose on local network/)
+    expect(src).toMatch(/testID="lan-scan-empty-state"/)
+    expect(src).toMatch(/testID="lan-scan-empty-title"/)
+    expect(src).toMatch(/testID="lan-scan-empty-hint"/)
+  })
+
+  test('shows error guidance when scan throws', () => {
+    expect(src).toMatch(/scanError/)
+    expect(src).toMatch(/testID="lan-scan-error-title"/)
+    expect(src).toMatch(/testID="lan-scan-error-hint"/)
+  })
+
+  test('scan error logs to console and does not swallow the error', () => {
+    expect(src).toMatch(/console\.warn.*LAN scan/)
+    expect(src).toMatch(/setScanError\(true\)/)
+  })
+
   test('shows scan progress percentage', () => {
     expect(src).toMatch(/scanProgress/)
     expect(src).toMatch(/Scanning\.\.\./)

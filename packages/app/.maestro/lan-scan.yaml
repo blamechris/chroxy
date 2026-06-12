@@ -16,7 +16,7 @@ name: LAN scan flow
 # first probe), so the transient "Scanning... NN%" text is racy to assert on
 # its own. Accept any of: the in-progress indicator, the results header
 # ("Found N server(s) on LAN", uppercased via textTransform), or the empty
-# result ("No servers found on LAN").
+# result ("No servers found on port ...").
 - extendedWaitUntil:
     visible:
       text: ".*(Scanning|[Ff]ound|FOUND).*"
