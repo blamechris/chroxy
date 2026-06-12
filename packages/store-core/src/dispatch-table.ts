@@ -47,7 +47,14 @@
  * same per-entry narrowing without pulling the whole protocol in.
  */
 
-import type { ChatMessage, SessionInfo } from './types'
+import type {
+  ChatMessage,
+  SessionInfo,
+  AgentInfo,
+  DevPreview,
+  PendingBackgroundShell,
+  WebTask,
+} from './types'
 import {
   handleAvailablePermissionModes,
   handleSessionUpdated,
@@ -56,10 +63,27 @@ import {
   handleConversationId,
   handlePermissionRulesUpdated,
   handleConfirmPermissionMode,
+  // --- slice 2 (epic #5556) — next batch of byte-identical pure cases ---
+  handleAgentSpawned,
+  handleAgentCompleted,
+  handleAgentEvent,
+  handleBackgroundWorkChanged,
+  handlePlanStarted,
+  handleInactivityWarning,
+  handleMcpServers,
+  handleSessionUsage,
+  handleSessionCostThresholdCrossed,
+  handleDevPreview,
+  handleDevPreviewStopped,
+  handleWebFeatureStatus,
+  handleWebTaskList,
+  // notification_prefs (slice 2 reconcile — app dropped its inline copy)
+  handleNotificationPrefs,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
   type PendingPermissionConfirm,
+  type NotificationPrefsState,
 } from './handlers'
 
 // ---------------------------------------------------------------------------
@@ -86,6 +110,14 @@ export interface DispatchSessionBase {
   conversationId?: string | null
   sessionRules?: PermissionRule[]
   isIdle?: boolean
+  // --- slice 2 reads (epic #5556) ---
+  // `activeAgents` — read+rewritten by agent_spawned / agent_completed
+  // `pendingBackgroundShells` — read+rewritten by background_work_changed
+  // `devPreviews` — read+rewritten by dev_preview / dev_preview_stopped
+  // Both clients' real `SessionState` carry these exact arrays.
+  activeAgents?: AgentInfo[]
+  pendingBackgroundShells?: PendingBackgroundShell[]
+  devPreviews?: DevPreview[]
 }
 
 /**
@@ -160,6 +192,82 @@ export interface DispatchMessageMap {
     mode?: string
     warning?: string
   }
+  // --- slice 2 (epic #5556) ---
+  agent_spawned: {
+    type: 'agent_spawned'
+    sessionId?: string
+    toolUseId?: string
+    description?: string
+    startedAt?: number
+  }
+  agent_completed: {
+    type: 'agent_completed'
+    sessionId?: string
+    toolUseId?: string
+  }
+  agent_event: {
+    type: 'agent_event'
+    sessionId?: string
+    parentToolUseId?: string
+    eventType?: string
+    payload?: unknown
+  }
+  background_work_changed: {
+    type: 'background_work_changed'
+    sessionId?: string
+    pending?: unknown[]
+  }
+  plan_started: {
+    type: 'plan_started'
+    sessionId?: string
+  }
+  inactivity_warning: {
+    type: 'inactivity_warning'
+    sessionId?: string
+    idleMs?: number
+    prefab?: string
+  }
+  mcp_servers: {
+    type: 'mcp_servers'
+    sessionId?: string
+    servers?: unknown[]
+  }
+  session_usage: {
+    type: 'session_usage'
+    sessionId?: string
+    cumulativeUsage?: Record<string, unknown>
+  }
+  session_cost_threshold_crossed: {
+    type: 'session_cost_threshold_crossed'
+    sessionId?: string
+    costUsd?: number
+    thresholdUsd?: number
+  }
+  dev_preview: {
+    type: 'dev_preview'
+    sessionId?: string
+    port?: number
+    url?: string
+  }
+  dev_preview_stopped: {
+    type: 'dev_preview_stopped'
+    sessionId?: string
+    port?: number
+  }
+  web_feature_status: {
+    type: 'web_feature_status'
+    available?: unknown
+    remote?: unknown
+    teleport?: unknown
+  }
+  web_task_list: {
+    type: 'web_task_list'
+    tasks?: unknown[]
+  }
+  notification_prefs: {
+    type: 'notification_prefs'
+    prefs?: unknown
+  }
 }
 
 /** Union of message types this table currently handles. */
@@ -180,10 +288,14 @@ export type DispatchTable<S extends DispatchSessionBase> = {
 // Handlers — one pure delegation per migrated case
 //
 // Each was byte-for-byte identical between the app and dashboard switches
-// (see the PR body's per-case diff verdicts). Divergent cases (model_changed,
-// permission_mode_changed, agent_idle, budget_warning/exceeded, primary_changed,
-// available_models, notification_prefs, client_joined/left/focus_changed,
-// permission_expired) are deliberately NOT here — they stay platform-local.
+// (see the PR body's per-case diff verdicts). Genuinely-divergent cases
+// (model_changed, permission_mode_changed, agent_idle — all carry a dashboard
+// flat-state fallback the app lacks; budget_warning/exceeded — platform alert
+// APIs; primary_changed, client_joined/left/focus_changed — the app's
+// dedicated multi-client store; available_models — dashboard-only
+// `availableModelsProvider`; permission_expired — divergent notification
+// lifecycle + the dashboard's #2833 already-resolved branch) are deliberately
+// NOT here — they stay platform-local and visible as such.
 // ---------------------------------------------------------------------------
 
 /** `available_permission_modes` — replace the flat list when the payload parses. */
@@ -283,6 +395,217 @@ function dispatchConfirmPermissionMode<S extends DispatchSessionBase>(
 }
 
 // ---------------------------------------------------------------------------
+// Slice 2 — next batch of byte-identical pure-delegation cases (epic #5556)
+//
+// Each below was diffed app-vs-dashboard and was byte-identical in BOTH
+// switches (modulo comment text). The builder-pattern cases resolve a
+// `{ sessionId, applyTo }` builder, then patch the target session only when it
+// exists locally — none of them carry a flat-`messages`/flat-state fallback in
+// either client, which is exactly why they were safe to share (the divergent
+// cases that DO have a dashboard flat fallback stay platform-local).
+//
+// `notification_prefs` is the one slice-2 RECONCILE: the dashboard already
+// routed through `handleNotificationPrefs`; the app hand-maintained a
+// byte-identical inline Zod parse (same `ServerNotificationPrefsSchema`, same
+// `bypassCategories` conditional spread, same warn-on-invalid). Unifying both
+// on the shared handler kills that drift — behaviour is preserved for the app
+// (the #4542/#4544 source-shape contract is the schema, which is unchanged).
+// ---------------------------------------------------------------------------
+
+/** `agent_spawned` — add the spawned background-agent entry to its session. */
+function dispatchAgentSpawned<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['agent_spawned'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleAgentSpawned(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
+    adapter.updateSession(builder.sessionId, (ss) => {
+      const next = builder.applyTo(ss.activeAgents ?? [])
+      return next === ss.activeAgents ? ({} as Partial<S>) : ({ activeAgents: next } as Partial<S>)
+    })
+  }
+}
+
+/** `agent_completed` — remove the completed background-agent entry. */
+function dispatchAgentCompleted<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['agent_completed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleAgentCompleted(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
+    adapter.updateSession(builder.sessionId, (ss) => {
+      const next = builder.applyTo(ss.activeAgents ?? [])
+      return next === ss.activeAgents ? ({} as Partial<S>) : ({ activeAgents: next } as Partial<S>)
+    })
+  }
+}
+
+/** `agent_event` — append a nested child event to the parent Task bubble. */
+function dispatchAgentEvent<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['agent_event'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleAgentEvent(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
+    adapter.updateSession(builder.sessionId, (ss) => {
+      const next = builder.applyTo(ss.messages)
+      return next === ss.messages ? ({} as Partial<S>) : ({ messages: next } as Partial<S>)
+    })
+  }
+}
+
+/** `background_work_changed` — replace the session's pending-shells snapshot. */
+function dispatchBackgroundWorkChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['background_work_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleBackgroundWorkChanged(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
+    adapter.updateSession(builder.sessionId, (ss) => {
+      const next = builder.applyTo(ss.pendingBackgroundShells ?? [])
+      return next === ss.pendingBackgroundShells
+        ? ({} as Partial<S>)
+        : ({ pendingBackgroundShells: next } as Partial<S>)
+    })
+  }
+}
+
+/** `plan_started` — clear pending-plan state on the target session. */
+function dispatchPlanStarted<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['plan_started'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handlePlanStarted(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => patch as Partial<S>)
+  }
+}
+
+/** `inactivity_warning` — stamp the soft check-in prompt onto its session. */
+function dispatchInactivityWarning<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['inactivity_warning'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const warning = handleInactivityWarning(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (warning && warning.sessionId && adapter.hasSession(warning.sessionId)) {
+    adapter.updateSession(warning.sessionId, () => warning.patch as Partial<S>)
+  }
+}
+
+/** `mcp_servers` — replace the target session's MCP-server list. */
+function dispatchMcpServers<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['mcp_servers'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handleMcpServers(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => patch as Partial<S>)
+  }
+}
+
+/** `session_usage` — store the session's cumulative token/cost usage. */
+function dispatchSessionUsage<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_usage'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handleSessionUsage(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => patch as Partial<S>)
+  }
+}
+
+/** `session_cost_threshold_crossed` — store the one-shot cost-warning banner. */
+function dispatchSessionCostThresholdCrossed<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_cost_threshold_crossed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  // Explicit sessionId only — no active-session fallback (matches both clients).
+  const { sessionId, patch } = handleSessionCostThresholdCrossed(msg as Record<string, unknown>)
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => patch as unknown as Partial<S>)
+  }
+}
+
+/** `dev_preview` — add/replace a dev-preview entry (deduped by port). */
+function dispatchDevPreview<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['dev_preview'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleDevPreview(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
+    adapter.updateSession(builder.sessionId, (ss) => builder.applyTo(ss.devPreviews ?? []) as Partial<S>)
+  }
+}
+
+/** `dev_preview_stopped` — remove the dev-preview entry matching `port`. */
+function dispatchDevPreviewStopped<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['dev_preview_stopped'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleDevPreviewStopped(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (builder.sessionId && adapter.hasSession(builder.sessionId)) {
+    adapter.updateSession(builder.sessionId, (ss) => builder.applyTo(ss.devPreviews ?? []) as Partial<S>)
+  }
+}
+
+/** `web_feature_status` — replace the flat Claude-Code-Web availability flags. */
+function dispatchWebFeatureStatus<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['web_feature_status'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  adapter.setState(
+    handleWebFeatureStatus(msg as Record<string, unknown>) as unknown as Record<string, unknown>,
+  )
+}
+
+/** `web_task_list` — replace the flat web-task list. */
+function dispatchWebTaskList<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['web_task_list'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { tasks } = handleWebTaskList(msg as Record<string, unknown>)
+  adapter.setState({ webTasks: tasks as WebTask[] } as Record<string, WebTask[]>)
+}
+
+/**
+ * `notification_prefs` — validate + store the notification-prefs snapshot.
+ * Slice-2 RECONCILE: both clients now share `handleNotificationPrefs`. A failed
+ * parse logs a warning and leaves existing state untouched (prior behaviour on
+ * both sides). The dashboard already did exactly this; the app's previously
+ * inline Zod parse was byte-identical and is now retired.
+ */
+function dispatchNotificationPrefs<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['notification_prefs'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { notificationPrefs, issues } = handleNotificationPrefs(msg as Record<string, unknown>)
+  if (!notificationPrefs) {
+    // eslint-disable-next-line no-console
+    console.warn('notification_prefs: invalid payload from server', issues)
+    return
+  }
+  adapter.setState({ notificationPrefs } as Record<string, NotificationPrefsState>)
+}
+
+// ---------------------------------------------------------------------------
 // Table + runner
 // ---------------------------------------------------------------------------
 
@@ -302,6 +625,21 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     conversation_id: dispatchConversationId,
     permission_rules_updated: dispatchPermissionRulesUpdated,
     confirm_permission_mode: dispatchConfirmPermissionMode,
+    // --- slice 2 (epic #5556) ---
+    agent_spawned: dispatchAgentSpawned,
+    agent_completed: dispatchAgentCompleted,
+    agent_event: dispatchAgentEvent,
+    background_work_changed: dispatchBackgroundWorkChanged,
+    plan_started: dispatchPlanStarted,
+    inactivity_warning: dispatchInactivityWarning,
+    mcp_servers: dispatchMcpServers,
+    session_usage: dispatchSessionUsage,
+    session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
+    dev_preview: dispatchDevPreview,
+    dev_preview_stopped: dispatchDevPreviewStopped,
+    web_feature_status: dispatchWebFeatureStatus,
+    web_task_list: dispatchWebTaskList,
+    notification_prefs: dispatchNotificationPrefs,
   }
 }
 
@@ -314,6 +652,21 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'conversation_id',
   'permission_rules_updated',
   'confirm_permission_mode',
+  // --- slice 2 (epic #5556) ---
+  'agent_spawned',
+  'agent_completed',
+  'agent_event',
+  'background_work_changed',
+  'plan_started',
+  'inactivity_warning',
+  'mcp_servers',
+  'session_usage',
+  'session_cost_threshold_crossed',
+  'dev_preview',
+  'dev_preview_stopped',
+  'web_feature_status',
+  'web_task_list',
+  'notification_prefs',
 ]
 
 /**
