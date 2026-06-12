@@ -956,6 +956,7 @@ export function SessionScreen() {
             onPress={() => setViewMode('chat')}
             accessibilityRole="button"
             accessibilityLabel="Chat"
+            accessibilityState={{ selected: viewMode === 'chat' }}
           >
             <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
               Chat
@@ -966,7 +967,9 @@ export function SessionScreen() {
               style={[styles.modeButton, chatFilterCompact && styles.modeButtonActive]}
               onPress={() => { setChatFilterCompact((v) => !v); clearSelection(); }}
               accessibilityRole="button"
-              accessibilityLabel={chatFilterCompact ? 'Show all messages' : 'Show chat only'}
+              accessibilityLabel={chatFilterCompact ? 'Compact messages' : 'All messages'}
+              accessibilityHint={chatFilterCompact ? 'Show all messages' : 'Show compact messages only'}
+              accessibilityState={{ selected: chatFilterCompact }}
             >
               <Text style={[styles.modeButtonText, chatFilterCompact && styles.modeButtonTextActive]}>
                 {chatFilterCompact ? 'Compact' : 'All'}
@@ -980,6 +983,7 @@ export function SessionScreen() {
               onPress={() => setViewMode('terminal')}
               accessibilityRole="button"
               accessibilityLabel="Terminal"
+              accessibilityState={{ selected: viewMode === 'terminal' }}
             >
               <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
                 Term
@@ -991,6 +995,7 @@ export function SessionScreen() {
             onPress={() => setViewMode('files')}
             accessibilityRole="button"
             accessibilityLabel="Files"
+            accessibilityState={{ selected: viewMode === 'files' }}
           >
             <Text style={[styles.modeButtonText, viewMode === 'files' && styles.modeButtonTextActive]}>
               Files
@@ -1644,7 +1649,10 @@ const styles = StyleSheet.create({
     flex: 0,
     paddingHorizontal: 16,
     paddingVertical: 8,
+    // #5634 — 44pt minimum touch target for the primary view-mode tabs.
+    minHeight: 44,
     alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 8,
   },
   modeButtonActive: {
