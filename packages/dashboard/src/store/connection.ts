@@ -1282,6 +1282,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
     }
 
+    // #5597 — re-resolve the live endpoint (URL + token) for the active registry
+    // server. Falls back to the closure-captured `url`/`token` for the local
+    // same-origin target (no registry entry) or a stale/desynced active id, so
+    // a manual local connect or a mid-edit registry never loses its endpoint.
+    const resolveActiveEndpoint = (
+      fallbackUrl: string,
+      fallbackToken: string,
+    ): ConnectEndpoint => {
+      const sid = get().activeServerId;
+      if (!sid) return { url: fallbackUrl, token: fallbackToken };
+      const entry = get().serverRegistry.find((s) => s.id === sid);
+      if (!entry) return { url: fallbackUrl, token: fallbackToken };
+      return { url: entry.wsUrl, token: entry.token || fallbackToken };
+    };
+
     // #5556 sub-item 4 — the HTTP health check / restart-detect / retry-or-
     // give-up decision tree now lives in the shared `runConnectAttempt`. The
     // dashboard supplies the EFFECTS as callbacks (single-store `set()` writes,
@@ -1293,10 +1308,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       attempt: _retryCount,
       maxRetries: MAX_RETRIES,
       retryDelays: RETRY_DELAYS,
-      // #5597/#5537 seam — static endpoint today (the url/token captured at
-      // connect-start). Returns null when superseded so the probe is skipped.
+      // #5597 seam — re-resolve the endpoint per attempt instead of dialing the
+      // closure-captured URL/token forever. The dashboard already re-read the
+      // registry TOKEN per reconnect (#5281); this mirrors that for the URL, so
+      // a registry entry whose `wsUrl` was repointed mid-ladder (e.g. another
+      // tab edited it, or a rotated endpoint was written back) is dialed on the
+      // next health-check retry instead of the dead captured URL. Returns null
+      // when superseded so the probe is skipped.
       resolveEndpoint: (): ConnectEndpoint | null =>
-        myAttemptId !== connectionAttemptId ? null : { url, token },
+        myAttemptId !== connectionAttemptId ? null : resolveActiveEndpoint(url, token),
       isStale: () => myAttemptId !== connectionAttemptId,
       // The HTTP `/health` GET — root path (/) not /ws (GET /ws returns 404) —
       // with the 5s abort, mapped to a ProbeResult. #4771: the shared
@@ -1349,7 +1369,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         console.log(`[ws] Retrying in ${delayMs}ms...`);
         setTimeout(() => {
           if (myAttemptId !== connectionAttemptId) return;
-          get().connect(url, token, { silent, _retryCount: nextAttempt, ...(pairingId ? { _pairingId: pairingId } : {}) });
+          // #5597 — re-resolve the registry endpoint so a repointed `wsUrl`
+          // (or token) is dialed on the next attempt, not the dead captured one.
+          const next = resolveActiveEndpoint(url, token);
+          get().connect(next.url, next.token, { silent, _retryCount: nextAttempt, ...(pairingId ? { _pairingId: pairingId } : {}) });
         }, delayMs);
       },
       onRestartGaveUp: () => {
@@ -1400,12 +1423,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // stale-attempt guard covers the timer-fire boundary.
     const reconnectScheduler = createReconnectScheduler({
       nextRung: nextReconnectAttempt,
+      // #5597 — re-resolve the registry endpoint (URL + token) on each socket-
+      // close reconnect. Previously only the token was re-read (#5281); the URL
+      // was the closure-captured one, so a registry entry whose `wsUrl` was
+      // repointed kept re-dialing the dead URL up the whole ladder. Now both
+      // come from the live active registry entry.
       reconnect: () => {
-        const sid = get().activeServerId;
-        const reconnectToken = sid
-          ? (get().serverRegistry.find((s) => s.id === sid)?.token ?? token)
-          : token;
-        get().connect(url, reconnectToken);
+        const next = resolveActiveEndpoint(url, token);
+        get().connect(next.url, next.token);
       },
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: RETRY_DELAYS,

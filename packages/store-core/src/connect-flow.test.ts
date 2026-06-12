@@ -18,8 +18,10 @@ import {
   runConnectAttempt,
   createReconnectScheduler,
   retryDelayForAttempt,
+  selectReconnectEndpoint,
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  LAN_FALLBACK_THRESHOLD,
   type ConnectFlowScheduler,
   type ProbeResult,
   type ConnectEndpoint,
@@ -413,5 +415,64 @@ describe('createReconnectScheduler', () => {
     })
     s.schedule()
     expect(fake.lastDelay()).toBe(RETRY_DELAYS[0] + 250)
+  })
+
+})
+
+// ---------------------------------------------------------------------------
+// selectReconnectEndpoint — LAN→tunnel fast fallback (#5537)
+// ---------------------------------------------------------------------------
+
+describe('selectReconnectEndpoint (#5537 LAN→tunnel fallback)', () => {
+  const LAN = 'ws://192.168.1.50:8080'
+  const TUNNEL = 'wss://abc.trycloudflare.com'
+
+  it('stays on the LAN URL for the first threshold attempts', () => {
+    for (const attempt of [0, 1]) {
+      expect(
+        selectReconnectEndpoint({ lastUrl: LAN, attempt, tunnelUrl: TUNNEL, lastUrlIsLan: true }),
+      ).toBe(LAN)
+    }
+  })
+
+  it('switches to the tunnel at and beyond the threshold', () => {
+    for (const attempt of [2, 3, 5, 99]) {
+      expect(
+        selectReconnectEndpoint({ lastUrl: LAN, attempt, tunnelUrl: TUNNEL, lastUrlIsLan: true }),
+      ).toBe(TUNNEL)
+    }
+  })
+
+  it('honors a custom threshold', () => {
+    expect(
+      selectReconnectEndpoint({ lastUrl: LAN, attempt: 0, tunnelUrl: TUNNEL, lastUrlIsLan: true, threshold: 1 }),
+    ).toBe(LAN)
+    expect(
+      selectReconnectEndpoint({ lastUrl: LAN, attempt: 1, tunnelUrl: TUNNEL, lastUrlIsLan: true, threshold: 1 }),
+    ).toBe(TUNNEL)
+  })
+
+  it('keeps retrying the LAN URL when no tunnel fallback exists', () => {
+    for (const attempt of [0, 1, 2, 5]) {
+      expect(
+        selectReconnectEndpoint({ lastUrl: LAN, attempt, tunnelUrl: null, lastUrlIsLan: true }),
+      ).toBe(LAN)
+    }
+  })
+
+  it('never touches a non-LAN (tunnel) drop — out of scope (#5537)', () => {
+    for (const attempt of [0, 2, 5]) {
+      expect(
+        selectReconnectEndpoint({ lastUrl: TUNNEL, attempt, tunnelUrl: TUNNEL, lastUrlIsLan: false }),
+      ).toBe(TUNNEL)
+    }
+  })
+
+  it('LAN_FALLBACK_THRESHOLD is the documented default (2)', () => {
+    expect(LAN_FALLBACK_THRESHOLD).toBe(2)
+    // The default (no `threshold`) matches passing the constant explicitly.
+    const args = { lastUrl: LAN, tunnelUrl: TUNNEL, lastUrlIsLan: true } as const
+    expect(selectReconnectEndpoint({ ...args, attempt: 1 })).toBe(LAN)
+    expect(selectReconnectEndpoint({ ...args, attempt: LAN_FALLBACK_THRESHOLD })).toBe(TUNNEL)
   })
 })
