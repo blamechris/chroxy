@@ -101,7 +101,7 @@ describe('ConnectScreen component structure', () => {
     expect(src).toMatch(/testID="lan-scan-error-hint"/)
   })
 
-  test('scan error logs to console and does not swallow the error', () => {
+  test('logs scan error to console and surfaces it via scanError state instead of an alert', () => {
     expect(src).toMatch(/console\.warn.*LAN scan/)
     expect(src).toMatch(/setScanError\(true\)/)
   })

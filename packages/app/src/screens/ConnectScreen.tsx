@@ -507,7 +507,7 @@ export function ConnectScreen() {
         <View
           style={styles.discoveredSection}
           testID="lan-scan-empty-state"
-          accessibilityLabel="LAN scan result: no servers found"
+          accessibilityLabel={scanError ? 'LAN scan result: scan failed' : 'LAN scan result: no servers found'}
         >
           {scanError ? (
             <>
