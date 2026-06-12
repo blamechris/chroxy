@@ -102,6 +102,7 @@ import {
   handleSlashCommands as sharedSlashCommands,
   handleAgentList as sharedAgentList,
   handleProviderList as sharedProviderList,
+  handleAuthBootstrap as sharedAuthBootstrap,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
   handleGitBranchesResult as sharedGitBranchesResult,
@@ -287,6 +288,12 @@ interface MessageHandlerContext extends EncryptionContext {
 
   // Message queue
   messageQueue: QueuedMessage[];
+
+  // #5555 (auth_bootstrap) — set from auth_ok's `capabilities.authBootstrap`.
+  // When true, the server pushes an `auth_bootstrap` burst frame carrying the
+  // provider / slash-command / agent lists, so the connect-time list_* request
+  // round trip is skipped (in BOTH the eager and discrete key-exchange paths).
+  serverWillBootstrap: boolean;
 }
 
 function createDefaultContext(): MessageHandlerContext {
@@ -316,6 +323,7 @@ function createDefaultContext(): MessageHandlerContext {
     clientRender: new RollingPercentiles(200),
     lastLatencyLogAt: 0,
     messageQueue: [],
+    serverWillBootstrap: false,
   };
   return ctx;
 }
@@ -340,6 +348,34 @@ export function resetAllHandlerState(): void {
   disconnectedAttemptId = -1;
   lastConnectedUrl = null;
   pendingPairingId = null;
+}
+
+/**
+ * #5555 — normalize a raw provider list (from either the `provider_list`
+ * response or the `auth_bootstrap` burst) into validated `ProviderInfo[]`.
+ * Guards against misbehaving servers / malicious endpoints that might send
+ * non-objects or objects without a string `name`, and preserves the
+ * capabilities + auth/billing summary (#3404). Shared so the discrete and
+ * bootstrap paths apply identical element validation.
+ */
+function mapProviderList(rawProviders: unknown[]): ProviderInfo[] {
+  return rawProviders
+    .filter(
+      (p): p is { name: string; capabilities?: unknown; auth?: unknown } =>
+        !!p &&
+        typeof p === 'object' &&
+        typeof (p as { name?: unknown }).name === 'string',
+    )
+    .map((p) => {
+      const entry: ProviderInfo = { name: p.name };
+      if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
+        entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
+      }
+      if (p.auth && typeof p.auth === 'object' && !Array.isArray(p.auth)) {
+        entry.auth = p.auth as ProviderInfo['auth'];
+      }
+      return entry;
+    });
 }
 
 // ---------------------------------------------------------------------------
@@ -1252,6 +1288,29 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       useConnectionLifecycleStore.getState().setConnectionError(null, 0);
       useConnectionLifecycleStore.getState().setUserDisconnected(false);
 
+      // #5555 — fold the static permission-mode enum out of auth_ok when the
+      // server provided it, so we don't have to wait for the discrete
+      // `available_permission_modes` burst frame. Older servers omit the field
+      // (null) and the discrete frame still lands; new servers send both and
+      // this just wins the race harmlessly (idempotent set).
+      if (auth.availablePermissionModes) {
+        set({ availablePermissionModes: auth.availablePermissionModes });
+      }
+
+      // #5555 (auth_bootstrap) — when the server advertises the bootstrap
+      // capability it pushes an `auth_bootstrap` burst frame carrying the
+      // provider / slash-command / agent lists right after auth_ok. In that
+      // case we SKIP the 3 connect-time list requests (they arrive unsolicited
+      // in the burst). Older servers don't set the flag, so we request as
+      // before. The list_* request paths stay live for post-connect refreshes.
+      _ctx.serverWillBootstrap = auth.serverCapabilities.authBootstrap === true;
+      const sendConnectListRequests = () => {
+        if (_ctx.serverWillBootstrap) return;
+        wsSend(ctx.socket, { type: 'list_providers' });
+        wsSend(ctx.socket, { type: 'list_slash_commands' });
+        wsSend(ctx.socket, { type: 'list_agents' });
+      };
+
       // Start client-side heartbeat for dead connection detection
       startHeartbeat(ctx.socket);
 
@@ -1264,26 +1323,44 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // _ctx.pendingSalt. If the server honoured the eager path it returns
         // its public key in auth_ok; derive the shared key immediately and
         // start the burst a full RTT earlier than the discrete handshake.
+        //
+        // #5555 follow-up (hardening) — `auth.serverPublicKey` is shared-parser
+        // normalized (empty/non-string → null) but a non-empty MALFORMED value
+        // (bad base64 / wrong length) still passes that filter and makes
+        // `deriveSharedKey` throw. The discrete `key_exchange_ok` handler
+        // guards against a bad key; mirror that here by wrapping the eager
+        // derivation in try/catch and FALLING BACK to the discrete handshake
+        // on any failure instead of letting the throw tear down the connection.
+        let eagerEstablished = false;
         if (auth.serverPublicKey && _ctx.pendingKeyPair) {
-          const rawSharedKey = deriveSharedKey(auth.serverPublicKey, _ctx.pendingKeyPair.secretKey);
-          const encryptionKey = _ctx.pendingSalt
-            ? deriveConnectionKey(rawSharedKey, _ctx.pendingSalt)
-            : rawSharedKey;
-          _ctx.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
-          _ctx.pendingKeyPair = null;
-          _ctx.pendingSalt = null;
-          console.log('[crypto] E2E encryption established (eager)');
-          // Burst un-gated: server already activated encryption after auth_ok.
-          wsSend(ctx.socket, { type: 'list_providers' });
-          wsSend(ctx.socket, { type: 'list_slash_commands' });
-          wsSend(ctx.socket, { type: 'list_agents' });
-          resetClientVisibleMemo();
-          sendClientVisible(ctx.socket, isVisibleAppState(AppState.currentState));
-        } else {
-          // Fallback (old server / eager derivation declined): the keypair is
-          // still stashed from onopen — send the discrete key_exchange so the
-          // server replies key_exchange_ok. If onopen never ran (defensive),
-          // regenerate so we never send an empty handshake.
+          try {
+            const rawSharedKey = deriveSharedKey(auth.serverPublicKey, _ctx.pendingKeyPair.secretKey);
+            const encryptionKey = _ctx.pendingSalt
+              ? deriveConnectionKey(rawSharedKey, _ctx.pendingSalt)
+              : rawSharedKey;
+            _ctx.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
+            _ctx.pendingKeyPair = null;
+            _ctx.pendingSalt = null;
+            eagerEstablished = true;
+            console.log('[crypto] E2E encryption established (eager)');
+            // Burst un-gated: server already activated encryption after auth_ok.
+            sendConnectListRequests();
+            resetClientVisibleMemo();
+            sendClientVisible(ctx.socket, isVisibleAppState(AppState.currentState));
+          } catch (err) {
+            // Malformed eager key — discard any partial state and fall through
+            // to the discrete handshake below (regenerating the keypair if the
+            // eager attempt consumed it).
+            console.warn('[crypto] Eager key derivation failed, falling back to discrete key_exchange', err);
+            _ctx.encryptionState = null;
+          }
+        }
+        if (!eagerEstablished) {
+          // Fallback (old server / no eager key / eager derivation failed): the
+          // keypair is still stashed from onopen — send the discrete
+          // key_exchange so the server replies key_exchange_ok. If onopen never
+          // ran (defensive) or the eager attempt nulled it, regenerate so we
+          // never send an empty handshake.
           if (!_ctx.pendingKeyPair) {
             _ctx.pendingKeyPair = createKeyPair();
             _ctx.pendingSalt = generateConnectionSalt();
@@ -1294,9 +1371,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }
       } else {
         // No encryption — send post-auth messages immediately
-        wsSend(ctx.socket, { type: 'list_providers' });
-        wsSend(ctx.socket, { type: 'list_slash_commands' });
-        wsSend(ctx.socket, { type: 'list_agents' });
+        sendConnectListRequests();
         useConnectionLifecycleStore.getState().setServerInfo({ isEncrypted: false });
         // #3404: server defaults visible=true on fresh connect; sync if we
         // reconnected while backgrounded so completion pushes still fire.
@@ -1334,10 +1409,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _ctx.pendingKeyPair = null;
         _ctx.pendingSalt = null;
         console.log('[crypto] E2E encryption established');
-        // Now send the post-auth messages that were deferred
-        wsSend(ctx.socket, { type: 'list_providers' });
-        wsSend(ctx.socket, { type: 'list_slash_commands' });
-        wsSend(ctx.socket, { type: 'list_agents' });
+        // Now send the post-auth messages that were deferred. #5555: skip the
+        // 3 list requests when the server advertised the auth_bootstrap
+        // capability (the burst frame already carries that data, queued behind
+        // encryption and decrypted once this handshake completes).
+        if (!_ctx.serverWillBootstrap) {
+          wsSend(ctx.socket, { type: 'list_providers' });
+          wsSend(ctx.socket, { type: 'list_slash_commands' });
+          wsSend(ctx.socket, { type: 'list_agents' });
+        }
         // #3404: sync visibility once encryption is established (mirrors the
         // unencrypted auth_ok path above).
         resetClientVisibleMemo();
@@ -2698,31 +2778,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'provider_list': {
       const providerResult = sharedProviderList(msg);
       if (!providerResult) break;
-      // Validate element shape before storing — guard against misbehaving
-      // servers / malicious endpoints that might send non-objects or
-      // objects without a string `name`.
-      const providers: ProviderInfo[] = providerResult.providers
-        .filter(
-          (p): p is { name: string; capabilities?: unknown; auth?: unknown } =>
-            !!p &&
-            typeof p === 'object' &&
-            typeof (p as { name?: unknown }).name === 'string',
-        )
-        .map((p) => {
-          const entry: ProviderInfo = { name: p.name };
-          if (p.capabilities && typeof p.capabilities === 'object' && !Array.isArray(p.capabilities)) {
-            entry.capabilities = p.capabilities as ProviderInfo['capabilities'];
-          }
-          // #3404 audit (F1+F5): preserve the server's auth/billing summary so
-          // the create-session modal can disable unready chips and show the
-          // billing identity. Earlier code dropped the field, breaking the
-          // entire mobile UI surface for these features.
-          if (p.auth && typeof p.auth === 'object' && !Array.isArray(p.auth)) {
-            entry.auth = p.auth as ProviderInfo['auth'];
-          }
-          return entry;
-        });
-      set({ availableProviders: providers });
+      set({ availableProviders: mapProviderList(providerResult.providers) });
       break;
     }
 
@@ -2730,6 +2786,31 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const agentResult = sharedAgentList(msg, get().activeSessionId);
       if (!agentResult) break;
       const customAgents = agentResult.agents as CustomAgent[];
+      set({ customAgents });
+      useConversationStore.getState().setCustomAgents(customAgents);
+      break;
+    }
+
+    case 'auth_bootstrap': {
+      // #5555 — connect-time bootstrap burst folds the provider / slash-command
+      // / agent lists into one server-initiated frame so the client skips its
+      // 3-request connect-time round trip. Apply each list through the SAME
+      // store mutations + element validation the discrete responses use, so the
+      // bootstrap and refresh paths are behaviourally identical.
+      const boot = sharedAuthBootstrap(msg);
+      // Providers (server-wide, no session guard).
+      set({ availableProviders: mapProviderList(boot.providers) });
+      // Slash commands + agents are scoped to the connect-time active session.
+      // Guard against a stale burst: if a session switch already moved the
+      // active id off the burst's `sessionId`, skip the session-scoped lists
+      // (the post-switch session_switched flow re-requests them) but keep the
+      // server-wide provider list applied above.
+      const activeId = get().activeSessionId;
+      if (boot.sessionId && activeId && boot.sessionId !== activeId) break;
+      const slashCommands = boot.slashCommands as SlashCommand[];
+      set({ slashCommands });
+      useConversationStore.getState().setSlashCommands(slashCommands);
+      const customAgents = boot.agents as CustomAgent[];
       set({ customAgents });
       useConversationStore.getState().setCustomAgents(customAgents);
       break;

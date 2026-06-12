@@ -65,6 +65,7 @@ import {
   handleSlashCommands,
   handleAgentList,
   handleProviderList,
+  handleAuthBootstrap,
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,
@@ -1456,6 +1457,11 @@ describe('handleAuthOk', () => {
       webFeatures: { available: true, remote: false, teleport: true },
       capabilities: { notificationPrefs: true, somethingElse: false },
       serverPublicKey: 'srv-pub-key',
+      // #5555 — folded static permission-mode enum.
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'auto', label: 'Auto' },
+      ],
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1473,6 +1479,10 @@ describe('handleAuthOk', () => {
       webFeatures: { available: true, remote: false, teleport: true },
       serverCapabilities: { notificationPrefs: true, somethingElse: false },
       serverPublicKey: 'srv-pub-key',
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'auto', label: 'Auto' },
+      ],
     })
   })
 
@@ -1708,6 +1718,7 @@ describe('handleAuthOk', () => {
       webFeatures: { available: false, remote: false, teleport: false },
       serverCapabilities: {},
       serverPublicKey: null,
+      availablePermissionModes: null,
     })
   })
 })
@@ -3485,6 +3496,40 @@ describe('handleProviderList', () => {
     expect(handleProviderList({ providers: 'oops' })).toBeNull()
     expect(handleProviderList({ providers: { x: 1 } })).toBeNull()
     expect(handleProviderList({ providers: null })).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleAuthBootstrap (#5555)
+// ---------------------------------------------------------------------------
+describe('handleAuthBootstrap', () => {
+  it('extracts all three lists + sessionId', () => {
+    const providers = [{ name: 'anthropic' }]
+    const slashCommands = [{ name: 'clear', source: 'builtin' }]
+    const agents = [{ name: 'reviewer', source: 'project' }]
+    expect(
+      handleAuthBootstrap({ type: 'auth_bootstrap', providers, slashCommands, agents, sessionId: 'sess-1' }),
+    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1' })
+  })
+
+  it('defaults each missing list to [] and sessionId to null', () => {
+    expect(handleAuthBootstrap({ type: 'auth_bootstrap' })).toEqual({
+      providers: [],
+      slashCommands: [],
+      agents: [],
+      sessionId: null,
+    })
+  })
+
+  it('coerces non-array lists to [] independently (partial-compute tolerance)', () => {
+    expect(
+      handleAuthBootstrap({ providers: [{ name: 'x' }], slashCommands: 'oops', agents: null }),
+    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null })
+  })
+
+  it('treats empty/non-string sessionId as null', () => {
+    expect(handleAuthBootstrap({ sessionId: '' }).sessionId).toBeNull()
+    expect(handleAuthBootstrap({ sessionId: 42 as unknown as string }).sessionId).toBeNull()
   })
 })
 

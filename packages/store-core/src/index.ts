@@ -459,6 +459,8 @@ export {
   handleSlashCommands,
   handleAgentList,
   handleProviderList,
+  // #5555 — connect-time bootstrap burst (providers + slash commands + agents)
+  handleAuthBootstrap,
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,

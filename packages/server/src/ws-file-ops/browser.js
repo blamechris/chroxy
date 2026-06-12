@@ -398,7 +398,13 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    *   to look up built-ins. Null/unknown providers skip the built-in merge
    *   (picker still shows project + user commands).
    */
-  async function listSlashCommands(ws, cwd, sessionId, providerName = null) {
+  /**
+   * Compute the merged slash-command list (built-ins + project/user .md files)
+   * without touching the socket. Shared by the `list_slash_commands` request
+   * path (`listSlashCommands`) and the connect-time `auth_bootstrap` burst
+   * (#5555) so both produce an identical `commands` array.
+   */
+  async function computeSlashCommands(cwd, providerName = null) {
     const commands = []
     const seen = new Set()
 
@@ -467,6 +473,11 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
       return a.name.localeCompare(b.name)
     })
 
+    return commands
+  }
+
+  async function listSlashCommands(ws, cwd, sessionId, providerName = null) {
+    const commands = await computeSlashCommands(cwd, providerName)
     const response = { type: 'slash_commands', commands }
     if (sessionId) response.sessionId = sessionId
     sendFn(ws, response)
@@ -482,7 +493,12 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
    * @param {string[]} [opts.userAgentsDirs] - Override the list of user-level agent directories
    *   to scan (#2965). When omitted, defaults to [~/.claude/agents].
    */
-  async function listAgents(ws, cwd, sessionId, opts = {}) {
+  /**
+   * Compute the merged custom-agent list (project + user `.claude/agents`)
+   * without touching the socket. Shared by the `list_agents` request path
+   * (`listAgents`) and the connect-time `auth_bootstrap` burst (#5555).
+   */
+  async function computeAgents(cwd, opts = {}) {
     /**
      * List the candidate agent .md files in a single directory. Returns
      * `{ dir, source, filenames[] }`. Errors (missing dir, unreadable, etc.)
@@ -556,6 +572,11 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
 
     agents.sort((a, b) => a.name.localeCompare(b.name))
 
+    return agents
+  }
+
+  async function listAgents(ws, cwd, sessionId, opts = {}) {
+    const agents = await computeAgents(cwd, opts)
     const response = { type: 'agent_list', agents }
     if (sessionId) response.sessionId = sessionId
     sendFn(ws, response)
@@ -567,5 +588,7 @@ export function createBrowserOps(sendFn, resolveSessionCwd, validatePathWithinCw
     listFiles,
     listSlashCommands,
     listAgents,
+    computeSlashCommands,
+    computeAgents,
   }
 }
