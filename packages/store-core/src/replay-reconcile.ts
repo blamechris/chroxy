@@ -62,8 +62,25 @@ const _rebuildBaseline = new Map<string, number>()
  * the next `auth`. Survives across reconnects in module memory (the same module
  * instance lives for the app/dashboard session), and is the single source the
  * connect path reads when building the auth payload.
+ *
+ * Iteration order is LRU-by-update: `recordHistorySeq` re-inserts the touched
+ * key so it moves to the tail (newest), and the cap below evicts from the head
+ * (oldest). This keeps the map bounded and — critically — guarantees the
+ * just-updated (active) session's cursor is never the one evicted, so a heavy
+ * user with hundreds of historical sessions still gets a delta reconnect on the
+ * session they're actually viewing (#5555.3 review thread).
  */
 const _historyCursors = new Map<string, number>()
+
+/**
+ * Client-side cap on the per-session cursor map. Mirrors the server's
+ * `MAX_HISTORY_CURSORS` (ws-auth.js): the server only honours that many keys
+ * from a single `auth`, so retaining/sending more is pure bloat. Holding the
+ * client cap at the same value (and evicting LRU) means the client never sends
+ * a cursor the server would silently drop, and the active session's cursor is
+ * always within the honoured window.
+ */
+const MAX_CLIENT_HISTORY_CURSORS = 64
 
 /**
  * Reset all replay-reconcile state. Called on fresh auth / hard reset so a new
@@ -85,7 +102,18 @@ export function recordHistorySeq(sessionId: string | null | undefined, seq: unkn
   if (!sessionId) return
   if (typeof seq !== 'number' || !Number.isFinite(seq) || seq < 0) return
   const cur = _historyCursors.get(sessionId)
-  if (cur === undefined || seq > cur) _historyCursors.set(sessionId, seq)
+  if (cur !== undefined && seq <= cur) return
+  // Re-insert so the touched (active) session moves to the Map tail — LRU order
+  // for the cap below. A plain `.set` on an existing key keeps its old slot, so
+  // delete-then-set is required to refresh recency.
+  _historyCursors.delete(sessionId)
+  _historyCursors.set(sessionId, seq)
+  // Evict the least-recently-updated cursor(s) from the head once over the cap.
+  while (_historyCursors.size > MAX_CLIENT_HISTORY_CURSORS) {
+    const oldest = _historyCursors.keys().next().value
+    if (oldest === undefined) break
+    _historyCursors.delete(oldest)
+  }
 }
 
 /**

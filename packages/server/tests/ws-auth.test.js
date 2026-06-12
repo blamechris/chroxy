@@ -317,16 +317,37 @@ describe('handleAuthMessage', () => {
       assert.equal(client.historyCursors, undefined)
     })
 
-    it('drops non-numeric / negative / non-finite cursor values', () => {
+    it('rejects auth when a cursor value is invalid (negative / non-finite / non-integer / non-numeric)', () => {
+      // AuthSchema validates historyCursors as
+      // z.record(z.string(), z.number().int().nonnegative()), so a single bad
+      // VALUE fails the whole safeParse → auth_fail (invalid_message), not a
+      // silent filter. The handler's defensive value-filter loop is therefore
+      // belt-and-suspenders only — these inputs never reach it. We pin the real
+      // wire behaviour here so a future schema relaxation can't regress to
+      // silently honouring a malformed cursor.
+      for (const bad of [-1, Infinity, NaN, 1.5, 'x', null]) {
+        const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+        handleAuthMessage(ctx, ws, {
+          type: 'auth',
+          token: 'good-token',
+          historyCursors: { ok: 7, bad },
+        })
+        const last = ws.lastSent()
+        assert.equal(last?.type, 'auth_fail', `bad value ${String(bad)} must reject auth`)
+        assert.equal(last?.reason, 'invalid_message')
+        assert.equal(client.authenticated, false)
+        assert.equal(client.historyCursors, undefined)
+      }
+    })
+
+    it('honours a fully-valid cursor map (handler filter passes every entry through)', () => {
       const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
-      // Zod coerces the record; invalid entries that survive parsing are
-      // filtered in the handler. Pass through .passthrough() with mixed values.
       handleAuthMessage(ctx, ws, {
         type: 'auth',
         token: 'good-token',
-        historyCursors: { ok: 7 },
+        historyCursors: { ok: 7, zero: 0 },
       })
-      assert.deepEqual(client.historyCursors, { ok: 7 })
+      assert.deepEqual(client.historyCursors, { ok: 7, zero: 0 })
     })
 
     it('caps the number of honoured cursors at MAX_HISTORY_CURSORS', () => {

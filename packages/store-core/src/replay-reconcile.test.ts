@@ -41,6 +41,34 @@ describe('history cursor tracking (#5555.3)', () => {
     expect(getHistoryCursors()).toEqual({})
   })
 
+  // #5555.3 review thread: the server honours at most MAX_HISTORY_CURSORS (64)
+  // keys from a single auth. The client must cap+evict LRU so it never sends a
+  // cursor the server would drop, and — critically — never evicts the active
+  // (most-recently-updated) session's cursor.
+  it('caps the cursor map at 64, evicting the least-recently-updated keys', () => {
+    for (let i = 0; i < 100; i++) recordHistorySeq(`s${i}`, i + 1)
+    const cursors = getHistoryCursors()
+    expect(Object.keys(cursors).length).toBe(64)
+    // The 36 oldest (s0..s35) were evicted; the 64 newest survive.
+    expect(cursors['s0']).toBeUndefined()
+    expect(cursors['s35']).toBeUndefined()
+    expect(cursors['s36']).toBe(37)
+    expect(cursors['s99']).toBe(100)
+  })
+
+  it('touching an old session refreshes its recency so it is not evicted', () => {
+    for (let i = 0; i < 64; i++) recordHistorySeq(`s${i}`, 1)
+    // s0 is currently the oldest. Advance its cursor → moves it to the tail.
+    recordHistorySeq('s0', 2)
+    // Add one more new session → eviction fires; s1 (now oldest) goes, not s0.
+    recordHistorySeq('s64', 1)
+    const cursors = getHistoryCursors()
+    expect(Object.keys(cursors).length).toBe(64)
+    expect(cursors['s0']).toBe(2) // refreshed, retained
+    expect(cursors['s1']).toBeUndefined() // evicted as the new oldest
+    expect(cursors['s64']).toBe(1)
+  })
+
   it('resetReplayReconcile retains cursors unless clearCursors', () => {
     recordHistorySeq('s1', 3)
     resetReplayReconcile() // baseline only
