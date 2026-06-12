@@ -174,11 +174,13 @@ export interface RunConnectAttemptOptions {
    * Recurse into the client's own `connect()` for the next retry. The client
    * owns this so each retry re-runs its full per-connect store setup (the same
    * recursion the hand-written flow used). `attempt` is the NEXT attempt index.
+   * The client's `scheduleRetry` owns the retry timer (its own `setTimeout`), so
+   * the flow itself never schedules — that's why there's no `scheduler` opt
+   * here (unlike {@link CreateReconnectSchedulerOptions}, which arms its own
+   * timer and therefore takes one).
    */
   scheduleRetry: (nextAttempt: number, delayMs: number) => void
 
-  /** Timer surface; defaults to the global `setTimeout`/`clearTimeout`. */
-  scheduler?: ConnectFlowScheduler
   /** Jitter fn; defaults to store-core's `withJitter` (0–50%). */
   jitter?: (delayMs: number) => number
 }
