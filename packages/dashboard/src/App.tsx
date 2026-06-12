@@ -80,6 +80,7 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
+import { useTunnelReady } from './hooks/useTunnelReady'
 import { SplitPane, type SplitDirection } from './components/SplitPane'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed, loadPersistedSidebarRepoOrder, loadPersistedSidebarSessionOrder, persistSidebarRepoOrder, persistSidebarSessionOrder, persistSessionTabOrder, loadPersistedSessionTabOrder } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
@@ -2216,33 +2217,9 @@ export function App() {
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
   const showWelcome = isConnected && sessions.length === 0
 
-  // Track whether a configured tunnel is fully ready (connection info available)
-  const [tunnelReady, setTunnelReady] = useState(true)
-  useEffect(() => {
-    if (!isConnected) { setTunnelReady(true); return }
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    async function checkTunnel() {
-      try {
-        const { getServerInfo } = await import('./hooks/useTauriIPC')
-        const info = await getServerInfo()
-        // Only track tunnel readiness if tunnel mode is configured
-        if (!info || info.tunnelMode === 'none') { setTunnelReady(true); return }
-      } catch {
-        // Not in Tauri — check /connect directly
-      }
-      try {
-        const { getAuthToken } = await import('./utils/auth')
-        const token = getAuthToken()
-        if (!token) return
-        const res = await fetch('/connect', { headers: { Authorization: `Bearer ${token}` } })
-        if (res.ok) { if (!cancelled) setTunnelReady(true); return }
-      } catch { /* ignore */ }
-      if (!cancelled) { setTunnelReady(false); timer = setTimeout(checkTunnel, 3000) }
-    }
-    checkTunnel()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [isConnected])
+  // Track whether a configured tunnel is fully ready (connection info
+  // available). Extracted to `useTunnelReady` (#5560).
+  const tunnelReady = useTunnelReady(isConnected)
 
   // Fetch conversation history when welcome screen is shown
   useEffect(() => {
