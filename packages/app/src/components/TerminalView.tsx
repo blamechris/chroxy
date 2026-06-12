@@ -1,8 +1,52 @@
 import React, { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState, useEffect } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
+import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { buildXtermHtml } from './xterm-html';
 import { COLORS } from '../constants/colors';
+
+/**
+ * Navigation allow-list for the embedded xterm WebView (#5645).
+ *
+ * The terminal is rendered from an inline `source={{ html }}` document with no
+ * `baseUrl`. RN WebView's native code falls back to `about:blank` as the base
+ * URL on iOS (RNCWebViewImpl.m: `loadHTMLString:baseURL:about:blank`) and loads
+ * via `loadDataWithBaseURL("", ...)` on Android — so the document's request URL
+ * is reported as `about:blank` (iOS) or the empty string (Android). That
+ * document is purely display-only — it never navigates. The crash-recovery
+ * `reload()` path simply re-loads the *same* inline document, which again
+ * surfaces as `about:blank` / `''`.
+ *
+ * Defense-in-depth: server-controlled ANSI (or a future xterm web-links addon /
+ * regression) must never be able to trigger a navigation away from that
+ * document. So we allow ONLY the inline document load (and its reload) and block
+ * everything else — http/https, link taps, data: URLs, deep links, `about:`
+ * pseudo-pages like `about:srcdoc`/`about:version`, etc.
+ *
+ * `originWhitelist` is the coarse origin pre-filter; `onShouldStartLoadWithRequest`
+ * (this guard) is the precise per-request gate and the *real* containment control —
+ * it is consulted for every real navigation. We deliberately keep `originWhitelist`
+ * at the permissive `['*']`: RN WebView's own `compileWhitelist`/`passesWhitelist`
+ * (WebViewShared.tsx) compute `extractOrigin('') === ''`, and ONLY the compiled
+ * `'*'` -> `^.*` regex matches that empty origin. A narrower value such as
+ * `['about:*']` rejects Android's empty (`''`) inline-load origin, which would
+ * blank the terminal with no recovery the moment any Android navigation is routed
+ * through the whitelist. The narrowing lives in this guard instead, where it can't
+ * break the legitimate inline load on either platform. (Empirically verified
+ * against the real RN filter — see TerminalView.test.tsx "RN whitelist wrapper".)
+ */
+function isInlineDocumentRequest(request: ShouldStartLoadRequest): boolean {
+  // The inline `source={{ html }}` with no baseUrl resolves to exactly
+  // `about:blank` on iOS (loadHTMLString:baseURL:about:blank) and to the empty
+  // string `''` on Android (loadDataWithBaseURL("", ...)). Allow ONLY those two
+  // exact URLs — nothing else, including other `about:` pseudo-pages.
+  const url = request.url ?? '';
+  return url === '' || url === 'about:blank';
+}
+
+export function shouldAllowTerminalNavigation(request: ShouldStartLoadRequest): boolean {
+  return isInlineDocumentRequest(request);
+}
 
 // -- Public handle --
 
@@ -115,7 +159,14 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         ref={webViewRef}
         source={{ html }}
         style={styles.container}
+        // Containment (#5645): only the inline xterm document may load; block
+        // any server-/ANSI-triggered navigation. The real gate is
+        // onShouldStartLoadWithRequest below (consulted for every navigation).
+        // originWhitelist stays `['*']` because RN's whitelist rejects Android's
+        // empty (`''`) inline-load origin for any narrower glob — narrowing it
+        // would blank the terminal. See shouldAllowTerminalNavigation.
         originWhitelist={['*']}
+        onShouldStartLoadWithRequest={shouldAllowTerminalNavigation}
         onMessage={handleMessage}
         onContentProcessDidTerminate={handleWebViewCrash}
         onRenderProcessGone={handleWebViewCrash}
