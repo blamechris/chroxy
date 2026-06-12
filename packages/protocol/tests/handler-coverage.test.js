@@ -137,6 +137,28 @@ const PLATFORM_SPECIFIC = {
 // Helpers
 // ---------------------------------------------------------------------------
 
+/**
+ * Extract the message types owned by the SHARED store-core dispatch table
+ * (epic #5556, sub-item 3). These cases were migrated OUT of both
+ * clients' switches into `store-core/src/dispatch-table.ts`, so they no longer
+ * appear as a `case` in app/dashboard source — but they ARE covered by both
+ * clients (each routes through `runDispatch` before its own switch). The
+ * coverage checks below union this set into BOTH client type sets so a
+ * table-registered case counts as covered for both platforms.
+ *
+ * Source of truth is the `DISPATCH_TABLE_TYPES` array in dispatch-table.ts;
+ * static-parse it (same approach as the rest of this test — no runtime import).
+ */
+function extractSharedDispatchTypes(dispatchSrc) {
+  const block = dispatchSrc.match(
+    /DISPATCH_TABLE_TYPES:\s*readonly\s+DispatchMessageType\[\]\s*=\s*\[([\s\S]*?)\]/,
+  )
+  assert.ok(block, 'Should find DISPATCH_TABLE_TYPES array in dispatch-table.ts')
+  const types = [...block[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1])
+  assert.ok(types.length > 0, 'Should find shared dispatch-table types')
+  return new Set(types)
+}
+
 function extractServerMessageTypes(wsServerSrc) {
   // Extract server message types from the Server -> Client doc comment in ws-server.js
   const serverSection = wsServerSrc.match(/\* Server -> Client:\n([\s\S]*?)\n \*\n \* Encrypted envelope/)?.[1]
@@ -187,14 +209,20 @@ describe('handler coverage contract', () => {
   const wsServerPath = resolve(import.meta.dirname, '../../server/src/ws-server.js')
   const appHandlerPath = resolve(import.meta.dirname, '../../app/src/store/message-handler.ts')
   const dashHandlerPath = resolve(import.meta.dirname, '../../dashboard/src/store/message-handler.ts')
+  const dispatchTablePath = resolve(import.meta.dirname, '../../store-core/src/dispatch-table.ts')
 
   const wsServerSrc = readFileSync(wsServerPath, 'utf-8')
   const appSrc = readFileSync(appHandlerPath, 'utf-8')
   const dashSrc = readFileSync(dashHandlerPath, 'utf-8')
+  const dispatchSrc = readFileSync(dispatchTablePath, 'utf-8')
 
   const allServerTypes = extractServerMessageTypes(wsServerSrc)
-  const appTypes = extractAppHandlerTypes(appSrc)
-  const dashTypes = extractDashboardHandlerTypes(dashSrc)
+  // #5556 — cases owned by the shared store-core dispatch table count as
+  // covered by BOTH clients (each routes through `runDispatch` first). Union
+  // them into both per-client sets so a migrated case isn't reported missing.
+  const sharedDispatchTypes = extractSharedDispatchTypes(dispatchSrc)
+  const appTypes = new Set([...extractAppHandlerTypes(appSrc), ...sharedDispatchTypes])
+  const dashTypes = new Set([...extractDashboardHandlerTypes(dashSrc), ...sharedDispatchTypes])
 
   it('every ServerMessageType is handled by at least one handler (or explicitly excluded)', () => {
     const unhandled = []
