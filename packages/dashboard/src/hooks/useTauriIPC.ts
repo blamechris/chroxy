@@ -68,8 +68,11 @@ export async function getExposeOnLan(): Promise<boolean | null> {
  * on the next server restart (bind address is fixed at spawn). Throws on error.
  */
 export async function setExposeOnLan(expose: boolean): Promise<void> {
+  if (!isTauri()) return
   const invoke = getTauriInvoke()
-  if (!invoke) return
+  if (!invoke) {
+    throw new Error('Tauri invoke is unavailable')
+  }
   await invoke('set_expose_on_lan', { expose })
 }
 

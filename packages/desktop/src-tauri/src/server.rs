@@ -983,10 +983,18 @@ impl ServerManager {
         // pin the embedded server to 127.0.0.1 so the control socket (which
         // drives a billed claude PTY and takes a token over the wire) is not
         // reachable from the LAN. CHROXY_HOST maps to config.host in the server,
-        // which binds that interface with auth still on. When exposed, we omit
-        // the var so the server keeps its 0.0.0.0 default (LAN QR-scan flow).
-        if let Some(host) = self.bind_host_env() {
-            cmd.env("CHROXY_HOST", host);
+        // which binds that interface with auth still on. When exposed, we
+        // explicitly clear the var (rather than just omitting it) so an inherited
+        // CHROXY_HOST from the desktop app's own environment can't silently pin
+        // the server to a different interface and make the toggle ineffective —
+        // the server then keeps its 0.0.0.0 default (LAN QR-scan flow).
+        match self.bind_host_env() {
+            Some(host) => {
+                cmd.env("CHROXY_HOST", host);
+            }
+            None => {
+                cmd.env_remove("CHROXY_HOST");
+            }
         }
         // Mark this as a bundled .app launch so the doctor Dependencies check
         // downgrades to `warn` instead of `fail` — end users can't run

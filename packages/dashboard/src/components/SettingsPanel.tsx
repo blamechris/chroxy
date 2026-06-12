@@ -857,13 +857,20 @@ export function SettingsContent({ active, showConsoleTab, onToggleConsoleTab, in
       if (mode) setTunnelModeState(mode)
     })
     // #5356 — read saved LAN-exposure setting (false = loopback-only default).
+    // This effect only runs in Tauri (gated on inTauri above), so a `null`
+    // here means the IPC invoke failed (the shared helper converts errors to
+    // null) — surface it rather than silently presenting the default toggle.
     setExposeOnLanError(null)
     getExposeOnLan().then(value => {
       if (value !== null) {
         setExposeOnLanState(value)
         setSavedExposeOnLan(value)
+      } else {
+        setExposeOnLanError('Could not load the LAN-exposure setting.')
       }
-    }).catch(() => {})
+    }).catch(err => {
+      setExposeOnLanError(err instanceof Error ? err.message : String(err))
+    })
     // Read running server's actual mode (may differ if not restarted)
     getServerInfo().then(info => {
       if (info?.tunnelMode) setServerTunnelMode(info.tunnelMode)
