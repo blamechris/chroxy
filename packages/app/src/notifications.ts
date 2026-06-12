@@ -89,7 +89,11 @@ export async function registerForPushNotifications(): Promise<string | null> {
     const tokenData = await Notifications.getExpoPushTokenAsync(
       projectId ? { projectId } : undefined
     );
-    console.log('[push] Expo push token:', tokenData.data);
+    // Gate the raw token behind __DEV__ — it's useful while developing but is a
+    // secret that must not land in production logs (#5646).
+    if (__DEV__) {
+      console.log('[push] Expo push token:', tokenData.data);
+    }
     return tokenData.data;
   } catch (err) {
     // Expo Go SDK 53+ removed push notification support — gracefully degrade
