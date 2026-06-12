@@ -270,10 +270,21 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       if (msg.mode === 'auto' && !msg.confirmed) {
         // #4828: session-scoped (single-session fallback).
         ;sessionLogger(permModeSessionId).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
+        // #5609: on providers where the auto-switch is destructive (CLI —
+        // _onPermissionModeChanged respawns the `claude -p` subprocess, the
+        // #3729 panic-button) AND a turn is currently in flight, name the
+        // consequence so the user isn't surprised by a dropped response. SDK
+        // and TUI apply the switch in-place and keep the turn running, so they
+        // keep the plain warning. The warning string is rendered verbatim by
+        // the mobile app's confirm Alert (SettingsBar.tsx).
+        const interruptsTurn = !!entry.session.constructor.capabilities?.interruptsTurnOnAutoSwitch
+        const warning = interruptsTurn && entry.session._isBusy
+          ? 'This session is mid-response. Switching to Auto will INTERRUPT the running turn and restart the session — the in-flight response will be dropped. Tools will then run without asking for permission.'
+          : 'Auto mode bypasses all permission checks. Claude will execute tools without asking.'
         ctx.transport.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
-          warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
+          warning,
         })
       } else {
         const previousMode = entry.session.permissionMode || 'unknown'

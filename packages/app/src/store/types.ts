@@ -169,6 +169,12 @@ export interface ProviderCapabilities {
   inProcessPermissions?: boolean;
   modelSwitch?: boolean;
   permissionModeSwitch?: boolean;
+  // #5609: true when switching to 'auto' mid-turn interrupts the running turn
+  // (CLI respawns its `claude -p` subprocess — the #3729 panic-button). The
+  // app renders the server-provided `confirm_permission_mode` warning verbatim,
+  // so this flag is informational on the app side; the server derives the
+  // warning copy from it.
+  interruptsTurnOnAutoSwitch?: boolean;
   planMode?: boolean;
   resume?: boolean;
   terminal?: boolean;
