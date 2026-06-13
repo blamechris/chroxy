@@ -86,6 +86,11 @@ const CONFIG_SCHEMA = {
   tokenExpiry: 'string',
   sessionTimeout: 'string',
   costBudget: 'number',
+  // #5665: monthly programmatic-credit budget meter config. Nested object:
+  //   billing.creditTier             pro | max5x | max20x
+  //   billing.monthlyCreditBudgetUsd raw USD cap (wins over the tier preset)
+  //   billing.budgetWarningPercent   warn threshold 1-100 (default 80)
+  billing: 'object',
   externalUrl: 'string',
   repos: 'array',
   // #5172 (Control Room v2): filesystem root the Host Status survey scans
@@ -442,6 +447,40 @@ const MAX_DISCORD_COLOR = 16777215
  * @param {*} discord - The `notifications.discord` value
  * @param {string[]} warnings - Accumulator the caller logs/returns
  */
+/**
+ * #5665: validate the `billing` block (monthly programmatic-credit budget
+ * meter). Per-FIELD problems (bad creditTier, out-of-range numbers) are
+ * "Invalid value" warnings — non-fatal, the meter clamps/ignores at runtime.
+ * A gross top-level non-object value additionally trips the generic
+ * `billing: 'object'` schema check ("Invalid type", fatal), matching the
+ * `notifications` / `environments` object blocks — a billing block that isn't
+ * even an object is a real misconfiguration worth failing fast on.
+ */
+function validateBillingBlock(billing, warnings) {
+  if (typeof billing !== 'object' || billing === null || Array.isArray(billing)) {
+    warnings.push(`Invalid value for 'billing': expected object, got ${Array.isArray(billing) ? 'array' : typeof billing}`)
+    return
+  }
+  const VALID_TIERS = ['pro', 'max5x', 'max20x']
+  if (Object.prototype.hasOwnProperty.call(billing, 'creditTier')) {
+    if (typeof billing.creditTier !== 'string' || !VALID_TIERS.includes(billing.creditTier)) {
+      warnings.push(`Invalid value for 'billing.creditTier': expected one of ${VALID_TIERS.join(' | ')}, got ${JSON.stringify(billing.creditTier)}`)
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(billing, 'monthlyCreditBudgetUsd')) {
+    const v = billing.monthlyCreditBudgetUsd
+    if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+      warnings.push(`Invalid value for 'billing.monthlyCreditBudgetUsd': expected a number >= 0, got ${JSON.stringify(v)}`)
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(billing, 'budgetWarningPercent')) {
+    const v = billing.budgetWarningPercent
+    if (typeof v !== 'number' || !Number.isFinite(v) || v <= 0 || v > 100) {
+      warnings.push(`Invalid value for 'billing.budgetWarningPercent': expected a number 1-100, got ${JSON.stringify(v)}`)
+    }
+  }
+}
+
 function validateDiscordNotificationsBlock(discord, warnings) {
   if (typeof discord !== 'object' || discord === null || Array.isArray(discord)) {
     warnings.push(`Invalid value for 'notifications.discord': expected object, got ${Array.isArray(discord) ? 'array' : typeof discord}`)
@@ -806,6 +845,12 @@ export function validateConfig(config, verbose = false) {
   // typo in a cosmetic color can never become a fatal startup error via the
   // loadAndMergeConfig "Invalid type" escalation — the sink clamps bad
   // values to its defaults at runtime.
+  // #5665: validate the `billing` block (monthly programmatic-credit meter).
+  // Per-field typos are warn-only "Invalid value"; see validateBillingBlock.
+  if (config.billing !== undefined) {
+    validateBillingBlock(config.billing, warnings)
+  }
+
   if (config.notifications !== undefined) {
     if (typeof config.notifications !== 'object' || config.notifications === null || Array.isArray(config.notifications)) {
       // "Invalid value", NOT "Invalid type" — loadAndMergeConfig escalates

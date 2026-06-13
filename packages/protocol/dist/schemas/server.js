@@ -2116,6 +2116,25 @@ export const ServerBudgetExceededSchema = z.object({
     percent: z.number(),
     message: z.string(),
 });
+// #5665: machine-wide monthly programmatic-credit budget meter. Broadcast to
+// ALL clients after each programmatic-credit-billed turn, and sent once on
+// connect as a snapshot. `budgetUsd`/`percent` are null when no cap is
+// configured (chroxy can't detect the plan tier). `justWarned`/`justExceeded`
+// mark one-shot threshold crossings on the live event and are omitted from the
+// on-connect snapshot.
+export const ServerMonthlyBudgetSchema = z.object({
+    type: z.literal('monthly_budget'),
+    month: z.string(), // "YYYY-MM" (UTC calendar month)
+    spentUsd: z.number().finite().nonnegative(),
+    turnsBilled: z.number().int().nonnegative(),
+    budgetUsd: z.number().finite().nonnegative().nullable(),
+    warningPercent: z.number().finite(),
+    percent: z.number().finite().nullable(),
+    warning: z.boolean(),
+    exceeded: z.boolean(),
+    justWarned: z.boolean().optional(),
+    justExceeded: z.boolean().optional(),
+});
 // -- Web task schemas --
 const WebTaskSchema = z.object({
     taskId: z.string(),

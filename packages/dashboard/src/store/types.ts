@@ -311,6 +311,23 @@ export interface EvaluatorResultPayload {
   error?: { code: string; message: string; status?: number };
 }
 
+/**
+ * #5665 — machine-wide monthly programmatic-credit budget meter snapshot.
+ * Mirrors the server's `monthly_budget` wire payload (minus the one-shot
+ * justWarned/justExceeded crossing flags). `budgetUsd`/`percent` are null when
+ * no cap is configured (chroxy can't detect the plan tier).
+ */
+export interface MonthlyBudgetState {
+  month: string; // "YYYY-MM" (UTC)
+  spentUsd: number;
+  turnsBilled: number;
+  budgetUsd: number | null;
+  warningPercent: number;
+  percent: number | null;
+  warning: boolean;
+  exceeded: boolean;
+}
+
 export interface SessionNotification {
   id: string;
   sessionId: string;
@@ -782,6 +799,12 @@ export interface ConnectionState {
 
   // Background session notifications (permission, question, completed, error)
   sessionNotifications: SessionNotification[];
+
+  // #5665 — machine-wide monthly programmatic-credit budget meter snapshot,
+  // set from the server's `monthly_budget` event (sent on connect and after
+  // each programmatic-credit-billed turn). null until the first one arrives or
+  // when the server predates the feature.
+  monthlyBudget: MonthlyBudgetState | null;
 
   // #4982 — set when the server emits `session_error{code:'SESSION_NOT_FOUND'}`.
   // Activated by message-handler.ts:case 'session_error' on the

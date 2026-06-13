@@ -540,6 +540,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   serverErrors: [],
   infoNotifications: [],
   sessionNotifications: [],
+  // #5665 — machine-wide monthly programmatic-credit meter; populated by the
+  // server's `monthly_budget` event (on connect + after each billed turn).
+  monthlyBudget: null,
   sessionNotFoundError: null,
   resolvedPermissions: {},
   serverPhase: null,

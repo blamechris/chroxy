@@ -635,6 +635,8 @@ export async function startCliServer(config) {
     sessionTimeout: config.sessionTimeout || null,
     sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
+    // #5665: monthly programmatic-credit budget meter config.
+    billing: config.billing || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
     // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). null = BaseSession default (30 min).
     // #3899: HARD-cap inactivity timeout (ms). null = BaseSession default (2h).

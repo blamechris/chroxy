@@ -374,6 +374,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     }
     send(ws, { type: 'session_list', sessions })
 
+    // #5665: send the current monthly programmatic-credit meter snapshot so a
+    // freshly-connected dashboard shows it immediately, not only after the next
+    // billed turn. Machine-wide, so it's sent regardless of boundSessionId.
+    if (typeof sessionManager.getMonthlyBudgetStatus === 'function') {
+      send(ws, { type: 'monthly_budget', ...sessionManager.getMonthlyBudgetStatus() })
+    }
+
     // Surface any sessions that failed to restore at startup (#2954) so newly
     // connecting clients see the "needs attention" state without having to
     // reconnect after the event fired.

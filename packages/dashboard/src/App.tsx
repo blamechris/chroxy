@@ -146,6 +146,8 @@ export function App() {
   )
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
+  // #5665 — machine-wide monthly programmatic-credit meter (sidebar token view).
+  const monthlyBudget = useConnectionStore(s => s.monthlyBudget)
   const sessionStates = useConnectionStore(s => s.sessionStates)
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const viewMode = useConnectionStore(s => s.viewMode)
@@ -1715,6 +1717,7 @@ export function App() {
           searchConversations={searchConversations}
           clearSearchResults={clearSearchResults}
           sessions={sessions}
+          monthlyBudget={monthlyBudget}
           initialPanelHeight={loadPersistedSidebarPanelHeight() ?? 200}
           initialPanelView={loadPersistedSidebarPanelView()}
           initialPanelCollapsed={loadPersistedSidebarPanelCollapsed()}

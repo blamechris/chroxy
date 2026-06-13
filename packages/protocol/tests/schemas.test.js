@@ -1620,6 +1620,54 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(result.success)
     })
 
+    it('ServerMonthlyBudgetSchema validates the live event (with crossing flags) and the snapshot (#5665)', async () => {
+      const { ServerMonthlyBudgetSchema } = await import('../src/schemas/server.ts')
+      // Live event after a billed turn — includes the one-shot crossing flags.
+      const live = ServerMonthlyBudgetSchema.safeParse({
+        type: 'monthly_budget',
+        month: '2026-06',
+        spentUsd: 17,
+        turnsBilled: 4,
+        budgetUsd: 20,
+        warningPercent: 80,
+        percent: 85,
+        warning: true,
+        exceeded: false,
+        justWarned: true,
+        justExceeded: false,
+      })
+      assert.ok(live.success)
+      // On-connect snapshot — crossing flags omitted.
+      const snapshot = ServerMonthlyBudgetSchema.safeParse({
+        type: 'monthly_budget',
+        month: '2026-06',
+        spentUsd: 0,
+        turnsBilled: 0,
+        budgetUsd: 20,
+        warningPercent: 80,
+        percent: 0,
+        warning: false,
+        exceeded: false,
+      })
+      assert.ok(snapshot.success)
+    })
+
+    it('ServerMonthlyBudgetSchema permits a null cap / percent when no tier is configured (#5665)', async () => {
+      const { ServerMonthlyBudgetSchema } = await import('../src/schemas/server.ts')
+      const result = ServerMonthlyBudgetSchema.safeParse({
+        type: 'monthly_budget',
+        month: '2026-06',
+        spentUsd: 42,
+        turnsBilled: 9,
+        budgetUsd: null,
+        warningPercent: 80,
+        percent: null,
+        warning: false,
+        exceeded: false,
+      })
+      assert.ok(result.success)
+    })
+
     it('ServerSessionCostThresholdCrossedSchema validates the threshold-crossed payload', async () => {
       const { ServerSessionCostThresholdCrossedSchema } = await import('../src/schemas/server.ts')
       const result = ServerSessionCostThresholdCrossedSchema.safeParse({

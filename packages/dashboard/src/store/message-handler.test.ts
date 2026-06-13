@@ -223,6 +223,116 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('monthly_budget dispatch (#5665)', () => {
+    it('stores the latest monthly credit-meter snapshot', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 23.45,
+          turnsBilled: 12,
+          budgetUsd: 100,
+          warningPercent: 80,
+          percent: 23.45,
+          warning: false,
+          exceeded: false,
+          justWarned: false,
+          justExceeded: false,
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).monthlyBudget).toEqual({
+        month: '2026-06',
+        spentUsd: 23.45,
+        turnsBilled: 12,
+        budgetUsd: 100,
+        warningPercent: 80,
+        percent: 23.45,
+        warning: false,
+        exceeded: false,
+      })
+    })
+
+    it('preserves a null cap / percent (no tier configured)', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 8.2,
+          turnsBilled: 3,
+          budgetUsd: null,
+          warningPercent: 80,
+          percent: null,
+          warning: false,
+          exceeded: false,
+        },
+        ctx() as any,
+      )
+      const mb = (store.getState() as any).monthlyBudget
+      expect(mb.budgetUsd).toBeNull()
+      expect(mb.percent).toBeNull()
+      expect(mb.spentUsd).toBe(8.2)
+    })
+
+    it('ignores a malformed snapshot with no month', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage({ type: 'monthly_budget', spentUsd: 5 }, ctx() as any)
+      expect((store.getState() as any).monthlyBudget).toBeNull()
+    })
+
+    it('fires a one-time info toast on a fresh warning crossing (justWarned)', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 85, turnsBilled: 7, budgetUsd: 100,
+          warningPercent: 80, percent: 85, warning: true, exceeded: false,
+          justWarned: true, justExceeded: false,
+        },
+        ctx() as any,
+      )
+      const infos = (store.getState() as any)._infoNotifications as string[]
+      expect(infos.length).toBe(1)
+      expect(infos[0]!).toContain('85%')
+      expect(infos[0]!).toContain('$85.00 of $100.00')
+    })
+
+    it('fires the exceeded toast on justExceeded but not on a steady-state snapshot', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      // Steady-state snapshot (no crossing) → no toast.
+      handleMessage(
+        {
+          type: 'monthly_budget', month: '2026-06',
+          spentUsd: 50, turnsBilled: 3, budgetUsd: 100,
+          warningPercent: 80, percent: 50, warning: false, exceeded: false,
+        },
+        ctx() as any,
+      )
+      expect(((store.getState() as any)._infoNotifications as string[]).length).toBe(0)
+      // Fresh exceeded crossing → toast.
+      handleMessage(
+        {
+          type: 'monthly_budget', month: '2026-06',
+          spentUsd: 105, turnsBilled: 8, budgetUsd: 100,
+          warningPercent: 80, percent: 105, warning: true, exceeded: true,
+          justWarned: false, justExceeded: true,
+        },
+        ctx() as any,
+      )
+      const infos = (store.getState() as any)._infoNotifications as string[]
+      expect(infos.length).toBe(1)
+      expect(infos[0]!.toLowerCase()).toContain('exceeded')
+    })
+  })
+
   describe('pair_fail dispatch (#5281 ③ PR 2)', () => {
     it('removes the optimistic tokenless entry and alerts', () => {
       store = createMockStore(baseState({
