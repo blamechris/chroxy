@@ -1351,6 +1351,8 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
 
   it('#5699: sendPermissionResponse refuses (no enqueue, no optimistic resolve) when disconnected', async () => {
     const { useConnectionStore } = await import('./connection');
+    const { _testQueueInternals } = await import('./message-handler');
+    _testQueueInternals.clear();
     // No socket (or a non-OPEN socket) — the disconnected case.
     useConnectionStore.setState({ socket: null, resolvedPermissions: {} });
 
@@ -1360,11 +1362,15 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     // bug (#5699): the UI would show "answered" for a request the server never got.
     expect(result).toBe(false);
     expect(useConnectionStore.getState().resolvedPermissions['req-x']).toBeUndefined();
+    // And must NOT queue the answer — a permission request expires server-side,
+    // so a queued answer would be replayed against a dead request.
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
 
     // A CLOSED socket (readyState !== OPEN) is treated the same as no socket.
     useConnectionStore.setState({ socket: { readyState: 3, send: () => {} } as unknown as WebSocket });
     expect(useConnectionStore.getState().sendPermissionResponse('req-y', 'deny')).toBe(false);
     expect(useConnectionStore.getState().resolvedPermissions['req-y']).toBeUndefined();
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
   });
 
   it('sendPermissionResponse with allowSession sends wire "allow" + set_permission_rules', async () => {

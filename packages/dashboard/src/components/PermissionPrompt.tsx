@@ -120,7 +120,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     // #2852: submittingRef short-circuits duplicate invocations from
     // double-click or keyboard auto-repeat before React re-renders with the
     // store's answered state.
-    if (submittingRef.current || answered || remaining <= 0) return
+    // #5699: also bail when disconnected — this is the single choke point for
+    // BOTH the buttons and the keyboard shortcuts (Cmd+Y / Cmd+Shift+Y / Escape).
+    // sendPermissionResponse refuses to send/resolve while the socket is down, so
+    // if we latched `submitting` here the prompt would wedge permanently
+    // (`submitting` only resets when `answered` flips, which never happens). Bail
+    // before the latch so the prompt stays actionable once reconnected.
+    if (submittingRef.current || answered || remaining <= 0 || !connected) return
     submittingRef.current = true
     setSubmitting(true)
     // 'allowSession' is only meaningful when both the tool is rule-eligible
@@ -134,7 +140,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       decision === 'allowSession' && !allowSessionOk ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
     onRespond(requestId, effective)
-  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules])
+  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected])
 
   // Keyboard shortcuts:
   //   Cmd/Ctrl+Y         -> allow

@@ -589,6 +589,41 @@ describe('PermissionPrompt', () => {
     fireEvent.click(allow)
     expect(onRespond).not.toHaveBeenCalled()
   })
+
+  // #5699 (review): the keyboard shortcuts must ALSO be gated. A disconnected
+  // keypress that reached respond() would latch `submitting` and wedge the prompt
+  // permanently (submitting never resets), so it must be a complete no-op.
+  it('ignores keyboard shortcuts while disconnected and does not wedge the prompt (#5699)', () => {
+    mockStoreState.connectionPhase = 'reconnecting'
+    const onRespond = vi.fn()
+    const { rerender } = render(
+      <PermissionPrompt
+        requestId="req-kbd"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })   // Cmd+Y allow
+    fireEvent.keyDown(document, { key: 'Escape' })             // deny
+    expect(onRespond).not.toHaveBeenCalled()
+
+    // Reconnect: the prompt must still be actionable (not wedged on a latched
+    // `submitting`). A keypress now answers for real.
+    mockStoreState.connectionPhase = 'connected'
+    rerender(
+      <PermissionPrompt
+        requestId="req-kbd"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-kbd', 'allow')
+  })
 })
 
 // ---------------------------------------------------------------------------
