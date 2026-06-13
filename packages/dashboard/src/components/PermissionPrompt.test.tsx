@@ -67,6 +67,28 @@ describe('PermissionPrompt', () => {
     vi.useRealTimers()
   })
 
+  // #5731 (a11y): the prompt auto-denies on timeout, so a screen-reader user
+  // must hear it the moment it appears — it's an assertive alertdialog with an
+  // accessible name + description association.
+  it('is an assertive alertdialog with an accessible name and description (#5731)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-a11y"
+        tool="Write"
+        description="write the file"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const prompt = screen.getByTestId('permission-prompt')
+    expect(prompt).toHaveAttribute('role', 'alertdialog')
+    expect(prompt).toHaveAttribute('aria-live', 'assertive')
+    expect(prompt.getAttribute('aria-label')).toMatch(/permission request/i)
+    // The description is associated for SR context.
+    expect(prompt).toHaveAttribute('aria-describedby', 'perm-desc-req-a11y')
+    expect(document.getElementById('perm-desc-req-a11y')).toBeInTheDocument()
+  })
+
   it('renders tool name and description', () => {
     render(
       <PermissionPrompt

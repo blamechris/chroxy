@@ -127,8 +127,12 @@ export function StatusBar({
       )}
     </div>
     <div className="status-bar-group status-bar-right">
+      {/* #5731 (a11y): the busy spinner was motion-only. role=img + aria-label
+          gives it an accessible name on focus/hover WITHOUT a role=status live
+          region (which would announce on every turn — the #4873 spam the status
+          dots already dropped role=status to avoid). */}
       {isBusy && (
-        <span className="busy-indicator" data-testid="busy-indicator" />
+        <span className="busy-indicator" data-testid="busy-indicator" role="img" aria-label="Agent working" />
       )}
       {costBadgeMode ? (
         // #5184: configurable badge. The display mode comes from Settings

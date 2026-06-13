@@ -227,7 +227,9 @@ export function FooterBar({
             Share
           </button>
         )}
-        {isBusy && <span className="footer-busy" />}
+        {/* #5731 (a11y): accessible name for the motion-only busy dot (no live
+            region — see StatusBar rationale). */}
+        {isBusy && <span className="footer-busy" role="img" aria-label="Agent working" />}
         {/*
          * #4653 — chroxy-side intervention counter. Renders only when at
          * least one intervention has fired for the active session. Click
