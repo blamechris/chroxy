@@ -90,8 +90,9 @@ export async function maybeAutoReapWorktrees(config, log, deps = {}) {
 
   // #5706: pass the configured absolute-age fallback through to the GC core.
   // A test's `deps.planDeps` still wins (spread last) so seams override config.
+  const cfgMaxAge = config.worktreeGc.maxLockAgeMs
   const planDeps = {
-    ...(typeof config.worktreeGc.maxLockAgeMs === 'number' ? { maxLockAgeMs: config.worktreeGc.maxLockAgeMs } : {}),
+    ...(Number.isFinite(cfgMaxAge) && cfgMaxAge >= 0 ? { maxLockAgeMs: cfgMaxAge } : {}),
     ...(deps.planDeps || {}),
   }
   const summary = await reapWorktrees({ repos, planDeps, yieldFn: deps.yieldFn })

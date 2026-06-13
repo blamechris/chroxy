@@ -62,8 +62,9 @@ export function collectWorktreeGc(options = {}, deps = {}) {
   // age-fallback setting as the auto-reaper (otherwise an operator who set
   // maxLockAgeMs would find the CLI ignored it). Soft-read → {} when absent.
   const cfg = readConfigSoft(configPath, deps)
+  const cliMaxAge = cfg.worktreeGc?.maxLockAgeMs
   const planDeps = {
-    ...(typeof cfg.worktreeGc?.maxLockAgeMs === 'number' ? { maxLockAgeMs: cfg.worktreeGc.maxLockAgeMs } : {}),
+    ...(Number.isFinite(cliMaxAge) && cliMaxAge >= 0 ? { maxLockAgeMs: cliMaxAge } : {}),
     ...(deps.planDeps || {}),
   }
 
