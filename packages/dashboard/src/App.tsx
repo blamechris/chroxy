@@ -27,6 +27,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
+import { derivePendingPermissionSessions } from './utils/pendingPermissions'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
@@ -999,28 +1000,16 @@ export function App() {
   // the server's natural order at the end. Stale ids in `tabOrder` (server
   // removed the session) are harmlessly ignored because we filter against
   // the live `sessions` list.
-  // #5667 — which sessions have an unanswered permission prompt, across ALL
-  // sessions (not just the active one). Now that the server routes a prompt to
-  // its owning session, a background session's prompt no longer lands in the
-  // focused tab — without a per-tab indicator it would be invisible until the
-  // operator happened to switch to that session. Shallow-equal Record so this
-  // only re-renders a tab when its pending state actually flips, not on every
-  // stream delta. Scans newest-first and early-exits at the first match.
+  // #5667 — which sessions have an unanswered, still-live permission prompt,
+  // across ALL sessions (not just the active one). Now that the server routes a
+  // prompt to its owning session, a background session's prompt no longer lands
+  // in the focused tab — without a per-tab indicator it would be invisible until
+  // the operator switched to that session. Shallow-equal Record so this only
+  // re-renders a tab when its pending state actually flips, not on every stream
+  // delta. The `expiresAt > now` check (inside the helper) clears the indicator
+  // on expiry/timeout, which set `options: undefined` but not `answered`.
   const pendingPermissionSessionIds = useConnectionStore(
-    useShallow((s) => {
-      const out: Record<string, true> = {}
-      for (const id in s.sessionStates) {
-        const msgs = s.sessionStates[id]!.messages
-        for (let i = msgs.length - 1; i >= 0; i--) {
-          const m = msgs[i]!
-          if (m.type === 'prompt' && m.requestId && m.expiresAt && !m.answered) {
-            out[id] = true
-            break
-          }
-        }
-      }
-      return out
-    }),
+    useShallow((s) => derivePendingPermissionSessions(s.sessionStates, Date.now())),
   )
 
   const sessionTabs: SessionTabData[] = useMemo(
