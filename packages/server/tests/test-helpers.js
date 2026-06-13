@@ -337,7 +337,21 @@ export function createMockSession(overrides = {}) {
   session.sessionPreamble = ''
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
-  session.setModel = createSpy()
+  // #5696: mirror the real BaseSession.setModel contract — returns true only
+  // when the change actually lands (false when busy mid-turn or a same-model
+  // no-op). The handler now reads this return to decide whether to broadcast
+  // model_changed, so the mock must report it (matches setPermissionMode etc).
+  // NOTE: this deliberately does a RAW id compare and skips the production
+  // resolveModelId() alias collapse (so e.g. 'sonnet' vs 'claude-sonnet-4-6'
+  // reads as a change here). That keeps alias-sending handler tests on the
+  // broadcast path without coupling the mock to the live model registry;
+  // tests that must exercise a no-op set _isBusy or reuse the exact model id.
+  session.setModel = createSpy((model) => {
+    if (session._isBusy) return false
+    if (model === session.model) return false
+    session.model = model
+    return true
+  })
   // #3729: handler now reads session.permissionMode AFTER setPermissionMode
   // returns to detect silently-rejected mid-turn changes. Mock the real
   // contract: state mutates on a successful set so handler tests don't

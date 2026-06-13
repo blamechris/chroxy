@@ -81,11 +81,32 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
 
-      settingsHandlers.set_model(makeWs(), client, { model: 'sonnet' }, ctx)
+      // Use a model that differs from the mock's default ('claude-sonnet-4-6')
+      // even once aliases are resolved, so this exercises the change-applied
+      // (broadcast) path rather than a same-model no-op.
+      settingsHandlers.set_model(makeWs(), client, { model: 'haiku' }, ctx)
 
       assert.equal(ctx.transport.broadcastToSession.callCount, 1)
       const [, msg] = ctx.transport.broadcastToSession.lastCall
       assert.equal(msg.type, 'model_changed')
+    })
+
+    it('does not broadcast model_changed when the session rejects the change (busy)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session._isBusy = true // setModel() returns false mid-turn
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.set_model(ws, client, { model: 'haiku', requestId: 'r-busy' }, ctx)
+
+      assert.equal(session.setModel.callCount, 1)
+      assert.equal(ctx.transport.broadcastToSession.callCount, 0, 'must not broadcast a change that did not land')
+      assert.equal(ws._messages.length, 1)
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'MODEL_NOT_APPLIED')
     })
 
     it('ignores invalid model ids', () => {

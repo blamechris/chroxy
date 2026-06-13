@@ -140,7 +140,15 @@ function handleSetModel(ws, client, msg, ctx) {
         return
       }
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${model}`)
-      entry.session.setModel(model)
+      // #5696: setModel() returns false when the session is busy (mid-turn) or
+      // the model is unchanged (no-op). Mirror the permission-mode guard
+      // (#3729) below — only broadcast model_changed when the change actually
+      // landed, else clients show a model the session never switched to.
+      if (!entry.session.setModel(model)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${model}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${model}' was not applied (session busy or already on that model).`, undefined, ctx)
+        return
+      }
       ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
       return
     }
@@ -164,7 +172,12 @@ function handleSetModel(ws, client, msg, ctx) {
       }
       // #4828: session-scoped (single-session fallback as above).
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-      entry.session.setModel(msg.model)
+      // #5696: only broadcast when setModel() reports the change landed.
+      if (!entry.session.setModel(msg.model)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
+        return
+      }
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
       // alias collapse (claude-sonnet-4-6 → sonnet) and returns the input
@@ -180,7 +193,12 @@ function handleSetModel(ws, client, msg, ctx) {
     if (entry) {
       // #4828: session-scoped (single-session fallback).
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-      entry.session.setModel(msg.model)
+      // #5696: only broadcast when setModel() reports the change landed.
+      if (!entry.session.setModel(msg.model)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
+        return
+      }
       ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
     return
