@@ -61,7 +61,6 @@ describe('SessionPicker pill — pending-permission dot wiring (#5750)', () => {
     'utf-8',
   );
   const pillStartIdx = source.indexOf('function SessionPill');
-  const pillEndIdx = source.indexOf('interface SessionPickerProps', source.indexOf('interface SessionPillProps'));
   const pillSection = source.slice(pillStartIdx, source.indexOf('const styles', pillStartIdx));
 
   it('the pill takes a pendingPermissionCount prop', () => {
