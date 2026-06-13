@@ -3982,6 +3982,33 @@ describe('dashboard message-handler dispatch', () => {
       // The active tab must NOT have received the background session's prompt.
       expect(activeMsgs.find((m: any) => m.type === 'prompt')).toBeUndefined()
     })
+
+    it('leaves originSessionId undefined for an unmapped request (no wire sessionId) (#5667)', () => {
+      // No sessionId on the wire → the prompt falls back to the active tab for
+      // routing, but originSessionId must stay undefined (not the active id) so
+      // it is not mislabelled as the active session's own prompt.
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-active',
+          sessionStates: { 's-active': createEmptySessionState() },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          requestId: 'perm-unmapped',
+          tool: 'Bash',
+          input: { command: 'ls' },
+          remainingMs: 300000,
+        },
+        ctx() as any,
+      )
+      const msgs = (store.getState() as any).sessionStates['s-active'].messages
+      const promptMsg = msgs.find((m: any) => m.type === 'prompt')
+      expect(promptMsg).toBeDefined()
+      expect(promptMsg.originSessionId).toBeUndefined()
+    })
   })
 
   // #3247 — direct unit coverage for the three skill message handlers.

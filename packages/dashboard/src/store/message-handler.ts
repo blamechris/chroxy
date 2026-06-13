@@ -2023,8 +2023,13 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),
-      // #5667 — record which session asked so the renderer can label it.
-      originSessionId: permTargetId ?? undefined,
+      // #5667 — record the OWNING session (the wire sessionId), so the renderer
+      // can label which session asked. Deliberately not `permTargetId`: that
+      // falls back to the active session for unmapped/legacy requests, which
+      // would mislabel them as the active session's own prompt. Undefined when
+      // the request maps to no session (contract: originSessionId is the owner
+      // or absent).
+      originSessionId: permPayload.sessionId ?? undefined,
     };
     if (permTargetId && get().sessionStates[permTargetId]) {
       updateSession(permTargetId, (ss) => ({
