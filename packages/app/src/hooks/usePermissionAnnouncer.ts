@@ -17,10 +17,17 @@
  *     `answered` decision. (The requestId+expiresAt pair excludes
  *     AskUserQuestion prompts, which are also `type:'prompt'`.)
  *   - Announces once per prompt, keyed on `requestId`.
- *   - Seeds the last-announced ref SYNCHRONOUSLY at first render with whatever
- *     is already pending, so arriving at a session that ALREADY shows a prompt
- *     stays silent — only genuinely newly-arriving prompts are announced.
+ *   - Seeds the last-announced ref SYNCHRONOUSLY with whatever is already
+ *     pending, so arriving at a session that ALREADY shows a prompt stays
+ *     silent — only genuinely newly-arriving prompts are announced.
  *   - Clears the ref when no prompt is live, so the next arrival announces.
+ *
+ * Session-aware (#5760 review): ChatView is NOT remounted on a tab-switch — it
+ * just re-renders with the new session's `messages` — so a single persistent
+ * ref would carry across sessions and falsely announce the destination
+ * session's ALREADY-pending prompt. We therefore re-seed whenever `sessionKey`
+ * changes: the seed runs again for the new session, suppressing its existing
+ * prompt and announcing only what arrives after the switch settles.
  */
 import { useEffect, useRef } from 'react';
 import { AccessibilityInfo } from 'react-native';
@@ -38,12 +45,17 @@ export function firstLivePermissionPrompt(messages: ChatMessage[], now: number):
   return null;
 }
 
-export function usePermissionAnnouncer(messages: ChatMessage[]): void {
+export function usePermissionAnnouncer(messages: ChatMessage[], sessionKey: string | null): void {
   // requestId of the prompt we last announced. `undefined` = not yet seeded;
-  // `null` = nothing pending. Seeded once on the first render so a prompt that
-  // is already present at mount isn't announced — only new arrivals are.
+  // `null` = nothing pending. Seeded so a prompt already present (at mount, or
+  // in the session we just switched to) isn't announced — only new arrivals.
   const lastAnnouncedRef = useRef<string | null | undefined>(undefined);
-  if (lastAnnouncedRef.current === undefined) {
+  // The session the ref is seeded for. A change means we navigated sessions and
+  // must re-seed against the destination's existing prompt (ChatView doesn't
+  // remount on switch, so the ref would otherwise leak across sessions).
+  const seededSessionRef = useRef<string | null | undefined>(undefined);
+  if (seededSessionRef.current !== sessionKey) {
+    seededSessionRef.current = sessionKey;
     lastAnnouncedRef.current = firstLivePermissionPrompt(messages, Date.now())?.requestId ?? null;
   }
 
@@ -59,5 +71,5 @@ export function usePermissionAnnouncer(messages: ChatMessage[]): void {
     lastAnnouncedRef.current = id;
     const summary = getPermissionSummary(live!.tool, live!.toolInput);
     AccessibilityInfo.announceForAccessibility?.(`Permission requested: ${summary}`);
-  }, [messages]);
+  }, [messages, sessionKey]);
 }

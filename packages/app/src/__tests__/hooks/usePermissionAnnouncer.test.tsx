@@ -38,22 +38,22 @@ function permPrompt(over: Partial<ChatMessage> = {}): ChatMessage {
   } as ChatMessage;
 }
 
-function Harness({ messages }: { messages: ChatMessage[] }) {
-  usePermissionAnnouncer(messages);
+function Harness({ messages, sessionKey }: { messages: ChatMessage[]; sessionKey: string }) {
+  usePermissionAnnouncer(messages, sessionKey);
   return null;
 }
 
-function render(messages: ChatMessage[]) {
+function render(messages: ChatMessage[], sessionKey = 'A') {
   let tree!: renderer.ReactTestRenderer;
   act(() => {
-    tree = renderer.create(<Harness messages={messages} />);
+    tree = renderer.create(<Harness messages={messages} sessionKey={sessionKey} />);
   });
   return tree;
 }
 
-function update(tree: renderer.ReactTestRenderer, messages: ChatMessage[]) {
+function update(tree: renderer.ReactTestRenderer, messages: ChatMessage[], sessionKey = 'A') {
   act(() => {
-    tree.update(<Harness messages={messages} />);
+    tree.update(<Harness messages={messages} sessionKey={sessionKey} />);
   });
 }
 
@@ -115,5 +115,22 @@ describe('usePermissionAnnouncer', () => {
     update(tree, [permPrompt({ answered: 'allow' }), permPrompt({ id: 'p2', requestId: 'req-2', tool: 'Edit', toolInput: { file_path: '/a/b/c.ts' } })]);
     expect(announceMock).toHaveBeenCalledTimes(1);
     expect(announceMock).toHaveBeenCalledWith('Permission requested: Edit(c.ts)');
+  });
+
+  // #5760 review — ChatView isn't remounted on a tab-switch; it re-renders with
+  // the destination session's messages. Switching to a session that ALREADY
+  // has a live pending prompt must stay SILENT (re-seed on sessionKey change),
+  // not announce a prompt that was pending before the user navigated to it.
+  it('does NOT announce a pre-existing prompt when switching to another session', () => {
+    // Active session A, no prompt.
+    const tree = render([], 'A');
+    expect(announceMock).not.toHaveBeenCalled();
+    // Switch to session B, whose cache ALREADY holds a live prompt → silent.
+    update(tree, [permPrompt({ requestId: 'req-B' })], 'B');
+    expect(announceMock).not.toHaveBeenCalled();
+    // A genuinely NEW prompt arriving in B (after the switch settled) announces.
+    update(tree, [permPrompt({ requestId: 'req-B', answered: 'allow' }), permPrompt({ id: 'p3', requestId: 'req-B2', tool: 'Bash', toolInput: { command: 'rm x' } })], 'B');
+    expect(announceMock).toHaveBeenCalledTimes(1);
+    expect(announceMock).toHaveBeenCalledWith('Permission requested: Bash(rm x)');
   });
 });

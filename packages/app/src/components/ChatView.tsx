@@ -165,8 +165,10 @@ export function ChatView({
   // screen readers (the prompt auto-denies on timeout, so silence loses the
   // user an action they might have allowed). Mirrors the dashboard's #5733
   // assertive treatment; fires once per prompt and stays silent for a prompt
-  // already present at mount (see the hook).
-  usePermissionAnnouncer(messages);
+  // already present at mount OR in the session we just switched to (the hook
+  // re-seeds on activeSessionId change — ChatView isn't remounted per switch).
+  const announcerSessionId = useConnectionStore((s) => s.activeSessionId);
+  usePermissionAnnouncer(messages, announcerSessionId);
 
   // #5517: row expand/collapse registry, keyed by message id / activity
   // group key. The list is now a virtualized FlatList, so an off-screen tool
