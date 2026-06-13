@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chroxy — Status &amp; Friction Report · 2026-06-13</title>
+<style>
+  :root {
+    --bg: #14121c; --panel: #1d1a28; --panel2: #232032; --line: #322c44;
+    --text: #e6e1f2; --muted: #a79fc4; --dim: #7d769c;
+    --purple: #8b7fd6; --green: #5fd6a0; --orange: #e0a458; --red: #d6685f; --blue: #6fb3e0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 28px 80px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 8px; }
+  h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.5px; }
+  h1 .v { color: var(--purple); font-weight: 600; }
+  .sub { color: var(--muted); font-size: 14px; }
+  h2 { font-size: 20px; margin: 38px 0 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h2:first-of-type { border-top: none; }
+  h3 { font-size: 16px; margin: 20px 0 8px; color: var(--text); }
+  p { margin: 8px 0; color: var(--text); }
+  .muted { color: var(--muted); }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 5px; font-size: 13px;
+    font-family: "SF Mono", Menlo, monospace; color: #cfc8e8; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card .n { font-size: 26px; font-weight: 700; }
+  .card .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px 20px; margin: 14px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+  tr:last-child td { border-bottom: none; }
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 20px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .ok { background: rgba(95,214,160,.15); color: var(--green); }
+  .warn { background: rgba(224,164,88,.15); color: var(--orange); }
+  .bad { background: rgba(214,104,95,.15); color: var(--red); }
+  .info { background: rgba(111,179,224,.15); color: var(--blue); }
+  .neutral { background: rgba(167,159,196,.13); color: var(--muted); }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  .callout { border-left: 3px solid var(--purple); background: var(--panel); padding: 12px 18px; border-radius: 0 10px 10px 0; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--orange); }
+  .callout.good { border-left-color: var(--green); }
+  footer { margin-top: 50px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Chroxy — Status &amp; Friction Report <span class="v">v0.9.46</span></h1>
+  <div class="sub">Generated 2026-06-13 · remote terminal harness for Claude Code · monorepo (server · app · desktop · dashboard · protocol · store-core · claude-hooks)</div>
+</header>
+
+<div class="cards">
+  <div class="card"><div class="n" style="color:var(--green)">4 / 4</div><div class="l">Target bugs resolved</div></div>
+  <div class="card"><div class="n">3</div><div class="l">PRs merged this session</div></div>
+  <div class="card"><div class="n">39</div><div class="l">Open issues</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">green</div><div class="l">CI on main</div></div>
+</div>
+
+<h2>1 · Executive summary</h2>
+<p>The headline concern is <strong>friction, not capability</strong>: chroxy does a lot, but an accumulation of minor papercuts has kept it slower in practice than driving Claude Code straight from the terminal. This session closed the four user-reported papercuts and shipped one deferred feature; the remaining backlog is mostly small UX/perf nits and tech-debt cleanup rather than missing functionality.</p>
+<div class="callout good">
+  <strong>Mic fixed + redeployed.</strong> The desktop app was rebuilt from current <code>main</code> and reinstalled to <code>/Applications/Chroxy.app</code> (v0.9.46, fresh universal <code>speech-helper</code>, code-signed, same bundle id so existing permission grants carry over). It now carries both the June-3 RunLoop fix and this session's push-to-talk fix. <span class="muted">Pending your confirmation on next launch.</span>
+</div>
+
+<h2>2 · Shipped this session</h2>
+<table>
+  <thead><tr><th>PR</th><th>What</th><th>Issue</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5672</td><td>Push-to-talk no longer corrupts fast typing or hijacks an active mic recording</td><td>#5666 · #5668 (code half)</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5673</td><td>Permission prompts attributed to the session that asked (server <code>sessionId</code> + per-prompt badge + per-tab indicator)</td><td>#5667</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5678</td><td>Monthly programmatic-credit budget meter for CLI/SDK sessions</td><td>#5665</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">Every PR ran implement → adversarial review (each caught a real defect: a navigation-key guard regression, a stuck pending-indicator on expiry, a dead warning path) → fix → green CI → Copilot-thread triage → approved squash-merge. No auto-merges.</p>
+
+<h3>Mic / voice — the nuance that mattered</h3>
+<p>#5668 had two causes. The <strong>code</strong> cause (a Space-hold hijacking a button recording) was fixed in #5672. The <strong>likely real-world</strong> cause was a stale installed <code>.app</code> bundling an older speech helper — which no code change can fix. That's why the rebuild-and-reinstall above is the operative fix; the issue stays open only for the "surface helper-spawn failures instead of a silent revert" nicety.</p>
+
+<h2>3 · Friction backlog — what actually slows daily use</h2>
+<p>These are the open issues most directly tied to "it's faster to just use the CLI." Knocking these out is the highest-leverage path to making chroxy the default.</p>
+<table>
+  <thead><tr><th>Issue</th><th>Friction</th><th>Class</th></tr></thead>
+  <tbody>
+    <tr><td>#5631</td><td>Model metadata hardcoded &amp; stale — unknown models (e.g. <code>claude-fable-5</code>) degrade across the UI</td><td><span class="pill warn">UX</span></td></tr>
+    <tr><td>#5623</td><td>Stale "Observing" banner flash on reconnect (app-side <code>sessionRole</code> not reset)</td><td><span class="pill warn">UX</span></td></tr>
+    <tr><td>#5613</td><td><code>session_role</code> not re-emitted on reconnect → former primary shows a stale "primary" badge</td><td><span class="pill warn">UX</span></td></tr>
+    <tr><td>#5622</td><td>Reconnect-storm starves the server event loop (unbounded eager key derivations)</td><td><span class="pill bad">perf</span></td></tr>
+    <tr><td>#5674</td><td>Mobile: permission prompts don't show which session asked (dashboard parity from #5667)</td><td><span class="pill info">parity</span></td></tr>
+    <tr><td>#5668</td><td>Mic helper-spawn failures revert silently instead of surfacing an error</td><td><span class="pill warn">UX</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">Reconnect is a recurring theme (#5623 / #5613 / #5622) — the reconnection path is where the "phone/desktop feels janky vs the terminal" perception concentrates. A focused reconnect-hardening pass would likely move the needle most.</p>
+
+<h3>Other open work (not friction)</h3>
+<ul>
+  <li><span class="pill neutral">cleanup</span> #5618 dispatch-table migration · #5620 collapse dual JSON-write paths · #5621 retry-ladder dedupe · #5617 claude-tui FormDriver injection · #5619 both-clients contract + lint</li>
+  <li><span class="pill info">security</span> #5616 identity-key rotation handoff · #5604 domain-separate identity-key signatures</li>
+  <li><span class="pill neutral">epic</span> #5530 Control Room environment/runtime control · #5681 surface repo-memory missed queries</li>
+</ul>
+
+<h2>4 · Harness "init instructions" — your question, answered</h2>
+<p>You asked whether chroxy can prepend/send initialization instructions to whichever model a session uses, telling the agent about the harness and how to leverage it. <strong>The plumbing already exists; the convenience layer doesn't.</strong></p>
+<div class="panel">
+  <h3 style="margin-top:14px">What exists today (system-prompt injection)</h3>
+  <ul>
+    <li><strong>Per-session preamble</strong> — <code>sessionPreamble</code> flows through <code>BaseSession._buildSystemPrompt()</code> into every provider's system-prompt channel: SDK <code>systemPrompt.append</code>, CLI <code>--append-system-prompt</code>, BYOK/DeepSeek/Ollama Anthropic <code>system</code> field, Codex/Gemini subprocess prepend.</li>
+    <li><strong>Per-repo presets</strong> — trust-gated <code>.chroxy/session.json</code> (<code>preamble</code> + operator-facing <code>seed</code>), with a pre-trusted daemon override in <code>~/.chroxy/config.json</code> under <code>repos[].sessionPreset</code>. 4000-char cap, repo+session folding.</li>
+    <li><strong>Runtime control</strong> — <code>set_session_preamble</code> wire message updates it live per session.</li>
+    <li>A small mobile-focused <code>CHROXY_CONTEXT_HINT_TEXT</code> exists but is ~50 words about screen size — not harness onboarding.</li>
+  </ul>
+  <h3>What's missing (the feature worth building)</h3>
+  <ul>
+    <li><strong>A global "harness onboarding" preamble</strong> — one config key (e.g. <code>billing</code>-style <code>harnessPreamble</code> in <code>~/.chroxy/config.json</code>) prepended to <em>every</em> session, explaining chroxy's capabilities and how best to use them (slash commands, MCP tools, plan mode, worktrees, etc.).</li>
+    <li><strong>Provider-specific capability notes</strong> — optionally tailor the onboarding per provider (SDK vs CLI vs BYOK have different affordances).</li>
+  </ul>
+  <p class="muted">Natural insertion: a new global preamble folded <em>before</em> the repo/session preamble in <code>session-manager.js</code> session creation, with precedence <code>global harness → repo → session → chroxy hint → skills</code>. This is also a friction lever — priming the model to use chroxy's strengths could make sessions feel more capable out of the box.</p>
+</div>
+
+<h2>5 · Recommended next moves</h2>
+<ol>
+  <li><strong>Confirm the mic</strong> on next desktop launch (the one open user-facing unknown).</li>
+  <li><strong>Reconnect-hardening sprint</strong> — bundle #5623 + #5613 + #5622; this is where perceived jank lives.</li>
+  <li><strong>Build the global harness preamble</strong> (#new) — small, high-leverage, directly improves the agent experience.</li>
+  <li><strong>Finish model-metadata cleanup</strong> (#5631) so new models stop degrading the UI.</li>
+  <li>Mobile permission-attribution parity (#5674) once the dashboard version has soaked.</li>
+</ol>
+
+<footer>
+  Chroxy v0.9.46 · report generated 2026-06-13 · source of truth: <code>gh issue list</code>, merged PRs #5662–#5678, and a read-only sweep of <code>packages/server/src</code>. CI green on <code>main</code> at generation time.
+</footer>
+
+</div>
+</body>
+</html>
