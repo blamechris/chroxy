@@ -2323,9 +2323,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'stream_start': {
       const targetId = (msg.sessionId as string) || get().activeSessionId;
+      // #5697 — only reuse an existing response bubble when THIS session is
+      // replaying history; a live colliding id starts a fresh bubble (per-session
+      // scope, matching the tool_start case's replayingSessions gate).
+      const streamStartIsReplay = targetId ? _ctx.replayingSessions.has(targetId) : false;
       if (targetId && get().sessionStates[targetId]) {
         updateSession(targetId, (ss) => {
-          const out = sharedStreamStart(msg, get().activeSessionId, ss.messages);
+          const out = sharedStreamStart(msg, get().activeSessionId, streamStartIsReplay, ss.messages);
           if (out.remap) {
             _ctx.deltaIdRemaps.set(out.remap.from, out.remap.to);
           }

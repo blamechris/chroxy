@@ -1745,6 +1745,9 @@ describe('stream_start handler', () => {
     });
     setStore(store as any);
     _testMessageHandler.setContext(createMockContext() as any);
+    // #5697: reuse is correct ONLY while replaying — the server re-sends the
+    // same id for an already-rendered turn. Enter replay mode for s1 first.
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
 
     _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
 
@@ -1753,6 +1756,30 @@ describe('stream_start handler', () => {
     expect(ss.streamingMessageId).toBe('msg-1');
     expect(ss.messages).toHaveLength(1);
     expect(ss.messages[0].content).toBe('partial');
+    resetReplayFlags();
+  });
+
+  it('#5697: a LIVE stream_start colliding with a prior response starts a fresh bubble (no concatenation)', () => {
+    // Not replaying — a stream_start whose id matches a completed response is a
+    // NEW turn. Reusing the old bubble would concatenate two turns; instead a
+    // fresh response bubble is created so the new turn renders separately.
+    const existing = { id: 'msg-1', type: 'response' as const, content: 'first turn', timestamp: 1 };
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [existing], streamingMessageId: null } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+
+    const ss = store.getState().sessionStates.s1;
+    // Fresh bubble added; the original response is untouched.
+    expect(ss.messages).toHaveLength(2);
+    expect(ss.messages[0].content).toBe('first turn');
+    expect(ss.messages[1]).toMatchObject({ id: 'msg-1-response', type: 'response', content: '' });
+    expect(ss.streamingMessageId).toBe('msg-1-response');
   });
 
   it('ID collision: creates suffixed response message when ID is already used by tool_use', () => {

@@ -4839,25 +4839,54 @@ export interface StreamStartPayload {
 export function handleStreamStart(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
+  receivingHistoryReplay: boolean,
   existingMessages: readonly ChatMessage[],
 ): StreamStartPayload {
   const streamId = typeof msg.messageId === 'string' ? msg.messageId : nextMessageId('msg')
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
   const existing = existingMessages.find((m) => m.id === streamId)
-  const { resolvedId, remap } = resolveStreamId(existing, streamId)
 
   if (existing && existing.type === 'response') {
-    // Reuse existing response message (reconnect replay dedup) — caller only
-    // updates streamingMessageId.
+    // #5697: a stream_start whose messageId already exists as a response is only
+    // legitimately a REUSE during reconnect history replay — the server replays
+    // the same ids for already-rendered turns. Reuse the bubble so the caller
+    // just re-points streamingMessageId. Mirrors the receivingHistoryReplay
+    // guard the sibling handlers (handleMessage, handleToolStart) already take.
+    if (receivingHistoryReplay) {
+      return {
+        sessionId,
+        streamingMessageId: streamId,
+        isNewMessage: false,
+        newMessage: null,
+        remap: null,
+      }
+    }
+    // LIVE turn colliding with a prior response id: this is a NEW turn, not a
+    // replay. Reusing the old bubble would concatenate two turns into one (the
+    // response/response case of the stream_id collision class). Start a fresh
+    // bubble at a suffixed id and remap so this turn's stream_deltas route to
+    // it. (The server's ids are monotonic + per-boot-prefixed, so this path is
+    // not currently reachable — it's defensive parity with the siblings.)
+    let freshId = `${streamId}-response`
+    if (existingMessages.some((m) => m.id === freshId)) freshId = nextMessageId('msg')
+    const newMessage: ChatMessage = {
+      id: freshId,
+      type: 'response',
+      content: '',
+      timestamp: Date.now(),
+    }
     return {
       sessionId,
-      streamingMessageId: resolvedId,
-      isNewMessage: false,
-      newMessage: null,
-      remap: null,
+      streamingMessageId: freshId,
+      isNewMessage: true,
+      newMessage,
+      remap: { from: streamId, to: freshId },
     }
   }
 
+  // Non-response collision (e.g. the server reuses a tool_start id for the
+  // post-tool stream_start) — resolveStreamId suffixes + remaps as before.
+  const { resolvedId, remap } = resolveStreamId(existing, streamId)
   const newMessage: ChatMessage = {
     id: resolvedId,
     type: 'response',

@@ -1677,9 +1677,13 @@ function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
 
 function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const targetId = (msg.sessionId as string) || get().activeSessionId;
+  // #5697 — only reuse an existing response bubble when THIS session is
+  // replaying history; a live colliding id starts a fresh bubble (per-session
+  // scope, matching handleToolStart's _replayingSessions gate).
+  const streamStartIsReplay = targetId ? _replayingSessions.has(targetId) : false;
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, (ss) => {
-      const out = sharedStreamStart(msg, get().activeSessionId, ss.messages);
+      const out = sharedStreamStart(msg, get().activeSessionId, streamStartIsReplay, ss.messages);
       if (out.remap) {
         _deltaIdRemaps.set(out.remap.from, out.remap.to);
       }
@@ -1694,7 +1698,7 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     });
   } else {
     set((state: ConnectionState) => {
-      const out = sharedStreamStart(msg, get().activeSessionId, state.messages);
+      const out = sharedStreamStart(msg, get().activeSessionId, streamStartIsReplay, state.messages);
       if (out.remap) {
         _deltaIdRemaps.set(out.remap.from, out.remap.to);
       }

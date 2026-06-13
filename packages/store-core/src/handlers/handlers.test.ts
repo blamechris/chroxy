@@ -7699,13 +7699,14 @@ describe('handleToolInputDelta', () => {
 // handleStreamStart
 // ---------------------------------------------------------------------------
 describe('handleStreamStart', () => {
-  it('reuses existing response message (no new message, no remap)', () => {
+  it('reuses existing response message during replay (no new message, no remap)', () => {
     const existing: ChatMessage[] = [
       { id: 'msg-1', type: 'response', content: 'partial', timestamp: 1 },
     ]
     const out = handleStreamStart(
       { messageId: 'msg-1', sessionId: 'sess-1' },
       'sess-active',
+      true, // receivingHistoryReplay — same id replayed for an already-rendered turn
       existing,
     )
     expect(out.sessionId).toBe('sess-1')
@@ -7715,11 +7716,53 @@ describe('handleStreamStart', () => {
     expect(out.remap).toBeNull()
   })
 
+  // #5697: a LIVE (non-replay) stream_start whose id collides with a prior
+  // response must NOT reuse that bubble — its deltas would concatenate two
+  // turns into one. It starts a fresh bubble + remaps deltas to it.
+  it('starts a FRESH bubble when a live stream_start collides with a prior response id (#5697)', () => {
+    const existing: ChatMessage[] = [
+      { id: 'msg-1', type: 'response', content: 'first turn', timestamp: 1 },
+    ]
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 'sess-1' },
+      'sess-active',
+      false, // live turn, not replay
+      existing,
+    )
+    expect(out.isNewMessage).toBe(true)
+    expect(out.streamingMessageId).toBe('msg-1-response')
+    expect(out.newMessage).not.toBeNull()
+    expect(out.newMessage!.id).toBe('msg-1-response')
+    expect(out.newMessage!.type).toBe('response')
+    expect(out.newMessage!.content).toBe('')
+    // deltas for the colliding id route to the fresh bubble
+    expect(out.remap).toEqual({ from: 'msg-1', to: 'msg-1-response' })
+  })
+
+  it('synthesizes a unique id when the live-collision suffix also exists (#5697)', () => {
+    const existing: ChatMessage[] = [
+      { id: 'msg-1', type: 'response', content: 'first', timestamp: 1 },
+      { id: 'msg-1-response', type: 'response', content: 'second', timestamp: 2 },
+    ]
+    const out = handleStreamStart(
+      { messageId: 'msg-1', sessionId: 'sess-1' },
+      'sess-active',
+      false,
+      existing,
+    )
+    expect(out.isNewMessage).toBe(true)
+    expect(out.streamingMessageId).not.toBe('msg-1')
+    expect(out.streamingMessageId).not.toBe('msg-1-response')
+    expect(out.streamingMessageId.length).toBeGreaterThan(0)
+    expect(out.remap).toEqual({ from: 'msg-1', to: out.streamingMessageId })
+  })
+
   it('creates a new response message when no existing message matches', () => {
     const before = Date.now()
     const out = handleStreamStart(
       { messageId: 'msg-1', sessionId: 'sess-1' },
       'sess-active',
+      false,
       [],
     )
     const after = Date.now()
@@ -7742,6 +7785,7 @@ describe('handleStreamStart', () => {
     const out = handleStreamStart(
       { messageId: 'msg-1', sessionId: 'sess-1' },
       'sess-active',
+      false,
       existing,
     )
     expect(out.sessionId).toBe('sess-1')
@@ -7757,6 +7801,7 @@ describe('handleStreamStart', () => {
     const out = handleStreamStart(
       { messageId: 'msg-1' },
       'sess-active',
+      false,
       [],
     )
     expect(out.sessionId).toBe('sess-active')
@@ -7766,6 +7811,7 @@ describe('handleStreamStart', () => {
     const out = handleStreamStart(
       { messageId: 'msg-1', sessionId: 'sess-from-msg' },
       'sess-active',
+      false,
       [],
     )
     expect(out.sessionId).toBe('sess-from-msg')
@@ -7775,6 +7821,7 @@ describe('handleStreamStart', () => {
     const out = handleStreamStart(
       { messageId: 'msg-1' },
       null,
+      false,
       [],
     )
     expect(out.sessionId).toBeNull()
@@ -7788,6 +7835,7 @@ describe('handleStreamStart', () => {
     const out = handleStreamStart(
       { messageId: 42, sessionId: 'sess-1' },
       'sess-active',
+      false,
       [],
     )
     expect(out.sessionId).toBe('sess-1')
@@ -7803,6 +7851,7 @@ describe('handleStreamStart', () => {
     const out = handleStreamStart(
       { messageId: 'msg-1', sessionId: 42 },
       'sess-active',
+      false,
       [],
     )
     expect(out.sessionId).toBe('sess-active')
