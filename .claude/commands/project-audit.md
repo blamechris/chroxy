@@ -168,6 +168,7 @@ You are auditing a project from the lens of **{LENS}**.
 You MUST explore the codebase thoroughly. Read source files, configuration, tests, and documentation. Do NOT base your audit on file names alone.
 
 ### Exploration Strategy
+0. **Use repo-memory first to save tokens** (this repo has it, ~1,500 files pre-indexed): `get_project_map` for structure, `get_file_summary`/`batch_file_summaries` to scan files (~50 tokens each vs ~800 for a full Read), `search_by_purpose` to find files by concept, `get_dependency_graph` to trace impact. `Read` files in full only for exact implementation/control flow or when a summary returns `suggestFullRead: true`.
 1. Start with entry points: main files, index files, app entry, CLI entry
 2. Trace key flows end-to-end (at least 2-3 major flows)
 3. Read configuration and build files

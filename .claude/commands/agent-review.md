@@ -23,6 +23,8 @@ gh pr view ${PR_NUM}
 gh pr diff ${PR_NUM}
 ```
 
+**Use repo-memory to gather surrounding context cheaply.** This repo has the `repo-memory` MCP. For files the diff touches, call `get_file_summary` (or `batch_file_summaries`) and `get_dependency_graph` to understand the change's blast radius in ~50 tokens/file instead of fully re-reading each one — then `Read` the changed regions in full to review the actual lines. Use `search_by_purpose` to locate related code the diff should have updated.
+
 ### 2. Review Criteria
 
 The agent reviews against these standards:
