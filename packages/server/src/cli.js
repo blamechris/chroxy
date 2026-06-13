@@ -24,6 +24,7 @@ import { registerPairDiscordCommand } from './cli/pair-discord-cmd.js'
 import { registerWorktreeCommand } from './cli/worktree-gc-cmd.js'
 import { registerCredentialsCommand } from './cli/credentials-cmd.js'
 import { registerProvidersCommand } from './cli/providers-cmd.js'
+import { registerPagesCommands } from './cli/pages-cmd.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json')
@@ -50,5 +51,6 @@ registerPairDiscordCommand(program)
 registerWorktreeCommand(program)
 registerCredentialsCommand(program)
 registerProvidersCommand(program)
+registerPagesCommands(program)
 
 program.parse()
