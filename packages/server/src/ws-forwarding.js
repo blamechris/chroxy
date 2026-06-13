@@ -220,12 +220,13 @@ function setupSessionForwarding(normalizer, ctx) {
   if (checkpointManager && typeof checkpointManager.on === 'function') {
     checkpointManager.on('checkpoint_persist_failed', safeForward('checkpoint_persist_failed', ({ sessionId, operation }) => {
       if (!sessionId) return
+      const what = operation === 'delete' ? 'checkpoint deletion' : 'checkpoint'
       broadcastToSession(sessionId, {
         type: 'session_error',
         code: 'CHECKPOINT_PERSIST_FAILED',
         sessionId,
         recoverable: true,
-        message: `Couldn't save your checkpoint ${operation === 'delete' ? 'deletion' : ''}— it may be lost on restart. Check the daemon's disk space and write permissions.`,
+        message: `Couldn't save your ${what} — it may be lost on restart. Check the daemon's disk space and write permissions.`,
       })
     }))
   }
