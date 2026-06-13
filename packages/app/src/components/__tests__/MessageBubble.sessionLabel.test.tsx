@@ -125,4 +125,19 @@ describe('MessageBubble session label render (#5674)', () => {
     const tree = render(makePrompt({ originSessionId: 's-1' }));
     expect(tree.root.findAllByProps({ testID: 'prompt-session-label' })).toHaveLength(0);
   });
+
+  it('omits the label once the prompt is answered (no stale "who is asking" on a resolved prompt)', () => {
+    act(() => {
+      useConnectionStore.setState({
+        sessions: [
+          makeSession({ sessionId: 's-1', name: 'chat-A' }),
+          makeSession({ sessionId: 's-2', name: 'chat-B' }),
+        ],
+      });
+    });
+    // An answered AskUserQuestion prompt (no requestId) still reaches the main
+    // render path — the !message.answered gate must keep the label off it.
+    const tree = render(makePrompt({ originSessionId: 's-2', requestId: undefined, answered: 'approve' }));
+    expect(tree.root.findAllByProps({ testID: 'prompt-session-label' })).toHaveLength(0);
+  });
 });

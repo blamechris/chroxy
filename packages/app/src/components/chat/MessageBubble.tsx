@@ -364,9 +364,14 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
         )}
       </View>
       {/* #5674 — which session is asking. Rendered as its own line under the
-          header so it never crowds the tool name / countdown row, and only
-          when there's more than one session to disambiguate. */}
-      {isPrompt && promptSessionLabel && (
+          header so it never crowds the tool name / countdown row, and only on
+          an UNANSWERED prompt with 2+ sessions to disambiguate. Intentionally
+          broader than the dashboard (which labels only live permission
+          prompts): an AskUserQuestion prompt benefits from the same "which
+          chat wants my input" attribution, so we gate on the prompt being
+          live rather than on requestId. Answered+collapsed permission prompts
+          take the PermissionPill early-return above and never reach here. */}
+      {isPrompt && !message.answered && promptSessionLabel && (
         <Text
           testID="prompt-session-label"
           style={styles.promptSessionLabel}
