@@ -594,7 +594,7 @@ describe('ClaudeByokSession', () => {
       await session.destroy()
     })
 
-    it('emits cost: 0 when model has no pricing entry (graceful degradation)', async () => {
+    it('emits cost: null when model has no pricing entry (#5630 graceful degradation)', async () => {
       const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-future-model-9-9' })
       session._client = {
         messages: {
@@ -614,8 +614,9 @@ describe('ClaudeByokSession', () => {
       // Usage still propagates even when pricing is unknown — the
       // cumulative-display story (#4054) can still show token counts.
       assert.equal(result.payload.usage.input_tokens, 100)
-      // But cost falls back to 0 rather than crashing or emitting NaN.
-      assert.equal(result.payload.cost, 0)
+      // #5630: cost now degrades to `null` (unknown), NOT 0 — the dashboard
+      // renders "n/a" rather than a misleading $0.00. Still never NaN / crash.
+      assert.equal(result.payload.cost, null)
       await session.destroy()
     })
 

@@ -4,8 +4,9 @@ import { statSync, mkdirSync, rmSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
-import { getProvider } from './providers.js'
+import { getProvider, getProviderAuthInfo } from './providers.js'
 import { isClaudeProvider } from './models.js'
+import { billingClassForProvider } from './billing-class.js'
 import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
@@ -1247,6 +1248,22 @@ export class SessionManager extends EventEmitter {
       const totals = entry.session.stdinDroppedTotals
       const stdinDroppedBytes = totals && Number.isFinite(totals.bytes) ? totals.bytes : 0
       const stdinDroppedCount = totals && Number.isFinite(totals.count) ? totals.count : 0
+      const resolvedProvider = entry.provider || this._providerType
+      // #5630/#5629: per-session billing class for the dashboard cost labels.
+      // Prefer the provider's live resolveAuth().billingClass (it already folds
+      // in the era gate + the claude-sdk/claude-cli explicit-key refinement);
+      // fall back to billingClassForProvider() for any provider whose
+      // resolveAuth predates the field. Wrapped defensively so a misbehaving
+      // custom provider's resolveAuth can't crash the snapshot.
+      let billingClass
+      try {
+        billingClass = getProviderAuthInfo(resolvedProvider, ProviderClass)?.billingClass
+      } catch {
+        billingClass = undefined
+      }
+      if (!billingClass) {
+        billingClass = billingClassForProvider(resolvedProvider, Date.now())
+      }
       list.push({
         sessionId,
         name: entry.name,
@@ -1265,7 +1282,11 @@ export class SessionManager extends EventEmitter {
         createdAt: entry.createdAt,
         lastActivityAt: this._sessionLastActivityAt.get(sessionId) || entry.createdAt,
         conversationId: entry.session.resumeSessionId || null,
-        provider: entry.provider || this._providerType,
+        provider: resolvedProvider,
+        // #5630/#5629: era-aware billing class so the dashboard labels the
+        // cost row per class (api-key → "Cost (BYOK)", programmatic-credit →
+        // "Credit spend", subscription → "Included (subscription)").
+        billingClass,
         capabilities: ProviderClass.capabilities || {},
         worktree: entry.worktreePath != null,
         repoCwd: entry.worktreeRepoDir || null,
@@ -2098,6 +2119,23 @@ export class SessionManager extends EventEmitter {
         // otherwise the user-billed tokens on a failed turn would silently
         // drop out of cumulativeUsage / sessionCost / budget gates (#5038).
         //
+        // Billing-class cost contract (#5630/#5629): which turns produce a
+        // real dollar figure depends on the session's billing class.
+        //   - subscription (claude-tui/claude-channel, and HOST claude-cli/sdk
+        //     BEFORE 2026-06-15): `total_cost_usd: null` → no per-turn dollar
+        //     charge; the cost accumulator stays zero and the UI shows the
+        //     no-dollar "Included (subscription)" chip.
+        //   - programmatic-credit (HOST claude-cli/sdk ON/AFTER 2026-06-15):
+        //     real metered credit spend — the provider now forwards a finite
+        //     `total_cost_usd`, so the finite-cost gate below accumulates it
+        //     exactly like api-key spend.
+        //   - api-key (byok, docker-byok, docker-cli/sdk — which forward an
+        //     ANTHROPIC_API_KEY into the container with no OAuth fallback — and
+        //     every non-Claude provider): real per-token spend, always a finite
+        //     cost (or `null` when pricing is unknown — see computePromptCostUsd,
+        //     which now degrades 0→null; the finite gate skips a null without
+        //     poisoning the accumulator).
+        //
         // Two independent gates (#5115):
         //   1. COST gate — `Number.isFinite(data?.cost)`. Drives _trackCost
         //      (the $ accumulator + budget thresholds). Subscription-billed
@@ -2334,12 +2372,25 @@ export class SessionManager extends EventEmitter {
     acc.cacheCreationTokens += tokenDelta(Number(u.cache_creation_input_tokens))
     acc.costUsd += finiteCost(Number(resultData?.cost))
     acc.turnsBilled += 1
+    // #5630/#5629: carry the per-session billing class on the live usage
+    // event so a client that joined before the first session_list (or after a
+    // mid-session era flip) labels the cost row correctly without a refetch.
+    // Resolved the same way as listSessions; defensive so a misbehaving
+    // provider can't break the usage broadcast.
+    const usageProvider = entry.provider || this._providerType
+    let billingClass
+    try {
+      billingClass = getProviderAuthInfo(usageProvider, entry.session.constructor)?.billingClass
+    } catch {
+      billingClass = undefined
+    }
+    if (!billingClass) billingClass = billingClassForProvider(usageProvider, Date.now())
     // Shallow-copy on emit so a subscriber that mutates the payload
     // can't corrupt the canonical accumulator (#4072 review-prep).
     this.emit('session_event', {
       sessionId,
       event: 'session_usage',
-      data: { cumulativeUsage: { ...acc } },
+      data: { cumulativeUsage: { ...acc }, billingClass },
     })
     // #4075: soft threshold crossing. Fire ONCE per session: the latch
     // (`costThresholdNotified`) stays true for the session's lifetime so

@@ -23,6 +23,7 @@ import { OllamaSession } from './ollama-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
+import { BILLING_CLASSES } from './billing-class.js'
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,
@@ -265,6 +266,9 @@ function genericResolveAuth(ProviderClass, env) {
       envVars: [],
       hint: '',
       detail: 'No credential check declared by this provider',
+      // Custom/external providers default to per-token api-key billing — they
+      // never draw on Claude's subscription/credit pool (#5630).
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
   const envVars = Array.isArray(credSpec.envVars) ? credSpec.envVars : []
@@ -278,6 +282,7 @@ function genericResolveAuth(ProviderClass, env) {
       envVars,
       hint: '',
       detail: `External provider (${matched} set)`,
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
   return {
@@ -287,6 +292,7 @@ function genericResolveAuth(ProviderClass, env) {
     envVars,
     hint,
     detail: envVars.length ? `Not configured — ${hint}` : 'Not configured',
+    billingClass: BILLING_CLASSES.API_KEY,
   }
 }
 
@@ -310,7 +316,7 @@ function genericResolveAuth(ProviderClass, env) {
  * @param {string} _name - Provider id (unused — kept for caller back-compat)
  * @param {Function} ProviderClass
  */
-function getProviderAuthInfo(_name, ProviderClass) {
+export function getProviderAuthInfo(_name, ProviderClass) {
   if (typeof ProviderClass.resolveAuth === 'function') {
     return ProviderClass.resolveAuth(process.env, AUTH_HELPERS)
   }

@@ -128,6 +128,9 @@ describe('DockerByokSession static configuration', () => {
     assert.equal(result.ready, true)
     assert.equal(result.source, 'env')
     assert.equal(result.envVar, 'ANTHROPIC_API_KEY')
+    // #5630: docker-byok delegates to ClaudeByokSession.resolveAuth — api-key,
+    // era-independent (your own ANTHROPIC_API_KEY).
+    assert.equal(result.billingClass, 'api-key')
   })
 
   it('resolveAuth() returns not-ready when no key resolved', () => {

@@ -2,6 +2,7 @@ import { spawn, execFile } from 'child_process'
 import { createInterface } from 'readline'
 import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 const log = createLogger('docker-session')
 
@@ -131,13 +132,18 @@ export class DockerSession extends CliSession {
    * always" branch — container providers do not bill the host's subscription.
    *
    * @param {NodeJS.ProcessEnv} env
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth(env) {
     const credSpec = this.preflight.credentials
     const envVars = credSpec.envVars
     const hint = credSpec.hint
 
+    // docker-cli forwards the host's ANTHROPIC_API_KEY into the container and
+    // has NO OAuth fallback (the container has no ~/.claude state), so it
+    // always bills the raw API account — api-key, era-independent. The host's
+    // subscription/programmatic-credit pool never applies inside the container.
+    const billingClass = BILLING_CLASSES.API_KEY
     const matched = envVars.find(v => env[v])
     if (matched) {
       return {
@@ -147,6 +153,7 @@ export class DockerSession extends CliSession {
         envVars,
         hint: '',
         detail: `Anthropic API (forwarded to container) (${matched} set)`,
+        billingClass,
       }
     }
     return {
@@ -156,6 +163,7 @@ export class DockerSession extends CliSession {
       envVars,
       hint,
       detail: 'Not configured — set ANTHROPIC_API_KEY on the host (forwarded into the container at run time). No OAuth fallback inside the container — the container has no ~/.claude state.',
+      billingClass,
     }
   }
 

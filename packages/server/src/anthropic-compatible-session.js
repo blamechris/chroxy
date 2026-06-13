@@ -47,6 +47,7 @@ import { getRegistryForProvider } from './models.js'
 import { refreshDiscoveredModels } from './model-discovery.js'
 import { cachedResolveCredentialFile } from './auth-probes.js'
 import { createLogger } from './logger.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 const log = createLogger('anthropic-compatible')
 
@@ -342,6 +343,7 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
           envVars,
           hint: '',
           detail: `${entry.label} at ${entry.baseUrl} (no API key configured — config-driven Anthropic-compatible endpoint)`,
+          billingClass: BILLING_CLASSES.API_KEY,
         }
       }
       const envKey = entry.apiKeyEnv ? env[entry.apiKeyEnv] : undefined
@@ -356,6 +358,7 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
           envVars,
           hint: '',
           detail: `${entry.label} at ${entry.baseUrl} (${resolved.source === 'env' ? `${entry.apiKeyEnv} set` : '~/.chroxy/credentials.json'})`,
+          billingClass: BILLING_CLASSES.API_KEY,
         }
       }
       return {
@@ -365,6 +368,9 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
         envVars,
         hint: credentialHint(entry),
         detail: `${entry.label} at ${entry.baseUrl} (${resolved.reason})`,
+        // Config-driven endpoint billed against your own key — api-key,
+        // era-independent.
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
 

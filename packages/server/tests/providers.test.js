@@ -250,6 +250,9 @@ describe('Provider Registry', () => {
         assert.equal(sdk.auth.source, 'env')
         assert.equal(sdk.auth.envVar, 'ANTHROPIC_API_KEY')
         assert.match(sdk.auth.detail, /ANTHROPIC_API_KEY/)
+        // #5630: an explicit ANTHROPIC_API_KEY is a raw API account →
+        // api-key class in BOTH eras (the refinement, not the credit pool).
+        assert.equal(sdk.auth.billingClass, 'api-key')
       } finally {
         restoreKeys()
       }
@@ -279,6 +282,14 @@ describe('Provider Registry', () => {
         assert.equal(sdk.auth.ready, true)
         assert.equal(sdk.auth.source, 'oauth')
         assert.match(sdk.auth.detail, /OAuth from `claude login`/)
+        // #5630/#5629: OAuth = the host pool, era-gated. Before 2026-06-15 it's
+        // subscription; on/after it's programmatic-credit. Either is valid here
+        // depending on the wall-clock era (deterministic per-era coverage lives
+        // in billing-class.test.js). Never api-key on the OAuth branch.
+        assert.ok(
+          sdk.auth.billingClass === 'subscription' || sdk.auth.billingClass === 'programmatic-credit',
+          `OAuth branch must be host-pool class; got ${sdk.auth.billingClass}`,
+        )
       } finally {
         restoreKeys()
       }

@@ -2,6 +2,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 // Minimum `claude` CLI version that ships the `--channels` MCP transport.
 // Verified present in v2.1.163 (the locally-installed CLI) and documented
@@ -107,7 +108,7 @@ export class ClaudeChannelSession extends BaseSession {
    * see Keychain credentials. Detail flags the research-preview status and
    * the credit-metering bypass so the dashboard billing panel reads true.
    *
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth() {
     const envVars = this.preflight.credentials.envVars
@@ -118,6 +119,9 @@ export class ClaudeChannelSession extends BaseSession {
       envVars,
       hint: 'run `claude login` if not yet authed',
       detail: 'Claude subscription (channel MCP — bypasses programmatic credit metering · research preview)',
+      // Channel MCP bypasses credit metering — flat subscription billing in
+      // both eras (#5629 leaves this UNCHANGED).
+      billingClass: BILLING_CLASSES.SUBSCRIPTION,
     }
   }
 

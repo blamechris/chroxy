@@ -55,6 +55,8 @@ export type {
 import type {
   AgentInfo,
   BaseSessionState,
+  // #5630/#5629: era-aware billing class union.
+  BillingClass,
   ChatMessage,
   Checkpoint,
   ConnectedClient,
@@ -194,6 +196,10 @@ export interface ProviderAuth {
   envVars: string[];
   hint: string;
   detail: string;
+  // #5630/#5629: era-aware billing class. Optional — older servers omit it.
+  // The app's mapProviderList passes auth through verbatim (no strict Zod
+  // strip), so an unknown key was never rejected — this just types it.
+  billingClass?: BillingClass;
 }
 
 export interface ProviderInfo {

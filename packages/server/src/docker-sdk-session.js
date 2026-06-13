@@ -3,6 +3,7 @@ import { SdkSession } from './sdk-session.js'
 import { createLogger } from './logger.js'
 import { classifyDockerError } from './docker-session.js'
 import { DockerBackend, FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH } from './environments/backends/docker.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 const log = createLogger('docker-sdk')
 
@@ -69,13 +70,17 @@ export class DockerSdkSession extends SdkSession {
    * the only valid path. See DockerSession for the full rationale.
    *
    * @param {NodeJS.ProcessEnv} env
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth(env) {
     const credSpec = this.preflight.credentials
     const envVars = credSpec.envVars
     const hint = credSpec.hint
 
+    // docker-sdk forwards the host's ANTHROPIC_API_KEY into the container and
+    // has NO OAuth fallback, so it always bills the raw API account — api-key,
+    // era-independent. The host subscription/credit pool never applies inside
+    // the container.
     const matched = envVars.find(v => env[v])
     if (matched) {
       return {
@@ -84,7 +89,8 @@ export class DockerSdkSession extends SdkSession {
         envVar: matched,
         envVars,
         hint: '',
-        detail: `Anthropic API (forwarded to container) (${matched} set)`,
+        detail: `Docker-isolated — Anthropic API (your ${matched})`,
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     return {
@@ -94,6 +100,7 @@ export class DockerSdkSession extends SdkSession {
       envVars,
       hint,
       detail: 'Not configured — set ANTHROPIC_API_KEY on the host (forwarded into the container at run time). No OAuth fallback inside the container — the container has no ~/.claude state.',
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
 

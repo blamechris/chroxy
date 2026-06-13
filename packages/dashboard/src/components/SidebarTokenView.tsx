@@ -21,7 +21,7 @@
  * `session_usage` event stream).
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
-import type { CumulativeUsage, SessionInfo } from '@chroxy/store-core'
+import type { BillingClass, CumulativeUsage, SessionInfo } from '@chroxy/store-core'
 import { formatCostBadge, formatTokens, getProviderLabel } from '@chroxy/store-core'
 
 // Subscription/PTY providers that never emit token usage today (decision #1).
@@ -30,11 +30,79 @@ import { formatCostBadge, formatTokens, getProviderLabel } from '@chroxy/store-c
 // subscription via stream-json's `result.usage`, so it is NOT in this set.
 const UNTRACKED_PROVIDERS = new Set(['claude-tui'])
 
+// #5630/#5629: per-billing-class cost-row copy + tooltip. The label/value
+// rendering is class-specific:
+//   - api-key            → "Cost (BYOK)" with a real dollar figure
+//   - programmatic-credit → "Credit spend" with a real dollar figure
+//   - subscription       → "Included (subscription)" — NO dollar figure (the
+//                          flat subscription has no per-turn dollar charge)
+const BILLING_CLASS_LABEL: Record<BillingClass, string> = {
+  'api-key': 'Cost (BYOK)',
+  'programmatic-credit': 'Credit spend',
+  subscription: 'Included (subscription)',
+}
+
+const BILLING_CLASS_TOOLTIP: Record<BillingClass, string> = {
+  'api-key':
+    'Billed per token against your own API key. Cost is computed from billed ' +
+    'tokens, which include the full conversation context re-sent every call — ' +
+    'so long agentic sessions bill far more input than the visible count ' +
+    'suggests. Pricing follows the provider’s published rates.',
+  'programmatic-credit':
+    'Drawn from Anthropic’s monthly programmatic-credit pool (metered credits, ' +
+    'effective 2026-06-15). The dollar figure is the metered credit spend for ' +
+    'these turns.',
+  subscription:
+    'Included in your flat Claude subscription — no per-turn dollar charge. ' +
+    'Token counts are shown above; there is no metered cost to display.',
+}
+
+// Render order for the per-class aggregate cost rows. Priced classes first so
+// the dollar figures lead; the no-dollar subscription chip trails.
+const BILLING_CLASS_ORDER: BillingClass[] = ['api-key', 'programmatic-credit', 'subscription']
+
+// #5630: when a session predates the server's billingClass field, derive a
+// best-effort class from the provider id so the cost row still labels
+// correctly. Mirrors the server's billingClassForProvider buckets but cannot
+// see the era flip or the explicit-key refinement — it's a fallback only.
+const SUBSCRIPTION_PROVIDERS = new Set(['claude-tui', 'claude-channel'])
+const API_KEY_PROVIDERS = new Set([
+  'claude-byok',
+  'docker-byok',
+  'codex',
+  'gemini',
+  'deepseek',
+  'ollama',
+])
+function deriveBillingClass(session: SessionInfo): BillingClass {
+  if (session.billingClass) return session.billingClass
+  const provider = session.provider ?? 'unknown'
+  if (SUBSCRIPTION_PROVIDERS.has(provider)) return 'subscription'
+  if (API_KEY_PROVIDERS.has(provider)) return 'api-key'
+  // claude-cli/sdk + docker-cli/sdk + any unknown: without the server field we
+  // can't know the era, so default to api-key (the priced class) — a dollar
+  // figure is the safer default than hiding real spend behind a subscription
+  // chip. The server populates billingClass for live sessions, so this only
+  // bites pre-#5630 reconnect snapshots.
+  return 'api-key'
+}
+
 export interface ProviderTotals {
   provider: string
   /** True when this provider doesn't surface token data today (decision #1). */
   untracked: boolean
   totals: CumulativeUsage
+  sessionCount: number
+  /** #5630: the billing class for this provider's rows (cost labelling). */
+  billingClass: BillingClass
+}
+
+/** #5630: per-billing-class cost subtotal for the aggregate cost rows. */
+export interface BillingClassTotals {
+  billingClass: BillingClass
+  /** Summed cost across tracked sessions in this class. */
+  costUsd: number
+  /** Number of (tracked) sessions in this class — used to show/hide the row. */
   sessionCount: number
 }
 
@@ -42,6 +110,12 @@ export interface AggregateTotals {
   /** Sum across ALL providers that surface tokens (untracked excluded). */
   totals: CumulativeUsage
   byProvider: ProviderTotals[]
+  /**
+   * #5630: cost subtotals grouped by billing class. Each entry drives one
+   * aggregate cost row: a dollar figure for api-key / programmatic-credit, the
+   * no-dollar "Included (subscription)" chip for subscription.
+   */
+  byBillingClass: BillingClassTotals[]
   /** Total session count across all providers (including untracked). */
   totalSessions: number
   /** Whether any untracked-provider session is present (used for UI tooltip). */
@@ -100,6 +174,10 @@ function formatPercent(ratio: number): string {
  */
 export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
   const byProviderMap = new Map<string, ProviderTotals>()
+  // #5630: per-class cost subtotal. Subscription sessions (including untracked
+  // claude-tui) are tallied here so the no-dollar "Included (subscription)"
+  // chip appears whenever such a session exists, even with zero cost.
+  const byClassMap = new Map<BillingClass, BillingClassTotals>()
   let crossTotal = EMPTY_USAGE
   let totalSessions = 0
   let hasUntracked = false
@@ -109,6 +187,7 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     const provider = session.provider ?? 'unknown'
     const untracked = UNTRACKED_PROVIDERS.has(provider)
     if (untracked) hasUntracked = true
+    const billingClass = deriveBillingClass(session)
 
     const usage = session.cumulativeUsage ?? EMPTY_USAGE
 
@@ -118,11 +197,23 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
         untracked,
         totals: EMPTY_USAGE,
         sessionCount: 0,
+        billingClass,
       })
     }
     const entry = byProviderMap.get(provider)!
     entry.totals = addUsage(entry.totals, usage)
     entry.sessionCount += 1
+
+    // Per-class cost subtotal. Every session (tracked or not) contributes its
+    // session count so a subscription-only set still shows the chip; cost is
+    // summed verbatim (subscription sessions report 0, which is correct — the
+    // chip never shows a dollar figure anyway).
+    if (!byClassMap.has(billingClass)) {
+      byClassMap.set(billingClass, { billingClass, costUsd: 0, sessionCount: 0 })
+    }
+    const classEntry = byClassMap.get(billingClass)!
+    classEntry.costUsd += usage.costUsd
+    classEntry.sessionCount += 1
 
     // Cross-provider totals exclude untracked providers — the value of "—" is
     // that it doesn't pretend to be a number, so untracked sessions should not
@@ -141,9 +232,15 @@ export function aggregateUsage(sessions: SessionInfo[]): AggregateTotals {
     return bTotal - aTotal
   })
 
+  // Stable class order: priced classes first, subscription chip last.
+  const byBillingClass = BILLING_CLASS_ORDER
+    .map((bc) => byClassMap.get(bc))
+    .filter((x): x is BillingClassTotals => x !== undefined)
+
   return {
     totals: crossTotal,
     byProvider,
+    byBillingClass,
     totalSessions,
     hasUntracked,
   }
@@ -303,15 +400,9 @@ function InfoDisclosure({
   )
 }
 
-const COST_INFO_EXPLANATION =
-  // #4348: the optical illusion is that visible tokens ÷ cost yields a rate
-  // nowhere near Anthropic's published pricing. Spell out the gap between
-  // visible and billed tokens here.
-  'Token counts above are user-visible (new content per turn). ' +
-  'BYOK cost is computed from billed tokens, which include the ' +
-  'full conversation context re-sent on every API call — so ' +
-  'long agentic sessions bill far more input than the visible ' +
-  'count suggests. Pricing follows Anthropic’s published rates.'
+// #5630: the legacy single "Cost (BYOK)" explanation was replaced by the
+// per-billing-class BILLING_CLASS_TOOLTIP map above (the api-key tooltip
+// carries the same visible-vs-billed-tokens explanation).
 
 const TUI_UNTRACKED_EXPLANATION =
   'Token count not exposed by claude TUI (PTY-only interface)'
@@ -351,6 +442,8 @@ export function SidebarTokenView({
           session: s,
           tokens: usage.inputTokens + usage.outputTokens,
           costUsd: usage.costUsd,
+          // #5630: per-session billing class for the class-aware cost label.
+          billingClass: deriveBillingClass(s),
         }
       })
       .sort((a, b) => {
@@ -390,24 +483,52 @@ export function SidebarTokenView({
             </span>
           </div>
         )}
-        {agg.totals.costUsd > 0 && (
-          <div className="sidebar-token-view-aggregate-row">
-            <span className="sidebar-token-view-label">
-              Cost (BYOK){' '}
-              <InfoDisclosure
-                triggerText={'ⓘ'}
-                ariaLabel="Why doesn't this cost match the visible token count?"
-                triggerClassName="sidebar-token-view-info"
-                testIdBase="sidebar-token-view-cost-info"
-              >
-                {COST_INFO_EXPLANATION}
-              </InfoDisclosure>
-            </span>
-            <span className="sidebar-token-view-value-secondary">
-              {formatCostBadge(agg.totals.costUsd)}
-            </span>
-          </div>
-        )}
+        {/* #5630: one aggregate cost row PER billing class. Priced classes
+            (api-key / programmatic-credit) show a dollar figure only when
+            there's spend; the subscription class shows the no-dollar
+            "Included (subscription)" chip whenever a subscription session
+            exists, even at $0 (a flat subscription has no per-turn charge). */}
+        {agg.byBillingClass.map((cls) => {
+          const isSubscription = cls.billingClass === 'subscription'
+          // Priced classes hide their row when there's no spend yet; the
+          // subscription chip shows as long as such a session exists.
+          if (!isSubscription && cls.costUsd <= 0) return null
+          const label = BILLING_CLASS_LABEL[cls.billingClass]
+          return (
+            <div
+              key={cls.billingClass}
+              className="sidebar-token-view-aggregate-row"
+              data-testid={`sidebar-token-view-cost-${cls.billingClass}`}
+            >
+              <span className="sidebar-token-view-label">
+                {label}{' '}
+                <InfoDisclosure
+                  triggerText={'ⓘ'}
+                  ariaLabel={`What does "${label}" mean?`}
+                  triggerClassName="sidebar-token-view-info"
+                  testIdBase={`sidebar-token-view-cost-info-${cls.billingClass}`}
+                >
+                  {BILLING_CLASS_TOOLTIP[cls.billingClass]}
+                </InfoDisclosure>
+              </span>
+              {isSubscription ? (
+                <span
+                  className="sidebar-token-view-value-secondary sidebar-token-view-included-chip"
+                  data-testid={`sidebar-token-view-cost-value-${cls.billingClass}`}
+                >
+                  Included
+                </span>
+              ) : (
+                <span
+                  className="sidebar-token-view-value-secondary"
+                  data-testid={`sidebar-token-view-cost-value-${cls.billingClass}`}
+                >
+                  {formatCostBadge(cls.costUsd)}
+                </span>
+              )}
+            </div>
+          )
+        })}
       </div>
 
       <div className="sidebar-token-view-section" data-testid="sidebar-token-view-by-provider">
@@ -421,11 +542,15 @@ export function SidebarTokenView({
             {agg.byProvider.map((row) => {
               const label = getProviderLabel(row.provider)
               const tokens = row.totals.inputTokens + row.totals.outputTokens
+              // #5630: label the cost suffix by billing class — a dollar for
+              // priced classes, "Included" for subscription (no dollar figure).
+              const isSubscription = row.billingClass === 'subscription'
               return (
                 <li
                   key={row.provider}
                   className="sidebar-token-view-provider-row"
                   data-testid={`sidebar-token-view-provider-${row.provider}`}
+                  data-billing-class={row.billingClass}
                 >
                   <span className="sidebar-token-view-provider-label">{label}</span>
                   {row.untracked ? (
@@ -440,10 +565,16 @@ export function SidebarTokenView({
                   ) : (
                     <span className="sidebar-token-view-provider-tokens">
                       {formatTokens(tokens)}
-                      {row.totals.costUsd > 0 && (
-                        <span className="sidebar-token-view-provider-cost">
-                          {' '}({formatCostBadge(row.totals.costUsd)})
+                      {isSubscription ? (
+                        <span className="sidebar-token-view-provider-cost sidebar-token-view-included-chip">
+                          {' '}(Included)
                         </span>
+                      ) : (
+                        row.totals.costUsd > 0 && (
+                          <span className="sidebar-token-view-provider-cost">
+                            {' '}({formatCostBadge(row.totals.costUsd)})
+                          </span>
+                        )
                       )}
                     </span>
                   )}
@@ -458,15 +589,22 @@ export function SidebarTokenView({
         <div className="sidebar-token-view-section" data-testid="sidebar-token-view-by-session">
           <div className="sidebar-token-view-section-header">By session</div>
           <ul className="sidebar-token-view-session-list">
-            {sessionRows.map(({ session, tokens, costUsd }) => {
+            {sessionRows.map(({ session, tokens, costUsd, billingClass }) => {
               const isActive = session.sessionId === activeSessionId
+              const isSubscription = billingClass === 'subscription'
               const tokensLabel = (
-                <span className="sidebar-token-view-session-tokens">
+                <span className="sidebar-token-view-session-tokens" data-billing-class={billingClass}>
                   {formatTokens(tokens)}
-                  {costUsd > 0 && (
-                    <span className="sidebar-token-view-provider-cost">
-                      {' '}({formatCostBadge(costUsd)})
+                  {isSubscription ? (
+                    <span className="sidebar-token-view-provider-cost sidebar-token-view-included-chip">
+                      {' '}(Included)
                     </span>
+                  ) : (
+                    costUsd > 0 && (
+                      <span className="sidebar-token-view-provider-cost">
+                        {' '}({formatCostBadge(costUsd)})
+                      </span>
+                    )
                   )}
                 </span>
               )

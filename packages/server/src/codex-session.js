@@ -9,6 +9,7 @@ import {
   getRatchetCap,
   maybeRatchetContextWindow,
 } from './utils/context-window-learn.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -439,6 +440,7 @@ export class CodexSession extends JsonlSubprocessSession {
         envVars,
         hint: '',
         detail: `OpenAI API (${matched} set)`,
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     if (helpers.hasCodexOAuthCreds()) {
@@ -449,6 +451,7 @@ export class CodexSession extends JsonlSubprocessSession {
         envVars,
         hint,
         detail: 'OpenAI API (OAuth from `codex login`)',
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     const resolvedHint = hint
@@ -461,6 +464,8 @@ export class CodexSession extends JsonlSubprocessSession {
       envVars,
       hint: resolvedHint,
       detail: envVars.length ? `Not configured — ${resolvedHint}` : 'Not configured',
+      // Non-Claude provider — always per-token api-key billing, era-independent.
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
 

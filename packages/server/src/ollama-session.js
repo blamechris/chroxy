@@ -41,6 +41,7 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { resolveOllamaBaseUrl, ollamaEnvOverride, refreshOllamaModels } from './ollama-tags.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 // Compatibility re-export — resolution moved to ollama-tags.js (#5421).
 export { resolveOllamaBaseUrl }
@@ -116,6 +117,10 @@ export class OllamaSession extends ClaudeByokSession {
       envVars: ['CHROXY_OLLAMA_BASE_URL', 'OLLAMA_HOST'],
       hint: '',
       detail: `Local Ollama at ${baseURL} (no API key — local inference)`,
+      // Local inference has no metered billing; classify api-key (the
+      // "your own infra / per-token" bucket) so the UI never mislabels it
+      // as a Claude subscription/credit pool. Era-independent.
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
 

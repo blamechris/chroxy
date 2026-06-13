@@ -30,6 +30,7 @@ import {
   computePromptCostUsd,
 } from './models.js'
 import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
+import { BILLING_CLASSES } from './billing-class.js'
 import { translateSdkEvent } from './byok-event-translator.js'
 import { BUILTIN_TOOLS, TASK_PERMISSION_MODE_LIST, TASK_PERMISSION_MODE_RANK } from './byok-tools.js'
 import { executeBuiltinTool } from './byok-tool-executor.js'
@@ -157,7 +158,7 @@ export class ClaudeByokSession extends BaseSession {
    *
    * @param {NodeJS.ProcessEnv} env
    * @param {{ cachedResolveCredentialFile: Function }} helpers
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth(env, helpers) {
     const credSpec = this.preflight.credentials
@@ -176,6 +177,9 @@ export class ClaudeByokSession extends BaseSession {
         envVars,
         hint: '',
         detail: `Anthropic API (${resolved.source === 'env' ? 'ANTHROPIC_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
+        // BYOK is always your own key, per-token — api-key in both eras
+        // (#5629 leaves this UNCHANGED).
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     return {
@@ -185,6 +189,7 @@ export class ClaudeByokSession extends BaseSession {
       envVars,
       hint,
       detail: `Anthropic API (${resolved.reason})`,
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
 
@@ -534,6 +539,13 @@ export class ClaudeByokSession extends BaseSession {
     // tool-use turn reports only 1/5th of the actual cost (#4056).
     const turnUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 }
     let turnCost = 0
+    // #5630: computePromptCostUsd now returns `null` (not 0) when pricing is
+    // unknown. Adding `null` to turnCost would make it NaN, so we guard every
+    // add and track whether ANY round produced a known cost. If no round did
+    // (pricing unknown for the model all turn), we emit `cost: null` so the
+    // dashboard shows "n/a" rather than a misleading $0.00 — distinct from a
+    // genuine zero-cost turn.
+    let turnCostKnown = false
     const pricingModel = this.model || this._defaultModel
     const pricing = this._getPricing(pricingModel)
     if (!pricing && !this._pricingWarnedModels.has(pricingModel)) {
@@ -707,7 +719,12 @@ export class ClaudeByokSession extends BaseSession {
         turnUsage.output_tokens += Number(roundUsage.output_tokens) || 0
         turnUsage.cache_read_input_tokens += Number(roundUsage.cache_read_input_tokens) || 0
         turnUsage.cache_creation_input_tokens += Number(roundUsage.cache_creation_input_tokens) || 0
-        turnCost += computePromptCostUsd(roundUsage, pricing)
+        // #5630: skip a null (unknown) cost so turnCost never becomes NaN;
+        // a non-null value marks the turn cost as known.
+        {
+          const c = computePromptCostUsd(roundUsage, pricing)
+          if (c !== null) { turnCost += c; turnCostKnown = true }
+        }
 
         // Append the assistant turn — full content array preserves
         // tool_use blocks for the next round of conversation.
@@ -853,7 +870,11 @@ export class ClaudeByokSession extends BaseSession {
           turnUsage.output_tokens += Number(sUsage.output_tokens) || 0
           turnUsage.cache_read_input_tokens += Number(sUsage.cache_read_input_tokens) || 0
           turnUsage.cache_creation_input_tokens += Number(sUsage.cache_creation_input_tokens) || 0
-          turnCost += computePromptCostUsd(sUsage, pricing)
+          // #5630: skip a null (unknown) cost — see the round-usage add above.
+          {
+            const c = computePromptCostUsd(sUsage, pricing)
+            if (c !== null) { turnCost += c; turnCostKnown = true }
+          }
           this._history.push({ role: 'assistant', content: summaryFinal.content })
           break
         }
@@ -868,7 +889,11 @@ export class ClaudeByokSession extends BaseSession {
       turnUsage.output_tokens += this._subagentUsageThisTurn.output_tokens
       turnUsage.cache_read_input_tokens += this._subagentUsageThisTurn.cache_read_input_tokens
       turnUsage.cache_creation_input_tokens += this._subagentUsageThisTurn.cache_creation_input_tokens
+      // Subagent cost is a finite accumulator (child `result.cost` coerced via
+      // `Number(...) || 0`); any positive contribution means the turn cost is
+      // at least partially known (#5630).
       turnCost += this._subagentCostThisTurn
+      if (this._subagentCostThisTurn > 0) turnCostKnown = true
 
       this.emit('stream_end', { messageId })
       this.emit('result', {
@@ -877,7 +902,9 @@ export class ClaudeByokSession extends BaseSession {
         stopReason: lastStopReason,
         duration: Date.now() - turnStartedAt,
         usage: turnUsage,
-        cost: turnCost,
+        // #5630: emit null when no round produced a known cost so the UI
+        // shows "n/a" instead of a misleading $0.00.
+        cost: turnCostKnown ? turnCost : null,
       })
     } catch (err) {
       // #4118: extend the synchronous stream-init rollback (#4109) to
@@ -913,10 +940,13 @@ export class ClaudeByokSession extends BaseSession {
       turnUsage.cache_read_input_tokens += this._subagentUsageThisTurn.cache_read_input_tokens
       turnUsage.cache_creation_input_tokens += this._subagentUsageThisTurn.cache_creation_input_tokens
       turnCost += this._subagentCostThisTurn
+      if (this._subagentCostThisTurn > 0) turnCostKnown = true
       this.emit('stream_end', { messageId })
       this._emitTurnError(messageId, err, 'STREAM_ERROR', {
         usage: turnUsage,
-        cost: turnCost,
+        // #5630: null when no priced round committed before the error so the
+        // partial-cost line shows "n/a" rather than $0.00.
+        cost: turnCostKnown ? turnCost : null,
       })
     } finally {
       // #4080: per-turn isolation guarantee. The per-round clear after

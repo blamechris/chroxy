@@ -333,7 +333,10 @@ export const ServerToolInputDeltaSchema = z.object({
 
 export const ServerResultSchema = z.object({
   type: z.literal('result'),
-  cost: z.number().optional(),
+  // #5630: `null` means "cost unknown" (pricing/usage couldn't be computed) —
+  // distinct from a genuine $0 turn. Subscription runs and any turn whose model
+  // pricing is unknown emit `null`; the dashboard renders "n/a" for it.
+  cost: z.number().nullable().optional(),
   duration: z.number().optional(),
   usage: z.any().optional(),
   sessionId: z.string().nullable().optional(),
@@ -1674,6 +1677,11 @@ export const ServerSessionListEntrySchema = z.object({
   lastActivityAt: z.number().optional(),
   conversationId: z.string().nullable().optional(),
   provider: z.string().optional(),
+  // #5630/#5629: per-session era-aware billing class (mirrors the provider
+  // auth field) so the dashboard token view labels each session's cost row by
+  // class. Optional — older servers omit it; the client falls back to deriving
+  // it from `provider`.
+  billingClass: z.enum(['api-key', 'subscription', 'programmatic-credit']).optional(),
   capabilities: z.record(z.string(), z.unknown()).optional(),
   worktree: z.boolean().optional(),
   repoCwd: z.string().nullable().optional(),
@@ -1783,6 +1791,11 @@ const ProviderAuthSchema = z.object({
   envVars: z.array(z.string()),
   hint: z.string(),
   detail: z.string(),
+  // #5630/#5629: era-aware billing class so the client can label the cost row
+  // per class (api-key → "Cost (BYOK)", programmatic-credit → "Credit spend",
+  // subscription → "Included (subscription)"). Optional so older servers that
+  // omit it still parse; clients fall back to a static per-provider default.
+  billingClass: z.enum(['api-key', 'subscription', 'programmatic-credit']).optional(),
 })
 
 export const ServerProviderListSchema = z.object({

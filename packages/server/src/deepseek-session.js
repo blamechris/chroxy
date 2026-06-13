@@ -24,6 +24,7 @@ import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { resolveDeepSeekApiKey } from './deepseek-credentials.js'
 import { getDeepSeekPricing } from './models.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 // Override point for self-hosted or pinned-version endpoints. Defaults
 // to DeepSeek's Anthropic-compatible endpoint, which they explicitly
@@ -106,6 +107,7 @@ export class DeepSeekSession extends ClaudeByokSession {
         envVars,
         hint: '',
         detail: `DeepSeek API (${resolved.source === 'env' ? 'DEEPSEEK_API_KEY set' : '~/.chroxy/credentials.json'} — per-token billing)`,
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     return {
@@ -115,6 +117,8 @@ export class DeepSeekSession extends ClaudeByokSession {
       envVars,
       hint,
       detail: `DeepSeek API (${resolved.reason})`,
+      // Non-Claude provider — always per-token api-key billing, era-independent.
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
 

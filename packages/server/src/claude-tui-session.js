@@ -17,6 +17,7 @@ import { isOperatorTimeoutInRange } from './duration.js'
 import { materializeAttachments, buildAttachmentsPromptSuffix } from './claude-tui-attachments.js'
 import { TranscriptTaskScanner, transcriptPathForSessionFile } from './transcript-tasks.js'
 import { hasClaudeOAuthCreds } from './auth-probes.js'
+import { BILLING_CLASSES } from './billing-class.js'
 import {
   parseBackgroundShellId,
   parseBackgroundShellOutputPath,
@@ -156,7 +157,7 @@ export class ClaudeTuiSession extends BaseSession {
    * classifier (#5321), which surfaces AUTH_REQUIRED at session start on every
    * platform regardless of where the token lives.
    *
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth() {
     const envVars = this.preflight.credentials.envVars
@@ -169,6 +170,9 @@ export class ClaudeTuiSession extends BaseSession {
         envVars,
         hint: 'authenticated — Claude OAuth credentials found on disk',
         detail: 'Claude subscription (OAuth credentials on disk)',
+        // TUI is an interactive PTY that bypasses programmatic credit metering
+        // — flat subscription billing in both eras (#5629 leaves this UNCHANGED).
+        billingClass: BILLING_CLASSES.SUBSCRIPTION,
       }
     }
     const keychainPossible = process.platform === 'darwin'
@@ -186,6 +190,7 @@ export class ClaudeTuiSession extends BaseSession {
       detail: keychainPossible
         ? 'Claude subscription (OAuth in macOS Keychain — not on-disk-verifiable; runtime AUTH_REQUIRED is authoritative)'
         : 'Claude subscription — no on-disk OAuth credentials found (logged out)',
+      billingClass: BILLING_CLASSES.SUBSCRIPTION,
     }
   }
 

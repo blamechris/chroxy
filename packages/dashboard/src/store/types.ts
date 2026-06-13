@@ -36,6 +36,8 @@ export type {
   InputSettings,
   ModelInfo,
   SessionInfo,
+  // #5630/#5629: era-aware billing class union.
+  BillingClass,
   AgentInfo,
   ConnectedClient,
   SessionHealth,
@@ -85,6 +87,7 @@ export type {
 // Import for local use in SessionState/ConnectionState definitions below
 import type {
   BaseSessionState,
+  BillingClass,
   ChatMessage,
   Checkpoint,
   ConnectedClient,
@@ -159,6 +162,8 @@ export interface ProviderAuth {
   envVars: string[];
   hint: string;
   detail: string;
+  // #5630/#5629: era-aware billing class. Optional — older servers omit it.
+  billingClass?: BillingClass;
 }
 
 export interface ProviderInfo {
