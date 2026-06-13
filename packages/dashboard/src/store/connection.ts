@@ -115,6 +115,8 @@ import {
   clearPendingTrustGrants,
   registerModelChangeRequest,
   clearPendingModelReverts,
+  registerPermissionModeChangeRequest,
+  clearPendingPermissionModeReverts,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
@@ -1616,6 +1618,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // against a closed socket.
       clearPendingTrustGrants();
       clearPendingModelReverts();
+      clearPendingPermissionModeReverts();
       // #3605: also clear the per-session pendingTrustGrants arrays
       // (added in #3588). disconnect() handles user-initiated closes, but
       // an unexpected drop here would otherwise leave the SkillsPanel
@@ -1713,6 +1716,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       rejectAllSummarizeRequests('Connection errored before the summary arrived');
       clearPendingTrustGrants();
       clearPendingModelReverts();
+      clearPendingPermissionModeReverts();
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
       set({ socket: null, sessionStates: cleanedSessionStates });
@@ -1746,6 +1750,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // against the disconnected socket.
     clearPendingTrustGrants();
     clearPendingModelReverts();
+    clearPendingPermissionModeReverts();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -2490,17 +2495,28 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (permissionMode && permissionMode !== mode) {
       set({ previousPermissionMode: permissionMode });
     }
+    // #5716: remember the mode we're switching FROM, keyed by a requestId the
+    // server echoes on a PERMISSION_MODE_NOT_APPLIED rejection, so the error
+    // handler can roll the optimistic update below back instead of leaving the
+    // dropdown showing a mode the session never entered (a phantom bypass is the
+    // dangerous case). Read the live optimistic target, mirroring the write below.
+    const previousMode = (activeSessionId && get().sessionStates[activeSessionId])
+      ? (get().sessionStates[activeSessionId]!.permissionMode ?? null)
+      : (get().permissionMode ?? null);
+    const requestId = `set-perm-mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (mode === 'auto') {
       // Send with confirmed:true so the server skips its own confirmation
       // round-trip and broadcasts `permission_mode_changed` directly.
       if (socket && socket.readyState === WebSocket.OPEN) {
-        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true };
+        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode });
+        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true, requestId };
         if (activeSessionId) payload.sessionId = activeSessionId;
         wsSend(socket, payload);
       }
     } else {
       if (socket && socket.readyState === WebSocket.OPEN) {
-        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode };
+        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode });
+        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, requestId };
         if (activeSessionId) payload.sessionId = activeSessionId;
         wsSend(socket, payload);
       }

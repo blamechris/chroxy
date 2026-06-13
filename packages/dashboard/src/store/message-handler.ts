@@ -349,6 +349,51 @@ export function _testModelRevertPendingSize(): number {
   return _pendingModelReverts.size;
 }
 
+// #5716 (sibling of #5711): set_permission_mode is also applied OPTIMISTICALLY
+// (the dropdown flips immediately in setPermissionMode), but the server may
+// reject it (PERMISSION_MODE_NOT_APPLIED — a mid-turn change or same-mode no-op
+// is rejected server-side, settings-handlers.js). Without a rollback the
+// dashboard keeps showing a permission mode the session never switched to —
+// the most dangerous case being a phantom "auto"/bypass that the session never
+// entered. Remember the mode we switched FROM, keyed by the set_permission_mode
+// requestId the server echoes on its error, so the `error` handler can roll the
+// optimistic update back. Cleared on the matching error or on disconnect — NOT
+// on success: the server sends permission_mode_changed XOR error per requestId,
+// so clearing on success would drop a second in-flight revert (the #5715 bug).
+// Bounded FIFO like the model-revert map.
+interface PendingPermissionModeRevert {
+  sessionId: string | null;
+  previousMode: string | null;
+}
+
+const _pendingPermissionModeReverts = new Map<string, PendingPermissionModeRevert>();
+const PERMISSION_MODE_REVERT_PENDING_CAP = 16;
+
+export function registerPermissionModeChangeRequest(requestId: string, entry: PendingPermissionModeRevert): void {
+  if (_pendingPermissionModeReverts.size >= PERMISSION_MODE_REVERT_PENDING_CAP) {
+    const oldestKey = _pendingPermissionModeReverts.keys().next().value;
+    if (oldestKey !== undefined) _pendingPermissionModeReverts.delete(oldestKey);
+  }
+  _pendingPermissionModeReverts.set(requestId, { ...entry });
+}
+
+function consumePendingPermissionModeRevert(requestId: string): PendingPermissionModeRevert | null {
+  const entry = _pendingPermissionModeReverts.get(requestId);
+  if (!entry) return null;
+  _pendingPermissionModeReverts.delete(requestId);
+  return entry;
+}
+
+/** Clear all pending permission-mode reverts — called on WebSocket close. */
+export function clearPendingPermissionModeReverts(): void {
+  _pendingPermissionModeReverts.clear();
+}
+
+/** @internal test seam. */
+export function _testPermissionModeRevertPendingSize(): number {
+  return _pendingPermissionModeReverts.size;
+}
+
 /** @internal Exposed for tests so they can inspect the in-flight map. */
 export function _testTrustGrantPendingSize(): number {
   return _pendingTrustGrants.size;
@@ -4453,6 +4498,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             updateSession(revert.sessionId, () => ({ activeModel: revert.previousModel }));
           } else {
             set({ activeModel: revert.previousModel });
+          }
+        }
+      }
+      // #5716: roll back the optimistic set_permission_mode when the server says
+      // it never applied (PERMISSION_MODE_NOT_APPLIED — mid-turn or no-op). Mirror
+      // setPermissionMode's session-vs-flat optimistic write so the revert lands
+      // exactly where the optimistic update did. Critical for a rejected switch to
+      // 'auto'/bypass: without it the dropdown shows bypass the session never entered.
+      if (errCode === 'PERMISSION_MODE_NOT_APPLIED' && errReqId) {
+        const revert = consumePendingPermissionModeRevert(errReqId);
+        if (revert) {
+          if (revert.sessionId && get().sessionStates[revert.sessionId]) {
+            updateSession(revert.sessionId, () => ({ permissionMode: revert.previousMode }));
+          } else {
+            set({ permissionMode: revert.previousMode });
           }
         }
       }
