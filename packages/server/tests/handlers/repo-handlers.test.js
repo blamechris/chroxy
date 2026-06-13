@@ -148,5 +148,24 @@ describe('repo-handlers', () => {
       assert.match(ctx._sent[0].message, /Failed to remove repo/)
       assert.equal(ctx.writeReposToConfig.callCount, 0, 'no write attempted when the read failed')
     })
+
+    // The removal persisted; only the follow-up list refresh failed. The message
+    // must NOT claim the removal failed (the repo IS gone from config).
+    it('reports a refresh-only failure distinctly after a successful write', async () => {
+      const ctx = makeCtx()
+      ctx._repoStore.push({ path: '/tmp/gone', name: 'gone' })
+      // buildRepoList scans conversations; make that throw AFTER the write lands.
+      ctx.scanConversations = createSpy(async () => { throw new Error('scanner offline') })
+
+      await assert.doesNotReject(
+        repoHandlers.remove_repo(makeWs(), makeClient(), { path: '/tmp/gone' }, ctx),
+      )
+
+      assert.equal(ctx.writeReposToConfig.callCount, 1, 'the write still persisted')
+      assert.equal(ctx._repoStore.length, 0, 'repo actually removed from config')
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Repo removed/, 'message acknowledges the removal succeeded')
+      assert.doesNotMatch(ctx._sent[0].message, /Failed to remove repo/)
+    })
   })
 })

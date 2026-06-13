@@ -136,21 +136,30 @@ async function handleRemoveRepo(ws, client, msg, ctx) {
   try { targetPath = realpathSync(msg.path) } catch { /* fall back to raw path */ }
   const readRepos = ctx.readReposFromConfig || defaultReadRepos
   const writeRepos = ctx.writeReposToConfig || defaultWriteRepos
-  // The config read + write were previously OUTSIDE this try/catch: a failing
+  // The config read + write were previously OUTSIDE any try/catch: a failing
   // readReposFromConfig / writeReposToConfig (disk full, locked file, read-only
   // home) threw out of the handler, so the client got NO response at all and the
   // removal silently failed — the client's repo list stayed showing a repo the
-  // user thought they'd removed. Wrap them like handleAddRepo so a config-write
-  // failure surfaces a session_error the user can act on, and the repo_list
-  // refresh only runs when the mutation actually persisted.
+  // user thought they'd removed.
+  //
+  // The mutation and the list-refresh are guarded SEPARATELY so the error stays
+  // accurate: a read/write failure means the removal did NOT persist, whereas a
+  // buildRepoList failure AFTER a successful write means the repo WAS removed and
+  // only the follow-up list resend failed — saying "Failed to remove repo" there
+  // would wrongly imply the repo is still configured.
   try {
     const existing = readRepos()
     const filtered = existing.filter(r => r.path !== targetPath)
     writeRepos(filtered)
+  } catch (err) {
+    sendSessionError(ws, ctx, `Failed to remove repo: ${err.message}`)
+    return
+  }
+  try {
     const repos = await buildRepoList(ctx)
     ctx.transport.send(ws, { type: 'repo_list', repos })
   } catch (err) {
-    sendSessionError(ws, ctx, `Failed to remove repo: ${err.message}`)
+    sendSessionError(ws, ctx, `Repo removed, but the list couldn't be refreshed: ${err.message}`)
   }
 }
 
