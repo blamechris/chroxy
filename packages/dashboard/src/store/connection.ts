@@ -1677,9 +1677,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // active session's flat-state mirror for us, and is a no-op for any
       // session that returns an empty patch.
       const clearTransientSessionState = (
-        ss: import('./types').SessionState,
-      ): Partial<import('./types').SessionState> => {
-        const patch: Partial<import('./types').SessionState> = {};
+        ss: SessionState,
+      ): Partial<SessionState> => {
+        const patch: Partial<SessionState> = {};
         if (ss.streamingMessageId) patch.streamingMessageId = null;
         if (ss.isPlanPending) {
           patch.isPlanPending = false;
