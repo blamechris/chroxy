@@ -821,6 +821,160 @@ describe('DiscordWebhookSink — heartbeat', () => {
   })
 })
 
+// #5676: two-stage staleness watchdog. A hook-based external session that dies
+// WITHOUT session_end (kill -9, crash, laptop sleep, daemon restart) would
+// otherwise leave its `online` embed "🟢 working" forever — the heartbeat keeps
+// re-rendering it alive. The watchdog downgrades a quiet embed online → stale →
+// offline, measuring silence against lastUpdateTs (the last REAL event, NOT a
+// heartbeat tick), and spares idle/permission (legitimately waiting on a human).
+describe('DiscordWebhookSink — staleness watchdog (#5676)', () => {
+  // Small injected thresholds + a controllable clock. prune stays at the 24h
+  // default so the watchdog (not retention) is what acts at these silences.
+  const watchdog = (over = {}) => makeSink({
+    staleAfterMs: 10 * 60_000,
+    offlineAfterMs: 30 * 60_000,
+    ...over,
+  })
+
+  // online entries come from the Phase-3 session lifecycle categories.
+  const online = (data = {}) => ({
+    category: 'session_online',
+    title: 'Session online',
+    body: 'External session started',
+    data: { project: 'proj1', ...data },
+  })
+  const activity = (data = {}) => ({
+    category: 'session_activity',
+    title: 'Tool activity',
+    body: 'Tool use completed',
+    data: { project: 'proj1', ...data },
+  })
+
+  it('online + silent past STALE_AFTER_MS → downgrades to stale (PATCH sent, persisted)', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
+
+    advance(11 * 60_000) // 11 min of silence — past the 10m stale threshold
+    const calls = scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+
+    const patches = calls.filter((c) => c.method === 'PATCH')
+    assert.equal(patches.length, 1, 'one PATCH issued for the downgrade')
+    const embed = JSON.parse(patches[0].body).embeds[0]
+    assert.match(embed.title, /proj1 — Quiet for a while/, 'stale title rendered')
+    assert.equal(readState(statePath).projects.proj1.state, 'stale', 'state persisted as stale')
+  })
+
+  it('stale + silent past OFFLINE_AFTER_MS → downgrades to offline', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+
+    // Trip stale first.
+    advance(11 * 60_000)
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.state, 'stale')
+
+    // Now silent for >30 min total since the last real event.
+    advance(20 * 60_000) // total 31 min of silence
+    const calls = scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+
+    const patches = calls.filter((c) => c.method === 'PATCH')
+    assert.equal(patches.length, 1, 'one final PATCH for the offline downgrade')
+    const embed = JSON.parse(patches[0].body).embeds[0]
+    assert.match(embed.title, /proj1 — Session Offline/, 'offline title rendered')
+    assert.equal(readState(statePath).projects.proj1.state, 'offline', 'state persisted as offline')
+  })
+
+  it('online + recent (< STALE_AFTER_MS) → stays online (normal footer refresh only)', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+
+    advance(5 * 60_000) // 5 min — under the 10m stale threshold
+    const calls = scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+
+    const patches = calls.filter((c) => c.method === 'PATCH')
+    assert.equal(patches.length, 1, 'still PATCHes to refresh the footer')
+    const embed = JSON.parse(patches[0].body).embeds[0]
+    assert.match(embed.title, /proj1 — Session Online/, 'still online')
+    assert.equal(readState(statePath).projects.proj1.state, 'online')
+  })
+
+  it('idle and permission entries of any age are left untouched', async () => {
+    const { sink, statePath, advance } = watchdog()
+    // idle (alpha) + permission (beta) tracked.
+    scriptFetch([
+      { status: 200, body: { id: 'm-alpha' } }, // idle POST
+      { status: 200, body: { id: 'm-beta' } },  // permission POST
+    ])
+    await sink.send(idle({ sessionName: 'alpha' }))
+    await sink.send(waiting({ sessionName: 'beta' }))
+    assert.equal(readState(statePath).projects.alpha.state, 'idle')
+    assert.equal(readState(statePath).projects.beta.state, 'permission')
+
+    advance(60 * 60_000) // an hour of silence — well past every threshold
+    scriptFetch([{ status: 200 }, { status: 200 }])
+    await sink._heartbeatTick()
+
+    const st = readState(statePath).projects
+    assert.equal(st.alpha.state, 'idle', 'idle is waiting on a human, never downgraded')
+    assert.equal(st.beta.state, 'permission', 'permission is waiting on a human, never downgraded')
+  })
+
+  it('a real event after a stale downgrade restores online and resets the silence clock', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+
+    // Downgrade to stale.
+    advance(11 * 60_000)
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.state, 'stale')
+
+    // A real event arrives — normal update() path restores online + resets clock.
+    scriptFetch([{ status: 200 }]) // routine session_activity PATCH
+    await sink.send(activity())
+    assert.equal(readState(statePath).projects.proj1.state, 'online', 'real event restored online')
+
+    // The very next tick must NOT immediately re-downgrade: the clock reset.
+    advance(5 * 60_000) // under the stale threshold again
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.state, 'online', 'clock reset — still online')
+  })
+
+  it('a heartbeat tick alone does NOT advance lastUpdateTs (so repeated ticks eventually trip)', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+    const ts0 = readState(statePath).projects.proj1.lastUpdateTs
+
+    // Two ticks while still under the stale threshold — neither should touch
+    // lastUpdateTs (a heartbeat is not real activity).
+    advance(3 * 60_000)
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    advance(3 * 60_000)
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.lastUpdateTs, ts0, 'ticks never bump lastUpdateTs')
+    assert.equal(readState(statePath).projects.proj1.state, 'online', 'still online under threshold')
+
+    // Because the clock never advanced, total silence now crosses the threshold.
+    advance(5 * 60_000) // 11 min total since the real event
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.state, 'stale', 'silence accumulated across ticks → tripped')
+  })
+})
+
 describe('PushManager integration (#5413 Phase 2)', () => {
   it('registers the Discord sink alongside Expo, off by default', () => {
     const pm = new PushManager({

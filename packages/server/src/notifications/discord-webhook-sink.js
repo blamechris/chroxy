@@ -82,6 +82,22 @@ const DEFAULT_PRUNE_AFTER_MS = 86_400_000 // 24h
 // documented disable (parity with the heartbeatIntervalMs 10s floor).
 const MIN_PRUNE_AFTER_MS = 60_000 // 60s
 
+// #5676: two-stage staleness watchdog for the heartbeat. A hook-based external
+// session (chroxy-hooks) that dies WITHOUT emitting session_end — kill -9,
+// crash, OOM, terminal closed, laptop sleep, daemon restart mid-session — never
+// fires session_offline, so its `online` embed would stay "🟢 working" forever
+// while the heartbeat keeps re-rendering it as alive. The internal session
+// types emit `inactivity_warning` to cover this; the ingest hook path has no
+// equivalent. The heartbeat therefore watches silence = now - lastUpdateTs (the
+// last REAL event, NOT a heartbeat tick) and downgrades a quiet embed:
+//   online → stale  after STALE_AFTER_MS of silence,
+//   stale  → offline after OFFLINE_AFTER_MS of silence (final).
+// idle/permission are spared — those are legitimately waiting on the human, not
+// dead. A real event takes the normal update() path and restores the true
+// state, resetting the silence clock automatically.
+const DEFAULT_STALE_AFTER_MS = 10 * 60_000   // 10m
+const DEFAULT_OFFLINE_AFTER_MS = 30 * 60_000 // 30m
+
 // Embed sidebar color defaults — ported from claude-code-notify
 // (colors.conf.example + the CLAUDE_NOTIFY_*_COLOR defaults).
 const DEFAULT_PROJECT_COLOR = 5793266   // Discord blurple #5865F2
@@ -229,6 +245,12 @@ export class DiscordWebhookSink extends NotificationSink {
    *   0 disables pruning; invalid values and values below 60s fall back to
    *   the 24h default (#5457 — a tiny retention prunes the messageId between
    *   events and turns the status embed into message-per-event spam).
+   * @param {number} [opts.staleAfterMs] - #5676 watchdog: silence after which
+   *   an `online` embed is downgraded to `stale` in a heartbeat tick. Injected
+   *   small for tests; defaults to 10m.
+   * @param {number} [opts.offlineAfterMs] - #5676 watchdog: silence after which
+   *   a `stale` embed is downgraded to `offline` (final). Injected small for
+   *   tests; defaults to 30m.
    * @param {Function} [opts.resolveWebhookUrl] - Injection seam for tests;
    *   defaults to the env > 0600-credentials.json resolver.
    * @param {Function} [opts.sleepImpl] - Injection seam for tests (429/backoff
@@ -245,6 +267,8 @@ export class DiscordWebhookSink extends NotificationSink {
     updateThrottleMs = 15_000,
     heartbeatIntervalMs = 300_000,
     pruneAfterMs = DEFAULT_PRUNE_AFTER_MS,
+    staleAfterMs = DEFAULT_STALE_AFTER_MS,
+    offlineAfterMs = DEFAULT_OFFLINE_AFTER_MS,
     // Cached by default (#5427 review): isConfigured() is probed per
     // notification; the cache only re-reads credentials.json when its
     // mtime/size/mode or the env var changes.
@@ -266,6 +290,10 @@ export class DiscordWebhookSink extends NotificationSink {
     if (!Number.isFinite(pruneAfterMs) || pruneAfterMs < 0) pruneAfterMs = DEFAULT_PRUNE_AFTER_MS
     if (pruneAfterMs > 0 && pruneAfterMs < MIN_PRUNE_AFTER_MS) pruneAfterMs = DEFAULT_PRUNE_AFTER_MS
     this._pruneAfterMs = pruneAfterMs
+    // #5676 watchdog thresholds. Invalid values fall back to the defaults so a
+    // bad config can never disable the dead-session guard.
+    this._staleAfterMs = Number.isFinite(staleAfterMs) && staleAfterMs >= 0 ? staleAfterMs : DEFAULT_STALE_AFTER_MS
+    this._offlineAfterMs = Number.isFinite(offlineAfterMs) && offlineAfterMs >= 0 ? offlineAfterMs : DEFAULT_OFFLINE_AFTER_MS
     this._resolveWebhookUrl = resolveWebhookUrl
     this._sleep = sleepImpl
     this._now = now
@@ -787,21 +815,51 @@ export class DiscordWebhookSink extends NotificationSink {
   }
 
   /**
-   * One heartbeat pass: refresh each LIVE project's embed in place.
+   * One heartbeat pass: refresh each LIVE project's embed in place, and run the
+   * #5676 staleness watchdog so a dead external session doesn't sit "🟢 online"
+   * forever.
+   *
    * Offline entries are skipped (#5434) — the offline embed is final, and
-   * re-PATCHing it would both keep its elapsed-time footer counting up
-   * forever and spend a Discord call per dead project per tick. Stale
-   * entries never even reach the loop: _loadState prunes them, so the
-   * tick's work is bounded to live projects.
+   * re-PATCHing it would both keep its elapsed-time footer counting up forever
+   * and spend a Discord call per dead project per tick. Entries pruned by
+   * retention never even reach the loop: _loadState drops them.
+   *
+   * Watchdog (before the routine footer PATCH), measuring silence against
+   * `lastUpdateTs` — the last REAL event time, which the heartbeat NEVER writes,
+   * so repeated ticks let the clock keep climbing until it trips:
+   *   - `online` silent > staleAfterMs   → downgrade to `stale`
+   *   - `stale`  silent > offlineAfterMs → downgrade to `offline` (final)
+   * `idle` and `permission` are spared — they are legitimately waiting on the
+   * human, not dead. A downgraded state is rebuilt into the PATCH payload so the
+   * embed shows the new title/color. A real event (update()) restores the true
+   * state and resets `lastUpdateTs`, so recovery is automatic.
    */
   async _heartbeatTick() {
     const webhookUrl = this._configuredUrl()
     if (!webhookUrl) return
     const base = this._apiBase(webhookUrl)
     const store = this._loadState()
+    const now = this._now()
     let mutated = false
     for (const [project, entry] of Object.entries(store.projects)) {
       if (!entry?.messageId || entry.state === 'offline') continue
+
+      // #5676: staleness downgrade. Only `online`/`stale` decay; idle/permission
+      // are left to their normal footer refresh. silence reads lastUpdateTs (the
+      // last real event), which the heartbeat does not bump — so a long-silent
+      // entry eventually trips even with ticks firing in between.
+      const last = entry.lastUpdateTs
+      const silence = Number.isFinite(last) ? now - last : Infinity
+      if (entry.state === 'online' && silence > this._staleAfterMs) {
+        entry.state = 'stale'
+        entry.lastStateChangeTs = now
+        mutated = true
+      } else if (entry.state === 'stale' && silence > this._offlineAfterMs) {
+        entry.state = 'offline'
+        entry.lastStateChangeTs = now
+        mutated = true
+      }
+
       try {
         const res = await this._discordFetch(`${base}/messages/${entry.messageId}`, {
           method: 'PATCH',
