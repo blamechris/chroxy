@@ -4639,6 +4639,32 @@ button.sidebar-token-view-session-row:hover {
   outline-offset: 2px;
 }
 
+/* #5668 — voice recognition/helper failure, surfaced instead of a silent
+   mic-off. Mirrors the evaluator error treatment (red accent). */
+.voice-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* `.input-bar` is a flex-wrap container, so claim a full-width row of our
+     own (same pattern as `.attachment-chips`) instead of sharing the row
+     with the textarea/actions on wider viewports. */
+  width: 100%;
+  margin: 4px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--accent-red);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-error);
+}
+.voice-error-icon {
+  color: var(--accent-red);
+  flex-shrink: 0;
+}
+.voice-error-text {
+  flex: 1;
+  min-width: 0;
+}
+
 .thinking-indicator {
   display: flex;
   align-items: center;

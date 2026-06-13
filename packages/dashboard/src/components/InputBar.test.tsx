@@ -2409,6 +2409,7 @@ describe('InputBar push-to-talk (#5610)', () => {
     isRecording: boolean
     isAvailable: boolean
     transcript: string
+    error: string | null
     start: () => void
     stop: () => void
   }> = {}) {
@@ -2416,6 +2417,7 @@ describe('InputBar push-to-talk (#5610)', () => {
       isRecording: false,
       isAvailable: true,
       transcript: '',
+      error: null,
       start: vi.fn(),
       stop: vi.fn(),
       ...overrides,
@@ -2591,7 +2593,7 @@ describe('InputBar push-to-talk (#5610)', () => {
         onInterrupt={vi.fn()}
         controlledValue=""
         onValueChange={() => {}}
-        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', start, stop: firstStop }}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: null, start, stop: firstStop }}
       />,
     )
     const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
@@ -2607,13 +2609,42 @@ describe('InputBar push-to-talk (#5610)', () => {
         onInterrupt={vi.fn()}
         controlledValue=""
         onValueChange={() => {}}
-        voiceInput={{ isRecording: true, isAvailable: true, transcript: '', start, stop: latestStop }}
+        voiceInput={{ isRecording: true, isAvailable: true, transcript: '', error: null, start, stop: latestStop }}
       />,
     )
 
     unmount()
     expect(firstStop).not.toHaveBeenCalled()
     expect(latestStop).toHaveBeenCalledTimes(1)
+  })
+
+  // #5668 — a voice failure must be surfaced, not flipped off silently.
+  it('renders voiceInput.error as an accessible alert', () => {
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: null, start: vi.fn(), stop: vi.fn() }}
+      />,
+    )
+    // No error → nothing rendered.
+    expect(screen.queryByTestId('voice-error')).toBeNull()
+
+    // Error set (e.g. mic permission denied) → surfaced as a role="alert".
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: 'Microphone access was denied.', start: vi.fn(), stop: vi.fn() }}
+      />,
+    )
+    const alert = screen.getByTestId('voice-error')
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert).toHaveTextContent('Microphone access was denied.')
   })
 
   it('does not arm PTT when voice is unavailable (Space types normally)', () => {
