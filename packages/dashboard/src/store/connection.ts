@@ -2491,6 +2491,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         : true;
       if (!ok) return;
     }
+    // #5716: capture the Shift+Tab toggle target BEFORE we overwrite it below,
+    // so a rejected change can restore it too (Copilot review on #5722) — without
+    // this, a rejected switch leaves previousPermissionMode pointing at the
+    // current mode and the toggle silently becomes a no-op.
+    const priorPreviousMode = get().previousPermissionMode ?? null;
     // Save current mode before switching (for Shift+Tab toggle)
     if (permissionMode && permissionMode !== mode) {
       set({ previousPermissionMode: permissionMode });
@@ -2508,14 +2513,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Send with confirmed:true so the server skips its own confirmation
       // round-trip and broadcasts `permission_mode_changed` directly.
       if (socket && socket.readyState === WebSocket.OPEN) {
-        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode });
+        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode, priorPreviousMode });
         const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true, requestId };
         if (activeSessionId) payload.sessionId = activeSessionId;
         wsSend(socket, payload);
       }
     } else {
       if (socket && socket.readyState === WebSocket.OPEN) {
-        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode });
+        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode, priorPreviousMode });
         const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, requestId };
         if (activeSessionId) payload.sessionId = activeSessionId;
         wsSend(socket, payload);

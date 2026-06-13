@@ -364,6 +364,10 @@ export function _testModelRevertPendingSize(): number {
 interface PendingPermissionModeRevert {
   sessionId: string | null;
   previousMode: string | null;
+  // The Shift+Tab toggle target (previousPermissionMode) as it was BEFORE the
+  // optimistic change overwrote it, so a rejected change can restore it too
+  // (#5722 review). Optional for back-compat with entries that predate the field.
+  priorPreviousMode?: string | null;
 }
 
 const _pendingPermissionModeReverts = new Map<string, PendingPermissionModeRevert>();
@@ -4513,6 +4517,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             updateSession(revert.sessionId, () => ({ permissionMode: revert.previousMode }));
           } else {
             set({ permissionMode: revert.previousMode });
+          }
+          // #5722 review: also roll back the Shift+Tab toggle target. The
+          // optimistic setPermissionMode overwrote previousPermissionMode with the
+          // mode we tried to switch FROM (revert.previousMode); restore the value
+          // it had before. Compare-and-swap on that exact value so a later
+          // successful change (which re-set previousPermissionMode) is not clobbered.
+          if (revert.priorPreviousMode !== undefined && get().previousPermissionMode === revert.previousMode) {
+            set({ previousPermissionMode: revert.priorPreviousMode });
           }
         }
       }
