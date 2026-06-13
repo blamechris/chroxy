@@ -202,7 +202,8 @@ async function handleDestroySession(ws, client, msg, ctx) {
     return
   }
 
-  if (!ctx.sessions.sessionManager.getSession(targetId)) {
+  const targetEntry = ctx.sessions.sessionManager.getSession(targetId)
+  if (!targetEntry) {
     sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
@@ -214,6 +215,16 @@ async function handleDestroySession(ws, client, msg, ctx) {
 
   if (ctx.sessions.sessionManager.isSessionLocked?.(targetId)) {
     sendSessionError(ws, ctx, 'Session is being modified by another operation')
+    return
+  }
+
+  // #5695: never tear down a session (which also deletes its worktree) while it
+  // is actively streaming or has pending background shells — that orphans the
+  // in-flight turn and can lose uncommitted worktree work. The CLI won't delete
+  // the session you're running in either. Interrupt first, then delete.
+  // (A `force` escape hatch for a wedged session is tracked as a follow-up.)
+  if (targetEntry.session?.isRunning) {
+    sendSessionError(ws, ctx, 'Cannot destroy a session while it is running — interrupt it first, then delete.')
     return
   }
 
