@@ -52,7 +52,7 @@ export function settlePush(promise, label, logger = log) {
   // call sites simply ignore the return.
   return Promise.resolve(promise)
     .then((ok) => { if (ok === false) logger.warn(`push notification not delivered (${label})`) })
-    .catch((err) => { logger.warn(`push notification error (${label}): ${err?.message || err}`) })
+    .catch((err) => { logger.warn(`push notification error (${label}): ${String(err?.message || err)}`) })
 }
 
 // Rate limits per category (ms) — prevents notification spam.

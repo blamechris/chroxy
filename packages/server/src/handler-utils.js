@@ -563,14 +563,14 @@ export function sendError(ws, requestId, code, message, data, ctx) {
     try {
       ctx.transport.send(ws, payload)
     } catch (err) {
-      log.warn(`sendError: transport send failed for ${payload.code || 'error'}: ${err?.message || err}`)
+      log.warn(`sendError: transport send failed for ${payload.code || 'error'}: ${String(err?.message || err)}`)
     }
     return
   }
   try {
     ws.send(JSON.stringify(payload))
   } catch (err) {
-    log.warn(`sendError: raw send failed for ${payload.code || 'error'}: ${err?.message || err}`)
+    log.warn(`sendError: raw send failed for ${payload.code || 'error'}: ${String(err?.message || err)}`)
   }
 }
 
