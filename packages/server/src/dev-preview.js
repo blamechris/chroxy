@@ -145,18 +145,36 @@ export class DevPreviewManager extends EventEmitter {
     const tunnel = this._getTunnel(sessionId, port)
     if (!tunnel) return
 
+    // #5731: capture (don't swallow) a stop() failure. The previous code
+    // signalled a clean stop unconditionally — if tunnel.stop() threw, the
+    // public tunnel (and thus the exposed local port) could still be live while
+    // the user was told it was shut down.
+    let stopError = null
     try {
       await tunnel.stop()
-    } catch { /* ignore */ }
+    } catch (err) {
+      stopError = err
+    }
 
+    // Drop our tracking entry regardless: the tunnel handle is unusable for a
+    // retry whether or not stop() succeeded, so keeping it would only wedge the
+    // port slot. The UI still gets dev_preview_stopped so it doesn't show a
+    // phantom live preview.
     const sessionTunnels = this._tunnels.get(sessionId)
     if (sessionTunnels) {
       sessionTunnels.delete(port)
       if (sessionTunnels.size === 0) this._tunnels.delete(sessionId)
     }
 
+    if (stopError) {
+      // Surface it so the user can verify / kill cloudflared manually instead of
+      // assuming the port is no longer exposed.
+      log.error(`Failed to stop tunnel for session ${sessionId} port ${port}: ${stopError.message}`)
+      this.emit('dev_preview_stop_failed', { sessionId, port, error: stopError.message })
+    } else {
+      log.info(`Tunnel stopped for session ${sessionId} port ${port}`)
+    }
     this.emit('dev_preview_stopped', { sessionId, port })
-    log.info(`Tunnel stopped for session ${sessionId} port ${port}`)
   }
 
   /**

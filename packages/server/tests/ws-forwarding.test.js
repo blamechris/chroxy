@@ -445,6 +445,35 @@ describe('setupForwarding', () => {
     })
   })
 
+  describe('dev_preview_stop_failed event (#5731)', () => {
+    it('surfaces a tunnel-stop failure as a per-session session_error', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.devPreview.emit('dev_preview_stop_failed', { sessionId: 'sess-1', port: 3000, error: 'kill failed' })
+
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.code === 'DEV_PREVIEW_STOP_FAILED'
+      )
+      assert.ok(call, 'should broadcast a DEV_PREVIEW_STOP_FAILED session_error to the session')
+      const [sessionId, msg] = call.arguments
+      assert.equal(sessionId, 'sess-1')
+      assert.equal(msg.recoverable, true)
+      assert.match(msg.message, /port 3000/)
+      assert.match(msg.message, /may still be exposed/)
+    })
+
+    it('ignores a dev_preview_stop_failed with no sessionId', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      ctx.devPreview.emit('dev_preview_stop_failed', { port: 3000, error: 'x' })
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.code === 'DEV_PREVIEW_STOP_FAILED'
+      )
+      assert.equal(call, undefined)
+    })
+  })
+
   // #4756 — `stopped` event surfaces through the normalizer as a
   // `session_stopped` broadcast targeted at subscribers of the affected
   // session (NOT global broadcast). Pairs with the wiring in
