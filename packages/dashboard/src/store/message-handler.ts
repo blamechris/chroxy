@@ -339,13 +339,6 @@ function consumePendingModelRevert(requestId: string): PendingModelRevert | null
   return entry;
 }
 
-/** A model_changed for `sessionId` landed — drop any pending revert for it. */
-function clearPendingModelRevertForSession(sessionId: string | null): void {
-  for (const [reqId, entry] of _pendingModelReverts) {
-    if (entry.sessionId === sessionId) _pendingModelReverts.delete(reqId);
-  }
-}
-
 /** Clear all pending model reverts — called on WebSocket close. */
 export function clearPendingModelReverts(): void {
   _pendingModelReverts.clear();
@@ -1227,9 +1220,13 @@ function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgS
   } else {
     set({ activeModel: model });
   }
-  // #5711: the change landed for this session — drop any pending revert so a
-  // later unrelated error can't roll back a model that's now correct.
-  clearPendingModelRevertForSession(targetId);
+  // #5711: deliberately do NOT clear pending reverts here. The server sends
+  // model_changed XOR error per requestId (never both), so a successful change
+  // never receives a later error to mis-consume. Clearing by sessionId would be
+  // too coarse — with two rapid changes on one session (A→B, B→C), the ack for
+  // the first would drop the SECOND's still-in-flight revert, stranding the
+  // dropdown if the second is then rejected. Stale success entries are bounded
+  // by the FIFO cap and cleared on disconnect.
 }
 
 function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
