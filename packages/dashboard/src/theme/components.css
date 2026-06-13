@@ -4645,6 +4645,10 @@ button.sidebar-token-view-session-row:hover {
   display: flex;
   align-items: center;
   gap: 6px;
+  /* `.input-bar` is a flex-wrap container, so claim a full-width row of our
+     own (same pattern as `.attachment-chips`) instead of sharing the row
+     with the textarea/actions on wider viewports. */
+  width: 100%;
   margin: 4px 0;
   padding: 6px 10px;
   border: 1px solid var(--accent-red);
