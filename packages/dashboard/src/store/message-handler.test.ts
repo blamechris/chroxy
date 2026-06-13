@@ -3944,6 +3944,44 @@ describe('dashboard message-handler dispatch', () => {
       expect(promptMsg).toBeDefined()
       expect(promptMsg.content).toBe('Permission required')
     })
+
+    it('routes the prompt to its owning (non-active) session and records originSessionId (#5667)', () => {
+      // 's-bg' is asking while 's-active' is focused. The prompt must land in
+      // s-bg's message list (not the active tab) and carry originSessionId so
+      // the renderer can label which session asked.
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-active',
+          // Background session asking → pushSessionNotification runs (it
+          // early-returns only for the active session), so seed the array it
+          // mutates. Exercises the real cross-session notification path.
+          sessionNotifications: [],
+          sessionStates: {
+            's-active': createEmptySessionState(),
+            's-bg': createEmptySessionState(),
+          },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          sessionId: 's-bg',
+          requestId: 'perm-bg',
+          tool: 'Bash',
+          input: { command: 'rm -rf /tmp/x' },
+          remainingMs: 300000,
+        },
+        ctx() as any,
+      )
+      const bgMsgs = (store.getState() as any).sessionStates['s-bg'].messages
+      const activeMsgs = (store.getState() as any).sessionStates['s-active'].messages
+      const promptMsg = bgMsgs.find((m: any) => m.type === 'prompt')
+      expect(promptMsg).toBeDefined()
+      expect(promptMsg.originSessionId).toBe('s-bg')
+      // The active tab must NOT have received the background session's prompt.
+      expect(activeMsgs.find((m: any) => m.type === 'prompt')).toBeUndefined()
+    })
   })
 
   // #3247 — direct unit coverage for the three skill message handlers.

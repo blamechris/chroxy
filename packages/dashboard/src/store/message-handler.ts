@@ -2023,6 +2023,8 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),
+      // #5667 — record which session asked so the renderer can label it.
+      originSessionId: permTargetId ?? undefined,
     };
     if (permTargetId && get().sessionStates[permTargetId]) {
       updateSession(permTargetId, (ss) => ({

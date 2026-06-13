@@ -2804,6 +2804,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           options: newOptions,
           expiresAt: newExpiresAt,
           timestamp: Date.now(),
+          // #5667 — record which session asked so the prompt can be labelled.
+          originSessionId: permTargetId ?? undefined,
         };
         {
           const effectiveId = (permTargetId && get().sessionStates[permTargetId]) ? permTargetId : get().activeSessionId;

@@ -335,6 +335,34 @@ describe('createPermissionHandler', () => {
       assert.equal(mappedSessionId, 'chroxy-sess-7')
 
       assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+
+      // #5667 — the HTTP broadcast must carry the owning sessionId so clients
+      // route the prompt to the session that asked instead of the active tab.
+      assert.equal(opts.broadcastFn.mock.calls.length, 1)
+      const broadcast = opts.broadcastFn.mock.calls[0].arguments[0]
+      assert.equal(broadcast.type, 'permission_request')
+      assert.equal(broadcast.sessionId, 'chroxy-sess-7',
+        'mapped HTTP requests must broadcast sessionId for client routing (#5667)')
+    })
+
+    it('omits sessionId from the broadcast when the request maps to no chroxy session (#5667)', async () => {
+      // No hook secret → ownerSessionId stays null → the broadcast must NOT
+      // invent a sessionId (clients fall back to the active session for these
+      // genuinely unmapped legacy requests).
+      const opts = makeHandlerOpts()
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const req = makeReq(body)
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      assert.equal(opts.broadcastFn.mock.calls.length, 1)
+      const broadcast = opts.broadcastFn.mock.calls[0].arguments[0]
+      assert.equal(broadcast.type, 'permission_request')
+      assert.equal(Object.prototype.hasOwnProperty.call(broadcast, 'sessionId'), false,
+        'unmapped requests must not carry a sessionId in the broadcast')
     })
 
     it('does not populate permissionSessionMap when hookSecret has no chroxy sessionId (legacy single-session mode)', async () => {

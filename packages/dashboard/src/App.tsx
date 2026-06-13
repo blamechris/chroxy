@@ -999,6 +999,30 @@ export function App() {
   // the server's natural order at the end. Stale ids in `tabOrder` (server
   // removed the session) are harmlessly ignored because we filter against
   // the live `sessions` list.
+  // #5667 — which sessions have an unanswered permission prompt, across ALL
+  // sessions (not just the active one). Now that the server routes a prompt to
+  // its owning session, a background session's prompt no longer lands in the
+  // focused tab — without a per-tab indicator it would be invisible until the
+  // operator happened to switch to that session. Shallow-equal Record so this
+  // only re-renders a tab when its pending state actually flips, not on every
+  // stream delta. Scans newest-first and early-exits at the first match.
+  const pendingPermissionSessionIds = useConnectionStore(
+    useShallow((s) => {
+      const out: Record<string, true> = {}
+      for (const id in s.sessionStates) {
+        const msgs = s.sessionStates[id]!.messages
+        for (let i = msgs.length - 1; i >= 0; i--) {
+          const m = msgs[i]!
+          if (m.type === 'prompt' && m.requestId && m.expiresAt && !m.answered) {
+            out[id] = true
+            break
+          }
+        }
+      }
+      return out
+    }),
+  )
+
   const sessionTabs: SessionTabData[] = useMemo(
     () => {
       const byId = new Map(sessions.map(s => [s.sessionId, s]))
@@ -1025,9 +1049,12 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
+        // #5667: flag tabs with an unanswered permission prompt so a
+        // background session's request is visible without switching to it.
+        pendingPermission: pendingPermissionSessionIds[s.sessionId] ?? false,
       }))
     },
-    [sessions, activeSessionId, getSessionVisualStatus, tabOrder],
+    [sessions, activeSessionId, getSessionVisualStatus, tabOrder, pendingPermissionSessionIds],
   )
 
   // Derive sidebar repo tree from sessions
@@ -1492,6 +1519,7 @@ export function App() {
     setViewMode,
     stalledPromptIds,
     hasPendingAskUserQuestionPermission,
+    sessions,
   })
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —

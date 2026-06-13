@@ -29,6 +29,14 @@ export interface PermissionPromptProps {
   description: string
   remainingMs: number
   onRespond: (requestId: string, decision: PermissionDecision) => void
+  /**
+   * #5667 — human label for the session that asked (e.g. "ltl · CLI"),
+   * derived by the renderer from the message's `originSessionId`. Rendered as
+   * a badge so an operator running multiple agents can tell which one is
+   * requesting before approving. Omitted when only one session exists (no
+   * ambiguity to disambiguate).
+   */
+  sessionLabel?: string
 }
 
 function formatCountdown(ms: number): string {
@@ -38,7 +46,7 @@ function formatCountdown(ms: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`
 }
 
-export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond }: PermissionPromptProps) {
+export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond, sessionLabel }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // #3619: anchor on monotonic `performance.now()` so an NTP sync /
@@ -168,6 +176,11 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
 
   return (
     <div className={`permission-prompt${answered ? ' answered' : ''}`} data-testid="permission-prompt">
+      {sessionLabel && (
+        <div className="perm-session" data-testid="perm-session" title={`Requested by ${sessionLabel}`}>
+          {sessionLabel}
+        </div>
+      )}
       <div className="perm-desc">
         <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
       </div>
