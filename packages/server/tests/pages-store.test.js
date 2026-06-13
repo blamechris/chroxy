@@ -4,7 +4,7 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, symlinkSyn
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
-  PagesStore, isValidSlug, mimeForPath, DEFAULT_ENTRY,
+  PagesStore, isValidSlug, mimeForPath, DEFAULT_ENTRY, MAX_FILES_PER_PAGE,
 } from '../src/pages-store.js'
 
 function freshStore(opts = {}) {
@@ -129,6 +129,16 @@ test('resolveFile contains paths and defeats traversal + symlink escape', () => 
     } catch (err) {
       if (err.code !== 'EPERM') throw err // some CI filesystems forbid symlink; skip if so
     }
+  } finally { cleanup() }
+})
+
+test('publish rejects a file count over the per-page cap (zero-byte amplification guard)', () => {
+  const { store, cleanup } = freshStore()
+  try {
+    // All zero-byte → passes the byte cap, but the file COUNT must be bounded.
+    const files = [{ path: DEFAULT_ENTRY, content: '' }]
+    for (let i = 0; i < MAX_FILES_PER_PAGE; i++) files.push({ path: `a${i}`, content: '' })
+    assert.throws(() => store.publish({ title: 't', files }), /per-page cap/)
   } finally { cleanup() }
 })
 

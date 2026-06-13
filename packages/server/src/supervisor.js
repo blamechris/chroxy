@@ -277,6 +277,7 @@ export class Supervisor extends EventEmitter {
         writeConnectionInfo({
           wsUrl: newWsUrl,
           httpUrl: newHttpUrl,
+          port: this._port, // #5683 — local loopback port for the CLI
           apiToken: this._apiToken,
           connectionUrl,
           tunnelMode: this._modeLabel,
@@ -321,6 +322,10 @@ export class Supervisor extends EventEmitter {
       writeConnectionInfo({
         wsUrl,
         httpUrl,
+        // #5683: the LOCAL listen port, so loopback CLIs (chroxy publish / pages)
+        // hit the right port even in tunnel mode, where httpUrl is the public
+        // trycloudflare URL with no :port to parse.
+        port: this._port,
         apiToken: this._apiToken,
         connectionUrl,
         tunnelMode: this._modeLabel,

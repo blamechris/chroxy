@@ -12,6 +12,65 @@ import { handleEventIngest } from './event-ingest.js'
 import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { isValidSlug, mimeForPath } from './pages-store.js'
+import { sendOversizeResponse } from './http-oversize.js'
+
+/**
+ * #5683 — read + JSON-parse a request body with a byte cap. Resolves to the
+ * parsed object, or `null` when it has already responded (413 oversize / 400
+ * invalid JSON). Mirrors the byte-counted, utf8-safe streaming guard in
+ * event-ingest.js (#5433): the violating chunk is never buffered, and the
+ * `end` body is wrapped so a parse throw can't escape to uncaughtException.
+ */
+function readJsonBodyCapped(req, res, maxBytes) {
+  return new Promise((resolve) => {
+    req.setEncoding('utf8')
+    let body = ''
+    let bytes = 0
+    let oversized = false
+    req.on('data', (chunk) => {
+      if (oversized) return
+      bytes += Buffer.byteLength(chunk, 'utf8')
+      if (bytes > maxBytes) {
+        oversized = true
+        sendOversizeResponse(req, res, { error: 'body too large' })
+        resolve(null)
+        return
+      }
+      body += chunk
+    })
+    req.on('end', () => {
+      // Wrap the WHOLE handler (not just JSON.parse): this listener runs on a
+      // later tick inside the Promise executor, OUTSIDE the dispatch try/catch
+      // (#5313), so an unguarded throw here (e.g. res write on a torn-down
+      // socket) would escape to uncaughtException.
+      try {
+        if (oversized) return
+        let parsed
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid JSON' }))
+          resolve(null)
+          return
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'body must be a JSON object' }))
+          resolve(null)
+          return
+        }
+        resolve(parsed)
+      } catch {
+        resolve(null)
+      }
+    })
+    // Settle on error AND close so a client abort / half-open socket can never
+    // leak a pending promise (resolve is idempotent, so a later `end` is a no-op).
+    req.on('error', () => resolve(null))
+    req.on('close', () => resolve(null))
+  })
+}
 
 // #5683 — security headers for every Chroxy Pages response. The `/p/<slug>`
 // route is intentionally UNAUTHENTICATED (the slug is the capability), and
@@ -444,6 +503,99 @@ export function createHttpHandler(server) {
     // Test seams: `server._poolStatsEnabled` / `server._poolStats` override
     // the env probe + aggregator so http-routes tests don't depend on
     // process.env or a live pool.
+    // #5683 (PR-2) — Chroxy Pages publish/manage API. PRIMARY-token only: each
+    // call writes to the host disk and mints a PUBLIC capability URL, so it is
+    // host-authority (a bound/pairing token is rejected with primary_token_required,
+    // matching the other host-write routes — see bearer-token-authority.md §4).
+    if (req.method === 'POST' && snapPath === '/api/pages' && server.pagesStore) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      // Body cap a little above the per-page byte cap to allow JSON overhead.
+      const maxBody = server.pagesStore.maxPageBytes + 1024 * 1024
+      readJsonBodyCapped(req, res, maxBody)
+        .then((parsed) => {
+          if (parsed === null) return // 413/400 already sent
+          const title = typeof parsed.title === 'string' ? parsed.title : 'Untitled'
+          // Accept either { html } (single self-contained page) or
+          // { files: [{ path, content }] } (multi-file). `html` is shorthand.
+          let files
+          if (typeof parsed.html === 'string') {
+            files = [{ path: 'index.html', content: parsed.html }]
+          } else if (Array.isArray(parsed.files)) {
+            // Validate every entry instead of coercing a non-string `content` to
+            // '' — silent coercion turns an invalid client payload into a
+            // successfully published but empty/garbled page.
+            const invalid = parsed.files.find((f) => !f || typeof f.path !== 'string' || typeof f.content !== 'string')
+            if (invalid !== undefined) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'each `files` entry requires a string `path` and string `content`' }))
+              return
+            }
+            files = parsed.files.map((f) => ({ path: f.path, content: f.content }))
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'body must include `html` (string) or `files` (array)' }))
+            return
+          }
+          let meta
+          try {
+            meta = server.pagesStore.publish({ title, files })
+          } catch (err) {
+            // publish() throws for BOTH client validation errors (plain Errors —
+            // bad paths, missing index.html, size/count caps) AND server-side I/O
+            // faults (which carry an errno `code` like EACCES/ENOSPC). Don't
+            // misreport an I/O fault as a 400, and don't leak fs detail in it.
+            if (err && typeof err.code === 'string') {
+              log.warn(`POST /api/pages publish I/O error: ${err.code} ${err?.message || ''}`)
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'publish failed' }))
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: err?.message || 'publish failed' }))
+            }
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ slug: meta.slug, path: `/p/${meta.slug}/`, title: meta.title, bytes: meta.bytes, createdAt: meta.createdAt }))
+        })
+        .catch((err) => {
+          log.warn(`POST /api/pages failed: ${err?.message || err}`)
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'publish failed' }))
+          }
+        })
+      return
+    }
+
+    if (req.method === 'GET' && snapPath === '/api/pages' && server.pagesStore) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const pages = server.pagesStore.list().map((p) => ({
+        slug: p.slug, title: p.title, createdAt: p.createdAt, bytes: p.bytes, path: `/p/${p.slug}/`,
+      }))
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ pages }))
+      return
+    }
+
+    if (req.method === 'DELETE' && snapPath.startsWith('/api/pages/') && server.pagesStore) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      let slug
+      try {
+        slug = decodeURIComponent(snapPath.slice('/api/pages/'.length))
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid slug' }))
+        return
+      }
+      // Idempotent: deleting an absent slug returns 200 { removed: false }
+      // rather than 404, so `chroxy pages rm` of an already-gone page reports
+      // cleanly instead of failing.
+      const removed = server.pagesStore.remove(slug)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ removed }))
+      return
+    }
+
     if (req.method === 'GET' && snapPath === '/api/pool/stats') {
       if (!server._validateBearerAuth(req, res)) return
       const enabled = typeof server._poolStatsEnabled === 'boolean'

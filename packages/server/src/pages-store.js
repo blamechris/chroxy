@@ -25,6 +25,10 @@ export const DEFAULT_MAX_PAGE_BYTES = 5 * 1024 * 1024 //  5 MB per page
 export const DEFAULT_MAX_TOTAL_BYTES = 100 * 1024 * 1024 // 100 MB across all pages
 export const SLUG_BYTES = 16 // → 22-char base64url
 export const DEFAULT_ENTRY = 'index.html'
+// Cap the file COUNT independently of total bytes: thousands of zero-byte files
+// pass the byte cap but still amplify into inode/dir-entry exhaustion + a long
+// synchronous mkdir/write loop. A page is a report, not a filesystem.
+export const MAX_FILES_PER_PAGE = 256
 
 // base64url alphabet; length-bounded to reject anything that isn't a plausible
 // minted slug before it ever touches the filesystem.
@@ -156,6 +160,9 @@ export class PagesStore {
   publish({ title = 'Untitled', files } = {}) {
     if (!Array.isArray(files) || files.length === 0) {
       throw new Error('publish requires a non-empty files array')
+    }
+    if (files.length > MAX_FILES_PER_PAGE) {
+      throw new Error(`Too many files: ${files.length} exceeds the ${MAX_FILES_PER_PAGE}-file per-page cap`)
     }
     // Normalize + validate every file path, and compute total size.
     const prepared = []
