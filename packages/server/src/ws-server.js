@@ -345,6 +345,8 @@ function _isSecureRequest(req) {
  *   { type: 'session_stopped', sessionId?, code? } — user-initiated Stop confirmation (#4756); CliSession emitted `stopped` after a clean SIGINT exit; pairs with the louder `session_error` crash toast
  *   { type: 'session_restore_failed', sessionId, name, provider, cwd?, model?, permissionMode?, errorCode, errorMessage, originalHistoryPreserved, historyLength? }
  *     — session in persisted state could not be restored (e.g. missing env var); history kept on disk for retry
+ *   { type: 'session_persist_failed', sessionId, name }
+ *     — a session-list mutation (create/rename/destroy) could not be flushed to disk and will be lost on restart (#5714)
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay

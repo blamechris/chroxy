@@ -4307,6 +4307,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'session_persist_failed': {
+      // #5714/#5701: a session-list mutation (create/rename/destroy) could not be
+      // flushed to disk and will be lost on restart. The write is atomic so
+      // on-disk state isn't corrupted — this is purely the "your change wasn't
+      // saved" signal, surfaced as an error banner so the user isn't left
+      // silently believing it persisted.
+      const persistSid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const persistName = typeof msg.name === 'string' ? msg.name : null;
+      const label = persistName ? `"${persistName}"` : (persistSid ? `session ${persistSid}` : 'your session change');
+      get().addServerError(
+        `Couldn't save ${label} — the change may be lost on restart. Check the daemon's disk space and write permissions.`,
+      );
+      // eslint-disable-next-line no-console
+      console.warn('[session_persist_failed]', { sessionId: persistSid, name: persistName });
+      break;
+    }
+
     // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'cost_update': {

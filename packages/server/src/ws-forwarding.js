@@ -203,6 +203,15 @@ function setupSessionForwarding(normalizer, ctx) {
     broadcast({ type: 'session_restore_failed', ...payload })
   }))
 
+  // Persist failures — surface to clients so the user knows a session-list
+  // mutation (create/rename/destroy) did NOT make it to disk and will be lost on
+  // restart, instead of silently believing it was saved (#5714 / #5701). The
+  // write is atomic so on-disk state isn't corrupted; this is purely the
+  // "your change wasn't saved" signal.
+  sessionManager.on('session_persist_failed', safeForward('session_persist_failed', (payload) => {
+    broadcast({ type: 'session_persist_failed', ...payload })
+  }))
+
   // Dev server preview: broadcast tunnel start/stop to clients
   devPreview.on('dev_preview_started', safeForward('dev_preview_started', ({ sessionId, port, url }) => {
     broadcastToSession(sessionId, { type: 'dev_preview', port, url })
