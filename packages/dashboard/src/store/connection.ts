@@ -2211,8 +2211,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // though the server never received it. That's the #5699 silent-loss bug
     // (you tap Allow on a cached/disconnected session and nothing happens, but
     // the UI says you answered). Returning false leaves the prompt un-answered
-    // and actionable; the answer buttons gate on `connected` (App.tsx) so the
-    // operator gets clear feedback rather than a dead click.
+    // and actionable; the answer buttons + keyboard shortcuts gate on `connected`
+    // in PermissionPrompt.tsx (respond()) so the operator gets clear feedback
+    // rather than a dead click.
     if (!socket || socket.readyState !== WebSocket.OPEN) {
       return false;
     }
