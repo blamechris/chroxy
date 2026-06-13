@@ -244,12 +244,12 @@ export function getDeepSeekPricing(modelId) {
  *
  * Returns `null` — NOT 0 — when pricing is unknown OR usage is missing OR the
  * computed cost isn't finite (#5630). A `null` means "cost unknown", which is
- * semantically distinct from a genuine `$0.00` turn: the dashboard renders
- * "n/a" for an unknown cost (via `formatCostBadgeOrNa`) instead of pretending
- * it was free. Callers that accumulate a turn total MUST skip a `null` (it is
- * not addable) — see byok-session.js's `turnCostKnown` guard. Never throws,
- * never returns NaN. Cache-read tokens are NOT also billed at the input rate;
- * the SDK already excludes them from `input_tokens`.
+ * semantically distinct from a genuine `$0.00` turn — it lets the per-turn
+ * wire `cost` carry an honest "unknown" instead of a misleading `0`. Callers
+ * that accumulate a turn total MUST skip a `null` (it is not addable) — see
+ * byok-session.js's `turnCostKnown` guard. Never throws, never returns NaN.
+ * Cache-read tokens are NOT also billed at the input rate; the SDK already
+ * excludes them from `input_tokens`.
  *
  * #4087 — long-context premium: when the pricing entry has a
  * `longContext` block AND the turn's total input (input + cache reads +

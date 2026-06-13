@@ -360,13 +360,14 @@ export interface CumulativeUsage {
  * #5630/#5629: era-aware billing class for a session/provider. Mirrors the
  * server's `BILLING_CLASSES` enum (packages/server/src/billing-class.js):
  *   - 'api-key'             — your own key / per-token (byok, docker-byok,
- *                             every non-Claude provider).
+ *                             docker-cli/sdk — they forward an API key into
+ *                             the container with no OAuth fallback — and every
+ *                             non-Claude provider).
  *   - 'subscription'        — flat Claude subscription, no per-turn dollar
- *                             figure (claude-tui, claude-channel; and the
+ *                             figure (claude-tui, claude-channel; and the host
  *                             programmatic providers BEFORE 2026-06-15).
- *   - 'programmatic-credit' — Anthropic's metered monthly credit pool
- *                             (claude-cli/sdk, docker-cli/sdk ON/AFTER
- *                             2026-06-15).
+ *   - 'programmatic-credit' — Anthropic's metered monthly credit pool (host
+ *                             claude-cli / claude-sdk ON/AFTER 2026-06-15).
  */
 export type BillingClass = 'api-key' | 'subscription' | 'programmatic-credit';
 
