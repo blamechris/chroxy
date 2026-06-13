@@ -120,10 +120,21 @@
     <tr><td>#5734</td><td><strong>Swallowed errors</strong> — <code>checkpoint-manager._persist</code> swallowed write failures, so a checkpoint create/delete reported success but was lost (or reappeared) on restart. Now emits a per-session error banner — the #5714 silent-loss class on the rewind feature.</td><td><span class="pill ok">merged</span></td></tr>
   </tbody>
 </table>
-<p class="muted">The remaining audit findings are documented in <a href="https://github.com/blamechris/chroxy/issues/5731">#5731</a> as a prioritized, file-level backlog — e.g. background-session streaming spinner that sticks after a disconnect, <code>session_role</code> stale across reconnect (#5623/#5613), <code>setThinkingLevel</code> optimistic-revert (the next sibling after the model + permission-mode reverts), and a destroyed session leaving a pending hook-permission wedged. Each is bounded and ready to pick up.</p>
+<h3>Then: burning down the #5731 Tier-1 backlog</h3>
+<p>With T1–T3 shipped, kept working straight down the audit's Tier-1 list (HIGH, bounded). Each one followed the same gate: implement → worktree-isolated adversarial review + Copilot → fix → full package suite + green CI → resolve threads → synchronous squash-merge.</p>
+<table>
+  <thead><tr><th>PR</th><th>Tier-1 finding → fix</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5736</td><td><strong>T4 · Background streaming spinner sticks after a drop</strong> — the dashboard <code>onclose</code> cleared transient stream/plan/inactivity/clarify state for the <em>active</em> session only, so a background tab mid-stream kept a phantom "thinking" bubble that surfaced on tab switch. Now clears every session.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5737</td><td><strong>T5 · <code>session_role</code> stale across reconnect</strong> (#5623/#5613) — <code>sendSessionInfo</code> re-synced model/perm-mode/thinking on reconnect but never the primary-owner, so the presence badge (Observing / Take over / driver name) went stale. Now re-emits <code>session_role</code> on reconnect/tab-switch.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5738</td><td><strong>T6 · Fresh session vanishes with no reason</strong> — when a provider's async <code>start()</code> rejected (claude-tui PTY spawn failure), the fresh session was destroyed with only a bare <code>session_destroyed</code> after the client already got a create success. Now emits <code>session_create_failed</code> → a <code>session_error</code> toast before teardown.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5739</td><td><strong>T7 · Destroyed session leaves a hook permission wedged</strong> — the destroy handler cleared the permission session-maps but not the parked HTTP-hook <code>_pendingPermissions</code>, so the tool call blocked for the full 5-min auto-deny timeout (then fired on a dead session + leaked the held response). Now drains the session's pending permissions as <code>deny</code> on destroy.</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">Remaining #5731 backlog (each bounded, ready): T8 checkpoint-restore git-rewinds a cwd shared by another live session (confirms deferred #5700), plus Tier-2 — <code>setThinkingLevel</code> optimistic-revert, stale dashboard pricing table (<code>gemini-2.0-pro</code> blank cost), <code>switchSession</code> rollback on a closed socket, <code>handleRemoveRepo</code> silent config-write failure, <code>resume_budget</code> silent no-op, <code>closePreview</code> tunnel-stop swallow, and mobile provider-capability gating.</p>
 
 <div class="cards">
-  <div class="card"><div class="n" style="color:var(--green)">8</div><div class="l">PRs merged (5 durability + 3 audit)</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">12</div><div class="l">PRs merged (5 durability + 3 audit + 4 Tier-1)</div></div>
   <div class="card"><div class="n">6</div><div class="l">Audit dimensions</div></div>
   <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
   <div class="card"><div class="n" style="color:var(--green)">clean</div><div class="l">main · every PR gated + reviewed</div></div>
