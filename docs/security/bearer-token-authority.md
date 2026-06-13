@@ -1,6 +1,6 @@
 # Bearer Token Authority Threat Model
 
-Chroxy's WebSocket and HTTP control surfaces accept four distinct token classes, each with a different authority scope. This document pins the design so future PRs that add HTTP endpoints, WebSocket message types, or new credential paths don't accidentally widen (or fail to narrow) the trust boundary.
+Chroxy's WebSocket and HTTP control surfaces accept four distinct token classes, each with a different authority scope — plus two intentionally **unauthenticated** surfaces (the LAN-bind fingerprint surface, §10, and Chroxy Pages share-slug URLs, §11). This document pins the design so future PRs that add HTTP endpoints, WebSocket message types, or new credential paths don't accidentally widen (or fail to narrow) the trust boundary.
 
 For the transport-layer story (key exchange, message encryption, nonce handling), see [`encryption-threat-model.md`](encryption-threat-model.md). This doc covers **authorization**, not confidentiality.
 
@@ -183,7 +183,22 @@ Mitigations / visibility:
 
 Whether the *defaults* should change (loopback-by-default for the desktop app, explicit tunnel choice in the wizard) is tracked in issue #5356 and deliberately not decided here.
 
-## 11. Known Risks
+## 11. Page Share Slugs — Unauthenticated Capability URLs (Chroxy Pages, #5683)
+
+Chroxy Pages serves a published HTML artifact at `GET /p/<slug>/…` ([`http-routes.js`](../../packages/server/src/http-routes.js), store in [`pages-store.js`](../../packages/server/src/pages-store.js)). This route is **intentionally unauthenticated** — it presents no bearer token. The **slug itself is the capability**: a `crypto.randomBytes(16)` base64url value (~128 bits) minted per page, so an unguessable link is the entire access grant. This lets a report be opened on any device without distributing the primary token, by design.
+
+This is a deliberate exception to "every control surface is bearer-token gated," so it is fenced on every side:
+
+| Control | Mechanism |
+|---|---|
+| **No JS, no network in served pages** | Every response (including 404s) carries `Content-Security-Policy: …; script-src 'none'; connect-src 'none'; sandbox; default-src 'none'; …` plus `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`. This is the load-bearing control: because `_validateBearerAuth` accepts a **`chroxy_auth` cookie** (`ws-server.js`), a same-origin served page in a logged-in browser could otherwise script authed `/api/*` calls with the operator's ambient credential. `script-src 'none'` + `connect-src 'none'` make served pages fully static, so they cannot run code or reach any endpoint. Interactive (JS) pages are explicitly **not** served here — they would require an isolated origin (deferred follow-up). |
+| **No arbitrary filesystem reads** | The slug is validated against the base64url charset *and* must exist in the manifest before any fs access. `resolveFile()` resolves under `~/.chroxy/pages/<slug>/` and rejects `..`, absolute paths, and **symlinks whose real path escapes the page directory** (`realpathSync` containment check). |
+| **No slug scanning / disk DoS** | The route is per-IP rate-limited (`_pagesRateLimiter`) before any fs work. Per-page and total-size caps bound disk use; `chroxy pages rm <slug>` deletes the directory + manifest entry, revoking the link instantly. |
+| **Scope** | The route only serves files under the pages directory — it can never read session state, credentials, or any other `~/.chroxy/` content. |
+
+The unauthenticated blast radius is therefore: anyone who **already holds a valid slug** can read that one static page (which the publisher chose to share) — equivalent to handing someone the link. A scanner with no slug gets rate-limited 404s.
+
+## 12. Known Risks
 
 - **Static primary token is the default.** The QR shown at startup encodes an ephemeral pairing URL (not the primary token), so the leak surface is the OS keychain entry, a fallback `~/.chroxy/config.json` on systems without keychain support, or any environment / launcher that surfaces the token in process listings. If any of those are exfiltrated, the attacker has full authority until the user rotates. Rotation is opt-in.
 - **No certificate pinning or out-of-band key verification.** See [`encryption-threat-model.md` §8 — Trust On First Use](encryption-threat-model.md#trust-on-first-use-tofu).
