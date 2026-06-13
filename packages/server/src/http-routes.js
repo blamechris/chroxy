@@ -39,25 +39,36 @@ function readJsonBodyCapped(req, res, maxBytes) {
       body += chunk
     })
     req.on('end', () => {
-      if (oversized) return
-      let parsed
+      // Wrap the WHOLE handler (not just JSON.parse): this listener runs on a
+      // later tick inside the Promise executor, OUTSIDE the dispatch try/catch
+      // (#5313), so an unguarded throw here (e.g. res write on a torn-down
+      // socket) would escape to uncaughtException.
       try {
-        parsed = JSON.parse(body)
+        if (oversized) return
+        let parsed
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid JSON' }))
+          resolve(null)
+          return
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'body must be a JSON object' }))
+          resolve(null)
+          return
+        }
+        resolve(parsed)
       } catch {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'invalid JSON' }))
         resolve(null)
-        return
       }
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        res.writeHead(400, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ error: 'body must be a JSON object' }))
-        resolve(null)
-        return
-      }
-      resolve(parsed)
     })
+    // Settle on error AND close so a client abort / half-open socket can never
+    // leak a pending promise (resolve is idempotent, so a later `end` is a no-op).
     req.on('error', () => resolve(null))
+    req.on('close', () => resolve(null))
   })
 }
 
@@ -557,8 +568,11 @@ export function createHttpHandler(server) {
         res.end(JSON.stringify({ error: 'invalid slug' }))
         return
       }
+      // Idempotent: deleting an absent slug returns 200 { removed: false }
+      // rather than 404, so `chroxy pages rm` of an already-gone page reports
+      // cleanly instead of failing.
       const removed = server.pagesStore.remove(slug)
-      res.writeHead(removed ? 200 : 404, { 'Content-Type': 'application/json' })
+      res.writeHead(200, { 'Content-Type': 'application/json' })
       res.end(JSON.stringify({ removed }))
       return
     }

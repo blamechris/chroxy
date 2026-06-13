@@ -34,7 +34,12 @@ async function daemonRequest(method, path, deps, { body } = {}) {
   const info = readConnectionInfo()
   if (!info) return { ok: false, reason: 'not_running' }
   if (!info.apiToken) return { ok: false, reason: 'no_token' }
-  const port = portFromUrl(info.httpUrl) || portFromUrl(info.wsUrl) || defaultPort
+  // Prefer the explicit local `port` (#5683) — in tunnel mode httpUrl/wsUrl are
+  // public URLs with no :port to parse, so without this the loopback request
+  // would always fall back to 8765 and miss a daemon on a custom PORT.
+  const port = (Number.isInteger(info.port) && info.port > 0)
+    ? info.port
+    : (portFromUrl(info.httpUrl) || portFromUrl(info.wsUrl) || defaultPort)
 
   const headers = { Authorization: `Bearer ${info.apiToken}`, Accept: 'application/json' }
   if (body !== undefined) headers['Content-Type'] = 'application/json'

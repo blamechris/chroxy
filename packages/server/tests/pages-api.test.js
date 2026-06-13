@@ -113,9 +113,9 @@ test('DELETE /api/pages/<slug> revokes the page (then the slug 404s)', async () 
   assert.equal((await del.json()).removed, true)
   const gone = await fetch(`${base}/p/${pub.slug}/`)
   assert.equal(gone.status, 404)
-  // Deleting an unknown slug → 404 { removed: false }.
+  // Deleting an unknown slug is idempotent → 200 { removed: false }.
   const missing = await fetch(`${base}/api/pages/Zzzzzzzzzzzzzzzzzzzzzz`, { method: 'DELETE', headers: auth() })
-  assert.equal(missing.status, 404)
+  assert.equal(missing.status, 200)
   assert.equal((await missing.json()).removed, false)
 })
 

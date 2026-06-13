@@ -3,7 +3,9 @@ import { test } from 'node:test'
 import assert from 'node:assert/strict'
 import { runPublishCmd, runPagesListCmd, runPagesRmCmd } from '../src/cli/pages-cmd.js'
 
-const CONN = { apiToken: 'primary-tok', httpUrl: 'https://abc.trycloudflare.com', wsUrl: 'wss://abc.trycloudflare.com' }
+// Tunnel-mode connection.json: public URLs with no :port, plus the explicit
+// local `port` (#5683) the CLI must use for loopback.
+const CONN = { apiToken: 'primary-tok', httpUrl: 'https://abc.trycloudflare.com', wsUrl: 'wss://abc.trycloudflare.com', port: 9123 }
 
 function mockFetch(responder) {
   const calls = []
@@ -30,8 +32,9 @@ test('publish reads the file, POSTs to the local daemon, prints the public URL',
     fetchFn, write: s.write, writeErr: s.writeErr,
   })
   assert.equal(res.ok, true)
-  // Hits the LOCAL daemon (loopback, default port since trycloudflare has none).
-  assert.equal(calls[0].url, 'http://127.0.0.1:8765/api/pages')
+  // Hits the LOCAL daemon at the explicit connection.json port (NOT the public
+  // tunnel host, NOT a hardcoded 8765 fallback).
+  assert.equal(calls[0].url, 'http://127.0.0.1:9123/api/pages')
   assert.equal(calls[0].opts.method, 'POST')
   assert.equal(calls[0].opts.headers.Authorization, 'Bearer primary-tok')
   const sent = JSON.parse(calls[0].opts.body)
@@ -106,6 +109,21 @@ test('pages rm sends DELETE and reports the result', async () => {
   assert.equal(res.ok, true)
   assert.equal(res.removed, true)
   assert.equal(calls[0].opts.method, 'DELETE')
-  assert.equal(calls[0].url, 'http://127.0.0.1:8765/api/pages/MySlug')
+  assert.equal(calls[0].url, 'http://127.0.0.1:9123/api/pages/MySlug')
   assert.ok(s.out.some((l) => /Removed MySlug/.test(l)))
+})
+
+test('falls back to the httpUrl port (then 8765) when connection.json has no explicit port', async () => {
+  // Legacy connection.json (pre-#5683) with a LAN httpUrl that carries a port.
+  const lan = { apiToken: 't', httpUrl: 'http://192.168.1.5:7000', wsUrl: 'ws://192.168.1.5:7000' }
+  const withPort = mockFetch(() => jsonRes(200, { pages: [] }))
+  await runPagesListCmd({}, { readConnectionInfo: () => lan, fetchFn: withPort.fetchFn, write: () => {}, writeErr: () => {} })
+  assert.equal(withPort.calls[0].url, 'http://127.0.0.1:7000/api/pages')
+  // No port anywhere → hardcoded 8765 fallback.
+  const none = mockFetch(() => jsonRes(200, { pages: [] }))
+  await runPagesListCmd({}, {
+    readConnectionInfo: () => ({ apiToken: 't', httpUrl: 'https://x.trycloudflare.com' }),
+    fetchFn: none.fetchFn, write: () => {}, writeErr: () => {},
+  })
+  assert.equal(none.calls[0].url, 'http://127.0.0.1:8765/api/pages')
 })
