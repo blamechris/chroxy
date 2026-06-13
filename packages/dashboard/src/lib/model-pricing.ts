@@ -82,6 +82,10 @@ const GEMINI_PRICING: Record<string, ModelPricing> = {
   // https://ai.google.dev/pricing#2_5flash
   'gemini-2.5-flash': { inputPer1k: 0.0003, outputPer1k: 0.0025, label: 'Gemini 2.5 Flash' },
   'gemini-2.5-flash-preview-04-17': { inputPer1k: 0.0003, outputPer1k: 0.0025, label: 'Gemini 2.5 Flash Preview' },
+  // Gemini 2.0 Pro — offered by the Gemini provider (gemini-session.js) but had
+  // no GA pricing as an experimental model; use the 2.5 Pro >200k rate as a
+  // conservative estimation proxy so its cost badge isn't blank.
+  'gemini-2.0-pro': { inputPer1k: 0.00125, outputPer1k: 0.01, label: 'Gemini 2.0 Pro' },
   // Gemini 2.0 Flash — https://ai.google.dev/pricing#2_0flash
   'gemini-2.0-flash': { inputPer1k: 0.0001, outputPer1k: 0.0004, label: 'Gemini 2.0 Flash' },
   'gemini-2.0-flash-001': { inputPer1k: 0.0001, outputPer1k: 0.0004, label: 'Gemini 2.0 Flash 001' },
@@ -106,6 +110,18 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   ...GEMINI_PRICING,
 }
 
+// Drift detection: an offered model that has no pricing row renders a BLANK
+// cost badge — silent, so the table quietly falls behind as providers ship new
+// models. Warn once per unknown model id (deduped) so the gap is visible in the
+// dev console instead of going unnoticed. Module-level so it persists across
+// calls; `_resetPricingDriftWarnings` is a test seam.
+const _warnedUnknownModels = new Set<string>()
+
+/** @internal test seam — clear the deduped drift-warning set. */
+export function _resetPricingDriftWarnings(): void {
+  _warnedUnknownModels.clear()
+}
+
 /**
  * Calculate the estimated cost in USD for a model invocation.
  *
@@ -120,7 +136,15 @@ export function calculateCost(
   outputTokens: number,
 ): number | null {
   const pricing = MODEL_PRICING[modelId]
-  if (!pricing) return null
+  if (!pricing) {
+    if (modelId && !_warnedUnknownModels.has(modelId)) {
+      _warnedUnknownModels.add(modelId)
+      console.warn(
+        `[model-pricing] no pricing entry for "${modelId}" — its cost estimate will be blank. Add it to model-pricing.ts.`,
+      )
+    }
+    return null
+  }
   return (
     (inputTokens / 1000) * pricing.inputPer1k +
     (outputTokens / 1000) * pricing.outputPer1k
