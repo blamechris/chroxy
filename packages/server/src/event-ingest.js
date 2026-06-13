@@ -82,7 +82,10 @@ const KEEPALIVE_EVENT_TYPES = new Set(['post_tool_use'])
 
 /**
  * Classify an ingest event type for rate limiting. Exported for unit testing.
- * @param {string} type
+ * Anything not in the keepalive set — including unknown, new, or
+ * undefined/empty types — classifies as 'lifecycle' (fail-safe: never
+ * silently route a meaningful event into the droppable keepalive bucket).
+ * @param {string | undefined} type
  * @returns {'keepalive' | 'lifecycle'}
  */
 export function ingestEventClass(type) {
