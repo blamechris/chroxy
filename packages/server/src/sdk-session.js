@@ -51,6 +51,15 @@ const log = createLogger('sdk')
 
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
+// #5711 (Gap 3): cap the SDK's mid-turn follow-up queue. SdkSession is the only
+// provider that QUEUES sends during an in-flight turn (CliSession instead
+// rejects a mid-turn send with "Already processing a message"), and that queue
+// was unbounded — a user mashing send during a long turn accumulated an
+// unbounded backlog that then flooded the agent when the turn ended (a memory
+// footgun + a surprising burst of late messages). Reuse the cap value (3) and
+// the discard-error wording from CliSession's not-ready queue (cli-session.js)
+// so the overflow UX is consistent across providers.
+const MAX_PENDING_INPUT = 3
 
 // Marker stamped on a proc the first time _attachSidecarProcessListeners()
 // wires its default listeners (#3504 review).  Subsequent calls on the same
@@ -542,6 +551,13 @@ export class SdkSession extends BaseSession {
     if (this._isBusy) {
       // Queue the message — it will be sent after the current turn completes
       if (!this._pendingInput) this._pendingInput = []
+      // #5711 (Gap 3): bound this SDK-specific mid-turn queue (max 3). Discard
+      // the overflow with a visible error rather than silently growing, reusing
+      // CliSession's discard-cap value + wording for a consistent overflow UX.
+      if (this._pendingInput.length >= MAX_PENDING_INPUT) {
+        this.emit('error', { message: `Pending message queue full (max ${MAX_PENDING_INPUT}) — message discarded` })
+        return
+      }
       this._pendingInput.push({ prompt, attachments, sendOptions })
       // #4828: session-scoped when init has fired (queue path requires an
       // in-flight turn, so init is normally already in by this point).
