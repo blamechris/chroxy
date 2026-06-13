@@ -408,7 +408,6 @@ echo "  $CARGO_TOML"
 echo "  $ROOT_LOCK (top-level + all workspace entries)"
 echo "  $SERVER_LOCK (standalone server package lockfile — no workspace entries)"
 echo "  $CARGO_LOCK (chroxy-desktop stanza only)"
-echo "  $IOS_INFO_PLIST"
 if [ "$CHANGELOG_UPDATED" -eq 1 ]; then
   echo "  $CHANGELOG (scaffolded section for $NEW_VERSION — replace the TODO lines before commit)"
 fi

@@ -16,14 +16,17 @@ describe('bump-version.sh trap-cleans orphan .tmp files (#3886)', () => {
     assert.match(src, /trap\s+cleanup_tmp_files\s+EXIT/, 'script should register EXIT trap')
   })
 
-  it('script registers Info.plist .tmp before its awk write', () => {
+  it('script registers Cargo.lock .tmp before its awk write', () => {
     const src = readFileSync(SCRIPT, 'utf-8')
-    // Look for track_tmp invocation immediately preceding the Info.plist awk
-    // pipeline. Using a [\s\S]{0,400} window keeps the assertion forgiving
-    // about intermediate whitespace/comments without globally accepting any
-    // distance (which would let the registration drift away from the write).
-    const pattern = /track_tmp "\$IOS_INFO_PLIST\.tmp"[\s\S]{0,400}awk[\s\S]{0,400}> "\$IOS_INFO_PLIST\.tmp"/
-    assert.match(src, pattern, 'Info.plist awk block should call track_tmp before writing the .tmp')
+    // Look for the track_tmp invocation immediately preceding an awk-into-place
+    // pipeline (the Cargo.lock no-cargo fallback). A [\s\S]{0,400} window keeps
+    // the assertion forgiving about intermediate whitespace/comments without
+    // globally accepting any distance (which would let the registration drift
+    // away from the write). The former iOS Info.plist awk block was removed
+    // when iOS moved to CNG (#5642) — the native version now comes from
+    // app.json at prebuild — so this guards the remaining awk-into-place site.
+    const pattern = /track_tmp "\$CARGO_LOCK\.tmp"[\s\S]{0,400}awk[\s\S]{0,400}> "\$CARGO_LOCK\.tmp"/
+    assert.match(src, pattern, 'Cargo.lock awk block should call track_tmp before writing the .tmp')
   })
 
   it('forced awk failure under the same trap pattern leaves no orphan .tmp', () => {
