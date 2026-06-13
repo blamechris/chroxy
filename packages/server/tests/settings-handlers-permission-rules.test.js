@@ -392,3 +392,34 @@ describe('SdkSession permission rules delegation', () => {
     session.destroy()
   })
 })
+
+// #5731 (T1): set_model must respect the provider's modelSwitch capability,
+// mirroring the existing permissionModeSwitch guard. claude-tui is the telling
+// case — it allows permission-mode switching (permissionModeSwitch: true) but
+// NOT model switching (modelSwitch: false), so only the new guard catches it.
+describe('handleSetModel — provider modelSwitch capability guard (#5731)', () => {
+  it('rejects set_model on claude-tui (modelSwitch:false) with CAPABILITY_NOT_SUPPORTED and no broadcast', () => {
+    const setModelSpy = mock.fn(() => true)
+    const session = makeSession({ setModel: setModelSpy, model: 'claude-sonnet-4-6' })
+    const entry = { session, cwd: '/tmp', name: 'tui', provider: 'claude-tui' }
+    const ctx = makeCtx(entry)
+    const client = makeClient()
+    const ws = { readyState: 1 }
+
+    // Use a model that IS in claude-tui's allowlist and differs from the session's
+    // current one, so WITHOUT the guard the request would pass the allowlist and
+    // call setModel + broadcast — i.e. every assertion below distinguishes the
+    // fixed handler from the unfixed one (#5732 review). An out-of-allowlist model
+    // would already be rejected by the pre-existing MODEL_NOT_SUPPORTED branch.
+    settingsHandlers['set_model'](ws, client, { type: 'set_model', model: 'claude-opus-4-7', requestId: 'r1' }, ctx)
+
+    // The PTY model is never touched and no false model_changed is broadcast.
+    assert.equal(setModelSpy.mock.callCount(), 0, 'setModel must NOT be called for a non-switch provider')
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0, 'no model_changed broadcast')
+    // A CAPABILITY_NOT_SUPPORTED error is returned, correlated by requestId.
+    assert.equal(ctx.transport.send.mock.callCount(), 1)
+    const payload = ctx.transport.send.mock.calls[0].arguments[1]
+    assert.equal(payload.code, 'CAPABILITY_NOT_SUPPORTED')
+    assert.equal(payload.requestId, 'r1')
+  })
+})
