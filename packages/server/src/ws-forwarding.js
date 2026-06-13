@@ -212,6 +212,29 @@ function setupSessionForwarding(normalizer, ctx) {
     broadcast({ type: 'session_persist_failed', ...payload })
   }))
 
+  // #5731 (T6): a FRESH session whose async start() rejected (claude-tui's PTY
+  // failing to spawn) is fully destroyed. Without this the client — which just
+  // got `session_created` + a success ack — would see only `session_destroyed`
+  // and the session would vanish with no reason. Surface it as a per-session
+  // error toast, reusing the existing `session_error` message (both clients
+  // route it to their error toast) rather than minting a new wire type. The
+  // SessionManager emits this synchronously BEFORE `session_destroyed`, so the
+  // session is still mapped here and `broadcastToSession` reaches its
+  // subscribers. recoverable:false — there's no retry affordance for a fresh
+  // session (unlike a failed restore); the user must re-create it.
+  sessionManager.on('session_create_failed', safeForward('session_create_failed', ({ sessionId, errorCode, errorMessage, provider }) => {
+    if (!sessionId) return
+    broadcastToSession(sessionId, {
+      type: 'session_error',
+      code: errorCode || 'SESSION_START_FAILED',
+      sessionId,
+      recoverable: false,
+      message: errorMessage
+        ? `The session failed to start: ${errorMessage}`
+        : `The session failed to start${provider ? ` (${provider})` : ''}.`,
+    })
+  }))
+
   // #5731 (T3): a checkpoint create/delete that couldn't be flushed to disk will
   // be lost (or reappear) on restart. Surface it as a per-session error banner —
   // reuse the existing `session_error` message (both clients route it to their

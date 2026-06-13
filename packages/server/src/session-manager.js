@@ -129,6 +129,10 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
  *   session_restore_failed { sessionId, name, provider, cwd, model, permissionMode, errorCode, errorMessage, originalHistoryPreserved, historyLength }
  *     — emitted when a session in the persisted state file fails to restore (e.g. missing env var).
  *       History on disk is preserved so the user can retry after fixing the underlying issue.
+ *   session_create_failed { sessionId, name, provider, cwd, model, errorCode, errorMessage } — #5731 T6:
+ *     a FRESH session whose async provider start() rejected (e.g. claude-tui's PTY failed to spawn).
+ *     The session is fully destroyed (no history to preserve); this carries the reason so the
+ *     forwarder can surface a `session_error` toast before the `session_destroyed` lands.
  *   session_persist_failed { sessionId, name } — #5701: a synchronous flush of a
  *     session-list mutation (create/rename/destroy) failed to write to disk
  *     (disk full / locked file / read-only home), so the change may be lost on
@@ -1072,7 +1076,28 @@ export class SessionManager extends EventEmitter {
     log.error(`Async start() rejected for session ${sessionId}: ${message}${err?.stack ? '\n' + err.stack : ''}`)
 
     if (!entry._isRestore) {
-      // Fresh session — full teardown (removes the freshly-created worktree).
+      // #5731 T6: a fresh session whose async start() rejects (claude-tui's
+      // PTY failing to spawn is the main case) would otherwise vanish with
+      // only a `session_destroyed` — the client that just received
+      // `session_created` + a success ack for createSession gets no reason for
+      // the disappearance. Surface the failure FIRST so the client shows an
+      // error toast, THEN tear down. There's no history worth preserving, so
+      // this stays a full destroy (unlike the restore-rebind path below, which
+      // round-trips history for a retry). Stamp a default code so the message
+      // is consistent with the restore path's START_FAILED.
+      if (err && !err.code) err.code = 'START_FAILED'
+      this.emit('session_create_failed', {
+        sessionId,
+        name: entry.name,
+        provider: entry.provider || this._providerType,
+        cwd: entry.cwd,
+        model: entry.session?.model || null,
+        errorCode: err?.code || 'START_FAILED',
+        errorMessage: message,
+      })
+      // Full teardown (removes the freshly-created worktree). The emit above
+      // ran synchronously, so subscribers received the error while the session
+      // was still mapped, before this broadcasts `session_destroyed`.
       this.destroySession(sessionId)
       return
     }
