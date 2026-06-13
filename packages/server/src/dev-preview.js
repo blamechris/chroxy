@@ -169,9 +169,12 @@ export class DevPreviewManager extends EventEmitter {
 
     if (stopError) {
       // Surface it so the user can verify / kill cloudflared manually instead of
-      // assuming the port is no longer exposed.
-      log.error(`Failed to stop tunnel for session ${sessionId} port ${port}: ${stopError.message}`)
-      this.emit('dev_preview_stop_failed', { sessionId, port, error: stopError.message })
+      // assuming the port is no longer exposed. Normalize the message — a promise
+      // rejection isn't guaranteed to be an Error (could be a string/null), so
+      // `.message` alone can drop the actual detail.
+      const stopMsg = stopError?.message || String(stopError)
+      log.error(`Failed to stop tunnel for session ${sessionId} port ${port}: ${stopMsg}${stopError?.stack ? '\n' + stopError.stack : ''}`)
+      this.emit('dev_preview_stop_failed', { sessionId, port, error: stopMsg })
     } else {
       log.info(`Tunnel stopped for session ${sessionId} port ${port}`)
     }
