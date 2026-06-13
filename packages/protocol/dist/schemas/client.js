@@ -360,6 +360,12 @@ export const CreateSessionSchema = z.object({
 export const DestroySessionSchema = z.object({
     type: z.literal('destroy_session'),
     sessionId: z.string().max(256),
+    // #5710 — force escape hatch: bypass the #5695 "is running" guard to delete a
+    // wedged session whose `isRunning` is stuck true (a crashed provider that never
+    // emits turn-end, or a leaked background-shell tracker entry). The client gates
+    // this behind an explicit "delete anyway?" confirm. Omitted/false = the normal
+    // guarded path.
+    force: z.boolean().optional(),
 });
 export const RenameSessionSchema = z.object({
     type: z.literal('rename_session'),

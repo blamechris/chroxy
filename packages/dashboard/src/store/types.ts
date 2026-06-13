@@ -1056,7 +1056,7 @@ export interface ConnectionState {
    */
   claimPrimary: (sessionId: string, options?: { force?: boolean }) => void;
   createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean }) => void;
-  destroySession: (sessionId: string) => void;
+  destroySession: (sessionId: string, force?: boolean) => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
   _resetSessionMemory: () => void;

@@ -385,6 +385,25 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(false);
   });
 
+  it('#5710: destroySession sends force:true only when forced', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket });
+
+    // Normal delete — no force field on the wire.
+    useConnectionStore.getState().destroySession('s1');
+    const normal = JSON.parse(send.mock.calls[0]![0] as string);
+    expect(normal).toEqual({ type: 'destroy_session', sessionId: 's1' });
+    expect(normal.force).toBeUndefined();
+
+    // Forced delete (a wedged running session) — carries force:true to bypass
+    // the server's #5695 busy guard.
+    useConnectionStore.getState().destroySession('s2', true);
+    const forced = JSON.parse(send.mock.calls[1]![0] as string);
+    expect(forced).toEqual({ type: 'destroy_session', sessionId: 's2', force: true });
+  });
+
   it('#5500: sendRepoMemoryReindex marks the repo pending, clears its stale result, and sends', async () => {
     const { useConnectionStore } = await import('./connection');
     const send = vi.fn();

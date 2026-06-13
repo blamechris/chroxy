@@ -222,10 +222,19 @@ async function handleDestroySession(ws, client, msg, ctx) {
   // is actively streaming or has pending background shells — that orphans the
   // in-flight turn and can lose uncommitted worktree work. The CLI won't delete
   // the session you're running in either. Interrupt first, then delete.
-  // (A `force` escape hatch for a wedged session is tracked as a follow-up.)
   if (targetEntry.session?.isRunning) {
-    sendSessionError(ws, ctx, 'Cannot destroy a session while it is running — interrupt it first, then delete.')
-    return
+    // #5710: force escape hatch. A wedged session whose `isRunning` is stuck true
+    // (a crashed provider that never emits turn-end, or a leaked background-shell
+    // tracker entry) could otherwise NEVER be deleted from any client. When the
+    // client sends `force: true` (gated behind an explicit "delete anyway?"
+    // confirm), bypass the guard and proceed — logged loudly so a forced teardown
+    // of a genuinely-running session is auditable.
+    if (msg.force === true) {
+      log.warn(`Force-destroying session ${targetId} while isRunning=true (client ${client.id}) — bypassing #5695 busy guard`)
+    } else {
+      sendSessionError(ws, ctx, 'Cannot destroy a session while it is running — interrupt it first, then delete.')
+      return
+    }
   }
 
   if (typeof ctx.sessions.sessionManager.destroySessionLocked === 'function') {

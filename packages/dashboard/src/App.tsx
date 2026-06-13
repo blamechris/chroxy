@@ -651,7 +651,7 @@ export function App() {
 
   // The actual session teardown, shared by the confirm path and the
   // no-confirm path (#5206).
-  const performCloseSession = useCallback((sessionId: string) => {
+  const performCloseSession = useCallback((sessionId: string, force?: boolean) => {
     // #3800: evict the per-session composer state (draft + collapsed-paste
     // blocks + next-id counter) so the refs further down don't leak the
     // pasted-text content for the lifetime of <App />. `handleSend` already
@@ -660,10 +660,28 @@ export function App() {
     // backstop for server-driven removals, but evicting synchronously here
     // keeps the cleanup tied to the click.
     evictSessionComposerState(sessionId)
-    destroySession(sessionId)
+    // Only thread `force` when set, so the normal close path stays a single-arg
+    // call (no spurious `undefined` second argument).
+    if (force) destroySession(sessionId, true)
+    else destroySession(sessionId)
   }, [destroySession])
 
   const handleCloseSession = useCallback((sessionId: string) => {
+    // #5710 — a busy/running session is rejected by the server's #5695 guard
+    // ("interrupt it first"). For a WEDGED session that never reports turn-end
+    // that's a dead end, so offer an explicit force-delete confirm here that
+    // sends `force: true`. `isBusy` is the client-visible proxy for the server's
+    // `isRunning`. window.confirm is synchronous and matches the auto-mode
+    // confirm pattern used elsewhere in the dashboard.
+    const session = sessions.find(s => s.sessionId === sessionId)
+    if (session?.isBusy) {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm('This session is still running. Delete it anyway? The in-flight turn will be interrupted and any uncommitted work in its worktree may be lost.')
+        : true
+      if (!ok) return
+      performCloseSession(sessionId, true)
+      return
+    }
     // #5206 — gate the teardown behind a styled confirm dialog when the
     // setting is enabled (the default). When disabled, close immediately.
     // The Control Room tab closes via its own non-session path and never
@@ -673,7 +691,7 @@ export function App() {
       return
     }
     performCloseSession(sessionId)
-  }, [confirmSessionClose, performCloseSession])
+  }, [sessions, confirmSessionClose, performCloseSession])
 
   // #3567 / #3602: dedicated restart handler for the StdinDisabledBanner.
   // Creates a replacement session FIRST and then destroys the broken one so

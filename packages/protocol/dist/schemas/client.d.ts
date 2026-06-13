@@ -314,6 +314,7 @@ export declare const CreateSessionSchema: z.ZodObject<{
 export declare const DestroySessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
     sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const RenameSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"rename_session">;
@@ -790,6 +791,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
     sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"rename_session">;
     sessionId: z.ZodString;

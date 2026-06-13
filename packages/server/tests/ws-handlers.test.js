@@ -232,6 +232,33 @@ describe('WS handler: destroy_session', () => {
     ws.close()
   })
 
+  it('force-destroys a running session when force:true bypasses the guard (#5710)', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Wedged', cwd: '/tmp', isRunning: true },
+    ])
+    manager.destroySession = createSpy(() => {})
+    manager.destroySessionLocked = createSpy(() => Promise.resolve())
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    // force:true must bypass the #5695 isRunning guard so a wedged session can
+    // still be deleted (the schema now carries `force` after the dist rebuild).
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2', force: true })
+
+    const destroyed = await waitForMessage(messages, 'session_destroyed')
+    assert.equal(destroyed.sessionId, 'sess-2', 'the wedged session is destroyed')
+    assert.equal(manager.destroySessionLocked.callCount, 1, 'destroySessionLocked SHOULD be called despite isRunning')
+
+    ws.close()
+  })
+
   it('awaits destroySessionLocked when present', async () => {
     const { manager, sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'First', cwd: '/tmp' },
