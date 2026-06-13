@@ -337,7 +337,18 @@ export function createMockSession(overrides = {}) {
   session.sessionPreamble = ''
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
-  session.setModel = createSpy()
+  // #5711 (Gap 2): the real setModel returns true only when the model actually
+  // changed (false when mid-turn or a same-model no-op), and the handler now
+  // broadcasts model_changed only on a true return. Mirror that contract:
+  // mutate `session.model` and report changed; `isBusy` defaults false so the
+  // common "applied" path is the default. Tests that want the busy/no-op path
+  // override `session.setModel` / `session.isBusy` after creation.
+  session.isBusy = false
+  session.setModel = createSpy((model) => {
+    if (model === session.model) return false
+    session.model = model
+    return true
+  })
   // #3729: handler now reads session.permissionMode AFTER setPermissionMode
   // returns to detect silently-rejected mid-turn changes. Mock the real
   // contract: state mutates on a successful set so handler tests don't

@@ -88,6 +88,44 @@ describe('settings-handlers', () => {
       assert.equal(msg.type, 'model_changed')
     })
 
+    it('does not broadcast model_changed when the session is mid-turn; sends MODEL_NOT_APPLIED (#5711)', () => {
+      // Gap 2: setModel() returns false mid-turn (server no-op). Broadcasting
+      // model_changed anyway told every client the model switched while the
+      // engine kept the old one. Now: no broadcast, and the requester gets a
+      // clear "deferred" error.
+      const sessions = new Map()
+      const session = createMockSession()
+      session.isBusy = true
+      session.setModel = createSpy(() => false) // real setModel returns false mid-turn
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.set_model(ws, client, { model: 'haiku', requestId: 'r-busy' }, ctx)
+
+      assert.equal(session.setModel.callCount, 1)
+      assert.equal(ctx.transport.broadcastToSession.callCount, 0) // no phantom switch
+      assert.equal(ws._messages.length, 1)
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'MODEL_NOT_APPLIED')
+    })
+
+    it('stays silent on a same-model no-op — no broadcast, no error (#5711)', () => {
+      const sessions = new Map()
+      const session = createMockSession() // isBusy false by default
+      session.setModel = createSpy(() => false) // no-op: model unchanged
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.set_model(ws, client, { model: 'sonnet', requestId: 'r-noop' }, ctx)
+
+      assert.equal(ctx.transport.broadcastToSession.callCount, 0)
+      assert.equal(ws._messages.length, 0) // a harmless no-op must not nag the user
+    })
+
     it('ignores invalid model ids', () => {
       const sessions = new Map()
       const session = createMockSession()

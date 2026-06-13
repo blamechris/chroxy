@@ -109,6 +109,27 @@ function getProviderAllowedModels(providerName) {
   }
 }
 
+// #5711 (Gap 2): apply a model change and broadcast model_changed ONLY when it
+// actually lands. setModel() returns false when the session is mid-turn (the
+// change is a server-side no-op) — the old code broadcast model_changed
+// regardless, so every client's dropdown showed the new model while the engine
+// (in-flight AND next turn) kept the old one. Mirrors the #3729 set_permission_mode
+// contract: no broadcast unless applied; a busy rejection tells the requester so
+// the UI can surface "deferred" instead of a phantom switch. A same-model no-op
+// is silent (the model already matches — nothing to report).
+function applyModelChange(ws, ctx, entry, sessionId, modelArg, broadcastModel, requestId) {
+  if (entry.session.setModel(modelArg)) {
+    ctx.transport.broadcastToSession(sessionId, { type: 'model_changed', model: broadcastModel })
+    return
+  }
+  if (entry.session.isBusy) {
+    sessionLogger(sessionId).warn(`set_model deferred (session mid-turn): requested ${modelArg}`)
+    sendError(ws, requestId, 'MODEL_NOT_APPLIED',
+      `Model change to '${modelArg}' was not applied — the session is mid-turn. Wait for it to finish or interrupt it, then switch.`,
+      { sessionId }, ctx)
+  }
+}
+
 function handleSetModel(ws, client, msg, ctx) {
   if (typeof msg.model !== 'string') {
     log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
@@ -140,8 +161,7 @@ function handleSetModel(ws, client, msg, ctx) {
         return
       }
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${model}`)
-      entry.session.setModel(model)
-      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
+      applyModelChange(ws, ctx, entry, modelSessionId, model, toShortModelId(model), msg?.requestId)
       return
     }
     if (providerAllowed) {
@@ -164,12 +184,11 @@ function handleSetModel(ws, client, msg, ctx) {
       }
       // #4828: session-scoped (single-session fallback as above).
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-      entry.session.setModel(msg.model)
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
       // alias collapse (claude-sonnet-4-6 → sonnet) and returns the input
       // unchanged for non-Claude IDs, so applying it uniformly is safe.
-      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      applyModelChange(ws, ctx, entry, modelSessionId, msg.model, toShortModelId(msg.model), msg?.requestId)
       return
     }
     // Fall through to the legacy global allowlist when the provider hasn't
@@ -180,8 +199,7 @@ function handleSetModel(ws, client, msg, ctx) {
     if (entry) {
       // #4828: session-scoped (single-session fallback).
       ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-      entry.session.setModel(msg.model)
-      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      applyModelChange(ws, ctx, entry, modelSessionId, msg.model, toShortModelId(msg.model), msg?.requestId)
     }
     return
   }

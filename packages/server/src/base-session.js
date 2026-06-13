@@ -545,6 +545,16 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #5711 (Gap 2): true while a turn is actively streaming (mid-turn). Distinct
+   * from `isRunning`, which also counts pending background shells — handlers use
+   * this to tell a deferred mid-turn setting change (e.g. setModel returning
+   * false because the session is busy) apart from a same-value no-op.
+   */
+  get isBusy() {
+    return this._isBusy
+  }
+
+  /**
    * #4307: read-only snapshot of pending background shells.
    * #5376: delegates to BackgroundShellTracker.
    */
