@@ -48,7 +48,7 @@ const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
   'docker-cli': {
     short: 'Docker CLI',
     label: 'Claude Code (Docker CLI)',
-    tooltip: 'Docker-isolated CLI — uses your claude.ai subscription',
+    tooltip: 'Docker-isolated CLI — forwards your ANTHROPIC_API_KEY into the container (per-token billing, no OAuth fallback)',
     type: 'cli',
   },
   'docker-sdk': {
@@ -60,7 +60,7 @@ const KNOWN_PROVIDERS: Record<string, ProviderDisplayInfo> = {
   'docker': {
     short: 'Docker CLI',
     label: 'Claude Code (Docker CLI)',
-    tooltip: 'Docker-isolated CLI — uses your claude.ai subscription (alias for docker-cli)',
+    tooltip: 'Docker-isolated CLI — forwards your ANTHROPIC_API_KEY into the container (alias for docker-cli)',
     type: 'cli',
   },
   'gemini': {

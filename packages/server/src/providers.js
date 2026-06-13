@@ -23,7 +23,7 @@ import { OllamaSession } from './ollama-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
-import { BILLING_CLASSES, billingClassForProvider } from './billing-class.js'
+import { BILLING_CLASSES } from './billing-class.js'
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,

@@ -2121,18 +2121,20 @@ export class SessionManager extends EventEmitter {
         //
         // Billing-class cost contract (#5630/#5629): which turns produce a
         // real dollar figure depends on the session's billing class.
-        //   - subscription (claude-tui/claude-channel, and claude-cli/sdk &
-        //     docker-cli/sdk BEFORE 2026-06-15): `total_cost_usd: null` →
-        //     no per-turn dollar charge; the cost accumulator stays zero and
-        //     the UI shows the no-dollar "Included (subscription)" chip.
-        //   - programmatic-credit (claude-cli/sdk & docker-cli/sdk ON/AFTER
-        //     2026-06-15): real metered credit spend — the provider now
-        //     forwards a finite `total_cost_usd`, so the finite-cost gate
-        //     below accumulates it exactly like api-key spend.
-        //   - api-key (byok, docker-byok, every non-Claude provider): real
-        //     per-token spend, always a finite cost (or `null` when pricing
-        //     is unknown — see computePromptCostUsd, which now degrades 0→null;
-        //     the finite gate skips a null without poisoning the accumulator).
+        //   - subscription (claude-tui/claude-channel, and HOST claude-cli/sdk
+        //     BEFORE 2026-06-15): `total_cost_usd: null` → no per-turn dollar
+        //     charge; the cost accumulator stays zero and the UI shows the
+        //     no-dollar "Included (subscription)" chip.
+        //   - programmatic-credit (HOST claude-cli/sdk ON/AFTER 2026-06-15):
+        //     real metered credit spend — the provider now forwards a finite
+        //     `total_cost_usd`, so the finite-cost gate below accumulates it
+        //     exactly like api-key spend.
+        //   - api-key (byok, docker-byok, docker-cli/sdk — which forward an
+        //     ANTHROPIC_API_KEY into the container with no OAuth fallback — and
+        //     every non-Claude provider): real per-token spend, always a finite
+        //     cost (or `null` when pricing is unknown — see computePromptCostUsd,
+        //     which now degrades 0→null; the finite gate skips a null without
+        //     poisoning the accumulator).
         //
         // Two independent gates (#5115):
         //   1. COST gate — `Number.isFinite(data?.cost)`. Drives _trackCost
