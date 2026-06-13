@@ -79,6 +79,14 @@ beforeEach(() => {
   MockWebSocket.instances = []
   resetReconnectAttempt()
   vi.spyOn(Math, 'random').mockReturnValue(0) // zero jitter
+  // Silence the per-cycle reconnect logging. These tests drive many
+  // close→reconnect cycles (the #5698 give-up test alone runs 11), and that
+  // console.log volume races vitest's onUserConsoleLog RPC at worker teardown
+  // ("Closing rpc while onUserConsoleLog was pending"), surfacing as a flaky
+  // EnvironmentTeardownError in CI even though every test passes. Restored by
+  // vi.restoreAllMocks() in afterEach.
+  vi.spyOn(console, 'log').mockImplementation(() => {})
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
   for (const k of Object.keys(store)) delete store[k]
   useConnectionStore.setState({
     serverRegistry: [],
