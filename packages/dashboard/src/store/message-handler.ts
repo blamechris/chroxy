@@ -1949,6 +1949,21 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
   // insert a prompt with an `undefined` requestId and still run the stream
   // split; such a message is unanswerable, so drop it outright.)
   if (!permPayload.requestId) return;
+  // #5693 containment: a permission MAPPED to a session must surface in THAT
+  // session's transcript, never whatever tab is focused — and must not disturb
+  // the focused tab's in-flight stream. Create the owning session's empty state
+  // (tab-invisible — tabs come from `sessions`, not `sessionStates`) BEFORE the
+  // #554 stream-split below, so the split reads the owning session's stream
+  // (null for a freshly-created state) instead of falling back to the ACTIVE
+  // session's `streamingMessageId` and clearing a different tab's stream.
+  // Unmapped prompts (no wire sessionId) intentionally stay with the active
+  // session (still answerable, not mislabeled — originSessionId stays undefined).
+  const ownerSessionId = permPayload.sessionId;
+  if (ownerSessionId && !get().sessionStates[ownerSessionId]) {
+    set((state) => ({
+      sessionStates: { ...state.sessionStates, [ownerSessionId]: createEmptySessionState() },
+    }));
+  }
   // Split streaming response at permission boundary (#554). The pure
   // split/remap-resolution core is shared via store-core (#5454); the side
   // effects below keep their original order.

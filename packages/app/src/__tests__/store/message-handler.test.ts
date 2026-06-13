@@ -3722,6 +3722,46 @@ describe('permission_request message handler', () => {
     expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny']);
   });
 
+  it('creates the owning session state and routes the prompt there when that session is NOT loaded (#5693)', () => {
+    // 's-bg' asks while 's-active' is focused and 's-bg' has no hydrated state.
+    // Containment fix: the handler creates s-bg's (tab-invisible) state and
+    // routes the prompt there — the app previously dropped it or routed to the
+    // active session. The active session must stay clean.
+    const store = createMockStore({
+      activeSessionId: 's-active',
+      sessions: [
+        { sessionId: 's-active', name: 'A', provider: 'claude-sdk' } as any,
+        { sessionId: 's-bg', name: 'B', provider: 'claude-sdk' } as any,
+      ],
+      sessionStates: { 's-active': createEmptySessionState() }, // NO s-bg
+      availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } } as any],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's-bg',
+      requestId: 'perm-unloaded',
+      tool: 'Bash',
+      input: { command: 'rm -rf /tmp/x' },
+      remainingMs: 300000,
+    });
+
+    const state = store.getState();
+    expect(state.sessionStates['s-bg']).toBeDefined();
+    const bgPrompt = state.sessionStates['s-bg'].messages.find((m: any) => m.type === 'prompt');
+    expect(bgPrompt).toBeDefined();
+    expect(bgPrompt!.originSessionId).toBe('s-bg');
+    // The focused tab must NOT have received the background session's prompt.
+    expect(state.sessionStates['s-active'].messages.find((m: any) => m.type === 'prompt')).toBeUndefined();
+    // Tab-invisibility: ensuring s-bg's state must not register a phantom tab —
+    // tabs derive from `sessions` (unchanged), not the `sessionStates` keys.
+    expect(state.sessions).toHaveLength(2);
+  });
+
   it('sets expiresAt from remainingMs', () => {
     const before = Date.now();
     const store = createMockStore({

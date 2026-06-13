@@ -4093,6 +4093,81 @@ describe('dashboard message-handler dispatch', () => {
       expect(activeMsgs.find((m: any) => m.type === 'prompt')).toBeUndefined()
     })
 
+    it('creates the owning session state and routes the prompt there when that session is NOT loaded (#5693)', () => {
+      // 's-bg' is asking but its sessionState has not been hydrated on this
+      // client (only 's-active' is loaded). Containment fix: create s-bg's
+      // (tab-invisible) state and route the prompt there — never into the active
+      // tab's transcript or the flat top-level messages that mirror it.
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-active',
+          sessionNotifications: [],
+          sessionStates: { 's-active': createEmptySessionState() }, // NO 's-bg'
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          sessionId: 's-bg',
+          requestId: 'perm-unloaded',
+          tool: 'Bash',
+          input: { command: 'rm -rf /tmp/x' },
+          remainingMs: 300000,
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      // Owning session state was created and holds the labeled prompt.
+      expect(state.sessionStates['s-bg']).toBeDefined()
+      const bgPrompt = state.sessionStates['s-bg'].messages.find((m: any) => m.type === 'prompt')
+      expect(bgPrompt).toBeDefined()
+      expect(bgPrompt.originSessionId).toBe('s-bg')
+      // The active tab must NOT have received it — not its state...
+      expect(state.sessionStates['s-active'].messages.find((m: any) => m.type === 'prompt')).toBeUndefined()
+      // ...and not the flat top-level messages that mirror the focused tab.
+      expect((state.messages || []).find((m: any) => m.type === 'prompt')).toBeUndefined()
+      // Tab-invisibility (the whole safety basis): creating s-bg's state must
+      // NOT register it as a tab — tabs derive from `sessions`, not the
+      // `sessionStates` keys.
+      expect((state.sessions || []).some((s: any) => s.sessionId === 's-bg')).toBe(false)
+    })
+
+    it('does not clear the active tab\'s in-flight stream when a mapped prompt arrives for an unloaded session (#5693)', () => {
+      // s-active is mid-stream; s-bg (not loaded) asks for permission. The #554
+      // stream-split must read s-bg's stream (null after the containment guard
+      // creates its state), NOT fall back to the active session's
+      // streamingMessageId and null it — that would interrupt the focused tab's
+      // response just because a different session asked.
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's-active',
+          streamingMessageId: 'stream-active',
+          sessionNotifications: [],
+          sessionStates: {
+            's-active': { ...createEmptySessionState(), streamingMessageId: 'stream-active' },
+          }, // NO s-bg
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        {
+          type: 'permission_request',
+          sessionId: 's-bg',
+          requestId: 'perm-stream',
+          tool: 'Bash',
+          input: { command: 'ls' },
+          remainingMs: 300000,
+        },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      // The active tab's stream is preserved — not cleared by s-bg's permission.
+      expect(state.streamingMessageId).toBe('stream-active')
+      // Containment still holds: s-bg received its prompt.
+      expect(state.sessionStates['s-bg'].messages.find((m: any) => m.type === 'prompt')).toBeDefined()
+    })
+
     it('leaves originSessionId undefined for an unmapped request (no wire sessionId) (#5667)', () => {
       // No sessionId on the wire → the prompt falls back to the active tab for
       // routing, but originSessionId must stay undefined (not the active id) so
