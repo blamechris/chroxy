@@ -129,13 +129,27 @@
     <tr><td>#5737</td><td><strong>T5 · <code>session_role</code> stale across reconnect</strong> (#5623/#5613) — <code>sendSessionInfo</code> re-synced model/perm-mode/thinking on reconnect but never the primary-owner, so the presence badge (Observing / Take over / driver name) went stale. Now re-emits <code>session_role</code> on reconnect/tab-switch.</td><td><span class="pill ok">merged</span></td></tr>
     <tr><td>#5738</td><td><strong>T6 · Fresh session vanishes with no reason</strong> — when a provider's async <code>start()</code> rejected (claude-tui PTY spawn failure), the fresh session was destroyed with only a bare <code>session_destroyed</code> after the client already got a create success. Now emits <code>session_create_failed</code> → a <code>session_error</code> toast before teardown.</td><td><span class="pill ok">merged</span></td></tr>
     <tr><td>#5739</td><td><strong>T7 · Destroyed session leaves a hook permission wedged</strong> — the destroy handler cleared the permission session-maps but not the parked HTTP-hook <code>_pendingPermissions</code>, so the tool call blocked for the full 5-min auto-deny timeout (then fired on a dead session + leaked the held response). Now drains the session's pending permissions as <code>deny</code> on destroy.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5741</td><td><strong>T8 · Checkpoint restore rug-pulls a shared cwd</strong> (confirms deferred #5700) — restoring hard-resets the working tree at the checkpoint's cwd; if another non-worktree session shared that cwd and was mid-turn, the reset yanked files out from under its active work. Now refuses (naming the busy session) when another session is busy in the same cwd; idle co-located sessions aren't blocked; cwd comparison is realpath-normalized.</td><td><span class="pill ok">merged</span></td></tr>
   </tbody>
 </table>
-<p class="muted">Remaining #5731 backlog (each bounded, ready): T8 checkpoint-restore git-rewinds a cwd shared by another live session (confirms deferred #5700), plus Tier-2 — <code>setThinkingLevel</code> optimistic-revert, stale dashboard pricing table (<code>gemini-2.0-pro</code> blank cost), <code>switchSession</code> rollback on a closed socket, <code>handleRemoveRepo</code> silent config-write failure, <code>resume_budget</code> silent no-op, <code>closePreview</code> tunnel-stop swallow, and mobile provider-capability gating.</p>
+<p class="muted"><strong>Tier-1 complete</strong> — all eight HIGH findings shipped.</p>
+
+<h3>Then: into the #5731 Tier-2 backlog</h3>
+<p>Continued straight into Tier-2 (MEDIUM), same gate. Picked the contained, lower-risk items first.</p>
+<table>
+  <thead><tr><th>PR</th><th>Tier-2 finding → fix</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5742</td><td><strong><code>setThinkingLevel</code> had no optimistic-update/revert</strong> — the last of the model (#5711) / permission-mode (#5716) siblings without it: the dropdown snapped back during the round-trip and stayed wrong on a server rejection. Now optimistic + a <code>THINKING_LEVEL_NOT_APPLIED</code> revert keyed by requestId (server echoes it on every rejection path).</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5743</td><td><strong><code>closePreview</code> faked a clean tunnel stop</strong> — swallowed a <code>tunnel.stop()</code> failure and still signalled "stopped", so the public tunnel (exposed port) could stay live while the user thought it was shut. Now surfaces a <code>DEV_PREVIEW_STOP_FAILED</code> session_error (multi-session + legacy CLI paths) so the user can verify / kill cloudflared.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5744</td><td><strong><code>handleRemoveRepo</code> swallowed a config-write failure</strong> — the read+write sat outside the try/catch, so a failed config write threw out with no client response and the removal silently failed. Now wrapped like <code>handleAddRepo</code>; a refresh-only failure reports distinctly from a removal failure.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5745</td><td><strong>Dashboard pricing table stale</strong> — <code>gemini-2.0-pro</code> is offered but had no pricing row → blank cost badge. Added it (2.5-pro proxy rate) and a deduped drift-warn so future unpriced-but-offered models surface in the console instead of silently blanking.</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<p class="muted"><strong>Remaining #5731 backlog, with risk notes:</strong> <code>switchSession</code> rollback + flat-slot bleed (<em>deferred — higher-risk state-management; left for review rather than risk a subtle regression unsupervised</em>); <code>resume_budget</code> silent no-op when not paused (<em>deferred — a clean fix needs a new ack wire-type, since reusing <code>budget_resumed</code> would inject a false "session resumed" chat message; edge case</em>); mobile provider-capability gating (<em>bigger, mobile-parity follow-up</em>); and Tier-3 LOW/defensive items (supervisor double-fork backoff, standby EADDRINUSE give-up, question-answer stale-<code>toolUseId</code> fallback, InterventionsPanel a11y). Each is bounded and individually documented in #5731.</p>
 
 <div class="cards">
-  <div class="card"><div class="n" style="color:var(--green)">12</div><div class="l">PRs merged (5 durability + 3 audit + 4 Tier-1)</div></div>
-  <div class="card"><div class="n">6</div><div class="l">Audit dimensions</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">17</div><div class="l">PRs merged (5 durability + 3 audit + 5 Tier-1 + docs + 4 Tier-2)</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">8/8</div><div class="l">#5731 Tier-1 shipped</div></div>
   <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
   <div class="card"><div class="n" style="color:var(--green)">clean</div><div class="l">main · every PR gated + reviewed</div></div>
 </div>
