@@ -223,6 +223,23 @@ describe('checkpoint-handlers', () => {
         assert.ok(ctx._sent.find(m => m.type === 'checkpoint_restored'), 'restore proceeds for an idle sibling')
       })
 
+      it('refuses across trailing-slash cwd spellings (normalized comparison)', async () => {
+        // checkpoint cwd '/repo' vs a busy sibling on '/repo/' — these are the
+        // same directory. The paths don't exist on disk, so normalizeCwd falls
+        // back to stripping the trailing slash; the guard must still match.
+        const ctx = makeRestoreCtx({
+          checkpointCwd: '/repo',
+          siblings: [{ sessionId: 's2', name: 'Sibling', cwd: '/repo/', isBusy: true }],
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.ok(err, 'trailing-slash spelling must still be detected as the same cwd')
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0)
+      })
+
       it('allows the restore when a busy session is in a DIFFERENT cwd', async () => {
         const ctx = makeRestoreCtx({
           checkpointCwd: '/repo',

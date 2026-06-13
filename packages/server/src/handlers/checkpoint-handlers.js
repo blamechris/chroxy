@@ -3,7 +3,27 @@
  *
  * Handles: create_checkpoint, list_checkpoints, restore_checkpoint, delete_checkpoint
  */
+import { realpathSync } from 'fs'
 import { sendSessionError } from '../handler-utils.js'
+
+/**
+ * Normalize a cwd for collision comparison so two sessions on the SAME physical
+ * directory reached via different strings (trailing slash, symlink, an explicit
+ * path vs the equivalent default) still compare equal. realpathSync resolves
+ * symlinks and drops trailing slashes; if the path doesn't exist (or perms),
+ * fall back to a trailing-slash-stripped form so '/repo' and '/repo/' still
+ * match. Without this the #5731 T8 shared-cwd guard would miss a real collision.
+ * @param {*} p
+ * @returns {*}
+ */
+function normalizeCwd(p) {
+  if (typeof p !== 'string' || !p) return p
+  try {
+    return realpathSync(p)
+  } catch {
+    return p.replace(/\/+$/, '') || p
+  }
+}
 
 async function handleCreateCheckpoint(ws, client, msg, ctx) {
   const sid = client.activeSessionId
@@ -86,8 +106,9 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
     const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
     if (cp?.cwd) {
+      const targetCwd = normalizeCwd(cp.cwd)
       const busyShare = sessionMgr.listSessions().find(
-        (s) => s.sessionId !== sid && s.cwd === cp.cwd && s.isBusy,
+        (s) => s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
       )
       if (busyShare) {
         sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
