@@ -139,7 +139,6 @@ export function calculateCost(
   if (!pricing) {
     if (modelId && !_warnedUnknownModels.has(modelId)) {
       _warnedUnknownModels.add(modelId)
-      // eslint-disable-next-line no-console
       console.warn(
         `[model-pricing] no pricing entry for "${modelId}" — its cost estimate will be blank. Add it to model-pricing.ts.`,
       )

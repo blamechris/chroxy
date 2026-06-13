@@ -25,7 +25,15 @@ function sig(n: number, digits = 6): number {
 // ---------------------------------------------------------------------------
 
 describe('calculateCost — unknown model', () => {
+  // Suppress the drift warning's stderr (asserted separately below) and keep the
+  // module-level deduped set clean across files.
+  afterEach(() => {
+    _resetPricingDriftWarnings()
+    vi.restoreAllMocks()
+  })
+
   it('returns null for an unrecognised model id', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(calculateCost('some-unknown-model-xyz', 1000, 500)).toBeNull()
   })
 })
