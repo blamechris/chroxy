@@ -1788,6 +1788,20 @@ export declare const ServerSessionRestoreFailedSchema: z.ZodObject<{
     historyLength: z.ZodOptional<z.ZodNumber>;
 }, z.core.$strip>;
 /**
+ * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
+ * could not be flushed to disk — disk full, locked file, read-only home. The
+ * write is atomic so on-disk state isn't corrupted, but the in-memory change
+ * will be lost on the next restart. Clients surface this as an error banner so
+ * the operator knows their change wasn't saved (instead of silently believing it
+ * was). `name` is null when the entry was already removed before the flush
+ * (destroy path) and no label could be resolved.
+ */
+export declare const ServerSessionPersistFailedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_persist_failed">;
+    sessionId: z.ZodString;
+    name: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+/**
  * #4756: user-initiated Stop confirmation broadcast. CliSession emits a
  * `stopped` event from `_handleChildClose` when the child process exits
  * cleanly after a Stop click (interrupt() set `_intentionalStop`). The

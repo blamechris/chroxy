@@ -1393,6 +1393,28 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('session_persist_failed dispatch (#5714)', () => {
+    it('surfaces an unsaved session-list mutation through addServerError', () => {
+      handleMessage(
+        { type: 'session_persist_failed', sessionId: 'sess-1', name: 'My Session' },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors).toHaveLength(1)
+      expect(state.serverErrors[0]).toContain('"My Session"')
+      expect(state.serverErrors[0]).toContain('may be lost on restart')
+    })
+
+    it('falls back to the sessionId label when name is null (destroy path)', () => {
+      handleMessage(
+        { type: 'session_persist_failed', sessionId: 'sess-gone', name: null },
+        ctx() as any,
+      )
+      const state = store.getState() as any
+      expect(state.serverErrors[0]).toContain('session sess-gone')
+    })
+  })
+
   describe('stream_delta dispatch', () => {
     // Fake timers for the 100ms delta batcher — runAllTimers() flushes
     // synchronously instead of waiting on real wall-clock setTimeout(150).

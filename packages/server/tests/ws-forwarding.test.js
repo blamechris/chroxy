@@ -337,6 +337,35 @@ describe('setupForwarding', () => {
     })
   })
 
+  describe('session_persist_failed event (#5714)', () => {
+    it('broadcasts a persist failure to all clients', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_persist_failed', { sessionId: 'sess-1', name: 'My Session' })
+
+      const call = ctx.broadcast.mock.calls.find(c =>
+        c.arguments[0].type === 'session_persist_failed'
+      )
+      assert.ok(call, 'should broadcast session_persist_failed')
+      assert.equal(call.arguments[0].sessionId, 'sess-1')
+      assert.equal(call.arguments[0].name, 'My Session')
+    })
+
+    it('forwards a null name (destroy path) without throwing', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_persist_failed', { sessionId: 'sess-gone', name: null })
+
+      const call = ctx.broadcast.mock.calls.find(c =>
+        c.arguments[0].type === 'session_persist_failed'
+      )
+      assert.ok(call)
+      assert.equal(call.arguments[0].name, null)
+    })
+  })
+
   // #4756 — `stopped` event surfaces through the normalizer as a
   // `session_stopped` broadcast targeted at subscribers of the affected
   // session (NOT global broadcast). Pairs with the wiring in
