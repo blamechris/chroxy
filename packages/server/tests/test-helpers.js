@@ -337,7 +337,16 @@ export function createMockSession(overrides = {}) {
   session.sessionPreamble = ''
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
-  session.setModel = createSpy()
+  // #5696: mirror the real BaseSession.setModel contract — returns true only
+  // when the change actually lands (false when busy mid-turn or a same-model
+  // no-op). The handler now reads this return to decide whether to broadcast
+  // model_changed, so the mock must report it (matches setPermissionMode etc).
+  session.setModel = createSpy((model) => {
+    if (session._isBusy) return false
+    if (model === session.model) return false
+    session.model = model
+    return true
+  })
   // #3729: handler now reads session.permissionMode AFTER setPermissionMode
   // returns to detect silently-rejected mid-turn changes. Mock the real
   // contract: state mutates on a successful set so handler tests don't

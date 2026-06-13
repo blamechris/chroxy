@@ -88,6 +88,24 @@ describe('settings-handlers', () => {
       assert.equal(msg.type, 'model_changed')
     })
 
+    it('does not broadcast model_changed when the session rejects the change (busy)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session._isBusy = true // setModel() returns false mid-turn
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.set_model(ws, client, { model: 'haiku', requestId: 'r-busy' }, ctx)
+
+      assert.equal(session.setModel.callCount, 1)
+      assert.equal(ctx.transport.broadcastToSession.callCount, 0, 'must not broadcast a change that did not land')
+      assert.equal(ws._messages.length, 1)
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'MODEL_NOT_APPLIED')
+    })
+
     it('ignores invalid model ids', () => {
       const sessions = new Map()
       const session = createMockSession()
