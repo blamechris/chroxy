@@ -78,6 +78,58 @@ describe('SessionBar', () => {
     expect(within(cleanTab).queryByTestId('tab-pending-permission')).not.toBeInTheDocument()
   })
 
+  it('shows the pending count on a tab with more than one prompt (#5693)', () => {
+    render(
+      <SessionBar
+        sessions={makeSessions([
+          { pendingPermission: true, pendingPermissionCount: 1 },
+          { pendingPermission: true, pendingPermissionCount: 3 },
+        ])}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    // One pending → bare '!'; many → '!N'.
+    expect(within(screen.getByTestId('session-tab-s1')).getByTestId('tab-pending-permission').textContent).toBe('!')
+    expect(within(screen.getByTestId('session-tab-s2')).getByTestId('tab-pending-permission').textContent).toBe('!3')
+  })
+
+  it('renders the aggregate "N pending" badge and jumps on click (#5693)', () => {
+    const onJumpToPending = vi.fn()
+    render(
+      <SessionBar
+        sessions={makeSessions([{}, { pendingPermission: true, pendingPermissionCount: 2 }])}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+        pendingPermissionTotal={2}
+        onJumpToPending={onJumpToPending}
+      />
+    )
+    const badge = screen.getByTestId('pending-permission-total')
+    expect(badge.textContent).toContain('2 pending')
+    fireEvent.click(badge)
+    expect(onJumpToPending).toHaveBeenCalledTimes(1)
+  })
+
+  it('hides the aggregate badge when nothing is pending (#5693)', () => {
+    render(
+      <SessionBar
+        sessions={makeSessions()}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+        pendingPermissionTotal={0}
+        onJumpToPending={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('pending-permission-total')).not.toBeInTheDocument()
+  })
+
   it('calls onSwitch when clicking inactive tab', () => {
     const onSwitch = vi.fn()
     render(

@@ -49,6 +49,9 @@ export interface SessionTabData {
   // attention indicator on the tab so a background session's request is
   // visible without switching to it.
   pendingPermission?: boolean
+  // #5693 (PR-3): how many live unanswered permission prompts this session has.
+  // Renders as a count on the tab (`!2`) when > 1.
+  pendingPermissionCount?: number
 }
 
 /**
@@ -88,6 +91,14 @@ export interface SessionBarProps {
    * `open`, a pinned non-session tab renders at the left of the strip.
    */
   controlRoom?: ControlRoomTabState
+  /**
+   * #5693 (PR-3) — total live pending permissions across ALL sessions. When
+   * > 0, an aggregate "N pending" badge renders in the bar; clicking it calls
+   * `onJumpToPending` to focus the next waiting session.
+   */
+  pendingPermissionTotal?: number
+  /** #5693 (PR-3) — focus the next session with a pending permission. */
+  onJumpToPending?: () => void
 }
 
 function shortenModel(model: string): string {
@@ -149,7 +160,7 @@ export function reorderTabs(ids: string[], fromIndex: number, toIndex: number): 
   return next
 }
 
-export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession, onReorder, controlRoom }: SessionBarProps) {
+export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession, onReorder, controlRoom, pendingPermissionTotal = 0, onJumpToPending }: SessionBarProps) {
   const [renamingId, setRenamingId] = useState<string | null>(null)
   const [renameValue, setRenameValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
@@ -530,17 +541,21 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
               )
             })()}
 
-            {/* #5667 — unanswered permission prompt waiting in this session. */}
-            {session.pendingPermission && (
-              <span
-                className="tab-pending-permission"
-                data-testid="tab-pending-permission"
-                title="Permission requested — waiting for your approval"
-                aria-label="Permission requested — waiting for your approval"
-              >
-                !
-              </span>
-            )}
+            {/* #5667 / #5693 — unanswered permission prompt(s) waiting in this
+                session. Shows the count when more than one is pending. */}
+            {session.pendingPermission && (() => {
+              const count = session.pendingPermissionCount ?? 1
+              return (
+                <span
+                  className="tab-pending-permission"
+                  data-testid="tab-pending-permission"
+                  title={`${count} permission request${count === 1 ? '' : 's'} — waiting for your approval`}
+                  aria-label={`${count} permission request${count === 1 ? '' : 's'} waiting for your approval`}
+                >
+                  {count > 1 ? `!${count}` : '!'}
+                </span>
+              )
+            })()}
 
             {renamingId === session.sessionId ? (
               <input
@@ -649,6 +664,23 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
       >
         +
       </button>
+
+      {/* #5693 (PR-3) — aggregate "N pending" badge across all sessions. One
+          place to see the total, and clicking it jumps to the next waiting
+          session (cyclically) so prompts stay contained in their own tab while
+          remaining one click away. */}
+      {pendingPermissionTotal > 0 && (
+        <button
+          className="session-bar-pending-total"
+          data-testid="pending-permission-total"
+          onClick={onJumpToPending}
+          aria-label={`${pendingPermissionTotal} permission request${pendingPermissionTotal === 1 ? '' : 's'} waiting — go to the next`}
+          title={`${pendingPermissionTotal} permission request${pendingPermissionTotal === 1 ? '' : 's'} waiting — click to go to the next`}
+          type="button"
+        >
+          <span aria-hidden="true">⚠ {pendingPermissionTotal} pending</span>
+        </button>
+      )}
 
       {/* #4951 — visually-hidden hint referenced via `aria-describedby`
           on each draggable tab. Renders unconditionally so the id stays

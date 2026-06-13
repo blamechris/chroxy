@@ -1823,9 +1823,12 @@ button.sidebar-token-view-session-row:hover {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 14px;
+  /* #5693: grow past a circle when a count (`!2`) is shown. */
+  min-width: 14px;
   height: 14px;
-  border-radius: 50%;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
   font-size: 10px;
   font-weight: 800;
   line-height: 1;
@@ -1833,6 +1836,36 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-purple);
   border: 1px solid var(--border-permission, color-mix(in srgb, var(--accent-purple) 45%, transparent));
   cursor: help;
+}
+
+/* #5693 (PR-3) — aggregate "N pending" badge in the session bar. Clickable;
+   jumps to the next waiting session. */
+.session-bar-pending-total {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 11px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--bg-permission, color-mix(in srgb, var(--accent-purple) 22%, transparent));
+  color: var(--accent-purple);
+  border: 1px solid var(--border-permission, color-mix(in srgb, var(--accent-purple) 45%, transparent));
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.session-bar-pending-total:hover {
+  background: color-mix(in srgb, var(--accent-purple) 32%, transparent);
+}
+
+.session-bar-pending-total:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 1px;
 }
 
 .tab-close {
