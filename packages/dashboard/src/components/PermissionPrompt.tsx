@@ -188,13 +188,26 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   if (dismissed) return null
 
   return (
-    <div className={`permission-prompt${answered ? ' answered' : ''}`} data-testid="permission-prompt">
+    // #5731 (a11y): a permission request is a time-critical decision that
+    // auto-DENIES on timeout, but the bare div announced nothing to a
+    // screen-reader user reading the dashboard. Mark it as an assertive
+    // alertdialog with an accessible name + description so it's spoken the moment
+    // it appears (the OS-notification fallback only fires when the window is
+    // unfocused, leaving the in-focus SR case uncovered).
+    <div
+      className={`permission-prompt${answered ? ' answered' : ''}`}
+      data-testid="permission-prompt"
+      role="alertdialog"
+      aria-live="assertive"
+      aria-label={`Permission request${sessionLabel ? ` from ${sessionLabel}` : ''}`}
+      aria-describedby={`perm-desc-${requestId}`}
+    >
       {sessionLabel && (
         <div className="perm-session" data-testid="perm-session" title={`Requested by ${sessionLabel}`}>
           {sessionLabel}
         </div>
       )}
-      <div className="perm-desc">
+      <div className="perm-desc" id={`perm-desc-${requestId}`}>
         <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
       </div>
 
@@ -202,6 +215,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         <div
           className={`perm-countdown${isUrgent ? ' urgent' : ''}${isExpired ? ' expired' : ''}`}
           data-testid="perm-countdown"
+          // #5731 (a11y): the countdown ticks every second INSIDE the assertive
+          // alertdialog container. Without muting it, the live region would
+          // re-announce the changing time every second (worse than silence — the
+          // #4873 reconnect-storm spam class). aria-live="off" excludes the tick
+          // from announcements while the container still announces the request
+          // ONCE on appearance. The visual urgent/expired styling is unaffected.
+          aria-live="off"
         >
           {isExpired ? 'Timed out' : formatCountdown(remaining)}
         </div>

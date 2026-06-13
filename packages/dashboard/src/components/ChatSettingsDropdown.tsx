@@ -178,6 +178,7 @@ export function ChatSettingsDropdown({
       {showPermissionMode && availablePermissionModes.length > 0 && (
         <select
           data-kind="permission"
+          aria-label="Permission mode"
           value={permissionMode || ''}
           onChange={e => onPermissionModeChange(e.target.value)}
           // #4019: server-side PERMISSION_MODES carries a `description` for
@@ -199,6 +200,7 @@ export function ChatSettingsDropdown({
       {showThinkingLevel && (
         <select
           data-kind="thinking"
+          aria-label="Thinking level"
           value={thinkingLevel || 'default'}
           onChange={e => onThinkingLevelChange(e.target.value)}
         >
