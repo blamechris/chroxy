@@ -406,7 +406,12 @@ describe('handleSetModel — provider modelSwitch capability guard (#5731)', () 
     const client = makeClient()
     const ws = { readyState: 1 }
 
-    settingsHandlers['set_model'](ws, client, { type: 'set_model', model: 'claude-opus-4-8', requestId: 'r1' }, ctx)
+    // Use a model that IS in claude-tui's allowlist and differs from the session's
+    // current one, so WITHOUT the guard the request would pass the allowlist and
+    // call setModel + broadcast — i.e. every assertion below distinguishes the
+    // fixed handler from the unfixed one (#5732 review). An out-of-allowlist model
+    // would already be rejected by the pre-existing MODEL_NOT_SUPPORTED branch.
+    settingsHandlers['set_model'](ws, client, { type: 'set_model', model: 'claude-opus-4-7', requestId: 'r1' }, ctx)
 
     // The PTY model is never touched and no false model_changed is broadcast.
     assert.equal(setModelSpy.mock.callCount(), 0, 'setModel must NOT be called for a non-switch provider')
