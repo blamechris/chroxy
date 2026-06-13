@@ -2643,4 +2643,84 @@ describe('InputBar push-to-talk (#5610)', () => {
 
     expect(voice.start).not.toHaveBeenCalled()
   })
+
+  // #5666 — fast typing must never hit the suppress-then-reinsert path that
+  // races overlapping keystrokes and reorders characters around spaces.
+  describe('typing-cadence guard (#5666)', () => {
+    it('a Space typed right after another key takes the native path (no arm, no programmatic splice)', () => {
+      vi.useFakeTimers()
+      const nowSpy = vi.spyOn(performance, 'now')
+      const voice = makeVoice()
+      const onValueChange = vi.fn()
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          controlledValue="hello"
+          onValueChange={onValueChange}
+          voiceInput={voice}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      textarea.setSelectionRange(5, 5)
+
+      // A letter at t=1000, then Space 100ms later — well inside the 250ms
+      // typing window, so the user is clearly typing words, not holding to talk.
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: 'o' })
+      nowSpy.mockReturnValue(1100)
+      fireEvent.keyDown(textarea, { key: ' ' })
+      act(() => { vi.advanceTimersByTime(300) })
+
+      // Never armed → never started recording.
+      expect(voice.start).not.toHaveBeenCalled()
+      // Native path → we never programmatically spliced a space (which is what
+      // raced the fast keystrokes in #5625). onValueChange is only called by the
+      // deferred re-insert, so it must not have fired.
+      expect(onValueChange).not.toHaveBeenCalled()
+      nowSpy.mockRestore()
+    })
+
+    it('a deliberate Space hold after a typing pause still arms PTT', () => {
+      vi.useFakeTimers()
+      const nowSpy = vi.spyOn(performance, 'now')
+      const voice = makeVoice()
+      render(<ControlledBar voiceInput={voice} initial="hi" />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      textarea.setSelectionRange(2, 2)
+
+      // Last key at t=1000; the Space comes 400ms later — past the guard, so a
+      // hold is a genuine push-to-talk gesture and must still arm.
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: 'i' })
+      nowSpy.mockReturnValue(1400)
+      fireEvent.keyDown(textarea, { key: ' ' })
+      act(() => { vi.advanceTimersByTime(300) })
+
+      expect(voice.start).toHaveBeenCalledTimes(1)
+      expect(textarea.value).toBe('hi')
+      nowSpy.mockRestore()
+    })
+  })
+
+  // #5668 — a Space hold landing on top of an already-running (button-started)
+  // recording must not arm PTT: arming would let the later release stop a
+  // recording PTT never started, and re-enter start() (wiping the transcript).
+  it('does not arm PTT when a recording is already in progress, and release does not stop it (#5668)', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    const voice = makeVoice({ isRecording: true, start, stop })
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    fireEvent.keyUp(textarea, { key: ' ' })
+
+    // PTT never armed → never re-invoked start() and never stopped the button
+    // recording on release.
+    expect(start).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+  })
 })
