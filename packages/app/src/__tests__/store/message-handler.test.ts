@@ -3757,6 +3757,9 @@ describe('permission_request message handler', () => {
     expect(bgPrompt!.originSessionId).toBe('s-bg');
     // The focused tab must NOT have received the background session's prompt.
     expect(state.sessionStates['s-active'].messages.find((m: any) => m.type === 'prompt')).toBeUndefined();
+    // Tab-invisibility: ensuring s-bg's state must not register a phantom tab —
+    // tabs derive from `sessions` (unchanged), not the `sessionStates` keys.
+    expect(state.sessions).toHaveLength(2);
   });
 
   it('sets expiresAt from remainingMs', () => {

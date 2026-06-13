@@ -4127,6 +4127,10 @@ describe('dashboard message-handler dispatch', () => {
       expect(state.sessionStates['s-active'].messages.find((m: any) => m.type === 'prompt')).toBeUndefined()
       // ...and not the flat top-level messages that mirror the focused tab.
       expect((state.messages || []).find((m: any) => m.type === 'prompt')).toBeUndefined()
+      // Tab-invisibility (the whole safety basis): creating s-bg's state must
+      // NOT register it as a tab — tabs derive from `sessions`, not the
+      // `sessionStates` keys.
+      expect((state.sessions || []).some((s: any) => s.sessionId === 's-bg')).toBe(false)
     })
 
     it('leaves originSessionId undefined for an unmapped request (no wire sessionId) (#5667)', () => {
