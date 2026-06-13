@@ -15,7 +15,8 @@ import { OTHER_OPTION_VALUE, bumpRenderCount } from '@chroxy/store-core';
 // `isFreeformAnswer` guard. Re-exported below for the existing call sites
 // (SessionScreen, ChatView, MessageBubble's own onSelectOption signature).
 import type { OtherFreeformAnswer } from '@chroxy/store-core';
-import type { ChatMessage, ToolResultImage } from '../../store/connection';
+import type { ChatMessage, ToolResultImage, SessionInfo } from '../../store/connection';
+import { useConnectionStore } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { FormattedResponse } from '../MarkdownRenderer';
@@ -51,6 +52,25 @@ import type { MultiQuestionAnswersMap } from './MultiQuestionForm';
 export type { OtherFreeformAnswer };
 
 export type SelectOptionValue = string | OtherFreeformAnswer;
+
+/**
+ * #5674 — mobile parity with the dashboard's `buildSessionLabel` (#5667):
+ * a short "which session is asking" label for a permission prompt, derived
+ * from the message's `originSessionId`. Returns undefined when there's no
+ * origin, the owning session is unknown, or only one session exists (nothing
+ * to disambiguate) — so single-session users see no extra chrome.
+ */
+export function buildPromptSessionLabel(
+  originSessionId: string | undefined,
+  sessions: SessionInfo[],
+): string | undefined {
+  if (!originSessionId || sessions.length <= 1) return undefined;
+  const session = sessions.find((s) => s.sessionId === originSessionId);
+  if (!session) return undefined;
+  const name = session.name?.trim() || originSessionId;
+  const provider = session.provider?.trim();
+  return provider ? `${name} · ${provider}` : name;
+}
 
 function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
@@ -137,6 +157,16 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
   const isSystem = message.type === 'system';
+
+  // #5674 — resolve the owning-session label for permission prompts so a user
+  // juggling multiple chats can see WHICH session is asking (dashboard parity,
+  // #5667). Read via a selector returning a stable string|undefined: non-prompt
+  // bubbles (no originSessionId) resolve to undefined and never re-render on a
+  // sessions change, and the #5516 memo skip on delta flushes is preserved (the
+  // label only changes when the session list itself does).
+  const promptSessionLabel = useConnectionStore((s) =>
+    buildPromptSessionLabel(message.originSessionId, s.sessions),
+  );
 
   // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
   // Without this, otherActive would stay true after an answer arrives from
@@ -333,6 +363,23 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
           <PermissionCountdown expiresAt={message.expiresAt} onExpire={() => setIsExpired(true)} />
         )}
       </View>
+      {/* #5674 — which session is asking. Rendered as its own line under the
+          header so it never crowds the tool name / countdown row, and only on
+          an UNANSWERED prompt with 2+ sessions to disambiguate. Intentionally
+          broader than the dashboard (which labels only live permission
+          prompts): an AskUserQuestion prompt benefits from the same "which
+          chat wants my input" attribution, so we gate on the prompt being
+          live rather than on requestId. Answered+collapsed permission prompts
+          take the PermissionPill early-return above and never reach here. */}
+      {isPrompt && !message.answered && promptSessionLabel && (
+        <Text
+          testID="prompt-session-label"
+          style={styles.promptSessionLabel}
+          numberOfLines={1}
+        >
+          {promptSessionLabel}
+        </Text>
+      )}
       {/* #4973 — when the multi-question form / summary renders, suppress
           the body content Text. The top-level `message.content` mirrors
           Q[0]'s question (store-core handleUserQuestion), so rendering it
@@ -656,6 +703,12 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     alignItems: 'center',
     marginBottom: 4,
+  },
+  promptSessionLabel: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: '500',
+    marginBottom: 6,
   },
   promptOptions: {
     flexDirection: 'row',
