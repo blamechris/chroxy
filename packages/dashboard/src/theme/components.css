@@ -4650,7 +4650,7 @@ button.sidebar-token-view-session-row:hover {
   border: 1px solid var(--accent-red);
   border-radius: 6px;
   font-size: 12px;
-  color: var(--text-bright);
+  color: var(--text-error);
 }
 .voice-error-icon {
   color: var(--accent-red);
