@@ -754,9 +754,11 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
   // stale across a reconnect or tab switch. `session_role` is otherwise only
   // broadcast on an actual primary change (_announcePrimary), so a client
   // that dropped while a role was assigned would never re-learn it — mirroring
-  // the model / permission-mode / thinking-level re-sync above. Always send:
-  // primaryClientId null (unclaimed) is a valid state the client must be able
-  // to clear a stale role to. Both clients' `session_role` handlers are pure
+  // the model / permission-mode / thinking-level re-sync above. When the ctx
+  // exposes getPrimary (always true for production wiring; a legacy/direct
+  // caller without it simply skips this), send unconditionally — including the
+  // unclaimed case as `primaryClientId: null`, a valid payload the client uses
+  // to CLEAR a stale role. Both clients' `session_role` handlers are pure
   // state-setters (no toast), so re-emitting on every reconnect is idempotent.
   if (typeof ctx.getPrimary === 'function') {
     send(ws, {
