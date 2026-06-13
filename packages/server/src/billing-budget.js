@@ -45,7 +45,10 @@ export function monthKeyUtc(now = Date.now()) {
  */
 export function resolveMonthlyCreditBudgetUsd(billingConfig = {}) {
   const override = billingConfig?.monthlyCreditBudgetUsd
-  if (Number.isFinite(override) && override >= 0) return override
+  // Require a POSITIVE override. `0` is treated as "no override" (fall through
+  // to the tier preset / null) rather than a real $0 cap — a $0 cap would
+  // render a permanently-"exceeded" $0/$0 meter the moment any session billed.
+  if (Number.isFinite(override) && override > 0) return override
   const tier = billingConfig?.creditTier
   if (typeof tier === 'string' && Object.prototype.hasOwnProperty.call(CREDIT_TIER_BUDGETS_USD, tier)) {
     return CREDIT_TIER_BUDGETS_USD[tier]
@@ -137,7 +140,11 @@ export class MonthlyProgrammaticBudgetManager {
   recordSpend(costUsd, now = Date.now()) {
     this._rollIfNeeded(now)
     if (Number.isFinite(costUsd)) {
-      this._state.spentUsd += costUsd
+      // Floor the running total at 0: a refund/credit turn (#4099, signed cost)
+      // reduces this month's spend but can never carry a NEGATIVE balance into
+      // later turns (which would silently mask subsequent real spend). "Spend
+      // this month" is a non-negative quantity.
+      this._state.spentUsd = Math.max(0, this._state.spentUsd + costUsd)
       this._state.turnsBilled += 1
     }
     const status = this.getStatus(now)

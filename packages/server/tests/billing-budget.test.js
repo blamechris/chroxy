@@ -41,6 +41,13 @@ test('resolveMonthlyCreditBudgetUsd: null when unconfigured or unknown tier', ()
   assert.equal(resolveMonthlyCreditBudgetUsd({ monthlyCreditBudgetUsd: Infinity }), null)
 })
 
+test('resolveMonthlyCreditBudgetUsd: a zero override is "no override" (falls through to tier / null)', () => {
+  // A literal $0 cap would render a permanently-exceeded $0/$0 meter, so 0 is
+  // treated as unset rather than a real cap.
+  assert.equal(resolveMonthlyCreditBudgetUsd({ monthlyCreditBudgetUsd: 0 }), null)
+  assert.equal(resolveMonthlyCreditBudgetUsd({ creditTier: 'pro', monthlyCreditBudgetUsd: 0 }), 20)
+})
+
 test('resolveWarningPercent: default and validation', () => {
   assert.equal(resolveWarningPercent({}), DEFAULT_BUDGET_WARNING_PERCENT)
   assert.equal(resolveWarningPercent({ budgetWarningPercent: 90 }), 90)
@@ -104,11 +111,14 @@ test('rolls over and resets at the UTC month boundary', () => {
   assert.equal(r2.justWarned, true)
 })
 
-test('spentUsd floors at 0 when a refund drives the raw total negative', () => {
+test('a refund floors the running total at 0 and does not carry negative into later turns', () => {
   const m = new MonthlyProgrammaticBudgetManager({ billingConfig: { creditTier: 'pro' }, now: JUN_2026 })
   m.recordSpend(5, JUN_2026)
-  const { status } = m.recordSpend(-20, JUN_2026) // refund
-  assert.equal(status.spentUsd, 0)
+  const { status } = m.recordSpend(-20, JUN_2026) // large refund
+  assert.equal(status.spentUsd, 0, 'floors at 0, not -15')
+  // The next real spend starts from 0 — the refund did NOT mask it.
+  const after = m.recordSpend(3, JUN_2026)
+  assert.equal(after.status.spentUsd, 3)
 })
 
 test('ignores non-finite cost deltas', () => {

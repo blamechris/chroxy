@@ -3103,25 +3103,41 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'monthly_budget': {
       // #5665 — machine-wide monthly programmatic-credit meter snapshot/event.
       // Sent on connect and after each programmatic-credit-billed turn. Store
-      // the latest snapshot; the one-shot justWarned/justExceeded flags drive
-      // notifications elsewhere and are not persisted in store state.
+      // the latest snapshot for the sidebar meter, and fire a one-time info
+      // toast when the server reports a fresh threshold crossing
+      // (justWarned/justExceeded — latched once per month server-side, so the
+      // toast never spams turn-over-turn while over the threshold).
       const month = typeof msg.month === 'string' ? msg.month : null;
       if (month) {
         const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
         const numOrNull = (v: unknown): number | null =>
           v === null ? null : typeof v === 'number' && Number.isFinite(v) ? v : null;
+        const spentUsd = num(msg.spentUsd);
+        const budgetUsd = numOrNull(msg.budgetUsd);
         getStore().setState({
           monthlyBudget: {
             month,
-            spentUsd: num(msg.spentUsd),
+            spentUsd,
             turnsBilled: num(msg.turnsBilled),
-            budgetUsd: numOrNull(msg.budgetUsd),
+            budgetUsd,
             warningPercent: num(msg.warningPercent),
             percent: numOrNull(msg.percent),
             warning: msg.warning === true,
             exceeded: msg.exceeded === true,
           },
         });
+        const cap = budgetUsd != null ? `$${budgetUsd.toFixed(2)}` : '';
+        const spent = `$${spentUsd.toFixed(2)}`;
+        if (msg.justExceeded === true) {
+          get().addInfoNotification(
+            `Monthly programmatic-credit budget exceeded — ${spent}${cap ? ` of ${cap}` : ''} of your credit pool spent this month (chroxy-observed).`,
+          );
+        } else if (msg.justWarned === true) {
+          const pct = numOrNull(msg.percent);
+          get().addInfoNotification(
+            `Monthly credit budget at ${pct != null ? `${Math.round(pct)}%` : 'the warning threshold'} — ${spent}${cap ? ` of ${cap}` : ''} spent this month (chroxy-observed).`,
+          );
+        }
       }
       break;
     }
