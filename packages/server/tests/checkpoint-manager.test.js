@@ -61,6 +61,10 @@ describe('CheckpointManager', () => {
   })
 
   it('#5731 (T3): emits checkpoint_persist_failed when the disk write fails, but still returns the checkpoint', async () => {
+    // Root bypasses DAC permission checks, so the read-only-dir trick can't force
+    // a write failure when run as uid 0 (Docker/devcontainer) — skip there, mirroring
+    // permission-hook-sidecar-integration.test.js.
+    if (process.getuid && process.getuid() === 0) return
     // Read-only checkpoints dir → writeFileRestricted can't create the file.
     const roDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-ro-'))
     chmodSync(roDir, 0o555)
