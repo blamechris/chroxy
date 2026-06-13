@@ -1556,6 +1556,33 @@ describe('handleKeyExchange', () => {
       assert.equal(ws.closed, false)
     })
 
+    it('aborts the handshake (rolls back crypto state, closes) when key_exchange_ok send fails (#5702 8b)', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx, client, flushPostAuthQueue } = makeKeyExchangeCtx({ ws })
+      client.postAuthQueue = [{ type: 'session_list' }]
+      // The key_exchange_ok send fails (half-open / torn-down socket). It's the
+      // only ws.send on the valid path, so this isolates the failure to it.
+      ws.send = () => { throw new Error('socket gone') }
+
+      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+      assert.equal(result, true)
+
+      // Crypto state rolled back — the server must NOT believe E2E is established
+      // (else it would encrypt frames the client never got the key for).
+      assert.equal(client.encryptionState, null)
+      assert.equal(client.encryptionPending, false)
+      // The post-auth queue must NOT be flushed.
+      assert.equal(flushPostAuthQueue.callCount, 0)
+      assert.equal(client.postAuthQueue, null)
+      // Connection closed so the client reconnects and retries the handshake.
+      assert.equal(ws.closed, true)
+      assert.equal(ws.closeCode, 1011)
+    })
+
     it('derives per-connection sub-key when client sends salt', () => {
       const clientKp = nacl.box.keyPair()
       const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
