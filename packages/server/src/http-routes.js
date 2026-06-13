@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync, statSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
@@ -286,6 +286,14 @@ export function createHttpHandler(server) {
         }
         let body
         try {
+          // Defence-in-depth: enforce the per-page size cap on SERVE too, not
+          // just at publish time, so a file that somehow grew past the cap (a
+          // future publish path, an external write) can't be read unbounded
+          // into memory.
+          if (statSync(filePath).size > server.pagesStore.maxPageBytes) {
+            notFound()
+            return
+          }
           body = readFileSync(filePath)
         } catch {
           notFound()

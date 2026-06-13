@@ -61,6 +61,14 @@ endpoints with the operator's ambient credential. Layered mitigations:
    `chroxy pages rm <slug>` revokes a link instantly (deletes the dir + manifest entry).
 5. New token class **"page share slug"** documented in
    `docs/security/bearer-token-authority.md`.
+6. **Serve-side size ceiling** — the per-page byte cap is re-checked on serve
+   (`statSync` vs `maxPageBytes`), not only at publish time, so a file that ever
+   grows past the cap can't be read unbounded into memory.
+
+**Accepted risk:** `GET /p/<guess>` returns `301` for an existing slug and `404`
+for a missing one — a slug-existence oracle. Against 128-bit random slugs under
+the per-IP rate limit this is academic (you cannot enumerate the space), so it is
+accepted rather than masked.
 
 ## Publish & manage flow
 

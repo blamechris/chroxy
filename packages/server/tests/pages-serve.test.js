@@ -3,7 +3,7 @@ import { test, before, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { createServer } from 'node:http'
 import { once } from 'node:events'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHttpHandler } from '../src/http-routes.js'
@@ -93,4 +93,24 @@ test('the pages route does not require (or consult) bearer auth', async () => {
   const meta = store.publishHtml({ title: 'public', html: '<p>open</p>' })
   const res = await fetch(`${base}/p/${meta.slug}/`)
   assert.equal(res.status, 200)
+})
+
+test('serve-side size ceiling: a file grown past the cap is not served (404)', async () => {
+  // Defence-in-depth: even if a file bypasses the publish-time cap, serve must
+  // refuse it rather than read it unbounded.
+  const d = mkdtempSync(join(tmpdir(), 'chroxy-pages-cap-'))
+  const smallStore = new PagesStore({ pagesDir: d, maxPageBytes: 50 })
+  const meta = smallStore.publishHtml({ title: 't', html: 'small' }) // within cap
+  writeFileSync(join(d, meta.slug, 'index.html'), 'x'.repeat(500)) // grow past cap
+  const srv = createServer(createHttpHandler({ ...mockServer(), pagesStore: smallStore }))
+  srv.listen(0, '127.0.0.1')
+  await once(srv, 'listening')
+  const b = `http://127.0.0.1:${srv.address().port}`
+  try {
+    const res = await fetch(`${b}/p/${meta.slug}/`)
+    assert.equal(res.status, 404)
+  } finally {
+    srv.close()
+    rmSync(d, { recursive: true, force: true })
+  }
 })

@@ -77,6 +77,11 @@ export class PagesStore {
     this._manifest = this._loadManifest()
   }
 
+  /** Per-page byte cap — also used as a serve-side ceiling (defence-in-depth). */
+  get maxPageBytes() {
+    return this._maxPageBytes
+  }
+
   _loadManifest() {
     try {
       const raw = JSON.parse(readFileSync(this._manifestPath, 'utf8'))
