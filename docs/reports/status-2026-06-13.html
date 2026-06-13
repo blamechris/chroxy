@@ -74,7 +74,7 @@
 <h2>1.5 · Autonomous durability marathon — continuation</h2>
 <p>Picking up the durability epic <a href="https://github.com/blamechris/chroxy/issues/5703">#5703</a> (parity with the Claude Code CLI — "don't let me break stuff, don't make me lose my place"). Run as orchestrator + delegated worktree-isolated review agents; every PR gated by adversarial review + full CI + resolved threads before a synchronous squash-merge. <strong>4 PRs merged; design decisions made on your behalf are recorded below.</strong></p>
 <div class="cards">
-  <div class="card"><div class="n" style="color:var(--green)">4</div><div class="l">Durability PRs merged</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">5</div><div class="l">Durability PRs merged</div></div>
   <div class="card"><div class="n">3</div><div class="l">Decisions recorded</div></div>
   <div class="card"><div class="n">2</div><div class="l">Follow-ups filed</div></div>
   <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides</div></div>
@@ -86,6 +86,7 @@
     <tr><td>#5727 → #5710</td><td>Force escape hatch to delete a wedged/stuck-running session (server <code>force</code> bypass + dashboard "delete anyway?" confirm). Recovers the recoverability gap #5707 introduced — you can't get stuck unable to remove a dead tab.</td><td><span class="pill ok">merged</span></td></tr>
     <tr><td>#5724 → #5698</td><td>Cap the reconnect ladder (10 rungs ≈ 59s) → terminal <code>server_down</code> state with a manual Reconnect + wake-recovery on tab-visible, instead of spinning "Reconnecting…" forever (FIX-2).</td><td><span class="pill ok">merged</span></td></tr>
     <tr><td>#5728 → #5699</td><td>Refuse permission answers on a disconnected/cached session (store + buttons + keyboard) instead of optimistically marking them "answered" and silently losing them. The "did it actually send?" footgun.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5729 → #5714</td><td>Surface <code>session_persist_failed</code> to clients (server forward + protocol + dashboard &amp; app banner): when a create/rename/destroy can't be flushed to disk it shows "couldn't save — may be lost on restart" instead of silently reverting on the next boot.</td><td><span class="pill ok">merged</span></td></tr>
     <tr><td>#5697</td><td><code>handleStreamStart</code> response-reuse replay guard</td><td><span class="pill neutral">wontfix (decision below)</span></td></tr>
   </tbody>
 </table>
