@@ -206,6 +206,32 @@ describe('WS handler: destroy_session', () => {
     ws.close()
   })
 
+  it('rejects destroying a session while it is running', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Busy', cwd: '/tmp', isRunning: true },
+    ])
+    manager.destroySession = createSpy(() => {})
+    manager.destroySessionLocked = createSpy(() => Promise.resolve())
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2' })
+
+    const error = await waitForMessage(messages, 'session_error')
+    assert.ok(error.message.includes('running'), 'Error should mention the session is running')
+    assert.equal(manager.destroySession.callCount, 0, 'destroySession should NOT be called')
+    assert.equal(manager.destroySessionLocked.callCount, 0, 'destroySessionLocked should NOT be called')
+
+    ws.close()
+  })
+
   it('awaits destroySessionLocked when present', async () => {
     const { manager, sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'First', cwd: '/tmp' },
