@@ -38,6 +38,9 @@ import {
   registerModelChangeRequest,
   clearPendingModelReverts,
   _testModelRevertPendingSize,
+  registerPermissionModeChangeRequest,
+  clearPendingPermissionModeReverts,
+  _testPermissionModeRevertPendingSize,
   setDeltaFlushIntervalOverride,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
@@ -451,9 +454,15 @@ describe('dashboard message-handler dispatch', () => {
         setStore(store)
         registerModelChangeRequest('req1', { sessionId: 's1', previousModel: 'A' })
         registerModelChangeRequest('req2', { sessionId: 's1', previousModel: 'B' })
+        expect(_testModelRevertPendingSize()).toBe(2)
 
         // req1 succeeds first.
         handleMessage({ type: 'model_changed', sessionId: 's1', model: 'B' }, ctx() as any)
+        // Discriminating assertion: success must NOT consume/clear either pending
+        // revert (the clear-on-success regression). Without this, the test passes
+        // either way — req2's revert target ('B') equals the success value ('B'),
+        // so the final activeModel is 'B' whether or not the revert actually fired.
+        expect(_testModelRevertPendingSize()).toBe(2)
         // req2 is then rejected.
         handleMessage(
           { type: 'error', requestId: 'req2', code: 'MODEL_NOT_APPLIED', message: 'mid-turn' },
@@ -462,6 +471,7 @@ describe('dashboard message-handler dispatch', () => {
 
         const state = store.getState() as any
         expect(state.sessionStates.s1.activeModel).toBe('B') // req2 rolled back to B, not stuck on C
+        expect(_testModelRevertPendingSize()).toBe(1) // req2 consumed; req1 still pending
       })
 
       it('does NOT revert when the error requestId does not match a pending change', () => {
@@ -489,6 +499,157 @@ describe('dashboard message-handler dispatch', () => {
         expect(_testModelRevertPendingSize()).toBe(2)
         clearPendingModelReverts()
         expect(_testModelRevertPendingSize()).toBe(0)
+      })
+    })
+
+    // #5716 (sibling of #5711): set_permission_mode is optimistic too; a
+    // PERMISSION_MODE_NOT_APPLIED rejection (mid-turn change or same-mode no-op)
+    // must roll the dropdown back — the dangerous case being a phantom switch to
+    // 'auto'/bypass the session never actually entered.
+    describe('PERMISSION_MODE_NOT_APPLIED revert (#5716)', () => {
+      afterEach(() => { clearPendingPermissionModeReverts() })
+
+      it('reverts the optimistic permissionMode for the rejected request\'s session', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            permissionMode: 'auto', // optimistic value already applied by setPermissionMode
+            sessionStates: { s1: { ...createEmptySessionState(), permissionMode: 'auto' } },
+          }),
+        )
+        setStore(store)
+        registerPermissionModeChangeRequest('set-perm-1', { sessionId: 's1', previousMode: 'approve' })
+
+        handleMessage(
+          { type: 'error', requestId: 'set-perm-1', code: 'PERMISSION_MODE_NOT_APPLIED', message: 'session busy' },
+          ctx() as any,
+        )
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.permissionMode).toBe('approve') // rolled back from phantom bypass
+        expect(state.permissionMode).toBe('approve') // flat top-level reverted too
+        expect(_testPermissionModeRevertPendingSize()).toBe(0) // consumed
+      })
+
+      // #5722 review (Copilot): setPermissionMode also overwrites
+      // previousPermissionMode (the Shift+Tab toggle target). A rejected change
+      // must restore THAT too, else the toggle silently becomes a no-op
+      // (previous == current). Compare-and-swap so a later success isn't clobbered.
+      it('also restores previousPermissionMode (the Shift+Tab toggle target) on revert', () => {
+        // Session was on 'plan' with the toggle pointing back at 'approve'. The user
+        // switches plan→auto; setPermissionMode optimistically sets permissionMode
+        // 'auto' AND previousPermissionMode 'plan'. The server then rejects it.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            permissionMode: 'auto', // optimistic value
+            previousPermissionMode: 'plan', // optimistic toggle target (was 'approve' before)
+            sessionStates: { s1: { ...createEmptySessionState(), permissionMode: 'auto' } },
+          }),
+        )
+        setStore(store)
+        registerPermissionModeChangeRequest('set-perm-1', {
+          sessionId: 's1',
+          previousMode: 'plan', // restore permissionMode → plan
+          priorPreviousMode: 'approve', // restore the toggle target → approve
+        })
+
+        handleMessage(
+          { type: 'error', requestId: 'set-perm-1', code: 'PERMISSION_MODE_NOT_APPLIED', message: 'mid-turn' },
+          ctx() as any,
+        )
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.permissionMode).toBe('plan') // mode rolled back
+        expect(state.previousPermissionMode).toBe('approve') // toggle target rolled back too
+      })
+
+      it('does NOT clobber previousPermissionMode if a later change already moved it (compare-and-swap)', () => {
+        // Same rejected req (previousMode 'plan'), but by the time the error lands a
+        // newer successful change has set previousPermissionMode to 'acceptEdits'.
+        // The CAS must leave that newer value intact (current !== revert.previousMode).
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            permissionMode: 'auto',
+            previousPermissionMode: 'acceptEdits', // a later change moved it
+            sessionStates: { s1: { ...createEmptySessionState(), permissionMode: 'auto' } },
+          }),
+        )
+        setStore(store)
+        registerPermissionModeChangeRequest('set-perm-1', {
+          sessionId: 's1',
+          previousMode: 'plan',
+          priorPreviousMode: 'approve',
+        })
+
+        handleMessage(
+          { type: 'error', requestId: 'set-perm-1', code: 'PERMISSION_MODE_NOT_APPLIED', message: 'mid-turn' },
+          ctx() as any,
+        )
+
+        const state = store.getState() as any
+        expect(state.previousPermissionMode).toBe('acceptEdits') // newer value preserved, not clobbered
+      })
+
+      it('reverts the SECOND of two rapid changes even after the first acks (per-request, not per-session)', () => {
+        // approve→plan (req1) then plan→auto (req2) on s1, both in-flight. Server
+        // acks req1 (permission_mode_changed plan) and rejects req2 (mid-turn). The
+        // revert must restore 'plan' (req2's previousMode), not leave a phantom auto.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            permissionMode: 'auto',
+            sessionStates: { s1: { ...createEmptySessionState(), permissionMode: 'auto' } },
+          }),
+        )
+        setStore(store)
+        registerPermissionModeChangeRequest('req1', { sessionId: 's1', previousMode: 'approve' })
+        registerPermissionModeChangeRequest('req2', { sessionId: 's1', previousMode: 'plan' })
+        expect(_testPermissionModeRevertPendingSize()).toBe(2)
+
+        handleMessage({ type: 'permission_mode_changed', sessionId: 's1', mode: 'plan' }, ctx() as any)
+        // Discriminating assertion: the success broadcast must NOT consume/clear
+        // either pending revert (the #5715 clear-on-success regression). The final
+        // permissionMode check alone can't catch that here — req2's revert target
+        // ('plan') equals the success value ('plan'), so the state is 'plan'
+        // whether or not the revert fired.
+        expect(_testPermissionModeRevertPendingSize()).toBe(2)
+        handleMessage(
+          { type: 'error', requestId: 'req2', code: 'PERMISSION_MODE_NOT_APPLIED', message: 'mid-turn' },
+          ctx() as any,
+        )
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.permissionMode).toBe('plan') // req2 rolled back to plan, not stuck on auto
+        expect(_testPermissionModeRevertPendingSize()).toBe(1) // req2 consumed; req1 still pending
+      })
+
+      it('does NOT revert when the error requestId does not match a pending change', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), permissionMode: 'auto' } },
+          }),
+        )
+        setStore(store)
+        registerPermissionModeChangeRequest('set-perm-1', { sessionId: 's1', previousMode: 'approve' })
+
+        handleMessage(
+          { type: 'error', requestId: 'some-other-request', code: 'PERMISSION_MODE_NOT_APPLIED', message: 'x' },
+          ctx() as any,
+        )
+
+        expect((store.getState() as any).sessionStates.s1.permissionMode).toBe('auto') // untouched
+        expect(_testPermissionModeRevertPendingSize()).toBe(1) // still pending
+      })
+
+      it('clears all pending reverts on disconnect', () => {
+        registerPermissionModeChangeRequest('req-a', { sessionId: 's1', previousMode: 'approve' })
+        registerPermissionModeChangeRequest('req-b', { sessionId: 's2', previousMode: 'plan' })
+        expect(_testPermissionModeRevertPendingSize()).toBe(2)
+        clearPendingPermissionModeReverts()
+        expect(_testPermissionModeRevertPendingSize()).toBe(0)
       })
     })
 
