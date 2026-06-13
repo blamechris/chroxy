@@ -261,6 +261,21 @@ function setupSessionForwarding(normalizer, ctx) {
   devPreview.on('dev_preview_stopped', safeForward('dev_preview_stopped', ({ sessionId, port }) => {
     broadcastToSession(sessionId, { type: 'dev_preview_stopped', port })
   }))
+  // #5731: a tunnel.stop() that failed during closePreview — the public tunnel
+  // (and the exposed local port) may still be live. Surface it as a per-session
+  // error banner (reusing `session_error`, like the checkpoint/persist failure
+  // paths) so the user can verify / kill cloudflared instead of assuming the
+  // port is closed. recoverable:true — informational; the slot is already freed.
+  devPreview.on('dev_preview_stop_failed', safeForward('dev_preview_stop_failed', ({ sessionId, port, error }) => {
+    if (!sessionId) return
+    broadcastToSession(sessionId, {
+      type: 'session_error',
+      code: 'DEV_PREVIEW_STOP_FAILED',
+      sessionId,
+      recoverable: true,
+      message: `Couldn't fully stop the preview tunnel on port ${port} — it may still be exposed. Check the daemon logs and kill cloudflared manually if needed.${error ? ` (${error})` : ''}`,
+    })
+  }))
 
   // Dev server preview: cleanup on session destroy
   sessionManager.on('session_destroyed', safeForward('session_destroyed', ({ sessionId }) => {
@@ -346,6 +361,20 @@ function setupCliForwarding(normalizer, ctx) {
   devPreview.on('dev_preview_stopped', safeForward('cli:dev_preview_stopped', ({ sessionId, port }) => {
     if (sessionId === '__legacy__') {
       broadcast({ type: 'dev_preview_stopped', port })
+    }
+  }))
+  // #5731: same don't-claim-a-clean-stop surfacing on the legacy CLI path — a
+  // failed tunnel.stop() must not be silently dropped here either. Global
+  // broadcast (CLI is single-session) so the lone client learns the port may
+  // still be exposed.
+  devPreview.on('dev_preview_stop_failed', safeForward('cli:dev_preview_stop_failed', ({ sessionId, port, error }) => {
+    if (sessionId === '__legacy__') {
+      broadcast({
+        type: 'session_error',
+        code: 'DEV_PREVIEW_STOP_FAILED',
+        recoverable: true,
+        message: `Couldn't fully stop the preview tunnel on port ${port} — it may still be exposed. Check the daemon logs and kill cloudflared manually if needed.${error ? ` (${error})` : ''}`,
+      })
     }
   }))
 

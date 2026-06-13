@@ -445,6 +445,35 @@ describe('setupForwarding', () => {
     })
   })
 
+  describe('dev_preview_stop_failed event (#5731)', () => {
+    it('surfaces a tunnel-stop failure as a per-session session_error', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.devPreview.emit('dev_preview_stop_failed', { sessionId: 'sess-1', port: 3000, error: 'kill failed' })
+
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.code === 'DEV_PREVIEW_STOP_FAILED'
+      )
+      assert.ok(call, 'should broadcast a DEV_PREVIEW_STOP_FAILED session_error to the session')
+      const [sessionId, msg] = call.arguments
+      assert.equal(sessionId, 'sess-1')
+      assert.equal(msg.recoverable, true)
+      assert.match(msg.message, /port 3000/)
+      assert.match(msg.message, /may still be exposed/)
+    })
+
+    it('ignores a dev_preview_stop_failed with no sessionId', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      ctx.devPreview.emit('dev_preview_stop_failed', { port: 3000, error: 'x' })
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.code === 'DEV_PREVIEW_STOP_FAILED'
+      )
+      assert.equal(call, undefined)
+    })
+  })
+
   // #4756 — `stopped` event surfaces through the normalizer as a
   // `session_stopped` broadcast targeted at subscribers of the affected
   // session (NOT global broadcast). Pairs with the wiring in
@@ -620,6 +649,32 @@ describe('setupCliForwarding', () => {
     ctx.cliSession.emit('custom_internal', { foo: 'bar' })
 
     assert.equal(ctx.broadcast.mock.calls.length, 0)
+  })
+
+  // #5731: legacy CLI path must also surface a tunnel-stop failure (global
+  // broadcast) instead of silently claiming a clean stop.
+  it('broadcasts a DEV_PREVIEW_STOP_FAILED session_error for a legacy stop failure', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.devPreview.emit('dev_preview_stop_failed', { sessionId: '__legacy__', port: 3000, error: 'kill failed' })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    const errMsg = calls.find(m => m.type === 'session_error' && m.code === 'DEV_PREVIEW_STOP_FAILED')
+    assert.ok(errMsg, 'expected a DEV_PREVIEW_STOP_FAILED session_error broadcast')
+    assert.equal(errMsg.recoverable, true)
+    assert.match(errMsg.message, /port 3000/)
+    assert.match(errMsg.message, /may still be exposed/)
+  })
+
+  it('does not broadcast a stop failure for a non-legacy sessionId in cli mode', () => {
+    const ctx = makeCliCtx()
+    setupForwarding(ctx)
+
+    ctx.devPreview.emit('dev_preview_stop_failed', { sessionId: 'sess-x', port: 3000, error: 'x' })
+
+    const calls = ctx.broadcast.mock.calls.map(c => c.arguments[0])
+    assert.equal(calls.find(m => m.type === 'session_error'), undefined)
   })
 
   // #4756: legacy-cli mode must also forward the `stopped` event so the
