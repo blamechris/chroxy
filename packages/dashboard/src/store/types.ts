@@ -87,6 +87,7 @@ export type {
 // Import for local use in SessionState/ConnectionState definitions below
 import type {
   BaseSessionState,
+  BillingClass,
   ChatMessage,
   Checkpoint,
   ConnectedClient,

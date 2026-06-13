@@ -21,17 +21,22 @@
  *   - subscription       — flat Claude subscription billing (claude-tui,
  *                          claude-channel). No per-turn dollar figure. Era-
  *                          independent.
- *   - programmatic-credit — claude-cli / claude-sdk / docker-cli / docker-sdk
- *                          when auth is the OAuth/subscription pool. BEFORE
- *                          2026-06-15 these bill as flat `subscription`; ON/AFTER
- *                          they draw from Anthropic's monthly metered
- *                          programmatic-credit pool, so spend becomes a real
- *                          dollar figure.
+ *   - programmatic-credit — host claude-cli / claude-sdk when auth is the
+ *                          OAuth/subscription pool. BEFORE 2026-06-15 these
+ *                          bill as flat `subscription`; ON/AFTER they draw from
+ *                          Anthropic's monthly metered programmatic-credit pool,
+ *                          so spend becomes a real dollar figure.
  *
  * Refinement: a claude-cli / claude-sdk session authed with an explicit
  * ANTHROPIC_API_KEY (the raw-API branch in resolveAuth, source === 'env') is
  * a real per-token API account, NOT the credit pool — it classifies as
  * `api-key` in BOTH eras.
+ *
+ * docker-cli / docker-sdk are NOT in the programmatic set: they forward the
+ * host's ANTHROPIC_API_KEY into the container and have no OAuth fallback (the
+ * container has no ~/.claude state), so they always bill the raw API account
+ * (`api-key`), era-independent — the host's credit pool never applies inside
+ * the container.
  */
 
 export const BILLING_CLASSES = Object.freeze({
@@ -53,15 +58,13 @@ export const BILLING_CLASSES = Object.freeze({
  */
 export const PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026, 5, 15)
 
-// Providers whose OAuth/subscription auth flips from `subscription` to
+// Host providers whose OAuth/subscription auth flips from `subscription` to
 // `programmatic-credit` at the era boundary. (When authed with an explicit
 // API key, claude-cli / claude-sdk are reclassified to `api-key` by the
 // caller via opts.apiKeyAuth — see billingClassForProvider.)
 const PROGRAMMATIC_PROVIDERS = new Set([
   'claude-cli',
   'claude-sdk',
-  'docker-cli',
-  'docker-sdk',
 ])
 
 // Providers that always bill as a flat Claude subscription, era-independent.
@@ -71,9 +74,13 @@ const SUBSCRIPTION_PROVIDERS = new Set([
 ])
 
 // Providers that always bill against your own key / per-token, era-independent.
+// docker-cli / docker-sdk forward ANTHROPIC_API_KEY into the container with no
+// OAuth fallback, so they bill the raw API account just like BYOK.
 const API_KEY_PROVIDERS = new Set([
   'claude-byok',
   'docker-byok',
+  'docker-cli',
+  'docker-sdk',
 ])
 
 /**
@@ -107,10 +114,8 @@ export function billingClassForProvider(providerType, now = Date.now(), opts = {
   if (SUBSCRIPTION_PROVIDERS.has(providerType)) return BILLING_CLASSES.SUBSCRIPTION
   if (PROGRAMMATIC_PROVIDERS.has(providerType)) {
     // claude-cli / claude-sdk authed via an explicit API key is a raw API
-    // account, not the credit pool — bill as api-key in both eras. (docker-*
-    // forward the key into the container and have no OAuth fallback, so they
-    // are effectively always api-key too when a key is set; the caller passes
-    // apiKeyAuth for those just the same.)
+    // account, not the credit pool — bill as api-key in both eras. (docker-cli
+    // / docker-sdk are already in API_KEY_PROVIDERS above and never reach here.)
     if (opts.apiKeyAuth) return BILLING_CLASSES.API_KEY
     return isProgrammaticCreditEra(now)
       ? BILLING_CLASSES.PROGRAMMATIC_CREDIT

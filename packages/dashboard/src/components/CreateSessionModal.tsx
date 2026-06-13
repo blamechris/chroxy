@@ -87,11 +87,13 @@ function isProgrammaticCreditEra(now: number = Date.now()): boolean {
 /**
  * Billing context per provider — helps users understand cost implications.
  *
- * Date-gated for the providers that flip from a flat subscription to the
- * metered programmatic-credit pool on 2026-06-15 (claude-cli/sdk,
- * docker-cli/sdk). This is only the STATIC fallback; the live server
- * `auth.detail` (which is itself era-gated server-side) takes precedence at
- * the render site below.
+ * Date-gated only for the HOST providers that flip from a flat subscription to
+ * the metered programmatic-credit pool on 2026-06-15 (claude-cli / claude-sdk).
+ * docker-cli / docker-sdk forward an ANTHROPIC_API_KEY into the container with
+ * no OAuth fallback, so they are always api-key (the host credit pool never
+ * applies inside the container) — NOT date-gated. This is only the STATIC
+ * fallback; the live server `auth.detail` (itself era-gated server-side) takes
+ * precedence at the render site below.
  */
 function providerBillingFallback(provider: string, now: number = Date.now()): string | undefined {
   const era = isProgrammaticCreditEra(now)
@@ -104,12 +106,8 @@ function providerBillingFallback(provider: string, now: number = Date.now()): st
       : 'Uses your Claude subscription',
     'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
     'claude-byok': 'Direct Anthropic API — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
-    'docker-cli': era
-      ? 'Docker-isolated — monthly programmatic credit pool'
-      : 'Docker-isolated — uses your Claude subscription',
-    'docker-sdk': era
-      ? 'Docker-isolated — monthly programmatic credit pool'
-      : 'Docker-isolated — uses Anthropic API credits',
+    'docker-cli': 'Docker-isolated — Anthropic API (your ANTHROPIC_API_KEY forwarded to the container)',
+    'docker-sdk': 'Docker-isolated — Anthropic API (your ANTHROPIC_API_KEY forwarded to the container)',
     // #5026: docker-byok runs the BYOK agent loop on the host (so chroxy talks
     // to api.anthropic.com directly) while file/Bash tool execution happens
     // inside an isolated Docker container. Trade-off vs. claude-byok: same

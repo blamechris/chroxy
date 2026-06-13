@@ -38,6 +38,10 @@ describe('billingClassForProvider — era-independent classes', () => {
     it(`api-key providers are always api-key (now=${now})`, () => {
       assert.equal(billingClassForProvider('claude-byok', now), BILLING_CLASSES.API_KEY)
       assert.equal(billingClassForProvider('docker-byok', now), BILLING_CLASSES.API_KEY)
+      // docker-cli / docker-sdk forward a key into the container (no OAuth
+      // fallback), so they bill the raw API account regardless of the era.
+      assert.equal(billingClassForProvider('docker-cli', now), BILLING_CLASSES.API_KEY)
+      assert.equal(billingClassForProvider('docker-sdk', now), BILLING_CLASSES.API_KEY)
     })
     it(`subscription providers are always subscription (now=${now})`, () => {
       assert.equal(billingClassForProvider('claude-tui', now), BILLING_CLASSES.SUBSCRIPTION)
@@ -52,7 +56,7 @@ describe('billingClassForProvider — era-independent classes', () => {
 })
 
 describe('billingClassForProvider — era-gated programmatic providers', () => {
-  const PROGRAMMATIC = ['claude-cli', 'claude-sdk', 'docker-cli', 'docker-sdk']
+  const PROGRAMMATIC = ['claude-cli', 'claude-sdk']
   for (const p of PROGRAMMATIC) {
     it(`${p} is subscription BEFORE the boundary`, () => {
       assert.equal(billingClassForProvider(p, JUST_BEFORE), BILLING_CLASSES.SUBSCRIPTION)
