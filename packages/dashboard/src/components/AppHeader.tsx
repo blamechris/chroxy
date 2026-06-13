@@ -117,6 +117,7 @@ export function AppHeader(props: AppHeaderProps) {
             connecting: warming ? 'Tunnel warming up…' : 'Connecting to Chroxy server…',
             reconnecting: 'Reconnecting to Chroxy server…',
             server_restarting: 'Server restarting…',
+            server_down: 'Chroxy server appears to be down', // #5698 — terminal; don't leak the raw enum
             disconnected: 'Disconnected from Chroxy server',
           }
           const label = STATUS_LABELS[phase] ?? `Connection status: ${phase}`

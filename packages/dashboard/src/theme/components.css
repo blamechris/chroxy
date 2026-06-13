@@ -451,6 +451,7 @@
 .status-dot.connecting { background: var(--status-connecting); }
 .status-dot.reconnecting { background: var(--status-restarting); }
 .status-dot.server_restarting { background: var(--status-restarting); }
+.status-dot.server_down { background: var(--accent-red); } /* #5698 — terminal */
 
 /* ---- Sidebar ---- */
 .sidebar {
