@@ -425,12 +425,14 @@ export function createReconnectScheduler(
     if (scheduled) return false
     const rung = nextRung()
     // #5698: cap the ladder. Once the rung reaches maxRung, stop arming retries
-    // and hand off to the terminal handler instead of spinning forever. Mark the
-    // socket as "scheduled" so a paired close/error (or a later event on this
-    // dead socket) is a dedup no-op and onGaveUp fires exactly once. A manual
-    // connect() builds a fresh socket + scheduler with a reset counter.
+    // and hand off to the terminal handler instead of spinning forever. NOTE: no
+    // timer is armed here — `scheduled = true` is purely a terminal/dedup LATCH
+    // (NOT "a reconnect is pending"), so a paired close/error or any later event
+    // on this dead socket short-circuits at the `if (scheduled) return` guard
+    // above and `onGaveUp` fires exactly once. A manual connect() builds a fresh
+    // socket + scheduler with a reset counter, so the latch is per-socket.
     if (maxRung != null && rung >= maxRung) {
-      scheduled = true
+      scheduled = true // terminal latch; intentionally no timer (see note above)
       if (onGaveUp) onGaveUp()
       return false
     }
