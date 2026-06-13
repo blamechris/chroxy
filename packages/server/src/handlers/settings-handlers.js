@@ -1340,17 +1340,31 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
+  // #5731 T9: every rejection path echoes the client's requestId with a single
+  // THINKING_LEVEL_NOT_APPLIED code so the dashboard rolls back its optimistic
+  // dropdown update (mirrors set_model's MODEL_NOT_APPLIED and
+  // set_permission_mode's PERMISSION_MODE_NOT_APPLIED). The capability check is
+  // inlined (rather than routed through requireSessionMethod) so the
+  // unsupported-provider rejection carries the requestId + code too — otherwise
+  // a no-op on a provider without thinking-level control would leave the
+  // dropdown stuck on a level the session never entered. requestId is optional
+  // (older clients omit it); sendError tolerates null.
+  const requestId = msg?.requestId
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
   if (!VALID_THINKING_LEVELS.has(level)) {
-    sendSessionError(ws, ctx, `Invalid thinking level: ${level}`)
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Invalid thinking level: ${level}`, undefined, ctx)
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSessionOrError(ws, ctx, msg, client)
-  if (!entry) return
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', 'No active session', undefined, ctx)
+    return
+  }
 
-  if (!requireSessionMethod(ws, ctx, entry, 'setThinkingLevel', 'This provider does not support thinking level control')) {
+  if (!entry.session || typeof entry.session.setThinkingLevel !== 'function') {
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', 'This provider does not support thinking level control', undefined, ctx)
     return
   }
 
@@ -1358,7 +1372,7 @@ async function handleSetThinkingLevel(ws, client, msg, ctx) {
     await entry.session.setThinkingLevel(level)
     ctx.transport.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
   } catch (err) {
-    sendSessionError(ws, ctx, `Failed to set thinking level: ${err.message}`)
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to set thinking level: ${err.message}`, undefined, ctx)
   }
 }
 

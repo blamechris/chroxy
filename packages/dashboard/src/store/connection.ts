@@ -118,6 +118,8 @@ import {
   registerModelChangeRequest,
   clearPendingModelReverts,
   registerPermissionModeChangeRequest,
+  registerThinkingLevelChangeRequest,
+  clearPendingThinkingLevelReverts,
   clearPendingPermissionModeReverts,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
@@ -1639,6 +1641,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearPendingTrustGrants();
       clearPendingModelReverts();
       clearPendingPermissionModeReverts();
+      clearPendingThinkingLevelReverts();
       // #3605: also clear the per-session pendingTrustGrants arrays
       // (added in #3588). disconnect() handles user-initiated closes, but
       // an unexpected drop here would otherwise leave the SkillsPanel
@@ -1750,6 +1753,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       clearPendingTrustGrants();
       clearPendingModelReverts();
       clearPendingPermissionModeReverts();
+      clearPendingThinkingLevelReverts();
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
       set({ socket: null, sessionStates: cleanedSessionStates });
@@ -1784,6 +1788,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearPendingTrustGrants();
     clearPendingModelReverts();
     clearPendingPermissionModeReverts();
+    clearPendingThinkingLevelReverts();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -2581,10 +2586,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   setThinkingLevel: (level: string) => {
     const { socket, activeSessionId } = get();
+    // #5731 T9: remember the level we're switching FROM, keyed by a requestId the
+    // server echoes on a THINKING_LEVEL_NOT_APPLIED rejection, so the error
+    // handler can roll the optimistic update below back instead of leaving the
+    // dropdown showing a level the session never entered. Read the live value,
+    // mirroring the optimistic write below. (Sibling of setModel/setPermissionMode.)
+    const previousLevel = (activeSessionId && get().sessionStates[activeSessionId])
+      ? (get().sessionStates[activeSessionId]!.thinkingLevel ?? 'default')
+      : 'default';
+    const requestId = `set-thinking-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_thinking_level', level };
+      registerThinkingLevelChangeRequest(requestId, { sessionId: activeSessionId, previousLevel });
+      const payload: Record<string, unknown> = { type: 'set_thinking_level', level, requestId };
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
+    }
+    // Optimistically update the active session's thinking level so the controlled
+    // `<select>` doesn't snap back to the prior value before the server's
+    // `thinking_level_changed` broadcast lands. Idempotent — the broadcast
+    // re-sets the same value when it arrives. thinkingLevel is per-session only.
+    if (activeSessionId && get().sessionStates[activeSessionId]) {
+      updateActiveSession(() => ({ thinkingLevel: level as SessionState['thinkingLevel'] }));
     }
   },
 
