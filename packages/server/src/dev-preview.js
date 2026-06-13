@@ -18,9 +18,10 @@ const log = createLogger('dev-preview')
  *   - Manual close via closePreview()
  *
  * Events emitted:
- *   dev_preview_started  { sessionId, port, url }
- *   dev_preview_stopped  { sessionId, port }
- *   dev_preview_error    { sessionId, port, error }
+ *   dev_preview_started     { sessionId, port, url }
+ *   dev_preview_stopped     { sessionId, port }
+ *   dev_preview_error       { sessionId, port, error }   — tunnel START failure
+ *   dev_preview_stop_failed { sessionId, port, error }   — tunnel STOP failure (#5731)
  */
 
 // Patterns that indicate a dev server started on localhost
