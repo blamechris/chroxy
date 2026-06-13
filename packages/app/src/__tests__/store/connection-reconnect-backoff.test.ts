@@ -300,3 +300,54 @@ describe('backoff ladder resets on auth_ok, not socket-open (#5555.5)', () => {
     ws.restore();
   });
 });
+
+// ---------------------------------------------------------------------------
+// #5623 — onclose clears the presence role on every session so a stale
+// "Observing"/driver badge doesn't survive the reconnect gap. The server
+// re-emits session_role on reconnect/tab-switch, re-establishing the role.
+// ---------------------------------------------------------------------------
+
+describe('onclose clears sessionRole/primaryClientId on all sessions (#5623)', () => {
+  async function openConnectedSocket() {
+    const fetchMock = jest.fn().mockResolvedValue(mockResponse(200, { status: 'ok' }));
+    global.fetch = fetchMock;
+    const ws = installMockWebSocket();
+
+    useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+    await flushPromises();
+    useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+    return { ws };
+  }
+
+  it('nulls sessionRole and primaryClientId across active + background sessions', async () => {
+    const { ws } = await openConnectedSocket();
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: {
+          messages: [],
+          sessionRole: 'observer',
+          primaryClientId: 'other-device',
+        },
+        b: {
+          messages: [],
+          sessionRole: 'primary',
+          primaryClientId: 'me',
+        },
+      } as never,
+    });
+
+    const socket = ws.instances[ws.instances.length - 1];
+    socket.onclose?.({ code: 1006 });
+    await flushPromises();
+
+    const st = useConnectionStore.getState();
+    expect(st.sessionStates.a!.sessionRole).toBeNull();
+    expect(st.sessionStates.a!.primaryClientId).toBeNull();
+    expect(st.sessionStates.b!.sessionRole).toBeNull();
+    expect(st.sessionStates.b!.primaryClientId).toBeNull();
+
+    ws.restore();
+  });
+});
