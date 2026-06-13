@@ -13,10 +13,37 @@ import {
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
 import type { SessionInfo, SessionHealth } from '../store/connection';
+import type { ChatMessage } from '@chroxy/store-core';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { getProviderInfo } from '../constants/providers';
 import { hapticMedium } from '../utils/haptics';
+
+/**
+ * #5750 — count live, unanswered permission prompts in a session's messages so
+ * a background tab can surface a "needs your permission" dot (mobile parity
+ * with the dashboard's per-tab indicator, #5667/#5674).
+ *
+ * Mirrors the dashboard's `isLivePermissionPrompt` predicate
+ * (packages/dashboard/src/utils/pendingPermissions.ts): a permission prompt is
+ * `type:'prompt'` with a `requestId` + a future `expiresAt` and no `answered`
+ * decision. The requestId+expiresAt pair distinguishes a permission prompt
+ * from an AskUserQuestion (also `type:'prompt'`, but with neither), and the
+ * `expiresAt > now` check clears the dot once the prompt times out (the expiry
+ * handlers clear the prompt's options but do NOT set `answered`).
+ *
+ * NOTE: this predicate is duplicated from the dashboard. Converging both clients
+ * onto a single store-core helper is tracked as a follow-up (see #5750).
+ */
+export function countLivePermissionPrompts(messages: ChatMessage[], now: number): number {
+  let count = 0;
+  for (const m of messages) {
+    if (m.type === 'prompt' && !!m.requestId && !!m.expiresAt && m.expiresAt > now && !m.answered) {
+      count++;
+    }
+  }
+  return count;
+}
 
 /** Pulsing dot for busy sessions */
 function PulsingDot() {
@@ -56,23 +83,33 @@ interface SessionPillProps {
   // long-running shell. SECONDARY to the busy pulse — the busy dot wins
   // during an active turn.
   pendingShellCount: number;
+  // #5750 — number of live, unanswered permission prompts the session is
+  // blocked on. Projected from its messages so a background tab surfaces a
+  // "needs your permission" dot (parity with the dashboard per-tab indicator).
+  pendingPermissionCount: number;
   onPress: () => void;
   onLongPress: () => void;
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, health, notificationCount, pendingShellCount, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, notificationCount, pendingShellCount, pendingPermissionCount, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isCrashed = health === 'crashed';
   const hasNotification = notificationCount > 0 && !isActive;
-  const showBusy = !isCrashed && session.isBusy;
+  // #5750 — a session blocked on a permission prompt is the most actionable
+  // (non-crashed) state: it can't progress until the user answers. Surface it
+  // on background tabs (on the active tab the prompt itself is already on
+  // screen). It takes precedence over the generic busy pulse — a session
+  // waiting on you isn't merely "processing".
+  const showPendingPermission = !isCrashed && !isActive && pendingPermissionCount > 0;
+  const showBusy = !isCrashed && !showPendingPermission && session.isBusy;
   // #4422 — only surface the pending-shells dot when the session is idle
   // (showBusy=false). During an active turn the busy pulse already conveys
   // "work happening"; the pending-shells indicator is for the "idle but
   // waiting on background work" gap the dashboard ActivityIndicator now
   // surfaces (#4419). Skip on crashed too — a crashed session's red dot is
   // the more urgent signal.
-  const showPendingShells = !isCrashed && !showBusy && pendingShellCount > 0;
-  const hasIndicators = isCrashed || showBusy || hasNotification || showPendingShells;
+  const showPendingShells = !isCrashed && !showBusy && !showPendingPermission && pendingShellCount > 0;
+  const hasIndicators = isCrashed || showPendingPermission || showBusy || hasNotification || showPendingShells;
   // Mobile parity with dashboard SessionBar chips (#3940): surface the
   // provider's short label as a small badge on the pill so claude-tui,
   // codex, gemini, docker-cli, etc. are distinguishable at-a-glance
@@ -95,13 +132,14 @@ function SessionPill({ session, isActive, health, notificationCount, pendingShel
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}${showPendingShells ? `, waiting on ${pendingShellCount} background ${pendingShellCount === 1 ? 'shell' : 'shells'}` : ''}`}
+      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}${showPendingPermission ? ', waiting for your permission' : ''}${showPendingShells ? `, waiting on ${pendingShellCount} background ${pendingShellCount === 1 ? 'shell' : 'shells'}` : ''}`}
       accessibilityState={{ selected: isActive }}
-      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : showPendingShells ? 'Session is idle but waiting on a backgrounded shell' : undefined}
+      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showPendingPermission ? 'Session is waiting for you to allow or deny a permission request' : showBusy ? 'Session is currently processing' : showPendingShells ? 'Session is idle but waiting on a backgrounded shell' : undefined}
     >
       {hasIndicators && (
         <View style={styles.indicators} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
           {isCrashed && <View style={styles.crashDot} />}
+          {showPendingPermission && <View style={styles.permissionDot} />}
           {showBusy && <PulsingDot />}
           {showPendingShells && <View style={styles.pendingShellsDot} />}
           {hasNotification && <NotificationBadge count={notificationCount} />}
@@ -279,6 +317,24 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     return counts;
   }, [sessionNotifications]);
 
+  // #5750 — per-session live permission-prompt counts, for the "needs your
+  // permission" tab dot. Recomputes when any session's messages change (which
+  // is also when a prompt is answered or its expiry handler fires, clearing
+  // the dot). `Date.now()` is read at compute time; an unanswered prompt that
+  // simply times out clears on the next message change via the `expiresAt >
+  // now` check — matching the dashboard's behavior.
+  const pendingPermissionCounts = useMemo(() => {
+    const now = Date.now();
+    const counts = new Map<string, number>();
+    for (const id in sessionStates) {
+      const messages = sessionStates[id]?.messages;
+      if (!messages || messages.length === 0) continue;
+      const c = countLivePermissionPrompts(messages, now);
+      if (c > 0) counts.set(id, c);
+    }
+    return counts;
+  }, [sessionStates]);
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -302,6 +358,7 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             // is undefined) and sessions whose state slot hasn't been seeded
             // yet (no entry in sessionStates).
             pendingShellCount={sessionStates[session.sessionId]?.pendingBackgroundShells?.length ?? 0}
+            pendingPermissionCount={pendingPermissionCounts.get(session.sessionId) || 0}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
             onLayout={(e) => handlePillLayout(session.sessionId, e)}
@@ -440,6 +497,16 @@ const styles = StyleSheet.create({
     height: 6,
     borderRadius: 3,
     backgroundColor: COLORS.accentRed,
+  },
+  // #5750 — "needs your permission" dot. Amber (the warning/attention accent)
+  // so it reads as actionable, distinct from the blue busy pulse and the green
+  // pending-shells dot. Static (no pulse) — the urgency is "you must answer",
+  // not "work is happening".
+  permissionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentOrange,
   },
   busyDot: {
     width: 6,
