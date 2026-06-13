@@ -5,6 +5,8 @@ import { WebSocketServer } from 'ws'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import { homedir } from 'os'
+import { PagesStore } from './pages-store.js'
 import { decrypt, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { safeTokenCompare } from './token-compare.js'
 import { createClientSender } from './ws-client-sender.js'
@@ -496,7 +498,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -544,6 +546,15 @@ export class WsServer {
     this._diagnosticsRateLimiter = new RateLimiter(
       { name: 'diagnostics', ...resolveDiagnosticsRateLimit(diagnosticsRateLimit) }
     )
+    // #5683 — Chroxy Pages. Per-IP limiter for the public `/p/<slug>` route
+    // (assets + refreshes are more frequent than diagnostics, hence higher
+    // than /diagnostics but still bounded to blunt slug-scanning). The store is
+    // injectable for tests; the default is rooted at $CHROXY_CONFIG_DIR /
+    // ~/.chroxy/pages and only READS on construct (no sandbox write).
+    this._pagesRateLimiter = new RateLimiter({ name: 'pages', windowMs: 60_000, maxMessages: 120, burst: 30 })
+    this.pagesStore = pagesStore || new PagesStore({
+      pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
+    })
     this._clientSend = createClientSender(log)
     this._clientManager = new WsClientManager()
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects

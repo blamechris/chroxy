@@ -11,6 +11,24 @@ import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
 import { handleEventIngest } from './event-ingest.js'
 import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
+import { isValidSlug, mimeForPath } from './pages-store.js'
+
+// #5683 — security headers for every Chroxy Pages response. The `/p/<slug>`
+// route is intentionally UNAUTHENTICATED (the slug is the capability), and
+// chroxy auth accepts a `chroxy_auth` cookie, so a same-origin served page in a
+// logged-in browser could otherwise script authed `/api/*` calls. `script-src
+// 'none'` + `connect-src 'none'` + `sandbox` make served pages fully static (no
+// JS, no network), neutralizing that risk — which is also exactly right for the
+// HTML reports this serves. See docs/security/bearer-token-authority.md.
+const PAGE_SECURITY_HEADERS = {
+  'Content-Security-Policy':
+    "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; script-src 'none'; base-uri 'none'; form-action 'none'; sandbox",
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
+  'Cache-Control': 'no-store',
+}
 
 const log = createLogger('ws')
 
@@ -211,6 +229,76 @@ export function createHttpHandler(server) {
       })
       res.end(JSON.stringify({ status: 'ok', mode: server.serverMode, version: SERVER_VERSION }))
       return
+    }
+
+    // #5683 — Chroxy Pages: serve a published HTML artifact at an unguessable,
+    // UNAUTHENTICATED URL (the slug is the capability). Static-only CSP headers
+    // (PAGE_SECURITY_HEADERS) neutralize the cookie-auth risk. Placed in the
+    // public section, before the authed routes, and only active when a pages
+    // store is wired.
+    {
+      const pagesPath = (req.url ?? '').split('?')[0]
+      if (req.method === 'GET' && pagesPath.startsWith('/p/') && server.pagesStore) {
+        // Rate-limit BEFORE any filesystem work so the public route can't be
+        // used to scan slugs or DoS the disk.
+        const limiter = server._pagesRateLimiter
+        if (limiter) {
+          const socketIp = req.socket?.remoteAddress || ''
+          const { allowed, retryAfterMs } = limiter.check(getRateLimitKey(socketIp, req))
+          if (!allowed) {
+            res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': Math.ceil(retryAfterMs / 1000) })
+            res.end('rate limited')
+            return
+          }
+        }
+
+        const notFound = () => {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...PAGE_SECURITY_HEADERS })
+          res.end('Not found')
+        }
+
+        const m = pagesPath.match(/^\/p\/([^/]+)(?:\/(.*))?$/)
+        let slug = null
+        let rel = ''
+        if (m) {
+          try {
+            slug = decodeURIComponent(m[1])
+            rel = m[2] != null ? decodeURIComponent(m[2]) : ''
+          } catch {
+            slug = null // malformed percent-encoding
+          }
+        }
+        if (!slug || !isValidSlug(slug) || !server.pagesStore.get(slug)) {
+          notFound()
+          return
+        }
+        // Trailing-slash redirect (`/p/<slug>` → `/p/<slug>/`) so a page's
+        // relative asset URLs resolve under its own directory.
+        if (m[2] == null) {
+          res.writeHead(301, { Location: `/p/${encodeURIComponent(slug)}/`, 'Cache-Control': 'no-store' })
+          res.end()
+          return
+        }
+        const filePath = server.pagesStore.resolveFile(slug, rel)
+        if (!filePath) {
+          notFound()
+          return
+        }
+        let body
+        try {
+          body = readFileSync(filePath)
+        } catch {
+          notFound()
+          return
+        }
+        res.writeHead(200, {
+          'Content-Type': mimeForPath(filePath),
+          'Content-Length': body.byteLength,
+          ...PAGE_SECURITY_HEADERS,
+        })
+        res.end(body)
+        return
+      }
     }
 
     // Version endpoint
