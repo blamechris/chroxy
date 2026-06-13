@@ -21,12 +21,16 @@ type MockStore = {
   activeSessionId: string | null
   sessions: { sessionId: string; provider?: string }[]
   availableProviders: { name: string; capabilities?: { sessionRules?: boolean } }[]
+  connectionPhase: string
 }
 const DEFAULT_MOCK_STORE: MockStore = {
   resolvedPermissions: {},
   activeSessionId: 's1',
   sessions: [{ sessionId: 's1', provider: 'claude-sdk' }],
   availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } }],
+  // #5699 — answer buttons gate on connected; default the mock to connected so
+  // the existing button-interaction tests keep working.
+  connectionPhase: 'connected',
 }
 let mockStoreState: MockStore = { ...DEFAULT_MOCK_STORE }
 function resetMockStore() {
@@ -560,6 +564,30 @@ describe('PermissionPrompt', () => {
     if (allow) expect(allow.disabled).toBe(true)
     if (deny) expect(deny.disabled).toBe(true)
     if (allowSession) expect(allowSession.disabled).toBe(true)
+  })
+
+  // #5699 — when disconnected, answering is refused store-side; the buttons must
+  // disable + a hint must explain why, so a tap isn't a silent no-op.
+  it('disables the answer buttons and shows a hint when disconnected (#5699)', () => {
+    mockStoreState.connectionPhase = 'reconnecting'
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-disc"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    const allow = screen.getByText('Allow') as HTMLButtonElement
+    const deny = screen.getByText('Deny') as HTMLButtonElement
+    expect(allow.disabled).toBe(true)
+    expect(deny.disabled).toBe(true)
+    expect(screen.getByTestId('perm-disconnected-hint')).toBeInTheDocument()
+    // A click on the disabled button does not fire onRespond.
+    fireEvent.click(allow)
+    expect(onRespond).not.toHaveBeenCalled()
   })
 })
 

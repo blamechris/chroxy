@@ -71,6 +71,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // primitive subscription — useShallow / stable refs not needed.
   const answered = useConnectionStore((s) => s.resolvedPermissions?.[requestId] ?? null)
 
+  // #5699 — only allow answering while connected. The store's
+  // sendPermissionResponse refuses to send (or optimistically resolve) a
+  // permission answer when the socket is down, because the server expires the
+  // request on disconnect and a queued answer is silently lost. Disable the
+  // buttons so the operator gets visible feedback instead of a dead click.
+  const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
+
   // #3072: gate the "Allow for Session" affordance on whether the active
   // session's provider supports session-scoped permission rules. Without
   // this, the button shows for every prompt and clicking on a non-supporting
@@ -203,7 +210,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
               type="button"
               aria-label={`Allow ${tool}`}
               title={`Allow (${allowHint})`}
-              disabled={submitting}
+              disabled={submitting || !connected}
             >
               Allow
             </button>
@@ -215,7 +222,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
                 aria-label={`Allow ${tool} for this session`}
                 data-testid="btn-allow-session"
                 title={`Allow for Session (${allowSessionHint})`}
-                disabled={submitting}
+                disabled={submitting || !connected}
               >
                 Allow for Session
               </button>
@@ -225,11 +232,18 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
               onClick={() => respond('deny')}
               type="button"
               aria-label={`Deny ${tool}`}
-              disabled={submitting}
+              disabled={submitting || !connected}
             >
               Deny
             </button>
           </div>
+          {!connected && (
+            // #5699 — explain why the buttons are disabled so a disconnected tap
+            // isn't a silent no-op. The prompt stays actionable once reconnected.
+            <div className="perm-disconnected-hint" data-testid="perm-disconnected-hint" role="status">
+              Disconnected — reconnect to answer.
+            </div>
+          )}
           <div className="perm-shortcut-hints" data-testid="perm-shortcut-hints" aria-hidden="true">
             <span className="perm-shortcut">
               <kbd className="perm-kbd">{allowHint}</kbd>
