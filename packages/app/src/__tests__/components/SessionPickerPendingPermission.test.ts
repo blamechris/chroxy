@@ -61,7 +61,11 @@ describe('SessionPicker pill — pending-permission dot wiring (#5750)', () => {
     'utf-8',
   );
   const pillStartIdx = source.indexOf('function SessionPill');
-  const pillSection = source.slice(pillStartIdx, source.indexOf('const styles', pillStartIdx));
+  const pillEndIdx = source.indexOf('const styles', pillStartIdx);
+  if (pillStartIdx < 0 || pillEndIdx < 0 || pillEndIdx <= pillStartIdx) {
+    throw new Error('Unable to locate the SessionPill render block in SessionPicker.tsx');
+  }
+  const pillSection = source.slice(pillStartIdx, pillEndIdx);
 
   it('the pill takes a pendingPermissionCount prop', () => {
     expect(source).toMatch(/pendingPermissionCount:\s*number/);
