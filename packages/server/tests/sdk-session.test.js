@@ -881,6 +881,27 @@ describe('SdkSession', () => {
       session.destroy()
       assert.equal(session._pendingInput.length, 0)
     })
+
+    it('caps the mid-turn queue at 3 and discards overflow with an error (#5711)', () => {
+      session._isBusy = true
+      const errors = []
+      session.on('error', (data) => errors.push(data))
+
+      // Fill the queue to the cap.
+      session.sendMessage('q1')
+      session.sendMessage('q2')
+      session.sendMessage('q3')
+      assert.equal(session._pendingInput.length, 3)
+      assert.equal(errors.length, 0)
+
+      // The 4th overflows: discarded with a visible error, queue stays at 3.
+      session.sendMessage('q4-overflow')
+      assert.equal(session._pendingInput.length, 3)
+      assert.equal(errors.length, 1)
+      assert.match(errors[0].message, /queue full \(max 3\)/)
+      // The discarded message is NOT in the queue.
+      assert.ok(!session._pendingInput.some((m) => m.prompt === 'q4-overflow'))
+    })
   })
 
   // -- sendMessage when stdin forwarding is disabled (#3539) --

@@ -51,6 +51,11 @@ const log = createLogger('sdk')
 
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
+// #5711 (Gap 3): cap the mid-turn follow-up queue, matching CliSession's max-3
+// (cli-session.js). Without a bound, a user mashing send during a long turn
+// accumulates an unbounded backlog that then floods the agent when the turn
+// ends — both a memory footgun and a surprising burst of late messages.
+const MAX_PENDING_INPUT = 3
 
 // Marker stamped on a proc the first time _attachSidecarProcessListeners()
 // wires its default listeners (#3504 review).  Subsequent calls on the same
@@ -542,6 +547,13 @@ export class SdkSession extends BaseSession {
     if (this._isBusy) {
       // Queue the message — it will be sent after the current turn completes
       if (!this._pendingInput) this._pendingInput = []
+      // #5711 (Gap 3): bound the queue like CliSession (max 3). Discard the
+      // overflow with a visible error rather than silently growing — mirrors
+      // cli-session.js so the same action behaves consistently across providers.
+      if (this._pendingInput.length >= MAX_PENDING_INPUT) {
+        this.emit('error', { message: `Pending message queue full (max ${MAX_PENDING_INPUT}) — message discarded` })
+        return
+      }
       this._pendingInput.push({ prompt, attachments, sendOptions })
       // #4828: session-scoped when init has fired (queue path requires an
       // in-flight turn, so init is normally already in by this point).
