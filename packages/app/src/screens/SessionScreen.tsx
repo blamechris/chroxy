@@ -247,6 +247,19 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
   });
+  // #5731 — gate the SettingsBar model/permission chips on the active provider's
+  // capabilities, mirroring the dashboard's dropdownFlags. Default to supported
+  // (true) unless the provider explicitly reports the capability as false, so a
+  // provider that can't switch (e.g. claude-tui — model fixed at boot) doesn't
+  // render chips that silently do nothing on tap.
+  const availableProviders = useConnectionStore((s) => s.availableProviders);
+  const providerCaps = useMemo(() => {
+    const caps = availableProviders.find((p) => p.name === activeSessionProvider)?.capabilities;
+    return {
+      modelSwitchSupported: caps?.modelSwitch !== false,
+      permissionModeSwitchSupported: caps?.permissionModeSwitch !== false,
+    };
+  }, [availableProviders, activeSessionProvider]);
   const allowMultiQuestion = useMemo(
     () =>
       activeSessionProvider != null &&
@@ -1134,6 +1147,8 @@ export function SessionScreen() {
           // that legitimately report no window (ollama) the usage meter shows
           // the raw token count instead of a percentage against 200k.
           provider={activeSessionProvider}
+          modelSwitchSupported={providerCaps.modelSwitchSupported}
+          permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
         />
       )}
 

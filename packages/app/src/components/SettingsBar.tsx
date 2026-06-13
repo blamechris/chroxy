@@ -90,6 +90,16 @@ export interface SettingsBarProps {
   // window (ollama) the usage meter renders the raw token count without
   // a percentage/progress bar instead of a misleading "% of 200k".
   provider?: string | null;
+  // #5731 — provider capability gating (mirrors the dashboard's dropdownFlags).
+  // Default to `true` (the value is undefined for older callers / before the
+  // provider list lands) so behaviour is unchanged unless the active provider
+  // explicitly reports the capability as false. When `modelSwitchSupported` is
+  // false (e.g. claude-tui — model fixed at boot), the model row renders a
+  // read-only badge instead of an interactive picker that can't actually
+  // switch; when `permissionModeSwitchSupported` is false the permission-mode
+  // chips are hidden entirely.
+  modelSwitchSupported?: boolean;
+  permissionModeSwitchSupported?: boolean;
 }
 
 // -- Helpers --
@@ -203,6 +213,8 @@ export function SettingsBar({
   connectionQuality,
   activePath,
   provider,
+  modelSwitchSupported = true,
+  permissionModeSwitchSupported = true,
 }: SettingsBarProps) {
   // Elapsed time ticker — only runs when expanded with active agents
   const [now, setNow] = useState(Date.now());
@@ -447,7 +459,12 @@ export function SettingsBar({
               </Text>
             </View>
           )}
-          {availableModels.length > 0 && (
+          {/* #5731: gate the interactive model picker on the provider's
+              modelSwitch capability. A provider that can't switch mid-session
+              (claude-tui) gets a non-interactive badge of its fixed model
+              instead of chips that silently do nothing on tap. Mirrors the
+              dashboard's `showModelPicker` / `readOnlyModel` split. */}
+          {availableModels.length > 0 && modelSwitchSupported && (
                 <View style={styles.chipRow}>
                   {availableModels.map((m) => {
                     const isActive = activeModel === m.id || activeModel === m.fullId
@@ -467,7 +484,25 @@ export function SettingsBar({
                   })}
                 </View>
               )}
-              {availablePermissionModes.length > 0 && (
+              {!modelSwitchSupported && (() => {
+                // Fall back to defaultModelId when there's no explicit override,
+                // mirroring the interactive chip's `!activeModel && defaultModelId`
+                // active-match so a non-switching provider still shows its model.
+                const fixedId = activeModel || defaultModelId;
+                if (!fixedId) return null;
+                const fixed = availableModels.find((m) => m.id === fixedId || m.fullId === fixedId);
+                return (
+                  <View style={styles.chipRow}>
+                    <View style={[styles.chip, styles.chipReadOnly]} accessibilityRole="text">
+                      <Text style={styles.chipReadOnlyText}>{fixed?.label || fixedId} · fixed</Text>
+                    </View>
+                  </View>
+                );
+              })()}
+              {/* #5731: hide the permission-mode chips when the provider can't
+                  switch permission modes (mirrors the dashboard's
+                  `showPermissionMode`). */}
+              {availablePermissionModes.length > 0 && permissionModeSwitchSupported && (
                 <View style={styles.chipRow}>
                   {availablePermissionModes.map((m) => {
                     const isActive = permissionMode === m.id;
@@ -492,7 +527,7 @@ export function SettingsBar({
                   description (older server) so mobile users still get the
                   trade-off explanation. Mirrors CreateSessionModal's #4019
                   hint pattern. */}
-              {permissionMode && availablePermissionModes.length > 0 && (() => {
+              {permissionMode && availablePermissionModes.length > 0 && permissionModeSwitchSupported && (() => {
                 const selected = availablePermissionModes.find((m) => m.id === permissionMode);
                 let hint = selected?.description;
                 if (!hint) {
@@ -873,6 +908,21 @@ const styles = StyleSheet.create({
   },
   chipTextActive: {
     color: COLORS.accentBlue,
+  },
+  // #5731: non-interactive model badge for providers that can't switch models.
+  chipReadOnly: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundCard,
+    borderWidth: 1,
+    borderColor: COLORS.borderTransparent,
+    opacity: 0.7,
+  },
+  chipReadOnlyText: {
+    color: COLORS.textDim,
+    fontSize: 11,
+    fontWeight: '500',
   },
   contextRow: {
     flexDirection: 'row',
