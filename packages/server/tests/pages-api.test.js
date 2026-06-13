@@ -97,6 +97,39 @@ test('POST 413s on an oversized body', async () => {
   assert.equal(res.status, 413)
 })
 
+test('POST 400s on a files entry with a non-string content (no silent coercion)', async () => {
+  const res = await fetch(`${base}/api/pages`, {
+    method: 'POST', headers: auth(),
+    body: JSON.stringify({ title: 't', files: [{ path: 'index.html', content: '<p>ok</p>' }, { path: 'bad.txt', content: 123 }] }),
+  })
+  assert.equal(res.status, 400)
+  assert.match((await res.json()).error, /string `content`/)
+})
+
+test('POST 500s (generic, no fs detail) when publish throws an I/O fault', async () => {
+  // A pagesStore whose publish raises an errno-coded fs error: the route must
+  // classify it as a 500 and not leak the path/message as a client 400.
+  const ioServer = {
+    ...mockServer(),
+    pagesStore: {
+      maxPageBytes: 2 * 1024 * 1024,
+      publish() { const e = new Error('EACCES: permission denied, mkdir \'/root/.chroxy/pages/x\''); e.code = 'EACCES'; throw e },
+    },
+  }
+  const srv = createServer(createHttpHandler(ioServer))
+  srv.listen(0, '127.0.0.1')
+  await once(srv, 'listening')
+  try {
+    const res = await fetch(`http://127.0.0.1:${srv.address().port}/api/pages`, {
+      method: 'POST', headers: auth(), body: JSON.stringify({ html: '<p>x</p>' }),
+    })
+    assert.equal(res.status, 500)
+    const body = await res.json()
+    assert.equal(body.error, 'publish failed')
+    assert.doesNotMatch(body.error, /EACCES|root|mkdir/)
+  } finally { srv.close() }
+})
+
 test('GET /api/pages lists published pages with their public paths', async () => {
   const res = await fetch(`${base}/api/pages`, { headers: auth() })
   assert.equal(res.status, 200)

@@ -521,7 +521,16 @@ export function createHttpHandler(server) {
           if (typeof parsed.html === 'string') {
             files = [{ path: 'index.html', content: parsed.html }]
           } else if (Array.isArray(parsed.files)) {
-            files = parsed.files.map((f) => ({ path: f?.path, content: typeof f?.content === 'string' ? f.content : '' }))
+            // Validate every entry instead of coercing a non-string `content` to
+            // '' — silent coercion turns an invalid client payload into a
+            // successfully published but empty/garbled page.
+            const invalid = parsed.files.find((f) => !f || typeof f.path !== 'string' || typeof f.content !== 'string')
+            if (invalid !== undefined) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'each `files` entry requires a string `path` and string `content`' }))
+              return
+            }
+            files = parsed.files.map((f) => ({ path: f.path, content: f.content }))
           } else {
             res.writeHead(400, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ error: 'body must include `html` (string) or `files` (array)' }))
@@ -531,8 +540,18 @@ export function createHttpHandler(server) {
           try {
             meta = server.pagesStore.publish({ title, files })
           } catch (err) {
-            res.writeHead(400, { 'Content-Type': 'application/json' })
-            res.end(JSON.stringify({ error: err?.message || 'publish failed' }))
+            // publish() throws for BOTH client validation errors (plain Errors —
+            // bad paths, missing index.html, size/count caps) AND server-side I/O
+            // faults (which carry an errno `code` like EACCES/ENOSPC). Don't
+            // misreport an I/O fault as a 400, and don't leak fs detail in it.
+            if (err && typeof err.code === 'string') {
+              log.warn(`POST /api/pages publish I/O error: ${err.code} ${err?.message || ''}`)
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'publish failed' }))
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: err?.message || 'publish failed' }))
+            }
             return
           }
           res.writeHead(200, { 'Content-Type': 'application/json' })
