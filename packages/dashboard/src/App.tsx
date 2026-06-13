@@ -27,7 +27,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
-import { derivePendingPermissionSessions } from './utils/pendingPermissions'
+import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession } from './utils/pendingPermissions'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
@@ -1010,8 +1010,8 @@ export function App() {
   // re-renders a tab when its pending state actually flips, not on every stream
   // delta. The `expiresAt > now` check (inside the helper) clears the indicator
   // on expiry/timeout, which set `options: undefined` but not `answered`.
-  const pendingPermissionSessionIds = useConnectionStore(
-    useShallow((s) => derivePendingPermissionSessions(s.sessionStates, Date.now())),
+  const pendingPermissionCounts = useConnectionStore(
+    useShallow((s) => derivePendingPermissionCounts(s.sessionStates, Date.now())),
   )
 
   const sessionTabs: SessionTabData[] = useMemo(
@@ -1042,11 +1042,24 @@ export function App() {
         stdinForwardingDisabled: s.stdinForwardingDisabled,
         // #5667: flag tabs with an unanswered permission prompt so a
         // background session's request is visible without switching to it.
-        pendingPermission: pendingPermissionSessionIds[s.sessionId] ?? false,
+        // #5693: also carry the count so the tab can show `!2`.
+        pendingPermission: (pendingPermissionCounts[s.sessionId] ?? 0) > 0,
+        pendingPermissionCount: pendingPermissionCounts[s.sessionId] ?? 0,
       }))
     },
-    [sessions, activeSessionId, getSessionVisualStatus, tabOrder, pendingPermissionSessionIds],
+    [sessions, activeSessionId, getSessionVisualStatus, tabOrder, pendingPermissionCounts],
   )
+
+  // #5693 (PR-3) — aggregate "N pending" badge + jump-to-next-waiting-session.
+  // Containment keeps each prompt in its own tab; this gives one place to see
+  // the total and one click to reach the next waiting session (cyclically, in
+  // visual tab order).
+  const pendingPermissionTotal = totalPendingPermissions(pendingPermissionCounts)
+  const handleJumpToPending = useCallback(() => {
+    const orderedIds = sessionTabs.map(t => t.sessionId)
+    const next = selectNextPendingSession(orderedIds, pendingPermissionCounts, activeSessionId)
+    if (next) handleSwitchSession(next)
+  }, [sessionTabs, pendingPermissionCounts, activeSessionId, handleSwitchSession])
 
   // Derive sidebar repo tree from sessions
   // #4120: dedicated selector for the cumulativeUsage slice the sidebar
@@ -1745,6 +1758,8 @@ export function App() {
               onActivate: openControlRoom,
               onClose: closeControlRoom,
             }}
+            pendingPermissionTotal={pendingPermissionTotal}
+            onJumpToPending={handleJumpToPending}
           />
         )}
 

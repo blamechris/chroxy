@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest'
 import type { ChatMessage } from '@chroxy/store-core'
-import { derivePendingPermissionSessions } from './pendingPermissions'
+import {
+  derivePendingPermissionSessions,
+  derivePendingPermissionCounts,
+  totalPendingPermissions,
+  selectNextPendingSession,
+} from './pendingPermissions'
 
 const NOW = 1_000_000
 
@@ -71,5 +76,78 @@ describe('derivePendingPermissionSessions (#5667)', () => {
       NOW,
     )
     expect(result).toEqual({ s1: true })
+  })
+})
+
+describe('derivePendingPermissionCounts (#5693)', () => {
+  it('counts multiple live prompts in one session and omits zero-pending sessions', () => {
+    const counts = derivePendingPermissionCounts(
+      states({
+        s1: [prompt({ id: 'a', requestId: 'r-a' }), prompt({ id: 'b', requestId: 'r-b' })],
+        s2: [prompt({ id: 'c', requestId: 'r-c' })],
+        s3: [prompt({ id: 'd', requestId: 'r-d', answered: 'allow' })], // resolved → omitted
+        s4: [], // empty → omitted
+      }),
+      NOW,
+    )
+    expect(counts).toEqual({ s1: 2, s2: 1 })
+  })
+
+  it('excludes answered / expired / AskUserQuestion prompts from the count', () => {
+    const counts = derivePendingPermissionCounts(
+      states({
+        s1: [
+          prompt({ id: 'live', requestId: 'r1' }),
+          prompt({ id: 'answered', requestId: 'r2', answered: 'deny' }),
+          prompt({ id: 'expired', requestId: 'r3', expiresAt: NOW - 1 }),
+          prompt({ id: 'aukq', requestId: undefined, expiresAt: undefined }),
+        ],
+      }),
+      NOW,
+    )
+    expect(counts).toEqual({ s1: 1 })
+  })
+
+  it('stays consistent with the boolean derive', () => {
+    const s = states({ s1: [prompt({ id: 'a' })], s2: [prompt({ id: 'b', answered: 'allow' })] })
+    expect(derivePendingPermissionSessions(s, NOW)).toEqual({ s1: true })
+    expect(Object.keys(derivePendingPermissionCounts(s, NOW))).toEqual(['s1'])
+  })
+})
+
+describe('totalPendingPermissions (#5693)', () => {
+  it('sums counts across sessions', () => {
+    expect(totalPendingPermissions({ s1: 2, s2: 1 })).toBe(3)
+    expect(totalPendingPermissions({})).toBe(0)
+  })
+})
+
+describe('selectNextPendingSession (#5693)', () => {
+  const order = ['a', 'b', 'c', 'd']
+
+  it('returns null when nothing is pending', () => {
+    expect(selectNextPendingSession(order, {}, 'a')).toBeNull()
+    expect(selectNextPendingSession([], { a: 1 }, 'a')).toBeNull()
+  })
+
+  it('jumps to the next pending session AFTER the active tab, in tab order', () => {
+    // active = 'a'; pending b and d → next after a is b.
+    expect(selectNextPendingSession(order, { b: 1, d: 2 }, 'a')).toBe('b')
+    // active = 'b'; next pending after b is d.
+    expect(selectNextPendingSession(order, { b: 1, d: 2 }, 'b')).toBe('d')
+  })
+
+  it('wraps around cyclically', () => {
+    // active = 'd' (last); pending a → wrap to a.
+    expect(selectNextPendingSession(order, { a: 1 }, 'd')).toBe('a')
+  })
+
+  it('returns the active tab when it is the only pending one (no-op focus)', () => {
+    expect(selectNextPendingSession(order, { b: 3 }, 'b')).toBe('b')
+  })
+
+  it('scans from the start when the active id is not in the list', () => {
+    expect(selectNextPendingSession(order, { c: 1 }, 'unknown')).toBe('c')
+    expect(selectNextPendingSession(order, { c: 1 }, null)).toBe('c')
   })
 })
