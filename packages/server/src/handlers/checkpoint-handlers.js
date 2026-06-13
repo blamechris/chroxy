@@ -5,6 +5,9 @@
  */
 import { realpathSync } from 'fs'
 import { sendSessionError } from '../handler-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
 
 /**
  * Normalize a cwd for collision comparison so two sessions on the SAME physical
@@ -100,21 +103,30 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   // "two tabs on one repo" case would be more surprising than helpful);
   // worktree-isolated sessions each have a distinct cwd and never collide.
   // listSessions() already excludes sessions mid-destroy. Both accessors are
-  // feature-detected so a partial/legacy manager can't crash the restore path.
-  const checkpointMgr = ctx.services.checkpointManager
-  const sessionMgr = ctx.sessions.sessionManager
-  if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
-    const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
-    if (cp?.cwd) {
-      const targetCwd = normalizeCwd(cp.cwd)
-      const busyShare = sessionMgr.listSessions().find(
-        (s) => s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
-      )
-      if (busyShare) {
-        sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
-        return
+  // feature-detected so a partial/legacy manager can't crash the restore path,
+  // and the whole scan is wrapped so an unexpected accessor failure (throw or a
+  // non-array return) fails OPEN — the guard is defense-in-depth, so on its own
+  // error we fall through to the normal restore (the pre-#5731 behaviour) rather
+  // than crashing the WS message handler.
+  try {
+    const checkpointMgr = ctx.services.checkpointManager
+    const sessionMgr = ctx.sessions.sessionManager
+    if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
+      const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
+      const liveSessions = sessionMgr.listSessions()
+      if (cp?.cwd && Array.isArray(liveSessions)) {
+        const targetCwd = normalizeCwd(cp.cwd)
+        const busyShare = liveSessions.find(
+          (s) => s && s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
+        )
+        if (busyShare) {
+          sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
+          return
+        }
       }
     }
+  } catch (err) {
+    log.warn(`Shared-cwd restore guard skipped (accessor error, failing open): ${err?.message || err}`)
   }
   try {
     const checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)

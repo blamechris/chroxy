@@ -240,6 +240,29 @@ describe('checkpoint-handlers', () => {
         assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0)
       })
 
+      it('fails OPEN (proceeds, no crash) when a guard accessor throws', async () => {
+        const ctx = makeRestoreCtx({ checkpointCwd: '/repo' })
+        ctx.sessions.sessionManager.listSessions = createSpy(() => { throw new Error('boom') })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        // Must not throw out of the handler; the guard is defense-in-depth.
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1,
+          'a guard-accessor error falls through to the normal restore')
+        assert.ok(ctx._sent.find(m => m.type === 'checkpoint_restored'))
+      })
+
+      it('tolerates a non-array listSessions return', async () => {
+        const ctx = makeRestoreCtx({ checkpointCwd: '/repo' })
+        ctx.sessions.sessionManager.listSessions = createSpy(() => null)
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
+      })
+
       it('allows the restore when a busy session is in a DIFFERENT cwd', async () => {
         const ctx = makeRestoreCtx({
           checkpointCwd: '/repo',
