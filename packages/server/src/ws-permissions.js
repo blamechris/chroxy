@@ -537,6 +537,42 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     }
   }
 
+  /**
+   * #5731 T7: auto-deny + clear any pending HTTP-hook permissions belonging to
+   * a single session. Called when that session is destroyed. Without it, the
+   * hook's POST /permission stays parked on a held response with a 5-min
+   * auto-deny timer: the tool call blocks for the full timeout, then the timer
+   * fires against a session that no longer exists, and the held `res` +
+   * resolve closure leak until then. `resolve('deny')` runs the shared
+   * cleanup() (clears the timer, deletes both maps, sends the deny response,
+   * releases the #2831 inactivity-pause). Collect the ids first so the
+   * resolve→cleanup→delete doesn't mutate permissionSessionMap mid-iteration.
+   * @param {string} sessionId
+   * @returns {number} how many pending permissions were drained
+   */
+  function drainSessionPermissions(sessionId) {
+    if (!sessionId) return 0
+    const toDeny = []
+    for (const [requestId, sid] of permissionSessionMap) {
+      if (sid === sessionId) toDeny.push(requestId)
+    }
+    let drained = 0
+    for (const requestId of toDeny) {
+      const pending = pendingPermissions.get(requestId)
+      if (!pending) continue
+      try {
+        pending.resolve('deny')
+        drained++
+      } catch (err) {
+        log.warn(`Failed to drain pending permission ${requestId} for destroyed session ${sessionId}: ${err?.message || err}`)
+      }
+    }
+    if (drained > 0) {
+      log.info(`Drained ${drained} pending HTTP permission(s) for destroyed session ${sessionId}`)
+    }
+    return drained
+  }
+
   /** Clean up: auto-deny all pending permissions */
   function destroy() {
     for (const [, pending] of pendingPermissions) {
@@ -552,6 +588,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     handlePermissionResponseHttp,
     resendPendingPermissions,
     resolvePermission,
+    drainSessionPermissions,
     destroy,
     // #3996: expose the HTTP-permission limiter so /diagnostics can include
     // its eviction stats alongside the three WsServer-owned limiters.
