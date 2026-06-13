@@ -16,6 +16,7 @@ import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { createLogger, loggerForSession } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
+import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('cli-session')
 
@@ -272,17 +273,26 @@ export class CliSession extends BaseSession {
    * OAuth state. Mark ready up front; the on-disk OAuth probe doesn't see
    * Keychain credentials and would otherwise misreport unconfigured.
    *
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth() {
     const envVars = this.preflight.credentials.envVars
+    // claude-cli always auths via the host OAuth/subscription pool (the env
+    // key is stripped before spawn), so it's never the `api-key` class. Before
+    // 2026-06-15 this is flat subscription; on/after it draws from the metered
+    // programmatic-credit pool (#5629). The era is read at call time so a
+    // long-running daemon flips copy at the boundary without a restart.
+    const era = isProgrammaticCreditEra()
     return {
       ready: true,
       source: 'oauth',
       envVar: null,
       envVars,
       hint: 'run `claude login` if not yet authed',
-      detail: 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
+      detail: era
+        ? 'Programmatic credit pool — monthly metered credits (CLI strips ANTHROPIC_API_KEY before spawn)'
+        : 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)',
+      billingClass: era ? BILLING_CLASSES.PROGRAMMATIC_CREDIT : BILLING_CLASSES.SUBSCRIPTION,
     }
   }
 
@@ -1169,6 +1179,14 @@ export class CliSession extends BaseSession {
 
         this.emit('result', {
           sessionId: data.session_id,
+          // #5629: `total_cost_usd` is forwarded verbatim from claude's
+          // stream-json result. Historically this was `null` for subscription
+          // runs (no dollar charge). On/after 2026-06-15 claude-cli draws on
+          // the metered programmatic-credit pool, so this becomes REAL credit
+          // spend — the session-manager finite-cost gate accumulates it the
+          // same way it does api-key spend (see _trackUsage / the billing-class
+          // cost contract there). No code change needed here; the field just
+          // starts carrying a finite number for those runs.
           cost: data.total_cost_usd,
           duration: data.duration_ms,
           usage: data.usage,

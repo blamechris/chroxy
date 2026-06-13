@@ -693,6 +693,71 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject non-boolean capability values')
   })
 
+  it('accepts ServerProviderListSchema with auth.billingClass (#5630)', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{
+        name: 'claude-cli',
+        auth: {
+          ready: true,
+          source: 'oauth',
+          envVar: null,
+          envVars: [],
+          hint: '',
+          detail: 'Programmatic credit pool — monthly metered credits',
+          billingClass: 'programmatic-credit',
+        },
+      }],
+    })
+    assert.ok(result.success, 'auth.billingClass should be accepted')
+    assert.equal(result.data.providers[0].auth.billingClass, 'programmatic-credit')
+  })
+
+  it('accepts ServerProviderListSchema auth WITHOUT billingClass (optional, #5630)', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{
+        name: 'claude-cli',
+        auth: { ready: true, source: 'oauth', envVar: null, envVars: [], hint: '', detail: 'x' },
+      }],
+    })
+    assert.ok(result.success, 'billingClass is optional — older servers omit it')
+  })
+
+  it('rejects ServerProviderListSchema with an unknown billingClass value (#5630)', async () => {
+    const { ServerProviderListSchema } = await import('../src/schemas/server.ts')
+    const result = ServerProviderListSchema.safeParse({
+      type: 'provider_list',
+      providers: [{
+        name: 'claude-cli',
+        auth: { ready: true, source: 'oauth', envVar: null, envVars: [], hint: '', detail: 'x', billingClass: 'bogus' },
+      }],
+    })
+    assert.ok(!result.success, 'unknown billingClass enum value must be rejected')
+  })
+
+  it('ServerResultSchema accepts cost: null (#5630 0→null degradation)', async () => {
+    const { ServerResultSchema } = await import('../src/schemas/server.ts')
+    const nullCost = ServerResultSchema.safeParse({ type: 'result', cost: null })
+    assert.ok(nullCost.success, 'cost: null should parse')
+    const numCost = ServerResultSchema.safeParse({ type: 'result', cost: 0.012 })
+    assert.ok(numCost.success, 'cost: <number> should still parse')
+    const omitted = ServerResultSchema.safeParse({ type: 'result' })
+    assert.ok(omitted.success, 'cost is optional')
+  })
+
+  it('ServerSessionListEntrySchema accepts billingClass (#5630)', async () => {
+    const { ServerSessionListEntrySchema } = await import('../src/schemas/server.ts')
+    const result = ServerSessionListEntrySchema.safeParse({
+      sessionId: 's1', name: 'A', provider: 'claude-byok', billingClass: 'api-key',
+    })
+    assert.ok(result.success, 'per-session billingClass should be accepted')
+    const omitted = ServerSessionListEntrySchema.safeParse({ sessionId: 's1', name: 'A' })
+    assert.ok(omitted.success, 'per-session billingClass is optional')
+  })
+
   it('validates ServerSkillsListSchema with description', async () => {
     const { ServerSkillsListSchema } = await import('../src/schemas/server.ts')
     const result = ServerSkillsListSchema.safeParse({

@@ -9,6 +9,7 @@ import {
   getRatchetCap,
   maybeRatchetContextWindow,
 } from './utils/context-window-learn.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 /**
  * Manages a Gemini CLI session using `gemini -p --output-format stream-json`.
@@ -258,6 +259,7 @@ export class GeminiSession extends JsonlSubprocessSession {
         envVars,
         hint: '',
         detail: `Google API (${matched} set)`,
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     if (helpers.hasGeminiOAuthCreds()) {
@@ -268,6 +270,7 @@ export class GeminiSession extends JsonlSubprocessSession {
         envVars,
         hint,
         detail: 'Google API (OAuth from `gemini login`)',
+        billingClass: BILLING_CLASSES.API_KEY,
       }
     }
     const resolvedHint = hint
@@ -280,6 +283,8 @@ export class GeminiSession extends JsonlSubprocessSession {
       envVars,
       hint: resolvedHint,
       detail: envVars.length ? `Not configured — ${resolvedHint}` : 'Not configured',
+      // Non-Claude provider — always per-token api-key billing, era-independent.
+      billingClass: BILLING_CLASSES.API_KEY,
     }
   }
 

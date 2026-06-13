@@ -714,15 +714,17 @@ describe('computePromptCostUsd()', () => {
     assert.ok(Math.abs(cost - 0.00375) < 1e-9)
   })
 
-  it('returns 0 for null pricing (unknown model)', () => {
-    assert.equal(computePromptCostUsd({ input_tokens: 1000 }, null), 0)
+  it('returns null for null pricing (unknown model) — #5630 0→null degradation', () => {
+    assert.equal(computePromptCostUsd({ input_tokens: 1000 }, null), null)
   })
 
-  it('returns 0 for null usage (no API response yet)', () => {
-    assert.equal(computePromptCostUsd(null, sonnet), 0)
+  it('returns null for null usage (no API response yet) — #5630 0→null degradation', () => {
+    assert.equal(computePromptCostUsd(null, sonnet), null)
   })
 
-  it('never returns NaN — coerces non-numeric usage fields to 0', () => {
+  it('never returns NaN — coerces non-numeric usage fields to 0 (finite → 0, not null)', () => {
+    // With KNOWN pricing the computation is finite (all fields coerce to 0),
+    // so this stays a genuine $0.00, NOT the unknown-cost null sentinel.
     const cost = computePromptCostUsd({ input_tokens: 'oops', output_tokens: NaN, cache_read_input_tokens: undefined }, sonnet)
     assert.equal(cost, 0)
   })

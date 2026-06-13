@@ -356,6 +356,20 @@ export interface CumulativeUsage {
   turnsBilled: number;
 }
 
+/**
+ * #5630/#5629: era-aware billing class for a session/provider. Mirrors the
+ * server's `BILLING_CLASSES` enum (packages/server/src/billing-class.js):
+ *   - 'api-key'             — your own key / per-token (byok, docker-byok,
+ *                             every non-Claude provider).
+ *   - 'subscription'        — flat Claude subscription, no per-turn dollar
+ *                             figure (claude-tui, claude-channel; and the
+ *                             programmatic providers BEFORE 2026-06-15).
+ *   - 'programmatic-credit' — Anthropic's metered monthly credit pool
+ *                             (claude-cli/sdk, docker-cli/sdk ON/AFTER
+ *                             2026-06-15).
+ */
+export type BillingClass = 'api-key' | 'subscription' | 'programmatic-credit';
+
 export interface SessionInfo {
   sessionId: string;
   name: string;
@@ -373,6 +387,10 @@ export interface SessionInfo {
   lastActivityAt?: number;
   conversationId: string | null;
   provider?: string;
+  // #5630/#5629: era-aware billing class for the cost-label renderers.
+  // Optional because older servers omit it; consumers fall back to deriving
+  // it from `provider`.
+  billingClass?: BillingClass;
   worktree?: boolean;
   // #3185: per-session promptEvaluator toggle. Optional in the type so
   // older servers that don't include the field don't break the parser.

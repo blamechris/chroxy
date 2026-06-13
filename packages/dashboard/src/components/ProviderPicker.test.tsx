@@ -131,11 +131,13 @@ describe('Provider picker in session creation (#1366)', () => {
 // the docker-byok vs. claude-byok trade-off, and visually distinguish
 // containerized providers in the capability-badge row.
 describe('docker-byok provider-selector polish (#5026)', () => {
-  test('PROVIDER_BILLING has a docker-byok entry distinct from claude-byok', () => {
+  test('billing fallback has a docker-byok entry distinct from claude-byok', () => {
     // The two must NOT share the same billing copy — the whole point of
     // surfacing the polish is to explain the trade-off (sandboxed tools
     // vs. host-side tools, same ANTHROPIC_API_KEY).
-    const billingMatch = modalSrc.match(/PROVIDER_BILLING[^}]*}/s)
+    // #5630: the static copy lives in the `STATIC` map inside
+    // providerBillingFallback() (was the top-level PROVIDER_BILLING const).
+    const billingMatch = modalSrc.match(/const STATIC: Record<string, string> = \{[\s\S]*?\n {2}\}/)
     expect(billingMatch).toBeTruthy()
     const block = billingMatch![0]
     expect(block).toMatch(/['"]docker-byok['"]/)

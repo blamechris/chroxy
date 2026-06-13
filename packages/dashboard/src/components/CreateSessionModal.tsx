@@ -71,21 +71,54 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 const EMPTY_STRINGS: string[] = []
 const EMPTY_MODELS: ModelInfo[] = []
 
-/** Billing context per provider — helps users understand cost implications. */
-const PROVIDER_BILLING: Record<string, string> = {
-  'claude-sdk': 'Uses Anthropic API credits',
-  'claude-cli': 'Uses your Claude subscription',
-  'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
-  'claude-byok': 'Direct Anthropic API — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
-  'docker-cli': 'Docker-isolated — uses your Claude subscription',
-  'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
-  // #5026: docker-byok runs the BYOK agent loop on the host (so chroxy talks
-  // to api.anthropic.com directly) while file/Bash tool execution happens
-  // inside an isolated Docker container. Trade-off vs. claude-byok: same
-  // billing (your ANTHROPIC_API_KEY), but tool side-effects are sandboxed.
-  'docker-byok': 'Direct Anthropic API (your ANTHROPIC_API_KEY) — tool execution sandboxed in a Docker container. Same billing as claude-byok, isolated filesystem.',
-  'codex': 'Uses OpenAI API credits',
-  'gemini': 'Uses Google API credits',
+// #5629: the programmatic-credit era boundary, MIRRORED from the server's
+// PROGRAMMATIC_CREDIT_ERA_START (packages/server/src/billing-class.js). The
+// server-driven `auth.detail` is always preferred; this constant only date-
+// gates the STATIC fallback copy below (shown before the live provider list
+// arrives). Keep the two boundaries in sync if this ever moves. 2026-06-15
+// 00:00:00 UTC — Date.UTC month arg is 0-indexed so `5` is June.
+const PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026, 5, 15)
+
+/** Client-side mirror of the server's isProgrammaticCreditEra (injectable now). */
+function isProgrammaticCreditEra(now: number = Date.now()): boolean {
+  return now >= PROGRAMMATIC_CREDIT_ERA_START
+}
+
+/**
+ * Billing context per provider — helps users understand cost implications.
+ *
+ * Date-gated for the providers that flip from a flat subscription to the
+ * metered programmatic-credit pool on 2026-06-15 (claude-cli/sdk,
+ * docker-cli/sdk). This is only the STATIC fallback; the live server
+ * `auth.detail` (which is itself era-gated server-side) takes precedence at
+ * the render site below.
+ */
+function providerBillingFallback(provider: string, now: number = Date.now()): string | undefined {
+  const era = isProgrammaticCreditEra(now)
+  const STATIC: Record<string, string> = {
+    'claude-sdk': era
+      ? 'Programmatic credit pool — monthly metered credits'
+      : 'Uses your Claude subscription',
+    'claude-cli': era
+      ? 'Programmatic credit pool — monthly metered credits'
+      : 'Uses your Claude subscription',
+    'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
+    'claude-byok': 'Direct Anthropic API — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
+    'docker-cli': era
+      ? 'Docker-isolated — monthly programmatic credit pool'
+      : 'Docker-isolated — uses your Claude subscription',
+    'docker-sdk': era
+      ? 'Docker-isolated — monthly programmatic credit pool'
+      : 'Docker-isolated — uses Anthropic API credits',
+    // #5026: docker-byok runs the BYOK agent loop on the host (so chroxy talks
+    // to api.anthropic.com directly) while file/Bash tool execution happens
+    // inside an isolated Docker container. Trade-off vs. claude-byok: same
+    // billing (your ANTHROPIC_API_KEY), but tool side-effects are sandboxed.
+    'docker-byok': 'Direct Anthropic API (your ANTHROPIC_API_KEY) — tool execution sandboxed in a Docker container. Same billing as claude-byok, isolated filesystem.',
+    'codex': 'Uses OpenAI API credits',
+    'gemini': 'Uses Google API credits',
+  }
+  return STATIC[provider]
 }
 
 /** Short labels for capability badges. */
@@ -672,14 +705,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             }
           </select>
           {/* Live auth detail from the server (#3404 audit F5) wins over the
-              static PROVIDER_BILLING fallback so the user sees the actual
-              billing identity, not a generic "uses API credits" hint.
-              Suppressed when the selected provider is unready — the
-              fix-hint panel below replaces it so the user isn't reading
-              billing copy for a provider they can't even launch. */}
+              static date-gated fallback so the user sees the actual billing
+              identity, not a generic "uses API credits" hint. The fallback
+              itself is era-gated client-side (#5629) so a client that renders
+              before the live provider list arrives still shows the right
+              subscription-vs-credit-pool copy. Suppressed when the selected
+              provider is unready — the fix-hint panel below replaces it so the
+              user isn't reading billing copy for a provider they can't launch. */}
           {selectedProviderUnready ? null : (() => {
             const live = availableProviders.find(p => p.name === provider)?.auth
-            const text = live?.detail || PROVIDER_BILLING[provider]
+            const text = live?.detail || providerBillingFallback(provider)
             if (!text) return null
             return (
               <span

@@ -68,6 +68,8 @@ export type {
   VoiceInputMode,
   ModelInfo,
   SessionInfo,
+  // #5630/#5629: era-aware billing class union.
+  BillingClass,
   AgentInfo,
   // #4308: ActiveTool — one entry per in-flight tool call, kept on
   // BaseSessionState.activeTools and driven by tool_start / tool_result.
@@ -210,6 +212,8 @@ export {
 // implementation avoids drift between the two surfaces.
 export {
   formatCostBadge,
+  // #5630: n/a-on-null cost formatter for priced billing classes.
+  formatCostBadgeOrNa,
   formatCostBreakdown,
   // #5039: error-path partial-cost helper shared by dashboard toast
   // sub-line and mobile Alert.alert body.

@@ -591,6 +591,11 @@ describe('SessionManager.restoreState', () => {
     // cumulativeUsage survives the restart — badge shows the running cost.
     assert.equal(sessions[0].cumulativeUsage.costUsd, 0.0345)
     assert.equal(sessions[0].cumulativeUsage.turnsBilled, 3)
+    // #5630/#5629: listSessions stamps an era-aware billing class per session.
+    assert.ok(
+      ['api-key', 'subscription', 'programmatic-credit'].includes(sessions[0].billingClass),
+      `expected a valid billingClass, got ${sessions[0].billingClass}`,
+    )
     // Latch survives — the threshold warning won't re-fire on next priced turn.
     const restoredSessionId = sessions[0].sessionId
     const entry = mgr._sessions.get(restoredSessionId)

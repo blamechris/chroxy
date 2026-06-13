@@ -36,6 +36,8 @@ export type {
   InputSettings,
   ModelInfo,
   SessionInfo,
+  // #5630/#5629: era-aware billing class union.
+  BillingClass,
   AgentInfo,
   ConnectedClient,
   SessionHealth,
@@ -159,6 +161,8 @@ export interface ProviderAuth {
   envVars: string[];
   hint: string;
   detail: string;
+  // #5630/#5629: era-aware billing class. Optional — older servers omit it.
+  billingClass?: BillingClass;
 }
 
 export interface ProviderInfo {

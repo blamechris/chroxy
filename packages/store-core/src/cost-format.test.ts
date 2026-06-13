@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatCostBadge,
+  formatCostBadgeOrNa,
   formatCostBreakdown,
   formatPartialCostLine,
   formatTokens,
@@ -39,6 +40,22 @@ describe('formatCostBadge (#4123)', () => {
     expect(formatCostBadge(-0.5)).toBe('$0')
     expect(formatCostBadge(NaN)).toBe('$0')
     expect(formatCostBadge(Infinity)).toBe('$0')
+  })
+})
+
+describe('formatCostBadgeOrNa (#5630)', () => {
+  it('returns "n/a" for null / undefined / non-finite (unknown cost)', () => {
+    expect(formatCostBadgeOrNa(null)).toBe('n/a')
+    expect(formatCostBadgeOrNa(undefined)).toBe('n/a')
+    expect(formatCostBadgeOrNa(NaN)).toBe('n/a')
+    expect(formatCostBadgeOrNa(Infinity)).toBe('n/a')
+  })
+
+  it('delegates to formatCostBadge for finite values (including $0)', () => {
+    // A genuine finite 0 stays "$0" (not "n/a") — only the null sentinel is n/a.
+    expect(formatCostBadgeOrNa(0)).toBe('$0')
+    expect(formatCostBadgeOrNa(0.07)).toBe('$0.070')
+    expect(formatCostBadgeOrNa(1.5)).toBe('$1.50')
   })
 })
 

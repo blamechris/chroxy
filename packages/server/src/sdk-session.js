@@ -18,6 +18,7 @@ import { PermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { detectThinkingKeyword } from './detect-thinking-keyword.js'
+import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('sdk')
 
@@ -194,27 +195,47 @@ export class SdkSession extends BaseSession {
    *
    * @param {NodeJS.ProcessEnv} env
    * @param {{ hasClaudeOAuthCreds: () => boolean }} helpers
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth(env, helpers) {
     const credSpec = this.preflight.credentials
     const envVars = credSpec.envVars
     const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+    // Era read at call time so a long-running daemon flips OAuth/credit-pool
+    // copy at the 2026-06-15 boundary without a restart (#5629).
+    const era = isProgrammaticCreditEra()
 
     const matched = envVars.find(v => env[v])
     if (matched) {
-      const identity = matched === 'ANTHROPIC_API_KEY'
-        ? 'Anthropic API'
-        : matched === 'CLAUDE_CODE_OAUTH_TOKEN'
-          ? 'Anthropic API (OAuth token)'
-          : 'Claude subscription'
+      // An explicit ANTHROPIC_API_KEY is a raw API account (per-token billing),
+      // NOT the subscription/credit pool — bill it `api-key` in BOTH eras
+      // (#5630 refinement). CLAUDE_CODE_OAUTH_TOKEN and any other matched var
+      // is the OAuth/credit-pool path, era-gated like the on-disk OAuth branch.
+      const isApiKey = matched === 'ANTHROPIC_API_KEY'
+      if (isApiKey) {
+        return {
+          ready: true,
+          source: 'env',
+          envVar: matched,
+          envVars,
+          hint: '',
+          detail: `Anthropic API (${matched} set)`,
+          billingClass: BILLING_CLASSES.API_KEY,
+        }
+      }
+      const identity = matched === 'CLAUDE_CODE_OAUTH_TOKEN'
+        ? 'Anthropic API (OAuth token)'
+        : 'Claude subscription'
       return {
         ready: true,
         source: 'env',
         envVar: matched,
         envVars,
         hint: '',
-        detail: `${identity} (${matched} set)`,
+        detail: era
+          ? `Programmatic credit pool — monthly metered credits (${matched} set)`
+          : `${identity} (${matched} set)`,
+        billingClass: era ? BILLING_CLASSES.PROGRAMMATIC_CREDIT : BILLING_CLASSES.SUBSCRIPTION,
       }
     }
 
@@ -225,7 +246,10 @@ export class SdkSession extends BaseSession {
         envVar: null,
         envVars,
         hint,
-        detail: 'Claude subscription (OAuth from `claude login`)',
+        detail: era
+          ? 'Programmatic credit pool — monthly metered credits (OAuth from `claude login`)'
+          : 'Claude subscription (OAuth from `claude login`)',
+        billingClass: era ? BILLING_CLASSES.PROGRAMMATIC_CREDIT : BILLING_CLASSES.SUBSCRIPTION,
       }
     }
 
@@ -236,6 +260,9 @@ export class SdkSession extends BaseSession {
       envVars,
       hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
       detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
+      // Unconfigured: default to the era-gated credit-pool class (this is the
+      // claude-sdk default auth path once configured via `claude login`).
+      billingClass: era ? BILLING_CLASSES.PROGRAMMATIC_CREDIT : BILLING_CLASSES.SUBSCRIPTION,
     }
   }
 

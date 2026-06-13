@@ -240,10 +240,16 @@ export function getDeepSeekPricing(modelId) {
 /**
  * Compute USD cost for a single turn's usage object as returned by the
  * Anthropic SDK (`{ input_tokens, output_tokens, cache_creation_input_tokens,
- * cache_read_input_tokens }`). Returns 0 if pricing is unknown OR usage is
- * missing — never throws, never returns NaN. Cache-read tokens are NOT
- * also billed at the input rate; the SDK already excludes them from
- * `input_tokens`.
+ * cache_read_input_tokens }`).
+ *
+ * Returns `null` — NOT 0 — when pricing is unknown OR usage is missing OR the
+ * computed cost isn't finite (#5630). A `null` means "cost unknown", which is
+ * semantically distinct from a genuine `$0.00` turn: the dashboard renders
+ * "n/a" for an unknown cost (via `formatCostBadgeOrNa`) instead of pretending
+ * it was free. Callers that accumulate a turn total MUST skip a `null` (it is
+ * not addable) — see byok-session.js's `turnCostKnown` guard. Never throws,
+ * never returns NaN. Cache-read tokens are NOT also billed at the input rate;
+ * the SDK already excludes them from `input_tokens`.
  *
  * #4087 — long-context premium: when the pricing entry has a
  * `longContext` block AND the turn's total input (input + cache reads +
@@ -251,9 +257,11 @@ export function getDeepSeekPricing(modelId) {
  * charged at the premium rate. The threshold-crossing applies to the
  * whole turn, not just over-threshold tokens — matches Anthropic's
  * public pricing-table format.
+ *
+ * @returns {number|null} Finite USD cost, or `null` when cost is unknown.
  */
 export function computePromptCostUsd(usage, pricing) {
-  if (!pricing || !usage) return 0
+  if (!pricing || !usage) return null
   const inputTokens = Number(usage.input_tokens) || 0
   const outputTokens = Number(usage.output_tokens) || 0
   const cacheReadTokens = Number(usage.cache_read_input_tokens) || 0
@@ -273,7 +281,7 @@ export function computePromptCostUsd(usage, pricing) {
     + outputTokens     * rates.output     / 1_000_000
     + cacheReadTokens  * rates.cacheRead  / 1_000_000
     + cacheWriteTokens * rates.cacheWrite / 1_000_000
-  return Number.isFinite(cost) ? cost : 0
+  return Number.isFinite(cost) ? cost : null
 }
 
 function getDefaultCachePath() {

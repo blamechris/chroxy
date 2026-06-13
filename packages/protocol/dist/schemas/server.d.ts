@@ -191,7 +191,7 @@ export declare const ServerToolInputDeltaSchema: z.ZodObject<{
 }, z.core.$strip>;
 export declare const ServerResultSchema: z.ZodObject<{
     type: z.ZodLiteral<"result">;
-    cost: z.ZodOptional<z.ZodNumber>;
+    cost: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
     duration: z.ZodOptional<z.ZodNumber>;
     usage: z.ZodOptional<z.ZodAny>;
     sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -1691,6 +1691,11 @@ export declare const ServerSessionListEntrySchema: z.ZodObject<{
     lastActivityAt: z.ZodOptional<z.ZodNumber>;
     conversationId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     provider: z.ZodOptional<z.ZodString>;
+    billingClass: z.ZodOptional<z.ZodEnum<{
+        "api-key": "api-key";
+        subscription: "subscription";
+        "programmatic-credit": "programmatic-credit";
+    }>>;
     capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
     worktree: z.ZodOptional<z.ZodBoolean>;
     repoCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -1729,6 +1734,11 @@ export declare const ServerSessionListSchema: z.ZodObject<{
         lastActivityAt: z.ZodOptional<z.ZodNumber>;
         conversationId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
         provider: z.ZodOptional<z.ZodString>;
+        billingClass: z.ZodOptional<z.ZodEnum<{
+            "api-key": "api-key";
+            subscription: "subscription";
+            "programmatic-credit": "programmatic-credit";
+        }>>;
         capabilities: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
         worktree: z.ZodOptional<z.ZodBoolean>;
         repoCwd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
@@ -1818,6 +1828,11 @@ export declare const ServerProviderListSchema: z.ZodObject<{
             envVars: z.ZodArray<z.ZodString>;
             hint: z.ZodString;
             detail: z.ZodString;
+            billingClass: z.ZodOptional<z.ZodEnum<{
+                "api-key": "api-key";
+                subscription: "subscription";
+                "programmatic-credit": "programmatic-credit";
+            }>>;
         }, z.core.$strip>>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
@@ -1837,6 +1852,11 @@ export declare const ServerAuthBootstrapSchema: z.ZodObject<{
             envVars: z.ZodArray<z.ZodString>;
             hint: z.ZodString;
             detail: z.ZodString;
+            billingClass: z.ZodOptional<z.ZodEnum<{
+                "api-key": "api-key";
+                subscription: "subscription";
+                "programmatic-credit": "programmatic-credit";
+            }>>;
         }, z.core.$strip>>;
     }, z.core.$strip>>>;
     slashCommands: z.ZodDefault<z.ZodArray<z.ZodObject<{

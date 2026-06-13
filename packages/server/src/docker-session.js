@@ -2,6 +2,7 @@ import { spawn, execFile } from 'child_process'
 import { createInterface } from 'readline'
 import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
+import { BILLING_CLASSES, isProgrammaticCreditEra } from './billing-class.js'
 
 const log = createLogger('docker-session')
 
@@ -131,13 +132,19 @@ export class DockerSession extends CliSession {
    * always" branch — container providers do not bill the host's subscription.
    *
    * @param {NodeJS.ProcessEnv} env
-   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
    */
   static resolveAuth(env) {
     const credSpec = this.preflight.credentials
     const envVars = credSpec.envVars
     const hint = credSpec.hint
 
+    // docker-cli draws on the host's Claude programmatic pool (era-gated): a
+    // flat subscription before 2026-06-15, the monthly metered credit pool
+    // on/after (#5629). Era read at call time so the daemon flips at the
+    // boundary without a restart.
+    const era = isProgrammaticCreditEra()
+    const billingClass = era ? BILLING_CLASSES.PROGRAMMATIC_CREDIT : BILLING_CLASSES.SUBSCRIPTION
     const matched = envVars.find(v => env[v])
     if (matched) {
       return {
@@ -146,7 +153,10 @@ export class DockerSession extends CliSession {
         envVar: matched,
         envVars,
         hint: '',
-        detail: `Anthropic API (forwarded to container) (${matched} set)`,
+        detail: era
+          ? 'Docker-isolated — monthly programmatic credit pool'
+          : 'Docker-isolated — uses your Claude subscription',
+        billingClass,
       }
     }
     return {
@@ -156,6 +166,7 @@ export class DockerSession extends CliSession {
       envVars,
       hint,
       detail: 'Not configured — set ANTHROPIC_API_KEY on the host (forwarded into the container at run time). No OAuth fallback inside the container — the container has no ~/.claude state.',
+      billingClass,
     }
   }
 

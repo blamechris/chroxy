@@ -1623,3 +1623,27 @@ describe('CliSession state-persistence roundtrip (#4700)', () => {
       'Map insertion order must round-trip so "most-recent" semantics survive a restart')
   })
 })
+
+describe('CliSession.resolveAuth — billing class (#5630/#5629)', () => {
+  // CliSession.resolveAuth() reads isProgrammaticCreditEra() at call time
+  // (no injectable `now` — it always auths via the host pool). Per-era
+  // classification is covered deterministically by billing-class.test.js
+  // (the pure comparator); here we assert resolveAuth carries a VALID
+  // era-gated billingClass + matching detail for the current wall-clock era.
+  it('returns a billingClass that is subscription or programmatic-credit (never api-key)', () => {
+    const auth = CliSession.resolveAuth()
+    assert.ok(auth.billingClass === 'subscription' || auth.billingClass === 'programmatic-credit',
+      `claude-cli is host-pool only; got ${auth.billingClass}`)
+    assert.notEqual(auth.billingClass, 'api-key')
+  })
+  it('detail copy matches the billingClass (subscription vs credit pool)', () => {
+    const auth = CliSession.resolveAuth()
+    if (auth.billingClass === 'programmatic-credit') {
+      assert.match(auth.detail, /programmatic credit pool/i)
+    } else {
+      assert.match(auth.detail, /subscription/i)
+    }
+    // Both eras keep the strip-before-spawn caveat.
+    assert.match(auth.detail, /strips ANTHROPIC_API_KEY/i)
+  })
+})

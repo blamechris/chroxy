@@ -35,6 +35,29 @@ export function formatCostBadge(costUsd: number): string {
 }
 
 /**
+ * #5630: cost formatter that distinguishes "unknown cost" from "$0".
+ *
+ * `computePromptCostUsd` now returns `null` when pricing/usage is unknown (a
+ * deliberate signal that the cost couldn't be computed, NOT that the turn was
+ * free). For a priced billing class (api-key / programmatic-credit), a `null`
+ * cost should read "n/a" rather than "$0" — showing $0 would imply the turn
+ * was genuinely free.
+ *
+ * Distinct from `formatCostBadge`, which keeps its `$0` semantics: the header
+ * cost badge relies on `$0` for the "no spend yet" / suppressed states and
+ * must NOT change. Callers that want the n/a-on-null behaviour opt into this
+ * helper explicitly.
+ *
+ * @param costUsd Finite USD value, or `null`/`undefined` for unknown.
+ */
+export function formatCostBadgeOrNa(costUsd: number | null | undefined): string {
+  if (costUsd === null || costUsd === undefined || !Number.isFinite(costUsd)) {
+    return 'n/a'
+  }
+  return formatCostBadge(costUsd)
+}
+
+/**
  * #5039: error-path partial-cost snapshot folded onto a server `error`
  * event when the failed turn ran any parent rounds + Task subagent
  * calls before the error fired. Shape returned by `handleError` and
