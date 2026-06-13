@@ -35,6 +35,9 @@ import {
   registerTrustGrantRequest,
   clearPendingTrustGrants,
   _testTrustGrantPendingSize,
+  registerModelChangeRequest,
+  clearPendingModelReverts,
+  _testModelRevertPendingSize,
   setDeltaFlushIntervalOverride,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
@@ -398,6 +401,95 @@ describe('dashboard message-handler dispatch', () => {
       const state = store.getState() as any
       expect(state.serverErrors).toHaveLength(1)
       expect(typeof state.serverErrors[0]).toBe('string')
+    })
+
+    // #5711 (Gap 2, client half): set_model is optimistic; a MODEL_NOT_APPLIED
+    // rejection (e.g. a mid-turn no-op the server #5696 now reports) must roll
+    // the dropdown back instead of leaving it on a model the session never
+    // switched to.
+    describe('MODEL_NOT_APPLIED revert (#5711)', () => {
+      afterEach(() => { clearPendingModelReverts() })
+
+      it('reverts the optimistic activeModel for the rejected request\'s session', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            activeModel: 'haiku', // optimistic value already applied by setModel
+            sessionStates: { s1: { ...createEmptySessionState(), activeModel: 'haiku' } },
+          }),
+        )
+        setStore(store)
+        // setModel would have registered this before sending; previousModel is
+        // what the session was on BEFORE the optimistic flip.
+        registerModelChangeRequest('set-model-1', { sessionId: 's1', previousModel: 'sonnet' })
+
+        handleMessage(
+          { type: 'error', requestId: 'set-model-1', code: 'MODEL_NOT_APPLIED', message: 'mid-turn' },
+          ctx() as any,
+        )
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.activeModel).toBe('sonnet') // rolled back
+        // The flat top-level activeModel (what the dropdown renders for the
+        // active session) is rolled back too.
+        expect(state.activeModel).toBe('sonnet')
+        expect(_testModelRevertPendingSize()).toBe(0) // consumed
+      })
+
+      it('reverts the SECOND of two rapid changes even after the first acks (per-request, not per-session)', () => {
+        // A→B (req1) then B→C (req2) on s1, both in-flight. Server acks req1
+        // (model_changed B) and rejects req2 (mid-turn). The revert must restore
+        // B (req2's previousModel), not leave the dropdown on C — i.e. req1's
+        // success must NOT drop req2's pending revert.
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            activeModel: 'C',
+            sessionStates: { s1: { ...createEmptySessionState(), activeModel: 'C' } },
+          }),
+        )
+        setStore(store)
+        registerModelChangeRequest('req1', { sessionId: 's1', previousModel: 'A' })
+        registerModelChangeRequest('req2', { sessionId: 's1', previousModel: 'B' })
+
+        // req1 succeeds first.
+        handleMessage({ type: 'model_changed', sessionId: 's1', model: 'B' }, ctx() as any)
+        // req2 is then rejected.
+        handleMessage(
+          { type: 'error', requestId: 'req2', code: 'MODEL_NOT_APPLIED', message: 'mid-turn' },
+          ctx() as any,
+        )
+
+        const state = store.getState() as any
+        expect(state.sessionStates.s1.activeModel).toBe('B') // req2 rolled back to B, not stuck on C
+      })
+
+      it('does NOT revert when the error requestId does not match a pending change', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), activeModel: 'haiku' } },
+          }),
+        )
+        setStore(store)
+        registerModelChangeRequest('set-model-1', { sessionId: 's1', previousModel: 'sonnet' })
+
+        handleMessage(
+          { type: 'error', requestId: 'some-other-request', code: 'MODEL_NOT_APPLIED', message: 'x' },
+          ctx() as any,
+        )
+
+        expect((store.getState() as any).sessionStates.s1.activeModel).toBe('haiku') // untouched
+        expect(_testModelRevertPendingSize()).toBe(1) // still pending
+      })
+
+      it('clears all pending reverts on disconnect', () => {
+        registerModelChangeRequest('req-a', { sessionId: 's1', previousModel: 'sonnet' })
+        registerModelChangeRequest('req-b', { sessionId: 's2', previousModel: 'opus' })
+        expect(_testModelRevertPendingSize()).toBe(2)
+        clearPendingModelReverts()
+        expect(_testModelRevertPendingSize()).toBe(0)
+      })
     })
 
     // #3570: INVALID_AUTHOR error from skill_trust_grant carries the
