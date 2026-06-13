@@ -255,6 +255,44 @@ describe('worktree-gc integration (real git repo)', () => {
     assert.equal(existsSync(join(ignoredDead, '.env.local')), true)
   })
 
+  // #5706: absolute-age fallback — a "live" pid whose worktree has been
+  // untouched longer than maxLockAgeMs is treated as a recycled pid.
+  describe('#5706 recycled-pid age fallback', () => {
+    // Deterministic age: now - mtimeMs(path). With now=1e6 and mtimeMs=0 the age
+    // is 1e6ms; maxLockAgeMs=1000 makes any such worktree "stale".
+    const STALE = { kill: fakeKill, now: () => 1_000_000, mtimeMs: () => 0, maxLockAgeMs: 1000 }
+
+    it('reclaims a CLEAN worktree whose live pid is stale (recycled)', () => {
+      addWorktree('live-stale', { lockReason: `claude agent a1 (pid ${LIVE_PID})` })
+      const item = planRepoGc(repo, STALE).items.find((i) => i.path.endsWith('/live-stale'))
+      assert.equal(item.action, 'remove')
+      assert.match(item.reason, /recycled pid/)
+    })
+
+    it('still SKIPS a live pid whose worktree is recently touched (age within threshold)', () => {
+      addWorktree('live-fresh', { lockReason: `claude agent a2 (pid ${LIVE_PID})` })
+      const item = planRepoGc(repo, { kill: fakeKill, now: () => 1_000_000, mtimeMs: () => 999_500, maxLockAgeMs: 1000 })
+        .items.find((i) => i.path.endsWith('/live-fresh'))
+      assert.equal(item.action, 'skip')
+      assert.match(item.skipReason, /live process/)
+    })
+
+    it('NEVER reclaims a DIRTY worktree even when the live pid is stale (clean-tree guard wins)', () => {
+      addWorktree('live-stale-dirty', { lockReason: `claude agent a3 (pid ${LIVE_PID})`, dirty: true })
+      const item = planRepoGc(repo, STALE).items.find((i) => i.path.endsWith('/live-stale-dirty'))
+      assert.equal(item.action, 'skip')
+      assert.match(item.skipReason, /uncommitted/)
+    })
+
+    it('maxLockAgeMs=0 disables the fallback — a stale live pid is still skipped', () => {
+      addWorktree('live-stale-disabled', { lockReason: `claude agent a4 (pid ${LIVE_PID})` })
+      const item = planRepoGc(repo, { kill: fakeKill, now: () => 1_000_000, mtimeMs: () => 0, maxLockAgeMs: 0 })
+        .items.find((i) => i.path.endsWith('/live-stale-disabled'))
+      assert.equal(item.action, 'skip')
+      assert.match(item.skipReason, /live process/)
+    })
+  })
+
   it('readLockReasonFromAdmin recovers the reason when porcelain omits it', () => {
     const wt = addWorktree('clean-dead', { lockReason: `claude agent a1 (pid ${DEAD_PID})` })
     const reason = readLockReasonFromAdmin(wt)
@@ -476,5 +514,20 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
     assert.equal(report.repos[0].path, repo, 'project-a was not the discovered repo')
     assert.equal(report.reclaimableCount, 1) // clean-dead
     assert.equal(report.skippedCount, 0) // only a clean-dead worktree in this fixture
+  })
+
+  it('#5706: threads config.worktreeGc.maxLockAgeMs into the plan deps (manual gc honors it)', async () => {
+    const { collectWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
+    const configPath = join(root, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ controlRoomRoot: root, worktreeGc: { maxLockAgeMs: 5000 } }))
+
+    let captured = null
+    const planSpy = (_p, deps) => { captured = deps; return { items: [] } }
+    collectWorktreeGc({}, { configPath, withSizes: false, plan: planSpy, planDeps: {} })
+    assert.equal(captured.maxLockAgeMs, 5000)
+
+    // Test seam (deps.planDeps) overrides config.
+    collectWorktreeGc({}, { configPath, withSizes: false, plan: planSpy, planDeps: { maxLockAgeMs: 12345 } })
+    assert.equal(captured.maxLockAgeMs, 12345)
   })
 })

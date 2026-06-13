@@ -25,9 +25,28 @@
 // is fully testable against real temp repos without poking the real home dir.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync } from 'node:fs'
+import { existsSync, readFileSync, statSync } from 'node:fs'
 import { isAbsolute, resolve as resolvePath } from 'node:path'
 import { GIT } from './git.js'
+
+// #5706: absolute-age fallback for the PID-liveness check. A dead agent's pid
+// can be RECYCLED by an unrelated process after uptime/PID reuse — then
+// `isPidAlive` reports "live", GC skips the orphaned worktree forever, and the
+// disk slowly fills. The fallback reclaims a lock whose pid LOOKS alive but
+// whose worktree mtime is older than `maxLockAgeMs` (treating the pid as
+// recycled) — still subject to the clean-tree guard, so no uncommitted/ignored
+// content is ever deleted.
+//
+// DEFAULT IS 0 (DISABLED): opt-in via `config.worktreeGc.maxLockAgeMs`. It's
+// off by default because the age signal is imperfect — directory mtime bumps
+// only on TOP-LEVEL entry add/remove (and top-level git ops), NOT on in-place or
+// nested-subdir edits. So a genuinely-live, clean, long-running agent that only
+// touches existing/nested files could read "stale" and have its working dir
+// reclaimed out from under it (no committed-work loss thanks to the clean-tree
+// guard, but a disruptive mid-run rug-pull). Operators who hit the recycled-pid
+// disk leak set a generous threshold (e.g. 14–30 days, well beyond any real
+// agent-session lifetime); the clean-tree guard remains the hard safety net.
+const DEFAULT_MAX_LOCK_AGE_MS = 0
 
 /**
  * Existence check for a pid without sending a real signal.
@@ -141,6 +160,11 @@ export function planRepoGc(repoPath, deps = {}) {
     kill = process.kill,
     exists = existsSync,
     readLockReason = (wtPath) => readLockReasonFromAdmin(wtPath),
+    // #5706: age-fallback seams. `now`/`mtimeMs` are injectable for tests.
+    // `maxLockAgeMs` defaults to 30d; 0 (or negative) disables the fallback.
+    now = () => Date.now(),
+    mtimeMs = (p) => { try { return statSync(p).mtimeMs } catch { return null } },
+    maxLockAgeMs = DEFAULT_MAX_LOCK_AGE_MS,
   } = deps
 
   let porcelain
@@ -164,13 +188,25 @@ export function planRepoGc(repoPath, deps = {}) {
         items.push({ path: e.path, action: 'skip', skipReason: 'locked with no pid in reason (not an abandoned agent worktree)', lockReason: reason })
         return
       }
+      // pid liveness, with the #5706 absolute-age fallback: a "live" pid whose
+      // worktree has been untouched longer than maxLockAgeMs is treated as a
+      // recycled pid (the original agent is long gone) so the orphan can be
+      // reclaimed instead of leaking forever.
+      let pidNote = 'lock held by dead pid'
       if (isPidAlive(pid, kill)) {
-        items.push({ path: e.path, action: 'skip', skipReason: `locked by a live process (pid ${pid})`, pid, lockReason: reason })
-        return
+        const m = maxLockAgeMs > 0 ? mtimeMs(e.path) : null
+        const ageMs = m != null ? now() - m : null
+        if (ageMs == null || ageMs <= maxLockAgeMs) {
+          items.push({ path: e.path, action: 'skip', skipReason: `locked by a live process (pid ${pid})`, pid, lockReason: reason })
+          return
+        }
+        // pid looks alive but the tree is stale → recycled pid; reclaim.
+        const ageDays = Math.round(ageMs / 86_400_000)
+        pidNote = `pid ${pid} appears live but worktree untouched ${ageDays}d — treating as a recycled pid (#5706)`
       }
-      // pid is dead — reclaimable, subject to the clean-tree guard.
+      // reclaimable (dead pid, or recycled-pid stale), subject to the clean-tree guard.
       if (dirGone) {
-        items.push({ path: e.path, action: 'prune', pid, lockReason: reason, reason: 'directory gone; lock held by dead pid', locked: true })
+        items.push({ path: e.path, action: 'prune', pid, lockReason: reason, reason: `directory gone; ${pidNote}`, locked: true })
         return
       }
       const clean = isClean(git, e.path)
@@ -182,7 +218,7 @@ export function planRepoGc(repoPath, deps = {}) {
         items.push({ path: e.path, action: 'skip', skipReason: 'has uncommitted/untracked/gitignored content (preserved)', pid, lockReason: reason })
         return
       }
-      items.push({ path: e.path, action: 'remove', pid, lockReason: reason, reason: 'clean worktree locked by dead pid', locked: true })
+      items.push({ path: e.path, action: 'remove', pid, lockReason: reason, reason: `clean worktree; ${pidNote}`, locked: true })
       return
     }
 

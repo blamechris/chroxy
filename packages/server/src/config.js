@@ -837,6 +837,17 @@ export function validateConfig(config, verbose = false) {
           warnings.push(`Invalid value for 'worktreeGc.reapIntervalMs': expected a positive number, got ${typeof v === 'number' ? v : typeof v}`)
         }
       }
+      // #5706: absolute-age fallback for the PID-liveness check. A non-negative
+      // number of ms; 0 (the default) disables the fallback (pure PID liveness).
+      // Negative / non-finite values WARN; they're not hard-rejected, but they
+      // fail safe — planRepoGc treats any non-positive/NaN value as disabled, so
+      // a typo can only ever turn the fallback OFF, never silently widen it.
+      if (Object.prototype.hasOwnProperty.call(config.worktreeGc, 'maxLockAgeMs')) {
+        const v = config.worktreeGc.maxLockAgeMs
+        if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+          warnings.push(`Invalid value for 'worktreeGc.maxLockAgeMs': expected a non-negative number (0 disables), got ${typeof v === 'number' ? v : typeof v}`)
+        }
+      }
     }
   }
 

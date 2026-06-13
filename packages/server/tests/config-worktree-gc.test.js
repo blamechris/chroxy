@@ -38,6 +38,22 @@ describe('config.worktreeGc (#5158)', () => {
     )
   })
 
+  // #5706 — maxLockAgeMs absolute-age fallback: non-negative number, 0 disables.
+  it('accepts a non-negative maxLockAgeMs (incl. 0 to disable)', () => {
+    assert.equal(validateConfig({ worktreeGc: { maxLockAgeMs: 1209600000 } }).warnings.length, 0)
+    assert.equal(validateConfig({ worktreeGc: { maxLockAgeMs: 0 } }).warnings.length, 0)
+  })
+
+  it('warns when maxLockAgeMs is negative or non-numeric', () => {
+    for (const bad of [-1, 'soon', NaN]) {
+      const result = validateConfig({ worktreeGc: { maxLockAgeMs: bad } })
+      assert.ok(
+        result.warnings.some((w) => w.includes('worktreeGc.maxLockAgeMs')),
+        `expected a warning for maxLockAgeMs=${String(bad)}, got: ${JSON.stringify(result.warnings)}`,
+      )
+    }
+  })
+
   it('does not flag worktreeGc as an unknown key', () => {
     const result = validateConfig({ worktreeGc: { autoReap: false } })
     const unknown = result.warnings.find((w) => w.includes('Unknown config key') && w.includes('worktreeGc'))

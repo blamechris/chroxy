@@ -58,12 +58,21 @@ export function collectWorktreeGc(options = {}, deps = {}) {
     withSizes = true,
   } = deps
 
+  // #5706: read config up front so manual `chroxy worktree gc` honors the same
+  // age-fallback setting as the auto-reaper (otherwise an operator who set
+  // maxLockAgeMs would find the CLI ignored it). Soft-read → {} when absent.
+  const cfg = readConfigSoft(configPath, deps)
+  const cliMaxAge = cfg.worktreeGc?.maxLockAgeMs
+  const planDeps = {
+    ...(Number.isFinite(cliMaxAge) && cliMaxAge >= 0 ? { maxLockAgeMs: cliMaxAge } : {}),
+    ...(deps.planDeps || {}),
+  }
+
   let repos
   if (options.repo) {
     const p = resolve(options.repo)
     repos = [{ name: basename(p), path: p }]
   } else {
-    const cfg = readConfigSoft(configPath, deps)
     repos = resolveRepoSet({
       repos: cfg.repos,
       root: cfg.controlRoomRoot,
@@ -77,7 +86,7 @@ export function collectWorktreeGc(options = {}, deps = {}) {
   let skippedCount = 0
 
   for (const r of repos) {
-    const p = plan(r.path, deps.planDeps || {})
+    const p = plan(r.path, planDeps)
     const reclaimable = p.items.filter((it) => it.action === 'remove' || it.action === 'prune')
     const skipped = p.items.filter((it) => it.action === 'skip')
     if (withSizes) {
