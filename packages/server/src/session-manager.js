@@ -2352,16 +2352,6 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    * @param {{ usage?: object, cost?: number }} resultData
    */
-  /**
-   * #5665: current monthly programmatic-credit meter snapshot (machine-wide).
-   * Sent to a client on connect so a freshly-loaded dashboard shows the meter
-   * without waiting for the next billed turn. Shape mirrors the `monthly_budget`
-   * event payload (minus the one-shot justWarned/justExceeded flags).
-   */
-  getMonthlyBudgetStatus() {
-    return this._creditBudget.getStatus(Date.now())
-  }
-
   _trackUsage(sessionId, resultData) {
     const entry = this._sessions.get(sessionId)
     if (!entry) return
@@ -2420,8 +2410,10 @@ export class SessionManager extends EventEmitter {
     // billingClass only resolves to PROGRAMMATIC_CREDIT post-boundary. Broadcast
     // the updated meter to ALL clients (it's per-machine, not per-session).
     if (billingClass === BILLING_CLASSES.PROGRAMMATIC_CREDIT) {
-      const turnCost = finiteCost(Number(resultData?.cost))
-      const { status, justWarned, justExceeded } = this._creditBudget.recordSpend(turnCost, Date.now())
+      // Pass the RAW cost (not finiteCost-coerced) so recordSpend's own
+      // Number.isFinite guard drops a non-finite turn entirely — coercing to 0
+      // here would still bump turnsBilled for a turn with no real cost.
+      const { status, justWarned, justExceeded } = this._creditBudget.recordSpend(Number(resultData?.cost), Date.now())
       this.emit('session_event', {
         sessionId,
         event: 'monthly_budget',
@@ -2454,6 +2446,16 @@ export class SessionManager extends EventEmitter {
         },
       })
     }
+  }
+
+  /**
+   * #5665: current monthly programmatic-credit meter snapshot (machine-wide).
+   * Sent to a client on connect so a freshly-loaded dashboard shows the meter
+   * without waiting for the next billed turn. Shape mirrors the `monthly_budget`
+   * event payload (minus the one-shot justWarned/justExceeded flags).
+   */
+  getMonthlyBudgetStatus() {
+    return this._creditBudget.getStatus(Date.now())
   }
 
   /**

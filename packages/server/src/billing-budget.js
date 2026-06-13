@@ -15,7 +15,7 @@
 //   billing.monthlyCreditBudgetUsd raw USD override (wins over the tier preset)
 //   billing.budgetWarningPercent   warn threshold (default 80)
 
-import { readFileSync, writeFileSync, renameSync, mkdirSync } from 'node:fs'
+import { readFileSync, writeFileSync, renameSync, mkdirSync, rmSync } from 'node:fs'
 import { dirname } from 'node:path'
 
 /** Per-tier monthly programmatic-credit caps (USD), per Anthropic's 2026-06-15 change. */
@@ -113,13 +113,17 @@ export class MonthlyProgrammaticBudgetManager {
 
   _save() {
     if (!this._statePath) return
+    const tmp = `${this._statePath}.tmp`
     try {
       mkdirSync(dirname(this._statePath), { recursive: true })
-      const tmp = `${this._statePath}.tmp`
       writeFileSync(tmp, JSON.stringify(this._state), 'utf8')
       renameSync(tmp, this._statePath)
     } catch {
       // Persistence is best-effort; a write failure must not break the turn.
+      // Clean up the temp file so a failed rename can't orphan a `.tmp` next
+      // to the state file (which would also block the atomic-write contract on
+      // the next save). Best-effort — ignore if it's already gone.
+      try { rmSync(tmp, { force: true }) } catch { /* ignore */ }
     }
   }
 

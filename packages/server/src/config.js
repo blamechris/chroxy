@@ -449,7 +449,12 @@ const MAX_DISCORD_COLOR = 16777215
  */
 /**
  * #5665: validate the `billing` block (monthly programmatic-credit budget
- * meter). Warn-only — never escalate to a fatal "Invalid type" error.
+ * meter). Per-FIELD problems (bad creditTier, out-of-range numbers) are
+ * "Invalid value" warnings — non-fatal, the meter clamps/ignores at runtime.
+ * A gross top-level non-object value additionally trips the generic
+ * `billing: 'object'` schema check ("Invalid type", fatal), matching the
+ * `notifications` / `environments` object blocks — a billing block that isn't
+ * even an object is a real misconfiguration worth failing fast on.
  */
 function validateBillingBlock(billing, warnings) {
   if (typeof billing !== 'object' || billing === null || Array.isArray(billing)) {
@@ -841,7 +846,7 @@ export function validateConfig(config, verbose = false) {
   // loadAndMergeConfig "Invalid type" escalation — the sink clamps bad
   // values to its defaults at runtime.
   // #5665: validate the `billing` block (monthly programmatic-credit meter).
-  // Warn-only — a cosmetic typo must never stop the daemon from booting.
+  // Per-field typos are warn-only "Invalid value"; see validateBillingBlock.
   if (config.billing !== undefined) {
     validateBillingBlock(config.billing, warnings)
   }
