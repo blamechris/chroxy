@@ -27,6 +27,7 @@ import {
   defaultIngestSecretPath,
   deriveProjectFromCwd,
   handleEventIngest,
+  ingestEventClass,
   INGEST_CATEGORY_FOR_TYPE,
   MAX_INGEST_BODY_BYTES,
 } from '../src/event-ingest.js'
@@ -218,14 +219,17 @@ describe('event-ingest', () => {
   })
 
   describe('rate limiting (per source)', () => {
-    it('429 with Retry-After once a source exceeds its bucket', async () => {
+    // #5675: the pre-seeded `_ingestRateLimiter` is now the KEEPALIVE bucket,
+    // so this exercises post_tool_use (the only keepalive type). The pre-seed
+    // knob (ws-server / tighter test knobs) keeps working.
+    it('429 with Retry-After once a source exceeds its keepalive bucket', async () => {
       const server = createMockServer({
         _ingestRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 2, burst: 0, name: 'ingest-test' }),
       })
       await startWith(server)
-      assert.equal((await post(validEvent())).status, 200)
-      assert.equal((await post(validEvent({ type: 'session_end' }))).status, 200)
-      const res = await post(validEvent({ type: 'notification' }))
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      const res = await post(validEvent({ type: 'post_tool_use' }))
       assert.equal(res.status, 429)
       assert.ok(res.headers.get('retry-after'), 'Retry-After header present')
       const body = await res.json()
@@ -237,9 +241,9 @@ describe('event-ingest', () => {
         _ingestRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 1, burst: 0, name: 'ingest-test' }),
       })
       await startWith(server)
-      assert.equal((await post(validEvent({ source: 'hooks-a' }))).status, 200)
-      assert.equal((await post(validEvent({ source: 'hooks-a' }))).status, 429)
-      assert.equal((await post(validEvent({ source: 'hooks-b' }))).status, 200)
+      assert.equal((await post(validEvent({ source: 'hooks-a', type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ source: 'hooks-a', type: 'post_tool_use' }))).status, 429)
+      assert.equal((await post(validEvent({ source: 'hooks-b', type: 'post_tool_use' }))).status, 200)
     })
 
     // #5432 review S1/S2 — the per-source buckets are keyed on a
@@ -269,6 +273,102 @@ describe('event-ingest', () => {
       // the auth check itself.
       const res = await post(validEvent(), { token: 'wrong-token' })
       assert.equal(res.status, 429)
+    })
+  })
+
+  // #5675: the per-source bucket is split by event class so a flood of
+  // droppable `post_tool_use` keepalives can't starve the must-deliver
+  // transition events (stop, subagent_stop, notification, ...).
+  describe('rate limiting (class split #5675)', () => {
+    // The core regression: flood the keepalive bucket until it 429s, then
+    // assert must-deliver transitions still pass — proving the priority
+    // inversion is fixed.
+    it('a keepalive flood does NOT starve must-deliver transitions', async () => {
+      const server = createMockServer({
+        // Tiny keepalive bucket so a short flood exhausts it; generous
+        // lifecycle bucket left to lazy default (300/min + 60 burst).
+        _ingestRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 3, burst: 0, name: 'keepalive-test' }),
+      })
+      await startWith(server)
+      // Flood post_tool_use until the keepalive bucket 429s.
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 429, 'keepalive bucket exhausted')
+      // The must-deliver transitions still pass — independent bucket.
+      assert.equal((await post(validEvent({ type: 'stop' }))).status, 200, 'stop still delivered')
+      assert.equal((await post(validEvent({ type: 'subagent_stop', sessionId: 's1' }))).status, 200, 'subagent_stop still delivered')
+      assert.equal((await post(validEvent({ type: 'notification' }))).status, 200, 'notification still delivered')
+    })
+
+    it('exhausting the lifecycle bucket does NOT 429 keepalives', async () => {
+      const server = createMockServer({
+        // Generous keepalive bucket; tiny lifecycle bucket.
+        _ingestRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 100, burst: 0, name: 'keepalive-test' }),
+        _ingestLifecycleRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 1, burst: 0, name: 'lifecycle-test' }),
+      })
+      await startWith(server)
+      assert.equal((await post(validEvent({ type: 'stop' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'stop' }))).status, 429, 'lifecycle bucket exhausted')
+      // Keepalives sail through their own bucket regardless.
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+    })
+
+    it('exhausting the keepalive bucket does NOT 429 lifecycle events', async () => {
+      const server = createMockServer({
+        _ingestRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 1, burst: 0, name: 'keepalive-test' }),
+        _ingestLifecycleRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 100, burst: 0, name: 'lifecycle-test' }),
+      })
+      await startWith(server)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 429, 'keepalive bucket exhausted')
+      // Lifecycle events pass through their own bucket.
+      assert.equal((await post(validEvent({ type: 'session_start' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'subagent_start', sessionId: 's1' }))).status, 200)
+    })
+
+    it('the per-IP ceiling still applies regardless of class', async () => {
+      const server = createMockServer({
+        _ingestIpRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 2, burst: 0, name: 'ingest-ip-test' }),
+        // Generous class buckets so only the IP ceiling can fire.
+        _ingestRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 100, burst: 0, name: 'keepalive-test' }),
+        _ingestLifecycleRateLimiter: new RateLimiter({ windowMs: 60_000, maxMessages: 100, burst: 0, name: 'lifecycle-test' }),
+      })
+      await startWith(server)
+      assert.equal((await post(validEvent({ type: 'stop' }))).status, 200)
+      assert.equal((await post(validEvent({ type: 'post_tool_use' }))).status, 200)
+      // Third request across either class is capped by the IP ceiling.
+      assert.equal((await post(validEvent({ type: 'stop' }))).status, 429, 'IP ceiling fires across classes')
+    })
+  })
+
+  describe('ingestEventClass (#5675)', () => {
+    it('maps post_tool_use to keepalive', () => {
+      assert.equal(ingestEventClass('post_tool_use'), 'keepalive')
+    })
+
+    it('maps every must-deliver transition type to lifecycle', () => {
+      for (const type of [
+        'session_start', 'session_end', 'subagent_start', 'subagent_stop',
+        'notification', 'user_prompt_submit', 'stop',
+      ]) {
+        assert.equal(ingestEventClass(type), 'lifecycle', `${type} should be lifecycle`)
+      }
+    })
+
+    it('defaults unknown/new types to lifecycle (fail safe — never silently drop)', () => {
+      assert.equal(ingestEventClass('some_future_type'), 'lifecycle')
+      assert.equal(ingestEventClass(''), 'lifecycle')
+      assert.equal(ingestEventClass(undefined), 'lifecycle')
+    })
+
+    it('covers the full ingest enum (no protocol type lands as keepalive by accident)', () => {
+      for (const type of INGEST_EVENT_TYPES) {
+        const cls = ingestEventClass(type)
+        if (type === 'post_tool_use') assert.equal(cls, 'keepalive')
+        else assert.equal(cls, 'lifecycle', `${type} should be lifecycle`)
+      }
     })
   })
 

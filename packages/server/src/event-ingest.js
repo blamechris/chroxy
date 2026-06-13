@@ -44,14 +44,53 @@ const log = createLogger('ingest')
 export const MAX_INGEST_BODY_BYTES = 65536
 
 /**
- * Per-source rate limit: 60 events/min (+10 burst) per `source` bucket.
- * A runaway hook loop saturates its own bucket and gets 429s instead of
- * flooding the pipeline (PushManager's per-category limits are the second
- * layer; Discord's own 429 handling is the third).
+ * Per-source rate limit, split into two independent class buckets (#5675).
+ *
+ * The original single per-source bucket (keyed `source:${source}`) caused a
+ * priority inversion under parallel-subagent load: `post_tool_use` fires on
+ * EVERY tool call with no client throttle (5-20/sec under heavy parallelism),
+ * so it drained the shared 60/min bucket in seconds — and for the rest of the
+ * minute the transition events that actually matter (`stop`, `subagent_stop`,
+ * `notification`) got 429'd and dropped, leaving the Discord embed stale.
+ *
+ * The fix keys each bucket by `source:${source}:${class}` so a flood of
+ * keepalives can no longer starve the must-deliver tokens:
+ *   - KEEPALIVE (post_tool_use): small bucket, 60/min + 10 burst. Dropping
+ *     under load is harmless — with the #5541 turn edges, user_prompt_submit
+ *     already holds the embed in "working", so post_tool_use only freshens
+ *     the detail line.
+ *   - LIFECYCLE / must-deliver (session/subagent/notification/turn edges):
+ *     generous bucket, 300/min + 60 burst. Naturally bounded by real
+ *     transition rates even under heavy parallelism, so it never drops.
+ *
+ * PushManager's per-category limits are the second layer; Discord's own 429
+ * handling is the third; the pre-auth per-IP ceiling below is the outer guard.
  */
 const INGEST_WINDOW_MS = 60_000
 const INGEST_MAX_EVENTS = 60
 const INGEST_BURST = 10
+const INGEST_LIFECYCLE_MAX_EVENTS = 300
+const INGEST_LIFECYCLE_BURST = 60
+
+/**
+ * Event classes for the split per-source rate limit (#5675). KEEPALIVE is the
+ * single droppable type; everything else is a meaningful transition. Unknown
+ * types default to 'lifecycle' (fail safe — a new/unrecognized type must never
+ * be silently dropped into the small keepalive bucket).
+ */
+const KEEPALIVE_EVENT_TYPES = new Set(['post_tool_use'])
+
+/**
+ * Classify an ingest event type for rate limiting. Exported for unit testing.
+ * Anything not in the keepalive set — including unknown, new, or
+ * undefined/empty types — classifies as 'lifecycle' (fail-safe: never
+ * silently route a meaningful event into the droppable keepalive bucket).
+ * @param {string | undefined} type
+ * @returns {'keepalive' | 'lifecycle'}
+ */
+export function ingestEventClass(type) {
+  return KEEPALIVE_EVENT_TYPES.has(type) ? 'keepalive' : 'lifecycle'
+}
 
 /**
  * Pre-auth per-IP ceiling (#5432 review S1/S2): the per-source buckets
@@ -324,20 +363,43 @@ export function handleEventIngest(server, req, res) {
       }
       const event = result.data
 
-      // Per-source rate limit. Lazily constructed so http-routes' mock
-      // servers get one for free; ws-server can pre-seed `_ingestRateLimiter`
-      // if tighter knobs are ever needed.
-      if (!server._ingestRateLimiter) {
-        server._ingestRateLimiter = new RateLimiter({
-          windowMs: INGEST_WINDOW_MS,
-          maxMessages: INGEST_MAX_EVENTS,
-          burst: INGEST_BURST,
-          name: 'ingest',
-        })
+      // Per-source rate limit, split into two class buckets (#5675) so a
+      // flood of `post_tool_use` keepalives can't starve the must-deliver
+      // transition events. Both lazily constructed so http-routes' mock
+      // servers get them for free.
+      //
+      // `_ingestRateLimiter` is the KEEPALIVE bucket — this preserves the
+      // documented pre-seed knob: ws-server (and existing tests) pre-seed
+      // `_ingestRateLimiter` for tighter keepalive knobs, and that path keeps
+      // working. The generous lifecycle bucket is the second limiter alongside.
+      const eventClass = ingestEventClass(event.type)
+      let limiter
+      if (eventClass === 'keepalive') {
+        if (!server._ingestRateLimiter) {
+          server._ingestRateLimiter = new RateLimiter({
+            windowMs: INGEST_WINDOW_MS,
+            maxMessages: INGEST_MAX_EVENTS,
+            burst: INGEST_BURST,
+            name: 'ingest-keepalive',
+          })
+        }
+        limiter = server._ingestRateLimiter
+      } else {
+        if (!server._ingestLifecycleRateLimiter) {
+          server._ingestLifecycleRateLimiter = new RateLimiter({
+            windowMs: INGEST_WINDOW_MS,
+            maxMessages: INGEST_LIFECYCLE_MAX_EVENTS,
+            burst: INGEST_LIFECYCLE_BURST,
+            name: 'ingest-lifecycle',
+          })
+        }
+        limiter = server._ingestLifecycleRateLimiter
       }
-      const { allowed, retryAfterMs } = server._ingestRateLimiter.check(`source:${event.source}`)
+      // Independent token pools per class — keyed by class so neither can
+      // starve the other.
+      const { allowed, retryAfterMs } = limiter.check(`source:${event.source}:${eventClass}`)
       if (!allowed) {
-        log.warn(`Rate limited POST /api/events from source "${event.source}"`)
+        log.warn(`Rate limited POST /api/events from source "${event.source}" (${eventClass})`)
         sendJson(res, 429, { error: 'rate limited', retryAfterMs }, {
           'Retry-After': Math.ceil(retryAfterMs / 1000),
         })
