@@ -10,9 +10,9 @@ describe('FALLBACK_MODELS (default registry)', () => {
     }
   })
 
-  it('contains sonnet, opus, and haiku aliases only', () => {
+  it('contains sonnet, opus, fable, and haiku aliases', () => {
     const ids = FALLBACK_MODELS.map(m => m.id).sort()
-    assert.deepEqual(ids, ['haiku', 'opus', 'sonnet'])
+    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet'])
   })
 
   it('each entry has id, label, fullId, and contextWindow', () => {
@@ -196,9 +196,10 @@ describe('updateModels', () => {
     assert.equal(result[1].fullId, 'claude-opus-4-6')
     assert.equal(result[1].contextWindow, 1_000_000)
 
-    // Fallback entries the SDK didn't list are appended (Opus 4.7, Haiku 4.5).
+    // Fallback entries the SDK didn't list are appended (Opus 4.7, Fable, Haiku 4.5).
     const fullIds = result.map(m => m.fullId)
     assert.ok(fullIds.includes('claude-opus-4-7'), 'opus 4.7 fallback should be merged in')
+    assert.ok(fullIds.includes('claude-fable-5'), 'fable fallback should be merged in')
     assert.ok(fullIds.includes('claude-haiku-4-5'), 'haiku 4.5 fallback should be merged in')
 
     // 1M variants are synthesized for any 1M-context model that lacks one.

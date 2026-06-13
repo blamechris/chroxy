@@ -29,6 +29,11 @@ export function resolveClaudeContextWindow(fullId) {
   if (fullId.endsWith(ONE_M_SUFFIX)) return 1_000_000
   if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
   if (fullId.includes('opus-4-7') || fullId.includes('opus-4.7')) return 1_000_000
+  // opus-4-8 is treated as 1M for consistency with the rest of the opus 4.x
+  // family the heuristic already maps to 1M — this is a family-consistency
+  // default, not a verified spec. The SDK's authoritative
+  // modelUsage.contextWindow overrides it after the first turn if wrong.
+  if (fullId.includes('opus-4-8') || fullId.includes('opus-4.8')) return 1_000_000
   return DEFAULT_CONTEXT_WINDOW
 }
 
@@ -57,6 +62,10 @@ export function claudeDeriveId(fullId) {
 export const FALLBACK_MODELS = Object.freeze([
   Object.freeze({ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveClaudeContextWindow('claude-sonnet-4-6') }),
   Object.freeze({ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveClaudeContextWindow('claude-opus-4-7') }),
+  // Fable falls through to the 200k DEFAULT_CONTEXT_WINDOW heuristic on
+  // purpose — the SDK's authoritative modelUsage.contextWindow ratchets it
+  // after the first turn; we don't invent a fable window here.
+  Object.freeze({ id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: resolveClaudeContextWindow('claude-fable-5') }),
   Object.freeze({ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveClaudeContextWindow('claude-haiku-4-5') }),
 ])
 
@@ -158,8 +167,40 @@ function resolvePricingKey(modelId) {
  * directly.
  */
 export function getModelPricing(modelId) {
+  return resolveModelPricing(modelId, defaultOverlay)
+}
+
+/**
+ * Resolve pricing for a model id with an optional overlay consulted first.
+ * Precedence: overlay pricing (matched on the resolved full id) > static
+ * CLAUDE_PRICING_USD_PER_MTOK > null. A missing overlay pricing block does
+ * NOT shadow the static table (we only short-circuit when the overlay
+ * actually carries a `pricing` object), and an absent match everywhere
+ * yields null — never 0.
+ *
+ * @param {string} modelId
+ * @param {Map} [overlay] - fullId → overlay entry map (see loadModelsOverlay)
+ * @returns {object|null}
+ */
+function resolveModelPricing(modelId, overlay) {
+  if (overlay && overlay.size > 0 && typeof modelId === 'string' && modelId.length > 0) {
+    // Try the id verbatim, then the registry-resolved full id, against the
+    // overlay's fullId-keyed map. Short ids ('opus') resolve via the default
+    // registry so an operator can key the overlay on either form.
+    const candidates = new Set([modelId])
+    const resolvedFull = defaultRegistry.resolveModelId(modelId)
+    if (typeof resolvedFull === 'string' && resolvedFull.length > 0) candidates.add(resolvedFull)
+    for (const candidate of candidates) {
+      const entry = overlay.get(candidate)
+      if (entry && entry.pricing) return entry.pricing
+    }
+  }
   const key = resolvePricingKey(modelId)
-  return key ? CLAUDE_PRICING_USD_PER_MTOK[key] : null
+  // Coalesce a resolved-but-absent key (e.g. a short alias that resolves to a
+  // full id with no pricing row because we don't ship unverified pricing) to null, not
+  // undefined, so the documented "rates or null" contract holds and callers
+  // that branch on `=== null` work.
+  return (key && CLAUDE_PRICING_USD_PER_MTOK[key]) || null
 }
 
 // Public DeepSeek pricing in USD per million tokens (#4656). Source:
@@ -239,6 +280,85 @@ function getDefaultCachePath() {
   const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
   return join(configDir, 'models-cache.json')
 }
+
+/**
+ * User-extensible overlay path. Mirrors getDefaultCachePath's config-dir
+ * resolution EXACTLY (CHROXY_CONFIG_DIR || ~/.chroxy) so the overlay file
+ * lives next to the cache. The overlay lets operators surface a brand-new
+ * model id, override a label/contextWindow, or supply pricing for a model
+ * the static table doesn't carry — all without a code change.
+ */
+function getDefaultOverlayPath() {
+  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return join(configDir, 'models.json')
+}
+
+/**
+ * Load and normalise the user overlay from disk (boot-only — not hot-reload;
+ * that's a deferred follow-up). The file is an object keyed by full model id:
+ *
+ *   {
+ *     "claude-fable-5": {
+ *       "shortId": "fable",            // optional
+ *       "label": "Fable",              // optional
+ *       "fullId": "claude-fable-5",    // optional (defaults to the key)
+ *       "contextWindow": 200000,       // optional
+ *       "pricing": {                   // optional
+ *         "input": 10, "output": 50, "cacheRead": 1, "cacheWrite": 12.5
+ *       }
+ *     }
+ *   }
+ *
+ * Parses defensively: a missing file yields an empty overlay; malformed JSON
+ * (or a non-object root) logs a warn and yields an empty overlay. NEVER throws
+ * on boot. Returns a Map keyed by fullId for O(1) lookup; each value carries a
+ * normalised `{ fullId, shortId, label, contextWindow, pricing }` where any
+ * absent field is left undefined (NOT defaulted to 0/null) so downstream
+ * precedence can distinguish "overlay said nothing" from "overlay said X".
+ *
+ * @param {string} [path]
+ * @returns {Map<string, {fullId:string, shortId?:string, label?:string, contextWindow?:number, pricing?:object}>}
+ */
+function loadModelsOverlay(path = getDefaultOverlayPath()) {
+  const overlay = new Map()
+  let raw
+  try {
+    raw = readFileSync(path, 'utf-8')
+  } catch {
+    // Missing file is the common case — empty overlay, no log.
+    return overlay
+  }
+  let parsed
+  try {
+    parsed = JSON.parse(raw)
+  } catch (err) {
+    log.warn(`loadModelsOverlay: malformed JSON in ${path}: ${err?.message || err} — ignoring overlay`)
+    return overlay
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    log.warn(`loadModelsOverlay: ${path} is not a JSON object keyed by model id — ignoring overlay`)
+    return overlay
+  }
+  for (const [key, value] of Object.entries(parsed)) {
+    if (typeof key !== 'string' || key.length === 0) continue
+    if (!value || typeof value !== 'object' || Array.isArray(value)) continue
+    const fullId = typeof value.fullId === 'string' && value.fullId.length > 0 ? value.fullId : key
+    const entry = { fullId }
+    if (typeof value.shortId === 'string' && value.shortId.length > 0) entry.shortId = value.shortId
+    if (typeof value.label === 'string' && value.label.length > 0) entry.label = value.label
+    if (typeof value.contextWindow === 'number' && value.contextWindow > 0) entry.contextWindow = value.contextWindow
+    if (value.pricing && typeof value.pricing === 'object' && !Array.isArray(value.pricing)) {
+      entry.pricing = value.pricing
+    }
+    overlay.set(fullId, entry)
+  }
+  return overlay
+}
+
+// Module-level overlay, loaded once at boot. The default Claude registry and
+// the module-level getModelPricing() consult this. Per-provider registries
+// take their own overlay via the createModelsRegistry hook.
+const defaultOverlay = loadModelsOverlay()
 
 /**
  * Per-provider cache path resolver (#4413). Non-Claude providers
@@ -399,15 +519,62 @@ function humanizeModelId(id) {
  *   `~/.chroxy/models-cache.json`. Non-Claude providers should supply a
  *   provider-scoped path (e.g. `~/.chroxy/models-cache.codex.json`) so the
  *   default Claude cache stays untouched by per-provider learn-loops (#4413).
+ * @param {Map} [hooks.overlay] - User-extensible overlay (fullId → entry; see
+ *   loadModelsOverlay). Overlay entries SEED the registry like a
+ *   FALLBACK_MODELS row, so a brand-new model id appears with no code change
+ *   and survives loadCache()'s family prune. The default Claude registry gets
+ *   the module-level `defaultOverlay`; pass `new Map()` to opt out.
  */
 export function createModelsRegistry(hooks = {}) {
-  const fallbackModels = hooks.fallbackModels ?? FALLBACK_MODELS
+  const baseFallbackModels = hooks.fallbackModels ?? FALLBACK_MODELS
   const deriveIdFn = typeof hooks.deriveId === 'function' ? hooks.deriveId : claudeDeriveId
   const resolveContextWindowFn = typeof hooks.resolveContextWindow === 'function'
     ? hooks.resolveContextWindow
     : resolveClaudeContextWindow
   const cachePathFn = typeof hooks.cachePath === 'function' ? hooks.cachePath : getDefaultCachePath
   const getModelMetadataFn = typeof hooks.getModelMetadata === 'function' ? hooks.getModelMetadata : null
+  const overlay = hooks.overlay instanceof Map ? hooks.overlay : new Map()
+
+  // Fold overlay entries into the fallback set. An overlay entry for a fullId
+  // NOT already in the base fallbacks seeds the registry exactly like a
+  // FALLBACK_MODELS row would — so it appears in getModels(), resolves both
+  // ways, lands in the allowlist, and is unioned into the loadCache prune
+  // allowlist (its family survives boot). For an id already present in the
+  // base fallbacks, the overlay's label/contextWindow override the static
+  // heuristic (overlay > heuristic). Pricing is handled separately by
+  // resolveModelPricing. SDK live values still win over both at
+  // updateModels() time (the contextWindowOverrides / providerMeta lookups
+  // are consulted ahead of the fallback row's contextWindow).
+  const overlayRows = []
+  const overriddenBase = []
+  const baseByFullId = new Map(baseFallbackModels.map((m) => [m.fullId, m]))
+  for (const entry of overlay.values()) {
+    const baseRow = baseByFullId.get(entry.fullId)
+    if (baseRow) {
+      // Override the base row's label/window from the overlay when supplied.
+      if (entry.label !== undefined || entry.contextWindow !== undefined || entry.shortId !== undefined) {
+        baseByFullId.set(entry.fullId, Object.freeze({
+          id: entry.shortId ?? baseRow.id,
+          label: entry.label ?? baseRow.label,
+          fullId: baseRow.fullId,
+          contextWindow: entry.contextWindow ?? baseRow.contextWindow,
+        }))
+      }
+      continue
+    }
+    const shortId = entry.shortId ?? deriveIdFn(entry.fullId)
+    overlayRows.push(Object.freeze({
+      id: shortId,
+      label: entry.label ?? humanizeModelId(shortId),
+      fullId: entry.fullId,
+      contextWindow: entry.contextWindow ?? resolveContextWindowFn(entry.fullId),
+    }))
+  }
+  // Preserve base order, then append overlay-only rows.
+  for (const m of baseFallbackModels) overriddenBase.push(baseByFullId.get(m.fullId))
+  const fallbackModels = overlayRows.length > 0 || overriddenBase.some((m, i) => m !== baseFallbackModels[i])
+    ? Object.freeze([...overriddenBase, ...overlayRows])
+    : baseFallbackModels
 
   let activeModels = fallbackModels
   let defaultModelId = null
@@ -652,6 +819,28 @@ export function createModelsRegistry(hooks = {}) {
       }
       converted.push(...variants)
 
+      // #5631 — robustness: the `/^default\b/i` displayName regex is the only
+      // path that sets nextDefault. If the SDK ever drops or renames the
+      // "Default (…)" marker, nextDefault stays null and the registry has no
+      // default model at all. Pick a deterministic fallback so drift is
+      // visible and the picker still has a sensible default: prefer a stable
+      // family present in FALLBACK_MODELS (opus, then sonnet) — matched by the
+      // fallback row's fullId so SDK-derived ids like `opus-4-8` (not the
+      // short alias `opus`) still match — else the first converted entry.
+      // Warn so the regex miss surfaces in logs.
+      if (nextDefault === null && converted.length > 0) {
+        let picked = null
+        for (const preferredShortId of ['opus', 'sonnet']) {
+          const fb = fallbackModels.find((m) => m.id === preferredShortId)
+          if (!fb) continue
+          const match = converted.find((m) => m.fullId === fb.fullId)
+          if (match) { picked = match.id; break }
+        }
+        if (!picked) picked = converted[0].id
+        nextDefault = picked
+        log.warn(`updateModels: no SDK entry matched the /^default\\b/i displayName regex — falling back to '${picked}' as the default model. The SDK's "Default (…)" marker may have changed shape.`)
+      }
+
       applyModels(converted, nextDefault)
       return converted
     },
@@ -844,8 +1033,10 @@ export function createModelsRegistry(hooks = {}) {
   }
 }
 
-// Default instance — preserves backward compatibility for all existing imports
-const defaultRegistry = createModelsRegistry()
+// Default instance — preserves backward compatibility for all existing imports.
+// Seeded with the boot-loaded user overlay so an operator-supplied model id
+// appears in the picker / allowlist and survives the loadCache prune.
+const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
 
 /**
  * Per-provider registries. Providers that expose static

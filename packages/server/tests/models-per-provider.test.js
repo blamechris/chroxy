@@ -82,6 +82,8 @@ describe('provider static metadata hooks', () => {
     const allowed = new Set(SdkSession.getAllowedModels())
     assert.ok(allowed.has('opus'))
     assert.ok(allowed.has('claude-opus-4-7'))
+    assert.ok(allowed.has('fable'))
+    assert.ok(allowed.has('claude-fable-5'))
     assert.ok(!allowed.has('opus-4-6'))
     assert.ok(!allowed.has('claude-opus-4-6'))
   })
@@ -91,6 +93,8 @@ describe('provider static metadata hooks', () => {
     const allowed = new Set(CliSession.getAllowedModels())
     assert.ok(allowed.has('opus'))
     assert.ok(allowed.has('claude-opus-4-7'))
+    assert.ok(allowed.has('fable'))
+    assert.ok(allowed.has('claude-fable-5'))
     assert.ok(!allowed.has('opus-4-6'))
     assert.ok(!allowed.has('claude-opus-4-6'))
   })
@@ -172,7 +176,7 @@ describe('createModelsRegistry(providerHooks)', () => {
   it('backward compat: no args => Claude-style defaults (FALLBACK_MODELS, claude- stripping)', () => {
     const r = createModelsRegistry()
     const ids = r.getModels().map(m => m.id).sort()
-    assert.deepEqual(ids, ['haiku', 'opus', 'sonnet'])
+    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet'])
     const converted = r.updateModels([
       { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
     ])
