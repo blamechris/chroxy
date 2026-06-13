@@ -718,7 +718,8 @@ export type ConnectionPhase =
   | 'connecting'          // Initial connection attempt
   | 'connected'           // WebSocket open + authenticated
   | 'reconnecting'        // Auto-reconnecting after unexpected disconnect
-  | 'server_restarting';  // Health check returns { status: 'restarting' }
+  | 'server_restarting'   // Health check returns { status: 'restarting' }
+  | 'server_down';        // Reconnect ladder gave up (#5698) — terminal, manual reconnect only
 
 /** Context captured from connect() closure for use by the extracted handleMessage(). */
 export interface ConnectionContext {

@@ -30,6 +30,14 @@ describe('FooterBar', () => {
     expect(screen.getByText('Reconnecting')).toBeInTheDocument()
   })
 
+  // #5698 — the terminal server_down phase must map to a human label, not leak
+  // the raw enum string into the footer chip (#5724 review finding A).
+  it('shows a human label for the terminal server_down phase', () => {
+    render(<FooterBar {...baseProps} connectionPhase={'server_down' as never} />)
+    expect(screen.getByText('Server down')).toBeInTheDocument()
+    expect(screen.queryByText('server_down')).not.toBeInTheDocument()
+  })
+
   it('shows abbreviated cwd', () => {
     render(<FooterBar {...baseProps} cwd="/Users/me/Projects/chroxy" />)
     expect(screen.getByText('Projects/chroxy')).toBeInTheDocument()

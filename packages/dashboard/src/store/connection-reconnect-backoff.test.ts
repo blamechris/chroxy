@@ -12,6 +12,7 @@
  * connection-pairing.test.ts, with fake timers so we can assert exact delays.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { RECONNECT_MAX_RUNG } from '@chroxy/store-core'
 
 const store: Record<string, string> = {}
 const localStorageMock = {
@@ -78,6 +79,14 @@ beforeEach(() => {
   MockWebSocket.instances = []
   resetReconnectAttempt()
   vi.spyOn(Math, 'random').mockReturnValue(0) // zero jitter
+  // Silence the per-cycle reconnect logging. These tests drive many
+  // close→reconnect cycles (the #5698 give-up test alone runs 11), and that
+  // console.log volume races vitest's onUserConsoleLog RPC at worker teardown
+  // ("Closing rpc while onUserConsoleLog was pending"), surfacing as a flaky
+  // EnvironmentTeardownError in CI even though every test passes. Restored by
+  // vi.restoreAllMocks() in afterEach.
+  vi.spyOn(console, 'log').mockImplementation(() => {})
+  vi.spyOn(console, 'warn').mockImplementation(() => {})
   for (const k of Object.keys(store)) delete store[k]
   useConnectionStore.setState({
     serverRegistry: [],
@@ -205,5 +214,47 @@ describe('backoff ladder resets on auth_ok, not socket-open (#5555.5)', () => {
     s1.onopen?.() // opened but never authenticated
     await vi.advanceTimersByTimeAsync(0)
     expect(mh.reconnectAttempt).toBe(1) // NOT reset by socket-open
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5698 — ladder gives up → terminal server_down + manual-retry recovery
+// ---------------------------------------------------------------------------
+
+describe('reconnect ladder gives up → server_down (#5698)', () => {
+  // Drive one drop. If a reconnect socket is created, mark it connected (but
+  // never auth_ok, so the ladder keeps climbing) and return true; if the ladder
+  // gave up (no new socket), return false.
+  async function driveDrop(): Promise<boolean> {
+    const socket = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    const before = MockWebSocket.instances.length
+    socket.onclose?.({ code: 1006 })
+    // Advance well past the top rung so any armed timer fires.
+    await vi.advanceTimersByTimeAsync(RETRY_DELAYS[4] * 2)
+    if (MockWebSocket.instances.length === before) return false // gave up
+    const next = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    next.readyState = 1
+    next.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    useConnectionStore.setState({ connectionPhase: 'connected' })
+    return true
+  }
+
+  it('goes terminal after RECONNECT_MAX_RUNG failed reconnects and a manual retry resets the ladder', async () => {
+    await openConnected()
+    let cycles = 0
+    while (await driveDrop()) {
+      cycles++
+      if (cycles > RECONNECT_MAX_RUNG + 2) throw new Error('ladder never gave up')
+    }
+    // The ladder armed rungs 0..RECONNECT_MAX_RUNG-1 (that many reconnects), then
+    // the next drop hit the cap and gave up instead of arming.
+    expect(cycles).toBe(RECONNECT_MAX_RUNG)
+    expect(useConnectionStore.getState().connectionPhase).toBe('server_down')
+
+    // A user-initiated retry resets the ladder (resetReconnectAttempt runs even
+    // though the local-daemon connect no-ops here — getAuthToken is mocked null).
+    useConnectionStore.getState().retryConnection()
+    expect(mh.reconnectAttempt).toBe(0)
   })
 })

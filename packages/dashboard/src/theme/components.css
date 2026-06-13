@@ -451,6 +451,7 @@
 .status-dot.connecting { background: var(--status-connecting); }
 .status-dot.reconnecting { background: var(--status-restarting); }
 .status-dot.server_restarting { background: var(--status-restarting); }
+.status-dot.server_down { background: var(--accent-red); } /* #5698 — terminal */
 
 /* ---- Sidebar ---- */
 .sidebar {
@@ -4824,6 +4825,7 @@ button.sidebar-token-view-session-row:hover {
 .footer-status-dot.connected { background: var(--accent-green); }
 .footer-status-dot.connecting, .footer-status-dot.reconnecting { background: var(--accent-orange); }
 .footer-status-dot.server_restarting { background: var(--accent-orange); }
+.footer-status-dot.server_down { background: var(--accent-red); } /* #5698 — terminal */
 .footer-status-dot.disconnected { background: var(--text-muted); }
 
 .footer-status-label {
@@ -7926,6 +7928,7 @@ button.sidebar-token-view-session-row:hover {
 .server-dot.connected { background: var(--accent-green); }
 .server-dot.connecting { background: var(--accent-yellow); animation: pulse 1.5s ease-in-out infinite; }
 .server-dot.restarting { background: var(--accent-orange, var(--accent-yellow)); }
+.server-dot.down { background: var(--accent-red); } /* #5698 — terminal */
 .server-dot.disconnected { background: var(--text-dim); opacity: 0.5; }
 
 .server-remove-btn {

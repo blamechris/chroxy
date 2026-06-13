@@ -240,4 +240,44 @@ describe('ReconnectBanner', () => {
       }).not.toThrow()
     })
   })
+
+  // #5698 — terminal "server_down" mode: the reconnect ladder gave up.
+  describe('terminal mode (#5698 server_down)', () => {
+    it('renders the terminal message without the attempt counter', () => {
+      render(
+        <ReconnectBanner
+          {...baseProps}
+          attempt={10}
+          terminal
+          message="Server appears to be down"
+        />,
+      )
+      const text = screen.getByTestId('reconnect-banner').textContent || ''
+      expect(text).toContain('Server appears to be down')
+      // No "(attempt N/M)" suffix in terminal mode.
+      expect(text).not.toContain('attempt')
+    })
+
+    it('still offers a manual Reconnect button in terminal mode', () => {
+      const onRetry = vi.fn()
+      render(<ReconnectBanner {...baseProps} terminal message="Server appears to be down" onRetry={onRetry} />)
+      fireEvent.click(screen.getByTestId('retry-button'))
+      expect(onRetry).toHaveBeenCalledTimes(1)
+    })
+
+    it('shows no restart countdown even if an ETA is somehow present', () => {
+      render(
+        <ReconnectBanner
+          {...baseProps}
+          terminal
+          message="Server appears to be down"
+          restartEtaMs={30_000}
+          restartingSince={5_000_000}
+        />,
+      )
+      const text = screen.getByTestId('reconnect-banner').textContent || ''
+      expect(text).toContain('Server appears to be down')
+      expect(text).not.toMatch(/~\d+:\d{2}/)
+    })
+  })
 })

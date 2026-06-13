@@ -1588,6 +1588,8 @@ export function App() {
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
+  // #5698 — the reconnect ladder gave up; terminal state, manual reconnect only.
+  const isServerDown = connectionPhase === 'server_down'
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
   const showWelcome = isConnected && sessions.length === 0
 
@@ -1627,10 +1629,15 @@ export function App() {
       <ConnectionAnnouncer phase={connectionPhase} />
       {/* Reconnect banner */}
       <ReconnectBanner
-        visible={isReconnecting}
+        visible={isReconnecting || isServerDown}
         attempt={connectionRetryCount}
         maxAttempts={5}
-        message={connectionPhase === 'server_restarting' ? 'Server restarting...' : undefined}
+        message={
+          isServerDown
+            ? 'Server appears to be down'
+            : connectionPhase === 'server_restarting' ? 'Server restarting...' : undefined
+        }
+        terminal={isServerDown}
         restartEtaMs={connectionPhase === 'server_restarting' ? restartEtaMs : null}
         restartingSince={connectionPhase === 'server_restarting' ? restartingSince : null}
         shutdownReason={connectionPhase === 'server_restarting' ? shutdownReason : null}

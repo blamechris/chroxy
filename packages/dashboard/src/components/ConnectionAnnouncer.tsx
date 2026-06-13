@@ -47,6 +47,7 @@ const SETTLED_LABELS: Record<string, string> = {
   connecting: 'Connecting to Chroxy server',
   reconnecting: 'Reconnecting to Chroxy server',
   server_restarting: 'Chroxy server restarting',
+  server_down: 'Chroxy server appears to be down. Reconnect to try again.',
   disconnected: 'Disconnected from Chroxy server',
 }
 

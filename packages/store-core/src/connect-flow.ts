@@ -52,6 +52,17 @@
 export const CONNECT_MAX_RETRIES = 5
 
 /**
+ * #5698 — how many post-connect reconnect rungs to climb before the ladder gives
+ * up and the client shows a terminal "server appears down" state (instead of
+ * spinning forever). The ladder caps its delay at the last RETRY_DELAYS rung
+ * (8s), so 10 rungs (0–9) ≈ 1+2+3+5+8·6 ≈ 59s of trying before going terminal —
+ * long enough to ride out a normal restart, short enough not to spin
+ * indefinitely. A user-initiated reconnect resets the counter, so the cap is not
+ * permanent.
+ */
+export const RECONNECT_MAX_RUNG = 10
+
+/**
  * Backoff ladder (ms) for both the pre-WS health-check retries and the
  * post-connect close/error reconnects. Climbed by attempt index, capped at the
  * last rung. Shared so the app and dashboard escalate identically. (#5594)
@@ -346,6 +357,22 @@ export interface CreateReconnectSchedulerOptions {
   scheduler?: ConnectFlowScheduler
   /** Jitter fn; defaults to store-core's `withJitter` (0–50%). */
   jitter?: (delayMs: number) => number
+  /**
+   * Maximum rung before the ladder gives up (#5698). When `nextRung()` returns a
+   * value `>= maxRung`, the scheduler does NOT arm another retry — it invokes
+   * `onGaveUp()` once for this socket and stops, so the client can show a
+   * terminal "server appears down" state with a manual-reconnect affordance
+   * instead of spinning the reconnect ladder forever. Omit (or `Infinity`) for
+   * the legacy never-give-up behavior. A fresh socket from a manual `connect()`
+   * gets a new scheduler with a reset counter, so giving up is not permanent.
+   */
+  maxRung?: number
+  /**
+   * Called once (per socket) when the ladder reaches `maxRung` instead of arming
+   * another retry. The client transitions to its terminal `server_down` phase
+   * here. Must be idempotent. No-op when `maxRung` is omitted.
+   */
+  onGaveUp?: () => void
 }
 
 /**
@@ -388,14 +415,28 @@ export function createReconnectScheduler(
     retryDelays = CONNECT_RETRY_DELAYS,
     scheduler = DEFAULT_SCHEDULER,
     jitter = defaultJitter,
+    maxRung,
+    onGaveUp,
   } = options
 
   let scheduled = false
 
   function schedule(): boolean {
     if (scheduled) return false
-    scheduled = true
     const rung = nextRung()
+    // #5698: cap the ladder. Once the rung reaches maxRung, stop arming retries
+    // and hand off to the terminal handler instead of spinning forever. NOTE: no
+    // timer is armed here — `scheduled = true` is purely a terminal/dedup LATCH
+    // (NOT "a reconnect is pending"), so a paired close/error or any later event
+    // on this dead socket short-circuits at the `if (scheduled) return` guard
+    // above and `onGaveUp` fires exactly once. A manual connect() builds a fresh
+    // socket + scheduler with a reset counter, so the latch is per-socket.
+    if (maxRung != null && rung >= maxRung) {
+      scheduled = true // terminal latch; intentionally no timer (see note above)
+      if (onGaveUp) onGaveUp()
+      return false
+    }
+    scheduled = true
     const delayMs = jitter(retryDelayForAttempt(rung, retryDelays))
     scheduler.setTimeout(() => {
       if (isStale()) return
