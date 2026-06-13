@@ -484,12 +484,17 @@ export function SettingsBar({
                   })}
                 </View>
               )}
-              {!modelSwitchSupported && activeModel && (() => {
-                const fixed = availableModels.find((m) => m.id === activeModel || m.fullId === activeModel);
+              {!modelSwitchSupported && (() => {
+                // Fall back to defaultModelId when there's no explicit override,
+                // mirroring the interactive chip's `!activeModel && defaultModelId`
+                // active-match so a non-switching provider still shows its model.
+                const fixedId = activeModel || defaultModelId;
+                if (!fixedId) return null;
+                const fixed = availableModels.find((m) => m.id === fixedId || m.fullId === fixedId);
                 return (
                   <View style={styles.chipRow}>
                     <View style={[styles.chip, styles.chipReadOnly]} accessibilityRole="text">
-                      <Text style={styles.chipReadOnlyText}>{fixed?.label || activeModel} · fixed</Text>
+                      <Text style={styles.chipReadOnlyText}>{fixed?.label || fixedId} · fixed</Text>
                     </View>
                   </View>
                 );

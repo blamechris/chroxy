@@ -6,7 +6,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Text, TouchableOpacity } from 'react-native';
+import { Text } from 'react-native';
 import { SettingsBar } from '../SettingsBar';
 
 function collectVisibleText(root: ReactTestInstance): string {
@@ -76,6 +76,18 @@ describe('SettingsBar capability gating (#5731)', () => {
     expect(text).toContain('fixed');
     // The non-active model ('Sonnet') must NOT appear as a switchable chip.
     expect(text).not.toContain('Sonnet');
+  });
+
+  it('uses defaultModelId for the fixed badge when there is no explicit activeModel', () => {
+    const tree = render(makeProps({
+      modelSwitchSupported: false,
+      activeModel: null,
+      defaultModelId: 'sonnet',
+    }));
+    const text = collectVisibleText(tree.root);
+    // Falls back to the default model's label rather than rendering no model row.
+    expect(text).toContain('Sonnet');
+    expect(text).toContain('fixed');
   });
 
   it('hides the permission-mode chips when permissionModeSwitch is false', () => {
