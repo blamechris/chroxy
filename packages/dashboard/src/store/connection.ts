@@ -2203,18 +2203,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendPermissionResponse: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {
     const { socket } = get();
+    // #5699 — refuse to answer a permission prompt while disconnected. A
+    // permission request is NOT safely queueable: the server expires the pending
+    // request when the socket drops, so the old `enqueueMessage` path either
+    // dropped the answer or replayed it against a dead request — and
+    // `markPermissionResolved` below would flip the prompt to "answered" even
+    // though the server never received it. That's the #5699 silent-loss bug
+    // (you tap Allow on a cached/disconnected session and nothing happens, but
+    // the UI says you answered). Returning false leaves the prompt un-answered
+    // and actionable; the answer buttons + keyboard shortcuts gate on `connected`
+    // in PermissionPrompt.tsx (respond()) so the operator gets clear feedback
+    // rather than a dead click.
+    if (!socket || socket.readyState !== WebSocket.OPEN) {
+      return false;
+    }
     // allowSession: wire decision is still 'allow' — session-scoped behaviour
     // is implemented client-side via a follow-up set_permission_rules message
     // (the schema only accepts 'allow' | 'allowAlways' | 'deny').
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
     const payload = { type: 'permission_response', requestId, decision: wireDecision };
-    let result: 'sent' | 'queued' | false;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, payload);
-      result = 'sent';
-    } else {
-      result = enqueueMessage('permission_response', payload);
-    }
+    wsSend(socket, payload);
+    const result: 'sent' | 'queued' | false = 'sent';
     // Persist the decision in the store so PermissionPrompt renders its
     // answered state across remounts (#2833 — tab switch regression).
     get().markPermissionResolved(requestId, decision);

@@ -2951,6 +2951,14 @@ button.sidebar-token-view-session-row:hover {
   line-height: 1.2;
 }
 
+/* #5699 — disconnected hint under the (disabled) answer buttons. */
+.perm-disconnected-hint {
+  margin-top: 6px;
+  font-size: var(--text-xs, 11px);
+  color: var(--accent-orange);
+  line-height: 1.2;
+}
+
 .perm-shortcut {
   display: inline-flex;
   align-items: center;
