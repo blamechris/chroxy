@@ -1965,7 +1965,11 @@ describe('WsServer drains pending permissions on session_destroyed (#5731 T7)', 
     // closure mimics the real handler's cleanup (clears the timer + removes
     // both map entries) so the test faithfully exercises the production path.
     let doomedDecision = null
+    // unref() so a failed assertion before the drain clears this can't hold the
+    // event loop open for the full 5 minutes (mirrors the long-fuse timers in
+    // cli-session.test.js).
     const timer = setTimeout(() => {}, 300_000)
+    timer.unref?.()
     server._pendingPermissions.set('req-doomed', {
       resolve: (decision) => {
         doomedDecision = decision
