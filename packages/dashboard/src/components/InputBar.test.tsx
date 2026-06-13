@@ -2681,6 +2681,27 @@ describe('InputBar push-to-talk (#5610)', () => {
       nowSpy.mockRestore()
     })
 
+    it('a navigation key (Arrow) right before a Space hold does NOT block PTT (caret-anchored dictation)', () => {
+      vi.useFakeTimers()
+      const nowSpy = vi.spyOn(performance, 'now')
+      const voice = makeVoice()
+      render(<ControlledBar voiceInput={voice} initial="hello world" />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      textarea.setSelectionRange(11, 11)
+
+      // Arrow the caret into place, then immediately (0ms later) hold Space to
+      // dictate at that caret. Arrow is not text typing, so it must not poison
+      // the cadence guard — PTT must still arm.
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: 'ArrowLeft' })
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: ' ' })
+      act(() => { vi.advanceTimersByTime(300) })
+
+      expect(voice.start).toHaveBeenCalledTimes(1)
+      nowSpy.mockRestore()
+    })
+
     it('a deliberate Space hold after a typing pause still arms PTT', () => {
       vi.useFakeTimers()
       const nowSpy = vi.spyOn(performance, 'now')

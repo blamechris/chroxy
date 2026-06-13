@@ -643,7 +643,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     } else {
       // #5666 — record typing activity so a Space arriving right after this key
       // takes the native path instead of arming PTT (see PTT_TYPING_GUARD_MS).
-      lastNonSpaceKeyAtRef.current = performance.now()
+      // Only *text-producing* keys count as typing: a single-character key with
+      // no command modifier (letters, digits, punctuation). Navigation/editing
+      // keys (Arrow, Backspace, Enter, Escape, Tab) and bare modifiers (Shift)
+      // must NOT poison the guard — otherwise arrowing the caret into place and
+      // then holding Space to dictate mid-draft (the caret-anchored dictation
+      // gesture) would be wrongly blocked.
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        lastNonSpaceKeyAtRef.current = performance.now()
+      }
       cancelPttArmOnOtherKey()
     }
 
