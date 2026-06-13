@@ -117,6 +117,23 @@ describe('usePermissionAnnouncer', () => {
     expect(announceMock).toHaveBeenCalledWith('Permission requested: Edit(c.ts)');
   });
 
+  // #5760 review — more than one permission can be live at once (parallel SDK
+  // tool calls). A second prompt arriving while the first is still live must
+  // still announce (keying on the first-by-position would swallow it).
+  it('announces a second concurrent prompt while the first is still live', () => {
+    const tree = render([]);
+    update(tree, [permPrompt({ requestId: 'req-1' })]);
+    expect(announceMock).toHaveBeenCalledTimes(1);
+    expect(announceMock).toHaveBeenLastCalledWith('Permission requested: Bash(ls)');
+    // Second prompt arrives; the first is STILL live (unanswered).
+    update(tree, [
+      permPrompt({ requestId: 'req-1' }),
+      permPrompt({ id: 'p2', requestId: 'req-2', tool: 'Edit', toolInput: { file_path: '/x/y/z.ts' } }),
+    ]);
+    expect(announceMock).toHaveBeenCalledTimes(2);
+    expect(announceMock).toHaveBeenLastCalledWith('Permission requested: Edit(z.ts)');
+  });
+
   // #5760 review — ChatView isn't remounted on a tab-switch; it re-renders with
   // the destination session's messages. Switching to a session that ALREADY
   // has a live pending prompt must stay SILENT (re-seed on sessionKey change),

@@ -35,41 +35,60 @@ import { AccessibilityInfo } from 'react-native';
 import type { ChatMessage } from '@chroxy/store-core';
 import { getPermissionSummary } from '../components/PermissionDetail';
 
+/** True iff `m` is a live, unanswered permission prompt (not an AskUserQuestion). */
+function isLivePermissionPrompt(m: ChatMessage, now: number): boolean {
+  return m.type === 'prompt' && !!m.requestId && !!m.expiresAt && m.expiresAt > now && !m.answered;
+}
+
 /** The first live, unanswered permission prompt in `messages`, or null. */
 export function firstLivePermissionPrompt(messages: ChatMessage[], now: number): ChatMessage | null {
   for (const m of messages) {
-    if (m.type === 'prompt' && !!m.requestId && !!m.expiresAt && m.expiresAt > now && !m.answered) {
-      return m;
-    }
+    if (isLivePermissionPrompt(m, now)) return m;
   }
   return null;
 }
 
+/** All live, unanswered permission prompts in `messages`, in order. */
+export function livePermissionPrompts(messages: ChatMessage[], now: number): ChatMessage[] {
+  return messages.filter((m) => isLivePermissionPrompt(m, now));
+}
+
 export function usePermissionAnnouncer(messages: ChatMessage[], sessionKey: string | null): void {
-  // requestId of the prompt we last announced. `undefined` = not yet seeded;
-  // `null` = nothing pending. Seeded so a prompt already present (at mount, or
-  // in the session we just switched to) isn't announced — only new arrivals.
-  const lastAnnouncedRef = useRef<string | null | undefined>(undefined);
-  // The session the ref is seeded for. A change means we navigated sessions and
-  // must re-seed against the destination's existing prompt (ChatView doesn't
-  // remount on switch, so the ref would otherwise leak across sessions).
+  // requestIds we've already announced. A Set (not a single id) because more
+  // than one permission can be live at once (parallel SDK tool calls) — keying
+  // on the *first* live prompt would never announce a second concurrent one
+  // while the first stayed live. Pruned each run to only still-live ids, which
+  // bounds it and (harmlessly, since requestIds are unique) allows re-use.
+  const announcedRef = useRef<Set<string>>(new Set());
+  // The session the set is seeded for. A change means we navigated sessions and
+  // must re-seed against the destination's existing prompts (ChatView doesn't
+  // remount on switch, so the set would otherwise leak across sessions and
+  // either re-announce or wrongly suppress).
   const seededSessionRef = useRef<string | null | undefined>(undefined);
   if (seededSessionRef.current !== sessionKey) {
     seededSessionRef.current = sessionKey;
-    lastAnnouncedRef.current = firstLivePermissionPrompt(messages, Date.now())?.requestId ?? null;
+    // Seed: treat the destination session's already-pending prompts as
+    // already-announced so arriving stays silent — only later arrivals speak.
+    announcedRef.current = new Set(
+      livePermissionPrompts(messages, Date.now()).map((m) => m.requestId as string),
+    );
   }
 
   useEffect(() => {
-    const live = firstLivePermissionPrompt(messages, Date.now());
-    const id = live?.requestId ?? null;
-    if (id == null) {
-      // Nothing live → reset so a future prompt (new requestId) announces.
-      lastAnnouncedRef.current = null;
-      return;
+    const now = Date.now();
+    const live = livePermissionPrompts(messages, now);
+    const liveIds = new Set(live.map((m) => m.requestId as string));
+    // Prune resolved/expired ids so the set stays bounded to what's live.
+    for (const id of announcedRef.current) {
+      if (!liveIds.has(id)) announcedRef.current.delete(id);
     }
-    if (id === lastAnnouncedRef.current) return;
-    lastAnnouncedRef.current = id;
-    const summary = getPermissionSummary(live!.tool, live!.toolInput);
+    // Announce the first not-yet-announced live prompt. Sequential arrivals
+    // (the common case — each tool call appends its own prompt message) each
+    // get their own effect run, so each announces once.
+    const fresh = live.find((m) => !announcedRef.current.has(m.requestId as string));
+    if (!fresh) return;
+    announcedRef.current.add(fresh.requestId as string);
+    const summary = getPermissionSummary(fresh.tool, fresh.toolInput);
     AccessibilityInfo.announceForAccessibility?.(`Permission requested: ${summary}`);
   }, [messages, sessionKey]);
 }
