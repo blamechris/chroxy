@@ -88,7 +88,13 @@ export async function maybeAutoReapWorktrees(config, log, deps = {}) {
     return null
   }
 
-  const summary = await reapWorktrees({ repos, planDeps: deps.planDeps || {}, yieldFn: deps.yieldFn })
+  // #5706: pass the configured absolute-age fallback through to the GC core.
+  // A test's `deps.planDeps` still wins (spread last) so seams override config.
+  const planDeps = {
+    ...(typeof config.worktreeGc.maxLockAgeMs === 'number' ? { maxLockAgeMs: config.worktreeGc.maxLockAgeMs } : {}),
+    ...(deps.planDeps || {}),
+  }
+  const summary = await reapWorktrees({ repos, planDeps, yieldFn: deps.yieldFn })
 
   const base = `worktree auto-reap: reclaimed ${summary.reclaimed} worktree(s) across ${summary.repos} repo(s); ${summary.skipped} preserved (live/dirty/unknown)`
   // Warn whenever anything went wrong — both per-item failures (counted in
