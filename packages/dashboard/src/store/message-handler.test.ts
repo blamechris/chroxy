@@ -454,9 +454,15 @@ describe('dashboard message-handler dispatch', () => {
         setStore(store)
         registerModelChangeRequest('req1', { sessionId: 's1', previousModel: 'A' })
         registerModelChangeRequest('req2', { sessionId: 's1', previousModel: 'B' })
+        expect(_testModelRevertPendingSize()).toBe(2)
 
         // req1 succeeds first.
         handleMessage({ type: 'model_changed', sessionId: 's1', model: 'B' }, ctx() as any)
+        // Discriminating assertion: success must NOT consume/clear either pending
+        // revert (the clear-on-success regression). Without this, the test passes
+        // either way — req2's revert target ('B') equals the success value ('B'),
+        // so the final activeModel is 'B' whether or not the revert actually fired.
+        expect(_testModelRevertPendingSize()).toBe(2)
         // req2 is then rejected.
         handleMessage(
           { type: 'error', requestId: 'req2', code: 'MODEL_NOT_APPLIED', message: 'mid-turn' },
@@ -465,6 +471,7 @@ describe('dashboard message-handler dispatch', () => {
 
         const state = store.getState() as any
         expect(state.sessionStates.s1.activeModel).toBe('B') // req2 rolled back to B, not stuck on C
+        expect(_testModelRevertPendingSize()).toBe(1) // req2 consumed; req1 still pending
       })
 
       it('does NOT revert when the error requestId does not match a pending change', () => {
@@ -538,8 +545,15 @@ describe('dashboard message-handler dispatch', () => {
         setStore(store)
         registerPermissionModeChangeRequest('req1', { sessionId: 's1', previousMode: 'approve' })
         registerPermissionModeChangeRequest('req2', { sessionId: 's1', previousMode: 'plan' })
+        expect(_testPermissionModeRevertPendingSize()).toBe(2)
 
         handleMessage({ type: 'permission_mode_changed', sessionId: 's1', mode: 'plan' }, ctx() as any)
+        // Discriminating assertion: the success broadcast must NOT consume/clear
+        // either pending revert (the #5715 clear-on-success regression). The final
+        // permissionMode check alone can't catch that here — req2's revert target
+        // ('plan') equals the success value ('plan'), so the state is 'plan'
+        // whether or not the revert fired.
+        expect(_testPermissionModeRevertPendingSize()).toBe(2)
         handleMessage(
           { type: 'error', requestId: 'req2', code: 'PERMISSION_MODE_NOT_APPLIED', message: 'mid-turn' },
           ctx() as any,
@@ -547,6 +561,7 @@ describe('dashboard message-handler dispatch', () => {
 
         const state = store.getState() as any
         expect(state.sessionStates.s1.permissionMode).toBe('plan') // req2 rolled back to plan, not stuck on auto
+        expect(_testPermissionModeRevertPendingSize()).toBe(1) // req2 consumed; req1 still pending
       })
 
       it('does NOT revert when the error requestId does not match a pending change', () => {
