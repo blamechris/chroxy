@@ -392,6 +392,59 @@ describe('setupForwarding', () => {
     })
   })
 
+  describe('session_create_failed event (#5731 T6)', () => {
+    it('surfaces a fresh-session start failure as a per-session session_error', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_create_failed', {
+        sessionId: 'sess-1',
+        name: 'Doomed',
+        provider: 'claude-tui',
+        cwd: '/tmp',
+        model: null,
+        errorCode: 'START_FAILED',
+        errorMessage: 'claude PTY exited during warmup (code=1)',
+      })
+
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.code === 'START_FAILED'
+      )
+      assert.ok(call, 'should broadcast a START_FAILED session_error to the session')
+      const [sessionId, msg] = call.arguments
+      assert.equal(sessionId, 'sess-1')
+      assert.equal(msg.sessionId, 'sess-1')
+      assert.equal(msg.recoverable, false, 'fresh-session failure has no retry affordance')
+      assert.match(msg.message, /failed to start/)
+      assert.match(msg.message, /warmup/, 'includes the provider rejection reason when present')
+    })
+
+    it('falls back to SESSION_START_FAILED + provider-named message when fields are sparse', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_create_failed', { sessionId: 'sess-2', provider: 'claude-tui' })
+
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.sessionId === 'sess-2'
+      )
+      assert.ok(call, 'should still broadcast with default code')
+      const msg = call.arguments[1]
+      assert.equal(msg.code, 'SESSION_START_FAILED')
+      assert.match(msg.message, /\(claude-tui\)/)
+    })
+
+    it('ignores a session_create_failed with no sessionId', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+      ctx.sessionManager.emit('session_create_failed', { errorMessage: 'oops' })
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error'
+      )
+      assert.equal(call, undefined, 'no broadcast without a session to scope to')
+    })
+  })
+
   // #4756 — `stopped` event surfaces through the normalizer as a
   // `session_stopped` broadcast targeted at subscribers of the affected
   // session (NOT global broadcast). Pairs with the wiring in

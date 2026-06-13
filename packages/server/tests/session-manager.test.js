@@ -2084,6 +2084,38 @@ describe('#5316 (WP-2.2) — async start() rejection handling', () => {
     assert.equal(mgr.getFailedRestores().length, 0, 'no failed-restore for a fresh session')
   })
 
+  it('surfaces session_create_failed BEFORE session_destroyed for a FRESH session (#5731 T6)', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const { registerProvider } = await import('../src/providers.js')
+    registerProvider('test-async-fail-fresh-event', AsyncFailProvider)
+
+    // Capture both lifecycle events with order so we can prove the client gets
+    // the REASON (session_create_failed) while the session is still mapped,
+    // before it vanishes (session_destroyed). The forwarder relies on this
+    // ordering to broadcastToSession before subscribers are torn down.
+    const order = []
+    const createFailed = []
+    mgr.on('session_create_failed', (e) => { order.push('create_failed'); createFailed.push(e) })
+    mgr.on('session_destroyed', () => order.push('destroyed'))
+    const restoreFailed = []
+    mgr.on('session_restore_failed', (e) => restoreFailed.push(e))
+
+    const id = mgr.createSession({ cwd: '/tmp', provider: 'test-async-fail-fresh-event', name: 'Doomed' })
+    await tick()
+
+    assert.equal(createFailed.length, 1, 'exactly one session_create_failed for a fresh start failure')
+    assert.equal(restoreFailed.length, 0, 'fresh session must NOT surface as a restore failure')
+    const ev = createFailed[0]
+    assert.equal(ev.sessionId, id)
+    assert.equal(ev.name, 'Doomed')
+    assert.equal(ev.provider, 'test-async-fail-fresh-event')
+    assert.equal(ev.cwd, '/tmp')
+    assert.equal(ev.errorCode, 'START_FAILED', 'code-less Error is stamped START_FAILED')
+    assert.match(ev.errorMessage, /PTY exited during warmup/, 'carries the provider rejection reason')
+    assert.deepEqual(order, ['create_failed', 'destroyed'],
+      'reason is emitted before the session is destroyed so the client can toast it')
+  })
+
   it('PRESERVES restored history + surfaces session_restore_failed for a RESTORED session', async () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
     const { registerProvider } = await import('../src/providers.js')
