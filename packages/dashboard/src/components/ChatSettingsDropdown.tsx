@@ -103,6 +103,32 @@ export function ChatSettingsDropdown({
     [availableModels, activeModel],
   )
 
+  // #5628: the session's active model arrives as either a short id ('fable')
+  // or a full id ('claude-fable-5'), but the <option> values are short ids
+  // (m.id). A native <select> whose `value` matches no <option> silently
+  // renders the FIRST option — so a full-id activeModel made the header show
+  // "Default (Sonnet 4.6)" even while the status bar (which dual-matches on
+  // id||fullId) showed the real model. Resolve the active model the same way
+  // the status bar does, then drive the <select> off the resolved short id so
+  // it matches its option. `activeEntry` is null for a model not in the list
+  // (e.g. unknown/unbroadcast) — we then render a synthetic option carrying the
+  // raw id so the picker degrades to the real id rather than misrendering as
+  // "Default" (#5631 graceful-degradation).
+  const activeEntry = useMemo(
+    () => availableModels.find(m => m.id === activeModel || m.fullId === activeModel) ?? null,
+    [availableModels, activeModel],
+  )
+  // The <option> value that represents the active model: its short id when
+  // known, else the raw activeModel string (matched by the synthetic option).
+  const activeOptionValue = activeEntry?.id ?? activeModel ?? ''
+  // True only when the active model genuinely IS the server default — compared
+  // on the normalized short id so a full-id activeModel still resolves.
+  const activeIsDefault = defaultModelId != null && activeOptionValue === defaultModelId
+  // Render a synthetic option ONLY when the active model is set, isn't the
+  // default, and isn't already one of the listed options.
+  const needsSyntheticOption =
+    !activeIsDefault && !!activeModel && activeEntry === null
+
   return (
     <>
       {/* Model */}
@@ -110,7 +136,7 @@ export function ChatSettingsDropdown({
         <select
           data-testid="chat-settings-trigger"
           data-kind="model"
-          value={activeModel === defaultModelId ? '' : (activeModel || '')}
+          value={activeIsDefault ? '' : activeOptionValue}
           onChange={handleModelChange}
           title={modelTitle}
           aria-label={modelTitle}
@@ -120,6 +146,9 @@ export function ChatSettingsDropdown({
               ? availableModels.find(m => m.id === defaultModelId)?.label
               : availableModels[0]?.label) ?? 'recommended'})
           </option>
+          {needsSyntheticOption && (
+            <option value={activeOptionValue}>{activeModel}</option>
+          )}
           {availableModels
             .filter(m => m.id !== defaultModelId)
             .map(m => (

@@ -163,6 +163,45 @@ describe('ChatSettingsDropdown', () => {
     expect(onModelChange).toHaveBeenCalledWith('sonnet')
   })
 
+  // #5628 — the active model can arrive as a FULL id ('claude-opus-4-7')
+  // while the <option> values are short ids ('opus'). A native <select> with
+  // an unmatched value renders its FIRST option, so the header showed
+  // "Default (…)" even though a non-default model was active. The select must
+  // resolve the active model the same way the status bar does (id || fullId).
+  describe('#5628 — header reflects the active session model', () => {
+    it('resolves a full-id activeModel to its short-id option (not Default)', () => {
+      renderDropdown({ defaultModelId: 'sonnet', activeModel: 'claude-opus-4-7' })
+      const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+      expect(modelSelect.value).toBe('opus')
+    })
+
+    it('shows Default only when the full-id activeModel IS the default', () => {
+      renderDropdown({ defaultModelId: 'opus', activeModel: 'claude-opus-4-7' })
+      const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+      expect(modelSelect.value).toBe('')
+    })
+
+    it('renders a synthetic option with the raw id for a model not in the list', () => {
+      // fable is active but not broadcast in availableModels — degrade to the
+      // raw id rather than misrendering as "Default" (#5631 spirit).
+      renderDropdown({ defaultModelId: 'sonnet', activeModel: 'claude-fable-5' })
+      const modelSelect = screen.getByTestId('chat-settings-trigger') as HTMLSelectElement
+      expect(modelSelect.value).toBe('claude-fable-5')
+      const opt = Array.from(modelSelect.querySelectorAll('option')).find(
+        o => o.value === 'claude-fable-5',
+      )
+      expect(opt).toBeDefined()
+      expect(opt!.textContent).toBe('claude-fable-5')
+    })
+
+    it('does not add a synthetic option when the active model is already listed', () => {
+      renderDropdown({ defaultModelId: 'sonnet', activeModel: 'opus' })
+      const modelSelect = screen.getByTestId('chat-settings-trigger')
+      // sonnet (filtered to Default) + haiku + opus = 3 options total
+      expect(modelSelect.querySelectorAll('option').length).toBe(3)
+    })
+  })
+
   // #3888 — header model-picker tooltip surfaces model + context-window
   // #5181 (C3): the model dropdown must be robust to any-length model
   // name. The actual truncation is CSS (`text-overflow: ellipsis` +
