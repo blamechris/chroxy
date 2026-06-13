@@ -1934,3 +1934,75 @@ describe('audit trail for auto-deny resolution paths (#3057)', () => {
       'session_destroyed listener must be removed on close()')
   })
 })
+
+// ---------------------------------------------------------------------------
+// #5731 T7 — destroying a session drains its parked HTTP-hook permission
+// ---------------------------------------------------------------------------
+
+describe('WsServer drains pending permissions on session_destroyed (#5731 T7)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('auto-denies a destroyed session\'s parked HTTP permission and leaves other sessions alone', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-doomed', name: 'Doomed', cwd: '/tmp' },
+    ])
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    await startServerAndGetPort(server)
+
+    // Seed a parked HTTP-hook permission for the doomed session. The resolve
+    // closure mimics the real handler's cleanup (clears the timer + removes
+    // both map entries) so the test faithfully exercises the production path.
+    let doomedDecision = null
+    // unref() so a failed assertion before the drain clears this can't hold the
+    // event loop open for the full 5 minutes (mirrors the long-fuse timers in
+    // cli-session.test.js).
+    const timer = setTimeout(() => {}, 300_000)
+    timer.unref?.()
+    server._pendingPermissions.set('req-doomed', {
+      resolve: (decision) => {
+        doomedDecision = decision
+        clearTimeout(timer)
+        server._pendingPermissions.delete('req-doomed')
+        server._permissionSessionMap.delete('req-doomed')
+      },
+      timer,
+    })
+    server._permissionSessionMap.set('req-doomed', 'sess-doomed')
+
+    // A permission belonging to a DIFFERENT session must survive the destroy.
+    let otherDecision = null
+    server._pendingPermissions.set('req-other', {
+      resolve: (decision) => { otherDecision = decision },
+      timer: null,
+    })
+    server._permissionSessionMap.set('req-other', 'sess-other')
+
+    // Destroy the session — the WsServer destroy handler must drain its parked
+    // permission instead of leaving the hook's POST /permission wedged for the
+    // full 5-minute auto-deny timeout.
+    manager.emit('session_destroyed', { sessionId: 'sess-doomed' })
+
+    assert.equal(doomedDecision, 'deny',
+      'the destroyed session\'s parked permission is auto-denied')
+    assert.equal(server._pendingPermissions.has('req-doomed'), false,
+      'drained entry removed from _pendingPermissions')
+    assert.equal(server._permissionSessionMap.has('req-doomed'), false,
+      'drained entry removed from _permissionSessionMap')
+    assert.equal(otherDecision, null,
+      'a different session\'s pending permission is untouched')
+    assert.equal(server._pendingPermissions.has('req-other'), true,
+      'the other session\'s permission survives the destroy')
+  })
+})

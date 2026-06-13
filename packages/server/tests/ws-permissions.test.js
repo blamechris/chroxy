@@ -115,6 +115,73 @@ describe('createPermissionHandler', () => {
     })
   })
 
+  describe('drainSessionPermissions (#5731 T7)', () => {
+    it('auto-denies only the destroyed session\'s pending permissions', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      const resolveA1 = mock.fn()
+      const resolveA2 = mock.fn()
+      const resolveB = mock.fn()
+      opts.pendingPermissions.set('a1', { resolve: resolveA1, timer: null })
+      opts.pendingPermissions.set('a2', { resolve: resolveA2, timer: null })
+      opts.pendingPermissions.set('b1', { resolve: resolveB, timer: null })
+      opts.permissionSessionMap.set('a1', 'sess-A')
+      opts.permissionSessionMap.set('a2', 'sess-A')
+      opts.permissionSessionMap.set('b1', 'sess-B')
+
+      const drained = drainSessionPermissions('sess-A')
+
+      assert.equal(drained, 2, 'both of sess-A\'s permissions drained')
+      assert.equal(resolveA1.mock.calls[0].arguments[0], 'deny')
+      assert.equal(resolveA2.mock.calls[0].arguments[0], 'deny')
+      assert.equal(resolveB.mock.calls.length, 0, 'sess-B\'s permission left untouched')
+    })
+
+    it('returns 0 and is a no-op for a session with no pending permissions', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      opts.pendingPermissions.set('b1', { resolve: mock.fn(), timer: null })
+      opts.permissionSessionMap.set('b1', 'sess-B')
+
+      assert.equal(drainSessionPermissions('sess-A'), 0)
+    })
+
+    it('returns 0 for a falsy sessionId without scanning', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      assert.equal(drainSessionPermissions(undefined), 0)
+      assert.equal(drainSessionPermissions(''), 0)
+    })
+
+    it('skips a mapping whose pending entry is already gone (orphaned map)', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      // Mapping exists but the pending permission already resolved/expired —
+      // drain must not throw and must report 0 drained for the orphan.
+      opts.permissionSessionMap.set('stale', 'sess-A')
+      assert.equal(drainSessionPermissions('sess-A'), 0)
+    })
+
+    it('does not throw and still counts an entry whose resolve write fails', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      const ok = mock.fn()
+      // In production resolve() runs cleanup() BEFORE the response write, so a
+      // write-throw on a torn-down socket still means the entry was drained —
+      // the drain must swallow the error and count it.
+      const boom = mock.fn(() => { throw new Error('socket torn down') })
+      opts.pendingPermissions.set('ok', { resolve: ok, timer: null })
+      opts.pendingPermissions.set('boom', { resolve: boom, timer: null })
+      opts.permissionSessionMap.set('ok', 'sess-A')
+      opts.permissionSessionMap.set('boom', 'sess-A')
+
+      const drained = drainSessionPermissions('sess-A')
+      assert.equal(drained, 2, 'both entries counted as drained (cleanup runs before the write)')
+      assert.equal(ok.mock.calls.length, 1)
+      assert.equal(boom.mock.calls.length, 1, 'the throwing resolve was still attempted')
+    })
+  })
+
   describe('resendPendingPermissions', () => {
     it('sends nothing when no pending permissions', () => {
       const opts = makeHandlerOpts()

@@ -934,6 +934,19 @@ export class WsServer {
         } catch (err) {
           log.warn(`Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
         }
+        // #5731 T7: auto-deny any pending HTTP-hook permission for this session
+        // BEFORE we drop its map entries below. Otherwise the hook's parked
+        // POST /permission blocks the tool call for the full 5-min timeout,
+        // then fires on a destroyed session, leaking the held response until
+        // then. drainSessionPermissions() resolves each as 'deny' (its shared
+        // cleanup also removes the requestId from _permissionSessionMap); the
+        // loop below then only mops up any orphaned mapping with no live
+        // pending entry.
+        try {
+          this._permissions?.drainSessionPermissions?.(sessionId)
+        } catch (err) {
+          log.warn(`Failed to drain pending permissions for destroyed session ${sessionId}: ${err.message}`)
+        }
         for (const [key, sid] of this._permissionSessionMap) {
           if (sid === sessionId) this._permissionSessionMap.delete(key)
         }
