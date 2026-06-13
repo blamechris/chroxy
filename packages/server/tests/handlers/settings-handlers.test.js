@@ -2342,4 +2342,78 @@ describe('settings-handlers', () => {
       }
     })
   })
+
+  // #5731 T9 — set_thinking_level is applied optimistically client-side; every
+  // rejection path must echo the requestId with THINKING_LEVEL_NOT_APPLIED so the
+  // dashboard rolls the dropdown back (mirrors set_model's MODEL_NOT_APPLIED).
+  describe('set_thinking_level', () => {
+    function sessionWithThinking(supported = true) {
+      const session = createMockSession()
+      if (supported) {
+        session.setThinkingLevel = createSpy(async () => {})
+      } else {
+        delete session.setThinkingLevel
+      }
+      return session
+    }
+
+    it('calls session.setThinkingLevel and broadcasts thinking_level_changed on success', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(makeWs(), client, { level: 'high', requestId: 'r1' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'thinking_level_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.level, 'high')
+      assert.equal(ctx._sent.filter((m) => m.type === 'error').length, 0)
+    })
+
+    it('rejects an invalid level with THINKING_LEVEL_NOT_APPLIED echoing the requestId', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(ws, client, { level: 'bogus', requestId: 'r-bad' }, ctx)
+
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      assert.equal(ws._messages[0].requestId, 'r-bad')
+    })
+
+    it('rejects an unsupported provider with THINKING_LEVEL_NOT_APPLIED + requestId (revert-correlatable)', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: sessionWithThinking(false), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-unsup' }, ctx)
+
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      assert.equal(ws._messages[0].requestId, 'r-unsup')
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
+    })
+
+    it('surfaces a setThinkingLevel throw as THINKING_LEVEL_NOT_APPLIED + requestId', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.setThinkingLevel = createSpy(async () => { throw new Error('pty gone') })
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(ws, client, { level: 'max', requestId: 'r-throw' }, ctx)
+
+      assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      assert.equal(ws._messages[0].requestId, 'r-throw')
+      assert.match(ws._messages[0].message, /pty gone/)
+    })
+  })
 })

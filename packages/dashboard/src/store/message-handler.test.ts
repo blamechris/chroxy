@@ -41,6 +41,9 @@ import {
   registerPermissionModeChangeRequest,
   clearPendingPermissionModeReverts,
   _testPermissionModeRevertPendingSize,
+  registerThinkingLevelChangeRequest,
+  clearPendingThinkingLevelReverts,
+  _testThinkingLevelRevertPendingSize,
   setDeltaFlushIntervalOverride,
 } from './message-handler'
 import { createEmptySessionState } from './utils'
@@ -650,6 +653,60 @@ describe('dashboard message-handler dispatch', () => {
         expect(_testPermissionModeRevertPendingSize()).toBe(2)
         clearPendingPermissionModeReverts()
         expect(_testPermissionModeRevertPendingSize()).toBe(0)
+      })
+    })
+
+    // #5731 T9 (sibling of #5711/#5716): set_thinking_level is optimistic too; a
+    // THINKING_LEVEL_NOT_APPLIED rejection (invalid level, provider without
+    // thinking-level control, or a setThinkingLevel throw) must roll the dropdown
+    // back instead of leaving it on a level the session never entered.
+    describe('THINKING_LEVEL_NOT_APPLIED revert (#5731 T9)', () => {
+      afterEach(() => { clearPendingThinkingLevelReverts() })
+
+      it('reverts the optimistic thinkingLevel for the rejected request\'s session', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), thinkingLevel: 'high' } }, // optimistic value
+          }),
+        )
+        setStore(store)
+        registerThinkingLevelChangeRequest('set-thinking-1', { sessionId: 's1', previousLevel: 'default' })
+
+        handleMessage(
+          { type: 'error', requestId: 'set-thinking-1', code: 'THINKING_LEVEL_NOT_APPLIED', message: 'provider does not support thinking level control' },
+          ctx() as any,
+        )
+
+        expect((store.getState() as any).sessionStates.s1.thinkingLevel).toBe('default') // rolled back
+        expect(_testThinkingLevelRevertPendingSize()).toBe(0) // consumed
+      })
+
+      it('does NOT revert when the error requestId does not match a pending change', () => {
+        store = createMockStore(
+          baseState({
+            activeSessionId: 's1',
+            sessionStates: { s1: { ...createEmptySessionState(), thinkingLevel: 'max' } },
+          }),
+        )
+        setStore(store)
+        registerThinkingLevelChangeRequest('set-thinking-1', { sessionId: 's1', previousLevel: 'default' })
+
+        handleMessage(
+          { type: 'error', requestId: 'other', code: 'THINKING_LEVEL_NOT_APPLIED', message: 'x' },
+          ctx() as any,
+        )
+
+        expect((store.getState() as any).sessionStates.s1.thinkingLevel).toBe('max') // untouched
+        expect(_testThinkingLevelRevertPendingSize()).toBe(1) // still pending
+      })
+
+      it('clears all pending reverts on disconnect', () => {
+        registerThinkingLevelChangeRequest('req-a', { sessionId: 's1', previousLevel: 'default' })
+        registerThinkingLevelChangeRequest('req-b', { sessionId: 's2', previousLevel: 'high' })
+        expect(_testThinkingLevelRevertPendingSize()).toBe(2)
+        clearPendingThinkingLevelReverts()
+        expect(_testThinkingLevelRevertPendingSize()).toBe(0)
       })
     })
 

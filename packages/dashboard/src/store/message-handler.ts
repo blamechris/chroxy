@@ -398,6 +398,51 @@ export function _testPermissionModeRevertPendingSize(): number {
   return _pendingPermissionModeReverts.size;
 }
 
+// #5731 T9 (sibling of #5711/#5716): set_thinking_level is also applied
+// OPTIMISTICALLY (the dropdown flips immediately in setThinkingLevel) so it
+// doesn't snap back before the server's thinking_level_changed broadcast lands.
+// The server may reject it (THINKING_LEVEL_NOT_APPLIED — an invalid level, a
+// provider without thinking-level control, or setThinkingLevel throwing), in
+// which case the dropdown would otherwise stay on a level the session never
+// entered. Remember the level we switched FROM, keyed by the set_thinking_level
+// requestId the server echoes on its error, so the `error` handler can roll the
+// optimistic update back. Cleared on the matching error or on disconnect — NOT
+// on success (the server sends thinking_level_changed XOR error per requestId,
+// so clearing on success would drop a second in-flight revert, the #5715 class).
+// Bounded FIFO like the model/permission-mode revert maps.
+interface PendingThinkingLevelRevert {
+  sessionId: string | null;
+  previousLevel: string | null;
+}
+
+const _pendingThinkingLevelReverts = new Map<string, PendingThinkingLevelRevert>();
+const THINKING_LEVEL_REVERT_PENDING_CAP = 16;
+
+export function registerThinkingLevelChangeRequest(requestId: string, entry: PendingThinkingLevelRevert): void {
+  if (_pendingThinkingLevelReverts.size >= THINKING_LEVEL_REVERT_PENDING_CAP) {
+    const oldestKey = _pendingThinkingLevelReverts.keys().next().value;
+    if (oldestKey !== undefined) _pendingThinkingLevelReverts.delete(oldestKey);
+  }
+  _pendingThinkingLevelReverts.set(requestId, { ...entry });
+}
+
+function consumePendingThinkingLevelRevert(requestId: string): PendingThinkingLevelRevert | null {
+  const entry = _pendingThinkingLevelReverts.get(requestId);
+  if (!entry) return null;
+  _pendingThinkingLevelReverts.delete(requestId);
+  return entry;
+}
+
+/** Clear all pending thinking-level reverts — called on WebSocket close. */
+export function clearPendingThinkingLevelReverts(): void {
+  _pendingThinkingLevelReverts.clear();
+}
+
+/** @internal test seam. */
+export function _testThinkingLevelRevertPendingSize(): number {
+  return _pendingThinkingLevelReverts.size;
+}
+
 /** @internal Exposed for tests so they can inspect the in-flight map. */
 export function _testTrustGrantPendingSize(): number {
   return _pendingTrustGrants.size;
@@ -4543,6 +4588,18 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           if (revert.priorPreviousMode !== undefined && get().previousPermissionMode === revert.previousMode) {
             set({ previousPermissionMode: revert.priorPreviousMode });
           }
+        }
+      }
+      // #5731 T9: roll back the optimistic set_thinking_level when the server
+      // says it never applied (THINKING_LEVEL_NOT_APPLIED — invalid level,
+      // provider without thinking-level control, or a setThinkingLevel throw).
+      // thinkingLevel is per-session only (no flat ConnectionState mirror, unlike
+      // activeModel/permissionMode), so the revert writes to the session state —
+      // matching setThinkingLevel's optimistic updateActiveSession write.
+      if (errCode === 'THINKING_LEVEL_NOT_APPLIED' && errReqId) {
+        const revert = consumePendingThinkingLevelRevert(errReqId);
+        if (revert?.sessionId && get().sessionStates[revert.sessionId]) {
+          updateSession(revert.sessionId, () => ({ thinkingLevel: (revert.previousLevel ?? 'default') as SessionState['thinkingLevel'] }));
         }
       }
       // #3570: skill_trust_grant INVALID_AUTHOR carries a structured

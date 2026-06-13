@@ -114,4 +114,23 @@ describe('#3693 — optimistic permission/model update', () => {
     const after = useConnectionStore.getState().sessionStates[sessionId]!
     expect(after.activeModel).toBe('claude-opus-4-7')
   })
+
+  // #5731 T9 — setThinkingLevel is optimistic too (the dropdown must not snap
+  // back while the WS round-trip is in flight).
+  it('setThinkingLevel updates active sessionState immediately', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sessionId = 'sess-4'
+    const ss = createEmptySessionState()
+    ss.thinkingLevel = 'default'
+    useConnectionStore.setState({
+      activeSessionId: sessionId,
+      sessionStates: { [sessionId]: ss },
+      socket: null,
+    })
+
+    useConnectionStore.getState().setThinkingLevel('high')
+
+    const after = useConnectionStore.getState().sessionStates[sessionId]!
+    expect(after.thinkingLevel).toBe('high')
+  })
 })
