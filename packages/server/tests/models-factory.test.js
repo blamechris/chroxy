@@ -66,12 +66,32 @@ describe('createModelsRegistry', () => {
     assert.equal(registry.getModels()[1].label, 'Opus')
   })
 
-  it('returns null defaultModelId when no model has Default prefix', () => {
+  it('falls back to a deterministic default when no model has the Default prefix (#5631)', () => {
+    // Before #5631 this returned null (the regex was the only path). Now
+    // updateModels picks a deterministic fallback — the opus family (merged
+    // in from FALLBACK_MODELS) — and warns, so registry drift is visible
+    // instead of leaving the picker with no default at all.
     const registry = createModelsRegistry()
     registry.updateModels([
       { value: 'claude-sonnet-4', displayName: 'Sonnet', description: '' },
     ])
-    assert.equal(registry.getDefaultModelId(), null)
+    // opus is always merged from FALLBACK_MODELS, so it wins the preference.
+    assert.equal(registry.getDefaultModelId(), 'opus-4-7')
+  })
+
+  it('picks the first converted entry when no opus/sonnet family is present (#5631)', () => {
+    // Non-Claude-shaped registry: supply our own fallback list with no
+    // opus/sonnet so the family-preference loop misses and the fallback is
+    // the first converted entry.
+    const registry = createModelsRegistry({
+      fallbackModels: [{ id: 'foo', label: 'Foo', fullId: 'foo-1', contextWindow: 1000 }],
+      deriveId: (id) => id,
+      resolveContextWindow: () => 1000,
+    })
+    registry.updateModels([
+      { value: 'zeta-9', displayName: 'Zeta', description: '' },
+    ])
+    assert.equal(registry.getDefaultModelId(), 'zeta-9')
   })
 
   it('resets defaultModelId on resetModels', () => {
@@ -386,10 +406,14 @@ describe('disk cache (loadCache / saveCache)', () => {
   // No-op load (nothing pruned, nothing changed) should NOT touch the disk.
   // Otherwise every server startup would needlessly rewrite the cache file.
   it('loadCache does not rewrite the disk file when no entries are pruned', async () => {
+    // The cache must hold exactly the current FALLBACK_MODELS set (no stale
+    // minor to prune, no fallback alias to merge) or loadCache would heal the
+    // file and bump mtime.
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
         { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
+        { id: 'fable-5', fullId: 'claude-fable-5', label: 'Fable 5', contextWindow: 200_000 },
         { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5', contextWindow: 200_000 },
       ],
     }))
