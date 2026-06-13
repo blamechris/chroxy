@@ -159,6 +159,15 @@ type EvaluatorState =
 // long enough to feel deliberate without lagging a fast typist.
 const PTT_HOLD_MS = 300
 
+// #5666 — typing-cadence guard. If the user pressed a non-Space key within this
+// window, the next Space is treated as ordinary inter-word typing and takes the
+// native path (no suppress/arm). Push-to-talk only makes sense from an idle
+// hold; a typist tapping Space mid-sentence should never trigger the
+// suppress-then-reinsert path that races fast keystrokes. 250ms comfortably
+// covers fast typing (sub-200ms inter-key) while still letting a deliberate
+// Space-hold from a pause arm dictation.
+const PTT_TYPING_GUARD_MS = 250
+
 // #5610 — internal push-to-talk arming state, tracked on a ref so the
 // repeated keydown events that fire while a key is held don't restart the
 // arm timer or re-suppress characters incorrectly.
@@ -185,6 +194,10 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   // so we can cancel it on early release or on any disqualifying keypress.
   const pttStateRef = useRef<PttState>('idle')
   const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // #5666 — timestamp (performance.now()) of the last non-Space keydown, used
+  // by the typing-cadence guard above. Initialised to -Infinity so the very
+  // first Space (no prior typing) is free to arm PTT.
+  const lastNonSpaceKeyAtRef = useRef(-Infinity)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -473,9 +486,17 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   // past the inserted space on the next frame.
   const insertSpaceAtCaret = useCallback(() => {
     const el = textareaRef.current
-    const start = el?.selectionStart ?? value.length
-    const end = el?.selectionEnd ?? value.length
-    const next = value.slice(0, start) + ' ' + value.slice(end)
+    // #5666 — read the LIVE value and caret off the DOM element, not the
+    // closure `value`/captured caret. In controlled mode `setValue` is a plain
+    // string callback (no functional updater), so the closure `value` lags the
+    // DOM whenever subsequent keystrokes are still flushing through React — the
+    // splice would then run against stale text and clobber the caret the user
+    // has already moved past. The textarea's own `.value`/`.selectionStart`
+    // always reflect the freshest committed state.
+    const live = el?.value ?? value
+    const start = el?.selectionStart ?? live.length
+    const end = el?.selectionEnd ?? live.length
+    const next = live.slice(0, start) + ' ' + live.slice(end)
     setValue(next)
     const caret = start + 1
     requestAnimationFrame(() => {
@@ -508,6 +529,20 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       e.preventDefault()
       return true
     }
+
+    // #5666 — typing-cadence guard. If the user pressed another key very
+    // recently they're typing words, not holding to dictate. Take the native
+    // space path (no suppress, no arm) so fast typing never hits the deferred
+    // re-insert race that reorders characters around spaces.
+    if (performance.now() - lastNonSpaceKeyAtRef.current < PTT_TYPING_GUARD_MS) {
+      return false
+    }
+
+    // #5668 — a recording is already live (e.g. the mic button was clicked).
+    // Don't arm PTT on top of it: arming would let a later release call
+    // voiceInput.stop() and kill a recording PTT never started. Treat Space as
+    // an ordinary character instead.
+    if (voiceInput.isRecording) return false
 
     // First Space down: suppress the native character, remember the caret as
     // the dictation anchor, and start the hold timer.
@@ -606,6 +641,17 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     if (e.key === ' ' || e.key === 'Spacebar') {
       if (handlePttKeyDown(e)) return
     } else {
+      // #5666 — record typing activity so a Space arriving right after this key
+      // takes the native path instead of arming PTT (see PTT_TYPING_GUARD_MS).
+      // Only *text-producing* keys count as typing: a single-character key with
+      // no command modifier (letters, digits, punctuation). Navigation/editing
+      // keys (Arrow, Backspace, Enter, Escape, Tab) and bare modifiers (Shift)
+      // must NOT poison the guard — otherwise arrowing the caret into place and
+      // then holding Space to dictate mid-draft (the caret-anchored dictation
+      // gesture) would be wrongly blocked.
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        lastNonSpaceKeyAtRef.current = performance.now()
+      }
       cancelPttArmOnOtherKey()
     }
 
