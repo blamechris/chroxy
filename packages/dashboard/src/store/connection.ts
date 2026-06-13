@@ -1700,6 +1700,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // state. Clear it; if the agent is still quiet post-reconnect,
         // the next soft-timeout firing will re-emit the warning.
         if (ss.inactivityWarning) patch.inactivityWarning = null;
+        // #5623: clear the presence role on disconnect so a stale
+        // "Observing" / driver badge doesn't persist through the
+        // reconnect gap. #5737 added the server-side re-emit, but the
+        // client never reset its own copy — so the old role survived
+        // the drop (and `ObserverBanner`'s a11y alert re-announced a
+        // soon-to-be-cleared "Observing" on every reconnect). The
+        // server re-emits `session_role` on reconnect/tab-switch, so
+        // the correct role re-establishes once the socket is back; a
+        // null role in the meantime reads as "unclaimed" (neutral),
+        // not a false "you're observing".
+        if (ss.sessionRole !== null) patch.sessionRole = null;
+        if (ss.primaryClientId !== null) patch.primaryClientId = null;
         return Object.keys(patch).length > 0 ? patch : {};
       };
       for (const sid of Object.keys(get().sessionStates)) {

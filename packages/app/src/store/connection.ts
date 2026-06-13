@@ -444,6 +444,44 @@ function clearInactivityWarningsAcrossSessions(
   if (changed) set({ sessionStates: next });
 }
 
+/**
+ * #5623 — clear the presence role (`sessionRole` + `primaryClientId`) on
+ * every session in the store.
+ *
+ * Used by both the `socket.onclose` cleanup (transport-level drop) and the
+ * user-initiated `disconnect()` path (which nulls `socket.onclose` so the
+ * close handler never runs) — same dual-call contract as
+ * `clearInactivityWarningsAcrossSessions`. Iterating all sessions matters
+ * because a stale "Observing"/driver badge on any session (and the
+ * `ObserverBanner`'s `accessibilityRole="alert"` live-region re-announcing
+ * it) must not survive the drop. The server re-emits `session_role` on
+ * reconnect/re-subscribe, so the correct role re-establishes once the socket
+ * is back; a null role in the meantime reads as "unclaimed" (neutral).
+ *
+ * Pure shape: skips the mutation when no roles are set so we don't churn
+ * referential equality.
+ */
+function clearSessionRolesAcrossSessions(
+  set: (s: Partial<ConnectionState> | ((state: ConnectionState) => Partial<ConnectionState>)) => void,
+  get: () => ConnectionState,
+): void {
+  const sessionStates = get().sessionStates;
+  const ids = Object.keys(sessionStates);
+  if (ids.length === 0) return;
+  let changed = false;
+  const next: Record<string, SessionState> = {};
+  for (const id of ids) {
+    const ss = sessionStates[id];
+    if (ss && (ss.sessionRole !== null || ss.primaryClientId !== null)) {
+      next[id] = { ...ss, sessionRole: null, primaryClientId: null };
+      changed = true;
+    } else if (ss) {
+      next[id] = ss;
+    }
+  }
+  if (changed) set({ sessionStates: next });
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
   sessions: [],
@@ -1219,6 +1257,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // agent is still quiet post-reconnect, the next soft-timeout
       // firing server-side will re-emit.
       clearInactivityWarningsAcrossSessions(set, get);
+      // #5623: clear the presence role across ALL sessions so a stale
+      // "Observing"/driver badge doesn't survive the reconnect gap.
+      clearSessionRolesAcrossSessions(set, get);
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
@@ -1298,6 +1339,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // and any outstanding check-in chip would survive into the next
     // connection. Mirror the cleanup across all sessions here.
     clearInactivityWarningsAcrossSessions(set, get);
+    // #5623: same dual-call contract — user-initiated disconnect nulls
+    // socket.onclose above, so the onclose role-clear never runs; mirror
+    // it here so a stale "Observing"/driver badge doesn't survive into
+    // the next connect.
+    clearSessionRolesAcrossSessions(set, get);
     // Reset replay flags in case disconnect happened mid-replay
     resetReplayFlags();
     // #5555.3/.4 — explicit disconnect is a hard reset: drop the replay

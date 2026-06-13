@@ -308,4 +308,46 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
     expect(st.sessionStates.b!.pendingEvaluatorClarify).toBeNull()
     expect(st.sessionStates.b!.inactivityWarning).toBeNull()
   })
+
+  // #5623 — onclose also clears the presence role (sessionRole/primaryClientId)
+  // on every session so a stale "Observing"/driver badge doesn't persist through
+  // the reconnect gap. The server re-emits session_role on reconnect/tab-switch.
+  it('nulls sessionRole / primaryClientId on all sessions (#5623)', async () => {
+    const ws = await openConnected()
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: {
+          messages: [],
+          streamingMessageId: null,
+          isPlanPending: false,
+          planAllowedPrompts: [],
+          pendingEvaluatorClarify: null,
+          inactivityWarning: null,
+          sessionRole: 'observer',
+          primaryClientId: 'other-device',
+        },
+        b: {
+          messages: [],
+          streamingMessageId: null,
+          isPlanPending: false,
+          planAllowedPrompts: [],
+          pendingEvaluatorClarify: null,
+          inactivityWarning: null,
+          sessionRole: 'primary',
+          primaryClientId: 'me',
+        },
+      } as never,
+    })
+
+    ws.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const st = useConnectionStore.getState()
+    expect(st.sessionStates.a!.sessionRole).toBeNull()
+    expect(st.sessionStates.a!.primaryClientId).toBeNull()
+    expect(st.sessionStates.b!.sessionRole).toBeNull()
+    expect(st.sessionStates.b!.primaryClientId).toBeNull()
+  })
 })
