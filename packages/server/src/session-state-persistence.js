@@ -250,14 +250,23 @@ export class SessionStatePersistence {
    * Used for session-list mutations that must survive an abrupt shutdown —
    * callers include createSession / destroySession / renameSession, where
    * losing the write would erase a user's session from the sidebar.
+   *
+   * #5701: returns whether the write succeeded so callers can surface the
+   * failure instead of silently losing the mutation on disk-full / locked-file
+   * / read-only-home conditions. (The write itself is still atomic — see
+   * serializeState — so a failure leaves the prior good file intact; the risk
+   * being signalled is the lost mutation, not corruption.)
    * @param {() => void} serializeFn
+   * @returns {boolean} true if the write succeeded, false if it threw.
    */
   flushPersist(serializeFn) {
     this.cancelPersist()
     try {
       serializeFn()
+      return true
     } catch (err) {
       log.error(`Failed to flush session state: ${err?.stack || err}`)
+      return false
     }
   }
 
