@@ -146,7 +146,7 @@ function handleSetModel(ws, client, msg, ctx) {
       // landed, else clients show a model the session never switched to.
       if (!entry.session.setModel(model)) {
         ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${model}`)
-        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${model}' was not applied (session busy or already in that mode).`, undefined, ctx)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${model}' was not applied (session busy or already on that model).`, undefined, ctx)
         return
       }
       ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
@@ -175,7 +175,7 @@ function handleSetModel(ws, client, msg, ctx) {
       // #5696: only broadcast when setModel() reports the change landed.
       if (!entry.session.setModel(msg.model)) {
         ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
-        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already in that mode).`, undefined, ctx)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
         return
       }
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
@@ -196,7 +196,7 @@ function handleSetModel(ws, client, msg, ctx) {
       // #5696: only broadcast when setModel() reports the change landed.
       if (!entry.session.setModel(msg.model)) {
         ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
-        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already in that mode).`, undefined, ctx)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
         return
       }
       ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })

@@ -81,7 +81,10 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
 
-      settingsHandlers.set_model(makeWs(), client, { model: 'sonnet' }, ctx)
+      // Use a model that differs from the mock's default ('claude-sonnet-4-6')
+      // even once aliases are resolved, so this exercises the change-applied
+      // (broadcast) path rather than a same-model no-op.
+      settingsHandlers.set_model(makeWs(), client, { model: 'haiku' }, ctx)
 
       assert.equal(ctx.transport.broadcastToSession.callCount, 1)
       const [, msg] = ctx.transport.broadcastToSession.lastCall
