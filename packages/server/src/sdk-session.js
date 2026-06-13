@@ -51,10 +51,14 @@ const log = createLogger('sdk')
 
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
-// #5711 (Gap 3): cap the mid-turn follow-up queue, matching CliSession's max-3
-// (cli-session.js). Without a bound, a user mashing send during a long turn
-// accumulates an unbounded backlog that then floods the agent when the turn
-// ends — both a memory footgun and a surprising burst of late messages.
+// #5711 (Gap 3): cap the SDK's mid-turn follow-up queue. SdkSession is the only
+// provider that QUEUES sends during an in-flight turn (CliSession instead
+// rejects a mid-turn send with "Already processing a message"), and that queue
+// was unbounded — a user mashing send during a long turn accumulated an
+// unbounded backlog that then flooded the agent when the turn ended (a memory
+// footgun + a surprising burst of late messages). Reuse the cap value (3) and
+// the discard-error wording from CliSession's not-ready queue (cli-session.js)
+// so the overflow UX is consistent across providers.
 const MAX_PENDING_INPUT = 3
 
 // Marker stamped on a proc the first time _attachSidecarProcessListeners()
@@ -547,9 +551,9 @@ export class SdkSession extends BaseSession {
     if (this._isBusy) {
       // Queue the message — it will be sent after the current turn completes
       if (!this._pendingInput) this._pendingInput = []
-      // #5711 (Gap 3): bound the queue like CliSession (max 3). Discard the
-      // overflow with a visible error rather than silently growing — mirrors
-      // cli-session.js so the same action behaves consistently across providers.
+      // #5711 (Gap 3): bound this SDK-specific mid-turn queue (max 3). Discard
+      // the overflow with a visible error rather than silently growing, reusing
+      // CliSession's discard-cap value + wording for a consistent overflow UX.
       if (this._pendingInput.length >= MAX_PENDING_INPUT) {
         this.emit('error', { message: `Pending message queue full (max ${MAX_PENDING_INPUT}) — message discarded` })
         return
