@@ -113,6 +113,8 @@ import {
   rejectAllEvaluatorRequests,
   registerTrustGrantRequest,
   clearPendingTrustGrants,
+  registerModelChangeRequest,
+  clearPendingModelReverts,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
 import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
@@ -1613,6 +1615,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // never), and a stale toast action would call grantCommunitySkillTrust
       // against a closed socket.
       clearPendingTrustGrants();
+      clearPendingModelReverts();
       // #3605: also clear the per-session pendingTrustGrants arrays
       // (added in #3588). disconnect() handles user-initiated closes, but
       // an unexpected drop here would otherwise leave the SkillsPanel
@@ -1709,6 +1712,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       rejectAllEvaluatorRequests('Connection errored before evaluator response arrived');
       rejectAllSummarizeRequests('Connection errored before the summary arrived');
       clearPendingTrustGrants();
+      clearPendingModelReverts();
       const cleanedSessionStates = clearAllSessionPendingTrustGrants(get().sessionStates);
 
       set({ socket: null, sessionStates: cleanedSessionStates });
@@ -1741,6 +1745,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // skill_trust_grant correlations so a stale toast button can't fire
     // against the disconnected socket.
     clearPendingTrustGrants();
+    clearPendingModelReverts();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
@@ -2420,8 +2425,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   setModel: (model: string) => {
     const { socket, activeSessionId } = get();
+    // #5711: remember the model we're switching FROM so a server
+    // MODEL_NOT_APPLIED rejection (e.g. a mid-turn no-op, #5696) can roll the
+    // optimistic update below back, instead of leaving the dropdown showing a
+    // model the session never actually switched to.
+    const previousModel = (activeSessionId && get().sessionStates[activeSessionId])
+      ? (get().sessionStates[activeSessionId]!.activeModel ?? null)
+      : (get().activeModel ?? null);
     if (socket && socket.readyState === WebSocket.OPEN) {
-      const payload: Record<string, unknown> = { type: 'set_model', model };
+      // Correlate the optimistic update with the server's ack/rejection. The
+      // requestId rides set_model's passthrough schema; the server echoes it on
+      // a MODEL_NOT_APPLIED error so the handler can revert the right request.
+      const requestId = `set-model-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+      registerModelChangeRequest(requestId, { sessionId: activeSessionId, previousModel });
+      const payload: Record<string, unknown> = { type: 'set_model', model, requestId };
       if (activeSessionId) payload.sessionId = activeSessionId;
       wsSend(socket, payload);
     }

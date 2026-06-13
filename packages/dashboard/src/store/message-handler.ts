@@ -308,6 +308,54 @@ export function clearPendingTrustGrants(): void {
   _pendingTrustGrants.clear();
 }
 
+// #5711 (Gap 2, client half): set_model is applied OPTIMISTICALLY (the dropdown
+// flips immediately), but the server may reject it (MODEL_NOT_APPLIED — e.g. a
+// mid-turn change is a no-op server-side, fixed in #5696). Without a rollback
+// the dashboard keeps showing a model the session never switched to. Remember
+// the model we switched FROM, keyed by the set_model requestId the server
+// echoes on its error, so the `error` handler can roll the optimistic update
+// back. Cleared on the matching `model_changed` success, on a matching error,
+// or on disconnect. Bounded FIFO like the trust-grant map.
+interface PendingModelRevert {
+  sessionId: string | null;
+  previousModel: string | null;
+}
+
+const _pendingModelReverts = new Map<string, PendingModelRevert>();
+const MODEL_REVERT_PENDING_CAP = 16;
+
+export function registerModelChangeRequest(requestId: string, entry: PendingModelRevert): void {
+  if (_pendingModelReverts.size >= MODEL_REVERT_PENDING_CAP) {
+    const oldestKey = _pendingModelReverts.keys().next().value;
+    if (oldestKey !== undefined) _pendingModelReverts.delete(oldestKey);
+  }
+  _pendingModelReverts.set(requestId, { ...entry });
+}
+
+function consumePendingModelRevert(requestId: string): PendingModelRevert | null {
+  const entry = _pendingModelReverts.get(requestId);
+  if (!entry) return null;
+  _pendingModelReverts.delete(requestId);
+  return entry;
+}
+
+/** A model_changed for `sessionId` landed — drop any pending revert for it. */
+function clearPendingModelRevertForSession(sessionId: string | null): void {
+  for (const [reqId, entry] of _pendingModelReverts) {
+    if (entry.sessionId === sessionId) _pendingModelReverts.delete(reqId);
+  }
+}
+
+/** Clear all pending model reverts — called on WebSocket close. */
+export function clearPendingModelReverts(): void {
+  _pendingModelReverts.clear();
+}
+
+/** @internal test seam. */
+export function _testModelRevertPendingSize(): number {
+  return _pendingModelReverts.size;
+}
+
 /** @internal Exposed for tests so they can inspect the in-flight map. */
 export function _testTrustGrantPendingSize(): number {
   return _pendingTrustGrants.size;
@@ -1179,6 +1227,9 @@ function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgS
   } else {
     set({ activeModel: model });
   }
+  // #5711: the change landed for this session — drop any pending revert so a
+  // later unrelated error can't roll back a model that's now correct.
+  clearPendingModelRevertForSession(targetId);
 }
 
 function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
@@ -4392,6 +4443,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const errReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
       if (errReqId) {
         clearPendingTrustGrantByRequestId(errReqId, get);
+      }
+      // #5711 (Gap 2, client half): roll back the optimistic set_model when the
+      // server says it never applied (MODEL_NOT_APPLIED — e.g. a mid-turn
+      // change). Without this the dropdown keeps showing a model the session
+      // never switched to. Mirror handleModelChanged's session-vs-flat write so
+      // the revert lands exactly where the optimistic update did.
+      if (errCode === 'MODEL_NOT_APPLIED' && errReqId) {
+        const revert = consumePendingModelRevert(errReqId);
+        if (revert) {
+          if (revert.sessionId && get().sessionStates[revert.sessionId]) {
+            updateSession(revert.sessionId, () => ({ activeModel: revert.previousModel }));
+          } else {
+            set({ activeModel: revert.previousModel });
+          }
+        }
       }
       // #3570: skill_trust_grant INVALID_AUTHOR carries a structured
       // `actualAuthor` field (#3568, locked by
