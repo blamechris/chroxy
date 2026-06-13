@@ -355,7 +355,22 @@ This keeps the app dependency-free (no debug menu, no URL scheme handler) and te
 
 ## Repo Memory MCP
 
-The `repo-memory` MCP is available. Prefer `get_file_summary` over `Read` when exploring code you won't edit — it returns cached summaries and saves tokens. Also available: `get_project_map`, `get_related_files`, `search_by_purpose`. Use `Read` when you need exact lines or plan to edit. When launching subagents, tell them repo-memory tools are available.
+This repo has the `repo-memory` MCP server configured, with ~1,500 files pre-indexed (AST summaries) and a `post-merge` hook that keeps the cache warm. Use it to avoid re-reading files and save tokens — it is heavily underused (the cache is warm but agents rarely call it).
+
+### Exploration protocol — try repo-memory before Read/grep
+
+- **Before you `Read` a file, call `get_file_summary`** — it returns exports, imports, purpose, and line count for a fraction of a full Read (a summary runs ~150–400 tokens; a full Read of a large file is several thousand). Use `batch_file_summaries` for several related files at once (preferred over N× `get_file_summary`).
+- **Before you grep for a concept** (auth, validation, tunnel, pairing…), call `search_by_purpose`.
+- Use `get_related_files` to find what else to look at, and `get_dependency_graph` to trace imports/dependents (useful for review-impact checks).
+- `get_project_map` for structure/entry points at the start of a task; `get_changed_files` to see what moved since the last session.
+
+### When to Read the full file anyway
+
+Read the full file (not just the summary) when you need exact implementation details, control flow, or to write code that matches the file's style — or when a summary returns `suggestFullRead: true` (low-quality summary, read instead).
+
+### Subagents
+
+Spawned subagents get a fresh context and **do not inherit this guidance** — when a skill or prompt launches an exploration/review subagent, repeat the exploration protocol in that subagent's prompt (the exploration-heavy skills already do). `get_token_report` summarizes savings; the `repo-memory report` CLI reads the same data at zero token cost.
 
 ## Reference
 
