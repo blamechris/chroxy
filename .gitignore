@@ -80,3 +80,6 @@ docs/audit-results/
 docs/audits/
 docs/qa-log.md
 docs/smoke-test.md
+
+# Stray autonomous-session scratch logs (never commit)
+autonomous-session-*.md
