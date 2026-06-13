@@ -71,6 +71,34 @@
   <strong>Mic fixed + redeployed.</strong> The desktop app was rebuilt from current <code>main</code> and reinstalled to <code>/Applications/Chroxy.app</code> (v0.9.46, fresh universal <code>speech-helper</code>, code-signed, same bundle id so existing permission grants carry over). It now carries both the June-3 RunLoop fix and this session's push-to-talk fix. <span class="muted">Pending your confirmation on next launch.</span>
 </div>
 
+<h2>1.5 · Autonomous durability marathon — continuation</h2>
+<p>Picking up the durability epic <a href="https://github.com/blamechris/chroxy/issues/5703">#5703</a> (parity with the Claude Code CLI — "don't let me break stuff, don't make me lose my place"). Run as orchestrator + delegated review agents; every PR gated by adversarial review + full CI + resolved threads before a synchronous squash-merge. <strong>Design decisions made on your behalf are recorded below.</strong></p>
+<table>
+  <thead><tr><th>PR / issue</th><th>What</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5722 → #5716</td><td>Dashboard rolls back an optimistic permission-mode switch the server rejects (<code>PERMISSION_MODE_NOT_APPLIED</code>) — incl. the Shift+Tab toggle target (Copilot-caught) via compare-and-swap</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5724 → #5698</td><td>Caps the reconnect ladder (10 rungs ≈ 65s) and surfaces a terminal <code>server_down</code> state with a manual Reconnect, instead of spinning "Reconnecting…" forever (dashboard; FIX-2)</td><td><span class="pill warn">in review</span></td></tr>
+    <tr><td>#5697</td><td><code>handleStreamStart</code> response-reuse replay guard</td><td><span class="pill neutral">wontfix (decision below)</span></td></tr>
+  </tbody>
+</table>
+
+<h3>Design decisions taken on your behalf</h3>
+<div class="callout">
+  <strong>#5697 — closed wontfix, not "fixed for parity."</strong> The proposed guard (force a fresh response bubble whenever a live <code>stream_start</code> collides with a prior response id) is defensive against a bug the swarm confirmed is <em>unreachable</em> (server response ids are monotonic + per-boot-prefixed). Implementing it (PR #5723) failed CI because both clients <em>intentionally</em> reuse a response bubble on a live same-id stream_start (the post-<code>stream_end</code> continuation path, encoded in <code>connection.test.ts</code>). Changing core streaming behavior to defend an impossible collision fails the "do no harm" bar — so it was reverted and the issue closed with the trigger-to-revisit recorded.
+</div>
+<div class="callout">
+  <strong>#5698 reconnect — client cap first; server-lifecycle change deferred.</strong> The biggest decision here is whether the supervisor should park in a terminal "I'm down" standby (serving <code>{status:'down'}</code>) instead of <code>_exit(1)</code> on max-restarts. That changes process-exit semantics under launchd/the desktop app — real blast radius. <strong>Decision:</strong> ship the pure-client ladder cap first (zero server risk, fixes the core "spins forever" jank), and defer the server-side positive-down signal (FIX-1) until the lifecycle question can be made deliberately. The client cap alone takes the user from an infinite spinner to a clear "Server appears to be down — Reconnect."
+</div>
+<div class="callout">
+  <strong>Scope discipline.</strong> #5698 was split: FIX-2 (client cap, dashboard) shipped now; FIX-1 (server signal), FIX-3 (per-session terminal flag), and the mobile-app wiring + resume/network clear are tracked follow-ups (<a href="https://github.com/blamechris/chroxy/issues/5725">#5725</a> for mobile; FIX-1/FIX-3 under the open parent #5698). The dashboard is "the app" you use day-to-day, so it got the surface first.
+</div>
+
+<h3>Process lessons banked (project memory)</h3>
+<ul>
+  <li><strong>Review agents must be worktree-isolated</strong> — a non-isolated review agent ran <code>git checkout</code> and switched the working tree mid-edit. All review agents now run in a worktree or are forbidden from switching branches.</li>
+  <li><strong>Run the full package suite before pushing shared <code>store-core</code> changes</strong> — a targeted-file-green change went red on contract/integration tests in CI; the shared module ripples widely.</li>
+</ul>
+
 <h2>2 · Shipped this session</h2>
 <table>
   <thead><tr><th>PR</th><th>What</th><th>Issue</th><th>Status</th></tr></thead>
