@@ -95,6 +95,32 @@ describe('SessionStatePersistence.serializeState', () => {
   })
 })
 
+describe('SessionStatePersistence.flushPersist (#5701)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-flush-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('returns true when the write succeeds', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const ok = p.flushPersist(() => p.serializeState({ version: 1, timestamp: Date.now(), sessions: [] }))
+    assert.strictEqual(ok, true)
+  })
+
+  it('returns false (no longer swallows) when the serialize throws', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const ok = p.flushPersist(() => { throw new Error('ENOSPC: no space left on device') })
+    assert.strictEqual(ok, false)
+  })
+})
+
 describe('SessionStatePersistence.restoreState', () => {
   let tempDir
   let stateFile

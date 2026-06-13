@@ -129,6 +129,10 @@ const DEFAULT_WORKTREE_BASE = join(homedir(), '.chroxy', 'worktrees')
  *   session_restore_failed { sessionId, name, provider, cwd, model, permissionMode, errorCode, errorMessage, originalHistoryPreserved, historyLength }
  *     — emitted when a session in the persisted state file fails to restore (e.g. missing env var).
  *       History on disk is preserved so the user can retry after fixing the underlying issue.
+ *   session_persist_failed { sessionId, name } — #5701: a synchronous flush of a
+ *     session-list mutation (create/rename/destroy) failed to write to disk
+ *     (disk full / locked file / read-only home), so the change may be lost on
+ *     restart. Observable signal; a client-facing surface is a follow-up.
  */
 
 // Re-export formatIdleDuration from SessionTimeoutManager for backward compatibility
@@ -1036,7 +1040,7 @@ export class SessionManager extends EventEmitter {
     // Exception: restoreState calls us in a loop and seeds history/budget
     // AFTER this returns; flushing here would write empty history to disk
     // and permanently discard the data being restored.
-    if (!skipPersist) this._flushPersist()
+    if (!skipPersist) this._flushPersistOrWarn(sessionId)
     return sessionId
   }
 
@@ -1454,7 +1458,7 @@ export class SessionManager extends EventEmitter {
     this.emit('session_updated', { sessionId, name })
     // Flush synchronously — before this, renames were never persisted at all,
     // so a restart would show the pre-rename label.
-    this._flushPersist()
+    this._flushPersistOrWarn(sessionId, name)
     return true
   }
 
@@ -1493,8 +1497,9 @@ export class SessionManager extends EventEmitter {
     }
     log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
     this.emit('session_destroyed', { sessionId })
-    // Flush synchronously so the deletion survives an abrupt shutdown.
-    this._flushPersist()
+    // Flush synchronously so the deletion survives an abrupt shutdown. The
+    // entry is already out of `_sessions` by now, so pass its name explicitly.
+    this._flushPersistOrWarn(sessionId, entry.name)
     return true
   }
 
@@ -1514,7 +1519,11 @@ export class SessionManager extends EventEmitter {
     try {
       this.serializeState()
     } catch (err) {
-      log.error(`Failed to serialize state during destroyAll: ${err?.stack || err}`)
+      // #5701: this is the final write before the process exits — a failure
+      // here loses the whole session list on the next start. Log loudly so the
+      // operator can act (disk space / permissions) rather than discovering it
+      // silently gone after restart.
+      log.error(`CRITICAL: failed to serialize session state during shutdown — sessions may NOT be restored on next start (check disk space and ~/.chroxy permissions): ${err?.stack || err}`)
     }
     // Set the destroying flag AFTER the final write — every persist call from
     // here on (duplicate shutdown handler, late-arriving session event) will
@@ -2085,7 +2094,29 @@ export class SessionManager extends EventEmitter {
    * using the debounced path to avoid write amplification.
    */
   _flushPersist() {
-    this._persistence.flushPersist(() => this.serializeState())
+    return this._persistence.flushPersist(() => this.serializeState())
+  }
+
+  /**
+   * #5701: flush a session-list mutation and surface a failure instead of
+   * swallowing it. flushPersist used to catch-and-log write errors (disk full,
+   * locked file, read-only home), so a create/rename/destroy could succeed in
+   * memory yet never reach disk and silently revert on the next restart. Now a
+   * failed flush is logged at error level with an operator-actionable hint and
+   * emits `session_persist_failed` so it is observable. (A client-facing banner
+   * is a follow-up — it needs a new wire message type; `session_warning` is
+   * reserved for the idle-timeout countdown UI and must not be overloaded.)
+   * @param {string} sessionId
+   * @param {string|null} name - pass explicitly when the entry is already gone
+   *   from `_sessions` (e.g. destroySession flushes after cleanup).
+   * @returns {boolean} true if the write succeeded.
+   */
+  _flushPersistOrWarn(sessionId, name = null) {
+    if (this._flushPersist()) return true
+    const resolvedName = name || this._sessions.get(sessionId)?.name || null
+    log.error(`Session state for ${sessionId}${resolvedName ? ` ("${resolvedName}")` : ''} was NOT persisted — it may be lost on restart. Check disk space and ~/.chroxy permissions.`)
+    this.emit('session_persist_failed', { sessionId, name: resolvedName })
+    return false
   }
 
   /**
