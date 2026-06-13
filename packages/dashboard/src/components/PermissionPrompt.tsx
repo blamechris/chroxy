@@ -215,6 +215,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         <div
           className={`perm-countdown${isUrgent ? ' urgent' : ''}${isExpired ? ' expired' : ''}`}
           data-testid="perm-countdown"
+          // #5731 (a11y): the countdown ticks every second INSIDE the assertive
+          // alertdialog container. Without muting it, the live region would
+          // re-announce the changing time every second (worse than silence — the
+          // #4873 reconnect-storm spam class). aria-live="off" excludes the tick
+          // from announcements while the container still announces the request
+          // ONCE on appearance. The visual urgent/expired styling is unaffected.
+          aria-live="off"
         >
           {isExpired ? 'Timed out' : formatCountdown(remaining)}
         </div>

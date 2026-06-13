@@ -87,6 +87,9 @@ describe('PermissionPrompt', () => {
     // The description is associated for SR context.
     expect(prompt).toHaveAttribute('aria-describedby', 'perm-desc-req-a11y')
     expect(document.getElementById('perm-desc-req-a11y')).toBeInTheDocument()
+    // The 1s countdown is muted so the assertive region announces the request
+    // ONCE on appearance, not re-announcing the ticking time every second.
+    expect(screen.getByTestId('perm-countdown')).toHaveAttribute('aria-live', 'off')
   })
 
   it('renders tool name and description', () => {
