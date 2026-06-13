@@ -40,6 +40,21 @@ import { DiscordWebhookSink } from './notifications/discord-webhook-sink.js'
 
 const log = createLogger('push')
 
+// #5702 (8d): settle a fire-and-forget pushManager.send() so neither a failed
+// delivery (resolves `false`) nor a dispatch error (rejects) is silently
+// dropped. A bare `pushManager.send(...)` leaves the rejection unhandled (it's
+// an async method) AND hides a half-open-link delivery failure while the
+// dashboard card still appears — the exact silent asymmetry #5702 calls out.
+// `label` names the call site so the log is greppable. `logger` defaults to the
+// push logger but call sites pass their own so the line is attributed correctly.
+export function settlePush(promise, label, logger = log) {
+  // Returns the settled chain so callers/tests CAN await it; the fire-and-forget
+  // call sites simply ignore the return.
+  return Promise.resolve(promise)
+    .then((ok) => { if (ok === false) logger.warn(`push notification not delivered (${label})`) })
+    .catch((err) => { logger.warn(`push notification error (${label}): ${String(err?.message || err)}`) })
+}
+
 // Rate limits per category (ms) — prevents notification spam.
 //
 // History:

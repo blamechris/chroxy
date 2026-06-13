@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { PushManager } from '../src/push.js'
+import { PushManager, settlePush } from '../src/push.js'
 
 /**
  * PushManager unit tests (#1719)
@@ -450,5 +450,27 @@ describe('PushManager.setPrefs rollback on persist failure (#4550)', () => {
       true,
       'getPrefs snapshot must reflect the rolled-back in-memory state',
     )
+  })
+})
+
+describe('settlePush fire-and-forget guard (#5702 8d)', () => {
+  it('logs (named) and does not reject when the send rejects', async () => {
+    const warns = []
+    await settlePush(Promise.reject(new Error('boom')), 'test-label', { warn: (m) => warns.push(m) })
+    assert.equal(warns.length, 1)
+    assert.match(warns[0], /push notification error \(test-label\): boom/)
+  })
+
+  it('logs when delivery resolves false', async () => {
+    const warns = []
+    await settlePush(Promise.resolve(false), 'lbl', { warn: (m) => warns.push(m) })
+    assert.equal(warns.length, 1)
+    assert.match(warns[0], /not delivered \(lbl\)/)
+  })
+
+  it('stays quiet on a successful (true) delivery', async () => {
+    const warns = []
+    await settlePush(Promise.resolve(true), 'lbl', { warn: (m) => warns.push(m) })
+    assert.equal(warns.length, 0)
   })
 })

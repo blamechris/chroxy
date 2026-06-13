@@ -2,6 +2,7 @@ import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 import { buildSessionTokenMismatchPayload } from './handler-utils.js'
+import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
 
@@ -242,7 +243,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       })
 
       if (pushManager) {
-        pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool }, 'permission')
+        // #5702 (8d): settle the fire-and-forget send so a failed phone
+        // notification is logged (named), not silently dropped while the
+        // dashboard card still appears.
+        settlePush(
+          pushManager.send('permission', 'Permission needed', `Claude wants to use: ${tool}`, { requestId, tool }, 'permission'),
+          `permission requested: ${tool}`,
+          log,
+        )
       }
 
       let closed = false

@@ -1514,3 +1514,25 @@ describe('requireSessionMethod (#4773)', () => {
     assert.strictEqual(sent.length, 1)
   })
 })
+
+describe('sendError fail-safe send guard (#5702 8a)', () => {
+  it('does not throw when ctx.transport.send throws (torn-down socket)', () => {
+    const ws = { readyState: 1 }
+    const ctx = { transport: { send: () => { throw new Error('socket gone') } } }
+    // A throw here would escape an error-reporting path (often a catch block).
+    assert.doesNotThrow(() => sendError(ws, 'r1', 'BOOM', 'msg', undefined, ctx))
+  })
+
+  it('does not throw when the raw ws.send throws (no ctx / pre-auth)', () => {
+    const ws = { readyState: 1, send: () => { throw new Error('socket gone') } }
+    assert.doesNotThrow(() => sendError(ws, 'r2', 'BOOM', 'msg'))
+  })
+
+  it('still sends normally on the happy path', () => {
+    const sent = []
+    const ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) }
+    sendError(ws, 'r3', 'CODE', 'message')
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].code, 'CODE')
+  })
+})

@@ -1,5 +1,6 @@
 import { createLogger } from './logger.js'
 import { getDefaultModelId, getRegistryForProvider } from './models.js'
+import { settlePush } from './push.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -333,7 +334,13 @@ function executeSideEffects(sideEffects, sessionId, ctx) {
         break
       case 'push':
         if (pushManager) {
-          pushManager.send(effect.category, effect.title, effect.body, effect.data, effect.channelId)
+          // #5702 (8d): settle the fire-and-forget send so a failed delivery /
+          // dispatch error is logged (named), not silently dropped.
+          settlePush(
+            pushManager.send(effect.category, effect.title, effect.body, effect.data, effect.channelId),
+            `effect: ${effect.category}`,
+            log,
+          )
         }
         break
       case 'flush_deltas': {

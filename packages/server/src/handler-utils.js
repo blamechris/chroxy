@@ -8,6 +8,9 @@
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { resolve, relative, sep } from 'path'
+import { createLogger } from './logger.js'
+
+const log = createLogger('handler-utils')
 
 // -- Permission modes --
 // `description` is a short, plain-English sentence the dashboard
@@ -551,11 +554,24 @@ export function sendError(ws, requestId, code, message, data, ctx) {
   }
   // #5632: prefer the encryption-aware transport so post-handshake errors are
   // encrypted; fall back to raw send for pre-auth call sites without a ctx.
+  // #5702 (8a): guard both sends. A throw here (e.g. a torn-down socket) would
+  // otherwise escape an error-reporting path — which often runs from a catch
+  // block — and could mask the original failure or take down the caller. The
+  // error frame failing to reach a half-open client is itself non-fatal, so we
+  // log and move on rather than rethrow.
   if (ctx && typeof ctx.transport?.send === 'function') {
-    ctx.transport.send(ws, payload)
+    try {
+      ctx.transport.send(ws, payload)
+    } catch (err) {
+      log.warn(`sendError: transport send failed for ${payload.code || 'error'}: ${String(err?.message || err)}`)
+    }
     return
   }
-  ws.send(JSON.stringify(payload))
+  try {
+    ws.send(JSON.stringify(payload))
+  } catch (err) {
+    log.warn(`sendError: raw send failed for ${payload.code || 'error'}: ${String(err?.message || err)}`)
+  }
 }
 
 // Issue #2912: every handler that rejects with SESSION_TOKEN_MISMATCH used to
