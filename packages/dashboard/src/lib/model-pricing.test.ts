@@ -187,6 +187,32 @@ describe('MODEL_PRICING table integrity', () => {
     expect(cost).not.toBeNull()
     expect(cost).toBeGreaterThan(0)
   })
+
+  // #5631 — current-generation Claude models were missing from the table
+  // (only 3.x/3.5/3.7 rows existed). These rows keep MODEL_PRICING correct +
+  // consistent with the server's authoritative table. (Note: the table is not
+  // on a live Claude cost path today — CLIENT_ESTIMATED_COST_PROVIDERS is
+  // {codex, gemini} — so this guards table correctness, not a rendered cost.)
+  it('prices the current-generation Claude models (#5631)', () => {
+    for (const id of ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5']) {
+      expect(MODEL_PRICING[id], `${id} missing`).toBeDefined()
+      const cost = calculateCost(id, 1000, 1000)
+      expect(cost, `${id} cost`).not.toBeNull()
+      expect(cost, `${id} cost`).toBeGreaterThan(0)
+    }
+    // Rates mirror the server's authoritative table (USD/Mtok → USD/1k).
+    expect(MODEL_PRICING['claude-opus-4-7']!.inputPer1k).toBe(0.015)
+    expect(MODEL_PRICING['claude-opus-4-7']!.outputPer1k).toBe(0.075)
+    expect(MODEL_PRICING['claude-sonnet-4-6']!.inputPer1k).toBe(0.003)
+    expect(MODEL_PRICING['claude-sonnet-4-6']!.outputPer1k).toBe(0.015)
+    expect(MODEL_PRICING['claude-haiku-4-5']!.inputPer1k).toBe(0.001)
+    expect(MODEL_PRICING['claude-haiku-4-5']!.outputPer1k).toBe(0.005)
+  })
+
+  // #5631 — claude-sonnet-4-5 was mislabeled "Claude 3.7 Sonnet".
+  it('labels claude-sonnet-4-5 correctly (was "Claude 3.7 Sonnet")', () => {
+    expect(MODEL_PRICING['claude-sonnet-4-5']!.label).toBe('Claude Sonnet 4.5')
+  })
 })
 
 // ---------------------------------------------------------------------------

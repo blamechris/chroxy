@@ -26,8 +26,24 @@ export interface ModelPricing {
 // ---------------------------------------------------------------------------
 
 const CLAUDE_PRICING: Record<string, ModelPricing> = {
+  // #5631 — current-generation Claude models, kept correct and consistent
+  // with the server's authoritative CLAUDE_PRICING_USD_PER_MTOK table
+  // (packages/server/src/models.js), converted from USD/Mtok to USD/1k.
+  // NOTE: this table only feeds calculateCost behind CLIENT_ESTIMATED_COST_
+  // PROVIDERS, which today is {codex, gemini} — Claude is NOT in it, so these
+  // Claude rows are not currently on any live cost path (Claude cost is
+  // server-authoritative). They exist to remove the stale 3.x-era data and
+  // keep the table right for any future consumer / if Claude is ever added to
+  // that set. (opus-4-8 + fable-5 are intentionally absent — the server
+  // doesn't price them yet either; tracked under #5631. The drift-warn in
+  // calculateCost surfaces any offered-but-unpriced model.)
+  'claude-opus-4-7': { inputPer1k: 0.015, outputPer1k: 0.075, label: 'Claude Opus 4.7' },
+  'claude-sonnet-4-6': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude Sonnet 4.6' },
+  'claude-haiku-4-5': { inputPer1k: 0.001, outputPer1k: 0.005, label: 'Claude Haiku 4.5' },
+  // Claude Sonnet 4.5 — previously mislabeled "Claude 3.7 Sonnet" (the rate
+  // is the standard Sonnet tier, only the display name was wrong).
+  'claude-sonnet-4-5': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude Sonnet 4.5' },
   // Claude 3.7 Sonnet
-  'claude-sonnet-4-5': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude 3.7 Sonnet' },
   'claude-3-7-sonnet-20250219': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude 3.7 Sonnet' },
   // Claude 3.5 Sonnet
   'claude-3-5-sonnet-20241022': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude 3.5 Sonnet' },
