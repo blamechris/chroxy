@@ -749,6 +749,23 @@ export function sendSessionInfo(ctx, ws, sessionId, opts = {}) {
     }
   }
 
+  // #5731 T5 / #5623 / #5613: re-sync the session's primary owner so the
+  // presence badge ("Observing" / "Take over" / driver name) doesn't go
+  // stale across a reconnect or tab switch. `session_role` is otherwise only
+  // broadcast on an actual primary change (_announcePrimary), so a client
+  // that dropped while a role was assigned would never re-learn it — mirroring
+  // the model / permission-mode / thinking-level re-sync above. Always send:
+  // primaryClientId null (unclaimed) is a valid state the client must be able
+  // to clear a stale role to. Both clients' `session_role` handlers are pure
+  // state-setters (no toast), so re-emitting on every reconnect is idempotent.
+  if (typeof ctx.getPrimary === 'function') {
+    send(ws, {
+      type: 'session_role',
+      sessionId,
+      primaryClientId: ctx.getPrimary(sessionId) ?? null,
+    })
+  }
+
   // #5160: snapshot-on-subscribe for the Control Room activity tree. A fresh
   // subscriber (new client, tab switch, reconnect) gets the full current tree
   // in one `activity_snapshot` so it reaches canonical state without replaying

@@ -792,6 +792,11 @@ export class WsServer {
       // #5563: index-maintaining active-session mutator for the post-auth
       // restore path (ws-history.js sets activeSessionId once per connect).
       setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
+      // #5731 T5 / #5623 / #5613: current primary owner for a session, so
+      // sendSessionInfo can re-sync `session_role` on reconnect/tab-switch
+      // (otherwise the presence badge goes stale — the role is only ever
+      // broadcast on an actual primary change via _announcePrimary).
+      getPrimary: (sid) => self._clientManager.getPrimary(sid),
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
       get defaultSessionId() { return self.defaultSessionId },
