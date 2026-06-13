@@ -584,7 +584,18 @@ export function handleKeyExchange(ctx, ws, msg) {
         ...(serverKeySig ? { serverKeySig } : {}),
       }))
     } catch (err) {
-      log.error(`Failed to send key_exchange_ok: ${err.message}`)
+      // #5702 (8b): the client never received the exchange key, so we must NOT
+      // mark E2E established or flush the post-auth queue. `encryptionState` was
+      // already set above, so proceeding would encrypt frames the client can't
+      // decrypt — a wedged session (the client waits forever for key_exchange_ok
+      // while the server speaks ciphertext it can't read). Roll the crypto state
+      // back and close so the client reconnects and retries the handshake.
+      log.error(`Failed to send key_exchange_ok to ${client.id}: ${String(err?.message || err)} — aborting handshake`)
+      client.encryptionState = null
+      client.encryptionPending = false
+      client.postAuthQueue = null
+      try { ws.close(1011, 'Key exchange failed') } catch { /* socket already gone */ }
+      return true
     }
     log.info(`E2E encryption established with ${client.id}`)
     const queue = client.postAuthQueue
