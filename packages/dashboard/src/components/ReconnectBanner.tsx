@@ -38,6 +38,13 @@ export interface ReconnectBannerProps {
    * recovering, `'shutdown'` → terminal (no countdown).
    */
   shutdownReason?: ShutdownReason
+  /**
+   * #5698 — terminal "reconnect ladder gave up" state (connectionPhase
+   * `server_down`). Renders `message` with NO attempt counter and NO countdown —
+   * the only way out is the manual Reconnect button. Distinct from
+   * `shutdownReason: 'shutdown'` (which is a server-announced shutdown).
+   */
+  terminal?: boolean
 }
 
 /**
@@ -64,12 +71,14 @@ export function ReconnectBanner({
   restartEtaMs,
   restartingSince,
   shutdownReason,
+  terminal,
 }: ReconnectBannerProps) {
   // Restart-countdown mode is active only when both the ETA and the anchor
-  // timestamp are populated. `shutdownReason === 'shutdown'` is terminal and
-  // shows no countdown even if an ETA is somehow present.
+  // timestamp are populated. `shutdownReason === 'shutdown'` and the #5698
+  // `terminal` (server_down) state are both terminal and show no countdown even
+  // if an ETA is somehow present.
   const inRestartMode =
-    !!restartEtaMs && restartEtaMs > 0 && !!restartingSince && shutdownReason !== 'shutdown'
+    !terminal && !!restartEtaMs && restartEtaMs > 0 && !!restartingSince && shutdownReason !== 'shutdown'
 
   // Client-side ticking countdown. Mirrors the mobile SessionScreen effect:
   // recompute every second, clear the interval once it hits zero, and reset to
@@ -102,7 +111,9 @@ export function ReconnectBanner({
 
   // Build the primary status line. Restart mode overrides the plain message.
   let statusText: string
-  if (shutdownReason === 'shutdown') {
+  if (terminal) {
+    statusText = message || 'Server appears to be down'
+  } else if (shutdownReason === 'shutdown') {
     statusText = 'Server shut down'
   } else if (inRestartMode && countdown != null && countdown > 0) {
     statusText = `Server restarting... ${formatCountdown(countdown)}`
@@ -123,7 +134,7 @@ export function ReconnectBanner({
   return (
     <div className="reconnect-banner" data-testid="reconnect-banner" role="status" aria-live="polite">
       <span className="reconnect-message">
-        {statusText} (attempt {attempt}/{maxAttempts})
+        {statusText}{terminal ? '' : ` (attempt ${attempt}/${maxAttempts})`}
       </span>
       {detail && (
         <span className="reconnect-detail" data-testid="reconnect-detail">

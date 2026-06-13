@@ -417,6 +417,72 @@ describe('createReconnectScheduler', () => {
     expect(fake.lastDelay()).toBe(RETRY_DELAYS[0] + 250)
   })
 
+  // #5698 — ladder cap: once the rung reaches maxRung the scheduler gives up
+  // (terminal) instead of arming another retry forever.
+  it('gives up at maxRung instead of arming a retry (#5698)', () => {
+    const fake = makeFakeScheduler()
+    const reconnect = vi.fn()
+    const onGaveUp = vi.fn()
+    let rung = 0
+    const s = createReconnectScheduler({
+      nextRung: () => rung++,
+      reconnect,
+      isStale: () => false,
+      scheduler: fake.scheduler,
+      jitter: noJitter,
+      maxRung: 3,
+      onGaveUp,
+    })
+
+    // Rungs 0,1,2 arm retries as usual.
+    expect(s.schedule()).toBe(true)  // rung 0
+    fake.fireAll()
+    // Re-create per socket (the client builds a fresh scheduler each connect),
+    // but here we reuse one and reset its arm by simulating fresh sockets:
+    const mk = () => createReconnectScheduler({
+      nextRung: () => rung++, reconnect, isStale: () => false,
+      scheduler: fake.scheduler, jitter: noJitter, maxRung: 3, onGaveUp,
+    })
+    expect(mk().schedule()).toBe(true)  // rung 1
+    expect(mk().schedule()).toBe(true)  // rung 2
+    // rung 3 >= maxRung 3 → give up.
+    expect(mk().schedule()).toBe(false)
+    expect(onGaveUp).toHaveBeenCalledTimes(1)
+    expect(reconnect).toHaveBeenCalledTimes(1) // only the rung-0 timer fired
+  })
+
+  it('does not re-arm or re-fire onGaveUp on a paired event after giving up (#5698)', () => {
+    const fake = makeFakeScheduler()
+    const onGaveUp = vi.fn()
+    const s = createReconnectScheduler({
+      nextRung: () => 5, // already at/over the cap
+      reconnect: vi.fn(),
+      isStale: () => false,
+      scheduler: fake.scheduler,
+      jitter: noJitter,
+      maxRung: 3,
+      onGaveUp,
+    })
+    expect(s.schedule()).toBe(false) // gave up
+    expect(s.scheduled).toBe(true)   // marked so a paired event is a no-op
+    expect(s.schedule()).toBe(false) // paired event: dedup no-op
+    expect(onGaveUp).toHaveBeenCalledTimes(1) // fired exactly once
+    expect(fake.count()).toBe(0)     // no timer ever armed
+  })
+
+  it('never gives up when maxRung is omitted (legacy behavior)', () => {
+    const fake = makeFakeScheduler()
+    const onGaveUp = vi.fn()
+    let rung = 100 // way past any ladder
+    const mk = () => createReconnectScheduler({
+      nextRung: () => rung++, reconnect: vi.fn(), isStale: () => false,
+      scheduler: fake.scheduler, jitter: noJitter, onGaveUp,
+    })
+    expect(mk().schedule()).toBe(true)
+    expect(mk().schedule()).toBe(true)
+    expect(onGaveUp).not.toHaveBeenCalled()
+  })
+
 })
 
 // ---------------------------------------------------------------------------

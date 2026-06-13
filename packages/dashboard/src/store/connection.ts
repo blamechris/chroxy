@@ -96,6 +96,7 @@ import {
   lastConnectedUrl,
   setLastConnectedUrl,
   nextReconnectAttempt,
+  resetReconnectAttempt,
   resetReplayFlags,
   clearPermissionSplits,
   clearTerminalWriteBatching,
@@ -149,6 +150,7 @@ import {
   // LAN/tunnel re-resolution seam (static today).
   runConnectAttempt,
   createReconnectScheduler,
+  RECONNECT_MAX_RUNG,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
@@ -1483,6 +1485,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       },
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: RETRY_DELAYS,
+      // #5698 — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs and go
+      // terminal instead of spinning forever. A user-initiated retryConnection()
+      // resets the counter (resetReconnectAttempt), so this is not permanent.
+      maxRung: RECONNECT_MAX_RUNG,
+      onGaveUp: () => {
+        if (myAttemptId !== connectionAttemptId) return; // superseded — don't clobber a newer attempt
+        console.log('[ws] reconnect ladder exhausted — server appears down');
+        set({
+          connectionPhase: 'server_down',
+          connectionError: 'Server appears to be down',
+        });
+      },
     });
     const scheduleReconnect = (
       reasonText: string,
@@ -1498,7 +1512,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // per-socket dedupe means a paired error → close drop advances the ladder
       // exactly once. The ladder resets on `auth_ok`, so a clean reconnect
       // starts back at the bottom (1s).
-      reconnectScheduler.schedule();
+      const armed = reconnectScheduler.schedule();
+      // #5698 — schedule() returns false here only when the ladder hit maxRung
+      // (the top `scheduled` guard already handled the dedup case). onGaveUp has
+      // set the terminal 'server_down' phase; don't overwrite it with
+      // 'reconnecting'.
+      if (!armed) return;
       console.log(`[ws] ${reasonText}, reconnecting...`);
       // #4771: `errorMessage === null` means the close code was 1000
       // (normal server-initiated close — see getWsCloseMessage). Match
@@ -3244,6 +3263,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
    * reuses connectToServer's no-reset reconnect for the registry case.
    */
   retryConnection: () => {
+    // #5698 — a user-initiated retry starts a fresh reconnect ladder. Without
+    // this, retrying from the terminal 'server_down' state would immediately
+    // re-exhaust the (still-maxed) counter and give up again on the first failure.
+    resetReconnectAttempt();
     const activeServerId = get().activeServerId;
     if (activeServerId) {
       // Registry server. connectToServer no-ops on an id absent from the

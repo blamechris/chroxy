@@ -26,8 +26,12 @@ const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
   disconnected: ['connecting'],
   connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting'],
   connected: ['disconnected', 'reconnecting', 'server_restarting'],
-  reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting'],
+  // #5698 — the reconnect ladder gives up → terminal 'server_down'.
+  reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting', 'server_down'],
   server_restarting: ['connecting', 'reconnecting', 'disconnected'],
+  // #5698 — terminal; only a user-initiated reconnect (→ connecting) or an
+  // explicit disconnect leaves it.
+  server_down: ['connecting', 'disconnected'],
 };
 
 interface ServerInfo {

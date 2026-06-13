@@ -647,6 +647,7 @@ export {
   selectReconnectEndpoint,
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  RECONNECT_MAX_RUNG,
   LAN_FALLBACK_THRESHOLD,
 } from './connect-flow'
 export type {
