@@ -1983,6 +1983,19 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
   ];
   const newExpiresAt = permPayload.remainingMs !== null ? Date.now() + permPayload.remainingMs : undefined;
   const permTargetId = permPayload.sessionId || get().activeSessionId;
+  // #5693 containment: a permission MAPPED to a session must surface in THAT
+  // session's transcript, never whatever tab is focused. If the owning session
+  // isn't loaded on this client yet, create its empty state — tab-invisible
+  // (tabs come from `sessions`, not `sessionStates`) — so the prompt routes home
+  // instead of leaking into the active session via the flat-messages fallback.
+  // Unmapped prompts (no wire sessionId) intentionally stay in the active
+  // session (still answerable, not mislabeled — originSessionId stays undefined).
+  const ownerSessionId = permPayload.sessionId;
+  if (ownerSessionId && !get().sessionStates[ownerSessionId]) {
+    set((state) => ({
+      sessionStates: { ...state.sessionStates, [ownerSessionId]: createEmptySessionState() },
+    }));
+  }
 
   const targetMessages = permTargetId && get().sessionStates[permTargetId]
     ? get().sessionStates[permTargetId]!.messages

@@ -2752,6 +2752,20 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // tapping the option on codex/gemini/claude-cli sessions hits a server
       // "not supported" error.
       const permTargetId = permPayload.sessionId || get().activeSessionId;
+      // #5693 containment: a permission MAPPED to a session must surface in THAT
+      // session's transcript, never whatever tab is focused. If the owning
+      // session isn't loaded on this client yet, create its empty state — which
+      // is tab-invisible (tabs come from `sessions`, not `sessionStates`) — so
+      // the prompt routes home instead of being dropped or injected into the
+      // active session. Unmapped prompts (no wire sessionId) intentionally stay
+      // in the active session (still answerable, not mislabeled — originSessionId
+      // stays undefined).
+      const ownerSessionId = permPayload.sessionId;
+      if (ownerSessionId && !get().sessionStates[ownerSessionId]) {
+        set((state) => ({
+          sessionStates: { ...state.sessionStates, [ownerSessionId]: createEmptySessionState() },
+        }));
+      }
       const permSession = permTargetId
         ? get().sessions.find((s) => s.sessionId === permTargetId)
         : null;
