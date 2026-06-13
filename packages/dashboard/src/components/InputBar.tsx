@@ -87,6 +87,11 @@ export interface InputBarProps {
     isRecording: boolean
     isAvailable: boolean
     transcript: string
+    /** #5668 — last recognition/helper error (e.g. mic permission denied,
+     * helper spawn failure). Captured by `useVoiceInput` but previously
+     * never surfaced, so a failed recording flipped the mic off silently.
+     * Cleared on the next `start()`. */
+    error: string | null
     start: () => void
     stop: () => void
   }
@@ -1098,6 +1103,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           onApplyRewrite={applyRewrite}
           onDismiss={dismissEvaluator}
         />
+      )}
+      {/* #5668 — surface voice recognition/helper failures instead of
+          flipping the mic off silently. `voiceInput.error` is cleared on the
+          next start(), so retrying dismisses it. role="alert" announces it to
+          screen readers (the failure is otherwise invisible). */}
+      {voiceInput?.error && (
+        <div className="voice-error" data-testid="voice-error" role="alert">
+          <span className="voice-error-icon" aria-hidden="true">⚠</span>
+          <span className="voice-error-text">{voiceInput.error}</span>
+        </div>
       )}
       <div className={`input-bar-textarea-wrap${tokens ? ' has-overlay' : ''}`}>
         {tokens && (
