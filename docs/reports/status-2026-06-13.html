@@ -148,7 +148,7 @@
 <p class="muted"><strong>Remaining #5731 backlog, with risk notes:</strong> <code>switchSession</code> rollback + flat-slot bleed (<em>deferred — higher-risk state-management; left for review rather than risk a subtle regression unsupervised</em>); <code>resume_budget</code> silent no-op when not paused (<em>deferred — a clean fix needs a new ack wire-type, since reusing <code>budget_resumed</code> would inject a false "session resumed" chat message; edge case</em>); mobile provider-capability gating (<em>bigger, mobile-parity follow-up</em>); and Tier-3 LOW/defensive items (supervisor double-fork backoff, standby EADDRINUSE give-up, question-answer stale-<code>toolUseId</code> fallback, InterventionsPanel a11y). Each is bounded and individually documented in #5731.</p>
 
 <div class="cards">
-  <div class="card"><div class="n" style="color:var(--green)">17</div><div class="l">PRs merged (5 durability + 3 audit + 5 Tier-1 + docs + 4 Tier-2)</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">17</div><div class="l">PRs merged (5 durability + 3 audit + 5 Tier-1 + 4 Tier-2)</div></div>
   <div class="card"><div class="n" style="color:var(--green)">8/8</div><div class="l">#5731 Tier-1 shipped</div></div>
   <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
   <div class="card"><div class="n" style="color:var(--green)">clean</div><div class="l">main · every PR gated + reviewed</div></div>
