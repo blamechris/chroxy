@@ -258,3 +258,54 @@ describe('reconnect ladder gives up → server_down (#5698)', () => {
     expect(mh.reconnectAttempt).toBe(0)
   })
 })
+
+// ---------------------------------------------------------------------------
+// #5731 T4 — onclose clears transient streaming/plan state for EVERY session,
+// not just the active one (a background tab mid-stream otherwise keeps a
+// phantom "thinking" bubble that handleSessionSwitched surfaces on tab switch).
+// ---------------------------------------------------------------------------
+
+describe('onclose clears transient state across all sessions (#5731 T4)', () => {
+  it('nulls streamingMessageId / plan / inactivity on background sessions too', async () => {
+    const ws = await openConnected()
+
+    // Active session "a" and a background session "b", both mid-stream, with
+    // a pending plan + inactivity chip on the background session.
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      streamingMessageId: 'msg-a',
+      sessionStates: {
+        a: {
+          messages: [],
+          streamingMessageId: 'msg-a',
+          isPlanPending: false,
+          planAllowedPrompts: [],
+          pendingEvaluatorClarify: null,
+          inactivityWarning: null,
+        },
+        b: {
+          messages: [],
+          streamingMessageId: 'msg-b',
+          isPlanPending: true,
+          planAllowedPrompts: ['go'],
+          pendingEvaluatorClarify: { question: 'why?' },
+          inactivityWarning: { sinceMs: 1 },
+        },
+      } as never,
+    })
+
+    ws.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const st = useConnectionStore.getState()
+    // Active session cleared (and its flat mirror).
+    expect(st.sessionStates.a!.streamingMessageId).toBeNull()
+    expect(st.streamingMessageId).toBeNull()
+    // Background session cleared too — the bug was that it stayed set.
+    expect(st.sessionStates.b!.streamingMessageId).toBeNull()
+    expect(st.sessionStates.b!.isPlanPending).toBe(false)
+    expect(st.sessionStates.b!.planAllowedPrompts).toEqual([])
+    expect(st.sessionStates.b!.pendingEvaluatorClarify).toBeNull()
+    expect(st.sessionStates.b!.inactivityWarning).toBeNull()
+  })
+})

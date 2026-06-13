@@ -106,6 +106,7 @@ import {
   clearMessageQueue,
   enqueueMessage,
   updateActiveSession,
+  updateSession,
   clearSavedCredentials,
   loadConnection,
   CLIENT_PROTOCOL_VERSION,
@@ -1667,7 +1668,17 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
-      updateActiveSession((ss) => {
+      // #5731 T4: clear transient state for EVERY session, not just the
+      // active one. A background tab mid-stream otherwise keeps its
+      // `streamingMessageId` (a phantom "thinking" bubble), pending plan,
+      // inactivity chip, or clarify question across the drop —
+      // `handleSessionSwitched` then surfaces that stale state when the
+      // user switches to the tab post-reconnect. `updateSession` syncs the
+      // active session's flat-state mirror for us, and is a no-op for any
+      // session that returns an empty patch.
+      const clearTransientSessionState = (
+        ss: import('./types').SessionState,
+      ): Partial<import('./types').SessionState> => {
         const patch: Partial<import('./types').SessionState> = {};
         if (ss.streamingMessageId) patch.streamingMessageId = null;
         if (ss.isPlanPending) {
@@ -1687,7 +1698,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         // the next soft-timeout firing will re-emit the warning.
         if (ss.inactivityWarning) patch.inactivityWarning = null;
         return Object.keys(patch).length > 0 ? patch : {};
-      });
+      };
+      for (const sid of Object.keys(get().sessionStates)) {
+        updateSession(sid, clearTransientSessionState);
+      }
 
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && !get().userDisconnected && disconnectedAttemptId !== myAttemptId) {
