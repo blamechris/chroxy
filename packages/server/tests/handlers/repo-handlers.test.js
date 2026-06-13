@@ -117,5 +117,36 @@ describe('repo-handlers', () => {
       assert.equal(ctx._repoStore.length, 1)
       assert.equal(ctx._repoStore[0].path, '/tmp/keep')
     })
+
+    // The config read+write used to sit outside the handler's try/catch, so a
+    // write failure threw out and the client got no response (silent failure).
+    it('sends session_error (not an uncaught throw) when the config write fails', async () => {
+      const ctx = makeCtx()
+      ctx._repoStore.push({ path: '/tmp/keep', name: 'keep' })
+      ctx.writeReposToConfig = createSpy(() => { throw new Error('EROFS: read-only file system') })
+
+      // Must not throw out of the handler.
+      await assert.doesNotReject(
+        repoHandlers.remove_repo(makeWs(), makeClient(), { path: '/tmp/keep' }, ctx),
+      )
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Failed to remove repo/)
+      assert.match(ctx._sent[0].message, /read-only file system/)
+    })
+
+    it('sends session_error when the config read fails', async () => {
+      const ctx = makeCtx()
+      ctx.readReposFromConfig = createSpy(() => { throw new Error('config parse error') })
+
+      await assert.doesNotReject(
+        repoHandlers.remove_repo(makeWs(), makeClient(), { path: '/tmp/keep' }, ctx),
+      )
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Failed to remove repo/)
+      assert.equal(ctx.writeReposToConfig.callCount, 0, 'no write attempted when the read failed')
+    })
   })
 })
