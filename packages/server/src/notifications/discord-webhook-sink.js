@@ -830,9 +830,13 @@ export class DiscordWebhookSink extends NotificationSink {
    *   - `online` silent > staleAfterMs   → downgrade to `stale`
    *   - `stale`  silent > offlineAfterMs → downgrade to `offline` (final)
    * `idle` and `permission` are spared — they are legitimately waiting on the
-   * human, not dead. A downgraded state is rebuilt into the PATCH payload so the
-   * embed shows the new title/color. A real event (update()) restores the true
-   * state and resets `lastUpdateTs`, so recovery is automatic.
+   * human, not dead. A pending downgrade is rendered into the PATCH payload from
+   * a CANDIDATE state, and only committed to the entry once Discord confirms the
+   * PATCH (res.ok) — a failed PATCH must not persist `stale`/`offline` while the
+   * embed still shows the old state. That matters most for `offline`, which later
+   * ticks skip: persisting it on a failed PATCH would wedge the embed forever
+   * (the very ghost this watchdog exists to prevent). A real event (update())
+   * restores the true state and resets `lastUpdateTs`, so recovery is automatic.
    */
   async _heartbeatTick() {
     const webhookUrl = this._configuredUrl()
@@ -847,32 +851,44 @@ export class DiscordWebhookSink extends NotificationSink {
       // #5676: staleness downgrade. Only `online`/`stale` decay; idle/permission
       // are left to their normal footer refresh. silence reads lastUpdateTs (the
       // last real event), which the heartbeat does not bump — so a long-silent
-      // entry eventually trips even with ticks firing in between.
+      // entry eventually trips even with ticks firing in between. The downgrade
+      // is a CANDIDATE here; entry.state is mutated only after a successful PATCH.
       const last = entry.lastUpdateTs
       const silence = Number.isFinite(last) ? now - last : Infinity
+      let downgradeTo = null
       if (entry.state === 'online' && silence > this._staleAfterMs) {
-        entry.state = 'stale'
-        entry.lastStateChangeTs = now
-        mutated = true
+        downgradeTo = 'stale'
       } else if (entry.state === 'stale' && silence > this._offlineAfterMs) {
-        entry.state = 'offline'
-        entry.lastStateChangeTs = now
-        mutated = true
+        downgradeTo = 'offline'
       }
+
+      // Render from the candidate state when a downgrade is pending, else the
+      // current state for the routine footer refresh.
+      const payloadEntry = downgradeTo
+        ? { ...entry, state: downgradeTo, lastStateChangeTs: now }
+        : entry
 
       try {
         const res = await this._discordFetch(`${base}/messages/${entry.messageId}`, {
           method: 'PATCH',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(this._buildPayload(project, entry)),
+          body: JSON.stringify(this._buildPayload(project, payloadEntry)),
         })
         if (res.status === 404) {
           // Deleted externally — forget the id so the next real event POSTs.
           entry.messageId = null
           mutated = true
+        } else if (res.ok && downgradeTo) {
+          // Commit the downgrade only now that Discord has the new embed. A
+          // failed/non-ok PATCH leaves the entry untouched so the next tick
+          // retries without corrupting persisted state.
+          entry.state = downgradeTo
+          entry.lastStateChangeTs = now
+          mutated = true
         }
       } catch {
         // Heartbeat is best-effort; the next real event takes the full path.
+        // A pending downgrade is intentionally NOT committed — retried next tick.
       }
     }
     if (mutated) this._persistState(store)

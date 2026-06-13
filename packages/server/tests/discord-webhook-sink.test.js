@@ -973,6 +973,60 @@ describe('DiscordWebhookSink — staleness watchdog (#5676)', () => {
     await sink._heartbeatTick()
     assert.equal(readState(statePath).projects.proj1.state, 'stale', 'silence accumulated across ticks → tripped')
   })
+
+  it('a FAILED downgrade PATCH does not persist the new state — retried next tick', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+
+    // Past the stale threshold, but the downgrade PATCH fails (5xx on all
+    // MAX_RETRIES=3 attempts, so _discordFetch returns the final 5xx).
+    advance(11 * 60_000)
+    scriptFetch([{ status: 500 }, { status: 502 }, { status: 503 }])
+    await sink._heartbeatTick()
+    assert.equal(
+      readState(statePath).projects.proj1.state,
+      'online',
+      'failed PATCH must NOT persist stale — embed never updated',
+    )
+
+    // Next tick with a working PATCH commits the downgrade.
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(
+      readState(statePath).projects.proj1.state,
+      'stale',
+      'retry succeeds → downgrade now committed',
+    )
+  })
+
+  it('a FAILED stale→offline PATCH does not wedge the entry as offline', async () => {
+    const { sink, statePath, advance } = watchdog()
+    scriptFetch([{ status: 200, body: { id: 'm1' } }])
+    await sink.send(online())
+
+    // Trip to stale (succeeds).
+    advance(11 * 60_000)
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.state, 'stale')
+
+    // Offline downgrade PATCH fails — must stay 'stale' (offline would be skipped
+    // on later ticks, freezing the embed: the exact ghost the watchdog prevents).
+    advance(20 * 60_000) // 31 min total silence
+    scriptFetch([{ status: 502 }, { status: 503 }, { status: 500 }])
+    await sink._heartbeatTick()
+    assert.equal(
+      readState(statePath).projects.proj1.state,
+      'stale',
+      'failed offline PATCH stays stale so the next tick can retry',
+    )
+
+    // Retry succeeds → offline commits.
+    scriptFetch([{ status: 200 }])
+    await sink._heartbeatTick()
+    assert.equal(readState(statePath).projects.proj1.state, 'offline', 'retry commits offline')
+  })
 })
 
 describe('PushManager integration (#5413 Phase 2)', () => {
