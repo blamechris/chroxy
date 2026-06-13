@@ -51,6 +51,12 @@ function makePrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
   } as ChatMessage;
 }
 
+// MessageBubble subscribes to useConnectionStore, so every mounted tree must be
+// torn down — otherwise an orphan subscriber survives the test and re-renders
+// (with an act() warning, or a flaky failure) when a later suite mutates the
+// store outside act. Track each tree and unmount in afterEach.
+const mountedTrees: renderer.ReactTestRenderer[] = [];
+
 function render(message: ChatMessage) {
   let tree!: renderer.ReactTestRenderer;
   act(() => {
@@ -66,6 +72,7 @@ function render(message: ChatMessage) {
       />,
     );
   });
+  mountedTrees.push(tree);
   return tree;
 }
 
@@ -98,6 +105,9 @@ describe('buildPromptSessionLabel (#5674)', () => {
 describe('MessageBubble session label render (#5674)', () => {
   afterEach(() => {
     act(() => {
+      // Unmount every tree BEFORE resetting the store so no orphan subscriber
+      // re-renders on the sessions change (avoids cross-suite act() warnings).
+      while (mountedTrees.length) mountedTrees.pop()!.unmount();
       useConnectionStore.setState({ sessions: [] });
     });
   });
