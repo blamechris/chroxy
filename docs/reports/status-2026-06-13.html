@@ -110,6 +110,25 @@
   <li><strong>A console-log-heavy test can flake CI at worker teardown</strong> — the reconnect-cycle integration test logged ~11× per run, racing vitest's <code>onUserConsoleLog</code> RPC at shutdown ("Closing rpc while … pending"). Silencing the test's console fixed a 3×-recurring red that was green locally.</li>
 </ul>
 
+<h3>Then: hardening swarm-audit (<a href="https://github.com/blamechris/chroxy/issues/5731">#5731</a>)</h3>
+<p>With the cleanly-scoped durability queue exhausted, ran the <code>/swarm-audit</code> you asked for — a 6-dimension read-only swarm (unknown/new-model defensibility, cross-provider quirks, UX determinism, swallowed errors, accessibility, race/failure-modes), each finding re-verified against current <code>main</code> (much of the seed issue #5631 was already fixed). The full triaged backlog is filed as <a href="https://github.com/blamechris/chroxy/issues/5731">#5731</a>; the top 3 findings shipped:</p>
+<table>
+  <thead><tr><th>PR</th><th>Audit finding → fix</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5732</td><td><strong>Provider/model defensibility</strong> — <code>handleSetModel</code> had no <code>modelSwitch</code> capability guard (its permission-mode sibling did), so a <code>set_model</code> on claude-tui broadcast a <code>model_changed</code> the PTY never adopted: a false "model changed" for every client. Added the parallel guard.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5733</td><td><strong>Accessibility</strong> — the permission prompt (which auto-<em>denies</em> on timeout) and the plan-approval prompt announced nothing to screen readers. Now <code>role="alertdialog"</code>/region + live-regions + control labels; the ticking countdown is muted so it announces once, not every second.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5734</td><td><strong>Swallowed errors</strong> — <code>checkpoint-manager._persist</code> swallowed write failures, so a checkpoint create/delete reported success but was lost (or reappeared) on restart. Now emits a per-session error banner — the #5714 silent-loss class on the rewind feature.</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">The remaining audit findings are documented in <a href="https://github.com/blamechris/chroxy/issues/5731">#5731</a> as a prioritized, file-level backlog — e.g. background-session streaming spinner that sticks after a disconnect, <code>session_role</code> stale across reconnect (#5623/#5613), <code>setThinkingLevel</code> optimistic-revert (the next sibling after the model + permission-mode reverts), and a destroyed session leaving a pending hook-permission wedged. Each is bounded and ready to pick up.</p>
+
+<div class="cards">
+  <div class="card"><div class="n" style="color:var(--green)">8</div><div class="l">PRs merged (5 durability + 3 audit)</div></div>
+  <div class="card"><div class="n">6</div><div class="l">Audit dimensions</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">pristine</div><div class="l">Repo (0 open PRs)</div></div>
+</div>
+
 <h2>2 · Shipped this session</h2>
 <table>
   <thead><tr><th>PR</th><th>What</th><th>Issue</th><th>Status</th></tr></thead>
