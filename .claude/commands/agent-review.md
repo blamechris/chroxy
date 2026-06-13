@@ -23,7 +23,7 @@ gh pr view ${PR_NUM}
 gh pr diff ${PR_NUM}
 ```
 
-**Use repo-memory to gather surrounding context cheaply.** This repo has the `repo-memory` MCP. For files the diff touches, call `get_file_summary` (or `batch_file_summaries`) and `get_dependency_graph` to understand the change's blast radius in ~50 tokens/file instead of fully re-reading each one — then `Read` the changed regions in full to review the actual lines. Use `search_by_purpose` to locate related code the diff should have updated.
+**Use repo-memory to gather surrounding context cheaply.** This repo has the `repo-memory` MCP. For files the diff touches, call `get_file_summary` (or `batch_file_summaries`) and `get_dependency_graph` to understand the change's blast radius for a fraction of a full Read instead of fully re-reading each one — then `Read` the changed regions in full to review the actual lines. Use `search_by_purpose` to locate related code the diff should have updated.
 
 ### 2. Review Criteria
 
@@ -191,6 +191,8 @@ Then below the table, list:
 **Chroxy Inspector** — expert in Node.js, React Native/Expo, WebSocket protocol, Claude Code CLI, Cloudflare tunnels, mobile connectivity.
 
 Mindset: "Will this code work reliably over a cellular connection through a tunnel to a remote dev machine?"
+
+When this persona runs as a spawned subagent (fresh context, no CLAUDE.md), use the **repo-memory** MCP to gather surrounding context cheaply: `get_file_summary`/`batch_file_summaries` and `get_dependency_graph` for the files the diff touches (blast radius for a fraction of a full Read), `search_by_purpose` to locate related code the diff should have updated — then `Read` the changed regions in full to review the actual lines.
 
 ## Review Philosophy
 

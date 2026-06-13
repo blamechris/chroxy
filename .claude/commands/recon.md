@@ -103,7 +103,7 @@ You MUST read actual files. Do not infer from filenames alone.
 
 ## Exploration — use repo-memory to save tokens
 
-This repo has the **repo-memory** MCP (~1,500 files pre-indexed). Before you `Read` a file, call `get_file_summary` (or `batch_file_summaries` for several at once) — it returns exports/imports/purpose in ~50 tokens vs ~800 for a full Read. Use `search_by_purpose` to find files by concept instead of grepping, and `get_related_files`/`get_dependency_graph` to trace dependencies. Read the full file only when you need exact implementation, control flow, or to match code style — or when a summary returns `suggestFullRead: true`.
+This repo has the **repo-memory** MCP (~1,500 files pre-indexed). Before you `Read` a file, call `get_file_summary` (or `batch_file_summaries` for several at once) — it returns exports/imports/purpose for a fraction of a full Read. Use `search_by_purpose` to find files by concept instead of grepping, and `get_related_files`/`get_dependency_graph` to trace dependencies. Read the full file only when you need exact implementation, control flow, or to match code style — or when a summary returns `suggestFullRead: true`.
 
 ## Output (use these exact sections)
 

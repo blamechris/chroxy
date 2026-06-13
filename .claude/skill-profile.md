@@ -8,12 +8,12 @@
 
 ## Repo-memory exploration protocol (cross-cutting)
 This repo has the `repo-memory` MCP (~1,500 files pre-indexed, AST summaries, warm cache via a `post-merge` hook). It is heavily underused. Any skill that **spawns code-exploring subagents or reads source heavily** must carry the exploration protocol so spawned agents (fresh context, don't inherit CLAUDE.md) actually use it:
-- Before `Read` → `get_file_summary` / `batch_file_summaries` (~50 tokens vs ~800).
+- Before `Read` → `get_file_summary` / `batch_file_summaries` (a fraction of a full Read).
 - Before grep → `search_by_purpose`; for impact/dependents → `get_related_files` / `get_dependency_graph`.
 - Full `Read` only for exact implementation/control flow, style matching, or when a summary returns `suggestFullRead: true`.
 - Tasks group (`create_task`/`mark_explored`) is **off** in chroxy's `.repo-memory.json` — do not reference those tools.
 
-Already wired inline (2026-06-12): `recon` (scout template), `bug-hunt` (hunter rules), `project-audit` (exploration strategy), `agent-review` (context gathering), plus the CLAUDE.md `## Repo Memory MCP` section. When re-installing/updating any of these, preserve the repo-memory block. Candidates not yet wired (covered by CLAUDE.md on the main thread): `check-pr`, `start-working`, `tackle-issues`, `full-review`.
+Already wired inline (2026-06-12): `recon` (scout template), `bug-hunt` (hunter rules), `project-audit` (exploration strategy), `agent-review` (context-gathering step + reviewer persona block), plus the CLAUDE.md `## Repo Memory MCP` section. When re-installing/updating any of these, preserve the repo-memory block. Candidates not yet wired (covered by CLAUDE.md on the main thread): `check-pr`, `start-working`, `tackle-issues`, `full-review`.
 
 ## Merge Gate
 - **Enabled:** Yes — branch protection requires conversation resolution (noted in check-pr line 15)

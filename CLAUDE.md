@@ -359,7 +359,7 @@ This repo has the `repo-memory` MCP server configured, with ~1,500 files pre-ind
 
 ### Exploration protocol — try repo-memory before Read/grep
 
-- **Before you `Read` a file, call `get_file_summary`** — it returns exports, imports, purpose, and line count in ~50 tokens vs ~800 for the full file. Use `batch_file_summaries` for several related files at once (preferred over N× `get_file_summary`).
+- **Before you `Read` a file, call `get_file_summary`** — it returns exports, imports, purpose, and line count for a fraction of a full Read (a summary runs ~150–400 tokens; a full Read of a large file is several thousand). Use `batch_file_summaries` for several related files at once (preferred over N× `get_file_summary`).
 - **Before you grep for a concept** (auth, validation, tunnel, pairing…), call `search_by_purpose`.
 - Use `get_related_files` to find what else to look at, and `get_dependency_graph` to trace imports/dependents (useful for review-impact checks).
 - `get_project_map` for structure/entry points at the start of a task; `get_changed_files` to see what moved since the last session.

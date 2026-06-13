@@ -105,7 +105,7 @@ Your job is to **find bugs that would make good GitHub issues** in the following
 
 ## Rules
 
-1. READ actual source code. Verify each finding against the code, not against vibes. **Use repo-memory to save tokens:** call `get_file_summary` (or `batch_file_summaries`) before a full `Read` to scope where to look (~50 tokens vs ~800), and `search_by_purpose` instead of grep — then `Read` the suspect lines in full to confirm the bug.
+1. READ actual source code. Verify each finding against the code, not against vibes. **Use repo-memory to save tokens:** call `get_file_summary` (or `batch_file_summaries`) before a full `Read` to scope where to look (a fraction of a full Read), and `search_by_purpose` instead of grep — then `Read` the suspect lines in full to confirm the bug.
 2. Every finding must be **concrete and reproducible**. "This might fail" is rejected. "Calling foo() with input=null on line 42 hits the unguarded `.length` on line 47 and throws" is accepted.
 3. Stay in your lens. If you stray into other hunters' lanes (e.g., Tester writing security findings), dedup later eats your work.
 4. Do NOT suggest fixes longer than 1-2 lines. Issue authors decide the fix; you describe the bug.
