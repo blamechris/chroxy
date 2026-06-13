@@ -498,7 +498,7 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
@@ -551,7 +551,12 @@ export class WsServer {
     // than /diagnostics but still bounded to blunt slug-scanning). The store is
     // injectable for tests; the default is rooted at $CHROXY_CONFIG_DIR /
     // ~/.chroxy/pages and only READS on construct (no sandbox write).
-    this._pagesRateLimiter = new RateLimiter({ name: 'pages', windowMs: 60_000, maxMessages: 120, burst: 30 })
+    // Injectable so tests/deployments can override or DISABLE it (pass null).
+    // `!== undefined` (not ||/??) so an explicit null genuinely disables the
+    // limiter rather than falling back to the default.
+    this._pagesRateLimiter = pagesRateLimiter !== undefined
+      ? pagesRateLimiter
+      : new RateLimiter({ name: 'pages', windowMs: 60_000, maxMessages: 120, burst: 30 })
     this.pagesStore = pagesStore || new PagesStore({
       pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
     })

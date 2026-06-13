@@ -8,6 +8,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createHttpHandler } from '../src/http-routes.js'
 import { PagesStore } from '../src/pages-store.js'
+import { RateLimiter } from '../src/rate-limiter.js'
 
 let dir, store, httpServer, base
 
@@ -93,6 +94,27 @@ test('the pages route does not require (or consult) bearer auth', async () => {
   const meta = store.publishHtml({ title: 'public', html: '<p>open</p>' })
   const res = await fetch(`${base}/p/${meta.slug}/`)
   assert.equal(res.status, 200)
+})
+
+test('per-IP rate limiter returns 429 + Retry-After + security headers and gates fs work', async () => {
+  // A tight limiter: 1 request per window, no burst → the 2nd request is denied.
+  const limiter = new RateLimiter({ name: 'pages-test', windowMs: 60_000, maxMessages: 1, burst: 0 })
+  const meta = store.publishHtml({ title: 't', html: '<p>x</p>' })
+  const srv = createServer(createHttpHandler({ ...mockServer(), _pagesRateLimiter: limiter }))
+  srv.listen(0, '127.0.0.1')
+  await once(srv, 'listening')
+  const b = `http://127.0.0.1:${srv.address().port}`
+  try {
+    const first = await fetch(`${b}/p/${meta.slug}/`)
+    assert.equal(first.status, 200)
+    const second = await fetch(`${b}/p/${meta.slug}/`)
+    assert.equal(second.status, 429)
+    assert.ok(Number(second.headers.get('retry-after')) >= 0)
+    // Even the rate-limited response carries the static-only CSP.
+    assert.match(second.headers.get('content-security-policy'), /script-src 'none'/)
+  } finally {
+    srv.close()
+  }
 })
 
 test('serve-side size ceiling: a file grown past the cap is not served (404)', async () => {

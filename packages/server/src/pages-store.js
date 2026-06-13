@@ -95,10 +95,15 @@ export class PagesStore {
   }
 
   _saveManifest() {
-    const tmp = `${this._manifestPath}.tmp`
+    // Per-pid temp suffix avoids a collision if two writers race the rename.
+    const tmp = `${this._manifestPath}.${process.pid}.tmp`
     try {
-      mkdirSync(this._pagesDir, { recursive: true })
-      writeFileSync(tmp, JSON.stringify(this._manifest), 'utf8')
+      // 0700 dir / 0600 file: slugs are capability URLs, so the manifest
+      // (index.json) and page contents must not be world-readable even under a
+      // permissive umask. umask can only clear bits, never add them, so passing
+      // the mode guarantees at-most these permissions.
+      mkdirSync(this._pagesDir, { recursive: true, mode: 0o700 })
+      writeFileSync(tmp, JSON.stringify(this._manifest), { encoding: 'utf8', mode: 0o600 })
       renameSync(tmp, this._manifestPath)
     } catch (err) {
       try { rmSync(tmp, { force: true }) } catch { /* ignore */ }
@@ -174,11 +179,13 @@ export class PagesStore {
 
     const slug = this._mintSlug()
     const dir = join(this._pagesDir, slug)
-    mkdirSync(dir, { recursive: true })
+    // 0700 dirs / 0600 files — page contents + slugs are sensitive (see
+    // _saveManifest). A permissive umask can't widen these.
+    mkdirSync(dir, { recursive: true, mode: 0o700 })
     for (const { rel, content } of prepared) {
       const dest = join(dir, rel)
-      mkdirSync(resolve(dest, '..'), { recursive: true })
-      writeFileSync(dest, content)
+      mkdirSync(resolve(dest, '..'), { recursive: true, mode: 0o700 })
+      writeFileSync(dest, content, { mode: 0o600 })
     }
     const meta = { slug, title: String(title).slice(0, 200), createdAt: Date.now(), bytes, entry: DEFAULT_ENTRY }
     this._manifest.pages[slug] = meta

@@ -246,7 +246,11 @@ export function createHttpHandler(server) {
           const socketIp = req.socket?.remoteAddress || ''
           const { allowed, retryAfterMs } = limiter.check(getRateLimitKey(socketIp, req))
           if (!allowed) {
-            res.writeHead(429, { 'Content-Type': 'text/plain', 'Retry-After': Math.ceil(retryAfterMs / 1000) })
+            res.writeHead(429, {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Retry-After': Math.ceil(retryAfterMs / 1000),
+              ...PAGE_SECURITY_HEADERS,
+            })
             res.end('rate limited')
             return
           }
@@ -275,7 +279,7 @@ export function createHttpHandler(server) {
         // Trailing-slash redirect (`/p/<slug>` → `/p/<slug>/`) so a page's
         // relative asset URLs resolve under its own directory.
         if (m[2] == null) {
-          res.writeHead(301, { Location: `/p/${encodeURIComponent(slug)}/`, 'Cache-Control': 'no-store' })
+          res.writeHead(301, { Location: `/p/${encodeURIComponent(slug)}/`, ...PAGE_SECURITY_HEADERS })
           res.end()
           return
         }

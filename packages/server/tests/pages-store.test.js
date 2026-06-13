@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, existsSync } from 'node:fs'
+import { mkdtempSync, rmSync, readFileSync, writeFileSync, mkdirSync, symlinkSync, existsSync, statSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -129,6 +129,16 @@ test('resolveFile contains paths and defeats traversal + symlink escape', () => 
     } catch (err) {
       if (err.code !== 'EPERM') throw err // some CI filesystems forbid symlink; skip if so
     }
+  } finally { cleanup() }
+})
+
+test('published dirs are 0700, files + manifest are 0600 (POSIX)', { skip: process.platform === 'win32' }, () => {
+  const { store, dir, cleanup } = freshStore()
+  try {
+    const meta = store.publishHtml({ title: 't', html: '<p>x</p>' })
+    assert.equal(statSync(join(dir, meta.slug)).mode & 0o777, 0o700, 'page dir 0700')
+    assert.equal(statSync(join(dir, meta.slug, 'index.html')).mode & 0o777, 0o600, 'page file 0600')
+    assert.equal(statSync(join(dir, 'index.json')).mode & 0o777, 0o600, 'manifest 0600')
   } finally { cleanup() }
 })
 
