@@ -58,6 +58,24 @@
   <div class="sub">Generated 2026-06-13 · remote terminal harness for Claude Code · monorepo (server · app · desktop · dashboard · protocol · store-core · claude-hooks)</div>
 </header>
 
+<div class="callout good">
+  <strong>✓ Closed out &amp; re-baselined — 2026-06-13.</strong> A 6-agent swarm audit (Skeptic · Builder · Guardian · Minimalist · Operator · Futurist) verified every backlog item below against current <code>main</code>. Full results: <a href="audit-results/00-master-assessment.md"><code>docs/reports/audit-results/</code></a>. Verdict on the forward plan: <strong>3.1 / 5 — the §3 friction table and §5 next-moves are a snapshot from the <em>start</em> of the marathon and were never re-baselined against the 19 PRs this report documents merging.</strong> The §1.5 record-of-work is accurate; the forward-looking sections below are <span class="muted">superseded by the reconciliation in the next box</span>.
+</div>
+
+<div class="callout">
+  <strong>Backlog reconciliation (what's actually open).</strong>
+  <ul>
+    <li><span class="pill ok">closed</span> <strong>#5613</strong> — fixed in code by #5737, only orphaned-open by GitHub's comma-list closing-keyword quirk. Closed.</li>
+    <li><span class="pill warn">reopened</span> <strong>#5623</strong> — its literal ask (clear <code>sessionRole</code> on disconnect, both clients) was <em>never</em> implemented; #5737 only shipped the server re-emit, leaving a flash window + an a11y false-alarm. Scope expanded to both clients.</li>
+    <li><span class="pill neutral">already shipped</span> <strong>#5674</strong> stays closed (#5694). Residual mobile parity (per-tab pending-permission dot + assertive a11y announcement) filed as <strong>#5750</strong>.</li>
+    <li><span class="pill info">re-scoped</span> <strong>#5631</strong> — ~60% done by #5663; real remaining work is the dashboard pricing-table drift + the pricing-less wire schema, not UI-wide degradation (annotated on the issue).</li>
+    <li><span class="pill info">re-aimed</span> <strong>#5622</strong> — the fix must bound the <em>server</em> derivation throughput (the only backstop counts the wrong sockets), and it's not user-felt for a solo driver (annotated).</li>
+    <li><span class="pill bad">live bug</span> <strong>#5668</strong> — the desktop "surface voice failures" half is a concrete unfixed wiring gap (<code>voiceInput.error</code> captured but never rendered); the audit's top felt-friction win.</li>
+    <li><span class="pill info">new</span> <strong>#5751</strong> harness-preamble (Futurist-minimal design) · <strong>#5752</strong> <code>resume_budget</code> dead-button · <strong>#5753</strong> question-answer fail-closed <code>toolUseId</code> guard.</li>
+  </ul>
+  <p class="muted"><strong>Ship order (Tier A — cheap, high felt-friction):</strong> #5668 desktop voice-error surfacing → #5623 clear role on disconnect (both clients) → #5631 quick-win (opus→4-8 + dashboard labels). Then #5750 mobile parity, #5631 structural.</p>
+</div>
+
 <div class="cards">
   <div class="card"><div class="n" style="color:var(--green)">4 / 4</div><div class="l">Target bugs resolved</div></div>
   <div class="card"><div class="n">3</div><div class="l">PRs merged this session</div></div>
