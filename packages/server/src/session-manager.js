@@ -1523,7 +1523,7 @@ export class SessionManager extends EventEmitter {
       // here loses the whole session list on the next start. Log loudly so the
       // operator can act (disk space / permissions) rather than discovering it
       // silently gone after restart.
-      log.error(`CRITICAL: failed to serialize session state during shutdown — sessions may NOT be restored on next start (check disk space and ~/.chroxy permissions): ${err?.stack || err}`)
+      log.error(`CRITICAL: failed to serialize session state during shutdown — sessions may NOT be restored on next start (check disk space and write permissions for ${this._stateFilePath}): ${err?.stack || err}`)
     }
     // Set the destroying flag AFTER the final write — every persist call from
     // here on (duplicate shutdown handler, late-arriving session event) will
@@ -2107,14 +2107,16 @@ export class SessionManager extends EventEmitter {
    * is a follow-up — it needs a new wire message type; `session_warning` is
    * reserved for the idle-timeout countdown UI and must not be overloaded.)
    * @param {string} sessionId
-   * @param {string|null} name - pass explicitly when the entry is already gone
-   *   from `_sessions` (e.g. destroySession flushes after cleanup).
+   * @param {string|null} name - pass explicitly to control the logged label:
+   *   the new name on rename, or the entry's name on destroy (where the entry
+   *   is already removed from `_sessions` before this flush, so a lookup would
+   *   be nameless). Omit to look it up from `_sessions`.
    * @returns {boolean} true if the write succeeded.
    */
   _flushPersistOrWarn(sessionId, name = null) {
     if (this._flushPersist()) return true
     const resolvedName = name || this._sessions.get(sessionId)?.name || null
-    log.error(`Session state for ${sessionId}${resolvedName ? ` ("${resolvedName}")` : ''} was NOT persisted — it may be lost on restart. Check disk space and ~/.chroxy permissions.`)
+    log.error(`Session state for ${sessionId}${resolvedName ? ` ("${resolvedName}")` : ''} was NOT persisted — it may be lost on restart. Check disk space and write permissions for ${this._stateFilePath}.`)
     this.emit('session_persist_failed', { sessionId, name: resolvedName })
     return false
   }
