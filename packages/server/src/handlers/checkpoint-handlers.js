@@ -71,6 +71,30 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.')
     return
   }
+  // #5731 T8 (confirms deferred #5700): restoring hard-resets the working tree
+  // at the checkpoint's cwd. If ANOTHER non-destroying session shares that cwd
+  // (the default for non-worktree sessions) and is mid-turn, the reset yanks
+  // files out from under its active work. Refuse and name it — mirroring the
+  // current-session busy guard above and the destroy-while-busy guard. Idle
+  // co-located sessions aren't blocked (recoverable, and blocking the common
+  // "two tabs on one repo" case would be more surprising than helpful);
+  // worktree-isolated sessions each have a distinct cwd and never collide.
+  // listSessions() already excludes sessions mid-destroy. Both accessors are
+  // feature-detected so a partial/legacy manager can't crash the restore path.
+  const checkpointMgr = ctx.services.checkpointManager
+  const sessionMgr = ctx.sessions.sessionManager
+  if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
+    const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
+    if (cp?.cwd) {
+      const busyShare = sessionMgr.listSessions().find(
+        (s) => s.sessionId !== sid && s.cwd === cp.cwd && s.isBusy,
+      )
+      if (busyShare) {
+        sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
+        return
+      }
+    }
+  }
   try {
     const checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
     const newSessionId = await ctx.sessions.sessionManager.createSession({

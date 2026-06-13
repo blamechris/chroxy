@@ -15,6 +15,10 @@ function makeCtx(sessions = new Map(), overrides = {}) {
       getSession: createSpy((id) => sessions.get(id)),
       createSession: createSpy(async () => 'restored-session-id'),
       getHistoryCount: createSpy(() => 5),
+      // #5731 T8: the shared-cwd guard scans the live session list. Default to
+      // only the active session (no co-located sibling) so existing tests don't
+      // trip the guard; the guard tests override this.
+      listSessions: createSpy(() => []),
     },
     checkpointManager: {
       createCheckpoint: createSpy(async () => ({
@@ -26,6 +30,8 @@ function makeCtx(sessions = new Map(), overrides = {}) {
         gitRef: null,
       })),
       listCheckpoints: createSpy(() => []),
+      // #5731 T8: the shared-cwd guard reads the checkpoint's cwd up front.
+      getCheckpoint: createSpy(() => ({ id: 'cp-1', name: 'Checkpoint 1', cwd: '/tmp', resumeSessionId: 'conv-1' })),
       restoreCheckpoint: createSpy(async () => ({
         id: 'cp-1',
         name: 'Checkpoint 1',
@@ -165,6 +171,69 @@ describe('checkpoint-handlers', () => {
       const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
       assert.ok(restored, 'checkpoint_restored not sent')
       assert.equal(restored.newSessionId, 'restored-session-id')
+    })
+
+    // #5731 T8 (confirms deferred #5700) — restoring hard-resets the working
+    // tree at the checkpoint's cwd. Refuse when another non-destroying session
+    // is BUSY in that same cwd (it would lose in-progress work). Idle co-located
+    // sessions are not blocked.
+    describe('shared-cwd busy guard (#5731 T8)', () => {
+      function makeRestoreCtx({ checkpointCwd = '/repo', siblings = [], activeBusy = false }) {
+        const sessions = new Map()
+        const active = createMockSession()
+        active.isRunning = activeBusy
+        sessions.set('s1', { session: active, name: 'Active', cwd: checkpointCwd })
+        sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: Checkpoint 1', cwd: checkpointCwd })
+        const ctx = makeCtx(sessions)
+        ctx.services.checkpointManager.getCheckpoint = createSpy(() => ({ id: 'cp-1', name: 'Checkpoint 1', cwd: checkpointCwd, resumeSessionId: 'conv-1' }))
+        ctx.sessions.sessionManager.listSessions = createSpy(() => [
+          { sessionId: 's1', name: 'Active', cwd: checkpointCwd, isBusy: activeBusy },
+          ...siblings,
+        ])
+        return ctx
+      }
+
+      it('refuses (naming the session) when a sibling is BUSY in the same cwd, before any restore', async () => {
+        const ctx = makeRestoreCtx({
+          checkpointCwd: '/repo',
+          siblings: [{ sessionId: 's2', name: 'Sibling', cwd: '/repo', isBusy: true }],
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        const err = ctx._sent.find(m => m.type === 'session_error')
+        assert.ok(err, 'should refuse with a session_error')
+        assert.match(err.message, /Sibling/, 'names the conflicting busy session')
+        assert.match(err.message, /same working directory/)
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 0, 'must NOT hard-reset the shared tree')
+        assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'must NOT create the rewind session')
+      })
+
+      it('allows the restore when the co-located sibling is IDLE', async () => {
+        const ctx = makeRestoreCtx({
+          checkpointCwd: '/repo',
+          siblings: [{ sessionId: 's2', name: 'Sibling', cwd: '/repo', isBusy: false }],
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1)
+        assert.ok(ctx._sent.find(m => m.type === 'checkpoint_restored'), 'restore proceeds for an idle sibling')
+      })
+
+      it('allows the restore when a busy session is in a DIFFERENT cwd', async () => {
+        const ctx = makeRestoreCtx({
+          checkpointCwd: '/repo',
+          siblings: [{ sessionId: 's2', name: 'Elsewhere', cwd: '/other', isBusy: true }],
+        })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        await checkpointHandlers.restore_checkpoint(makeWs(), client, { checkpointId: 'cp-1' }, ctx)
+
+        assert.equal(ctx.services.checkpointManager.restoreCheckpoint.callCount, 1, 'a busy session in another cwd is irrelevant')
+      })
     })
   })
 
