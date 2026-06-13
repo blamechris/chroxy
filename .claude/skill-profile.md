@@ -11,7 +11,7 @@ This repo has the `repo-memory` MCP (~1,500 files pre-indexed, AST summaries, wa
 - Before `Read` → `get_file_summary` / `batch_file_summaries` (a fraction of a full Read).
 - Before grep → `search_by_purpose`; for impact/dependents → `get_related_files` / `get_dependency_graph`.
 - Full `Read` only for exact implementation/control flow, style matching, or when a summary returns `suggestFullRead: true`.
-- Tasks group (`create_task`/`mark_explored`) is **off** in chroxy's `.repo-memory.json` — do not reference those tools.
+- Tasks group (`create_task`/`mark_explored`/`get_task_context`) is **off by default** and `.repo-memory.json` is gitignored (per-machine), so don't reference those tools unless you've confirmed the local config enables them — check `.repo-memory.json` if in doubt.
 
 Already wired inline (2026-06-12): `recon` (scout template), `bug-hunt` (hunter rules), `project-audit` (exploration strategy), `agent-review` (context-gathering step + reviewer persona block), plus the CLAUDE.md `## Repo Memory MCP` section. When re-installing/updating any of these, preserve the repo-memory block. Candidates not yet wired (covered by CLAUDE.md on the main thread): `check-pr`, `start-working`, `tackle-issues`, `full-review`.
 
