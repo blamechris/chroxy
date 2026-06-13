@@ -350,4 +350,29 @@ describe('onclose clears sessionRole/primaryClientId on all sessions (#5623)', (
 
     ws.restore();
   });
+
+  // User-initiated disconnect() nulls socket.onclose, so the onclose clear
+  // never runs — the role-clear must be mirrored here too (#5623).
+  it('also clears roles on user-initiated disconnect()', async () => {
+    const { ws } = await openConnectedSocket();
+
+    useConnectionStore.setState({
+      activeSessionId: 'a',
+      sessionStates: {
+        a: { messages: [], sessionRole: 'observer', primaryClientId: 'other-device' },
+        b: { messages: [], sessionRole: 'primary', primaryClientId: 'me' },
+      } as never,
+    });
+
+    useConnectionStore.getState().disconnect();
+    await flushPromises();
+
+    const st = useConnectionStore.getState();
+    expect(st.sessionStates.a!.sessionRole).toBeNull();
+    expect(st.sessionStates.a!.primaryClientId).toBeNull();
+    expect(st.sessionStates.b!.sessionRole).toBeNull();
+    expect(st.sessionStates.b!.primaryClientId).toBeNull();
+
+    ws.restore();
+  });
 });
