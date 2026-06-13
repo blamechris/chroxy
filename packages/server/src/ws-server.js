@@ -438,6 +438,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_cost_threshold_crossed', sessionId, costUsd, thresholdUsd } — soft "you've spent $X" warning; fires ONCE per session when cumulativeUsage.costUsd >= threshold (#4075)
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
+ *   { type: 'monthly_budget', month, spentUsd, budgetUsd, percent, warning, exceeded, ... } — machine-wide monthly programmatic-credit meter (#5665); broadcast to ALL clients after each programmatic-credit turn + sent once on connect
  *   { type: 'web_feature_status', features }            — web feature availability
  *   { type: 'permission_rules_updated', rules }         — per-session auto-approval rules changed
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)

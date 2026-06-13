@@ -1047,6 +1047,40 @@
   align-items: baseline;
 }
 
+/* #5665 — monthly programmatic-credit meter. */
+.sidebar-token-view-credit-meter {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.sidebar-token-view-credit-bar {
+  margin-top: 4px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.10);
+  overflow: hidden;
+}
+
+.sidebar-token-view-credit-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-purple, #8b7fd6);
+  transition: width 0.3s ease;
+}
+
+.sidebar-token-view-credit-meter-warning .sidebar-token-view-credit-bar-fill {
+  background: var(--accent-orange, #e0a458);
+}
+
+.sidebar-token-view-credit-meter-exceeded .sidebar-token-view-credit-bar-fill {
+  background: var(--accent-red, #d6685f);
+}
+
+.sidebar-token-view-credit-meter-exceeded .sidebar-token-view-value-secondary {
+  color: var(--accent-red, #d6685f);
+}
+
 .sidebar-token-view-label {
   color: var(--text-muted);
   font-size: 11px;

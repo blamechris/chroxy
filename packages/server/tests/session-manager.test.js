@@ -4032,3 +4032,44 @@ describe('#5315 — respawn_exhausted destroys the session', () => {
     assert.ok(destroyedEvents.some((e) => e.sessionId === 's1'), 'session_destroyed emitted for the dropped session')
   })
 })
+
+// #5665 — monthly programmatic-credit budget meter wiring. The spend/era
+// behaviour is covered by billing-budget.test.js; this asserts the
+// SessionManager constructs the meter from the `billing` config block and
+// exposes the on-connect snapshot.
+describe('#5665 — monthly programmatic-credit budget meter', () => {
+  it('exposes a budget snapshot whose cap comes from the billing config', () => {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      billing: { creditTier: 'max5x' },
+    })
+    const status = mgr.getMonthlyBudgetStatus()
+    assert.equal(status.budgetUsd, 100, 'max5x tier → $100 cap')
+    assert.equal(status.spentUsd, 0, 'no spend recorded yet')
+    assert.equal(status.warningPercent, 80, 'default warning threshold')
+    assert.match(status.month, /^\d{4}-\d{2}$/, 'UTC month key')
+  })
+
+  it('a raw monthlyCreditBudgetUsd override wins over the tier preset', () => {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      billing: { creditTier: 'pro', monthlyCreditBudgetUsd: 250, budgetWarningPercent: 90 },
+    })
+    const status = mgr.getMonthlyBudgetStatus()
+    assert.equal(status.budgetUsd, 250)
+    assert.equal(status.warningPercent, 90)
+  })
+
+  it('reports a null cap when billing is unconfigured (meter shows spend, no percent)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const status = mgr.getMonthlyBudgetStatus()
+    assert.equal(status.budgetUsd, null)
+    assert.equal(status.percent, null)
+    assert.equal(status.warning, false)
+    assert.equal(status.exceeded, false)
+  })
+})

@@ -6,7 +6,8 @@ import { homedir } from 'os'
 import { execFileSync } from 'child_process'
 import { getProvider, getProviderAuthInfo } from './providers.js'
 import { isClaudeProvider } from './models.js'
-import { billingClassForProvider } from './billing-class.js'
+import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
+import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
@@ -212,6 +213,9 @@ export class SessionManager extends EventEmitter {
     // passing null/undefined/NaN/Infinity/negative, falls back to the
     // 5.00 default (see _normalizeCostThreshold).
     costThresholdUsd,
+    // #5665: the `billing` config block (creditTier / monthlyCreditBudgetUsd /
+    // budgetWarningPercent) driving the monthly programmatic-credit meter.
+    billing,
     maxSkillBytes,
     maxTotalSkillBytes,
     providerSkillAllowlist,
@@ -415,6 +419,14 @@ export class SessionManager extends EventEmitter {
     // with a temp stateFilePath.
     this.skillsUsageRecorder = skillsUsageRecorder
       || new SkillsUsageRecorder({ filePath: join(dirname(this._stateFilePath), 'skills-usage.json') })
+    // #5665: monthly programmatic-credit budget meter. Its running-total state
+    // file sits next to the session-state file (same temp-redirect reasoning as
+    // skillsUsageRecorder), so a test's temp stateFilePath keeps it out of the
+    // real ~/.chroxy and the sandbox guard never fires.
+    this._creditBudget = new MonthlyProgrammaticBudgetManager({
+      billingConfig: billing || {},
+      statePath: join(dirname(this._stateFilePath), 'monthly-budget-state.json'),
+    })
     // #5553: per-repo session-preset trust ledger. Same temp-redirect logic as
     // skillsUsageRecorder — the default file sits next to the session-state
     // file so a test's temp stateFilePath keeps the ledger out of the real home.
@@ -2340,6 +2352,16 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    * @param {{ usage?: object, cost?: number }} resultData
    */
+  /**
+   * #5665: current monthly programmatic-credit meter snapshot (machine-wide).
+   * Sent to a client on connect so a freshly-loaded dashboard shows the meter
+   * without waiting for the next billed turn. Shape mirrors the `monthly_budget`
+   * event payload (minus the one-shot justWarned/justExceeded flags).
+   */
+  getMonthlyBudgetStatus() {
+    return this._creditBudget.getStatus(Date.now())
+  }
+
   _trackUsage(sessionId, resultData) {
     const entry = this._sessions.get(sessionId)
     if (!entry) return
@@ -2392,6 +2414,20 @@ export class SessionManager extends EventEmitter {
       event: 'session_usage',
       data: { cumulativeUsage: { ...acc }, billingClass },
     })
+    // #5665: feed this turn's cost into the machine-wide monthly
+    // programmatic-credit meter, but ONLY for programmatic-credit sessions
+    // (claude-cli/sdk on/after the 2026-06-15 era). The era gate is implicit:
+    // billingClass only resolves to PROGRAMMATIC_CREDIT post-boundary. Broadcast
+    // the updated meter to ALL clients (it's per-machine, not per-session).
+    if (billingClass === BILLING_CLASSES.PROGRAMMATIC_CREDIT) {
+      const turnCost = finiteCost(Number(resultData?.cost))
+      const { status, justWarned, justExceeded } = this._creditBudget.recordSpend(turnCost, Date.now())
+      this.emit('session_event', {
+        sessionId,
+        event: 'monthly_budget',
+        data: { ...status, justWarned, justExceeded },
+      })
+    }
     // #4075: soft threshold crossing. Fire ONCE per session: the latch
     // (`costThresholdNotified`) stays true for the session's lifetime so
     // a tool-heavy turn that crosses the threshold doesn't spam the

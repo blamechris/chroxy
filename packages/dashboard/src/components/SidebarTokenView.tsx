@@ -23,6 +23,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { BillingClass, CumulativeUsage, SessionInfo } from '@chroxy/store-core'
 import { formatCostBadge, formatTokens, getProviderLabel } from '@chroxy/store-core'
+import type { MonthlyBudgetState } from '../store/types'
 
 // Subscription/PTY providers that never emit token usage today (decision #1).
 // claude-tui is the only one in this set right now; if upstream adds usage
@@ -418,12 +419,20 @@ export interface SidebarTokenViewProps {
    * the rows as static (no click affordance).
    */
   onSessionClick?: (sessionId: string) => void
+  /**
+   * #5665 — machine-wide monthly programmatic-credit meter snapshot. When
+   * present (and there's a cap or some spend), a "Credit spend (chroxy-observed)"
+   * meter renders. Omitted/null → no meter (pre-era, pre-#5665 server, or no
+   * programmatic-credit activity).
+   */
+  monthlyBudget?: MonthlyBudgetState | null
 }
 
 export function SidebarTokenView({
   sessions,
   activeSessionId = null,
   onSessionClick,
+  monthlyBudget = null,
 }: SidebarTokenViewProps) {
   const agg = useMemo(() => aggregateUsage(sessions), [sessions])
   const totalTokens = agg.totals.inputTokens + agg.totals.outputTokens
@@ -529,6 +538,59 @@ export function SidebarTokenView({
             </div>
           )
         })}
+
+        {/* #5665 — machine-wide monthly programmatic-credit meter. Shows once
+            there's a configured cap or some observed spend this month. */}
+        {monthlyBudget && (monthlyBudget.budgetUsd != null || monthlyBudget.spentUsd > 0) && (() => {
+          const { spentUsd, budgetUsd, percent, warning, exceeded } = monthlyBudget
+          const clampedPercent = percent == null ? null : Math.min(100, Math.max(0, percent))
+          const state = exceeded ? 'exceeded' : warning ? 'warning' : 'ok'
+          return (
+            <div
+              className={`sidebar-token-view-credit-meter sidebar-token-view-credit-meter-${state}`}
+              data-testid="sidebar-token-view-credit-meter"
+              data-meter-state={state}
+            >
+              <div className="sidebar-token-view-aggregate-row">
+                <span className="sidebar-token-view-label">
+                  Credit spend{' '}
+                  <InfoDisclosure
+                    triggerText={'ⓘ'}
+                    ariaLabel="What does the credit spend meter count?"
+                    triggerClassName="sidebar-token-view-info"
+                    testIdBase="sidebar-token-view-credit-meter-info"
+                  >
+                    Chroxy-observed programmatic-credit spend (claude -p / SDK) this UTC month — only sessions THIS daemon ran. Not your full Anthropic credit-pool balance; sessions on other machines or outside chroxy aren't counted.
+                  </InfoDisclosure>
+                </span>
+                <span
+                  className="sidebar-token-view-value-secondary"
+                  data-testid="sidebar-token-view-credit-meter-value"
+                >
+                  {budgetUsd != null
+                    ? `${formatCostBadge(spentUsd)} / ${formatCostBadge(budgetUsd)}${clampedPercent != null ? ` · ${Math.round(clampedPercent)}%` : ''}`
+                    : `${formatCostBadge(spentUsd)} this month`}
+                </span>
+              </div>
+              {budgetUsd != null && clampedPercent != null && (
+                <div
+                  className="sidebar-token-view-credit-bar"
+                  role="progressbar"
+                  aria-valuenow={Math.round(clampedPercent)}
+                  aria-valuemin={0}
+                  aria-valuemax={100}
+                  aria-label="Monthly credit spend"
+                >
+                  <div
+                    className="sidebar-token-view-credit-bar-fill"
+                    data-testid="sidebar-token-view-credit-bar-fill"
+                    style={{ width: `${clampedPercent}%` }}
+                  />
+                </div>
+              )}
+            </div>
+          )
+        })()}
       </div>
 
       <div className="sidebar-token-view-section" data-testid="sidebar-token-view-by-provider">

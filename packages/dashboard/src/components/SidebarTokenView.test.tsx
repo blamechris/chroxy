@@ -200,6 +200,65 @@ describe('SidebarTokenView (#4303 v0)', () => {
     })
   })
 
+  describe('monthly credit meter (#5665)', () => {
+    const budget = (over = {}) => ({
+      month: '2026-06',
+      spentUsd: 23.45,
+      turnsBilled: 12,
+      budgetUsd: 100,
+      warningPercent: 80,
+      percent: 23.45,
+      warning: false,
+      exceeded: false,
+      ...over,
+    })
+
+    it('renders spend / cap / percent and a progress bar when a cap is configured', () => {
+      render(<SidebarTokenView sessions={[]} monthlyBudget={budget()} />)
+      const meter = screen.getByTestId('sidebar-token-view-credit-meter')
+      expect(meter).toHaveAttribute('data-meter-state', 'ok')
+      expect(screen.getByTestId('sidebar-token-view-credit-meter-value')).toHaveTextContent('$23.45 / $100.00 · 23%')
+      const fill = screen.getByTestId('sidebar-token-view-credit-bar-fill')
+      expect(fill).toHaveStyle({ width: '23.45%' })
+    })
+
+    it('marks the meter warning / exceeded via data-meter-state', () => {
+      const { rerender } = render(
+        <SidebarTokenView sessions={[]} monthlyBudget={budget({ percent: 88, warning: true })} />,
+      )
+      expect(screen.getByTestId('sidebar-token-view-credit-meter')).toHaveAttribute('data-meter-state', 'warning')
+      rerender(
+        <SidebarTokenView sessions={[]} monthlyBudget={budget({ spentUsd: 110, percent: 110, warning: true, exceeded: true })} />,
+      )
+      expect(screen.getByTestId('sidebar-token-view-credit-meter')).toHaveAttribute('data-meter-state', 'exceeded')
+      // Bar clamps at 100%.
+      expect(screen.getByTestId('sidebar-token-view-credit-bar-fill')).toHaveStyle({ width: '100%' })
+    })
+
+    it('shows spend without a bar when no cap is configured', () => {
+      render(
+        <SidebarTokenView
+          sessions={[]}
+          monthlyBudget={budget({ budgetUsd: null, percent: null, spentUsd: 8.2 })}
+        />,
+      )
+      expect(screen.getByTestId('sidebar-token-view-credit-meter-value')).toHaveTextContent('$8.20 this month')
+      expect(screen.queryByTestId('sidebar-token-view-credit-bar-fill')).toBeNull()
+    })
+
+    it('hides the meter when there is no budget snapshot', () => {
+      render(<SidebarTokenView sessions={[]} monthlyBudget={null} />)
+      expect(screen.queryByTestId('sidebar-token-view-credit-meter')).toBeNull()
+    })
+
+    it('hides the meter when there is no cap and no spend', () => {
+      render(
+        <SidebarTokenView sessions={[]} monthlyBudget={budget({ budgetUsd: null, percent: null, spentUsd: 0 })} />,
+      )
+      expect(screen.queryByTestId('sidebar-token-view-credit-meter')).toBeNull()
+    })
+  })
+
   describe('per-session breakdown', () => {
     it('lists tracked sessions sorted by tokens desc', () => {
       const sessions = [

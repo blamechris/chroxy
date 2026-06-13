@@ -223,6 +223,69 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('monthly_budget dispatch (#5665)', () => {
+    it('stores the latest monthly credit-meter snapshot', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 23.45,
+          turnsBilled: 12,
+          budgetUsd: 100,
+          warningPercent: 80,
+          percent: 23.45,
+          warning: false,
+          exceeded: false,
+          justWarned: false,
+          justExceeded: false,
+        },
+        ctx() as any,
+      )
+      expect((store.getState() as any).monthlyBudget).toEqual({
+        month: '2026-06',
+        spentUsd: 23.45,
+        turnsBilled: 12,
+        budgetUsd: 100,
+        warningPercent: 80,
+        percent: 23.45,
+        warning: false,
+        exceeded: false,
+      })
+    })
+
+    it('preserves a null cap / percent (no tier configured)', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage(
+        {
+          type: 'monthly_budget',
+          month: '2026-06',
+          spentUsd: 8.2,
+          turnsBilled: 3,
+          budgetUsd: null,
+          warningPercent: 80,
+          percent: null,
+          warning: false,
+          exceeded: false,
+        },
+        ctx() as any,
+      )
+      const mb = (store.getState() as any).monthlyBudget
+      expect(mb.budgetUsd).toBeNull()
+      expect(mb.percent).toBeNull()
+      expect(mb.spentUsd).toBe(8.2)
+    })
+
+    it('ignores a malformed snapshot with no month', () => {
+      store = createMockStore(baseState({ monthlyBudget: null }))
+      setStore(store)
+      handleMessage({ type: 'monthly_budget', spentUsd: 5 }, ctx() as any)
+      expect((store.getState() as any).monthlyBudget).toBeNull()
+    })
+  })
+
   describe('pair_fail dispatch (#5281 ③ PR 2)', () => {
     it('removes the optimistic tokenless entry and alerts', () => {
       store = createMockStore(baseState({

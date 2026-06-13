@@ -12,7 +12,7 @@ import { ServerPicker } from './ServerPicker'
 import { ViewersIndicator } from './ViewersIndicator'
 import { SidebarPanelSlot, type SidebarPanelView, type SidebarPanelLauncher } from './SidebarPanelSlot'
 import { SidebarTokenView, tokenViewCollapsedMetric } from './SidebarTokenView'
-import type { SearchResult, ConnectedClient } from '../store/types'
+import type { SearchResult, ConnectedClient, MonthlyBudgetState } from '../store/types'
 import {
   persistSidebarPanelHeight,
   persistSidebarPanelView,
@@ -93,6 +93,9 @@ export interface SidebarProps {
   // #4303 — full sessions list (used by the bottom slot's token view).
   // Optional so existing tests + callers don't break; defaults to [].
   sessions?: SessionInfo[]
+  // #5665 — machine-wide monthly programmatic-credit meter snapshot, passed
+  // through to the token view. Optional; null/omitted → no meter.
+  monthlyBudget?: MonthlyBudgetState | null
   // #4303 — initial state for the bottom panel slot (loaded from
   // localStorage in App.tsx; defaults applied here).
   initialPanelHeight?: number
@@ -144,6 +147,7 @@ export function Sidebar({
   clearSearchResults,
   onWidthChange,
   sessions = [],
+  monthlyBudget = null,
   initialPanelHeight = 200,
   initialPanelView = null,
   initialPanelCollapsed = false,
@@ -201,6 +205,7 @@ export function Sidebar({
           sessions={sessions}
           activeSessionId={activeSessionId}
           onSessionClick={onSessionClick}
+          monthlyBudget={monthlyBudget}
         />
       ),
       collapsedHeaderMetric: () => tokenViewCollapsedMetric(sessions),
@@ -208,7 +213,7 @@ export function Sidebar({
     // #5176 (epic #5170) — the Control Room v1 sidebar panel was retired here;
     // the per-session activity tree now drills down inside the main-tab
     // ControlRoomSection (mapped repo → active session → activity tree).
-  ]), [sessions, activeSessionId, onSessionClick])
+  ]), [sessions, activeSessionId, onSessionClick, monthlyBudget])
 
   // #5200 — Control Room launcher in the slot header. The host/repo table is
   // wide, so the launcher opens it in the main content area (via

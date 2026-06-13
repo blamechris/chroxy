@@ -136,6 +136,13 @@ function setupSessionForwarding(normalizer, ctx) {
       return
     }
 
+    // #5665: monthly programmatic-credit meter is machine-wide — broadcast to
+    // ALL authenticated clients, not per-session.
+    if (event === 'monthly_budget') {
+      broadcast({ type: 'monthly_budget', ...data })
+      return
+    }
+
     // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
     if (event === 'stream_start') {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })

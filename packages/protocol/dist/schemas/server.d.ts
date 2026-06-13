@@ -2124,6 +2124,19 @@ export declare const ServerBudgetExceededSchema: z.ZodObject<{
     percent: z.ZodNumber;
     message: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerMonthlyBudgetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"monthly_budget">;
+    month: z.ZodString;
+    spentUsd: z.ZodNumber;
+    turnsBilled: z.ZodNumber;
+    budgetUsd: z.ZodNullable<z.ZodNumber>;
+    warningPercent: z.ZodNumber;
+    percent: z.ZodNullable<z.ZodNumber>;
+    warning: z.ZodBoolean;
+    exceeded: z.ZodBoolean;
+    justWarned: z.ZodOptional<z.ZodBoolean>;
+    justExceeded: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
 export declare const ServerWebFeatureStatusSchema: z.ZodObject<{
     type: z.ZodLiteral<"web_feature_status">;
     available: z.ZodBoolean;
@@ -2275,6 +2288,7 @@ export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>;
 export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>;
 export type ServerSessionStoppedMessage = z.infer<typeof ServerSessionStoppedSchema>;
 export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>;
+export type ServerMonthlyBudgetMessage = z.infer<typeof ServerMonthlyBudgetSchema>;
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>;
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>;
 export type ServerAuthBootstrapMessage = z.infer<typeof ServerAuthBootstrapSchema>;

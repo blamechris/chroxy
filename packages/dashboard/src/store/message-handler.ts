@@ -3100,6 +3100,32 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'monthly_budget': {
+      // #5665 — machine-wide monthly programmatic-credit meter snapshot/event.
+      // Sent on connect and after each programmatic-credit-billed turn. Store
+      // the latest snapshot; the one-shot justWarned/justExceeded flags drive
+      // notifications elsewhere and are not persisted in store state.
+      const month = typeof msg.month === 'string' ? msg.month : null;
+      if (month) {
+        const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+        const numOrNull = (v: unknown): number | null =>
+          v === null ? null : typeof v === 'number' && Number.isFinite(v) ? v : null;
+        getStore().setState({
+          monthlyBudget: {
+            month,
+            spentUsd: num(msg.spentUsd),
+            turnsBilled: num(msg.turnsBilled),
+            budgetUsd: numOrNull(msg.budgetUsd),
+            warningPercent: num(msg.warningPercent),
+            percent: numOrNull(msg.percent),
+            warning: msg.warning === true,
+            exceeded: msg.exceeded === true,
+          },
+        });
+      }
+      break;
+    }
+
     case 'session_activity': {
       // #4639: server-emitted busy/idle broadcast (ws-forwarding.js fires it
       // on stream_start and result for every session, to every authenticated
