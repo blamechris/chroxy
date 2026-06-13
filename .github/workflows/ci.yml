@@ -498,9 +498,9 @@ jobs:
       # build. Added 2026-04-11 after a cascade of five failed EAS preview builds
       # traced to bugs that expo-doctor would have flagged instantly.
       #
-      # The "non-CNG project with native config" check is excluded — the project
-      # intentionally commits packages/app/ios/ for LiveActivity custom targets
-      # and is tracked as a P2 migration, not a P0 failure.
+      # Both native dirs (android/, ios/) are now CNG (gitignored), so the
+      # former "non-CNG project with native config" warning no longer fires and
+      # its allowlist entry has been removed (#5642).
       #
       # expo-doctor is pinned to a specific version (not `@1`) so that a minor
       # release can't silently change the human-readable title string this
@@ -517,11 +517,7 @@ jobs:
           failures=$(printf '%s\n' "$output" | grep -E '^✖' || true)
           # Strip known-acceptable warnings before deciding to fail:
           #
-          # 1. "non-CNG project with native config" — the project intentionally
-          #    commits packages/app/ios/ for LiveActivity custom targets and is
-          #    tracked as a P2 migration, not a P0 failure.
-          #
-          # 2. "packages match versions required by installed Expo SDK" — the
+          # 1. "packages match versions required by installed Expo SDK" — the
           #    Expo team periodically releases SDK 54.x patch updates that flag
           #    pinned versions as out-of-date until we bump. Bumping cascades
           #    into transitive-dep duplicates because expo-camera and friends
@@ -531,23 +527,22 @@ jobs:
           #    lands in a dedicated PR when the whole transitive set has caught
           #    up, not a per-PR release blocker.
           #
-          # 3. "issues with Metro config" — the monorepo intentionally uses a
+          # 2. "issues with Metro config" — the monorepo intentionally uses a
           #    custom metro.config.js that does NOT extend "expo/metro-config"
           #    because the chroxy mock-server resolver + workspace symlink
           #    handling require a hand-built config. Tracked as a P2 migration.
           #
-          # 4. "no duplicate dependencies are installed" — npm workspaces hoist
+          # 3. "no duplicate dependencies are installed" — npm workspaces hoist
           #    some expo-* packages to the root while expo's own nested deps
           #    keep their own copies (expo-font, expo-asset, expo-modules-core,
           #    @expo/fingerprint). Harmless at runtime; same upkeep-task class
           #    as (2) above.
           #
-          # 5. "Validate packages against React Native Directory" — the RN
+          # 4. "Validate packages against React Native Directory" — the RN
           #    directory metadata occasionally flags packages as unmaintained
           #    upstream (e.g. expo-live-activity). We accept the warning until
           #    a replacement lands; not a per-PR release blocker.
           filtered_failures=$(printf '%s\n' "$failures" \
-            | grep -v "Check for app config fields that may not be synced in a non-CNG project" \
             | grep -v "Check that packages match versions required by installed Expo SDK" \
             | grep -v "Check for issues with Metro config" \
             | grep -v "Check that no duplicate dependencies are installed" \
