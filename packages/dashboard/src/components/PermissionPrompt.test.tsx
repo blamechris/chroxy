@@ -77,6 +77,35 @@ describe('PermissionPrompt', () => {
     expect(screen.getByText(/Write to \/tmp\/file.txt/)).toBeInTheDocument()
   })
 
+  it('renders the session-origin badge when sessionLabel is provided (#5667)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="Run command"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        sessionLabel="ltl · claude-cli"
+      />
+    )
+    const badge = screen.getByTestId('perm-session')
+    expect(badge).toHaveTextContent('ltl · claude-cli')
+    expect(badge).toHaveAttribute('title', 'Requested by ltl · claude-cli')
+  })
+
+  it('omits the session badge when no sessionLabel is provided', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="Run command"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('perm-session')).not.toBeInTheDocument()
+  })
+
   it('shows countdown timer', () => {
     render(
       <PermissionPrompt

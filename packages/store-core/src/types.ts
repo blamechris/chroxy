@@ -73,6 +73,19 @@ export interface ChatMessage {
    */
   questions?: ChatMessageQuestion[];
   requestId?: string;
+  /**
+   * #5667: the chroxy session that originated this message, captured at
+   * creation time. Set on permission `prompt` messages so the renderer can
+   * label *which* session is asking — without this, a prompt routed to a
+   * background session is indistinguishable from the active session's own
+   * prompts once the operator switches tabs. Distinct from the message's
+   * physical location (`sessionStates[id].messages`): this is self-describing
+   * data that survives independent of which array the message lives in, and
+   * mirrors the on-the-fly lookup `PermissionHistoryScreen` already does.
+   * Undefined for messages with no owning session (top-level fallback) and for
+   * pre-#5667 messages.
+   */
+  originSessionId?: string;
   toolInput?: Record<string, unknown>;
   toolUseId?: string;
   toolResult?: string;

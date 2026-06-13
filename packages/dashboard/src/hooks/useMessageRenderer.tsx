@@ -1,6 +1,6 @@
 import { useCallback } from 'react'
 import type { ReactNode } from 'react'
-import type { ChatMessage } from '@chroxy/store-core'
+import type { ChatMessage, SessionInfo } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
 import { ToolGroup } from '../components/ToolGroup'
@@ -28,6 +28,29 @@ export interface UseMessageRendererArgs {
   setViewMode: ConnectionState['setViewMode']
   stalledPromptIds: Set<string>
   hasPendingAskUserQuestionPermission: boolean
+  /**
+   * #5667 — all connected sessions, used to label a permission prompt with the
+   * session that asked (from the message's `originSessionId`). Only consulted
+   * when more than one session exists.
+   */
+  sessions: SessionInfo[]
+}
+
+/**
+ * #5667 — build a short "which session is asking" label, e.g. "ltl · CLI",
+ * from a prompt's `originSessionId`. Returns undefined when there's no origin,
+ * the session is unknown, or only one session exists (nothing to disambiguate).
+ */
+function buildSessionLabel(
+  originSessionId: string | undefined,
+  sessions: SessionInfo[],
+): string | undefined {
+  if (!originSessionId || sessions.length <= 1) return undefined
+  const session = sessions.find(s => s.sessionId === originSessionId)
+  if (!session) return undefined
+  const name = session.name?.trim() || originSessionId
+  const provider = session.provider?.trim()
+  return provider ? `${name} · ${provider}` : name
 }
 
 /**
@@ -55,6 +78,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     setViewMode,
     stalledPromptIds,
     hasPendingAskUserQuestionPermission,
+    sessions,
   } = args
 
   return useCallback((msg: ChatViewMessage) => {
@@ -97,6 +121,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           description={storeMsg.content}
           remainingMs={remainingMs}
           onRespond={(reqId, decision) => sendPermissionResponse(reqId, decision)}
+          sessionLabel={buildSessionLabel(storeMsg.originSessionId, sessions)}
         />
       )
     }
@@ -271,5 +296,5 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
 }

@@ -45,6 +45,10 @@ export interface SessionTabData {
   // is visible even when another session is active and the bigger
   // banner isn't shown.
   stdinForwardingDisabled?: boolean
+  // #5667: this session has an unanswered permission prompt. Renders an
+  // attention indicator on the tab so a background session's request is
+  // visible without switching to it.
+  pendingPermission?: boolean
 }
 
 /**
@@ -525,6 +529,18 @@ export function SessionBar({ sessions, onSwitch, onClose, onRename, onNewSession
                 />
               )
             })()}
+
+            {/* #5667 — unanswered permission prompt waiting in this session. */}
+            {session.pendingPermission && (
+              <span
+                className="tab-pending-permission"
+                data-testid="tab-pending-permission"
+                title="Permission requested — waiting for your approval"
+                aria-label="Permission requested — waiting for your approval"
+              >
+                !
+              </span>
+            )}
 
             {renamingId === session.sessionId ? (
               <input

@@ -232,6 +232,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         description,
         input: sanitizedInput,
         remainingMs: 300_000,
+        // #5667: carry the owning session so clients route the prompt to the
+        // session that actually asked, instead of falling back to whatever tab
+        // is focused. Matches the resend-on-reconnect (line ~485) and SDK
+        // (line ~406) paths, which already include sessionId. The `sessionId`
+        // property is omitted entirely (absent, not null) when the request maps
+        // to no chroxy session — clients then fall back to the active session.
+        ...(ownerSessionId ? { sessionId: ownerSessionId } : {}),
       })
 
       if (pushManager) {

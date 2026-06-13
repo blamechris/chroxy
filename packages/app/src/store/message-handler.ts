@@ -2804,6 +2804,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           options: newOptions,
           expiresAt: newExpiresAt,
           timestamp: Date.now(),
+          // #5667 — record the OWNING session (the wire sessionId) so the
+          // prompt can be labelled. Not `permTargetId`: that falls back to the
+          // active session for unmapped/legacy requests and would mislabel them.
+          // Undefined when the request maps to no session.
+          originSessionId: permPayload.sessionId ?? undefined,
         };
         {
           const effectiveId = (permTargetId && get().sessionStates[permTargetId]) ? permTargetId : get().activeSessionId;

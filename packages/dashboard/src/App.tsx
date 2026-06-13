@@ -27,6 +27,7 @@ import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
+import { derivePendingPermissionSessions } from './utils/pendingPermissions'
 import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
@@ -999,6 +1000,18 @@ export function App() {
   // the server's natural order at the end. Stale ids in `tabOrder` (server
   // removed the session) are harmlessly ignored because we filter against
   // the live `sessions` list.
+  // #5667 — which sessions have an unanswered, still-live permission prompt,
+  // across ALL sessions (not just the active one). Now that the server routes a
+  // prompt to its owning session, a background session's prompt no longer lands
+  // in the focused tab — without a per-tab indicator it would be invisible until
+  // the operator switched to that session. Shallow-equal Record so this only
+  // re-renders a tab when its pending state actually flips, not on every stream
+  // delta. The `expiresAt > now` check (inside the helper) clears the indicator
+  // on expiry/timeout, which set `options: undefined` but not `answered`.
+  const pendingPermissionSessionIds = useConnectionStore(
+    useShallow((s) => derivePendingPermissionSessions(s.sessionStates, Date.now())),
+  )
+
   const sessionTabs: SessionTabData[] = useMemo(
     () => {
       const byId = new Map(sessions.map(s => [s.sessionId, s]))
@@ -1025,9 +1038,12 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
+        // #5667: flag tabs with an unanswered permission prompt so a
+        // background session's request is visible without switching to it.
+        pendingPermission: pendingPermissionSessionIds[s.sessionId] ?? false,
       }))
     },
-    [sessions, activeSessionId, getSessionVisualStatus, tabOrder],
+    [sessions, activeSessionId, getSessionVisualStatus, tabOrder, pendingPermissionSessionIds],
   )
 
   // Derive sidebar repo tree from sessions
@@ -1492,6 +1508,7 @@ export function App() {
     setViewMode,
     stalledPromptIds,
     hasPendingAskUserQuestionPermission,
+    sessions,
   })
 
   // #4412: registry-driven cheat sheet. Recomputed on every render —

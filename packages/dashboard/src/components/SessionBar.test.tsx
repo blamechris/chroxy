@@ -60,6 +60,24 @@ describe('SessionBar', () => {
     expect(within(busyTab).getByTestId('status-dot')).toHaveClass('status-working')
   })
 
+  it('shows a pending-permission indicator on tabs with an unanswered prompt (#5667)', () => {
+    render(
+      <SessionBar
+        sessions={makeSessions([{}, { pendingPermission: true }])}
+        onSwitch={vi.fn()}
+        onClose={vi.fn()}
+        onRename={vi.fn()}
+        onNewSession={vi.fn()}
+      />
+    )
+    // s2 (background) has the prompt → indicator present.
+    const pendingTab = screen.getByTestId('session-tab-s2')
+    expect(within(pendingTab).getByTestId('tab-pending-permission')).toBeInTheDocument()
+    // s1 has no pending prompt → no indicator.
+    const cleanTab = screen.getByTestId('session-tab-s1')
+    expect(within(cleanTab).queryByTestId('tab-pending-permission')).not.toBeInTheDocument()
+  })
+
   it('calls onSwitch when clicking inactive tab', () => {
     const onSwitch = vi.fn()
     render(

@@ -1783,6 +1783,24 @@ button.sidebar-token-view-session-row:hover {
   letter-spacing: 0.4px;
 }
 
+/* #5667 — per-tab "permission waiting" indicator. */
+.tab-pending-permission {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  background: var(--bg-permission, color-mix(in srgb, var(--accent-purple) 22%, transparent));
+  color: var(--accent-purple);
+  border: 1px solid var(--border-permission, color-mix(in srgb, var(--accent-purple) 45%, transparent));
+  cursor: help;
+}
+
 .tab-close {
   background: none;
   border: none;
@@ -2775,6 +2793,23 @@ button.sidebar-token-view-session-row:hover {
   padding: 12px 14px;
   align-self: flex-start;
   max-width: 85%;
+}
+
+/* #5667 — session-origin badge so multi-agent operators see which session asks. */
+.perm-session {
+  display: inline-block;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  color: var(--accent-purple);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-permission);
+  border-radius: 6px;
+  padding: 1px 7px;
+  margin-bottom: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .perm-desc {
