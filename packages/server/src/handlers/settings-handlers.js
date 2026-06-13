@@ -119,6 +119,33 @@ function handleSetModel(ws, client, msg, ctx) {
   const modelSessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
 
+  // #5731 (T1): reject set_model on a provider that can't switch models, mirroring
+  // the permissionModeSwitch guard in handleSetPermissionMode below. Without this,
+  // a provider whose setModel is a no-op (e.g. claude-tui, modelSwitch:false) still
+  // updates BaseSession.model and broadcasts `model_changed` while the running
+  // session keeps its original model — so every client (incl. the ungated mobile
+  // picker) shows a switch that never happened.
+  if (entry && entry.provider) {
+    let ModelProviderClass
+    try {
+      ModelProviderClass = getProvider(entry.provider)
+    } catch {
+      // Unknown provider — allow through (fail open for forward-compat).
+    }
+    if (ModelProviderClass && ModelProviderClass.capabilities?.modelSwitch === false) {
+      ;sessionLogger(modelSessionId).warn(`Rejected set_model on ${entry.provider} session ${modelSessionId} from ${client.id}: provider does not support modelSwitch`)
+      sendError(
+        ws,
+        msg?.requestId,
+        'CAPABILITY_NOT_SUPPORTED',
+        `The active provider '${entry.provider}' does not support model switching.`,
+        undefined,
+        ctx,
+      )
+      return
+    }
+  }
+
   // Per-provider allowlist: the global ALLOWED_MODEL_IDS is Claude-only, so
   // accepting any Claude model ID on a Gemini/Codex session and forwarding
   // it to setModel() would respawn the CLI with an unknown `-m` arg and
