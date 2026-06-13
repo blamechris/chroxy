@@ -55,9 +55,10 @@ export const CONNECT_MAX_RETRIES = 5
  * #5698 — how many post-connect reconnect rungs to climb before the ladder gives
  * up and the client shows a terminal "server appears down" state (instead of
  * spinning forever). The ladder caps its delay at the last RETRY_DELAYS rung
- * (8s), so ~10 rungs ≈ 1+2+3+5+8·6 ≈ 65s of trying before going terminal — long
- * enough to ride out a normal restart, short enough not to spin indefinitely. A
- * user-initiated reconnect resets the counter, so this cap is not permanent.
+ * (8s), so 10 rungs (0–9) ≈ 1+2+3+5+8·6 ≈ 59s of trying before going terminal —
+ * long enough to ride out a normal restart, short enough not to spin
+ * indefinitely. A user-initiated reconnect resets the counter, so the cap is not
+ * permanent.
  */
 export const RECONNECT_MAX_RUNG = 10
 

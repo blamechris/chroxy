@@ -3401,7 +3401,15 @@ if (typeof document !== 'undefined') {
     sendClientVisible(socket, visible);
 
     if (visible) {
-      if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
+      if (connectionPhase === 'server_down') {
+        // #5698 — the reconnect ladder gave up while the tab was hidden (e.g. the
+        // laptop slept through the whole backoff budget). The server is very
+        // likely fine now, so a wake is the natural moment to try again. Reuse
+        // the manual-retry path (resets the ladder + reconnects) so the user
+        // doesn't have to hunt for the Reconnect button after every sleep.
+        console.log('[ws] Tab became visible while server_down — retrying');
+        state.retryConnection();
+      } else if (connectionPhase === 'connected' && socket && socket.readyState !== WebSocket.OPEN && wsUrl && apiToken) {
         console.log('[ws] Tab became visible, socket stale — reconnecting');
         state.connect(wsUrl, apiToken);
       } else if (connectionPhase === 'connected' && activeSessionId && sessionStates[activeSessionId]) {

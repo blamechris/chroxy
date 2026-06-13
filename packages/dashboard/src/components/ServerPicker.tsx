@@ -19,6 +19,7 @@ function statusDot(phase: ConnectionPhase, isActive: boolean): string {
     case 'connecting':
     case 'reconnecting': return 'server-dot connecting'
     case 'server_restarting': return 'server-dot restarting'
+    case 'server_down': return 'server-dot down' // #5698 — terminal
     default: return 'server-dot disconnected'
   }
 }
@@ -30,6 +31,7 @@ function statusLabel(phase: ConnectionPhase, isActive: boolean): string {
     case 'connecting': return 'Connecting...'
     case 'reconnecting': return 'Reconnecting...'
     case 'server_restarting': return 'Restarting...'
+    case 'server_down': return 'Server down' // #5698 — terminal
     default: return 'Disconnected'
   }
 }

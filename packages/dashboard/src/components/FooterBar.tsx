@@ -79,6 +79,7 @@ const STATUS_LABELS: Record<string, string> = {
   connecting: 'Connecting',
   reconnecting: 'Reconnecting',
   server_restarting: 'Restarting',
+  server_down: 'Server down', // #5698 — terminal; avoid leaking the raw enum string
   disconnected: 'Disconnected',
 }
 
