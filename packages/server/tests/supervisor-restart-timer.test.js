@@ -171,4 +171,37 @@ describe('Supervisor restart timer (#1954)', () => {
       'no new child should have been started — shutdown cancelled the restart timer'
     )
   })
+
+  it('startChild during a crash-backoff window cancels the pending timer (no double-fork) (#5731)', async () => {
+    // Scenario: child crashes → backoff restart timer is scheduled → a deploy
+    // restartChild() lands during the backoff. restartChild's `!this._child`
+    // branch calls startChild() immediately; without the guard the still-pending
+    // backoff timer fires LATER and forks a SECOND child, orphaning the first.
+    const { supervisor, tmpDir } = setup()
+    cleanups.push(() => rmSync(tmpDir, { recursive: true, force: true }))
+
+    supervisor.startChild()
+    supervisor.lastChild.simulateReady()
+    supervisor.lastChild.simulateExit(1, null) // crash → schedules _restartTimer (2s)
+
+    assert.ok(supervisor._restartTimer !== null, 'precondition: a backoff timer is pending')
+    assert.equal(supervisor.childCount, 1, 'precondition: one fork so far')
+
+    // Deploy restart during the backoff window → immediate startChild (child #2).
+    supervisor.restartChild()
+
+    assert.equal(supervisor.childCount, 2, 'restartChild forked exactly one new child')
+    assert.equal(
+      supervisor._restartTimer,
+      null,
+      'the pending backoff timer was cleared, so it cannot fire a third (orphaning) fork',
+    )
+
+    // Wait past the 2s first-restart backoff to prove no delayed fork lands.
+    supervisor.lastChild.simulateReady()
+    await new Promise((r) => setTimeout(r, 2100))
+    assert.equal(supervisor.childCount, 2, 'no double-fork after the backoff window elapses')
+
+    await supervisor.shutdown('SIGTERM')
+  })
 })

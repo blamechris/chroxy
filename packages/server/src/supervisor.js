@@ -365,6 +365,20 @@ export class Supervisor extends EventEmitter {
   startChild() {
     if (this._shuttingDown) return
 
+    // Defensive: cancel any pending crash-backoff restart so two startChild()
+    // calls can't fork two children. A child crash schedules
+    // `_restartTimer = setTimeout(startChild, backoff)`; if a restartChild()
+    // lands during that backoff window its `!this._child` branch calls
+    // startChild() immediately — without this, the still-pending backoff timer
+    // would later fire a SECOND startChild() and orphan the first child. The
+    // SIGUSR2 `_childReady` guard makes the race rare, but a direct/extra caller
+    // would otherwise double-fork. Clearing an already-fired timer is a no-op,
+    // so the normal timer-driven restart path is unaffected.
+    if (this._restartTimer) {
+      clearTimeout(this._restartTimer)
+      this._restartTimer = null
+    }
+
     const childScript = resolve(__dirname, 'server-cli-child.js')
     const childEnv = {
       ...process.env,
