@@ -2915,10 +2915,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  destroySession: (sessionId: string) => {
+  destroySession: (sessionId: string, force?: boolean) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'destroy_session', sessionId });
+      // #5710 — `force` bypasses the server's #5695 "is running" guard so a
+      // wedged session can be deleted. Only sent when the user explicitly
+      // confirms the destructive force-delete (see App.handleCloseSession).
+      wsSend(socket, force ? { type: 'destroy_session', sessionId, force: true } : { type: 'destroy_session', sessionId });
     }
   },
 
