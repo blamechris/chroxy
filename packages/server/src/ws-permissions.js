@@ -560,11 +560,20 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     for (const requestId of toDeny) {
       const pending = pendingPermissions.get(requestId)
       if (!pending) continue
+      // Count before resolving: resolve() runs cleanup() (clears the timer +
+      // deletes both maps + releases the inactivity pause) FIRST and only then
+      // writes the HTTP deny response. So even if that response write throws on
+      // an already torn-down socket, the entry IS drained — the leak is gone.
+      // Treat such a throw as a debug-level note (the drain succeeded; only the
+      // best-effort response write failed) rather than a misleading warning on
+      // a mass session-destroy. A pending entry is never already-closed here:
+      // cleanup() deletes it from pendingPermissions, so a closed one wouldn't
+      // be in the map for us to fetch.
+      drained++
       try {
         pending.resolve('deny')
-        drained++
       } catch (err) {
-        log.warn(`Failed to drain pending permission ${requestId} for destroyed session ${sessionId}: ${err?.message || err}`)
+        log.debug(`Pending permission ${requestId} drained for destroyed session ${sessionId}, but the deny response write failed (socket likely gone): ${err?.message || err}`)
       }
     }
     if (drained > 0) {

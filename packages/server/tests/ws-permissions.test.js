@@ -162,20 +162,23 @@ describe('createPermissionHandler', () => {
       assert.equal(drainSessionPermissions('sess-A'), 0)
     })
 
-    it('counts only the entries it actually resolved when resolve throws', () => {
+    it('does not throw and still counts an entry whose resolve write fails', () => {
       const opts = makeHandlerOpts()
       const { drainSessionPermissions } = createPermissionHandler(opts)
       const ok = mock.fn()
+      // In production resolve() runs cleanup() BEFORE the response write, so a
+      // write-throw on a torn-down socket still means the entry was drained —
+      // the drain must swallow the error and count it.
       const boom = mock.fn(() => { throw new Error('socket torn down') })
       opts.pendingPermissions.set('ok', { resolve: ok, timer: null })
       opts.pendingPermissions.set('boom', { resolve: boom, timer: null })
       opts.permissionSessionMap.set('ok', 'sess-A')
       opts.permissionSessionMap.set('boom', 'sess-A')
 
-      // Must not throw; counts only the successful resolve.
       const drained = drainSessionPermissions('sess-A')
-      assert.equal(drained, 1)
+      assert.equal(drained, 2, 'both entries counted as drained (cleanup runs before the write)')
       assert.equal(ok.mock.calls.length, 1)
+      assert.equal(boom.mock.calls.length, 1, 'the throwing resolve was still attempted')
     })
   })
 
