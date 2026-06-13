@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
@@ -58,6 +58,30 @@ describe('CheckpointManager', () => {
     assert.equal(cp.messageCount, 5)
     assert.ok(cp.createdAt > 0)
     assert.ok(cp.gitRef) // should have a git tag
+  })
+
+  it('#5731 (T3): emits checkpoint_persist_failed when the disk write fails, but still returns the checkpoint', async () => {
+    // Read-only checkpoints dir → writeFileRestricted can't create the file.
+    const roDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-ro-'))
+    chmodSync(roDir, 0o555)
+    const roManager = new CheckpointManager({ checkpointsDir: roDir })
+    let failed = null
+    roManager.on('checkpoint_persist_failed', (e) => { failed = e })
+    try {
+      const cp = await roManager.createCheckpoint({
+        sessionId: 'sess-ro', resumeSessionId: 'sdk-x', cwd: gitDir, name: 'x', messageCount: 1,
+      })
+      // The checkpoint exists in memory and is returned (the user sees it)...
+      assert.ok(cp.id)
+      assert.equal(roManager.listCheckpoints('sess-ro').length, 1)
+      // ...but the failed disk write is surfaced so the user knows it isn't durable.
+      assert.ok(failed, 'should emit checkpoint_persist_failed')
+      assert.equal(failed.sessionId, 'sess-ro')
+      assert.equal(failed.operation, 'create')
+    } finally {
+      chmodSync(roDir, 0o755)
+      try { rmSync(roDir, { recursive: true, force: true }) } catch {}
+    }
   })
 
   it('lists checkpoints for a session', async () => {

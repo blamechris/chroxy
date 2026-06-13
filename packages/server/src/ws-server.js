@@ -1683,6 +1683,7 @@ export class WsServer {
       sessionManager: this.sessionManager,
       cliSession: this.cliSession,
       devPreview: this._devPreview,
+      checkpointManager: this._checkpointManager,
       pushManager: this.pushManager,
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,

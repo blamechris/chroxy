@@ -107,7 +107,7 @@ export function setupForwarding(ctx) {
 
 /** Multi-session forwarding via normalizer */
 function setupSessionForwarding(normalizer, ctx) {
-  const { sessionManager, devPreview, broadcast, broadcastToSession } = ctx
+  const { sessionManager, devPreview, checkpointManager, broadcast, broadcastToSession } = ctx
 
   sessionManager.on('session_event', ({ sessionId, event, data }) => {
     // #5313 (WP-1.3): this listener runs synchronously inside the
@@ -211,6 +211,24 @@ function setupSessionForwarding(normalizer, ctx) {
   sessionManager.on('session_persist_failed', safeForward('session_persist_failed', (payload) => {
     broadcast({ type: 'session_persist_failed', ...payload })
   }))
+
+  // #5731 (T3): a checkpoint create/delete that couldn't be flushed to disk will
+  // be lost (or reappear) on restart. Surface it as a per-session error banner —
+  // reuse the existing `session_error` message (both clients route it to their
+  // error toast) rather than minting a new wire type. checkpointManager is
+  // optional on ctx for legacy single-session callers that don't wire it.
+  if (checkpointManager && typeof checkpointManager.on === 'function') {
+    checkpointManager.on('checkpoint_persist_failed', safeForward('checkpoint_persist_failed', ({ sessionId, operation }) => {
+      if (!sessionId) return
+      broadcastToSession(sessionId, {
+        type: 'session_error',
+        code: 'CHECKPOINT_PERSIST_FAILED',
+        sessionId,
+        recoverable: true,
+        message: `Couldn't save your checkpoint ${operation === 'delete' ? 'deletion' : ''}— it may be lost on restart. Check the daemon's disk space and write permissions.`,
+      })
+    }))
+  }
 
   // Dev server preview: broadcast tunnel start/stop to clients
   devPreview.on('dev_preview_started', safeForward('dev_preview_started', ({ sessionId, port, url }) => {

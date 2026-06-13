@@ -144,7 +144,12 @@ export class CheckpointManager extends EventEmitter {
     checkpoints.push(checkpoint)
     this._counters.set(sessionId, (this._counters.get(sessionId) || 0) + 1)
     this._checkpoints.set(sessionId, checkpoints)
-    this._persist(sessionId)
+    // #5731 (T3): the checkpoint exists in memory and is returned to the client,
+    // but if the disk write failed it'll be gone on restart — surface that so the
+    // user isn't told their rewind point is saved when it isn't.
+    if (!this._persist(sessionId)) {
+      this.emit('checkpoint_persist_failed', { sessionId, checkpointId: checkpoint.id, operation: 'create' })
+    }
 
     // #5335: opportunistically retry any refs whose delete previously failed
     // for this cwd, so transient `git tag -d` failures don't accrue. Race-free
@@ -233,7 +238,11 @@ export class CheckpointManager extends EventEmitter {
 
     checkpoints.splice(idx, 1)
     this._checkpoints.set(sessionId, checkpoints)
-    this._persist(sessionId)
+    // #5731 (T3): a failed write here means the deleted checkpoint reappears on
+    // restart — surface it rather than silently "deleting" something that comes back.
+    if (!this._persist(sessionId)) {
+      this.emit('checkpoint_persist_failed', { sessionId, checkpointId, operation: 'delete' })
+    }
   }
 
   /**
@@ -488,13 +497,19 @@ export class CheckpointManager extends EventEmitter {
     }
   }
 
+  // #5731 (T3): returns true on success, false if the write failed (disk full,
+  // locked file, read-only home). Callers emit `checkpoint_persist_failed` on
+  // false so the user is told their checkpoint wasn't durable instead of believing
+  // it was — the same silent-loss class fixed for session state in #5714.
   _persist(sessionId) {
     const file = join(this._checkpointsDir, `${sessionId}.json`)
     const data = { version: 1, checkpoints: this._getCheckpoints(sessionId) }
     try {
       writeFileRestricted(file, JSON.stringify(data, null, 2))
+      return true
     } catch (err) {
-      log.warn(`Failed to persist checkpoint: ${err.message}`)
+      log.warn(`Failed to persist checkpoint for ${sessionId}: ${err.message}`)
+      return false
     }
   }
 }

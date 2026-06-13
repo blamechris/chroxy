@@ -31,12 +31,14 @@ function makeCtx(overrides = {}) {
   const devPreview = new EventEmitter()
   devPreview.handleToolResult = mock.fn()
   devPreview.closeSession = mock.fn()
+  const checkpointManager = new EventEmitter()
 
   return {
     normalizer,
     sessionManager: sm,
     cliSession: null,
     devPreview,
+    checkpointManager,
     pushManager: null,
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
@@ -363,6 +365,30 @@ describe('setupForwarding', () => {
       )
       assert.ok(call)
       assert.equal(call.arguments[0].name, null)
+    })
+  })
+
+  describe('checkpoint_persist_failed event (#5731 T3)', () => {
+    it('surfaces a checkpoint persist failure as a per-session session_error', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.checkpointManager.emit('checkpoint_persist_failed', { sessionId: 'sess-1', checkpointId: 'cp-1', operation: 'create' })
+
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'session_error' && c.arguments[1]?.code === 'CHECKPOINT_PERSIST_FAILED'
+      )
+      assert.ok(call, 'should broadcast a CHECKPOINT_PERSIST_FAILED session_error to the session')
+      const [sessionId, msg] = call.arguments
+      assert.equal(sessionId, 'sess-1')
+      assert.equal(msg.sessionId, 'sess-1')
+      assert.equal(msg.recoverable, true)
+      assert.match(msg.message, /lost on restart/)
+    })
+
+    it('does not throw when checkpointManager is absent (legacy single-session ctx)', () => {
+      const ctx = makeCtx({ checkpointManager: null })
+      assert.doesNotThrow(() => setupForwarding(ctx))
     })
   })
 
