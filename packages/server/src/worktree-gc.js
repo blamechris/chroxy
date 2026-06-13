@@ -32,16 +32,21 @@ import { GIT } from './git.js'
 // #5706: absolute-age fallback for the PID-liveness check. A dead agent's pid
 // can be RECYCLED by an unrelated process after uptime/PID reuse — then
 // `isPidAlive` reports "live", GC skips the orphaned worktree forever, and the
-// disk slowly fills. A genuinely-active worktree is touched continuously (a live
-// agent edits files), so when a lock's pid LOOKS alive but the worktree mtime is
-// older than this, the pid is almost certainly recycled and the worktree is
-// reclaimable (still subject to the clean-tree guard — no uncommitted/ignored
-// content is ever deleted). 30 days is far beyond any real agent-session
-// lifetime. Set `config.worktreeGc.maxLockAgeMs` to 0 to disable the fallback
-// (revert to pure PID-liveness). Caveat: directory mtime tracks entry add/remove
-// more reliably than in-place content edits, which is why the threshold is
-// generous and the clean-tree guard remains the hard safety net.
-const DEFAULT_MAX_LOCK_AGE_MS = 30 * 24 * 60 * 60 * 1000
+// disk slowly fills. The fallback reclaims a lock whose pid LOOKS alive but
+// whose worktree mtime is older than `maxLockAgeMs` (treating the pid as
+// recycled) — still subject to the clean-tree guard, so no uncommitted/ignored
+// content is ever deleted.
+//
+// DEFAULT IS 0 (DISABLED): opt-in via `config.worktreeGc.maxLockAgeMs`. It's
+// off by default because the age signal is imperfect — directory mtime bumps
+// only on TOP-LEVEL entry add/remove (and top-level git ops), NOT on in-place or
+// nested-subdir edits. So a genuinely-live, clean, long-running agent that only
+// touches existing/nested files could read "stale" and have its working dir
+// reclaimed out from under it (no committed-work loss thanks to the clean-tree
+// guard, but a disruptive mid-run rug-pull). Operators who hit the recycled-pid
+// disk leak set a generous threshold (e.g. 14–30 days, well beyond any real
+// agent-session lifetime); the clean-tree guard remains the hard safety net.
+const DEFAULT_MAX_LOCK_AGE_MS = 0
 
 /**
  * Existence check for a pid without sending a real signal.

@@ -515,4 +515,19 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
     assert.equal(report.reclaimableCount, 1) // clean-dead
     assert.equal(report.skippedCount, 0) // only a clean-dead worktree in this fixture
   })
+
+  it('#5706: threads config.worktreeGc.maxLockAgeMs into the plan deps (manual gc honors it)', async () => {
+    const { collectWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
+    const configPath = join(root, 'config.json')
+    writeFileSync(configPath, JSON.stringify({ controlRoomRoot: root, worktreeGc: { maxLockAgeMs: 5000 } }))
+
+    let captured = null
+    const planSpy = (_p, deps) => { captured = deps; return { items: [] } }
+    collectWorktreeGc({}, { configPath, withSizes: false, plan: planSpy, planDeps: {} })
+    assert.equal(captured.maxLockAgeMs, 5000)
+
+    // Test seam (deps.planDeps) overrides config.
+    collectWorktreeGc({}, { configPath, withSizes: false, plan: planSpy, planDeps: { maxLockAgeMs: 12345 } })
+    assert.equal(captured.maxLockAgeMs, 12345)
+  })
 })
