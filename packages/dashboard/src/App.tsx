@@ -405,10 +405,10 @@ export function App() {
   const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
-  // #5780 — nonce bumped on the explicit "jump to latest" user action. Today
-  // that is send (handleSend); wiring approve/answer is tracked in #5786.
-  // Passed to every ChatView so it snaps to the bottom even
-  // when the user had scrolled up to read history — see ChatView's
+  // #5780 — nonce bumped on the explicit "jump to latest" user action. Those
+  // actions are: send (handleSend), approving a permission/plan, and answering
+  // an AskUserQuestion (#5786). Passed to every ChatView so it snaps to the
+  // bottom even when the user had scrolled up to read history — see ChatView's
   // scrollToBottomSignal effect.
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
@@ -1449,6 +1449,9 @@ export function App() {
 
   const handlePlanApprove = useCallback(() => {
     sendInput('approve')
+    // #5786 — approving a plan is an explicit "show me the latest" action: snap
+    // to the bottom so the follow-up response scrolls into view.
+    setScrollToBottomSignal(n => n + 1)
   }, [sendInput])
 
   const handlePlanFeedback = useCallback(() => {
@@ -1514,17 +1517,35 @@ export function App() {
     setPermissionMode,
   })
 
+  // #5786 — approving a permission/plan or answering an AskUserQuestion is, like
+  // sending, an explicit "show me the latest" action: snap the chat to the
+  // bottom so the follow-up response scrolls into view even if the user had
+  // scrolled up to read history. These wrappers bump the same nonce handleSend
+  // does, then forward to the underlying store actions unchanged (same args,
+  // same return). They're passed to useMessageRenderer (and the banner handlers
+  // below) in place of the raw store actions so every approve/answer call site
+  // gets the snap for free.
+  const respondToPermission = useCallback<typeof sendPermissionResponse>((...args) => {
+    setScrollToBottomSignal(n => n + 1)
+    return sendPermissionResponse(...args)
+  }, [sendPermissionResponse])
+
+  const respondToUserQuestion = useCallback<typeof sendUserQuestionResponse>((...args) => {
+    setScrollToBottomSignal(n => n + 1)
+    return sendUserQuestionResponse(...args)
+  }, [sendUserQuestionResponse])
+
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
-    sendPermissionResponse(requestId, 'allow')
+    respondToPermission(requestId, 'allow')
     markPromptAnsweredByRequestId(requestId, 'Allowed')
     dismissSessionNotification(notificationId)
-  }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
+  }, [respondToPermission, markPromptAnsweredByRequestId, dismissSessionNotification])
 
   const handleBannerDeny = useCallback((requestId: string, notificationId: string) => {
-    sendPermissionResponse(requestId, 'deny')
+    respondToPermission(requestId, 'deny')
     markPromptAnsweredByRequestId(requestId, 'Denied')
     dismissSessionNotification(notificationId)
-  }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
+  }, [respondToPermission, markPromptAnsweredByRequestId, dismissSessionNotification])
 
   // Retry reconnects to the *active* server (remote registry entry or local),
   // not unconditionally to local — see retryConnection / #5284.
@@ -1543,8 +1564,9 @@ export function App() {
     storeMsgMap,
     chatToolGroupPayloads,
     chatTailMessageId,
-    sendPermissionResponse,
-    sendUserQuestionResponse,
+    // #5786 — wrapped so approve/answer also snaps the chat to the bottom.
+    sendPermissionResponse: respondToPermission,
+    sendUserQuestionResponse: respondToUserQuestion,
     markPromptAnswered,
     storeMessages,
     sendInput,
