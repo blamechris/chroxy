@@ -70,8 +70,12 @@
       "installed": "2026-06-02"
     },
     "skill": {
-      "hash": "18b9f3e",
-      "installed": "2026-06-04"
+      "hash": "d96078b",
+      "installed": "2026-06-14",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
     },
     "smoke-form": {
       "hash": "3cd93cc",
