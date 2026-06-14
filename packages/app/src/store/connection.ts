@@ -893,7 +893,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  // Initial connection uses bounded retries (CONNECT_MAX_RETRIES) with exponential backoff.
+  // Initial connection uses bounded retries (CONNECT_MAX_RETRIES) climbing the
+  // fixed CONNECT_RETRY_DELAYS ladder ([1000,2000,3000,5000,8000]ms).
   // This prevents infinite loops on bad credentials or missing servers.
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
