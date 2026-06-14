@@ -1,10 +1,26 @@
 > **Ported to `main` and verified 2026-06-14 (blamechris).** Re-checked every load-bearing
-> *internal* claim against current `main`: default provider `claude-sdk` (`server-cli.js:531`),
-> the `billing-class.js` era boundary (`PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026,5,15)`;
-> claude-sdk/claude-cli → programmatic, claude-tui → subscription), and the `docs/providers.md:9`
-> "bypasses the programmatic credit pool" copy — all confirmed. One correction: **#3951 (channels
-> spike) is CLOSED**, so rec #5's durable-successor work lives in its impl sub-issues (#3952–#3956),
-> not the spike. External/competitor claims are trusted at the confidence levels the doc states.
+> *internal* claim against `main` at port time: the default provider was `claude-sdk`
+> (`server-cli.js:531`), the `billing-class.js` era boundary
+> (`PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026,5,15)`; claude-sdk/claude-cli → programmatic,
+> claude-tui → subscription), and the `docs/providers.md:9` "bypasses the programmatic credit
+> pool" copy — all confirmed. One correction: **#3951 (channels spike) is CLOSED**, so rec #5's
+> durable-successor work lives in its impl sub-issues (#3952–#3956), not the spike.
+> External/competitor claims are trusted at the confidence levels the doc states.
+>
+> **Decisions taken 2026-06-14 (after this audit).** The "decide today" items in the BLUF were
+> acted on the same day — this audit is the point-in-time analysis that informed them, kept as the
+> record:
+> - **Default provider flipped `claude-sdk` → `claude-tui`** (the audit's BLUF #2 gap). This is
+>   **Option B**, which the audit explicitly leans *against* (it productizes the ToS-adverse
+>   loophole, §Part 1 Model B). Chosen deliberately to keep zero-config setups off the metered
+>   programmatic-credit pool at the cutover; BYOK remains the guaranteed-billing fallback.
+>   #5819 → PR #5822 (merged). The default now lives in one place (`@chroxy/protocol`
+>   `DEFAULT_PROVIDER`) — #5823 → PR #5824 (merged).
+> - **Honest billing copy shipped** — README + `docs/providers.md` now hedge the subscription
+>   bet as best-effort/not-guaranteed rather than asserting it. PR #5820 (merged).
+> - **`chroxy doctor` billing canary** to detect reclassification (claude-tui drawing
+>   programmatic cost = the bet broke) — PR #5821.
+> - **The durable successor remains `claude --channels`** (rec #4 / #5), not a better scrape.
 
 ---
 
