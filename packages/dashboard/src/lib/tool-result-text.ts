@@ -18,17 +18,23 @@ function streamsToText(obj: Record<string, unknown>): string | null {
   const hasStdout = typeof obj.stdout === 'string'
   const hasStderr = typeof obj.stderr === 'string'
   if (!hasStdout && !hasStderr) return null
-  const parts: string[] = []
-  if (hasStdout && obj.stdout !== '') parts.push(obj.stdout as string)
-  if (hasStderr && obj.stderr !== '') parts.push(obj.stderr as string)
-  return parts.join('\n')
+  const stdout = hasStdout && obj.stdout !== '' ? (obj.stdout as string) : ''
+  const stderr = hasStderr && obj.stderr !== '' ? (obj.stderr as string) : ''
+  if (!stdout) return stderr
+  if (!stderr) return stdout
+  // Append stderr directly after stdout, mirroring a real terminal. Only insert
+  // a separating newline when stdout doesn't already end in one, so shell output
+  // that ends with a trailing newline doesn't gain a spurious blank line.
+  const sep = stdout.endsWith('\n') ? '' : '\n'
+  return stdout + sep + stderr
 }
 
 /**
- * Unwrap a tool-result string for terminal-style display. Returns the
- * human-readable text; never throws.
+ * Unwrap a tool-result payload for terminal-style display. Returns the
+ * human-readable text; never throws. Accepts `unknown` because callers forward
+ * loosely-typed wire values — non-string inputs are coerced to a safe string.
  */
-export function unwrapToolResultText(resultText: string): string {
+export function unwrapToolResultText(resultText: unknown): string {
   if (typeof resultText !== 'string') return String(resultText ?? '')
 
   const trimmed = resultText.trim()

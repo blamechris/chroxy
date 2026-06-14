@@ -20,6 +20,18 @@ describe('unwrapToolResultText (#5778)', () => {
     expect(unwrapToolResultText(envelope)).toBe('out line\nerr line')
   })
 
+  it('does not double a trailing newline when stdout already ends in one', () => {
+    const envelope = JSON.stringify({ stdout: 'out line\n', stderr: 'err line' })
+    // Exactly one newline between the streams — no blank line.
+    expect(unwrapToolResultText(envelope)).toBe('out line\nerr line')
+  })
+
+  it('coerces a non-string input to a safe string', () => {
+    expect(unwrapToolResultText(null as unknown as string)).toBe('')
+    expect(unwrapToolResultText(undefined as unknown as string)).toBe('')
+    expect(unwrapToolResultText(42 as unknown as string)).toBe('42')
+  })
+
   it('renders stderr alone when stdout is empty', () => {
     const envelope = JSON.stringify({ stdout: '', stderr: 'boom' })
     expect(unwrapToolResultText(envelope)).toBe('boom')

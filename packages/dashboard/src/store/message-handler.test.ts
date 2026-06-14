@@ -3684,6 +3684,55 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  // #5778 — the Output tab (terminal preview) must show the unwrapped
+  // stdout/stderr text of a tool result, not the raw `{"stdout":...}` JSON
+  // envelope. These guard the wiring in handleToolResult, not just the helper.
+  describe('Output-tab tool_result unwrap (#5778)', () => {
+    it('forwards only the unwrapped stdout to appendTerminalData', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      const envelope = JSON.stringify({
+        stdout: 'total 0\ndrwxr-xr-x',
+        stderr: '',
+        interrupted: false,
+      })
+      handleMessage(
+        { type: 'tool_result', toolUseId: 'tu-1', result: envelope, sessionId: 's1' },
+        ctx() as any,
+      )
+      const writes = (store.getState() as any)._terminalWrites as string[]
+      expect(writes).toHaveLength(1)
+      // Dim-styled preview wraps the unwrapped text — assert no JSON braces leak.
+      expect(writes[0]).toContain('total 0\ndrwxr-xr-x')
+      expect(writes[0]).not.toContain('"stdout"')
+      expect(writes[0]).not.toContain('{')
+    })
+
+    it('passes a plain-string result through unchanged', () => {
+      store = createMockStore(
+        baseState({
+          activeSessionId: 's1',
+          sessions: [{ sessionId: 's1', name: 'S1' } as any],
+          sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+        }),
+      )
+      setStore(store)
+      handleMessage(
+        { type: 'tool_result', toolUseId: 'tu-2', result: 'plain output line', sessionId: 's1' },
+        ctx() as any,
+      )
+      const writes = (store.getState() as any)._terminalWrites as string[]
+      expect(writes).toHaveLength(1)
+      expect(writes[0]).toContain('plain output line')
+    })
+  })
+
   // Regression for #3171: when the Agent SDK shuts down abnormally, agent_idle
   // can fire without a closing stream_end/result. Pre-#3171 the only paths that
   // cleared streamingMessageId mid-turn were stream_end, result, disconnect, or
