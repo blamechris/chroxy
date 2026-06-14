@@ -24,6 +24,7 @@ import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
 import { registerProviderRegistry } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,
@@ -52,25 +53,13 @@ const PROVIDERS = {
   'codex': CodexSession,
 }
 
-/**
- * The provider used when neither `--provider` nor `config.provider` is set.
- *
- * Flipped from `claude-sdk` to `claude-tui` ahead of the 2026-06-15
- * programmatic-credit cutover (#5819). On/after that boundary the host
- * claude-sdk / claude-cli providers draw from Anthropic's monthly metered
- * programmatic-credit pool (see billing-class.js `PROGRAMMATIC_CREDIT_ERA_START`),
- * so a zero-config session would silently start spending metered credits.
- * `claude-tui` drives the interactive CLI, which bills against the flat Claude
- * subscription allowance today — keeping the out-of-the-box default off the
- * metered pool. This is a best-effort bet, not a sanctioned path (the
- * subscription-billing of a daemon-driven TUI is ToS-adverse and may be
- * reclassified/enforced against) — operators who want a guaranteed billing
- * model should set `--provider claude-byok` with their own ANTHROPIC_API_KEY.
- *
- * The single source of truth for the default — server-cli.js (runtime +
- * banner) and doctor.js import this rather than re-hardcoding the literal.
- */
-export const DEFAULT_PROVIDER = 'claude-tui'
+// The default provider lives in @chroxy/protocol so the server, dashboard,
+// and mobile app all agree on "which provider is the default?" from one
+// source (#5823). Re-exported here so existing server call sites
+// (server-cli.js, doctor.js, session-manager.js) keep importing it from the
+// provider registry. Flipped to claude-tui ahead of the 2026-06-15 cutover
+// (#5819) — see the protocol constant's doc for the billing rationale.
+export { DEFAULT_PROVIDER }
 
 // Names hidden from listProviders() (backward-compat aliases, etc.)
 const HIDDEN = new Set()

@@ -123,7 +123,7 @@ import {
   clearPendingPermissionModeReverts,
 } from './message-handler';
 import type { EvaluatorResultPayload } from './types';
-import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
+import { CLIENT_CAPABILITIES, DEFAULT_PROVIDER } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
@@ -508,12 +508,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   primaryClientId: null,
   followMode: false,
   activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
-  // #5819: default to claude-tui ahead of the 2026-06-15 programmatic-credit
-  // cutover so the dashboard's new-session picker doesn't pre-select a provider
-  // that silently draws metered credits. Mirrors the server's DEFAULT_PROVIDER
-  // (packages/server/src/providers.js). Users who explicitly chose a provider
-  // keep their persisted value.
-  defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-tui'),
+  // #5819 / #5823: pre-select the shared DEFAULT_PROVIDER (claude-tui) so the
+  // new-session picker doesn't default to a provider that silently draws
+  // metered programmatic credits at the 2026-06-15 cutover. Sourced from
+  // @chroxy/protocol so server + clients agree. Users who explicitly chose a
+  // provider keep their persisted value.
+  defaultProvider: loadPersistedSetting('chroxy_default_provider', DEFAULT_PROVIDER),
   defaultModel: loadPersistedSetting('chroxy_default_model', ''),
   // #5184: header cost-badge display mode. Validated through the badge's
   // own `isCostBadgeMode` guard so a stale / corrupt localStorage value
