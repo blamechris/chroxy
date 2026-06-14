@@ -810,9 +810,12 @@ describe('permission/question routing to originating session', () => {
 
     // A late answer carrying a toolUseId that is NOT in the routing map.
     send(ws, { type: 'user_question_response', toolUseId: 'unknown-tool-use-id', answer: 'yes' })
-    // No ack is sent for a dropped answer; give the server a beat to process,
-    // then assert the active session did NOT receive the stale answer.
-    await new Promise((r) => setTimeout(r, 150))
+    // A dropped answer has no ack. Instead of racing a fixed delay, send a
+    // follow-up request with a deterministic response and wait for IT — WS
+    // messages are processed in order, so once the second answer round-trips
+    // the (dropped) first one is guaranteed to have been processed too.
+    send(ws, { type: 'switch_session', sessionId: 'sess-a' })
+    await waitForMessage(messages, 'session_switched', 2000)
 
     assert.equal(sessionBGotQuestion, false,
       'a stale/unknown toolUseId must be dropped, not routed to the active session')

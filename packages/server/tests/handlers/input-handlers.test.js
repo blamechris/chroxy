@@ -1146,6 +1146,26 @@ describe('input-handlers', () => {
           'no toolUseId → active-session fallback preserved')
         assert.equal(sessionA.respondToQuestion.lastCall[0], 'yes')
       })
+
+      // #5753 (Copilot) — the wire schema allows an empty-string toolUseId.
+      // Empty string is falsy, but it IS a supplied toolUseId, so it must be
+      // treated as "supplied but unmapped" → dropped, NOT routed to the active
+      // session (the `typeof === 'string'` gate, not truthiness).
+      it('drops an empty-string toolUseId rather than active-fallback (#5753)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ id: 'empty-tid', boundSessionId: null, activeSessionId: 's1' })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'yes',
+          toolUseId: '',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'empty-string toolUseId is supplied-but-unmapped → dropped, not active-fallback')
+      })
     })
   })
 
