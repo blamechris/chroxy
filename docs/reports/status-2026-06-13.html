@@ -59,7 +59,7 @@
 </header>
 
 <div class="callout good">
-  <strong>✓ Closed out &amp; re-baselined — 2026-06-13.</strong> A 6-agent swarm audit (Skeptic · Builder · Guardian · Minimalist · Operator · Futurist) verified every backlog item below against current <code>main</code>. Full results: <a href="audit-results/00-master-assessment.md"><code>audit-results/00-master-assessment.md</code></a> (in <code>docs/reports/audit-results/</code>). Verdict on the forward plan: <strong>3.1 / 5 — the §3 friction table and §5 next-moves are a snapshot from the <em>start</em> of the marathon and were never re-baselined against the 19 PRs this report documents merging.</strong> The §1.5 record-of-work is accurate; the forward-looking sections below are <span class="muted">superseded by the reconciliation in the next box</span>.
+  <strong>✓ Closed out, re-baselined, and burned down — 2026-06-13.</strong> A 6-agent swarm audit (Skeptic · Builder · Guardian · Minimalist · Operator · Futurist) verified every backlog item below against current <code>main</code> (full results: <a href="audit-results/00-master-assessment.md"><code>audit-results/00-master-assessment.md</code></a>), the gaps were filed as issues, and the <strong>entire §3 friction + parity backlog was then cleared</strong> — 9 more PRs (28 total across the marathon), 10 issues resolved, the two genuine decision-forks brought to you. See <strong>§1.5 "the swarm-audit closeout"</strong> for the per-PR record. The §3 table below is now annotated with each item's resolution; §5 next-moves are the original snapshot, kept for provenance.
 </div>
 
 <div class="callout">
@@ -77,9 +77,9 @@
 </div>
 
 <div class="cards">
-  <div class="card"><div class="n" style="color:var(--green)">4 / 4</div><div class="l">Target bugs resolved</div></div>
-  <div class="card"><div class="n">3</div><div class="l">PRs merged this session</div></div>
-  <div class="card"><div class="n">39</div><div class="l">Open issues</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">28</div><div class="l">PRs merged across the marathon</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">Issues resolved in the closeout</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">cleared</div><div class="l">§3 friction backlog</div></div>
   <div class="card"><div class="n" style="color:var(--green)">green</div><div class="l">CI on main</div></div>
 </div>
 
@@ -175,9 +175,30 @@
 </table>
 <p class="muted"><strong>Remaining #5731 backlog (genuinely marginal / needs direction):</strong> <code>resume_budget</code> silent no-op when not paused (<em>a clean fix needs a new ack wire-type — reusing <code>budget_resumed</code> injects a false "session resumed" chat message; edge case</em>); standby <code>EADDRINUSE</code> give-up after ~10s of port contention (<em>niche lifecycle tweak — bump the retry cap</em>); and the question-answer stale-<code>toolUseId</code> fallback (<em>legacy single-session-mode subtlety; the audit notes it's mostly mitigated by per-provider waiting flags — risk &gt; value for unsupervised work</em>). The substantive backlog is done; these are the dregs.</p>
 
+<h3>Then: the swarm-audit closeout — burning down the friction &amp; parity backlog</h3>
+<p>Re-ran <code>/swarm-audit</code> focused on this report (6 agents; aggregate 3.1/5 on the forward plan — the §3/§5 sections were a start-of-marathon snapshot never re-baselined), recorded the results in <a href="audit-results/00-master-assessment.md"><code>audit-results/00-master-assessment.md</code></a>, filed the gaps as issues, then cleared the entire friction + parity backlog. Two of the three "marginal/needs-direction" dregs above got clean fixes (<code>resume_budget</code> #5752, stale <code>toolUseId</code> #5753); the standby <code>EADDRINUSE</code> retry-cap bump wasn't taken this pass. The two genuine forks (preamble, key-derivation approach) went to you for a decision. Same gate throughout: implement → worktree-isolated adversarial review + Copilot → fix → full package suite + green CI → resolve threads → synchronous squash-merge.</p>
+<table>
+  <thead><tr><th>PR → issue</th><th>What it fixes (the friction)</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5754</td><td><strong>Closeout</strong> — 6-agent swarm audit of this report, results recorded, backlog re-baselined and filed.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5755 → #5623</td><td><strong>Stale "Observing" flash on reconnect</strong> — clear <code>sessionRole</code>/<code>primaryClientId</code> on disconnect (both clients) so the presence badge doesn't survive a reconnect. The half #5737 left unimplemented.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5756 → #5668</td><td><strong>Mic fails silently</strong> — the dashboard captured <code>voiceInput.error</code> but never rendered it; now a <code>role="alert"</code> banner instead of a silent mic-off. The audit's top felt-friction win.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5757 → #5631</td><td><strong>Model pricing/labels (quick-win)</strong> — priced + correctly labelled current-gen Claude models in the dashboard pricing table (table hygiene; the structural half of #5631 stays open).</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5758 + #5760 → #5750</td><td><strong>Mobile permission-attribution parity</strong> — per-tab "needs your permission" indicator (#5758) + assertive screen-reader announcement of a new prompt (#5760). Dashboard parity from #5667. <em>#5760's review caught a cross-session ref-leak — fixed before merge.</em></td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5761 → #5759</td><td><strong>Pending-permission single source of truth</strong> — converged the live-prompt predicate + derivations into <code>@chroxy/store-core</code> so the rule can't drift between app and dashboard.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5762 → #5753</td><td><strong>Question-answer fail-closed</strong> — a stale/unmapped <code>toolUseId</code> answer no longer routes to the active session (which could answer the wrong session's question); it's dropped. <em>Review hardened the legacy-cli null-route + empty-string cases.</em></td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5763 → #5752</td><td><strong><code>resume_budget</code> dead-button</strong> — the not-paused path was silent (notably a 2nd client in a shared session). New dedicated <code>budget_resume_ack</code> wire-type acks every click; <code>budget_resumed</code> (which injects a chat note) stays for actual un-pauses only. <em>Review added the inbound <code>requestId</code> cap.</em></td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5764 → #5622</td><td><strong>Reconnect-storm event-loop starvation</strong> — the #5590 eager X25519 fold ran N synchronous scalar-mults per poll phase, delaying the 15s keepalive sweep. Bounded to 8 derivations/event-loop-iteration; the overflow degrades to the (existing) discrete handshake. Auth-critical — adversarial review verified no path to "encryption required but not established."</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5751</td><td><strong>Global harness-preamble</strong> — fork resolved with you: <em>deferred / closed as low-value</em> (per-repo <code>sessionPreset.preamble</code> already covers ~95%; a global preamble is a permanent per-turn token tax).</td><td><span class="pill neutral">closed (your call)</span></td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>Two decision-forks brought to you, not assumed.</strong> <strong>#5751</strong> (build a global preamble at all?) → deferred/closed. <strong>#5622</strong> approach (worker-pool offload vs. concurrency cap?) → you chose the <em>concurrency cap</em>; shipped as a per-event-loop-iteration budget (a classic async semaphore is a no-op for synchronous crypto — the correct analog bounds derivations per loop iteration, overflow falling back to the discrete handshake).</div>
+<p class="muted"><strong>Friction backlog cleared.</strong> Every §3 item below (#5631 quick-win, #5623, #5613, #5622, #5674→#5750, #5668) is now resolved or re-scoped to a tracked structural follow-up; the two forks are decided. Two real defects were caught in review and fixed before landing (#5760 cross-session ref-leak; #5763 stripped <code>requestId</code>).</p>
+
 <div class="cards">
-  <div class="card"><div class="n" style="color:var(--green)">19</div><div class="l">PRs merged (5 durability + 3 audit + 5 Tier-1 + 5 Tier-2 + 1 Tier-3)</div></div>
-  <div class="card"><div class="n" style="color:var(--green)">8/8</div><div class="l">#5731 Tier-1 shipped</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">28</div><div class="l">PRs merged (19 prior + 9 closeout)</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">Issues resolved in the closeout</div></div>
   <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
   <div class="card"><div class="n" style="color:var(--green)">clean</div><div class="l">main · every PR gated + reviewed</div></div>
 </div>
@@ -196,20 +217,20 @@
 <h3>Mic / voice — the nuance that mattered</h3>
 <p>#5668 had two causes. The <strong>code</strong> cause (a Space-hold hijacking a button recording) was fixed in #5672. The <strong>likely real-world</strong> cause was a stale installed <code>.app</code> bundling an older speech helper — which no code change can fix. That's why the rebuild-and-reinstall above is the operative fix; the issue stays open only for the "surface helper-spawn failures instead of a silent revert" nicety.</p>
 
-<h2>3 · Friction backlog — what actually slows daily use</h2>
-<p>These are the open issues most directly tied to "it's faster to just use the CLI." Knocking these out is the highest-leverage path to making chroxy the default.</p>
+<h2>3 · Friction backlog — what actually slows daily use <span class="pill ok">cleared 2026-06-13</span></h2>
+<p>These were the open issues most directly tied to "it's faster to just use the CLI." All are now resolved (or re-scoped to a tracked structural follow-up) in the closeout above — see §1.5 "the swarm-audit closeout."</p>
 <table>
-  <thead><tr><th>Issue</th><th>Friction</th><th>Class</th></tr></thead>
+  <thead><tr><th>Issue</th><th>Friction</th><th>Class</th><th>Resolution</th></tr></thead>
   <tbody>
-    <tr><td>#5631</td><td>Model metadata hardcoded &amp; stale — unknown models (e.g. <code>claude-fable-5</code>) degrade across the UI</td><td><span class="pill warn">UX</span></td></tr>
-    <tr><td>#5623</td><td>Stale "Observing" banner flash on reconnect (app-side <code>sessionRole</code> not reset)</td><td><span class="pill warn">UX</span></td></tr>
-    <tr><td>#5613</td><td><code>session_role</code> not re-emitted on reconnect → former primary shows a stale "primary" badge</td><td><span class="pill warn">UX</span></td></tr>
-    <tr><td>#5622</td><td>Reconnect-storm starves the server event loop (unbounded eager key derivations)</td><td><span class="pill bad">perf</span></td></tr>
-    <tr><td>#5674</td><td>Mobile: permission prompts don't show which session asked (dashboard parity from #5667)</td><td><span class="pill info">parity</span></td></tr>
-    <tr><td>#5668</td><td>Mic helper-spawn failures revert silently instead of surfacing an error</td><td><span class="pill warn">UX</span></td></tr>
+    <tr><td>#5631</td><td>Model metadata hardcoded &amp; stale — unknown models (e.g. <code>claude-fable-5</code>) degrade across the UI</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">quick-win shipped (#5757)</span> · structural half stays tracked</td></tr>
+    <tr><td>#5623</td><td>Stale "Observing" banner flash on reconnect (app-side <code>sessionRole</code> not reset)</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">fixed (#5755)</span></td></tr>
+    <tr><td>#5613</td><td><code>session_role</code> not re-emitted on reconnect → former primary shows a stale "primary" badge</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">fixed (#5737, prior)</span></td></tr>
+    <tr><td>#5622</td><td>Reconnect-storm starves the server event loop (unbounded eager key derivations)</td><td><span class="pill bad">perf</span></td><td><span class="pill ok">fixed (#5764)</span></td></tr>
+    <tr><td>#5674 → #5750</td><td>Mobile: permission prompts don't show which session asked (dashboard parity from #5667)</td><td><span class="pill info">parity</span></td><td><span class="pill ok">fixed (#5758 + #5760)</span></td></tr>
+    <tr><td>#5668</td><td>Mic helper-spawn failures revert silently instead of surfacing an error</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">fixed (#5756)</span></td></tr>
   </tbody>
 </table>
-<p class="muted">Reconnect is a recurring theme (#5623 / #5613 / #5622) — the reconnection path is where the "phone/desktop feels janky vs the terminal" perception concentrates. A focused reconnect-hardening pass would likely move the needle most.</p>
+<p class="muted">Reconnect was a recurring theme (#5623 / #5613 / #5622) — the reconnection path is where the "phone/desktop feels janky vs the terminal" perception concentrated; that cluster is now closed.</p>
 
 <h3>Other open work (not friction)</h3>
 <ul>
