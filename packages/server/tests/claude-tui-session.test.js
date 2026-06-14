@@ -3623,6 +3623,72 @@ describe('ClaudeTuiSession', () => {
   // _armResultTimeout() time and disarms on the first consumed hook
   // event, surfacing a stream_stall with the same dashboard chip the
   // inter-stream watchdog uses so the user can retry within minutes.
+  describe('first-turn submit nudge (#5777)', () => {
+    // A freshly-spawned TUI can report ready before its composer accepts the
+    // submit, so the first message's \r is dropped. _scheduleFirstTurnSubmitNudge
+    // re-sends a bare \r if no hook output arrives within the window.
+    function nudgeSession(overrides = {}) {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s._isBusy = true
+      s._ptyExited = false
+      s._firstOutputDisarmed = false
+      s._activeTurn = { startedAt: Date.now(), aborted: false }
+      s._firstTurnSubmitNudgeMs = 20
+      const writes = []
+      s._term = { write: (b) => writes.push(b), kill: () => {} }
+      Object.assign(s, overrides)
+      s._termWrites = writes
+      return s
+    }
+
+    it('re-sends a bare \\r when no hook output arrives within the window', async () => {
+      session = nudgeSession()
+      session._scheduleFirstTurnSubmitNudge('m1')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.ok(session._termWrites.includes('\r'), 'bare \\r re-sent to nudge the submit')
+    })
+
+    it('does NOT nudge once first output arrived (disarm clears the timer)', async () => {
+      session = nudgeSession()
+      session._scheduleFirstTurnSubmitNudge('m1')
+      // First consumed hook → _clearFirstOutputWatchdog also cancels the nudge.
+      session._clearFirstOutputWatchdog()
+      assert.equal(session._firstTurnSubmitNudgeTimer, null, 'nudge timer cancelled on first output')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.equal(session._termWrites.length, 0, 'no \\r written after first output')
+    })
+
+    it('stops after FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS', async () => {
+      session = nudgeSession()
+      session._scheduleFirstTurnSubmitNudge('m1')
+      await new Promise((r) => setTimeout(r, 120))
+      const crs = session._termWrites.filter((w) => w === '\r').length
+      assert.equal(crs, ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS, 'caps at MAX_ATTEMPTS then defers to the first-output watchdog')
+    })
+
+    it('does not nudge when the PTY has exited or the turn aborted', async () => {
+      session = nudgeSession({ _ptyExited: true })
+      session._scheduleFirstTurnSubmitNudge('m1')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.equal(session._termWrites.length, 0, 'no \\r when PTY exited')
+
+      const s2 = nudgeSession()
+      s2._activeTurn.aborted = true
+      s2._scheduleFirstTurnSubmitNudge('m2')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.equal(s2._termWrites.length, 0, 'no \\r when turn aborted')
+      s2.destroy?.()
+    })
+
+    it('is disabled when _firstTurnSubmitNudgeMs <= 0', async () => {
+      session = nudgeSession({ _firstTurnSubmitNudgeMs: 0 })
+      session._scheduleFirstTurnSubmitNudge('m1')
+      assert.equal(session._firstTurnSubmitNudgeTimer, null, 'no timer scheduled when disabled')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.equal(session._termWrites.length, 0, 'no \\r when disabled')
+    })
+  })
+
   describe('first-output watchdog (#4732)', () => {
     it('fires after _firstOutputTimeoutMs of zero hook events, clears busy state, emits stream_stall', async () => {
       session = new ClaudeTuiSession({
