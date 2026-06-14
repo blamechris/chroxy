@@ -5301,6 +5301,11 @@ button.sidebar-token-view-session-row:hover {
 .advanced-section .form-field[role='radiogroup'] {
   display: flex;
   flex-direction: column;
+  /* #5774: override the wrapping inherited from `.advanced-section .form-field`
+     above — once these are column stacks, leaving flex-wrap: wrap lets the
+     controls break into adjacent columns under a constrained height. Force a
+     single vertical stack. */
+  flex-wrap: nowrap;
   align-items: flex-start;
   gap: 4px;
 }
