@@ -46,6 +46,79 @@ const BACKPRESSURE_PAUSE_THRESHOLD = 256 * 1024
 const BACKPRESSURE_POLL_INTERVAL_MS = 20
 const BACKPRESSURE_MAX_WAIT_MS = 30_000
 
+// #5622 — bound the eager X25519 key derivations done SYNCHRONOUSLY per
+// event-loop iteration.
+//
+// The #5590 eager fold concentrates createKeyPair + DH (deriveSharedKey) + HKDF
+// (deriveConnectionKey) into the synchronous auth-frame handler (sendPostAuthInfo
+// below) for every connect. A reconnect storm delivers N auth frames in a single
+// poll phase, so the N scalar-mults run back-to-back on the event loop and can
+// delay the timer phase past the 15s keepalive sweep (#5594) — event-loop
+// starvation that bites only at fan-out scale (swarm-audit round 3, Tunneler).
+//
+// A classic async semaphore is meaningless here: the crypto is synchronous, so
+// no two derivations ever truly overlap — the cost is serialization within one
+// loop iteration, not concurrency. The correct analog of a concurrency cap for
+// synchronous work is therefore a per-iteration budget: run at most
+// MAX_EAGER_DERIVATIONS_PER_TICK derivations inline, and let any further connects
+// in the same iteration fall back to the DISCRETE key_exchange handshake. That
+// fallback is already wired (the `!eagerServerPublicKey` branch below engages
+// encryptionPending + the post-auth queue) and its derivation lands on a later
+// frame/tick, which de-concentrates the work so the timer phase — and the
+// keepalive sweep — gets to run between iterations.
+//
+// The counter resets on each setImmediate (fires once per loop iteration, in the
+// check phase, after timers), so the budget is genuinely per-iteration. Under
+// normal load (< CAP connects per iteration) the eager path is unchanged; only a
+// storm degrades, and only to the pre-#5590 discrete handshake (one extra RTT),
+// never to a failed connection.
+const MAX_EAGER_DERIVATIONS_PER_TICK = 8
+let _eagerDerivationsThisTick = 0
+let _eagerResetScheduled = false
+let _eagerResetHandle = null
+
+/**
+ * Reserve a slot for one synchronous eager key derivation in the current
+ * event-loop iteration. Returns true if under the per-iteration budget (caller
+ * should derive inline), false if the budget is spent (caller should skip the
+ * eager fold and let the client use the discrete handshake). Schedules a
+ * one-shot reset of the counter for the next iteration on first use.
+ *
+ * Exported for direct unit testing of the budget + reset behaviour.
+ */
+export function _reserveEagerDerivationSlot() {
+  if (_eagerDerivationsThisTick >= MAX_EAGER_DERIVATIONS_PER_TICK) return false
+  _eagerDerivationsThisTick++
+  if (!_eagerResetScheduled) {
+    _eagerResetScheduled = true
+    // Retain the handle so the test reset helper can cancel a still-pending
+    // reset and keep test isolation tight (#5764 review).
+    _eagerResetHandle = setImmediate(() => {
+      _eagerDerivationsThisTick = 0
+      _eagerResetScheduled = false
+      _eagerResetHandle = null
+    })
+  }
+  return true
+}
+
+/**
+ * Reset the per-iteration eager-derivation budget synchronously. Test-only — the
+ * module-global counter is reset by setImmediate in production, but node:test can
+ * run several synchronous test bodies within one macrotask, so a test that
+ * exhausts the budget would otherwise leak into the next. Call in a `beforeEach`.
+ */
+export function _resetEagerDerivationBudgetForTests() {
+  // Cancel any reset still queued from a prior test/tick so it can't fire mid
+  // test (after an `await`) and mutate the budget unexpectedly (#5764 review).
+  if (_eagerResetHandle) {
+    clearImmediate(_eagerResetHandle)
+    _eagerResetHandle = null
+  }
+  _eagerDerivationsThisTick = 0
+  _eagerResetScheduled = false
+}
+
 /**
  * Schedule `fn` once ws.bufferedAmount falls below BACKPRESSURE_PAUSE_THRESHOLD,
  * or immediately (via setImmediate) if the buffer is already drained. Polls
@@ -180,7 +253,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   let eagerServerKeySig = null
   let eagerEncryptionState = null
   if (client.eagerKeyExchange) {
-    if (requireEncryption) {
+    // #5622: only run the eager derivation inline while under the per-iteration
+    // budget. Over budget (reconnect storm) we skip the fold and leave
+    // eagerServerPublicKey null, so the `requireEncryption && !eagerServerPublicKey`
+    // branch below transparently engages the discrete key_exchange handshake —
+    // its scalar-mult lands on a later tick, keeping this iteration short enough
+    // for the keepalive sweep to run.
+    if (requireEncryption && _reserveEagerDerivationSlot()) {
       try {
         const serverKp = createKeyPair()
         const rawSharedKey = deriveSharedKey(client.eagerKeyExchange.publicKey, serverKp.secretKey)

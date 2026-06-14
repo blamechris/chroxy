@@ -12,6 +12,8 @@ import {
   flushPostAuthQueue,
   scheduleAfterDrain,
   scheduleProviderModelsRefresh,
+  _reserveEagerDerivationSlot,
+  _resetEagerDerivationBudgetForTests,
 } from '../src/ws-history.js'
 import { PERMISSION_MODES } from '../src/handler-utils.js'
 import { MAX_SANE_DURATION_MS } from '@chroxy/protocol'
@@ -157,6 +159,69 @@ describe('sendPostAuthInfo — base auth_ok payload', () => {
     assert.equal(serverMode.mode, 'multi')
     const status = ctx._sends.find(m => m.type === 'status')
     assert.equal(status.connected, true)
+  })
+})
+
+// ── #5622: per-iteration eager-derivation budget ────────────────────────────
+
+describe('_reserveEagerDerivationSlot — per-iteration budget (#5622)', () => {
+  beforeEach(_resetEagerDerivationBudgetForTests)
+
+  it('grants exactly the per-tick cap, then refuses within the same tick', () => {
+    let granted = 0
+    for (let i = 0; i < 20; i++) {
+      if (_reserveEagerDerivationSlot()) granted++
+    }
+    assert.equal(granted, 8, 'grants exactly MAX_EAGER_DERIVATIONS_PER_TICK slots per tick')
+  })
+
+  it('restores the budget on the next event-loop iteration', async () => {
+    while (_reserveEagerDerivationSlot()) { /* drain this tick's budget */ }
+    assert.equal(_reserveEagerDerivationSlot(), false, 'budget spent within the tick')
+    // Real setImmediate reset (production path), not the test helper.
+    await new Promise((r) => setImmediate(r))
+    assert.equal(_reserveEagerDerivationSlot(), true, 'budget restored on the next iteration')
+  })
+})
+
+// #5622: under a reconnect storm, the eager X25519 fold is capped per event-loop
+// iteration so the synchronous scalar-mults don't starve the keepalive sweep.
+// Connects beyond the cap fall back to the (already-tested) discrete handshake.
+describe('sendPostAuthInfo — eager-derivation storm fallback (#5622)', () => {
+  beforeEach(_resetEagerDerivationBudgetForTests)
+
+  it('serves the first CAP eager exchanges, then degrades to discrete within one tick', () => {
+    const results = []
+    // CAP + 1 (= 9) eager connects, all in ONE synchronous tick so they share
+    // the same per-iteration budget.
+    for (let i = 0; i < 9; i++) {
+      const ctx = makeCtx({ encryptionEnabled: true })
+      const ws = makeFakeWs()
+      const clientKp = createKeyPair()
+      const client = registerClient(ctx, ws, {
+        id: `storm-client-${i}`,
+        socketIp: '10.0.0.1', // not localhost → encryption required
+        eagerKeyExchange: { publicKey: clientKp.publicKey, salt: generateConnectionSalt() },
+      })
+      sendPostAuthInfo(ctx, ws)
+      results.push({ authOk: ctx._sends.find((m) => m.type === 'auth_ok'), client })
+    }
+
+    const withEager = results.filter((r) => r.authOk.serverPublicKey)
+    const withoutEager = results.filter((r) => !r.authOk.serverPublicKey)
+    assert.equal(withEager.length, 8, 'first 8 connects in the tick get the eager fold')
+    assert.equal(withoutEager.length, 1, 'the 9th degrades to the discrete handshake')
+
+    // Eager clients: encryption established inline, never marked pending.
+    for (const r of withEager) {
+      assert.ok(r.client.encryptionState, 'eager client has encryption established')
+      assert.notEqual(r.client.encryptionPending, true)
+    }
+    // Fallback client: awaits the discrete key_exchange (pending + queued burst).
+    const fb = withoutEager[0].client
+    assert.equal(fb.encryptionPending, true, 'fallback client awaits discrete key_exchange')
+    assert.ok(Array.isArray(fb.postAuthQueue), 'fallback client queues the post-auth burst')
+    clearTimeout(fb._keyExchangeTimeout) // cleanup the discrete-handshake timeout
   })
 })
 
@@ -676,6 +741,10 @@ function makeEncryptingCtx(overrides = {}) {
 }
 
 describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
+  // #5622: these single-connect eager tests must start with a full per-tick
+  // budget, independent of any storm test that ran in the same macrotask.
+  beforeEach(_resetEagerDerivationBudgetForTests)
+
   it('derives the shared key inline and returns serverPublicKey, un-gating the queue', () => {
     const ws = makeFakeWs()
     const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
