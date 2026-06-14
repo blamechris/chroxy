@@ -408,6 +408,20 @@ export class ClaudeTuiSession extends BaseSession {
     // answering / stalling one no longer disarms the others. Cleared per-id on
     // PostToolUse and cleared wholesale on the turn-ending paths + destroy().
     this._askUserQuestionWatchdogs = new Map()
+    // #5798: observability-only marker for the multi-select reinject "stop and
+    // wait" steer. When CHROXY_TUI_MULTISELECT_REINJECT is on and a multi-select
+    // AskUserQuestion is denied, the deny reason steers the model to STOP its
+    // turn so the reinjected selection (sendMessage) lands as a fresh turn. The
+    // FormDriver sets this marker right after the flag-on sendMessage; if the
+    // model instead emits another tool_use before the reinjected turn's first
+    // output clears it, we log a loud WARN (greppable: reinject_stop_wait_violation
+    // / #5798) — the signal the steer was NOT honored. Shape when set:
+    // { deniedToolUseId, at } where `at` is _nowMonotonic(). Null = no window
+    // open. Set ONLY on the flag-on reinject path; cleared one-shot on the WARN,
+    // on the reinjected turn's first consumed hook (_clearFirstOutputWatchdog),
+    // and on every teardown/destroy/pty-gone path so a stale marker can't leak.
+    // This NEVER changes behavior — it is a measurement aid only.
+    this._reinjectStopWaitWatch = null
     // #4732: effective pre-first-output timeout in ms. Distinct from
     // _streamStallTimeoutMs (#4638) — that watchdog only re-arms BETWEEN
     // hook events, so a turn where claude TUI accepts the prompt write
@@ -1085,6 +1099,12 @@ export class ClaudeTuiSession extends BaseSession {
     // saved by the tick's !_isBusy guard — fragile. Clear before the
     // _destroying early-return so it runs on both the destroy and respawn paths.
     this._clearFirstTurnSubmitNudge()
+    // #5798: _onPtyGone does NOT route through _clearFirstOutputWatchdog, so
+    // close the reinject stop-and-wait window explicitly here (before the
+    // _destroying early-return, so it runs on both the destroy and respawn
+    // paths) — a dead/respawning PTY can't legitimately emit the reinjected
+    // turn, and a stale marker must not leak into a later turn. Observability-only.
+    this._reinjectStopWaitWatch = null
     if (this._destroying) return
     // #5311 review — the socket 'close'/'error' paths have no exit info, so
     // render a clear "unknown" instead of a bare "code=undefined". The
@@ -2234,6 +2254,36 @@ export class ClaudeTuiSession extends BaseSession {
     }
 
     if (kind === 'PreToolUse') {
+      // #5798: observability-only — did the model honor the reinject "stop and
+      // wait" steer? When a flag-on multi-select reinject fired, the FormDriver
+      // opened a watch window (this._reinjectStopWaitWatch). The model SHOULD
+      // have ended its turn so the reinjected selection becomes a fresh turn; a
+      // PreToolUse arriving while the window is still open means it kept going
+      // and tool-called instead. Log a loud WARN with greppable fields, then
+      // clear the marker (one-shot — log once per reinject). The window is also
+      // cleared on the reinjected turn's first consumed hook
+      // (_clearFirstOutputWatchdog) and on teardown/destroy/pty-gone, so this
+      // fires ONLY for a tool_use in the gap between the deny and the reinjected
+      // turn's start.
+      //
+      // Heuristic + honest false-pos/neg profile (this is a tunable measurement
+      // aid, not a gate): the detector is "any PreToolUse observed while the
+      // post-reinject-deny watch is open". FALSE POSITIVE risk: a leftover
+      // pre-*.json hook file from the DENIED turn that drains after the marker is
+      // set could trip the WARN even though it predates the reinject (the denied
+      // form is denied before it renders, so no PostToolUse is expected, but a
+      // racing pre- file is theoretically possible). FALSE NEGATIVE risk: if the
+      // reinjected turn's own first legitimate output is a non-tool hook (or its
+      // first PreToolUse is preceded by another consumed hook in the same drain
+      // pass that clears the window first), a later "didn't stop" tool_use would
+      // be missed. Both are acceptable for a default-on gating signal — count the
+      // greppable token and tune later if the rate is noisy.
+      if (this._reinjectStopWaitWatch) {
+        const watch = this._reinjectStopWaitWatch
+        this._reinjectStopWaitWatch = null
+        const deltaMs = Math.round(this._nowMonotonic() - watch.at)
+        ;(this._log || log).warn(`reinject stop-and-wait NOT honored (#5798, reinject_stop_wait_violation): model emitted tool_use after a multi-select reinject deny instead of stopping | deniedToolUseId=${watch.deniedToolUseId || '?'} newTool=${toolName} newToolUseId=${toolUseId} deltaMs=${deltaMs}`)
+      }
       // #4307: stash the command text so the matching PostToolUse can
       // record the resulting shellId with the original command. Same
       // behaviour as sdk-session.js _handleToolUseBlock — keeps TUI
@@ -2712,6 +2762,14 @@ export class ClaudeTuiSession extends BaseSession {
     // this one site covers all of them.
     this._clearFirstTurnSubmitNudge()
     this._firstOutputDisarmed = true
+    // #5798: first consumed hook of a turn (or any teardown that routes through
+    // here) is the legitimate turn-start boundary — close the reinject
+    // stop-and-wait window so a tool_use in a LATER, unrelated turn can't trip
+    // the violation WARN. In the hook-drain loop this runs AFTER the per-event
+    // _emitToolHookEvent pass (line ~2046 vs the clear at ~2076), so a PreToolUse
+    // that IS the first hook of the reinjected turn still fires the WARN first;
+    // this clear then prevents any spurious re-fire. Observability-only.
+    this._reinjectStopWaitWatch = null
   }
 
   /**

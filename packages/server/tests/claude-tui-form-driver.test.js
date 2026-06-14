@@ -71,6 +71,13 @@ function makeMockHost(overrides = {}) {
     _isBusy: false,
     _activeTurn: { hexDumpEmitted: false, aborted: false, messageId: 'm1' },
     _log: { info() {}, warn: (m) => warns.push(m) },
+    // #5798 — the flag-on reinject path stamps a stop-and-wait watch marker with
+    // _nowMonotonic(); the real session has it (claude-tui-session.js:648). A
+    // fixed clock is enough for the form-driver tests (they only assert the marker
+    // shape, not deltas).
+    _nowMonotonic: () => 1000,
+    // #5798 — observability-only marker; starts unset, set by the flag-on reinject.
+    _reinjectStopWaitWatch: null,
     _outputTailHexDump: () => '',
     _writePtyTextThrottled: (t) => { writes.push(t); return Promise.resolve(true) },
     _writePtyMultiQuestionSequence: (seq) => { multiSeqs.push(seq); return Promise.resolve(true) },
@@ -271,6 +278,85 @@ describe('FormDriver — injected collaborator (#5617)', () => {
     assert.deepEqual(host._sent, [], 'no reinject when the flag is off')
     assert.equal(tornDown.length, 1)
     assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED')
+  })
+
+  it('single multi-select REINJECT (flag on): opens the stop-and-wait watch marker (#5798)', () => {
+    // Observability-only: after the flag-on reinject sends the new turn, the
+    // driver stamps host._reinjectStopWaitWatch so the session can detect a
+    // model that tool-calls instead of honoring the "stop and wait" steer.
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Mushroom', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => {}
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+
+    assert.deepEqual(host._sent, ['For "Pick toppings": Cheese, Onion'], 'reinject sent the turn')
+    assert.ok(host._reinjectStopWaitWatch, 'stop-and-wait watch marker is set')
+    assert.equal(host._reinjectStopWaitWatch.deniedToolUseId, 't1', 'marker records the denied tool id')
+    assert.equal(host._reinjectStopWaitWatch.at, 1000, 'marker stamps _nowMonotonic()')
+  })
+
+  it('single multi-select REINJECT (flag on): closes the watch when sendMessage resolves { ok:false } (#5798)', async () => {
+    // Race: the busy/not-runnable preflight passed, but sendMessage resolves
+    // { ok:false } (state changed) → the reinjected turn never started, so the
+    // marker must be cleared and not leak a spurious violation WARN later.
+    const host = makeMockHost({ sendMessage: () => Promise.resolve({ ok: false, reason: 'busy' }) })
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => {}
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+    // Marker is opened synchronously, then closed when the send resolves.
+    await new Promise((r) => setTimeout(r, 0))
+    assert.equal(host._reinjectStopWaitWatch, null, 'watch closed when the reinject turn never started ({ ok:false })')
+  })
+
+  it('single multi-select REINJECT (flag on): closes the watch when sendMessage rejects (#5798)', async () => {
+    const host = makeMockHost({ sendMessage: () => Promise.reject(new Error('boom')) })
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => {}
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+    await new Promise((r) => setTimeout(r, 0))
+    assert.equal(host._reinjectStopWaitWatch, null, 'watch closed when the reinject send rejected')
+  })
+
+  it('single multi-select: flag OFF does NOT open the stop-and-wait watch marker (#5798)', () => {
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => {}
+
+    withReinjectFlag(undefined, () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+
+    assert.equal(host._reinjectStopWaitWatch, null, 'no watch marker on the flag-off refusal path')
+  })
+
+  it('single multi-select REINJECT (flag on): a refused pre-flight (busy) does NOT open the watch marker (#5798)', () => {
+    // The marker is set ONLY after the actual reinject sendMessage. A pre-flight
+    // refusal (busy / not-runnable / empty) tears down without sending, so it
+    // must not open a false stop-and-wait window.
+    const host = makeMockHost({ _isBusy: true })
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => {}
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+
+    assert.deepEqual(host._sent, [], 'busy pre-flight does not send')
+    assert.equal(host._reinjectStopWaitWatch, null, 'no watch marker when the reinject is refused pre-flight')
   })
 
   it('formatMultiSelectReinject: parses array / JSON-string / comma-string into label text (#5776)', () => {

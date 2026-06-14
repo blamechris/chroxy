@@ -674,7 +674,28 @@ export class FormDriver {
       this._host._clearPendingAnswerByToolUseId(prevToolUseId)
       this._host._clearAskUserQuestionWatchdog(prevToolUseId)
       this._host._clearAskUserQuestionLock()
-      Promise.resolve(this._host.sendMessage(reinjectText)).catch((err) => {
+      // #5798 (observability-only): open the stop-and-wait watch window. The
+      // deny reason steered the model to STOP its turn so this reinjected
+      // selection lands as a fresh turn; if instead the model emits another
+      // tool_use before the reinjected turn's first output clears this marker,
+      // _emitToolHookEvent(PreToolUse) logs a loud WARN (reinject_stop_wait_
+      // violation / #5798). Set ONLY here on the flag-on reinject path — never on
+      // the flag-off refusal. No behavior change: just a marker field the session
+      // reads to decide whether to emit a measurement WARN. Set BEFORE the send
+      // so a failed send can close it again (below).
+      this._host._reinjectStopWaitWatch = { deniedToolUseId: prevToolUseId, at: this._host._nowMonotonic() }
+      Promise.resolve(this._host.sendMessage(reinjectText)).then((result) => {
+        // #5798: if the reinject never actually started a turn (busy/not-runnable
+        // race → { ok:false }), close the watch so it can't produce a spurious
+        // violation WARN against a turn that never began. Guard on the toolUseId
+        // so a stale resolution can't clear a newer reinject's watch.
+        if (result && result.ok === false && this._host._reinjectStopWaitWatch?.deniedToolUseId === prevToolUseId) {
+          this._host._reinjectStopWaitWatch = null
+        }
+      }).catch((err) => {
+        if (this._host._reinjectStopWaitWatch?.deniedToolUseId === prevToolUseId) {
+          this._host._reinjectStopWaitWatch = null
+        }
         ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject sendMessage failed: ${err?.message || err} (tool=${prevToolUseId || '?'})`)
       })
       return
