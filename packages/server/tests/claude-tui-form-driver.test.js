@@ -141,6 +141,35 @@ describe('FormDriver — injected collaborator (#5617)', () => {
     assert.deepEqual(host._cleared, ['t1'], 'only the answered entry is cleared')
   })
 
+  it('single-question: sanitizes the literal-answer fallthrough before PTY type (#5803)', () => {
+    // When the answer text matches no option label it falls through to typing
+    // the literal client text into the PTY (the Other/freeform back-compat
+    // path). That text is untrusted: control chars (CR/LF/ESC) must be stripped
+    // so a crafted answer can't submit the composer early or inject escapes.
+    const host = makeMockHost()
+    seedSingle(host, 't1', ['Alpha', 'Bravo'])
+    const fd = new FormDriver(host)
+
+    fd.respondToQuestion('custom\r\nanswer\x1b[31m', undefined, 't1')
+
+    // CR/LF/ESC removed; control runs collapse to a single space; no bare
+    // CR/LF reaches the PTY.
+    assert.deepEqual(host._writes, ['custom answer [31m'])
+    assert.ok(!host._writes[0].includes('\r') && !host._writes[0].includes('\n'), 'no bare CR/LF typed')
+    assert.ok(!host._writes[0].includes('\x1b'), 'no ESC typed')
+  })
+
+  it('single-question: a matched option is unaffected by the #5803 literal sanitizer', () => {
+    // The hotkey-digit path is a safe single char and must not be touched.
+    const host = makeMockHost()
+    seedSingle(host, 't1', ['Alpha', 'Bravo', 'Charlie'])
+    const fd = new FormDriver(host)
+
+    fd.respondToQuestion('Charlie', undefined, 't1')
+
+    assert.deepEqual(host._writes, ['3'])
+  })
+
   it('single-question: arms the stall watchdog for the pending entry', () => {
     const host = makeMockHost()
     seedSingle(host, 't1', ['Yes', 'No'])
@@ -252,6 +281,47 @@ describe('FormDriver — injected collaborator (#5617)', () => {
       'For "Pick toppings": Cheese, Onion', 'comma-joined fallback')
     assert.equal(
       formatMultiSelectReinject(questions, {}), '', 'no selection → empty string')
+  })
+
+  it('formatMultiSelectReinject: sanitizes control chars out of labels before PTY type (#5796)', () => {
+    const questions = [{ question: 'Pick toppings', multiSelect: true }]
+
+    // CR / LF in a label must not survive — a bare \r would submit the composer
+    // early when typed into the PTY. The control run collapses to a single space.
+    const crlf = formatMultiSelectReinject(questions, { 'Pick toppings': ['Chee\rse', 'On\nion'] })
+    assert.ok(!crlf.includes('\r'), 'no bare CR reaches output')
+    // \n only appears as the line separator between questions; with one question
+    // there is none, so the label's \n must be gone.
+    assert.ok(!crlf.includes('\n'), 'no bare LF reaches output (single question)')
+    assert.equal(crlf, 'For "Pick toppings": Chee se, On ion', 'control run → single space')
+
+    // ESC + an ANSI color sequence must be stripped (no terminal escape injection).
+    const esc = formatMultiSelectReinject(questions, { 'Pick toppings': ['\x1b[31mRed'] })
+    assert.ok(!esc.includes('\x1b'), 'ESC stripped')
+    assert.equal(esc, 'For "Pick toppings": [31mRed', 'only the ESC byte goes, rest is printable text')
+
+    // Backspace (\x08) and DEL (\x7f) are C0/DEL controls → removed.
+    const bs = formatMultiSelectReinject(questions, { 'Pick toppings': ['A\x08B\x7fC'] })
+    assert.equal(bs, 'For "Pick toppings": A B C', 'backspace + DEL → spaces')
+
+    // Normal unicode / printable text is untouched.
+    const uni = formatMultiSelectReinject(questions, { 'Pick toppings': ['Café ☕ 日本語'] })
+    assert.equal(uni, 'For "Pick toppings": Café ☕ 日本語', 'printable unicode preserved')
+
+    // A label that is ONLY control chars sanitizes to empty and is dropped (no
+    // stray separator); with all labels dropped the question yields no line.
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': ['\r\n\x1b', 'Cheese'] }),
+      'For "Pick toppings": Cheese', 'all-control label dropped, no stray comma')
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': ['\r\n'] }),
+      '', 'question with only control-char labels → no line')
+
+    // Non-string entries inside the parsed array are already filtered out, but
+    // weird answersMap values must not throw.
+    assert.doesNotThrow(() => formatMultiSelectReinject(questions, { 'Pick toppings': null }))
+    assert.doesNotThrow(() => formatMultiSelectReinject(questions, { 'Pick toppings': undefined }))
+    assert.doesNotThrow(() => formatMultiSelectReinject(questions, { 'Pick toppings': 42 }))
   })
 
   it('single multi-select REINJECT (flag on): busy session → no send, retryable teardown (#5776 busy-race)', () => {
