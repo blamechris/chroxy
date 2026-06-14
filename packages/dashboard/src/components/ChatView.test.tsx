@@ -162,6 +162,56 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
+  it('snaps to bottom when scrollToBottomSignal bumps, even if scrolled up (#5780)', async () => {
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(
+      <ChatView messages={messages} isStreaming={false} scrollToBottomSignal={0} />,
+    )
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // User scrolls up to read history — the scroll-to-bottom button appears
+    // and the count-change auto-follow would now leave them in place.
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // User sends a message: the parent bumps the signal. Even though they were
+    // scrolled up, the explicit action snaps the view back to the bottom and
+    // clears the scrolled-up flag (button disappears).
+    rerender(<ChatView messages={makeMessages(4)} isStreaming={false} scrollToBottomSignal={1} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('does not scroll on the initial scrollToBottomSignal value (#5780)', async () => {
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    render(<ChatView messages={messages} isStreaming={false} scrollToBottomSignal={7} />)
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // Scroll up; the initial signal value must NOT pull the view back down
+    // (only a genuine change to the nonce triggers the jump).
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(100)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
   it('preserves scrolled-up position when streaming ends mid-history-read (#4652)', async () => {
     // Repro for the AskUserQuestion scenario: streaming flips to false
     // when the question arrives. Previously, the streaming-end effect

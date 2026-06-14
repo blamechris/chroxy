@@ -134,6 +134,20 @@ export interface ChatViewProps {
    * hidden window because the component instance never unmounts.
    */
   hidden?: boolean
+  /**
+   * #5780 — monotonically-increasing nonce the parent bumps when the user
+   * performs an explicit "jump to the latest" action (sending a message,
+   * approving a plan, answering a question). Unlike the count-change
+   * auto-follow — which deliberately leaves a scrolled-up reader in place —
+   * a bump here ALWAYS snaps the view to the bottom and clears
+   * `userScrolledUp`, because the user just acted on the conversation and
+   * expects to see their input plus the incoming response. A nonce (rather
+   * than an imperative ref handle) keeps ChatView's memo wrapper intact and
+   * is robust to rapid sends: each distinct value fires the effect exactly
+   * once. The initial value is ignored (the mount effect already lands at
+   * the bottom); only changes trigger a scroll.
+   */
+  scrollToBottomSignal?: number
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -145,7 +159,14 @@ const TYPE_CLASS: Record<string, string> = {
   tool_use: 'tool',
 }
 
-const SCROLL_THRESHOLD = 60
+/**
+ * #5780 — "near the bottom" tolerance (px). A new incoming message/tool result
+ * auto-follows ONLY when the viewport is within this distance of the bottom, so
+ * a user who has scrolled up to read history keeps their position. Widened from
+ * 60 to 100 to match the standard chat affordance (a small manual nudge off the
+ * very bottom still counts as "following the conversation").
+ */
+const SCROLL_THRESHOLD = 100
 
 /**
  * #5561 — fallback `gap` between rows in `.chat-messages` (theme/components.css).
@@ -247,7 +268,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
@@ -505,6 +526,30 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage }: ChatView
       })
     }
   }, [dedupedMessages.length, userScrolledUp, isBusy])
+
+  // #5780 — explicit "jump to latest" on a user action (send / approve /
+  // answer). Watches the parent's `scrollToBottomSignal` nonce: whenever it
+  // changes we force the view to the bottom and clear `userScrolledUp`, even if
+  // the user had scrolled up to read history. This is the deliberate exception
+  // to the count-change auto-follow above — sending a message is the user
+  // asking to see their input plus the response, so we always follow. Seeded
+  // with the initial value so the first render (and mount) is a no-op; only a
+  // genuine bump scrolls. Robust to rapid sends: each distinct nonce fires
+  // once, and the RAF defers the write until after the new row has laid out so
+  // `scrollHeight` already includes it.
+  const lastScrollSignalRef = useRef(scrollToBottomSignal)
+  useEffect(() => {
+    if (scrollToBottomSignal === lastScrollSignalRef.current) return
+    lastScrollSignalRef.current = scrollToBottomSignal
+    setUserScrolledUp(false)
+    requestAnimationFrame(() => {
+      const el = containerRef.current
+      if (!el) return
+      programmaticScrollRef.current = true
+      el.scrollTop = el.scrollHeight
+      requestAnimationFrame(() => { programmaticScrollRef.current = false })
+    })
+  }, [scrollToBottomSignal])
 
   // During streaming, continuously scroll to bottom via RAF
   useEffect(() => {
