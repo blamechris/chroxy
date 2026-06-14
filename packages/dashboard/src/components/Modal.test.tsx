@@ -73,6 +73,28 @@ describe('Modal', () => {
     expect(onClose).toHaveBeenCalled()
   })
 
+  it('does not close on backdrop click when closeOnBackdrop is false (#5779)', () => {
+    const onClose = vi.fn()
+    render(
+      <Modal open onClose={onClose} title="Sticky" closeOnBackdrop={false}>
+        <p>Content</p>
+      </Modal>
+    )
+    fireEvent.click(screen.getByTestId('modal-overlay'))
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('still closes on Escape when closeOnBackdrop is false (#5779)', () => {
+    const onClose = vi.fn()
+    render(
+      <Modal open onClose={onClose} title="Sticky" closeOnBackdrop={false}>
+        <p>Content</p>
+      </Modal>
+    )
+    fireEvent.keyDown(document, { key: 'Escape' })
+    expect(onClose).toHaveBeenCalled()
+  })
+
   it('does not close when modal content clicked', () => {
     const onClose = vi.fn()
     render(
@@ -285,6 +307,19 @@ describe('CreateSessionModal', () => {
     )
     fireEvent.click(screen.getByText('Cancel'))
     expect(onClose).toHaveBeenCalled()
+  })
+
+  it('does not close (or discard input) on backdrop click (#5779)', () => {
+    const onClose = vi.fn()
+    render(
+      <CreateSessionModal open onClose={onClose} onCreate={vi.fn()} />
+    )
+    fireEvent.change(screen.getByPlaceholderText('Session name'), { target: { value: 'In progress' } })
+    fireEvent.click(screen.getByTestId('modal-overlay'))
+    expect(onClose).not.toHaveBeenCalled()
+    // The typed value survives the stray outside click.
+    const nameInput = screen.getByPlaceholderText('Session name') as HTMLInputElement
+    expect(nameInput.value).toBe('In progress')
   })
 
   it('clears fields when opened', () => {

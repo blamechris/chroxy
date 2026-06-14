@@ -504,7 +504,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [submit])
 
   return (
-    <Modal open={open} onClose={onClose} title="New Session">
+    <Modal open={open} onClose={onClose} title="New Session" closeOnBackdrop={false}>
       <input
         type="text"
         placeholder="Session name"

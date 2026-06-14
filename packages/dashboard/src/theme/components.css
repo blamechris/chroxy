@@ -5293,11 +5293,21 @@ button.sidebar-token-view-session-row:hover {
   min-width: 0;
 }
 
-.advanced-section .form-field--checkbox {
+/* #5774: checkbox + radio rows stack their controls vertically (one per line)
+   rather than competing as wrapping flex items on the row — otherwise the
+   row's flex-wrap squeezes each label down to its min-content width and the
+   text breaks one word per line. */
+.advanced-section .form-field--checkbox,
+.advanced-section .form-field[role='radiogroup'] {
   display: flex;
   flex-direction: column;
+  /* #5774: override the wrapping inherited from `.advanced-section .form-field`
+     above — once these are column stacks, leaving flex-wrap: wrap lets the
+     controls break into adjacent columns under a constrained height. Force a
+     single vertical stack. */
+  flex-wrap: nowrap;
   align-items: flex-start;
-  gap: 2px;
+  gap: 4px;
 }
 
 .advanced-section .checkbox-label {
@@ -5305,6 +5315,9 @@ button.sidebar-token-view-session-row:hover {
   align-items: center;
   gap: 6px;
   min-width: unset;
+  /* #5774: keep the control glued to the start of its label and let the label
+     text flow on natural lines instead of wrapping per word. */
+  align-self: stretch;
   cursor: pointer;
   color: var(--text-secondary);
   font-size: var(--text-sm);
@@ -5312,6 +5325,7 @@ button.sidebar-token-view-session-row:hover {
 
 .advanced-section .checkbox-label input[type='checkbox'] {
   cursor: pointer;
+  flex-shrink: 0;
 }
 
 /* #4244: tri-state radio group for skip-permissions. Stacks vertically with
@@ -5319,7 +5333,11 @@ button.sidebar-token-view-session-row:hover {
    the modal looks consistent. */
 .advanced-section .radio-label {
   display: flex;
-  align-items: center;
+  /* #5774: align the radio to the top of multi-line label text rather than
+     vertically centering, and stretch the row full-width so the label text
+     wraps naturally instead of one word per line. */
+  align-items: flex-start;
+  align-self: stretch;
   gap: 6px;
   min-width: unset;
   cursor: pointer;
@@ -5329,6 +5347,9 @@ button.sidebar-token-view-session-row:hover {
 
 .advanced-section .radio-label input[type='radio'] {
   cursor: pointer;
+  flex-shrink: 0;
+  /* Nudge the radio onto the first text line's baseline. */
+  margin-top: 2px;
 }
 
 .advanced-section .form-field-label {
