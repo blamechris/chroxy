@@ -124,15 +124,16 @@ swaps the refusal for a text-injection workaround.
 - **Default (`unset` or `0`) — OFF:** a single multi-select AskUserQuestion is
   torn down immediately with a visible, retryable error — *"Multi-select
   questions aren't supported here. Tap Retry to resend your request."* (error
-  code `ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED`). This fails loud rather than
-  driving a wrong keystroke or wedging the turn.
+  code `ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED`). This fails loudly rather
+  than driving a wrong keystroke or wedging the turn.
 - **`1` — ON:** the provider accepts the single-question multi-select form by
-  re-injecting the chosen option **labels, comma-joined**, as the *next user
-  message* to the TUI (the form was already denied at the permission hook before
-  it rendered, so Claude has stopped and is waiting for input). The model reads a
-  multi-select answer as comma-joined text anyway, so this matches the
-  structured-channel result.
-- **Multi-QUESTION forms (more than one question) are always refused**,
+  re-injecting the chosen labels as the *next user message* to the TUI,
+  formatted as `For "<question>": <label1>, <label2>` (one such line per
+  question, joined by newlines). The form was already denied at the permission
+  hook before it rendered, so Claude has stopped and is waiting for input. The
+  model reads a multi-select answer as comma-joined text anyway, so this matches
+  the structured-channel result.
+- **Multi-question forms (more than one question) are always refused**,
   regardless of this flag — they are denied at the permission hook and never
   driven.
 
