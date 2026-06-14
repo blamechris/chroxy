@@ -43,11 +43,12 @@ every skill into every repo, a repo pulls a skill the moment it needs one and th
   at which template hash. Lets `outdated`/`update` work from repo-local state.
 - **Targets** — the coding agents a skill is compiled for. `.claude/commands/<name>.md`
   (the customized install) is the provider-NEUTRAL source; `scripts/compile-skill-targets.mjs`
-  emits each agent's NATIVE format: `claude` → `.claude/skills/<name>/SKILL.md`,
-  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `~/.codex/prompts/<name>.md`.
-  The active list comes from the `targets:` line in `.claude/skill-profile.md` (prompt
-  the user if absent). This is what makes a skill model-agnostic — author once, run under
-  any model. The neutral arg token is `$ARGUMENTS`; the compiler maps it per agent.
+  emits each agent's NATIVE custom-command format: `claude` → `.claude/skills/<name>/SKILL.md`,
+  `gemini` → `.gemini/commands/<name>.toml`, `codex` → `~/.codex/prompts/<name>.md`. The active
+  list comes from the `targets:` line in `.claude/skill-profile.md` (prompt the user if absent;
+  the compiler falls back to `claude`). This is what makes a skill model-agnostic — author once,
+  run under any model. The neutral arg token is `$ARGUMENTS`; the compiler maps it per agent
+  (e.g. Gemini `{{args}}`). The compiler ships in the registry at `assets/compile-skill-targets.mjs`.
 
 ## Resolving the registry
 
@@ -131,19 +132,28 @@ note in the report that hashes may be stale. Record which source you used.
    (where `$REG` is the resolved registry clone). If it exits non-zero, fix the reported
    issues and re-lint before recording the lockfile — do not lock a skill that fails lint.
    Consumers can run the same linter as a pre-commit hook or in CI.
-7. **Record in the lockfile.** Create `.claude/skills.lock` (schema below) if absent,
-   then upsert `<name>` with the template `hash` and, when a `.claude/skill-profile.md`
-   exists, its `profileHash` (so `update` can tell when the *profile* changed, not just
-   the template).
-8. **Compile to native targets.** Read the `targets:` line from `.claude/skill-profile.md`
-   (e.g. `targets: claude, gemini, codex`). If the profile has no `targets:` line, the compiler
-   falls back to `claude` only — **ask the user** which agents to compile for (claude / gemini /
-   codex) and offer to record their choice in the profile. Then run:
-   `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
-   `--targets <list>` to override. This writes the native artifact for each target. The
-   command exits non-zero on any emit failure — treat that as a hard gate, fix and re-run
-   before locking. Codex emits to the user-global `~/.codex/prompts/` (not version-controlled,
-   deprecated upstream) — only when explicitly in `targets:`.
+7. **Compile to native targets.** Ensure the compiler exists in this repo (create `scripts/` if
+   absent). If `scripts/compile-skill-targets.mjs` is missing — or you're running `update`, so it
+   stays current with the registry — (re)fetch it: from a local clone,
+   `cp "$REG/assets/compile-skill-targets.mjs" scripts/`; on the network-only path (no local
+   clone), fetch it like the templates —
+   `gh api repos/blamechris/skill-templates/contents/assets/compile-skill-targets.mjs --jq '.content' | base64 -d > scripts/compile-skill-targets.mjs`.
+   Write it to `scripts/` and track it in VCS so it travels with the repo. Read the `targets:` line
+   from `.claude/skill-profile.md`;
+   if there is none, **ask the user** which agents to compile for (claude / gemini / codex) and
+   offer to record the choice in the profile (the compiler falls back to `claude` if unset). Then
+   run `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
+   `--targets <list>` to override. It writes the native artifact per target and exits non-zero on
+   any emit failure — treat that as a hard gate: fix and re-run before locking. Codex emits to the
+   user-global `~/.codex/prompts/` (not version-controlled, deprecated upstream) — only when
+   `codex` is explicitly a target. Keep the list of `targets` you compiled with for the next step.
+8. **Record in the lockfile.** Only after a successful compile, create `.claude/skills.lock`
+   (schema below) if absent and upsert `<name>` **atomically** with: the template `hash`; the
+   `profileHash` when a `.claude/skill-profile.md` exists (so `update` can tell when the *profile*
+   changed, not just the template); and the `targets` you just compiled with (so `remove` cleans
+   exactly the right native artifacts and `outdated` can detect target drift). Writing the entry
+   only after compile succeeds means a failed compile never leaves a half-written or
+   `targets`-less entry.
 9. **Report.** State the skill, the hash installed, the registry source used, the targets
    compiled (with output paths), and any markers dropped for lack of repo context.
 
@@ -157,9 +167,17 @@ note in the report that hashes may be stale. Record which source you used.
      `.claude/skill-profile.md` hash (the skill was tailored against an older profile);
    - **corruption drift** — the installed file fails a registry `guard` (some guard's
      `anyOf` regexes no longer match — a load-bearing section was lost).
+   - **target drift** — *only when the lock entry has a `targets` array* (a pre-`targets` install
+     with no such field is treated as "unknown" — fall back to disk inspection, never flagged just
+     for the field's absence): the profile's `targets:` list has an agent not in the lock entry's
+     `targets` (added to the profile but never compiled), or a recorded target's native artifact is
+     missing on disk — **excluding targets the compiler intentionally skips** (e.g. Gemini for a
+     body containing `{{…}}` / `!{…}` / `@{…}`, which is never emitted and so isn't real drift). A
+     plain recompile fixes genuine target drift — no registry fetch needed.
 3. Print the drifted skills with the reason, e.g. `name  abc1234 → def5678 (version)` or
-   `name  (guard miss: idempotency)`. If none, say so. (This is the consumer-side port of
-   the registry's `sync.sh` drift check — version stamp **and** content guards.)
+   `name  (guard miss: idempotency)` or `name  (target drift: gemini not compiled)`. If none, say
+   so. (This is the consumer-side port of the registry's `sync.sh` drift check — version stamp
+   **and** content guards.)
 
 ### `skill update [name]`
 
@@ -170,9 +188,11 @@ note in the report that hashes may be stale. Record which source you used.
 
 ### `skill remove <name>`
 
-Delete `.claude/commands/<name>.md`, its `.claude/skills.lock` entry, and every compiled
-native artifact: `.claude/skills/<name>/` (dir), `.gemini/commands/<name>.toml`, and (if
-codex was a target) `~/.codex/prompts/<name>.md`. Report what was removed.
+Read the skill's `targets` from its `.claude/skills.lock` entry, then delete
+`.claude/commands/<name>.md`, its lock entry, and exactly the native artifacts for those targets:
+`claude` → `.claude/skills/<name>/` (dir), `gemini` → `.gemini/commands/<name>.toml`,
+`codex` → `~/.codex/prompts/<name>.md`. If the lock entry has no `targets` (an older install),
+fall back to removing whichever of those three exist. Report what was removed.
 
 ## Lockfile schema (`.claude/skills.lock`)
 
@@ -180,8 +200,8 @@ codex was a target) `~/.codex/prompts/<name>.md`. Report what was removed.
 {
   "registry": "blamechris/skill-templates",
   "skills": {
-    "full-review": { "hash": "cc062bc", "installed": "2026-06-04", "profileHash": "3f1a9c2" },
-    "check-pr":    { "hash": "a10ef75", "installed": "2026-06-04" }
+    "full-review": { "hash": "cc062bc", "installed": "2026-06-04", "profileHash": "3f1a9c2", "targets": ["claude", "gemini"] },
+    "check-pr":    { "hash": "a10ef75", "installed": "2026-06-04", "targets": ["claude"] }
   }
 }
 ```
@@ -192,6 +212,10 @@ codex was a target) `~/.codex/prompts/<name>.md`. Report what was removed.
 - `profileHash` *(optional)* — short hash of `.claude/skill-profile.md` at install time.
   Present only when a profile existed. `outdated` flags profile drift when it no longer
   matches the current profile, so a changed profile triggers a re-tailor on `update`.
+- `targets` *(optional)* — the agents this skill was compiled for at install time
+  (e.g. `["claude", "gemini"]`). Written by the `add` compile step; `remove` uses it to delete
+  exactly the right native artifacts, and `outdated` uses it to detect target drift. Absent on
+  pre-targets installs — treat a missing `targets` as "unknown" and fall back to disk inspection.
 - The lockfile is the authoritative manifest; the per-file stamp is a convenient
   inline mirror. Keep them in agreement.
 
@@ -200,16 +224,16 @@ codex was a target) `~/.codex/prompts/<name>.md`. Report what was removed.
 - **The agent is the customizer.** No Haiku/API key — the agent running `/skill`
   tailors the template with full repo context, which is richer than a context-blind
   batch job. The self-validation step replaces the registry's automated `validate_output`.
-- **Auto-install on miss.** A repo or global `CLAUDE.md` rule should say: *asked to run
-  `/X`? Check the neutral source `.claude/commands/X.md` first. Missing → not installed →
-  `skill add X`. Present but the native artifact (`.claude/skills/X/SKILL.md`) is missing →
-  just not compiled → recompile with `compile-skill-targets.mjs --name X` (no registry
-  fetch). Then invoke.* That makes "use /full-review in a repo that lacks it" just work
-  without re-fetching when a recompile suffices.
+- **Auto-install on miss.** A repo or global `CLAUDE.md` rule should say: *asked to run `/X`?
+  Check the neutral source `.claude/commands/X.md`. Missing → not installed → `skill add X`.
+  Present but the native artifact (`.claude/skills/X/SKILL.md`) is missing → just not compiled →
+  recompile with `node scripts/compile-skill-targets.mjs --name X` (no registry fetch). Then invoke.* That
+  makes "use /full-review in a repo that lacks it" just work without re-fetching when a recompile
+  suffices.
 - **Compile is deterministic.** The generic→native transform lives in
-  `scripts/compile-skill-targets.mjs`, not in agent judgment — so the native artifacts are
-  reproducible. Editing a skill's generic source (`.claude/commands/<name>.md`) by hand?
-  Recompile with `node scripts/compile-skill-targets.mjs --name <name>`. `--dry-run` previews.
+  `scripts/compile-skill-targets.mjs`, not in agent judgment, so the native artifacts are
+  reproducible. Edited a skill's generic source (`.claude/commands/<name>.md`) by hand? Recompile
+  with `node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` previews).
 - **Idempotent.** Re-running `add` for a current skill is a no-op re-render; re-running
   for a moved template updates it. Safe to run anytime.
 - **Self-contained on first use.** `/skill` needs no customization to work — it ships
