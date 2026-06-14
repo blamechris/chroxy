@@ -13,37 +13,13 @@ import {
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
 import type { SessionInfo, SessionHealth } from '../store/connection';
-import type { ChatMessage } from '@chroxy/store-core';
+// #5759 — shared with the dashboard so the "live permission prompt" rule can't
+// drift between clients (it operates on the shared ChatMessage).
+import { countLivePermissionPrompts } from '@chroxy/store-core';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { getProviderInfo } from '../constants/providers';
 import { hapticMedium } from '../utils/haptics';
-
-/**
- * #5750 — count live, unanswered permission prompts in a session's messages so
- * a background tab can surface a "needs your permission" dot (mobile parity
- * with the dashboard's per-tab indicator, #5667/#5674).
- *
- * Mirrors the dashboard's `isLivePermissionPrompt` predicate
- * (packages/dashboard/src/utils/pendingPermissions.ts): a permission prompt is
- * `type:'prompt'` with a `requestId` + a future `expiresAt` and no `answered`
- * decision. The requestId+expiresAt pair distinguishes a permission prompt
- * from an AskUserQuestion (also `type:'prompt'`, but with neither), and the
- * `expiresAt > now` check clears the dot once the prompt times out (the expiry
- * handlers clear the prompt's options but do NOT set `answered`).
- *
- * NOTE: this predicate is duplicated from the dashboard. Converging both clients
- * onto a single store-core helper is tracked as a follow-up (see #5750).
- */
-export function countLivePermissionPrompts(messages: ChatMessage[], now: number): number {
-  let count = 0;
-  for (const m of messages) {
-    if (m.type === 'prompt' && !!m.requestId && !!m.expiresAt && m.expiresAt > now && !m.answered) {
-      count++;
-    }
-  }
-  return count;
-}
 
 /** Pulsing dot for busy sessions */
 function PulsingDot() {
