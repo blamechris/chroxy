@@ -51,23 +51,35 @@ function stripStamp(body) {
   return body.replace(/^<!--\s*skill-templates:.*?-->\s*$/gm, '').replace(/\n{3,}$/g, '\n').trimEnd() + '\n'
 }
 
-// First sentence of the first non-heading, non-blank paragraph -> a clean
-// one-line description for menus. Capped; ellipsis only when truncated.
+// First sentence of the first non-heading prose PARAGRAPH -> a clean one-line
+// description for menus. Accumulate the whole paragraph first (the source's first
+// sentence often wraps across several physical lines) so we don't return a dangling
+// half-sentence. Capped; ellipsis only when truncated.
 function deriveDescription(body, name) {
+  let para = ''
   for (const raw of body.split('\n')) {
     const line = raw.trim()
-    if (!line || line.startsWith('#') || line.startsWith('---') || line.startsWith('<!--')) continue
-    let desc = line.replace(/\s+/g, ' ').trim()
-    const dot = desc.search(/\.(\s|$)/)
-    if (dot !== -1 && dot < 160) desc = desc.slice(0, dot + 1)
-    if (desc.length > 160) desc = desc.slice(0, 157).trimEnd() + '...'
-    return desc
+    if (!line || line.startsWith('#') || line.startsWith('---') || line.startsWith('<!--')) {
+      if (para) break // blank/heading ends the first prose paragraph
+      continue
+    }
+    para = para ? `${para} ${line}` : line
   }
-  return `Project skill: /${name}`
+  if (!para) return `Project skill: /${name}`
+  let desc = para.replace(/\s+/g, ' ').trim()
+  const dot = desc.search(/\.(\s|$)/)
+  if (dot !== -1 && dot < 160) desc = desc.slice(0, dot + 1)
+  if (desc.length > 160) desc = desc.slice(0, 157).trimEnd() + '...'
+  return desc
+}
+
+// Escape a string for a double-quoted YAML/TOML scalar.
+function dqEscape(s) {
+  return s.replace(/\\/g, '\\\\').replace(/"/g, '\\"')
 }
 
 function yamlDq(s) {
-  return '"' + s.replace(/\\/g, '\\\\').replace(/"/g, '\\"') + '"'
+  return '"' + dqEscape(s) + '"'
 }
 
 // ---- emitters: (name, body, description, repo) -> { path, content } ----
@@ -100,11 +112,15 @@ function emitGemini(name, body, description, repo) {
     const esc = prompt.replace(/\\/g, '\\\\').replace(/"""/g, '\\"\\"\\"')
     promptBlock = `prompt = """\n${esc}"""`
   }
-  const descToml = description.includes("'") ? `"${description.replace(/\\/g, '\\\\').replace(/"/g, '\\"')}"` : `'${description}'`
+  const descToml = description.includes("'") ? `"${dqEscape(description)}"` : `'${description}'`
+  // Warn on positional $N args only when they appear OUTSIDE fenced code blocks —
+  // a bash `${1:-…}` inside a ```code``` block is a shell positional, not a Gemini
+  // arg-mapping concern, and would be a noisy false positive.
+  const prose = prompt.replace(/```[\s\S]*?```/g, '')
   return {
     path: join(repo, '.gemini/commands', `${name}.toml`),
     content: `description = ${descToml}\n${promptBlock}\n`,
-    warn: prompt.includes('$1') || prompt.includes('$2') ? `gemini: positional $N args have no Gemini equivalent (only {{args}})` : null,
+    warn: /\$[1-9]\b/.test(prose) ? `gemini: positional $N args have no Gemini equivalent (only {{args}})` : null,
   }
 }
 
@@ -162,6 +178,13 @@ function main() {
   }
 
   const names = args.name ? [args.name] : readdirSync(cmdDir).filter((f) => f.endsWith('.md')).map((f) => f.replace(/\.md$/, ''))
+  // `--name` is user-facing; a name with a path separator or `..` would let the
+  // emitters write outside the intended dirs (incl. ~/.codex). Reject up front.
+  const unsafe = names.filter((n) => /[/\\]/.test(n) || n.split(/[/\\]/).includes('..') || n.includes('..'))
+  if (unsafe.length) {
+    console.error(`Unsafe skill name(s): ${unsafe.join(', ')} — names must not contain "/", "\\", or "..".`)
+    process.exit(1)
+  }
   let failed = 0
   let skipped = 0
   console.log(`Compiling ${names.length} skill(s) -> [${targets.join(', ')}]${args.dryRun ? ' (dry-run)' : ''}\n`)

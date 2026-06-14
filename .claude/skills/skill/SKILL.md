@@ -1,5 +1,5 @@
 ---
-description: "The package manager for Claude Code skills — `npm`/`brew` for the skill registry"
+description: "The package manager for Claude Code skills — `npm`/`brew` for the skill registry at [`blamechris/skill-templates`](https://github.com/blamechris/skill-templa..."
 ---
 
 # /skill
@@ -136,9 +136,9 @@ note in the report that hashes may be stale. Record which source you used.
    exists, its `profileHash` (so `update` can tell when the *profile* changed, not just
    the template).
 8. **Compile to native targets.** Read the `targets:` line from `.claude/skill-profile.md`
-   (e.g. `targets: claude, gemini`). If the profile has no `targets:` line, **ask the user**
-   which agents to compile for (claude / gemini / codex) and offer to record their choice in
-   the profile. Then run:
+   (e.g. `targets: claude, gemini, codex`). If the profile has no `targets:` line, the compiler
+   falls back to `claude` only — **ask the user** which agents to compile for (claude / gemini /
+   codex) and offer to record their choice in the profile. Then run:
    `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
    `--targets <list>` to override. This writes the native artifact for each target. The
    command exits non-zero on any emit failure — treat that as a hard gate, fix and re-run

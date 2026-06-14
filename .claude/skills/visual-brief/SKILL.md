@@ -1,5 +1,5 @@
 ---
-description: "Generate a polished, **self-contained HTML brief** of a topic — session status,"
+description: "Generate a polished, **self-contained HTML brief** of a topic — session status, a plan, or a code walkthrough — saved to a durable folder and opened in the b..."
 ---
 
 # /visual-brief

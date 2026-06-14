@@ -94,8 +94,9 @@ custom-command format, so the same skill is first-party under whichever model yo
 - **codex** *(opt-in)* → `~/.codex/prompts/<name>.md` (invoked `/prompts:<name>`; user-global,
   not version-controlled, deprecated upstream).
 
-The active target list is the `targets:` line in `.claude/skill-profile.md` (default
-`claude, gemini`). After editing a skill's generic source by hand, recompile:
+The active target list is the `targets:` line in `.claude/skill-profile.md` (this repo:
+`claude, gemini, codex`); with no `targets:` line the compiler falls back to `claude` only
+and `/skill` prompts you. After editing a skill's generic source by hand, recompile:
 `node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` to preview).
 
 This repo carries `.claude/skill-profile.md` (the customization profile + `targets:`) and
