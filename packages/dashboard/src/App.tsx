@@ -1520,19 +1520,24 @@ export function App() {
   // #5786 — approving a permission/plan or answering an AskUserQuestion is, like
   // sending, an explicit "show me the latest" action: snap the chat to the
   // bottom so the follow-up response scrolls into view even if the user had
-  // scrolled up to read history. These wrappers bump the same nonce handleSend
-  // does, then forward to the underlying store actions unchanged (same args,
-  // same return). They're passed to useMessageRenderer (and the banner handlers
-  // below) in place of the raw store actions so every approve/answer call site
-  // gets the snap for free.
+  // scrolled up to read history. These wrappers forward to the underlying store
+  // actions unchanged (same args, same return) and bump the same nonce
+  // handleSend does — but AFTER the action runs and only when it was accepted
+  // (sendPermissionResponse / sendUserQuestionResponse return false when the
+  // socket isn't OPEN; review #5786). Bumping after the call lets the action's
+  // store updates land first, so ChatView's RAF scroll runs once the follow-up
+  // has rendered. A non-false result (incl. 'queued') still bumps — the message
+  // will send and produce a response.
   const respondToPermission = useCallback<typeof sendPermissionResponse>((...args) => {
-    setScrollToBottomSignal(n => n + 1)
-    return sendPermissionResponse(...args)
+    const result = sendPermissionResponse(...args)
+    if (result !== false) setScrollToBottomSignal(n => n + 1)
+    return result
   }, [sendPermissionResponse])
 
   const respondToUserQuestion = useCallback<typeof sendUserQuestionResponse>((...args) => {
-    setScrollToBottomSignal(n => n + 1)
-    return sendUserQuestionResponse(...args)
+    const result = sendUserQuestionResponse(...args)
+    if (result !== false) setScrollToBottomSignal(n => n + 1)
+    return result
   }, [sendUserQuestionResponse])
 
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
