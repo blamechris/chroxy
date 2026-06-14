@@ -90,6 +90,7 @@ function makeMockHost(overrides = {}) {
     // calling, so the typed shape is consumed only by callers that branch on it.
     sendMessage: (text) => {
       if (host._isBusy) { errors.push('Already processing a message'); return Promise.resolve({ ok: false, reason: 'busy' }) }
+      if (!host._processReady || !host._term || host._ptyExited) { errors.push('Session not running'); return Promise.resolve({ ok: false, reason: 'not_runnable' }) }
       sent.push(text); return Promise.resolve()
     },
     // Back-compat getter: most-recently-set entry (the no-toolUseId path).
