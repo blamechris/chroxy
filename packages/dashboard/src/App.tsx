@@ -401,6 +401,12 @@ export function App() {
   const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
+  // #5780 — nonce bumped on the explicit "jump to latest" user action. Today
+  // that is send (handleSend); wiring approve/answer is tracked in #5786.
+  // Passed to every ChatView so it snaps to the bottom even
+  // when the user had scrolled up to read history — see ChatView's
+  // scrollToBottomSignal effect.
+  const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
   const sendPermissionResponse = useConnectionStore(s => s.sendPermissionResponse)
   const switchSession = useConnectionStore(s => s.switchSession)
@@ -1375,6 +1381,9 @@ export function App() {
     const blockMap = new Map(blocks.map(b => [b.id, b.content]))
     const expanded = blockMap.size > 0 ? expandPasteMarkers(text, blockMap) : text
     sendInput(expanded, wire.length > 0 ? wire : undefined)
+    // #5780 — sending is an explicit "show me the latest" action: snap the
+    // chat to the bottom even if the user had scrolled up before typing.
+    setScrollToBottomSignal(n => n + 1)
     setFileAttachments([])
     setImageAttachments([])
     // Clear draft + pasted-text blocks for the session that sent the message.
@@ -1957,6 +1966,7 @@ export function App() {
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
+                        scrollToBottomSignal={scrollToBottomSignal}
                       />
                     }
                     second={
@@ -1998,6 +2008,7 @@ export function App() {
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
                         hidden={viewMode !== 'chat'}
+                        scrollToBottomSignal={scrollToBottomSignal}
                       />
                     </div>
                     <div
