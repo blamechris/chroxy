@@ -186,6 +186,11 @@ export interface ProviderCapabilities {
   // method existence — only providers whose session class implements
   // setPermissionRules report this as true (#3072).
   sessionRules?: boolean;
+  // #5791 — claude-tui only: true when the daemon will reinject a single
+  // multi-select AskUserQuestion answer (CHROXY_TUI_MULTISELECT_REINJECT).
+  // Gates the multi-select checkbox affordance so the client doesn't offer a
+  // form the server refuses.
+  multiSelectReinject?: boolean;
 }
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing detail.

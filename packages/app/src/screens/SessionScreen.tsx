@@ -270,10 +270,14 @@ export function SessionScreen() {
     () => providerSupportsMultiQuestion(activeSessionProvider),
     [activeSessionProvider],
   );
-  const allowSingleMultiSelect = useMemo(
-    () => providerSupportsSingleMultiSelect(activeSessionProvider),
-    [activeSessionProvider],
-  );
+  // #5791 — claude-tui's single multiSelect is gated on the server-advertised
+  // `multiSelectReinject` capability (the CHROXY_TUI_MULTISELECT_REINJECT flag),
+  // not just the provider name, so the client doesn't offer a form the server
+  // would refuse. Pass the active provider's raw capabilities to the predicate.
+  const allowSingleMultiSelect = useMemo(() => {
+    const caps = availableProviders.find((p) => p.name === activeSessionProvider)?.capabilities;
+    return providerSupportsSingleMultiSelect(activeSessionProvider, caps);
+  }, [activeSessionProvider, availableProviders]);
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);

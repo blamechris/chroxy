@@ -140,19 +140,37 @@ export function providerSupportsMultiQuestion(provider: string | null | undefine
 }
 
 /**
- * Can this provider render a SINGLE-question multi-select AskUserQuestion as a
- * checkbox form? True for every structured-channel provider PLUS claude-tui,
- * which re-injects the chosen labels as one text string via the #5776 reinject
- * path. The plain text-channel CLI providers (claude-cli, docker-cli, docker)
- * cannot.
- *
- * Note: claude-tui's reinject is itself gated server-side by
- * CHROXY_TUI_MULTISELECT_REINJECT (default OFF). Wiring that capability to the
- * client so the form is only offered when the server will honor it is tracked
- * separately in #5791; this predicate preserves the existing name-based gate.
+ * The slice of a provider's advertised `capabilities` that the AskUserQuestion
+ * render predicates consult. Comes from the server over the wire
+ * (`availableProviders[].capabilities`, see server `providers.js`/`listProviders`).
  */
-export function providerSupportsSingleMultiSelect(provider: string | null | undefined): boolean {
+export interface ProviderRenderCapabilities {
+  /**
+   * #5791 — claude-tui only honors a single multi-select AskUserQuestion when
+   * CHROXY_TUI_MULTISELECT_REINJECT is enabled on the daemon. The server
+   * surfaces that as this capability bit so the client can gate the form.
+   */
+  multiSelectReinject?: boolean
+}
+
+/**
+ * Can this provider render a SINGLE-question multi-select AskUserQuestion as a
+ * checkbox form? True for every structured-channel provider. claude-tui can
+ * too — but ONLY when the server advertises `multiSelectReinject` (the #5776
+ * reinject path, gated by CHROXY_TUI_MULTISELECT_REINJECT, default OFF). The
+ * plain text-channel CLI providers (claude-cli, docker-cli, docker) cannot.
+ *
+ * #5791 — passing `caps` closes the split-brain: previously claude-tui got the
+ * form unconditionally on the client while the server refused it by default,
+ * so the user submitted a form that was torn down. Now the affordance tracks
+ * the server's real capability. With no `caps` (capability unknown) claude-tui
+ * is treated as NOT supported, matching the server's default-OFF refusal.
+ */
+export function providerSupportsSingleMultiSelect(
+  provider: string | null | undefined,
+  caps?: ProviderRenderCapabilities | null,
+): boolean {
   if (!provider) return false
-  if (provider === 'claude-tui') return true
+  if (provider === 'claude-tui') return caps?.multiSelectReinject === true
   return getProviderInfo(provider).type !== 'cli'
 }
