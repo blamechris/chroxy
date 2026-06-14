@@ -72,7 +72,7 @@ export function buildPromptSessionLabel(
   return provider ? `${name} · ${provider}` : name;
 }
 
-function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
+function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
   onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
   /**
@@ -91,6 +91,15 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
    * there. Mirrors the dashboard's `allowMultiQuestionForm` gate.
    */
   allowMultiQuestion?: boolean;
+  /**
+   * #5773 — opt-in to render a SINGLE-question multiSelect as the checkbox
+   * `MultiQuestionForm` (it handles a length-1 array) instead of single-select
+   * option buttons. A multi-select AskUserQuestion from the TUI is almost
+   * always one question; without this the user could only pick one. True for
+   * the SDK-family providers (alongside `allowMultiQuestion`) and for claude-tui
+   * via the multi-select reinject path; off for claude-cli.
+   */
+  allowSingleMultiSelect?: boolean;
   isSelected: boolean;
   isSelecting: boolean;
   onLongPress: () => void;
@@ -191,8 +200,19 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   // single-question pins keep passing.
   const isMultiQuestion =
     isPrompt && Array.isArray(message.questions) && message.questions.length > 1;
+  // #5773 — a single-question multiSelect uses the SAME checkbox form +
+  // structured-summary path as a multi-question form (the form handles a
+  // length-1 array, and submit routes through onSubmitMultiQuestion just like
+  // the multi-question case). `useMultiForm` collapses both into one condition:
+  // a >1-question form when allowMultiQuestion, OR a single multiSelect when
+  // allowSingleMultiSelect (claude-tui reinject + SDK-family; off for claude-cli).
+  const isSingleMultiSelect =
+    isPrompt && Array.isArray(message.questions) && message.questions.length === 1
+    && message.questions[0]?.multiSelect === true;
+  const useMultiForm =
+    (isMultiQuestion && !!allowMultiQuestion) || (isSingleMultiSelect && !!allowSingleMultiSelect);
   const showMultiQuestionForm =
-    isMultiQuestion && !!allowMultiQuestion && message.answered == null && !isExpired;
+    useMultiForm && message.answered == null && !isExpired;
   // #4973 — the per-question structured summary chip needs the
   // `answeredAnswers` map (recorded by `markPromptAnsweredMulti` on the
   // client that submitted). When a multi-question prompt is answered but
@@ -201,17 +221,15 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   // flat `message.answered` summary text (Copilot review) so the answer
   // is never shown as blank.
   const hasMultiQuestionAnswers =
-    isMultiQuestion &&
-    !!allowMultiQuestion &&
+    useMultiForm &&
     message.answered != null &&
     message.answeredAnswers != null;
   const showMultiQuestionFallbackSummary =
-    isMultiQuestion &&
-    !!allowMultiQuestion &&
+    useMultiForm &&
     message.answered != null &&
     message.answeredAnswers == null;
   const showMultiQuestionSummary =
-    isMultiQuestion && !!allowMultiQuestion && message.answered != null;
+    useMultiForm && message.answered != null;
   // #4973 — per-question display labels for the post-answer summary chip.
   // Maps each question's chosen value(s) (from the structured
   // `answeredAnswers` map) back to its option label(s), comma-joined for

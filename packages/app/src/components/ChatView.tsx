@@ -63,6 +63,12 @@ export interface ChatViewProps {
    * `allowMultiQuestionForm` gate.
    */
   allowMultiQuestion?: boolean;
+  /**
+   * #5773 — opt-in to render a SINGLE-question multiSelect as a checkbox form
+   * (passed through to MessageBubble). True for the SDK family and claude-tui
+   * (multi-select reinject); off for claude-cli.
+   */
+  allowSingleMultiSelect?: boolean;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
@@ -140,6 +146,7 @@ export function ChatView({
   onSelectOption,
   onSubmitMultiQuestion,
   allowMultiQuestion,
+  allowSingleMultiSelect,
   isCliMode,
   selectedIds,
   isSelecting,
@@ -402,6 +409,7 @@ export function ChatView({
             reduceMotion={reduceMotion}
           >
             <MessageBubble
+              allowSingleMultiSelect={allowSingleMultiSelect}
               message={msg}
               onSelectOption={onSelectOption}
               onSubmitMultiQuestion={onSubmitMultiQuestion}
@@ -441,6 +449,7 @@ export function ChatView({
       onSelectOption,
       onSubmitMultiQuestion,
       allowMultiQuestion,
+      allowSingleMultiSelect,
       chatTailMessageId,
       lastUserInputContent,
       sendInput,

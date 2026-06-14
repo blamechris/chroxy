@@ -64,6 +64,7 @@ function render(
   message: ChatMessage,
   props: {
     allowMultiQuestion?: boolean;
+    allowSingleMultiSelect?: boolean;
     onSubmitMultiQuestion?: jest.Mock;
     onSelectOption?: jest.Mock;
   } = {},
@@ -81,10 +82,40 @@ function render(
         onSelectOption={props.onSelectOption ?? jest.fn()}
         onSubmitMultiQuestion={props.onSubmitMultiQuestion}
         allowMultiQuestion={props.allowMultiQuestion}
+        allowSingleMultiSelect={props.allowSingleMultiSelect}
       />,
     );
   });
   return tree;
+}
+
+// #5773 — a single-question multiSelect.
+function singleMultiSelectPrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
+  return {
+    id: 'sm-1',
+    type: 'prompt',
+    content: 'Pick toppings',
+    timestamp: Date.now(),
+    toolUseId: 'toolu_single_multi',
+    tool: 'AskUserQuestion',
+    options: [
+      { label: 'Cheese', value: 'Cheese' },
+      { label: 'Onion', value: 'Onion' },
+      { label: 'Pepper', value: 'Pepper' },
+    ],
+    questions: [
+      {
+        question: 'Pick toppings',
+        multiSelect: true,
+        options: [
+          { label: 'Cheese', value: 'Cheese' },
+          { label: 'Onion', value: 'Onion' },
+          { label: 'Pepper', value: 'Pepper' },
+        ],
+      },
+    ],
+    ...overrides,
+  } as ChatMessage;
 }
 
 // react-test-renderer surfaces a testID on both the composite and the
@@ -217,5 +248,37 @@ describe('MessageBubble multi-question form (#4973)', () => {
     expect(flat.props.children).toBe(
       'Q1 — deploy to production?: approve | Q2 — which areas to verify?: app, server',
     );
+  });
+});
+
+describe('MessageBubble single-question multiSelect (#5773)', () => {
+  it('renders the checkbox form when allowSingleMultiSelect is true', () => {
+    const tree = render(singleMultiSelectPrompt(), { allowSingleMultiSelect: true });
+    expect(present(tree, 'question-prompt-multi')).toBe(true);
+    expect(present(tree, 'question-multi-submit')).toBe(true);
+  });
+
+  it('forwards a string[] answers map on submit', () => {
+    const onSubmitMultiQuestion = jest.fn();
+    const tree = render(singleMultiSelectPrompt(), {
+      allowSingleMultiSelect: true,
+      onSubmitMultiQuestion,
+    });
+    tap(tree, 'question-multi-option-0-Cheese');
+    tap(tree, 'question-multi-option-0-Pepper');
+    tap(tree, 'question-multi-submit');
+    expect(onSubmitMultiQuestion).toHaveBeenCalledTimes(1);
+    expect(onSubmitMultiQuestion).toHaveBeenCalledWith(
+      { 'Pick toppings': ['Cheese', 'Pepper'] },
+      'sm-1',
+      'toolu_single_multi',
+    );
+  });
+
+  it('falls back to single-select option buttons when allowSingleMultiSelect is false (claude-cli)', () => {
+    const tree = render(singleMultiSelectPrompt(), { allowSingleMultiSelect: false });
+    expect(present(tree, 'question-prompt-multi')).toBe(false);
+    expect(present(tree, 'approval-button-Cheese')).toBe(true);
+    expect(present(tree, 'approval-button-Onion')).toBe(true);
   });
 });
