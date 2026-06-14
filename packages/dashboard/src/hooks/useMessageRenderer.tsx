@@ -148,7 +148,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           // `allowMultiQuestionForm` above so the flag flips correctly
           // on session-switch without a full re-render of every prompt.
           allowMultiQuestion={allowMultiQuestionForm}
-          // #5773 — render a SINGLE-question multiSelect as a checkbox form.
+          // #5776 — render a SINGLE-question multiSelect as a checkbox form.
           // True wherever a structured multi-answer can be consumed: the
           // SDK-family providers (already gated by allowMultiQuestionForm) AND
           // claude-tui via the multi-select reinject path. claude-cli is

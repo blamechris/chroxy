@@ -36,7 +36,7 @@
  *    `_clearFirstOutputWatchdog`, `_streamStallTimeout`, `_resultTimeout`,
  *    `_hardTimeout`, `_nowMonotonic`.
  *  - Misc: `_term`, `_log`, `emit` (the session is an EventEmitter),
- *    `sendMessage` (#5773 multi-select reinject — start a new turn with the
+ *    `sendMessage` (#5776 multi-select reinject — start a new turn with the
  *    formatted answer text when the denied multi-select form has no live form
  *    to drive).
  *
@@ -115,7 +115,7 @@ const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 // not yet captured. Prior wedge analysis: #4635, #4867.
 export const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
 
-// #5773 (Phase 0) — multi-select reinject spike. claude TUI is keyboard-only
+// #5776 (Phase 0) — multi-select reinject spike. claude TUI is keyboard-only
 // and exposes no structured answer channel, so multi-select forms are denied at
 // permission-hook.sh and (defense-in-depth) refused here. The reinject path
 // flips the strategy: instead of refusing, format the user's selection into a
@@ -130,7 +130,7 @@ export function multiSelectReinjectEnabled() {
   return process.env.CHROXY_TUI_MULTISELECT_REINJECT === '1'
 }
 
-// #5773 — parse a single question's answersMap value into an array of selected
+// #5776 — parse a single question's answersMap value into an array of selected
 // option LABELS. Mirrors the multi-select parsing in resolveQuestionKeystrokes
 // (native array post-#4735 / JSON-encoded array / comma-joined fallback) so the
 // reinject formatter and the keystroke driver agree on what the user picked.
@@ -145,11 +145,11 @@ function parseSelectedLabels(raw) {
   return []
 }
 
-// #5773 — format the pending questions + answersMap into the plain-text answer
+// #5776 — format the pending questions + answersMap into the plain-text answer
 // chroxy reinjects as the next user message. Uses option LABELS (not positional
 // digits/letters) so the answer is unambiguous to the model regardless of option
 // ordering. Returns '' when nothing resolvable was selected (caller falls back to
-// teardown). Free-text/"Other" combine is deferred to Phase 1 (#5773 option B).
+// teardown). Free-text/"Other" combine is deferred to Phase 1 (#5776 option B).
 export function formatMultiSelectReinject(questions, answersMap) {
   const map = (answersMap && typeof answersMap === 'object') ? answersMap : {}
   const lines = []
@@ -300,7 +300,7 @@ export class FormDriver {
     // since #4648 and still flow through the assembler below if hook-bypassed —
     // that dead path is removed in the follow-up cleanup.)
     if (pendingQuestions.length <= 1 && pendingQuestions.some((q) => q && q.multiSelect === true)) {
-      // #5773 (Phase 0) — reinject path: format the selection into text and feed
+      // #5776 (Phase 0) — reinject path: format the selection into text and feed
       // it to claude as a new turn instead of driving (un-drivable) keystrokes.
       // The form was denied at permission-hook.sh before it rendered, so there is
       // no live form and no PostToolUse — claude has stopped and is waiting for
@@ -309,9 +309,9 @@ export class FormDriver {
       if (multiSelectReinjectEnabled()) {
         const reinjectText = formatMultiSelectReinject(pendingQuestions, answersMap)
         if (opts && typeof opts.freeformText === 'string' && opts.freeformText.length > 0) {
-          // Phase 1 (#5773 option B) — free-text combine deferred. Log so a
+          // Phase 1 (#5776 option B) — free-text combine deferred. Log so a
           // dropped custom answer is visible rather than silent.
-          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject dropping freeformText (Phase 1, #5773 option B) tool=${prevToolUseId || '?'}`)
+          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject dropping freeformText (Phase 1, #5776 option B) tool=${prevToolUseId || '?'}`)
         }
         if (reinjectText.length === 0) {
           // Nothing resolvable selected — recover via teardown rather than send
@@ -325,7 +325,7 @@ export class FormDriver {
           })
           return
         }
-        // #5773 — the reinject only works once the in-flight (denied) turn has
+        // #5776 — the reinject only works once the in-flight (denied) turn has
         // wound down to idle. sendMessage() early-returns (emit 'error' + bare
         // return — NOT a Promise rejection, so the .catch below can't observe it)
         // when _isBusy is still true. In the normal flow the model stops on the

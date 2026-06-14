@@ -242,7 +242,7 @@ describe('permission-hook.sh — single multi-select AskUserQuestion deny (#5771
   })
 })
 
-describe('permission-hook.sh — single multi-select reinject deny-reason (#5773)', () => {
+describe('permission-hook.sh — single multi-select reinject deny-reason (#5776)', () => {
   // With CHROXY_TUI_MULTISELECT_REINJECT=1 the multi-select form is STILL denied
   // (that suppresses claude TUI's un-drivable form) but the reason steers the
   // model to STOP and wait for the selection as its next message instead of

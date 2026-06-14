@@ -955,11 +955,11 @@ describe('QuestionPrompt', () => {
   })
 })
 
-// #5773 — a SINGLE-question multiSelect must render as a checkbox form so the
+// #5776 — a SINGLE-question multiSelect must render as a checkbox form so the
 // user can pick several, gated by allowSingleMultiSelect (the multi-select
 // reinject path enables it for claude-tui; SDK-family providers via
 // allowMultiQuestion; claude-cli stays on single-select).
-describe('QuestionPrompt — single-question multiSelect (#5773)', () => {
+describe('QuestionPrompt — single-question multiSelect (#5776)', () => {
   const singleMultiOptions = [
     { label: 'Cheese', value: 'Cheese' },
     { label: 'Onion', value: 'Onion' },

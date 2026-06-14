@@ -102,7 +102,7 @@ export interface QuestionPromptProps {
    */
   allowMultiQuestion?: boolean
   /**
-   * #5773 — opt-in to render a SINGLE-question multiSelect as a checkbox
+   * #5776 — opt-in to render a SINGLE-question multiSelect as a checkbox
    * form (reusing MultiQuestionForm) instead of single-select buttons.
    * A multi-select AskUserQuestion from the TUI is almost always one
    * question, so without this it renders as radio buttons and the user
@@ -166,7 +166,7 @@ export function QuestionPrompt({ question, options, answered, questions, allowMu
     return <MultiQuestionDeferredNotice count={questions.length} />
   }
 
-  // #5773 — a SINGLE-question multiSelect renders as a checkbox form (reusing
+  // #5776 — a SINGLE-question multiSelect renders as a checkbox form (reusing
   // MultiQuestionForm, which handles a length-1 array and emits an answersMap
   // keyed by question text with the chosen labels as a string[]). Without this
   // it would fall through to SingleQuestionPrompt's radio buttons and the user

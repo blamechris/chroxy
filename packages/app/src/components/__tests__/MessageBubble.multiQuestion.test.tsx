@@ -89,7 +89,7 @@ function render(
   return tree;
 }
 
-// #5773 — a single-question multiSelect.
+// #5776 — a single-question multiSelect.
 function singleMultiSelectPrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
     id: 'sm-1',
@@ -251,7 +251,7 @@ describe('MessageBubble multi-question form (#4973)', () => {
   });
 });
 
-describe('MessageBubble single-question multiSelect (#5773)', () => {
+describe('MessageBubble single-question multiSelect (#5776)', () => {
   it('renders the checkbox form when allowSingleMultiSelect is true', () => {
     const tree = render(singleMultiSelectPrompt(), { allowSingleMultiSelect: true });
     expect(present(tree, 'question-prompt-multi')).toBe(true);

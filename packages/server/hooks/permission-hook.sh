@@ -102,7 +102,7 @@ EOF
     exit 0
   fi
   if [ "$QUESTION_COUNT" = "1" ] && [ "$HAS_MULTISELECT" = "1" ]; then
-    # #5773 (Phase 0) — when the multi-select reinject spike is enabled, the
+    # #5776 (Phase 0) — when the multi-select reinject spike is enabled, the
     # Chroxy client renders the multi-select form itself and delivers the user's
     # selection as a follow-up message. Steer the model to STOP and wait for that
     # message rather than decompose into single-select asks. Still a deny (that is

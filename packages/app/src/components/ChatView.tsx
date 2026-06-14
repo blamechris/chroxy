@@ -64,7 +64,7 @@ export interface ChatViewProps {
    */
   allowMultiQuestion?: boolean;
   /**
-   * #5773 — opt-in to render a SINGLE-question multiSelect as a checkbox form
+   * #5776 — opt-in to render a SINGLE-question multiSelect as a checkbox form
    * (passed through to MessageBubble). True for the SDK family and claude-tui
    * (multi-select reinject); off for claude-cli.
    */

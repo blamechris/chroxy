@@ -92,7 +92,7 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
    */
   allowMultiQuestion?: boolean;
   /**
-   * #5773 — opt-in to render a SINGLE-question multiSelect as the checkbox
+   * #5776 — opt-in to render a SINGLE-question multiSelect as the checkbox
    * `MultiQuestionForm` (it handles a length-1 array) instead of single-select
    * option buttons. A multi-select AskUserQuestion from the TUI is almost
    * always one question; without this the user could only pick one. True for
@@ -200,7 +200,7 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   // single-question pins keep passing.
   const isMultiQuestion =
     isPrompt && Array.isArray(message.questions) && message.questions.length > 1;
-  // #5773 — a single-question multiSelect uses the SAME checkbox form +
+  // #5776 — a single-question multiSelect uses the SAME checkbox form +
   // structured-summary path as a multi-question form (the form handles a
   // length-1 array, and submit routes through onSubmitMultiQuestion just like
   // the multi-question case). `useMultiForm` collapses both into one condition:
