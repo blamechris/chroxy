@@ -6,7 +6,7 @@ Nine first-party providers ship built-in (one, `claude-channel`, is a research-p
 
 - `claude-sdk` — **default**. Claude Code via the `@anthropic-ai/claude-agent-sdk` (in-process).
 - `claude-cli` — Legacy `claude -p` subprocess. Use if the SDK is unavailable or you need plan mode.
-- `claude-tui` — Interactive `claude` TUI driven under a PTY. Bills as your Claude subscription's interactive allowance and bypasses the programmatic credit pool. See [Billing & API usage](../README.md#billing--api-usage).
+- `claude-tui` — Interactive `claude` TUI driven under a PTY. Drives the interactive CLI, which **today** bills against your Claude subscription's interactive allowance rather than the programmatic credit pool — a best-effort bet, not a guarantee: Anthropic may reclassify or enforce against third-party apps that drive a subscription login programmatically. See [Billing & API usage](../README.md#billing--api-usage).
 - `claude-channel` — **Research preview, scaffold only (not yet runnable).** Will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`): same subscription billing as `claude-tui`, but a documented protocol instead of a TUI scrape, and — once the backend lands — live streaming plus a first-party permission relay. See [`claude-channel`](#claude-channel-research-preview).
 - `claude-byok` — "Bring your own key": the Anthropic Messages API driven directly via `@anthropic-ai/sdk`, no `claude` binary. Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP servers).
 - `deepseek` — DeepSeek's Anthropic-compatible API. A subclass of `claude-byok` — same agent loop, DeepSeek credentials/endpoint/pricing.
