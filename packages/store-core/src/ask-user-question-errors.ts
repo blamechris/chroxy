@@ -25,7 +25,10 @@
 
 /**
  * The set of AskUserQuestion teardown error codes that carry a "Tap Retry to
- * resend your request" affordance. Frozen so callers can't mutate it.
+ * resend your request" affordance. Typed as `ReadonlySet` so TS consumers can't
+ * `.add()`/`.delete()` it — the runtime Set is not actually frozen (Object.freeze
+ * doesn't lock a Set's contents), so treat it as immutable by contract. Prefer
+ * `isRetryableAskUserQuestionError()` over reaching into the set directly.
  */
 export const RETRYABLE_ASK_USER_QUESTION_ERROR_CODES: ReadonlySet<string> =
   new Set([

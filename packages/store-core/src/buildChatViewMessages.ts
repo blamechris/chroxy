@@ -188,16 +188,19 @@ export function buildChatViewMessages(
   // render (the AskUserQuestionStallChip rendered for the error bubble
   // below it carries the retry affordance).
   const stalledPromptIds = new Set<string>()
-  let lastStallIndex = -1
+  // Index of the most recent retryable AskUserQuestion teardown error (STALL
+  // plus the multi-select / multi-question codes — see
+  // isRetryableAskUserQuestionError); prompts before it are dead and suppressed.
+  let lastRetryableErrorIndex = -1
   for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
     const m = storeMessages[i]!
     if (m.type === 'error' && isRetryableAskUserQuestionError(m.code)) {
-      lastStallIndex = i
+      lastRetryableErrorIndex = i
       break
     }
   }
-  if (lastStallIndex >= 0) {
-    for (let i = 0; i < lastStallIndex; i += 1) {
+  if (lastRetryableErrorIndex >= 0) {
+    for (let i = 0; i < lastRetryableErrorIndex; i += 1) {
       const m = storeMessages[i]!
       if (m.type === 'prompt' && !m.answered) stalledPromptIds.add(m.id)
     }
