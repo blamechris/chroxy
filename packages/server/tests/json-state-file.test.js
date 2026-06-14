@@ -157,5 +157,17 @@ describe('JsonStateFile (#5580)', () => {
       assert.throws(() => saveJsonState(dir, { a: 1 }, { fsync: true, tmpSuffix: '.x.tmp' }))
       assert.ok(!existsSync(`${dir}.x.tmp`), 'temp cleaned up on failure')
     })
+
+    it('does NOT clobber a pre-existing sidecar on an EEXIST (wx) failure', () => {
+      // Simulate another writer's in-flight sidecar at the exact temp path.
+      const suffix = `.${process.pid}.held.tmp`
+      const sidecar = `${filePath}${suffix}`
+      writeFileSync(sidecar, 'other-writer-bytes')
+      // openSync('wx') must fail EEXIST and the catch must leave the sidecar intact.
+      assert.throws(() => saveJsonState(filePath, { a: 1 }, { fsync: true, tmpSuffix: suffix }))
+      assert.ok(existsSync(sidecar), "another writer's sidecar must survive")
+      assert.equal(readFileSync(sidecar, 'utf8'), 'other-writer-bytes', 'sidecar bytes untouched')
+      assert.ok(!existsSync(filePath), 'target not written when the temp was taken')
+    })
   })
 })

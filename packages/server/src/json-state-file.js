@@ -96,8 +96,11 @@ export function loadJsonState(filePath, fallback, opts = {}) {
 /**
  * Serialise `value` to pretty JSON (trailing newline) and write it atomically at
  * mode 0600. Creates the parent directory (mode 0700) first if missing. The temp
- * sidecar carries a per-pid suffix so concurrent writers to the same target never
- * share an intermediate path (#5309 / #5579).
+ * sidecar carries a per-pid suffix (`.<pid>.tmp`) by default so two SEPARATE
+ * daemons mid-write can't tear the file (#5309 / #5579). That default does NOT
+ * make two concurrent writes from the SAME process unique — a caller that flushes
+ * the same path from multiple call sites in one process must pass a per-call
+ * random `tmpSuffix` (as PathHashTrustLedger does: `.<pid>.<random>.tmp`).
  *
  * The default path delegates to `writeFileRestricted` (best-effort durability —
  * temp + chmod + rename, no fsync). Pass `fsync: true` for the durable variant:
@@ -129,13 +132,20 @@ export function saveJsonState(filePath, value, opts = {}) {
     // Durable variant (#5620). `wx` (O_EXCL) refuses to clobber a concurrent
     // writer's sidecar; the 0600 create mode is authoritative (umask only ever
     // tightens it), so no post-write chmod is needed. fsync before rename so the
-    // bytes are on disk before the entry flips. On failure, clean up our own fd
-    // + temp and re-throw (callers decide swallow-vs-surface).
+    // bytes are on disk before the entry flips.
     const tmpPath = `${filePath}${tmpSuffix}`
     let fd = null
+    let created = false
     try {
       fd = openSync(tmpPath, 'wx', 0o600)
-      writeSync(fd, payload, 0, 'utf8')
+      created = true
+      // writeSync(string) can short-write; loop over a Buffer until every byte
+      // lands, since this path exists specifically for durability.
+      const buf = Buffer.from(payload, 'utf8')
+      let written = 0
+      while (written < buf.length) {
+        written += writeSync(fd, buf, written, buf.length - written)
+      }
       fsyncSync(fd)
       closeSync(fd)
       fd = null
@@ -144,7 +154,12 @@ export function saveJsonState(filePath, value, opts = {}) {
       if (fd !== null) {
         try { closeSync(fd) } catch { /* ignore */ }
       }
-      try { unlinkSync(tmpPath) } catch { /* ignore */ }
+      // Only remove the temp if WE created it. An EEXIST from openSync('wx')
+      // means the sidecar belongs to another writer — unlinking it would clobber
+      // them, contradicting the `wx` refusal-to-clobber guarantee.
+      if (created) {
+        try { unlinkSync(tmpPath) } catch { /* ignore */ }
+      }
       throw err
     }
     return
