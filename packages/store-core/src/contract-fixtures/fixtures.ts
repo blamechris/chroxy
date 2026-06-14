@@ -432,6 +432,37 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     },
   },
 
+  // 15b. session_context — merge the per-session git/project context (#5618)
+  {
+    name: 'session_context merges the git/project context into the target session',
+    type: 'session_context',
+    init: { sessions: { s1: {} } },
+    message: {
+      type: 'session_context',
+      sessionId: 's1',
+      gitBranch: 'main',
+      gitDirty: 3,
+      gitAhead: 1,
+      projectName: 'chroxy',
+    },
+    expect: {
+      sessions: {
+        s1: { sessionContext: { gitBranch: 'main', gitDirty: 3, gitAhead: 1, projectName: 'chroxy' } },
+      },
+    },
+  },
+  {
+    name: 'session_context coerces missing/typed fields to null/0 defaults',
+    type: 'session_context',
+    init: { sessions: { s1: {} } },
+    message: { type: 'session_context', sessionId: 's1' },
+    expect: {
+      sessions: {
+        s1: { sessionContext: { gitBranch: null, gitDirty: 0, gitAhead: 0, projectName: null } },
+      },
+    },
+  },
+
   // 16. session_cost_threshold_crossed — one-shot cost banner (no active fallback)
   {
     name: 'session_cost_threshold_crossed stores the one-shot cost-warning banner',

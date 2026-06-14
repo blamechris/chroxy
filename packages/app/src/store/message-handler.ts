@@ -94,7 +94,6 @@ import {
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
   chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
   SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
-  handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
@@ -2031,13 +2030,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_context': {
-      const { sessionId: ctxSessionId, patch } = sharedSessionContext(msg, get().activeSessionId);
-      if (ctxSessionId && get().sessionStates[ctxSessionId]) {
-        updateSession(ctxSessionId, () => patch);
-      }
-      break;
-    }
+    // session_context — migrated to the shared store-core dispatch table (#5618)
 
     case 'session_switched': {
       const switched = sharedSessionSwitched(msg);
