@@ -32,6 +32,7 @@ export class ServerOrchestrator {
     tokenManager,
     pairingManager,
     pushManager = null,
+    billingCanaryMonitor = null,
     getWorktreeReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo = defaultRemoveConnectionInfo,
@@ -49,6 +50,7 @@ export class ServerOrchestrator {
     this._tokenManager = tokenManager
     this._pairingManager = pairingManager
     this._pushManager = pushManager
+    this._billingCanaryMonitor = billingCanaryMonitor
     this._getWorktreeReapTimer = typeof getWorktreeReapTimer === 'function' ? getWorktreeReapTimer : () => null
     this._emergencyCleanupSync = emergencyCleanupSync
     this._removeConnectionInfo = removeConnectionInfo
@@ -92,6 +94,11 @@ export class ServerOrchestrator {
     // wouldn't block exit, but clearing it avoids a sweep racing shutdown.
     const worktreeReapTimer = this._getWorktreeReapTimer()
     if (worktreeReapTimer) clearInterval(worktreeReapTimer)
+    // #5821: stop the billing-canary recompute timer. It's unref'd so it
+    // wouldn't block exit, but clearing it avoids a recompute racing shutdown.
+    if (this._billingCanaryMonitor) {
+      try { this._billingCanaryMonitor.stop() } catch {}
+    }
     // Persist sessions before destroying (enables restore on restart)
     try { this._sessionManager.serializeState() } catch (err) {
       log.error(`Failed to serialize session state: ${err?.message || err}`)

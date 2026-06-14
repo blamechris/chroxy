@@ -183,6 +183,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // undefined when the server hasn't bound a socket (test harnesses) or the
     // ctx predates the field; the auth_ok field is omitted in that case.
     exposure,
+    // #5821: current billing-canary snapshot ({ eraStarted, defaultProvider,
+    // defaultBillingClass, warnings }) — null when no provider is wired; the
+    // auth_ok field is omitted in that case.
+    billingCanary,
     // #5536: long-lived identity keypair for signing the eager exchange key.
     serverIdentity,
   } = ctx
@@ -398,6 +402,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // #5356: exposure snapshot for the dashboard warning banner. Optional on
     // the wire — older servers omit it and clients treat that as "unknown".
     ...(exposure ? { exposure } : {}),
+    // #5821: current billing-canary snapshot, so a freshly-connected client
+    // renders the billing banner immediately. Optional — omitted when no
+    // provider is wired (older servers / tests); live changes arrive via the
+    // `billing_canary` broadcast.
+    ...(billingCanary ? { billingCanary } : {}),
     // #5555: when the eager handshake succeeded, carry the server's public key
     // so the client derives the shared key immediately. Absent otherwise (no
     // eager fields / encryption disabled / derivation failed) → client falls

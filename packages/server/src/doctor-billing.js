@@ -124,11 +124,13 @@ export function classifyEgressIp(ip) {
 /**
  * Aggregate the canary. Returns a flat warnings array (empty = all clear).
  *
- * @param {{sessions?:Array, defaultProvider?:string, egressIp?:string, now?:number}} input
+ * @param {{sessions?:Array, defaultProvider?:string, egressIp?:string, now?:number, apiKeyAuth?:boolean}} input
+ *   `apiKeyAuth: true` forwards billing-class's refinement to the silent-metered
+ *   check so a BYOK (claude-sdk + ANTHROPIC_API_KEY) default isn't flagged.
  */
-export function runBillingCanary({ sessions = [], defaultProvider, egressIp, now = Date.now() } = {}) {
+export function runBillingCanary({ sessions = [], defaultProvider, egressIp, now = Date.now(), apiKeyAuth = false } = {}) {
   const warnings = []
-  warnings.push(...detectSilentMeteredDefault(defaultProvider, now))
+  warnings.push(...detectSilentMeteredDefault(defaultProvider, now, { apiKeyAuth }))
   warnings.push(...detectBillingReclassification(sessions, now))
   const egress = classifyEgressIp(egressIp)
   if (egress.datacenter) warnings.push({ code: egress.code, message: egress.message })

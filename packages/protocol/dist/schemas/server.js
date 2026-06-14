@@ -35,6 +35,26 @@ const ClientInfoSchema = z.object({
     deviceType: z.enum(['phone', 'tablet', 'desktop', 'unknown']),
     platform: z.string(),
 });
+// Billing canary (#5821 live wiring). A single billing early-warning entry —
+// `code` discriminates the kind (SILENT_METERED_DEFAULT, TUI_REPORTED_PROGRAMMATIC_COST,
+// DATACENTER_EGRESS); `message` is the human-facing copy. `provider` / `sessionId`
+// / `costUsd` are present only for the warnings that carry them. Defined ahead of
+// ServerAuthOkSchema so the snapshot can seed `auth_ok` for late-joining clients.
+export const BillingCanaryWarningSchema = z.object({
+    code: z.string(),
+    message: z.string(),
+    provider: z.string().optional(),
+    sessionId: z.string().optional(),
+    costUsd: z.number().finite().optional(),
+});
+// The canary's current state (no `type` — embedded in auth_ok as a seed and
+// extended into the billing_canary broadcast below). `warnings` empty = all clear.
+export const BillingCanarySnapshotSchema = z.object({
+    eraStarted: z.boolean(),
+    defaultProvider: z.string(),
+    defaultBillingClass: z.string(),
+    warnings: z.array(BillingCanaryWarningSchema),
+});
 export const ServerAuthOkSchema = z.object({
     type: z.literal('auth_ok'),
     clientId: z.string(),
@@ -105,6 +125,11 @@ export const ServerAuthOkSchema = z.object({
         bindHost: z.string().nullable(),
         quickTunnel: z.boolean(),
     }).optional(),
+    // #5821 (live wiring) — current billing-canary snapshot, seeded into auth_ok
+    // so a freshly-connected client renders the billing banner immediately rather
+    // than waiting for the next broadcast. Optional: older servers omit it; live
+    // changes still arrive via the `billing_canary` broadcast.
+    billingCanary: BillingCanarySnapshotSchema.optional(),
     // #5555 (eager key exchange) — the server's ephemeral X25519 public key,
     // present ONLY when the client supplied a valid `eagerPublicKey` + `eagerSalt`
     // in its `auth` message AND encryption is required. When present, the client
@@ -2129,6 +2154,15 @@ export const ServerBudgetExceededSchema = z.object({
     budget: z.number(),
     percent: z.number(),
     message: z.string(),
+});
+// #5821 (live wiring) — billing-canary broadcast. Pushed when the daemon's
+// billing early-warning state changes (silent metered default; the dormant
+// claude-tui reclassification tripwire). Empty `warnings` = all clear, so the
+// client clears its banner. The same snapshot also seeds `auth_ok` for late
+// joiners. Shares BillingCanarySnapshotSchema (defined near the top) so the
+// broadcast and the seed can't drift.
+export const ServerBillingCanarySchema = BillingCanarySnapshotSchema.extend({
+    type: z.literal('billing_canary'),
 });
 // #5752: positive ack for an actioned `resume_budget` request. The substantive
 // state change (un-pausing) is still broadcast as `budget_resumed` — but ONLY

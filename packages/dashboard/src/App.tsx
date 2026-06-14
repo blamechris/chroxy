@@ -40,6 +40,7 @@ import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
 import { ExposureWarningBanner } from './components/ExposureWarningBanner'
+import { BillingWarningBanner } from './components/BillingWarningBanner'
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
@@ -168,6 +169,10 @@ export function App() {
   const serverExposure = useConnectionStore(s => s.serverExposure)
   const exposureBannerDismissed = useConnectionStore(s => s.exposureBannerDismissed)
   const dismissExposureBanner = useConnectionStore(s => s.dismissExposureBanner)
+  // #5821: billing-canary banner state.
+  const billingCanary = useConnectionStore(s => s.billingCanary)
+  const billingBannerDismissed = useConnectionStore(s => s.billingBannerDismissed)
+  const dismissBillingBanner = useConnectionStore(s => s.dismissBillingBanner)
   const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
   // #5556 — restart-countdown parity with mobile: feed the ETA/anchor/reason
@@ -1724,6 +1729,16 @@ export function App() {
           lanBind={serverExposure.lanBind}
           quickTunnel={serverExposure.quickTunnel}
           onDismiss={dismissExposureBanner}
+        />
+      )}
+
+      {/* #5821 — billing-canary warnings (silent metered default; claude-tui
+          reclassification tripwire) during the 2026-06-15 credit window. */}
+      {billingCanary && billingCanary.warnings.length > 0 && (
+        <BillingWarningBanner
+          warnings={billingCanary.warnings}
+          dismissed={billingBannerDismissed}
+          onDismiss={dismissBillingBanner}
         />
       )}
 

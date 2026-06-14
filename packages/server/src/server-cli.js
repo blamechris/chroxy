@@ -4,6 +4,7 @@ import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer } from './ws-server.js'
+import { BillingCanaryMonitor } from './billing-canary-monitor.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 // #5368 slice (c): QUICK_TUNNEL_DNS_SETTLE_MS + TUNNEL_STATUS_MIN_PROTOCOL_VERSION
 // moved to tunnel-lifecycle-handler.js with the tunnel block; createTunnel +
@@ -894,6 +895,29 @@ export async function startCliServer(config) {
   maybeWarnNonLoopbackBind({ bindHost, log })
   wsServer.start(bindHost)
 
+  // #5821 (live wiring): the billing canary. Recomputes the daemon's billing
+  // early-warnings (silent metered default; the dormant claude-tui
+  // reclassification tripwire) and broadcasts a `billing_canary` message when
+  // they change, so the dashboard can surface a banner during the 2026-06-15
+  // programmatic-credit window. Created after wsServer (it broadcasts through
+  // it); the provider is wired back into wsServer so the snapshot also seeds
+  // auth_ok for late joiners. Egress detection is deliberately not run here —
+  // it needs an outbound IP lookup (deferred to an opt-in follow-up).
+  const billingCanaryMonitor = new BillingCanaryMonitor({
+    getSessions: () => sessionManager.listSessions(),
+    getDefaultProvider: () => config.provider || DEFAULT_PROVIDER,
+    getApiKeyAuth: () => (config.provider || DEFAULT_PROVIDER) === 'claude-sdk' && Boolean(process.env.ANTHROPIC_API_KEY),
+    broadcast: (msg) => { try { wsServer?.broadcast(msg) } catch { /* best-effort */ } },
+    logger: log,
+  })
+  wsServer.setBillingCanaryProvider(() => billingCanaryMonitor.current())
+  // Recompute on session lifecycle (changes the session set the canary reads);
+  // the periodic interval covers cost drift. These are additional listeners —
+  // they don't replace the logging ones above.
+  sessionManager.on('session_created', () => billingCanaryMonitor.refresh())
+  sessionManager.on('session_destroyed', () => billingCanaryMonitor.refresh())
+  billingCanaryMonitor.start()
+
   // #5053: wire the pool stats aggregator to the shared pool so the
   // dashboard's GET /api/pool/stats has rolling counters (hit rate,
   // eviction-by-reason, recent evictions) to read. Default-OFF — only the
@@ -1070,6 +1094,7 @@ export async function startCliServer(config) {
     tokenManager,
     pairingManager,
     pushManager,
+    billingCanaryMonitor,
     getWorktreeReapTimer: () => worktreeReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo,

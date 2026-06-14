@@ -145,7 +145,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2633,11 +2633,29 @@ function handleSummarizeSessionResult(msg: Record<string, unknown>): void {
 }
 
 /**
+ * #5821 — `billing_canary` broadcast. Validated via the shared schema (drop on
+ * mismatch). Stores the snapshot; resets the per-connection dismissal ONLY when
+ * the warning set changed (a new/cleared warning re-surfaces the banner) so an
+ * unchanged re-broadcast doesn't un-dismiss what the user already dismissed.
+ */
+function handleBillingCanary(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerBillingCanarySchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { eraStarted, defaultProvider, defaultBillingClass, warnings } = parsed.data;
+  const snapshot = { eraStarted, defaultProvider, defaultBillingClass, warnings };
+  const prev = get().billingCanary;
+  const sig = (s: typeof snapshot | null) => (s ? s.warnings.map((w) => w.code).sort().join('|') : '');
+  const changed = sig(prev) !== sig(snapshot);
+  set(changed ? { billingCanary: snapshot, billingBannerDismissed: false } : { billingCanary: snapshot });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
  */
 const HANDLERS: Record<string, Handler> = {
+  billing_canary: handleBillingCanary,
   pong: handlePong,
   raw: handleRaw,
   raw_background: handleRawBackground,
@@ -2822,6 +2840,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           ? { lanBind: rawExposure.lanBind === true, quickTunnel: rawExposure.quickTunnel === true }
           : null;
 
+      // #5821: billing-canary snapshot seed from auth_ok. Validated via the
+      // shared schema so a malformed/absent field → null (no banner). Live
+      // changes arrive via the `billing_canary` broadcast handled below.
+      const rawBillingCanary = (msg as { billingCanary?: unknown }).billingCanary;
+      const billingCanarySeed = rawBillingCanary
+        ? (BillingCanarySnapshotSchema.safeParse(rawBillingCanary).success
+            ? BillingCanarySnapshotSchema.parse(rawBillingCanary)
+            : null)
+        : null;
+
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
@@ -2848,6 +2876,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         serverPhase: null,
         tunnelProgress: null,
         serverExposure,
+        billingCanary: billingCanarySeed,
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
@@ -2862,6 +2891,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // #5356: a fresh (non-reconnect) connection re-surfaces the
           // exposure banner; silent reconnects keep the user's dismissal.
           exposureBannerDismissed: false,
+          // #5821: same for the billing banner — fresh connect re-surfaces it.
+          billingBannerDismissed: false,
           messages: [],
           terminalBuffer: '',
           terminalRawBuffer: '',
