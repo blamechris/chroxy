@@ -78,7 +78,7 @@
 
 <div class="cards">
   <div class="card"><div class="n" style="color:var(--green)">28</div><div class="l">PRs merged across the marathon</div></div>
-  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">issues resolved in the closeout</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">Issues resolved in the closeout</div></div>
   <div class="card"><div class="n" style="color:var(--green)">cleared</div><div class="l">§3 friction backlog</div></div>
   <div class="card"><div class="n" style="color:var(--green)">green</div><div class="l">CI on main</div></div>
 </div>
@@ -176,7 +176,7 @@
 <p class="muted"><strong>Remaining #5731 backlog (genuinely marginal / needs direction):</strong> <code>resume_budget</code> silent no-op when not paused (<em>a clean fix needs a new ack wire-type — reusing <code>budget_resumed</code> injects a false "session resumed" chat message; edge case</em>); standby <code>EADDRINUSE</code> give-up after ~10s of port contention (<em>niche lifecycle tweak — bump the retry cap</em>); and the question-answer stale-<code>toolUseId</code> fallback (<em>legacy single-session-mode subtlety; the audit notes it's mostly mitigated by per-provider waiting flags — risk &gt; value for unsupervised work</em>). The substantive backlog is done; these are the dregs.</p>
 
 <h3>Then: the swarm-audit closeout — burning down the friction &amp; parity backlog</h3>
-<p>Re-ran <code>/swarm-audit</code> focused on this report (6 agents; aggregate 3.1/5 on the forward plan — the §3/§5 sections were a start-of-marathon snapshot never re-baselined), recorded the results in <a href="audit-results/00-master-assessment.md"><code>audit-results/</code></a>, filed the gaps as issues, then cleared the entire friction + parity backlog. The three "marginal/needs-direction" dregs above all got clean fixes; the two genuine forks (preamble, key-derivation approach) went to you for a decision. Same gate throughout: implement → worktree-isolated adversarial review + Copilot → fix → full package suite + green CI → resolve threads → synchronous squash-merge.</p>
+<p>Re-ran <code>/swarm-audit</code> focused on this report (6 agents; aggregate 3.1/5 on the forward plan — the §3/§5 sections were a start-of-marathon snapshot never re-baselined), recorded the results in <a href="audit-results/00-master-assessment.md"><code>audit-results/00-master-assessment.md</code></a>, filed the gaps as issues, then cleared the entire friction + parity backlog. Two of the three "marginal/needs-direction" dregs above got clean fixes (<code>resume_budget</code> #5752, stale <code>toolUseId</code> #5753); the standby <code>EADDRINUSE</code> retry-cap bump wasn't taken this pass. The two genuine forks (preamble, key-derivation approach) went to you for a decision. Same gate throughout: implement → worktree-isolated adversarial review + Copilot → fix → full package suite + green CI → resolve threads → synchronous squash-merge.</p>
 <table>
   <thead><tr><th>PR → issue</th><th>What it fixes (the friction)</th><th>Status</th></tr></thead>
   <tbody>
@@ -198,7 +198,7 @@
 
 <div class="cards">
   <div class="card"><div class="n" style="color:var(--green)">28</div><div class="l">PRs merged (19 prior + 9 closeout)</div></div>
-  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">issues resolved in the closeout</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">Issues resolved in the closeout</div></div>
   <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
   <div class="card"><div class="n" style="color:var(--green)">clean</div><div class="l">main · every PR gated + reviewed</div></div>
 </div>
