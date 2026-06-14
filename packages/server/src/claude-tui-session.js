@@ -41,7 +41,7 @@ import {
 } from './claude-tui/pty-driver.js'
 import {
   ASK_USER_QUESTION_WATCHDOG_MS,
-  FormDriverMixin,
+  FormDriver,
 } from './claude-tui/form-driver.js'
 
 // Re-export the public writeHookSettings helper so existing
@@ -380,6 +380,11 @@ export class ClaudeTuiSession extends BaseSession {
     // tests + callers that read the single field keep working.
     this._pendingUserAnswers = new Map()
     this._lastPendingAnswerToolUseId = null
+    // #5617 — the interactive-form driver is an injected collaborator rather than
+    // a prototype mixin; it reaches session state/PTY writers through `this` as
+    // its host. `respondToQuestion` (below) delegates to it; the stall watchdog
+    // calls `this._formDriver._onAskUserQuestionStall`.
+    this._formDriver = new FormDriver(this)
     // #4604 / #5319 (WP-3.2): per-toolUseId stall watchdogs armed in
     // respondToQuestion(). If PostToolUse never arrives after we write an answer
     // (multi-question form wedge), the matching watchdog fires
@@ -512,20 +517,30 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #5617 — delegate the AskUserQuestion answer to the injected FormDriver.
+   * Kept on the session because external callers (input-handlers.js) and the
+   * provider contract call `session.respondToQuestion(...)`; the driving logic
+   * lives in form-driver.js, reaching session state/PTY writers via its host.
+   */
+  respondToQuestion(text, answersMap, toolUseId, opts) {
+    return this._formDriver.respondToQuestion(text, answersMap, toolUseId, opts)
+  }
+
+  /**
    * #5319 (WP-3.2): arm (or re-arm) the per-toolUseId AskUserQuestion stall
    * watchdog. Each toolUseId gets its own timer so a parallel sibling's arm
    * can't clobber this one. On fire it deletes its own Map entry, then calls
-   * _onAskUserQuestionStall. A null/undefined toolUseId is keyed verbatim
-   * (one anonymous slot) so the defensive no-toolUseId path keeps a watchdog.
-   * `ms` defaults to the standard window but the Other-freeform two-stage flow
-   * passes OTHER_FREEFORM_WATCHDOG_MS for its longer second stage.
+   * _formDriver._onAskUserQuestionStall. A null/undefined toolUseId is keyed
+   * verbatim (one anonymous slot) so the defensive no-toolUseId path keeps a
+   * watchdog. `ms` defaults to the standard window but the Other-freeform
+   * two-stage flow passes OTHER_FREEFORM_WATCHDOG_MS for its longer second stage.
    */
   _armAskUserQuestionWatchdog(toolUseId, ms = ASK_USER_QUESTION_WATCHDOG_MS) {
     const existing = this._askUserQuestionWatchdogs.get(toolUseId)
     if (existing) clearTimeout(existing)
     const t = setTimeout(() => {
       this._askUserQuestionWatchdogs.delete(toolUseId)
-      this._onAskUserQuestionStall(toolUseId)
+      this._formDriver._onAskUserQuestionStall(toolUseId)
     }, ms)
     this._askUserQuestionWatchdogs.set(toolUseId, t)
   }
@@ -3123,4 +3138,6 @@ function applyMixin(targetClass, mixinClass) {
 }
 
 applyMixin(ClaudeTuiSession, PtyDriverMixin)
-applyMixin(ClaudeTuiSession, FormDriverMixin)
+// #5617 — FormDriver is no longer mixed onto the prototype; it's an injected
+// collaborator constructed per-session (see the constructor) and reached via
+// the `respondToQuestion` delegator + `this._formDriver` for the stall callback.
