@@ -782,7 +782,13 @@ describe('permission/question routing to originating session', () => {
     ws.close()
   })
 
-  it('falls back to activeSessionId for unknown question toolUseId', async () => {
+  it('drops a stale/unknown question toolUseId instead of routing to activeSessionId (#5753)', async () => {
+    // #5753 — a toolUseId is registered for every question at dispatch and
+    // pruned on answer / session-destroy, so a toolUseId that arrives NOT in
+    // the routing map means its question is already gone. Falling back to the
+    // active session (the old behavior) mis-delivered that stale answer to
+    // whatever DIFFERENT question the active session was now waiting on (a
+    // deny meant for one tool landing on another). It must be dropped.
     const { manager, sessionsMap } = createTwoSessionManager()
 
     let sessionBGotQuestion = false
@@ -798,16 +804,18 @@ describe('permission/question routing to originating session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
 
-    // Switch to Session B
+    // Switch to Session B (now the active session).
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
     await waitForMessage(messages, 'session_switched', 2000)
 
-    // Send question response with unknown toolUseId — no entry in routing map
-    // Should fall back to activeSessionId (sess-b)
+    // A late answer carrying a toolUseId that is NOT in the routing map.
     send(ws, { type: 'user_question_response', toolUseId: 'unknown-tool-use-id', answer: 'yes' })
-    await waitFor(() => sessionBGotQuestion, { label: 'sessionB fallback question' })
+    // No ack is sent for a dropped answer; give the server a beat to process,
+    // then assert the active session did NOT receive the stale answer.
+    await new Promise((r) => setTimeout(r, 150))
 
-    assert.equal(sessionBGotQuestion, true, 'Should fall back to activeSessionId when toolUseId not in routing map')
+    assert.equal(sessionBGotQuestion, false,
+      'a stale/unknown toolUseId must be dropped, not routed to the active session')
 
     ws.close()
   })

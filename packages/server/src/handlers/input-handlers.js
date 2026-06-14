@@ -805,8 +805,32 @@ function handleNotificationPrefsSet(ws, client, msg, ctx) {
 }
 
 function handleUserQuestionResponse(ws, client, msg, ctx) {
-  const questionSessionId = (msg.toolUseId && ctx.permissions.questionSessionMap.get(msg.toolUseId))
-    || client.activeSessionId
+  // #5753 — route by toolUseId when one is supplied. `_registerQuestionRoute`
+  // maps every question that has a toolUseId at DISPATCH time (before the
+  // client can answer) and the entry is pruned the moment the question is
+  // answered (below) or its session is destroyed (ws-server `_questionSessionMap`
+  // sweep). So a toolUseId that is PRESENT but NO LONGER MAPPED means the
+  // question is already gone — answered, expired-and-cleared, or a double
+  // submit. Falling back to `client.activeSessionId` in that case (the old
+  // behavior) would mis-deliver the late answer to whatever DIFFERENT question
+  // that session is now waiting on — a deny meant for one tool landing on
+  // another (Guardian's #5731 finding). Fail CLOSED: drop it.
+  //
+  // Only fall back to the active session when NO toolUseId was supplied at all
+  // (legacy single-session mode / clients that don't send one), where there is
+  // a single question in flight and no cross-question mis-route risk.
+  let questionSessionId
+  if (msg.toolUseId) {
+    questionSessionId = ctx.permissions.questionSessionMap.get(msg.toolUseId)
+    if (!questionSessionId) {
+      sessionLogger(client.activeSessionId || undefined).info(
+        `user_question_response dropped: stale/unknown toolUseId=${msg.toolUseId} (question already resolved or its session is gone)`,
+      )
+      return
+    }
+  } else {
+    questionSessionId = client.activeSessionId
+  }
 
   // Enforce session binding before consuming the mapping — if the client
   // is bound to a different session, leave the mapping intact so the
