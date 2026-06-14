@@ -12,8 +12,9 @@
 //
 // #5617 makes FormDriver an INJECTED COLLABORATOR: the session constructs it as
 // `this._formDriver = new FormDriver(this)` and delegates `respondToQuestion()`;
-// every former `this._field` is now `this._host._field` against the explicit
-// {@link FormDriverHost} surface below. The byte-sequence bodies are otherwise
+// every former session access `this._<member>` is now `this._host._<member>`
+// against the explicit {@link FormDriverHost} surface below (the `_<member>`s are
+// enumerated there). The byte-sequence bodies are otherwise
 // UNCHANGED (the #5617 diff reverses to the #5559 source exactly — a pure
 // receiver swap). The point is testability: a unit test injects a mock host and
 // asserts the keystroke sequences against the pinned recordings WITHOUT a live
