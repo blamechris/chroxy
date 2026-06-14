@@ -361,6 +361,12 @@ export class ClaudeTuiSession extends BaseSession {
     // silently dropped (#3919). Kept small (~4KB) so it doesn't eat
     // memory on long sessions.
     this._outputTail = ''
+    // #5794: monotonic count of ALL PTY output bytes ever appended. Unlike
+    // _outputTail (capped at PTY_TAIL_BYTES, so its length stops growing once
+    // full — e.g. after a long resume transcript), this keeps growing, so the
+    // first-turn nudge can detect "output arrived since arm" even when the tail
+    // is already at the cap (#5809 review).
+    this._totalOutputBytes = 0
     // #4031 (review): _outputTail is ANSI-stripped for readability +
     // probe stability, so the hex-dump diagnostic sourced from it
     // could never surface the very escape/control bytes we wanted to
@@ -1674,6 +1680,9 @@ export class ClaudeTuiSession extends BaseSession {
   _appendToOutputTail(data) {
     const rawStr = String(data)
     const chunk = Buffer.from(rawStr, 'utf8')
+    // #5794/#5809: monotonic total — never capped, so the nudge's progress check
+    // works even when _outputTail is pinned at PTY_TAIL_BYTES.
+    this._totalOutputBytes += chunk.length
     const merged = this._outputTailRaw.length === 0
       ? chunk
       : Buffer.concat([this._outputTailRaw, chunk])
@@ -2733,11 +2742,13 @@ export class ClaudeTuiSession extends BaseSession {
    *   - The CALLER (sendMessage) only schedules this for a SINGLE-LINE first
    *     message of each (re)spawn — a multi-line prompt goes through the
    *     bracketed-paste write path where a bare \r is unsafe.
-   *   - Belt-and-braces no-op guard: the tick also skips the \r if `_outputTail`
-   *     has grown since arm time. The submit landing re-renders the TUI (output
-   *     before any hook), so a grown tail is independent evidence the composer
-   *     accepted the submit on a slow-but-healthy turn — don't risk a stray
-   *     second submit; defer to the first-output watchdog instead.
+   *   - Belt-and-braces no-op guard: the tick also skips the \r if PTY output
+   *     (`_totalOutputBytes`) has grown since arm time. The submit landing
+   *     re-renders the TUI (output before any hook), so new output is
+   *     independent evidence the composer accepted the submit on a slow-but-
+   *     healthy turn — don't risk a stray second submit; defer to the
+   *     first-output watchdog instead. Uses the uncapped byte total (not
+   *     _outputTail.length, which stops growing at PTY_TAIL_BYTES — #5809).
    *
    * @param {string} messageId
    */
@@ -2745,15 +2756,17 @@ export class ClaudeTuiSession extends BaseSession {
     if (!(this._firstTurnSubmitNudgeMs > 0)) return
     this._clearFirstTurnSubmitNudge()
     let attempts = 0
-    // #5794 (3): snapshot the output tail length at arm time. The submit landing
-    // makes the TUI re-render (the typed prompt scrolls up, the thinking spinner
-    // appears) which lands in `_outputTail` BEFORE the first hook is written —
-    // so a grown tail is independent evidence the composer accepted the submit,
-    // even on a slow-but-healthy turn whose first hook arrives after the window.
-    // We re-snapshot before each retry so a nudge that itself produced progress
-    // doesn't double-fire. `_outputTail` is empty in the stubbed-term unit tests
-    // (no onData wired), so the existing nudge tests still fire as before.
-    let tailLenAtArm = (this._outputTail || '').length
+    // #5794 (3): snapshot the total PTY output bytes at arm time. The submit
+    // landing makes the TUI re-render (the typed prompt scrolls up, the thinking
+    // spinner appears) which arrives as PTY output BEFORE the first hook is
+    // written — so growth here is independent evidence the composer accepted the
+    // submit, even on a slow-but-healthy turn whose first hook arrives after the
+    // window. We re-snapshot before each retry so a nudge that itself produced
+    // progress doesn't double-fire. _totalOutputBytes is 0 in the stubbed-term
+    // unit tests (no onData wired), so the existing nudge tests still fire.
+    // Uses the uncapped byte total, not _outputTail.length — the tail caps at
+    // PTY_TAIL_BYTES and would stop growing after a long resume transcript (#5809).
+    let bytesAtArm = this._totalOutputBytes
     const tick = () => {
       this._firstTurnSubmitNudgeTimer = null
       // Nothing to nudge if the turn ended/aborted, the PTY died, the composer
@@ -2765,7 +2778,7 @@ export class ClaudeTuiSession extends BaseSession {
       // #5794 (3): genuine progress since we armed → the submit landed; a stray
       // \r now risks an empty second submit on an already-warm composer. Defer
       // to the first-output watchdog instead of nudging.
-      if ((this._outputTail || '').length > tailLenAtArm) {
+      if (this._totalOutputBytes > bytesAtArm) {
         ;(this._log || log).info(`first-turn submit nudge skipped (#5794, msg=${messageId}) — output grew since arm, submit landed`)
         return
       }
@@ -2780,7 +2793,7 @@ export class ClaudeTuiSession extends BaseSession {
       if (attempts < ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS) {
         // Re-snapshot so the next tick's no-progress check measures growth since
         // THIS nudge (if our \r landed the submit, the next tick should skip).
-        tailLenAtArm = (this._outputTail || '').length
+        bytesAtArm = this._totalOutputBytes
         this._firstTurnSubmitNudgeTimer = setTimeout(tick, this._firstTurnSubmitNudgeMs)
       }
     }

@@ -3734,20 +3734,35 @@ describe('ClaudeTuiSession', () => {
     // after the nudge window. The no-progress guard must NOT fire a stray \r.
     it('does NOT nudge a slow-but-healthy first turn (output grew, hook not yet drained) (#5794)', async () => {
       session = nudgeSession()
-      session._outputTail = '' // armed with an empty tail
+      session._totalOutputBytes = 0 // armed with no output yet
       session._scheduleFirstTurnSubmitNudge('m1')
-      // Submit landed: claude re-renders the composer + spinner into _outputTail
-      // before its first hook file is written (_firstOutputDisarmed still false).
-      session._outputTail = '...thinking...'
+      // Submit landed: claude re-renders the composer + spinner, which arrives as
+      // PTY output BEFORE its first hook file is written (_firstOutputDisarmed
+      // still false). #5809: use the uncapped byte total, not _outputTail.length.
+      session._totalOutputBytes += 14
       await new Promise((r) => setTimeout(r, 120))
       assert.equal(session._termWrites.filter((w) => w === '\r').length, 0, 'no stray \\r when output grew since arm')
     })
 
-    // #5794 (3): the no-progress guard only suppresses when the tail GREW. A
-    // genuinely wedged turn (tail unchanged) still gets nudged.
+    // #5809: the cap case — _outputTail is already pinned at PTY_TAIL_BYTES (long
+    // resume transcript) so its length can't grow, but _totalOutputBytes still
+    // does, so the guard correctly suppresses the nudge on a healthy turn.
+    it('does NOT nudge when the tail is at cap but total output still grew (#5809)', async () => {
+      session = nudgeSession()
+      session._outputTail = 'x'.repeat(ClaudeTuiSession.PTY_TAIL_BYTES) // pinned at cap
+      session._totalOutputBytes = ClaudeTuiSession.PTY_TAIL_BYTES
+      session._scheduleFirstTurnSubmitNudge('m1')
+      // More output arrives; _outputTail.length stays at the cap, _totalOutputBytes grows.
+      session._totalOutputBytes += 50
+      await new Promise((r) => setTimeout(r, 120))
+      assert.equal(session._termWrites.filter((w) => w === '\r').length, 0, 'no stray \\r when total output grew despite a capped tail')
+    })
+
+    // #5794 (3): the no-progress guard only suppresses when output GREW. A
+    // genuinely wedged turn (no new output) still gets nudged.
     it('still nudges when output has NOT grown since arm (#5794)', async () => {
       session = nudgeSession()
-      session._outputTail = 'stale-banner'
+      session._totalOutputBytes = 100 // some prior output, but none after arm
       session._scheduleFirstTurnSubmitNudge('m1')
       await new Promise((r) => setTimeout(r, 35))
       assert.ok(session._termWrites.includes('\r'), 'wedged turn (no output growth) still nudged')
