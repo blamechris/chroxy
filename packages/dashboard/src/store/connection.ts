@@ -156,6 +156,9 @@ import {
   runConnectAttempt,
   createReconnectScheduler,
   RECONNECT_MAX_RUNG,
+  // #5621 — the shared retry-ladder defaults (was duplicated verbatim here).
+  CONNECT_MAX_RETRIES,
+  CONNECT_RETRY_DELAYS,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
@@ -320,8 +323,8 @@ const EMPTY_TRANSCRIPT_BACKGROUND_TASKS: never[] = [];
 const EMPTY_INTERVENTIONS: never[] = [];
 
 // #5555.5 — the close/error-path reconnect delay is no longer a fixed
-// constant. Both handlers now climb the RETRY_DELAYS ladder (defined in
-// connect()) via the module-level reconnectAttempt counter, which resets on
+// constant. Both handlers now climb the shared CONNECT_RETRY_DELAYS ladder
+// (from @chroxy/store-core) via the module-level reconnectAttempt counter, which resets on
 // `auth_ok`. See scheduleReconnect() below.
 
 /**
@@ -1285,7 +1288,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ savedConnection: null });
   },
 
-  // Initial connection uses bounded retries (MAX_RETRIES) with exponential backoff.
+  // Initial connection uses bounded retries (CONNECT_MAX_RETRIES) climbing the
+  // fixed CONNECT_RETRY_DELAYS ladder ([1000,2000,3000,5000,8000]ms).
   // This prevents infinite loops on bad credentials or missing servers.
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
@@ -1302,8 +1306,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const pairingId = _retryCount === 0
       ? (() => { const id = pendingPairingId; pendingPairingId = null; return id; })()
       : (options?._pairingId ?? null);
-    const MAX_RETRIES = 5;
-    const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
 
     // Detect if connecting to a different server — clear old session data + queue
     const currentUrl = get().wsUrl;
@@ -1335,7 +1337,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     set({ socket: null, connectionPhase: phase, connectionRetryCount: _retryCount, userDisconnected: false, ...errorPatch });
 
     if (_retryCount > 0) {
-      console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
+      console.log(`[ws] Connection attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1}...`);
     }
 
     // #5597 — re-resolve the live endpoint (URL + token) for the active registry
@@ -1358,12 +1360,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // dashboard supplies the EFFECTS as callbacks (single-store `set()` writes,
     // the console give-up + clearSavedConnection, the `_pairingId`-threaded
     // recursion); the algorithm (which branch, when to retry, what delay) is
-    // shared with the app. `MAX_RETRIES`/`RETRY_DELAYS` above are kept for the
-    // inline log strings and stay equal to the shared defaults.
+    // shared with the app. #5621 — consume the shared CONNECT_MAX_RETRIES /
+    // CONNECT_RETRY_DELAYS defaults directly instead of re-declaring the ladder.
     void runConnectAttempt({
       attempt: _retryCount,
-      maxRetries: MAX_RETRIES,
-      retryDelays: RETRY_DELAYS,
+      maxRetries: CONNECT_MAX_RETRIES,
+      retryDelays: CONNECT_RETRY_DELAYS,
       // #5597 seam — re-resolve the endpoint per attempt instead of dialing the
       // closure-captured URL/token forever. The dashboard already re-read the
       // registry TOKEN per reconnect (#5281); this mirrors that for the URL, so
@@ -1416,7 +1418,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           restartEtaMs,
           restartingSince: currentState.restartingSince || Date.now(),
         });
-        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
+        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1})`);
       },
       onProbeFailed: (reason) => {
         set({ connectionError: reason });
@@ -1489,7 +1491,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         get().connect(next.url, next.token);
       },
       isStale: () => myAttemptId !== connectionAttemptId,
-      retryDelays: RETRY_DELAYS,
+      retryDelays: CONNECT_RETRY_DELAYS,
       // #5698 — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs and go
       // terminal instead of spinning forever. A user-initiated retryConnection()
       // resets the counter (resetReconnectAttempt), so this is not permanent.
@@ -1513,7 +1515,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (reconnectScheduler.scheduled) return;
       if (get().userDisconnected) return;
       if (disconnectedAttemptId === myAttemptId) return;
-      // #5555.5 — climb the RETRY_DELAYS ladder (was a fixed 1.5s/2s). The
+      // #5555.5 — climb the CONNECT_RETRY_DELAYS ladder (was a fixed 1.5s/2s). The
       // per-socket dedupe means a paired error → close drop advances the ladder
       // exactly once. The ladder resets on `auth_ok`, so a clean reconnect
       // starts back at the bottom (1s).

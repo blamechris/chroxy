@@ -157,6 +157,9 @@ import {
   // as callbacks. `resolveEndpoint` is the #5597/#5537 LAN/tunnel seam (static).
   runConnectAttempt,
   createReconnectScheduler,
+  // #5621 — the shared retry-ladder defaults (was duplicated verbatim here).
+  CONNECT_MAX_RETRIES,
+  CONNECT_RETRY_DELAYS,
   // #5537 — shared LAN→tunnel fast-fallback decision for the reconnect ladder.
   selectReconnectEndpoint,
   type ProbeResult,
@@ -227,9 +230,9 @@ const ENCRYPTED_PHASE_PLAINTEXT_ALLOWLIST = new Set([
 ]);
 
 // #5555.5 — the close/error-path reconnect delay is no longer a fixed
-// constant. Both handlers now climb the RETRY_DELAYS ladder (defined in
-// connect()) via the module-level reconnectAttempt counter, which resets on
-// `auth_ok`. See scheduleReconnect() below.
+// constant. Both handlers now climb the shared CONNECT_RETRY_DELAYS ladder
+// (from @chroxy/store-core) via the module-level reconnectAttempt counter,
+// which resets on `auth_ok`. See scheduleReconnect() below.
 
 // #4771: getWsCloseMessage and getHealthCheckErrorMessage are now
 // defined in `packages/store-core/src/ws-errors.ts` and exported from
@@ -890,7 +893,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  // Initial connection uses bounded retries (MAX_RETRIES) with exponential backoff.
+  // Initial connection uses bounded retries (CONNECT_MAX_RETRIES) climbing the
+  // fixed CONNECT_RETRY_DELAYS ladder ([1000,2000,3000,5000,8000]ms).
   // This prevents infinite loops on bad credentials or missing servers.
   // Auto-reconnect (socket.onclose) calls connect() with _retryCount=0, resetting
   // the retry budget — intentional, since established connections should recover
@@ -911,8 +915,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   ) => {
     const _retryCount = options?._retryCount ?? 0;
     const silent = options?.silent ?? false;
-    const MAX_RETRIES = 5;
-    const RETRY_DELAYS = [1000, 2000, 3000, 5000, 8000];
     // Honor a precheck only on the first attempt (retries must re-probe), and
     // only when it's recent enough that the host's liveness hasn't gone stale.
     const HEALTH_PRECHECK_MAX_AGE_MS = 2000;
@@ -956,7 +958,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     useConnectionLifecycleStore.getState().setUserDisconnected(false);
 
     if (_retryCount > 0) {
-      console.log(`[ws] Connection attempt ${_retryCount + 1}/${MAX_RETRIES + 1}...`);
+      console.log(`[ws] Connection attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1}...`);
     }
 
     // #5555 — prewarm the device ID off the critical path. The `auth` frame in
@@ -986,13 +988,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // give-up decision tree now lives in the shared `runConnectAttempt`. The app
     // supplies the EFFECTS as callbacks (phase store writes, the Alert give-up,
     // the recursion entry point); the algorithm (which branch, when to retry,
-    // what delay) is shared with the dashboard. `MAX_RETRIES`/`RETRY_DELAYS`
-    // above are kept for the inline log strings and stay equal to the shared
-    // CONNECT_MAX_RETRIES / CONNECT_RETRY_DELAYS defaults.
+    // what delay) is shared with the dashboard. #5621 — consume the shared
+    // CONNECT_MAX_RETRIES / CONNECT_RETRY_DELAYS defaults directly instead of
+    // re-declaring the ladder verbatim here.
     void runConnectAttempt({
       attempt: _retryCount,
-      maxRetries: MAX_RETRIES,
-      retryDelays: RETRY_DELAYS,
+      maxRetries: CONNECT_MAX_RETRIES,
+      retryDelays: CONNECT_RETRY_DELAYS,
       // #5597/#5537 seam — re-resolve the endpoint per attempt instead of
       // dialing the closure-captured URL forever:
       //   • #5597: a tunnel rotation that landed mid-ladder (live
@@ -1049,7 +1051,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           restartingSince: currentState.restartingSince || Date.now(),
         });
         useConnectionLifecycleStore.getState().setConnectionPhase('server_restarting');
-        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${MAX_RETRIES + 1})`);
+        console.log(`[ws] Server is restarting, will retry (attempt ${_retryCount + 1}/${CONNECT_MAX_RETRIES + 1})`);
       },
       onProbeFailed: (reason) => {
         useConnectionLifecycleStore.getState().setConnectionError(reason, _retryCount);
@@ -1112,7 +1114,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // can still arm its own retry timer. The flag is bounded to this socket's
     // lifetime; first-write-wins on the reconnecting phase.
     //
-    // #5555.5 — the close/error path climbs the same RETRY_DELAYS ladder used by
+    // #5555.5 — the close/error path climbs the same CONNECT_RETRY_DELAYS ladder used by
     // the pre-WS health-check retries (1s → 2s → 3s → 5s → 8s, capped) instead
     // of a fixed 1.5s/2s. The ladder counter is module-level and only resets on
     // `auth_ok`, so a socket that opens but never authenticates keeps backing
@@ -1134,7 +1136,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // tunnel fast-fallback (keyed on the per-attempt index).
       reconnect: () => get().connect(resolveCurrentEndpointUrl(url, token), token),
       isStale: () => myAttemptId !== connectionAttemptId,
-      retryDelays: RETRY_DELAYS,
+      retryDelays: CONNECT_RETRY_DELAYS,
     });
     const scheduleReconnect = (): void => { reconnectScheduler.schedule(); };
 
@@ -1272,7 +1274,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
         // #3624 — dedup via the per-socket guard so a paired error → close
         // sequence arms exactly one retry. #5555.5 — delay comes from the
-        // RETRY_DELAYS ladder, not a fixed constant.
+        // CONNECT_RETRY_DELAYS ladder, not a fixed constant.
         scheduleReconnect();
       } else {
         // Connection dropped before it ever reached "connected" state. Previously
