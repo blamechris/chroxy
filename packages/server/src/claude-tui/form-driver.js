@@ -24,8 +24,8 @@
  * The slice of ClaudeTuiSession that FormDriver drives. The session satisfies
  * this structurally (FormDriver receives `this`); tests pass a mock. Grouped:
  *
- *  - PTY writers: `_writePtyTextThrottled`, `_writePtyMultiQuestionSequence`,
- *    `_writePtyArrowNavSequence` — emit the keystroke bytes.
+ *  - PTY writers: `_writePtyTextThrottled`, `_writePtyArrowNavSequence` —
+ *    emit the keystroke bytes.
  *  - Pending-answer state: `_pendingUserAnswers` (Map), `_pendingUserAnswer`
  *    (back-compat getter), `_clearPendingAnswerByToolUseId`.
  *  - Turn/result state: `_activeTurn`, `_isBusy`, `_currentMessageId`,
@@ -55,7 +55,9 @@ const log = createLogger('claude-tui-session')
 // PostToolUse never fires. Without this watchdog the session wedges at
 // _isBusy=true forever (the 8m+ symptom in #4604). On expiry we clear
 // _isBusy + _pendingUserAnswer and emit ASK_USER_QUESTION_STALL so the
-// dashboard can prompt the user to retry. Root cause is fixed in Chunk B.
+// dashboard can prompt the user to retry. The multi-question wedge this
+// originally guarded was removed in #5773 (assembler deleted); the watchdog
+// now backstops single-question / multi-select-reinject stalls.
 export const ASK_USER_QUESTION_WATCHDOG_MS = 30 * 1000
 
 // #4651 — settle delay between the "Other" digit write and the freeform
@@ -74,47 +76,6 @@ const OTHER_FREEFORM_SETTLE_MS = 150
 // emoji-heavy text) and tear down a turn that's actively progressing.
 const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 
-// #4635 — settle delay between the final single-select question's auto-
-// advance digit and the Submit `'1'` keystroke. Mixed multi-question
-// forms (with at least one multi-select) work fine because the explicit
-// `'\t'` after each multi-select gives claude TUI a settled commit signal
-// that fully renders the next screen before our next keystroke. But on a
-// pure all-single-select form the LAST digit auto-advances to the Submit
-// screen, and the 1ms per-char throttle writes the Submit `'1'` faster
-// than claude TUI can render the Submit screen — so the `'1'` lands on
-// the still-rendering last-question screen, gets swallowed, and the form
-// never submits. The 30s ASK_USER_QUESTION watchdog then fires.
-//
-// 150 ms mirrors the empirically-validated OTHER_FREEFORM_SETTLE_MS used
-// for the option-menu → text-input prompt swap (#4651) — same render-
-// settling motivation, same observed magnitude. Only inserted when the
-// final question in the sequence is single-select; mixed forms keep the
-// pre-#4635 timing-free path (Tab's commit signal makes Submit settle
-// naturally and the existing empirical recording pins the Tab + '1' run).
-//
-// #4882 (resolved 2026-06-07) — the fresh all-single-select recorder pass
-// finally ran against a live claude TUI (v2.1.168) and is committed at
-// `docs/empirical/4882-all-single-select-2q.jsonl`. A human driving a pure
-// two-question all-single-select form submitted with the digit sequence
-// `'2','2','1'` and the form committed on the Submit `'1'` ALONE — no
-// trailing `\r` was pressed. So:
-//   - The Submit screen accepts `'1'` (it does NOT require `\r`, and does
-//     NOT auto-submit after the last digit — there IS a Submit screen).
-//   - 150ms is kept (LOCKED): the human's natural gap before Submit was
-//     ~4s, which confirms a settle works but gives no lower bound, so
-//     tuning down isn't justified by this capture. 150ms mirrors the
-//     OTHER_FREEFORM_SETTLE_MS render-settle magnitude (#4651) and the
-//     #4635 wedge has not recurred, so it stays.
-//   - The trailing `\r` below is now CONFIRMED unnecessary (the human
-//     never sent it) but is retained as confirmed-harmless belt-and-braces
-//     — see the comment at its `sequence.push('\r')` site. It is NOT
-//     removed here because this recording covered only the 2-question
-//     all-single-select shape; pulling the `\r` from the mixed and 3+q
-//     paths it also feeds would be an overreach from a single-shape capture.
-// The 30s ASK_USER_QUESTION watchdog remains the safety net for any shape
-// not yet captured. Prior wedge analysis: #4635, #4867.
-export const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
-
 // #5776 (Phase 0) — multi-select reinject spike. claude TUI is keyboard-only
 // and exposes no structured answer channel, so multi-select forms are denied at
 // permission-hook.sh and (defense-in-depth) refused here. The reinject path
@@ -131,9 +92,8 @@ export function multiSelectReinjectEnabled() {
 }
 
 // #5776 — parse a single question's answersMap value into an array of selected
-// option LABELS. Mirrors the multi-select parsing in resolveQuestionKeystrokes
-// (native array post-#4735 / JSON-encoded array / comma-joined fallback) so the
-// reinject formatter and the keystroke driver agree on what the user picked.
+// option LABELS. Accepts the three wire shapes the dashboard may send: a native
+// array (post-#4735), a JSON-encoded array string, or a comma-joined fallback.
 function parseSelectedLabels(raw) {
   if (Array.isArray(raw)) return raw.filter((s) => typeof s === 'string')
   if (typeof raw === 'string' && raw.length > 0) {
@@ -172,45 +132,38 @@ export class FormDriver {
   }
 
   /**
-   * Send a response to an AskUserQuestion prompt (#4278, multi-question
-   * support added in #4604 Chunk B). The dashboard's QuestionPrompt UI
-   * fires this when the user submits. Two paths:
+   * Send a response to an AskUserQuestion prompt (#4278). The dashboard's
+   * QuestionPrompt UI fires this when the user submits. Supported shapes:
    *
-   * - Single-question (`questions.length === 1`, the v0.9.4 happy path):
-   *   write the 1-indexed option digit through the throttled writer,
-   *   which appends \r. claude TUI's prompt accepts either; Enter is
-   *   redundant but harmless. Pin-tested via #4290.
+   * - Single-question, single-select (`questions.length === 1`, the v0.9.4
+   *   happy path): write the 1-indexed option digit through the throttled
+   *   writer, which appends \r. claude TUI's prompt accepts either; Enter is
+   *   redundant but harmless. Pin-tested via #4290. Options beyond the
+   *   single-digit hotkey range (idx >= 9) drive via arrow-key navigation
+   *   (#4848, _writePtyArrowNavSequence).
    *
-   * - Multi-question (#4604 Chunk B): drive the inline form per the
-   *   empirical key sequence captured by scripts/tui-form-recorder.mjs
-   *   against claude CLI v2.1.158 (see tui_multi_question_form_keys
-   *   memory). For each question:
-   *     - single-select → write the digit (auto-advances to next q)
-   *     - multi-select  → write each chosen digit (no advance) then
-   *                       write Tab `\t` to commit + advance
-   *   After the last question, focus lands on the Submit screen
-   *   (`❯ 1. Submit answers / 2. Cancel`); write `'1'` to confirm.
-   *   The whole sequence is wrapped in bracketed-paste-disable/re-enable
-   *   exactly once and every visible char goes through the same
-   *   per-char throttle the single-question path uses (#4269 paste
-   *   detector defense).
+   * - Single-question, multi-select (#5776): claude TUI is keyboard-only with
+   *   no reliable multi-toggle+submit sequence, so multi-select is denied at
+   *   the permission hook and (flag-gated) reinjected as text — the chosen
+   *   labels are formatted (formatMultiSelectReinject) and sent as the next
+   *   user message rather than driven as keystrokes.
    *
-   * `answersMap` keys are the question text (`q.question`), values are
-   * either the chosen option's label string (single-select) or a
-   * JSON-encoded `["label1","label2"]` array / comma-joined list
-   * (multi-select). Back-compat: when the dashboard only sends `text`
-   * with no map (old client + multi-question form), defaults every
-   * question to its first option and logs a WARN so the wedge is
-   * visible in chroxy.log even though the session isn't stalled.
+   * - Multi-QUESTION forms (`questions.length > 1`): denied at the permission
+   *   hook since #4648; the keystroke assembler that drove them was removed in
+   *   #5773. If such an entry reaches here (a fail-open hook) it is refused
+   *   with a retryable teardown, never driven.
+   *
+   * `answersMap` keys are the question text (`q.question`), values are either
+   * the chosen option's label string (single-select) or a JSON-encoded
+   * `["label1","label2"]` array / comma-joined list (multi-select).
    *
    * No-op when no pending answer.
    *
    * @param {string} text — the chosen answer (single-question path); on the
    *   Other / freeform path (#4651) this is the Other option's label, used
-   *   to resolve the 1-indexed TUI digit. Ignored on the multi-question
-   *   path when answersMap is populated.
+   *   to resolve the 1-indexed TUI digit.
    * @param {object} [answersMap] — `{ [questionText]: string | string[] }`;
-   *   required for multi-question forms (Chunk B).
+   *   used by the single multi-select reinject path (#5776).
    * @param {string} [toolUseId] — #4668: target the specific pending entry
    *   to answer when multiple AskUserQuestion tool_uses are in flight in
    *   the same turn. When omitted, falls back to the most-recently-set
@@ -386,9 +339,9 @@ export class FormDriver {
       })
       return
     }
-    // Single-question / free-text path requires a non-empty `text`. The
-    // multi-question path is driven from answersMap (text is ignored when
-    // a map is present) so an empty string is permitted there.
+    // Single-question / free-text path requires a non-empty `text`. The single
+    // multi-select reinject path (#5776) is driven from answersMap (text is
+    // ignored when a map is present) so an empty string is permitted there.
     if (typeof text !== 'string') return
     if (text.length === 0 && answersMapKeyCount === 0) return
     const { options } = entry
@@ -605,267 +558,22 @@ export class FormDriver {
       return
     }
 
-    // #4604 Chunk B — multi-question form driver. Build the keystroke
-    // sequence per the empirical findings, then write through the
-    // dedicated multi-question writer (one bracketed-paste wrap around
-    // the whole sequence; per-char throttle; no trailing \r).
-    const map = (answersMap && typeof answersMap === 'object') ? answersMap : {}
-    const haveMap = Object.keys(map).length > 0
-    if (!haveMap) {
-      // #4828: session-scoped.
-      ;(this._host._log || log).warn(`AskUserQuestion multi-question: dashboard didn't send answersMap (tool=${prevToolUseId || '?'}, questions=${questions.length}) — defaulting every question to option 1. Update the client to populate the per-question answers map.`)
-    }
-
-    // #4625 + #4848 — claude TUI's single-digit hotkey alphabet ('1'..'9')
-    // covers options at indices 0..8 only. When a question has 10+ options
-    // AND the user explicitly picked one at index ≥ 9, we have no
-    // representable digit keystroke. Pre-#4625 the driver silently
-    // defaulted such picks to option 1; #4625 surfaced a structured
-    // ASK_USER_QUESTION_TOO_MANY_OPTIONS error before any PTY write so
-    // the dashboard could prompt for a re-ask. #4848 splits this by
-    // question kind:
-    //   - single-select questions with an explicit pick at idx >= 9:
-    //     driven natively via arrow-key navigation in the assembled
-    //     sequence below (each Down arrow lands the cursor on the next
-    //     option, Enter commits + advances to the next question — same
-    //     mechanism the single-question path now uses).
-    //   - multi-select questions with a toggle at idx >= 9: KEEP the
-    //     structured ASK_USER_QUESTION_TOO_MANY_OPTIONS error. multi-
-    //     select form navigation (arrow + Space to toggle + return-to-
-    //     start) is empirically unrecorded; mixing arrow nav with the
-    //     digit hotkeys for in-range toggles in the same question would
-    //     leave the cursor in an unknown state without a tested return-
-    //     to-anchor primitive. Reserve the too-many error for this case.
-    //
-    // Bail BEFORE any PTY write so the form stays in its initial state
-    // when the error fires (claude TUI's watchdog or the user's Ctrl-C
-    // unsticks it). 10+ option questions with no per-question answer
-    // still fall back to option 1 (back-compat for old clients).
-    if (haveMap) {
-      const unrepresentableMultiSelect = []
-      for (const q of questions) {
-        const opts = Array.isArray(q.options) ? q.options : []
-        if (opts.length <= 9) continue
-        if (!q.multiSelect) continue // single-select 10+ now driven via arrow nav
-        const raw = map[q.question]
-        // Gather every label the user toggled for this multi-select.
-        // MUST mirror resolveQuestionKeystrokes' multi-select parsing —
-        // array → JSON-encoded array → comma-joined list — so an
-        // unrepresentable toggle sent via the comma-joined fallback
-        // (e.g. "a,k") isn't accidentally treated as a single 3-char
-        // label and missed (Copilot review feedback on #4625).
-        let labels = []
-        if (Array.isArray(raw)) {
-          labels = raw.filter((s) => typeof s === 'string')
-        } else if (typeof raw === 'string' && raw.length > 0) {
-          let parsed = null
-          try { parsed = JSON.parse(raw) } catch { parsed = null }
-          if (Array.isArray(parsed)) {
-            labels = parsed.filter((s) => typeof s === 'string')
-          } else {
-            labels = raw.split(',').map((s) => s.trim()).filter(Boolean)
-          }
-        }
-        for (const label of labels) {
-          const idx = opts.findIndex((o) => o && o.label === label)
-          if (idx >= 9) unrepresentableMultiSelect.push({ question: q.question, label, index: idx, total: opts.length })
-        }
-      }
-      if (unrepresentableMultiSelect.length > 0) {
-        const first = unrepresentableMultiSelect[0]
-        ;(this._host._log || log).warn(`AskUserQuestion multi-question: multi-select question has ${first.total} options and the user toggled option ${first.index + 1} ("${(first.label || '').slice(0, 40)}") which is outside claude TUI's 1..9 hotkey alphabet AND beyond the arrow-nav single-select fallback (#4848 deliberately scopes arrow-nav to single-select only) — surfacing ASK_USER_QUESTION_TOO_MANY_OPTIONS (tool=${prevToolUseId || '?'})`)
-        // Full AskUserQuestion teardown: synth tool_result + Ctrl-C the
-        // TUI + clear inactivity timers + stream_end + _emitResult +
-        // error (in that order). Without the full teardown the dashboard
-        // would leave the Working banner + Stop button up and the
-        // "Running AskUserQuestion · Ns" pill ticking even though
-        // chroxy gave up before writing any keystrokes (#4625 hands the
-        // form's resolution back to the user via the error toast).
-        this._teardownAskUserQuestion(prevToolUseId, {
-          synthResult: `AskUserQuestion failed: multi-select question has ${first.total} options and you toggled option ${first.index + 1}, beyond the 9 the claude TUI multi-select form can drive (#4848).`,
-          emitResultReason: 'ask_user_question_too_many_options',
-          errorCode: 'ASK_USER_QUESTION_TOO_MANY_OPTIONS',
-          errorMessage: `Couldn't answer: a multi-select question has ${first.total} options and you toggled option ${first.index + 1}, which is beyond the 9 the claude TUI form can drive for multi-select. Re-prompt the agent to ask with 9 or fewer options for that question.`,
-        })
-        return
-      }
-    }
-
-    /** Resolve a single label to its 1-indexed digit; null if no usable digit. */
-    const labelToDigit = (q, label) => {
-      if (!q || !Array.isArray(q.options) || q.options.length === 0) return null
-      const idx = q.options.findIndex((o) => o && o.label === label)
-      if (idx >= 0 && idx < 9) return String(idx + 1)
-      return null
-    }
-
-    /**
-     * Resolve a single question's answer entry to an array of keystroke
-     * tokens to write. Tokens are arbitrary-length strings — usually a
-     * single digit ('1'..'9') or Tab/Enter, but for #4848 a single-select
-     * answer at idx >= 9 expands to a multi-token arrow-nav sequence
-     * (`'\x1b[B'` × idx + `'\r'`). The writer (`_writePtyMultiQuestionSequence`)
-     * doesn't care about token length — it writes each entry as one
-     * `term.write` call with a throttle pause after.
-     */
-    const resolveQuestionKeystrokes = (q, rawAnswer) => {
-      const opts = Array.isArray(q.options) ? q.options : []
-      const defaultDigit = opts.length > 0 ? '1' : null
-
-      if (q.multiSelect) {
-        // multi-select expects 0+ choices. Accept array, JSON-encoded
-        // array string, or comma-joined list — the wire schema is
-        // `Record<string, string | string[]>` post-#4735 so newer
-        // dashboard / app builds send the native array form; pre-#4735
-        // builds JSON-stringified the array into a single string for
-        // back-compat. Both shapes resolve here.
-        let labels = []
-        if (Array.isArray(rawAnswer)) {
-          labels = rawAnswer.filter((s) => typeof s === 'string')
-        } else if (typeof rawAnswer === 'string' && rawAnswer.length > 0) {
-          let parsed = null
-          try { parsed = JSON.parse(rawAnswer) } catch { parsed = null }
-          if (Array.isArray(parsed)) {
-            labels = parsed.filter((s) => typeof s === 'string')
-          } else {
-            // Fallback: comma-joined "label1,label2" — only safe when
-            // labels themselves don't contain commas; defensive
-            // single-label case also handled here.
-            labels = rawAnswer.split(',').map((s) => s.trim()).filter(Boolean)
-          }
-        }
-        const digits = []
-        for (const label of labels) {
-          const d = labelToDigit(q, label)
-          if (d) digits.push(d)
-          // Multi-select 10+ toggles already pre-screened above and
-          // surfaced as ASK_USER_QUESTION_TOO_MANY_OPTIONS — anything
-          // unrepresentable here means the dashboard sent something we
-          // couldn't match (defaulted handling below).
-        }
-        if (digits.length === 0 && defaultDigit) {
-          // #4828: session-scoped (closure runs inside respondToQuestion, post-start).
-          ;(this._host._log || log).warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (multi-select) — defaulting to option 1`)
-          digits.push(defaultDigit)
-        }
-        return digits
-      }
-
-      // single-select — exactly one keystroke token.
-      let pickedLabel = null
-      if (typeof rawAnswer === 'string' && rawAnswer.length > 0) {
-        pickedLabel = rawAnswer
-      } else if (Array.isArray(rawAnswer) && typeof rawAnswer[0] === 'string') {
-        pickedLabel = rawAnswer[0]
-      }
-      if (pickedLabel !== null) {
-        const idx = opts.findIndex((o) => o && o.label === pickedLabel)
-        if (idx >= 0 && idx < 9) return [String(idx + 1)]
-        if (idx >= 9) {
-          // #4848 — option at idx >= 9 in a single-select question.
-          // Drive via arrow-key navigation: idx Down arrows from the
-          // top option (cursor starts at idx 0) followed by Enter to
-          // commit + advance to the next question. The arrow sequence
-          // and the Enter are emitted as two distinct keystroke tokens
-          // so the throttle pauses BETWEEN them (claude TUI's paste
-          // detector treats a single 11-byte burst as a paste). Each
-          // arrow is 3 bytes ('\x1b[B'); 10 arrows = 30 bytes is still
-          // well under any reasonable paste threshold, but stay safe.
-          log.info(`AskUserQuestion multi-question: single-select pick at idx=${idx} (option ${idx + 1}) in q="${(q.question || '').slice(0, 40)}" → arrow-nav (#4848)`)
-          const tokens = []
-          for (let i = 0; i < idx; i++) tokens.push('\x1b[B')
-          tokens.push('\r')
-          return tokens
-        }
-      }
-      if (defaultDigit) {
-        // #4828: session-scoped (closure runs inside respondToQuestion, post-start).
-        if (haveMap) (this._host._log || log).warn(`AskUserQuestion multi-question: no resolvable answer for q="${(q.question || '').slice(0, 40)}" (single-select) — defaulting to option 1`)
-        return [defaultDigit]
-      }
-      return []
-    }
-
-    // Assemble the inner keystroke sequence (no paste-mode toggles —
-    // _writePtyMultiQuestionSequence wraps the whole thing). The sequence
-    // is a mixed array of strings (chars to write) and numbers (ms to
-    // sleep) — the writer dispatches on type.
-    const sequence = []
-    for (const q of questions) {
-      const rawAnswer = map[q.question]
-      const keystrokes = resolveQuestionKeystrokes(q, rawAnswer)
-      for (const k of keystrokes) sequence.push(k)
-      if (q.multiSelect) {
-        // Multi-select needs an explicit advance keystroke; single-select
-        // auto-advances on digit OR on Enter after arrow-nav (verified
-        // empirically for digit; arrow-nav variant pinned by #4848).
-        sequence.push('\t')
-      }
-    }
-    // #4635 — when the LAST question is single-select, insert a settling
-    // delay before the Submit keystroke. The last digit auto-advances to
-    // the Submit screen, but the 1ms per-char throttle races claude TUI's
-    // render of that screen so the trailing '1' lands on the still-
-    // rendering last-question screen and gets swallowed (the wedge the
-    // issue documents). Mixed forms ending in multi-select don't need
-    // this — the explicit '\t' already settles the form.
-    // #4883 — tighten the lastIsSingleSelect detection so an unexpected TUI
-    // question shape surfaces in logs instead of silently picking a branch.
-    // Today's TUI omits `multiSelect` on single-select questions and sets it
-    // to `true` on multi-select; any other shape (string, null, number, a
-    // hypothetical future field rename) is treated as "assume single-select
-    // for settle purposes" — but we log a WARN so the shape drift is visible.
-    //
-    // The "drift" check uses `'multiSelect' in lastQuestion` rather than
-    // `!== undefined` so it also catches the in-code pathological case
-    // `{ multiSelect: undefined }` (Copilot review on #4902): the key is
-    // present but the value isn't boolean — that's still drift worth
-    // surfacing, since wire-deserialized shapes can't produce that pattern
-    // (JSON.stringify drops undefined-valued keys) but in-code shapes can.
-    const lastQuestion = questions.length > 0 ? questions[questions.length - 1] : null
-    if (lastQuestion && 'multiSelect' in lastQuestion && typeof lastQuestion.multiSelect !== 'boolean') {
-      ;(this._host._log || log).warn(`AskUserQuestion multi-question: last question has non-boolean multiSelect=${JSON.stringify(lastQuestion.multiSelect)} (q="${(lastQuestion.question || '').slice(0, 40)}") — assuming single-select for settle (#4883)`)
-    }
-    const lastIsSingleSelect = !!(lastQuestion && lastQuestion.multiSelect !== true)
-    if (lastIsSingleSelect) {
-      sequence.push(MULTI_QUESTION_SUBMIT_SETTLE_MS)
-    }
-    // Focus lands on `❯ 1. Submit answers / 2. Cancel` after the last
-    // question — press 1 to confirm submission.
-    // #4884: tag the Submit position with a marker object so
-    // _writePtyMultiQuestionSequence can record the wall-clock at the
-    // point the writer reaches Submit (immediately before the `'1'` is
-    // written to the PTY, after any preceding settle has elapsed). Used
-    // by _emitToolHookEvent's PostToolUse handler to log the
-    // Submit→PostToolUse delta — the marker timestamp is the lower bound
-    // for when '1' actually leaves the writer (within
-    // PROMPT_CHAR_DELAY_MS of the actual write).
-    if (prevToolUseId) {
-      sequence.push({ type: 'mark', label: 'submit', toolUseId: prevToolUseId })
-    }
-    sequence.push('1')
-    // #4635 — trailing Enter after the Submit `'1'`.
-    // #4882 (resolved 2026-06-07): the all-single-select recorder pass
-    // (docs/empirical/4882-all-single-select-2q.jsonl) confirmed a human
-    // submits the Submit screen with `'1'` ALONE — the trailing `\r` is
-    // NOT required (the Submit screen commits on the digit, same as the
-    // mixed-form recording and the single-q path's redundant Enter pinned
-    // in #4290). The `\r` is RETAINED as confirmed-harmless belt-and-braces:
-    // it lands ~1ms after Submit-'1' (per-char throttle) on a form that has
-    // already committed, and #4884's Submit→PostToolUse forensics show it
-    // arriving without disrupting the round-trip. Kept (not removed) because
-    // the recording covered only the 2-question all-single-select shape and
-    // this push also feeds the mixed and 3+q paths, which were not re-recorded.
-    sequence.push('\r')
-
-    const keystrokeCount = sequence.filter((x) => typeof x === 'string').length
-    ;(this._host._log || log).info(`AskUserQuestion multi-question: tool=${prevToolUseId || '?'} questions=${questions.length} keystrokes=${keystrokeCount} haveAnswersMap=${haveMap}`)
-
-    this._host._writePtyMultiQuestionSequence(sequence).catch((err) => {
-      // #4828: session-scoped.
-      ;(this._host._log || log).warn(`respondToQuestion multi-question PTY write failed: ${err.message} (tool=${prevToolUseId || '?'})`)
+    // #5773: claude TUI multi-QUESTION forms (questions.length > 1) are denied at
+    // the permission hook (since #4648), so this path is unreachable in production.
+    // The keystroke assembler that drove them (toggle-digit + Tab + Submit settle
+    // timing, #4604 Chunk B) and _writePtyMultiQuestionSequence have been removed
+    // as a version-pinned maintenance liability (swarm audit 2026-06-13). Keep a
+    // defense-in-depth refusal: if a multi-question entry ever reaches
+    // respondToQuestion (a fail-open hook), tear the turn down cleanly instead of
+    // driving guessed keystrokes — mirroring the hook deny. Single-question and
+    // single multi-select (reinject, #5776) are handled above and return early.
+    ;(this._host._log || log).warn(`AskUserQuestion: refusing ${questions.length}-question form (tool=${prevToolUseId || '?'}) — multi-question is denied at the permission hook; not driving keystrokes`)
+    this._teardownAskUserQuestion(prevToolUseId, {
+      synthResult: 'Multi-question AskUserQuestion forms aren\'t supported by the TUI provider. Ask one single-select question at a time.',
+      emitResultReason: 'ask_user_question_multi_question_unsupported',
+      errorCode: 'ASK_USER_QUESTION_MULTI_QUESTION_UNSUPPORTED',
+      errorMessage: 'Multi-question forms aren\'t supported here. Tap Retry to resend as single questions.',
     })
-    armWatchdog()
   }
 
   /**

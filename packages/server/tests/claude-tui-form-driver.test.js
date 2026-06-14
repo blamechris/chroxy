@@ -332,10 +332,11 @@ describe('FormDriver — injected collaborator (#5617)', () => {
       'the rejection is logged via the .catch, not surfaced as an unhandled throw')
   })
 
-  it('multi-QUESTION (length>1) multiSelect never takes the reinject path — single-question only (#5776)', () => {
-    // The reinject guard is `pendingQuestions.length <= 1 && some(multiSelect)`.
-    // A >1-question form (denied separately at the hook since #4648) must NOT
-    // reinject even with the flag on — pins the single-question-only boundary.
+  it('multi-QUESTION (length>1) is refused — no reinject, no keystrokes, retryable teardown (#5773)', () => {
+    // Multi-question forms are denied at the permission hook (#4648); the
+    // keystroke assembler was removed in #5773. If a >1-question entry reaches
+    // the driver anyway (fail-open hook), it must refuse + tear down cleanly —
+    // never reinject (single-question only, #5776) and never drive keystrokes.
     const host = makeMockHost()
     const options = [{ label: 'A' }, { label: 'B' }]
     host._pendingUserAnswers.set('t1', {
@@ -347,12 +348,18 @@ describe('FormDriver — injected collaborator (#5617)', () => {
       options,
     })
     const fd = new FormDriver(host)
+    const tornDown = []
+    fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
 
     withReinjectFlag('1', () => {
       fd.respondToQuestion('', { Q1: ['A'], Q2: 'B' }, 't1')
     })
 
     assert.deepEqual(host._sent, [], 'reinject path is single-question only')
+    assert.deepEqual(host._writes, [], 'no digit keystrokes written')
+    assert.deepEqual(host._multiSeqs, [], 'no multi-question keystroke sequence driven')
+    assert.equal(tornDown.length, 1, 'multi-question is torn down, not driven')
+    assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTI_QUESTION_UNSUPPORTED')
   })
 
   it('single-question: an unmatched label falls through to the literal text', () => {
