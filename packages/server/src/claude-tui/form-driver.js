@@ -55,7 +55,9 @@ const log = createLogger('claude-tui-session')
 // PostToolUse never fires. Without this watchdog the session wedges at
 // _isBusy=true forever (the 8m+ symptom in #4604). On expiry we clear
 // _isBusy + _pendingUserAnswer and emit ASK_USER_QUESTION_STALL so the
-// dashboard can prompt the user to retry. Root cause is fixed in Chunk B.
+// dashboard can prompt the user to retry. The multi-question wedge this
+// originally guarded was removed in #5773 (assembler deleted); the watchdog
+// now backstops single-question / multi-select-reinject stalls.
 export const ASK_USER_QUESTION_WATCHDOG_MS = 30 * 1000
 
 // #4651 — settle delay between the "Other" digit write and the freeform
@@ -90,9 +92,8 @@ export function multiSelectReinjectEnabled() {
 }
 
 // #5776 — parse a single question's answersMap value into an array of selected
-// option LABELS. Mirrors the multi-select parsing in resolveQuestionKeystrokes
-// (native array post-#4735 / JSON-encoded array / comma-joined fallback) so the
-// reinject formatter and the keystroke driver agree on what the user picked.
+// option LABELS. Accepts the three wire shapes the dashboard may send: a native
+// array (post-#4735), a JSON-encoded array string, or a comma-joined fallback.
 function parseSelectedLabels(raw) {
   if (Array.isArray(raw)) return raw.filter((s) => typeof s === 'string')
   if (typeof raw === 'string' && raw.length > 0) {
@@ -131,45 +132,38 @@ export class FormDriver {
   }
 
   /**
-   * Send a response to an AskUserQuestion prompt (#4278, multi-question
-   * support added in #4604 Chunk B). The dashboard's QuestionPrompt UI
-   * fires this when the user submits. Two paths:
+   * Send a response to an AskUserQuestion prompt (#4278). The dashboard's
+   * QuestionPrompt UI fires this when the user submits. Supported shapes:
    *
-   * - Single-question (`questions.length === 1`, the v0.9.4 happy path):
-   *   write the 1-indexed option digit through the throttled writer,
-   *   which appends \r. claude TUI's prompt accepts either; Enter is
-   *   redundant but harmless. Pin-tested via #4290.
+   * - Single-question, single-select (`questions.length === 1`, the v0.9.4
+   *   happy path): write the 1-indexed option digit through the throttled
+   *   writer, which appends \r. claude TUI's prompt accepts either; Enter is
+   *   redundant but harmless. Pin-tested via #4290. Options beyond the
+   *   single-digit hotkey range (idx >= 9) drive via arrow-key navigation
+   *   (#4848, _writePtyArrowNavSequence).
    *
-   * - Multi-question (#4604 Chunk B): drive the inline form per the
-   *   empirical key sequence captured by scripts/tui-form-recorder.mjs
-   *   against claude CLI v2.1.158 (see tui_multi_question_form_keys
-   *   memory). For each question:
-   *     - single-select → write the digit (auto-advances to next q)
-   *     - multi-select  → write each chosen digit (no advance) then
-   *                       write Tab `\t` to commit + advance
-   *   After the last question, focus lands on the Submit screen
-   *   (`❯ 1. Submit answers / 2. Cancel`); write `'1'` to confirm.
-   *   The whole sequence is wrapped in bracketed-paste-disable/re-enable
-   *   exactly once and every visible char goes through the same
-   *   per-char throttle the single-question path uses (#4269 paste
-   *   detector defense).
+   * - Single-question, multi-select (#5776): claude TUI is keyboard-only with
+   *   no reliable multi-toggle+submit sequence, so multi-select is denied at
+   *   the permission hook and (flag-gated) reinjected as text — the chosen
+   *   labels are formatted (formatMultiSelectReinject) and sent as the next
+   *   user message rather than driven as keystrokes.
    *
-   * `answersMap` keys are the question text (`q.question`), values are
-   * either the chosen option's label string (single-select) or a
-   * JSON-encoded `["label1","label2"]` array / comma-joined list
-   * (multi-select). Back-compat: when the dashboard only sends `text`
-   * with no map (old client + multi-question form), defaults every
-   * question to its first option and logs a WARN so the wedge is
-   * visible in chroxy.log even though the session isn't stalled.
+   * - Multi-QUESTION forms (`questions.length > 1`): denied at the permission
+   *   hook since #4648; the keystroke assembler that drove them was removed in
+   *   #5773. If such an entry reaches here (a fail-open hook) it is refused
+   *   with a retryable teardown, never driven.
+   *
+   * `answersMap` keys are the question text (`q.question`), values are either
+   * the chosen option's label string (single-select) or a JSON-encoded
+   * `["label1","label2"]` array / comma-joined list (multi-select).
    *
    * No-op when no pending answer.
    *
    * @param {string} text — the chosen answer (single-question path); on the
    *   Other / freeform path (#4651) this is the Other option's label, used
-   *   to resolve the 1-indexed TUI digit. Ignored on the multi-question
-   *   path when answersMap is populated.
+   *   to resolve the 1-indexed TUI digit.
    * @param {object} [answersMap] — `{ [questionText]: string | string[] }`;
-   *   required for multi-question forms (Chunk B).
+   *   used by the single multi-select reinject path (#5776).
    * @param {string} [toolUseId] — #4668: target the specific pending entry
    *   to answer when multiple AskUserQuestion tool_uses are in flight in
    *   the same turn. When omitted, falls back to the most-recently-set
@@ -345,9 +339,9 @@ export class FormDriver {
       })
       return
     }
-    // Single-question / free-text path requires a non-empty `text`. The
-    // multi-question path is driven from answersMap (text is ignored when
-    // a map is present) so an empty string is permitted there.
+    // Single-question / free-text path requires a non-empty `text`. The single
+    // multi-select reinject path (#5776) is driven from answersMap (text is
+    // ignored when a map is present) so an empty string is permitted there.
     if (typeof text !== 'string') return
     if (text.length === 0 && answersMapKeyCount === 0) return
     const { options } = entry

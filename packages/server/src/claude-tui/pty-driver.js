@@ -3,7 +3,7 @@
 // #5559 — pure-move extraction of the PTY layer out of claude-tui-session.js.
 // These helpers + the throttled-write methods carry the most empirically-tuned
 // behaviour in the repo (paste detector defeat via per-char throttle, bracketed-
-// paste handling, the arrow-nav + multi-question writers). Bodies are moved
+// paste handling, the arrow-nav writer). Bodies are moved
 // BYTE-IDENTICAL from the original; only the module location changed. The write
 // methods live on `PtyDriverMixin` and are copied onto ClaudeTuiSession.prototype
 // via applyMixin() in claude-tui-session.js, so `this` still refers to the
