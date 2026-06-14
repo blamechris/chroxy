@@ -35,7 +35,10 @@
  *    `_clearAskUserQuestionWatchdog`, `_clearAskUserQuestionLock`,
  *    `_clearFirstOutputWatchdog`, `_streamStallTimeout`, `_resultTimeout`,
  *    `_hardTimeout`, `_nowMonotonic`.
- *  - Misc: `_term`, `_log`, `emit` (the session is an EventEmitter).
+ *  - Misc: `_term`, `_log`, `emit` (the session is an EventEmitter),
+ *    `sendMessage` (#5773 multi-select reinject — start a new turn with the
+ *    formatted answer text when the denied multi-select form has no live form
+ *    to drive).
  *
  * @typedef {import('../claude-tui-session.js').ClaudeTuiSession} FormDriverHost
  */
@@ -111,6 +114,53 @@ const OTHER_FREEFORM_WATCHDOG_MS = 30 * 1000
 // The 30s ASK_USER_QUESTION watchdog remains the safety net for any shape
 // not yet captured. Prior wedge analysis: #4635, #4867.
 export const MULTI_QUESTION_SUBMIT_SETTLE_MS = 150
+
+// #5773 (Phase 0) — multi-select reinject spike. claude TUI is keyboard-only
+// and exposes no structured answer channel, so multi-select forms are denied at
+// permission-hook.sh and (defense-in-depth) refused here. The reinject path
+// flips the strategy: instead of refusing, format the user's selection into a
+// plain-text answer and feed it to claude as a NEW turn via sendMessage(). This
+// works because the form was denied BEFORE it rendered (so there is no live form
+// to drive and no PostToolUse coming), and because a multi-select answer reaches
+// the model as comma-joined TEXT anyway (verified live 2026-06-13 — see project
+// memory tui_askuserquestion_keyboard_only). Gated behind an env flag so the
+// default (refuse) behavior is untouched; the same flag steers the hook's deny
+// reason. Read at call time so tests can toggle it per-case.
+export function multiSelectReinjectEnabled() {
+  return process.env.CHROXY_TUI_MULTISELECT_REINJECT === '1'
+}
+
+// #5773 — parse a single question's answersMap value into an array of selected
+// option LABELS. Mirrors the multi-select parsing in resolveQuestionKeystrokes
+// (native array post-#4735 / JSON-encoded array / comma-joined fallback) so the
+// reinject formatter and the keystroke driver agree on what the user picked.
+function parseSelectedLabels(raw) {
+  if (Array.isArray(raw)) return raw.filter((s) => typeof s === 'string')
+  if (typeof raw === 'string' && raw.length > 0) {
+    let parsed = null
+    try { parsed = JSON.parse(raw) } catch { parsed = null }
+    if (Array.isArray(parsed)) return parsed.filter((s) => typeof s === 'string')
+    return raw.split(',').map((s) => s.trim()).filter(Boolean)
+  }
+  return []
+}
+
+// #5773 — format the pending questions + answersMap into the plain-text answer
+// chroxy reinjects as the next user message. Uses option LABELS (not positional
+// digits/letters) so the answer is unambiguous to the model regardless of option
+// ordering. Returns '' when nothing resolvable was selected (caller falls back to
+// teardown). Free-text/"Other" combine is deferred to Phase 1 (#5773 option B).
+export function formatMultiSelectReinject(questions, answersMap) {
+  const map = (answersMap && typeof answersMap === 'object') ? answersMap : {}
+  const lines = []
+  for (const q of questions) {
+    if (!q || !q.question) continue
+    const labels = parseSelectedLabels(map[q.question])
+    if (labels.length === 0) continue
+    lines.push(`For "${q.question}": ${labels.join(', ')}`)
+  }
+  return lines.join('\n')
+}
 
 // --- interactive-form driver: an injected collaborator of ClaudeTuiSession (#5617) ---
 export class FormDriver {
@@ -250,6 +300,42 @@ export class FormDriver {
     // since #4648 and still flow through the assembler below if hook-bypassed —
     // that dead path is removed in the follow-up cleanup.)
     if (pendingQuestions.length <= 1 && pendingQuestions.some((q) => q && q.multiSelect === true)) {
+      // #5773 (Phase 0) — reinject path: format the selection into text and feed
+      // it to claude as a new turn instead of driving (un-drivable) keystrokes.
+      // The form was denied at permission-hook.sh before it rendered, so there is
+      // no live form and no PostToolUse — claude has stopped and is waiting for
+      // the next user message (verified live 2026-06-13). Gated by the env flag;
+      // when off, fall through to the original refuse-and-teardown behavior.
+      if (multiSelectReinjectEnabled()) {
+        const reinjectText = formatMultiSelectReinject(pendingQuestions, answersMap)
+        if (opts && typeof opts.freeformText === 'string' && opts.freeformText.length > 0) {
+          // Phase 1 (#5773 option B) — free-text combine deferred. Log so a
+          // dropped custom answer is visible rather than silent.
+          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject dropping freeformText (Phase 1, #5773 option B) tool=${prevToolUseId || '?'}`)
+        }
+        if (reinjectText.length === 0) {
+          // Nothing resolvable selected — recover via teardown rather than send
+          // an empty turn.
+          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject produced empty text (tool=${prevToolUseId || '?'}) — tearing down`)
+          this._teardownAskUserQuestion(prevToolUseId, {
+            synthResult: 'No selection received for the multi-select question.',
+            emitResultReason: 'ask_user_question_multiselect_empty',
+            errorCode: 'ASK_USER_QUESTION_MULTISELECT_EMPTY',
+            errorMessage: 'No selection received. Tap Retry to resend your request.',
+          })
+          return
+        }
+        ;(this._host._log || log).info(`respondToQuestion: multiSelect reinject (flag on) tool=${prevToolUseId || '?'} text="${reinjectText.slice(0, 80)}"`)
+        // The denied form left a pending entry + armed watchdog; clear both, plus
+        // the sibling lock, before starting the new turn.
+        this._host._clearPendingAnswerByToolUseId(prevToolUseId)
+        this._host._clearAskUserQuestionWatchdog(prevToolUseId)
+        this._host._clearAskUserQuestionLock()
+        Promise.resolve(this._host.sendMessage(reinjectText)).catch((err) => {
+          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject sendMessage failed: ${err?.message || err} (tool=${prevToolUseId || '?'})`)
+        })
+        return
+      }
       ;(this._host._log || log).warn(`respondToQuestion: refusing single multiSelect AskUserQuestion (tool=${prevToolUseId || '?'}) — multi-select is denied at the permission hook; not driving keystrokes`)
       this._teardownAskUserQuestion(prevToolUseId, {
         synthResult: 'Multi-select questions aren\'t supported by the TUI provider. Ask one single-select question at a time.',

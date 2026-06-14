@@ -9,7 +9,20 @@
 
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { FormDriver } from '../src/claude-tui/form-driver.js'
+import { FormDriver, formatMultiSelectReinject } from '../src/claude-tui/form-driver.js'
+
+// #5773 — run `fn` with CHROXY_TUI_MULTISELECT_REINJECT forced to `value`,
+// restoring the prior value afterward so tests don't leak the flag into each
+// other (the driver reads it at call time via multiSelectReinjectEnabled()).
+function withReinjectFlag(value, fn) {
+  const prev = process.env.CHROXY_TUI_MULTISELECT_REINJECT
+  if (value === undefined) delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
+  else process.env.CHROXY_TUI_MULTISELECT_REINJECT = value
+  try { return fn() } finally {
+    if (prev === undefined) delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
+    else process.env.CHROXY_TUI_MULTISELECT_REINJECT = prev
+  }
+}
 
 /**
  * Build a mock FormDriverHost that records the PTY writes + watchdog arms and
@@ -22,6 +35,9 @@ function makeMockHost(overrides = {}) {
   const arrowNavs = []       // _writePtyArrowNavSequence indices
   const arms = []            // _armAskUserQuestionWatchdog (toolUseId, ms?)
   const cleared = []         // _clearPendingAnswerByToolUseId ids
+  const wdCleared = []       // #5773 _clearAskUserQuestionWatchdog ids
+  const locksCleared = []    // #5773 _clearAskUserQuestionLock calls
+  const sent = []            // #5773 sendMessage payloads (reinject)
   const host = {
     _pendingUserAnswers: new Map(),
     _term: {},               // truthy = a live PTY
@@ -34,6 +50,10 @@ function makeMockHost(overrides = {}) {
     _writePtyArrowNavSequence: (idx) => { arrowNavs.push(idx); return Promise.resolve(true) },
     _armAskUserQuestionWatchdog: (id, ms) => { arms.push({ id, ms }) },
     _clearPendingAnswerByToolUseId: (id) => { cleared.push(id) },
+    // #5773 — surface the multi-select reinject path touches on success.
+    _clearAskUserQuestionWatchdog: (id) => { wdCleared.push(id) },
+    _clearAskUserQuestionLock: () => { locksCleared.push(true) },
+    sendMessage: (text) => { sent.push(text); return Promise.resolve() },
     // Back-compat getter: most-recently-set entry (the no-toolUseId path).
     get _pendingUserAnswer() {
       const vals = [...host._pendingUserAnswers.values()]
@@ -46,6 +66,9 @@ function makeMockHost(overrides = {}) {
   host._arrowNavs = arrowNavs
   host._arms = arms
   host._cleared = cleared
+  host._wdCleared = wdCleared
+  host._locksCleared = locksCleared
+  host._sent = sent
   return host
 }
 
@@ -116,6 +139,79 @@ describe('FormDriver — injected collaborator (#5617)', () => {
     assert.equal(tornDown.length, 1, 'tore the turn down exactly once')
     assert.equal(tornDown[0].id, 't1')
     assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED')
+  })
+
+  it('single multi-select REINJECT (flag on): formats the selection to text and sends a new turn (#5773)', () => {
+    // With CHROXY_TUI_MULTISELECT_REINJECT=1 the driver does NOT tear down or
+    // drive keystrokes — it formats the picked labels into a plain-text answer
+    // and feeds it to claude via sendMessage() as a fresh turn (the denied form
+    // never rendered, so there's no live form and no PostToolUse).
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Mushroom', 'Onion', 'Pepper'])
+    const fd = new FormDriver(host)
+    const tornDown = []
+    fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+
+    assert.deepEqual(host._writes, [], 'no single-digit throttled write')
+    assert.deepEqual(host._multiSeqs, [], 'no multi-question keystroke sequence')
+    assert.equal(tornDown.length, 0, 'reinject does NOT tear the turn down')
+    assert.deepEqual(host._sent, ['For "Pick toppings": Cheese, Onion'],
+      'sends the label-based answer text as a new turn')
+    assert.deepEqual(host._cleared, ['t1'], 'clears the denied pending entry')
+    assert.deepEqual(host._wdCleared, ['t1'], 'clears the armed stall watchdog')
+    assert.equal(host._locksCleared.length, 1, 'clears the sibling AskUserQuestion lock')
+  })
+
+  it('single multi-select REINJECT (flag on): empty selection falls back to teardown (#5773)', () => {
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Mushroom'])
+    const fd = new FormDriver(host)
+    const tornDown = []
+    fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
+
+    withReinjectFlag('1', () => {
+      // No matching answersMap key → nothing resolvable → empty formatted text.
+      fd.respondToQuestion('', { 'Some other question': ['X'] }, 't1')
+    })
+
+    assert.deepEqual(host._sent, [], 'no empty turn is sent')
+    assert.equal(tornDown.length, 1, 'recovers via teardown')
+    assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_EMPTY')
+  })
+
+  it('single multi-select: flag OFF still refuses + tears down (default behavior preserved) (#5773)', () => {
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    const tornDown = []
+    fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
+
+    withReinjectFlag(undefined, () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+
+    assert.deepEqual(host._sent, [], 'no reinject when the flag is off')
+    assert.equal(tornDown.length, 1)
+    assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED')
+  })
+
+  it('formatMultiSelectReinject: parses array / JSON-string / comma-string into label text (#5773)', () => {
+    const questions = [{ question: 'Pick toppings', multiSelect: true }]
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': ['Cheese', 'Onion'] }),
+      'For "Pick toppings": Cheese, Onion', 'native array')
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': '["Cheese","Onion"]' }),
+      'For "Pick toppings": Cheese, Onion', 'JSON-encoded array (legacy client)')
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': 'Cheese, Onion' }),
+      'For "Pick toppings": Cheese, Onion', 'comma-joined fallback')
+    assert.equal(
+      formatMultiSelectReinject(questions, {}), '', 'no selection → empty string')
   })
 
   it('single-question: an unmatched label falls through to the literal text', () => {
