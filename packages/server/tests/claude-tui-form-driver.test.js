@@ -148,7 +148,11 @@ describe('FormDriver — injected collaborator (#5617)', () => {
 
     // The dashboard would send an empty text + an answers map for a checkbox
     // form; either way the guard fires on the entry's multiSelect flag.
-    fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    // Pin the flag OFF so an ambient CHROXY_TUI_MULTISELECT_REINJECT can't route
+    // this default-behavior assertion down the reinject path.
+    withReinjectFlag(undefined, () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
 
     assert.deepEqual(host._writes, [], 'no single-digit throttled write')
     assert.deepEqual(host._multiSeqs, [], 'no multi-question keystroke sequence')
