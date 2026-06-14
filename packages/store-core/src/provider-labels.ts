@@ -115,15 +115,24 @@ export function getProviderInfo(provider: string): ProviderDisplayInfo {
 // (b) silently mishandled docker-cli/docker (cli-type, single-text answer
 // channel like claude-cli, yet they fell through the bare `!= claude-cli`
 // checks and were treated as structured-capable). Keying off the registered
-// `type` fixes both: cli-type providers take a single TEXT answer only.
+// `type` fixes both: cli-type providers answer over a single TEXT channel.
+//
+// The distinction is the ANSWER CHANNEL, not a method signature: cli-type
+// providers deliver the answer as one text string over CLI stdin / TUI PTY
+// keystrokes, so they cannot receive a structured per-question answersMap from
+// the client the way the SDK-family providers do. (claude-tui's server-side
+// respondToQuestion does take an answersMap internally — it uses it only to
+// format the single multi-select reinject text, not to drive a multi-question
+// form — so it's the documented exception in the single-multiselect predicate
+// below.)
 
 /**
  * Can this provider render a multi-QUESTION AskUserQuestion form (several
  * questions at once, per-question answers incl. multi-select arrays)?
  *
- * Only providers with a structured answer channel can — i.e. NOT the
- * cli-type providers (claude-cli, claude-tui, docker-cli, docker), whose
- * respondToQuestion accepts a single text answer with no answersMap.
+ * Only providers with a structured (per-question) answer channel can — i.e.
+ * NOT the cli-type providers (claude-cli, claude-tui, docker-cli, docker),
+ * which answer over a single text channel (CLI stdin / TUI PTY keystrokes).
  */
 export function providerSupportsMultiQuestion(provider: string | null | undefined): boolean {
   if (!provider) return false
@@ -133,8 +142,9 @@ export function providerSupportsMultiQuestion(provider: string | null | undefine
 /**
  * Can this provider render a SINGLE-question multi-select AskUserQuestion as a
  * checkbox form? True for every structured-channel provider PLUS claude-tui,
- * which re-injects the chosen labels as text via the #5776 reinject path.
- * The plain CLI providers (claude-cli, docker-cli, docker) cannot.
+ * which re-injects the chosen labels as one text string via the #5776 reinject
+ * path. The plain text-channel CLI providers (claude-cli, docker-cli, docker)
+ * cannot.
  *
  * Note: claude-tui's reinject is itself gated server-side by
  * CHROXY_TUI_MULTISELECT_REINJECT (default OFF). Wiring that capability to the
