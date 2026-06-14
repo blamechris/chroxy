@@ -429,6 +429,13 @@ export class ClaudeTuiSession extends BaseSession {
     // if no hook output has arrived within the window. 0 disables.
     this._firstTurnSubmitNudgeMs = ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MS
     this._firstTurnSubmitNudgeTimer = null
+    // #5794: per-spawn latch so the nudge arms on the FIRST message after each
+    // (re)spawn, not only the lifetime-first message. `_messageCounter` is
+    // monotonic (never reset), so keying the nudge on `=== 1` left a mid-session
+    // respawn's first turn un-nudged even though the warm-composer wedge can
+    // recur on the fresh PTY. Reset to false in _spawnPty (every successful
+    // (re)spawn), flipped true the first time sendMessage arms the nudge.
+    this._firstTurnNudgedForSpawn = false
     // #5431: incremental transcript scanner for outstanding background work
     // (run_in_background Bash/Agent, Monitor, ScheduleWakeup). Created
     // lazily by getBackgroundTaskSnapshot() once the per-PID session file
@@ -1462,6 +1469,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._outputTail = ''
     this._outputTailRaw = Buffer.alloc(0)
 
+    // #5794: a fresh PTY can swallow the first submit again, so re-arm the
+    // first-turn submit nudge for the first message on THIS spawn. Reset after
+    // the destroy-race guard above so an aborted (re)spawn doesn't clear it.
+    this._firstTurnNudgedForSpawn = false
+
     this._term.onData((data) => this._appendToOutputTail(data))
     this._term.onExit((info) => this._onPtyGone(info, 'exit'))
 
@@ -1934,14 +1946,24 @@ export class ClaudeTuiSession extends BaseSession {
     // hard fires after the full window of silence → force-clear + error.
     this._armResultTimeout()
 
-    // #5777: on the FIRST turn of the session, schedule the submit nudge. A
-    // freshly-spawned TUI sometimes reports ready before its composer accepts
-    // the trailing \r, so the prompt sits typed-but-unsent. If no hook output
-    // arrives within the window, _scheduleFirstTurnSubmitNudge re-sends a bare
-    // \r (a no-op on an already-submitted/empty composer, a submit on a stuck
-    // one). Later turns don't wedge — the composer is warm — so this is gated
-    // to the first turn to keep the blast radius minimal.
-    if (this._messageCounter === 1) {
+    // #5777/#5794: on the FIRST message of each (re)spawn, schedule the submit
+    // nudge. A freshly-spawned TUI sometimes reports ready before its composer
+    // accepts the trailing \r, so the prompt sits typed-but-unsent. If no hook
+    // output arrives within the window, _scheduleFirstTurnSubmitNudge re-sends a
+    // bare \r (a no-op on an already-submitted/empty composer, a submit on a
+    // stuck one). Two gates keep the blast radius minimal:
+    //   - #5794 (1): single-line only. A multi-line prompt takes the
+    //     bracketed-paste path in _writePtyTextThrottled (its own `hasNewlines`
+    //     check, mirrored here on the SAME promptToSend the write used), where a
+    //     bare \r is interpreted as a newline-in-composition / can submit a
+    //     partial paste — not a safe re-submit. Skip the nudge for that path.
+    //   - #5794 (2): first-message-per-spawn, not lifetime-first. `_messageCounter`
+    //     is monotonic and never reset, so the old `=== 1` gate left a post-respawn
+    //     wedge un-nudged. The `_firstTurnNudgedForSpawn` latch (reset in
+    //     _spawnPty) re-arms once per (re)spawn instead.
+    const hasNewlines = /\r?\n/.test(promptToSend || '')
+    if (!this._firstTurnNudgedForSpawn && !hasNewlines) {
+      this._firstTurnNudgedForSpawn = true
       this._scheduleFirstTurnSubmitNudge(messageId)
     }
 
@@ -2707,12 +2729,31 @@ export class ClaudeTuiSession extends BaseSession {
    * defers to the longer first-output watchdog. Cancelled by
    * _clearFirstOutputWatchdog (first output / any teardown / destroy).
    *
+   * #5794 hardening:
+   *   - The CALLER (sendMessage) only schedules this for a SINGLE-LINE first
+   *     message of each (re)spawn — a multi-line prompt goes through the
+   *     bracketed-paste write path where a bare \r is unsafe.
+   *   - Belt-and-braces no-op guard: the tick also skips the \r if `_outputTail`
+   *     has grown since arm time. The submit landing re-renders the TUI (output
+   *     before any hook), so a grown tail is independent evidence the composer
+   *     accepted the submit on a slow-but-healthy turn — don't risk a stray
+   *     second submit; defer to the first-output watchdog instead.
+   *
    * @param {string} messageId
    */
   _scheduleFirstTurnSubmitNudge(messageId) {
     if (!(this._firstTurnSubmitNudgeMs > 0)) return
     this._clearFirstTurnSubmitNudge()
     let attempts = 0
+    // #5794 (3): snapshot the output tail length at arm time. The submit landing
+    // makes the TUI re-render (the typed prompt scrolls up, the thinking spinner
+    // appears) which lands in `_outputTail` BEFORE the first hook is written —
+    // so a grown tail is independent evidence the composer accepted the submit,
+    // even on a slow-but-healthy turn whose first hook arrives after the window.
+    // We re-snapshot before each retry so a nudge that itself produced progress
+    // doesn't double-fire. `_outputTail` is empty in the stubbed-term unit tests
+    // (no onData wired), so the existing nudge tests still fire as before.
+    let tailLenAtArm = (this._outputTail || '').length
     const tick = () => {
       this._firstTurnSubmitNudgeTimer = null
       // Nothing to nudge if the turn ended/aborted, the PTY died, the composer
@@ -2721,6 +2762,13 @@ export class ClaudeTuiSession extends BaseSession {
       if (this._activeTurn?.aborted) return
       if (this._ptyExited || !this._term) return
       if (this._firstOutputDisarmed) return
+      // #5794 (3): genuine progress since we armed → the submit landed; a stray
+      // \r now risks an empty second submit on an already-warm composer. Defer
+      // to the first-output watchdog instead of nudging.
+      if ((this._outputTail || '').length > tailLenAtArm) {
+        ;(this._log || log).info(`first-turn submit nudge skipped (#5794, msg=${messageId}) — output grew since arm, submit landed`)
+        return
+      }
       attempts += 1
       try {
         this._term.write('\r')
@@ -2730,6 +2778,9 @@ export class ClaudeTuiSession extends BaseSession {
         return
       }
       if (attempts < ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS) {
+        // Re-snapshot so the next tick's no-progress check measures growth since
+        // THIS nudge (if our \r landed the submit, the next tick should skip).
+        tailLenAtArm = (this._outputTail || '').length
         this._firstTurnSubmitNudgeTimer = setTimeout(tick, this._firstTurnSubmitNudgeMs)
       }
     }
