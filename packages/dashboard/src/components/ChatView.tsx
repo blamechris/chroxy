@@ -390,14 +390,27 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
     setUserScrolledUp(!atBottom)
   }, [])
 
-  const scrollToBottom = useCallback(() => {
+  // The bare "snap to bottom" primitive shared by the mount, count-follow, and
+  // scrollToBottomSignal effects: flag the write as programmatic (so the
+  // resulting synthetic scroll event isn't misread as a user scroll-up), write
+  // scrollTop to scrollHeight, then clear the flag on the next frame. Reads the
+  // container ref itself and no-ops when unmounted, so callers don't repeat the
+  // null guard. Does NOT touch userScrolledUp — that's the caller's contract
+  // (the signal effect clears it; the count-follow effect only runs when already
+  // at bottom). Keeping the suppression contract in one place is the #5786 DRY
+  // ask — do not change its behavior.
+  const scrollToBottomNow = useCallback(() => {
     const el = containerRef.current
     if (!el) return
     programmaticScrollRef.current = true
     el.scrollTop = el.scrollHeight
-    setUserScrolledUp(false)
     requestAnimationFrame(() => { programmaticScrollRef.current = false })
   }, [])
+
+  const scrollToBottom = useCallback(() => {
+    scrollToBottomNow()
+    setUserScrolledUp(false)
+  }, [scrollToBottomNow])
 
   // Scroll to the bottom on initial mount so switching back to the chat
   // tab always lands on the most-recent message above the input bar.
@@ -405,15 +418,12 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
   // ChatView when the parent toggles viewMode away and back, so this
   // effect re-runs naturally on every tab return.
   useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    programmaticScrollRef.current = true
-    el.scrollTop = el.scrollHeight
+    if (!containerRef.current) return
+    scrollToBottomNow()
     // #5561 — seed the windowing geometry from the real container size on mount
     // so the first render after layout has an accurate viewport height.
     syncGeometry()
-    requestAnimationFrame(() => { programmaticScrollRef.current = false })
-  }, [syncGeometry])
+  }, [syncGeometry, scrollToBottomNow])
 
   // #5561 — keep the windowed range correct when the container resizes (panel
   // split drag, window resize, sidebar toggle) without a scroll event firing.
@@ -516,24 +526,18 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
     const countChanged = dedupedMessages.length !== prevCountRef.current
     prevCountRef.current = dedupedMessages.length
     if (countChanged && !userScrolledUp) {
-      requestAnimationFrame(() => {
-        const el = containerRef.current
-        if (el) {
-          programmaticScrollRef.current = true
-          el.scrollTop = el.scrollHeight
-          requestAnimationFrame(() => { programmaticScrollRef.current = false })
-        }
-      })
+      requestAnimationFrame(() => { scrollToBottomNow() })
     }
-  }, [dedupedMessages.length, userScrolledUp, isBusy])
+  }, [dedupedMessages.length, userScrolledUp, isBusy, scrollToBottomNow])
 
-  // #5780 — explicit "jump to latest" on a user action (currently send;
-  // approve/answer wiring tracked in #5786). Watches the parent's
-  // `scrollToBottomSignal` nonce: whenever it
-  // changes we force the view to the bottom and clear `userScrolledUp`, even if
-  // the user had scrolled up to read history. This is the deliberate exception
-  // to the count-change auto-follow above — sending a message is the user
-  // asking to see their input plus the response, so we always follow. Seeded
+  // #5780 / #5786 — explicit "jump to latest" on a user action: send, approving
+  // a permission/plan, or answering an AskUserQuestion (the parent bumps the
+  // nonce for all three). Watches the parent's `scrollToBottomSignal` nonce:
+  // whenever it changes we force the view to the bottom and clear
+  // `userScrolledUp`, even if the user had scrolled up to read history. This is
+  // the deliberate exception to the count-change auto-follow above — those
+  // actions are the user asking to see the resulting response, so we always
+  // follow. Seeded
   // with the initial value so the first render (and mount) is a no-op; only a
   // genuine bump scrolls. Robust to rapid sends: each distinct nonce fires
   // once, and the RAF defers the write until after the new row has laid out so
@@ -543,14 +547,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
     if (scrollToBottomSignal === lastScrollSignalRef.current) return
     lastScrollSignalRef.current = scrollToBottomSignal
     setUserScrolledUp(false)
-    requestAnimationFrame(() => {
-      const el = containerRef.current
-      if (!el) return
-      programmaticScrollRef.current = true
-      el.scrollTop = el.scrollHeight
-      requestAnimationFrame(() => { programmaticScrollRef.current = false })
-    })
-  }, [scrollToBottomSignal])
+    requestAnimationFrame(() => { scrollToBottomNow() })
+  }, [scrollToBottomSignal, scrollToBottomNow])
 
   // During streaming, continuously scroll to bottom via RAF
   useEffect(() => {

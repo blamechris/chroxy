@@ -212,6 +212,66 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
+  it('does not snap to bottom when scrollToBottomSignal is unchanged across a rerender (#5786)', async () => {
+    // After the #5786 DRY refactor the signal effect routes through the shared
+    // scrollToBottomNow() helper. This guards the lastScrollSignalRef compare on
+    // a *live* rerender (distinct from the initial-value test): a prop churn that
+    // re-renders ChatView without bumping the nonce must NOT force-scroll a user
+    // who has scrolled up to read history.
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(
+      <ChatView messages={messages} isStreaming={false} scrollToBottomSignal={2} />,
+    )
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // User scrolls up to read history.
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // Rerender with the SAME signal value (a no-op prop churn, e.g. a new
+    // renderMessage identity). The view must stay put.
+    rerender(<ChatView messages={messages} isStreaming={false} scrollToBottomSignal={2} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(100)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('snaps to bottom via the shared helper when scrollToBottomSignal bumps after refactor (#5786)', async () => {
+    // Companion to the #5780 bump test: confirms the extracted scrollToBottomNow()
+    // path still snaps to bottom (programmaticScrollRef + scrollTop = scrollHeight
+    // + RAF reset) when the nonce changes across two distinct, non-initial values.
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(
+      <ChatView messages={messages} isStreaming={false} scrollToBottomSignal={5} />,
+    )
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // Approve/answer-style bump (the App-level wiring increments the same nonce).
+    rerender(<ChatView messages={messages} isStreaming={false} scrollToBottomSignal={6} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
   it('preserves scrolled-up position when streaming ends mid-history-read (#4652)', async () => {
     // Repro for the AskUserQuestion scenario: streaming flips to false
     // when the question arrives. Previously, the streaming-end effect
