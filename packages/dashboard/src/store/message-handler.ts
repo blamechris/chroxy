@@ -159,6 +159,7 @@ import {
 import { filterThinking, nextMessageId } from './utils';
 import { calculateCost } from '../lib/model-pricing';
 import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
+import { unwrapToolResultText } from '../lib/tool-result-text';
 import type {
   ChatMessage,
   ConnectionContext,
@@ -2051,10 +2052,13 @@ function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet
   const result = sharedToolResult(msg, get().activeSessionId);
   if (!result) return;
   // Forward tool result to terminal view (dashboard-only side effect).
+  // #5778: unwrap the result envelope first so the Output tab shows the
+  // stdout/stderr text rather than the raw `{"stdout":...}` JSON.
   if (result.resultText) {
-    const preview = result.resultText.length > 500
-      ? result.resultText.slice(0, 500) + '...'
-      : result.resultText;
+    const text = unwrapToolResultText(result.resultText);
+    const preview = text.length > 500
+      ? text.slice(0, 500) + '...'
+      : text;
     get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
   }
   const targetId = result.sessionId;
