@@ -213,11 +213,17 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // wins (for tests), else config.provider, else DEFAULT_PROVIDER — so the
   // billing line tracks whichever provider a zero-config session would use.
   const effectiveDefault = resolvedProviders[0] || DEFAULT_PROVIDER
-  const meteredWarnings = detectSilentMeteredDefault(effectiveDefault, now)
+  // billing-class refinement: claude-sdk authed with an explicit ANTHROPIC_API_KEY
+  // bills the raw API account (api-key), not the metered credit pool — so a BYOK
+  // default must not trip a false silent-metered warning. claude-cli strips the key
+  // before spawn, so the env var doesn't change its class; only claude-sdk honours
+  // it here, matching sdk-session's auth resolution.
+  const apiKeyAuth = effectiveDefault === 'claude-sdk' && Boolean(process.env.ANTHROPIC_API_KEY)
+  const meteredWarnings = detectSilentMeteredDefault(effectiveDefault, now, { apiKeyAuth })
   if (meteredWarnings.length > 0) {
     checks.push({ name: 'Billing', status: 'warn', message: meteredWarnings[0].message })
   } else {
-    const billingClass = billingClassForProvider(effectiveDefault, now)
+    const billingClass = billingClassForProvider(effectiveDefault, now, { apiKeyAuth })
     const detail = billingDetailForClass(billingClass)
     if (isProgrammaticCreditEra(now)) {
       checks.push({

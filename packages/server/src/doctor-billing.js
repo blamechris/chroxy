@@ -33,6 +33,11 @@ import {
  */
 export function detectBillingReclassification(sessions = [], now = Date.now()) {
   const warnings = []
+  // Only meaningful on/after the cutover: before it, claude-tui and the host
+  // programmatic providers all bill as flat subscription, so a cost reading is
+  // not a reclassification signal. Gating here keeps the behaviour matching the
+  // docstring (no surprising pre-cutover warnings).
+  if (!isProgrammaticCreditEra(now)) return warnings
   for (const s of sessions || []) {
     if (!s || s.provider !== 'claude-tui') continue
     // claude-tui is always SUBSCRIPTION per billing-class; guard anyway so this
@@ -60,17 +65,24 @@ export function detectBillingReclassification(sessions = [], now = Date.now()) {
  *
  * @param {string} defaultProvider - the resolved default provider id
  * @param {number} [now]
+ * @param {{ apiKeyAuth?: boolean }} [opts] - `apiKeyAuth: true` forwards billing-class's
+ *   refinement: claude-sdk/claude-cli authed with an explicit ANTHROPIC_API_KEY bill the
+ *   raw API account (api-key), NOT the credit pool — so a BYOK default must NOT trip this
+ *   warning. The caller decides this (e.g. claude-sdk + ANTHROPIC_API_KEY set).
  * @returns {Array<{code:string, provider:string, message:string}>}
  */
-export function detectSilentMeteredDefault(defaultProvider, now = Date.now()) {
+export function detectSilentMeteredDefault(defaultProvider, now = Date.now(), { apiKeyAuth = false } = {}) {
   if (!isProgrammaticCreditEra(now)) return []
-  if (billingClassForProvider(defaultProvider, now) !== BILLING_CLASSES.PROGRAMMATIC_CREDIT) return []
+  if (billingClassForProvider(defaultProvider, now, { apiKeyAuth }) !== BILLING_CLASSES.PROGRAMMATIC_CREDIT) return []
+  // Derive the boundary date from the shared constant so a moved cutover can't
+  // leave a stale string here.
+  const cutover = new Date(PROGRAMMATIC_CREDIT_ERA_START).toISOString().slice(0, 10)
   return [{
     code: 'SILENT_METERED_DEFAULT',
     provider: defaultProvider,
     message:
       `The default provider '${defaultProvider}' bills against the metered programmatic-credit pool ` +
-      `since 2026-06-15. New default sessions draw credits silently — switch with --provider claude-tui ` +
+      `since ${cutover}. New default sessions draw credits silently — switch with --provider claude-tui ` +
       `(subscription, best-effort) or set ANTHROPIC_API_KEY (BYOK).`,
   }]
 }

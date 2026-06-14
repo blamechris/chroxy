@@ -41,6 +41,29 @@ test('detectSilentMeteredDefault flags a programmatic default in the era only', 
   assert.equal(detectSilentMeteredDefault('claude-byok', AFTER).length, 0) // api-key
 })
 
+test('detectSilentMeteredDefault does NOT flag claude-sdk when apiKeyAuth (BYOK)', () => {
+  // claude-sdk + explicit ANTHROPIC_API_KEY = raw-API billing, not the credit
+  // pool — so a BYOK default must not trip the silent-metered warning.
+  assert.equal(detectSilentMeteredDefault('claude-sdk', AFTER, { apiKeyAuth: true }).length, 0)
+  // ...but without the key it still warns.
+  assert.equal(detectSilentMeteredDefault('claude-sdk', AFTER, { apiKeyAuth: false }).length, 1)
+})
+
+test('detectSilentMeteredDefault derives the cutover date from the shared constant', () => {
+  // Guards against a hardcoded date drifting from PROGRAMMATIC_CREDIT_ERA_START.
+  assert.match(detectSilentMeteredDefault('claude-sdk', AFTER)[0].message, /since 2026-06-15\b/)
+})
+
+test('detectBillingReclassification stays silent before the cutover (era-gated)', () => {
+  // Matches the docstring: a cost reading is only a reclassification signal
+  // on/after the boundary; before it everything bills flat subscription.
+  const w = detectBillingReclassification(
+    [{ id: 's1', provider: 'claude-tui', totalCostUsd: 0.99 }],
+    BEFORE,
+  )
+  assert.equal(w.length, 0)
+})
+
 test('classifyEgressIp flags datacenter prefixes, not residential', () => {
   assert.equal(classifyEgressIp('95.216.1.2').datacenter, true)
   assert.equal(classifyEgressIp('95.216.1.2').code, 'DATACENTER_EGRESS')
