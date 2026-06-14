@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE, bumpRenderCount, isRetryableAskUserQuestionError } from '@chroxy/store-core';
+import { OTHER_OPTION_VALUE, bumpRenderCount, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -206,9 +206,7 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   // the multi-question case). `useMultiForm` collapses both into one condition:
   // a >1-question form when allowMultiQuestion, OR a single multiSelect when
   // allowSingleMultiSelect (claude-tui reinject + SDK-family; off for claude-cli).
-  const isSingleMultiSelect =
-    isPrompt && Array.isArray(message.questions) && message.questions.length === 1
-    && message.questions[0]?.multiSelect === true;
+  const isSingleMultiSelect = isPrompt && isSingleMultiSelectForm(message.questions);
   const useMultiForm =
     (isMultiQuestion && !!allowMultiQuestion) || (isSingleMultiSelect && !!allowSingleMultiSelect);
   const showMultiQuestionForm =
