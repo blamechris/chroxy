@@ -44,9 +44,9 @@
  * On-disk formats are BYTE-COMPATIBLE with the pre-extraction files — existing
  * ledgers load unchanged and re-serialise to the same shape. No migration.
  */
-import { readFileSync, mkdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
-import { dirname } from 'path'
+import { readFileSync } from 'fs'
 import { randomBytes } from 'crypto'
+import { saveJsonState } from './json-state-file.js'
 
 /**
  * @typedef {Object} TrustRecord
@@ -287,33 +287,23 @@ export class PathHashTrustLedger {
   }
 
   /**
-   * Persist the ledger to disk. No-op when clean. Atomic-via-rename + 0600 with
-   * a per-pid + random temp suffix (the safest of the two source variants —
-   * tolerates concurrent writers in the same process, #3238). fsync before
-   * rename so the bytes are durable before the directory entry flips.
+   * Persist the ledger to disk. No-op when clean. Delegates to the shared
+   * durable-write seam (`saveJsonState({ fsync: true })`, #5620) — atomic
+   * via-rename + 0600, fsync before rename, with a per-pid + random temp suffix
+   * (the safest variant — tolerates concurrent writers in the same process,
+   * #3238). The seam owns the fd/temp cleanup; this layer only adds the dirty
+   * gate + the warn / conditional re-throw policy.
    *
-   * On failure: best-effort cleanup of our own fd + temp, then either re-throw
-   * (subclass set `throwOnFlushError`) or swallow with a warn.
+   * On failure: either re-throw (subclass set `throwOnFlushError`) or swallow
+   * with a warn. `_dirty` stays set on failure so a later flush retries.
    */
   flush() {
     if (!this._dirty) return
-    const tmpPath = `${this._filePath}.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
-    let fd = null
+    const tmpSuffix = `.${process.pid}.${randomBytes(6).toString('hex')}.tmp`
     try {
-      mkdirSync(dirname(this._filePath), { recursive: true })
-      const payload = JSON.stringify(this._serialize(), null, 2) + '\n'
-      fd = openSync(tmpPath, 'wx', 0o600)
-      writeSync(fd, payload, 0, 'utf8')
-      fsyncSync(fd)
-      closeSync(fd)
-      fd = null
-      renameSync(tmpPath, this._filePath)
+      saveJsonState(this._filePath, this._serialize(), { fsync: true, tmpSuffix })
       this._dirty = false
     } catch (err) {
-      if (fd !== null) {
-        try { closeSync(fd) } catch { /* ignore */ }
-      }
-      try { unlinkSync(tmpPath) } catch { /* ignore */ }
       this._log.warn(`Could not persist trust file (${err && err.code ? err.code : err.message || err})`)
       if (this._throwOnFlushError) throw err
     }

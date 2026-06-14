@@ -27,7 +27,7 @@
  * owns the read-bytes-or-empty and write-bytes-atomically mechanics that every
  * one of them was duplicating.
  */
-import { existsSync, readFileSync, mkdirSync } from 'fs'
+import { existsSync, readFileSync, mkdirSync, openSync, writeSync, closeSync, fsyncSync, renameSync, unlinkSync } from 'fs'
 import { dirname } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
@@ -95,9 +95,17 @@ export function loadJsonState(filePath, fallback, opts = {}) {
 
 /**
  * Serialise `value` to pretty JSON (trailing newline) and write it atomically at
- * mode 0600 via `writeFileRestricted`. Creates the parent directory (mode 0700)
- * first if missing. The temp sidecar carries a per-pid suffix so concurrent
- * writers to the same target never share an intermediate path (#5309 / #5579).
+ * mode 0600. Creates the parent directory (mode 0700) first if missing. The temp
+ * sidecar carries a per-pid suffix so concurrent writers to the same target never
+ * share an intermediate path (#5309 / #5579).
+ *
+ * The default path delegates to `writeFileRestricted` (best-effort durability —
+ * temp + chmod + rename, no fsync). Pass `fsync: true` for the durable variant:
+ * the bytes are `fsync`'d before the rename flips the directory entry, so a crash
+ * mid-write can't leave a renamed-but-empty file. #5620 promotes this — formerly
+ * the hand-rolled `PathHashTrustLedger.flush` (#3238) — into the shared seam so
+ * the trust ledgers stop re-implementing the atomic-durable-write dance, while
+ * the ~15 best-effort state writers keep the cheaper non-fsync path.
  *
  * Re-throws on write/rename failure — callers that must surface a read-only-HOME
  * failure (e.g. SkillsTrustStore.flush) get the error; callers that treat
@@ -105,7 +113,7 @@ export function loadJsonState(filePath, fallback, opts = {}) {
  *
  * @param {string} filePath
  * @param {unknown} value
- * @param {{ pretty?: boolean, tmpSuffix?: string }} [opts]
+ * @param {{ pretty?: boolean, tmpSuffix?: string, fsync?: boolean }} [opts]
  */
 export function saveJsonState(filePath, value, opts = {}) {
   const dir = dirname(filePath)
@@ -116,5 +124,31 @@ export function saveJsonState(filePath, value, opts = {}) {
   const tmpSuffix = typeof opts.tmpSuffix === 'string' && opts.tmpSuffix.length > 0
     ? opts.tmpSuffix
     : `.${process.pid}.tmp`
+
+  if (opts.fsync) {
+    // Durable variant (#5620). `wx` (O_EXCL) refuses to clobber a concurrent
+    // writer's sidecar; the 0600 create mode is authoritative (umask only ever
+    // tightens it), so no post-write chmod is needed. fsync before rename so the
+    // bytes are on disk before the entry flips. On failure, clean up our own fd
+    // + temp and re-throw (callers decide swallow-vs-surface).
+    const tmpPath = `${filePath}${tmpSuffix}`
+    let fd = null
+    try {
+      fd = openSync(tmpPath, 'wx', 0o600)
+      writeSync(fd, payload, 0, 'utf8')
+      fsyncSync(fd)
+      closeSync(fd)
+      fd = null
+      renameSync(tmpPath, filePath)
+    } catch (err) {
+      if (fd !== null) {
+        try { closeSync(fd) } catch { /* ignore */ }
+      }
+      try { unlinkSync(tmpPath) } catch { /* ignore */ }
+      throw err
+    }
+    return
+  }
+
   writeFileRestricted(filePath, payload, { tmpSuffix })
 }
