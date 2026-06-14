@@ -141,6 +141,35 @@ describe('FormDriver — injected collaborator (#5617)', () => {
     assert.deepEqual(host._cleared, ['t1'], 'only the answered entry is cleared')
   })
 
+  it('single-question: sanitizes the literal-answer fallthrough before PTY type (#5803)', () => {
+    // When the answer text matches no option label it falls through to typing
+    // the literal client text into the PTY (the Other/freeform back-compat
+    // path). That text is untrusted: control chars (CR/LF/ESC) must be stripped
+    // so a crafted answer can't submit the composer early or inject escapes.
+    const host = makeMockHost()
+    seedSingle(host, 't1', ['Alpha', 'Bravo'])
+    const fd = new FormDriver(host)
+
+    fd.respondToQuestion('custom\r\nanswer\x1b[31m', undefined, 't1')
+
+    // CR/LF/ESC removed; control runs collapse to a single space; no bare
+    // CR/LF reaches the PTY.
+    assert.deepEqual(host._writes, ['custom answer [31m'])
+    assert.ok(!host._writes[0].includes('\r') && !host._writes[0].includes('\n'), 'no bare CR/LF typed')
+    assert.ok(!host._writes[0].includes('\x1b'), 'no ESC typed')
+  })
+
+  it('single-question: a matched option is unaffected by the #5803 literal sanitizer', () => {
+    // The hotkey-digit path is a safe single char and must not be touched.
+    const host = makeMockHost()
+    seedSingle(host, 't1', ['Alpha', 'Bravo', 'Charlie'])
+    const fd = new FormDriver(host)
+
+    fd.respondToQuestion('Charlie', undefined, 't1')
+
+    assert.deepEqual(host._writes, ['3'])
+  })
+
   it('single-question: arms the stall watchdog for the pending entry', () => {
     const host = makeMockHost()
     seedSingle(host, 't1', ['Yes', 'No'])

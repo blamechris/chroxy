@@ -524,6 +524,10 @@ export class FormDriver {
       // claude TUI's Other-path may still mis-parse that, tracked in
       // #4288 as a separate concern.
       let writeText = text
+      // #5803 — track whether we resolved the answer to a safe hotkey digit.
+      // If not, `writeText` stays the untrusted literal client answer and must
+      // be sanitized before it reaches the PTY (same threat as reinject labels).
+      let isHotkeyDigit = false
       if (Array.isArray(options) && options.length > 0) {
         const matchIdx = options.findIndex((o) => o && o.label === text)
         // #4292 + #4746 + #4848: single-digit hotkey covers indices 0..8.
@@ -570,7 +574,17 @@ export class FormDriver {
         }
         if (matchIdx >= 0 && matchIdx < 9) {
           writeText = String(matchIdx + 1)
+          isHotkeyDigit = true
         }
+      }
+      // #5803 — the literal-answer fallthrough (no hotkey/arrow match, e.g. the
+      // Other/freeform back-compat path) types untrusted client text straight
+      // into the live PTY. Sanitize control chars (CR/LF/ESC) out of it the
+      // same way as multi-select reinject labels so a crafted answer can't
+      // submit the composer early or inject terminal escape sequences. The
+      // hotkey-digit path is already a single safe char and is left untouched.
+      if (!isHotkeyDigit) {
+        writeText = sanitizeReinjectLabel(writeText)
       }
       // Fire-and-forget — the write is async due to the per-char throttle,
       // but the caller (handleUserQuestionResponse) is sync. Errors here
