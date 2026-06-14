@@ -263,7 +263,8 @@ export interface DispatchMessageMap {
   budget_resume_ack: {
     type: 'budget_resume_ack'
     sessionId?: string
-    wasPaused?: boolean
+    // Required, matching ServerBudgetResumeAckSchema — the server always sends it.
+    wasPaused: boolean
   }
   conversation_id: {
     type: 'conversation_id'

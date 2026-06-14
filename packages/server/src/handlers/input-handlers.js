@@ -686,6 +686,9 @@ function handleResumeBudget(ws, client, msg, ctx) {
     type: 'budget_resume_ack',
     sessionId: budgetSessionId,
     wasPaused,
+    // Echo requestId for correlation. The inbound ResumeBudgetSchema caps it at
+    // 128 (#5752), so the ack always satisfies ServerBudgetResumeAckSchema —
+    // same single-enforcement-point pattern as cancel_activity_ack (#5277).
     ...(typeof msg.requestId === 'string' ? { requestId: msg.requestId } : {}),
   })
 }

@@ -441,6 +441,30 @@ describe('WS handler: resume_budget', () => {
 
     ws.close()
   })
+
+  it('echoes a within-cap requestId for correlation', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Default', cwd: '/tmp' },
+    ])
+    manager.isBudgetPaused = () => false
+    manager.resumeBudget = createSpy()
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'resume_budget', requestId: 'req-42' })
+
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.requestId, 'req-42')
+
+    ws.close()
+  })
 })
 
 describe('WS handler: register_push_token', () => {
