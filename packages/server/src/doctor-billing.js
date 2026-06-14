@@ -1,15 +1,19 @@
 // doctor-billing.js — billing canary for the 2026-06-15 programmatic-credit cutover.
 //
-// DRAFT (rec #4 of docs/audit/june15-billing-strategy-2026-06-14.md). Early-warning
-// that the `claude-tui` subscription-billing bet may have stopped holding, plus a
-// datacenter-egress ban-signal warning. The checks here are PURE and injectable
-// (pass `now`, the session list, the egress ip) so they unit-test without timers or
-// network; a thin runner aggregates them for a future `chroxy doctor billing` command.
+// rec #4 of docs/audit/june15-billing-strategy-2026-06-14.md. Early-warning that the
+// `claude-tui` subscription-billing bet may have stopped holding, plus a
+// datacenter-egress ban-signal warning. Every check here is PURE and injectable (pass
+// `now`, the session list, the egress ip) so they unit-test without timers or network.
 //
-// Wiring left for review before shipping: (a) map live SessionManager sessions to the
-// {id, provider, totalCostUsd} shape `runBillingCanary` expects, (b) fetch the daemon's
-// public egress ip, (c) register the `doctor` subcommand in the CLI. None of that is
-// done yet — this module is the reviewable core.
+// Wiring status:
+//   - detectSilentMeteredDefault — WIRED into `chroxy doctor` (doctor.js "Billing"
+//     check). It needs only the resolved default provider + the clock, both available
+//     in the standalone preflight.
+//   - detectBillingReclassification — exported for the DAEMON / dashboard to call: it
+//     needs live per-session `totalCostUsd`, which a standalone `chroxy doctor` (no
+//     running daemon) does not have. Not wired into the CLI for that reason.
+//   - classifyEgressIp — exported; needs the daemon's resolved public egress IP (a
+//     network lookup), so it is consumed by the daemon/dashboard, not standalone doctor.
 import {
   BILLING_CLASSES,
   PROGRAMMATIC_CREDIT_ERA_START,
@@ -72,14 +76,19 @@ export function detectSilentMeteredDefault(defaultProvider, now = Date.now()) {
 }
 
 // Datacenter-egress ban-signal. Cloud-hosted daemons behind a tunnel are a documented
-// flag (the audit cites ~20-minute bans on Hetzner/Cloudflare ranges). This is a pure
-// classifier over a known-prefix list; the caller supplies the public egress ip.
-// DRAFT: the prefix list is a starting point, not exhaustive — curate before shipping.
+// flag (the audit cites ~20-minute bans on Hetzner ranges). This is a pure classifier
+// over a known-prefix list; the caller supplies the public egress ip.
+//
+// CONSERVATIVE BY DESIGN: only specific, documented datacenter /16-ish ranges are
+// listed. Coarse /8 blocks (e.g. AWS/GCP `13.`, `34.`, `52.`) were deliberately
+// REMOVED — they span large amounts of residential/ISP space too and would fire false
+// positives, training users to ignore the warning. A comprehensive classifier needs a
+// maintained cloud-IP dataset (e.g. the published AWS/GCP/Azure range JSON); until that
+// is plumbed in, a precise-but-narrow list that never cries wolf beats a broad-but-noisy
+// one. A missed datacenter IP is a silent non-warning; a false hit erodes trust.
 const DATACENTER_IPV4_PREFIXES = [
-  // Hetzner (cited in claude-code#21678)
+  // Hetzner (cited in claude-code#21678) — specific allocated /16s.
   '5.9.', '88.99.', '95.216.', '116.202.', '135.181.', '167.235.', '168.119.',
-  // common cloud egress ranges (illustrative; expand from a real dataset)
-  '13.', '18.', '34.', '35.', '52.', '54.', // AWS/GCP blocks (coarse — DRAFT)
 ]
 
 /**

@@ -49,6 +49,16 @@ test('classifyEgressIp flags datacenter prefixes, not residential', () => {
   assert.equal(classifyEgressIp(undefined).datacenter, false)
 })
 
+test('classifyEgressIp does NOT flag coarse /8 blocks (false-positive guard)', () => {
+  // These broad AWS/GCP /8 prefixes were removed because they span huge
+  // amounts of residential/ISP space too. A false hit erodes trust in the
+  // warning, so the classifier stays conservative until a real cloud-IP
+  // dataset is plumbed in. Lock that out so they can't creep back.
+  for (const ip of ['13.52.1.1', '18.200.1.1', '34.120.1.1', '35.1.2.3', '52.10.20.30', '54.1.2.3']) {
+    assert.equal(classifyEgressIp(ip).datacenter, false, `${ip} must not be flagged`)
+  }
+})
+
 test('runBillingCanary aggregates all three signals', () => {
   const out = runBillingCanary({
     sessions: [{ id: 's1', provider: 'claude-tui', totalCostUsd: 1.5 }],

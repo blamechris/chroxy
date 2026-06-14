@@ -63,6 +63,35 @@ describe('runDoctorChecks', () => {
     assert.ok(configCheck)
   })
 
+  describe('Billing check (#5821)', () => {
+    const AFTER = Date.UTC(2026, 5, 16) // one day into the programmatic-credit era
+    const BEFORE = Date.UTC(2026, 5, 1) // before the cutover
+
+    it('warns when the default provider meters silently on/after the cutover', async () => {
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], now: AFTER })
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'warn')
+      assert.match(billing.message, /metered programmatic-credit pool/)
+    })
+
+    it('passes for a subscription default (claude-tui) in the era', async () => {
+      const { checks } = await runDoctorChecks({ providers: ['claude-tui'], now: AFTER })
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /claude-tui/)
+    })
+
+    it('passes before the cutover and surfaces the upcoming date', async () => {
+      const { checks } = await runDoctorChecks({ providers: ['claude-sdk'], now: BEFORE })
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /cutover: 2026-06-15/)
+    })
+  })
+
   it('dependencies check is present', async () => {
     const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const depsCheck = checks.find(c => c.name === 'Dependencies')

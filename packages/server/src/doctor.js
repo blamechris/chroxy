@@ -8,6 +8,13 @@ import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { detectSilentMeteredDefault } from './doctor-billing.js'
+import {
+  billingClassForProvider,
+  billingDetailForClass,
+  isProgrammaticCreditEra,
+  PROGRAMMATIC_CREDIT_ERA_START,
+} from './billing-class.js'
 import { checkDependencies } from './utils/check-dependencies.js'
 
 // Resolve the server package root (the directory containing package.json
@@ -123,7 +130,7 @@ function resolveProviders({ providers, configProvider }) {
  *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR } = {}) {
+export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now() } = {}) {
   const checks = []
   const isMac = platform() === 'darwin'
   const isLinux = platform() === 'linux'
@@ -196,6 +203,39 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 5. Config check — appended after provider checks so per-provider
   // sections group together in the output report.
   checks.push(configCheck)
+
+  // 5.5 Billing canary (#5821, audit rec #4). Standalone-feasible half of the
+  // canary: the silent-metered-default check needs only the resolved default
+  // provider + the clock. (The reclassification + datacenter-egress checks in
+  // doctor-billing.js need live daemon state / a network lookup, so they're
+  // consumed by the daemon/dashboard, not this preflight.) Use the same
+  // resolution as the provider checks above — explicit `providers` override
+  // wins (for tests), else config.provider, else DEFAULT_PROVIDER — so the
+  // billing line tracks whichever provider a zero-config session would use.
+  const effectiveDefault = resolvedProviders[0] || DEFAULT_PROVIDER
+  const meteredWarnings = detectSilentMeteredDefault(effectiveDefault, now)
+  if (meteredWarnings.length > 0) {
+    checks.push({ name: 'Billing', status: 'warn', message: meteredWarnings[0].message })
+  } else {
+    const billingClass = billingClassForProvider(effectiveDefault, now)
+    const detail = billingDetailForClass(billingClass)
+    if (isProgrammaticCreditEra(now)) {
+      checks.push({
+        name: 'Billing',
+        status: 'pass',
+        message: `Default provider '${effectiveDefault}' — ${detail}`,
+      })
+    } else {
+      // Pre-cutover: nothing meters yet, but surface the upcoming boundary and
+      // what the default will bill once it lands.
+      const cutover = new Date(PROGRAMMATIC_CREDIT_ERA_START).toISOString().slice(0, 10)
+      checks.push({
+        name: 'Billing',
+        status: 'pass',
+        message: `Default provider '${effectiveDefault}' — ${detail}. Programmatic-credit cutover: ${cutover}.`,
+      })
+    }
+  }
 
   // 6. Dependencies
   // Resolve deps relative to the server package, not process.cwd() — Tauri
