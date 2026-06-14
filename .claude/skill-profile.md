@@ -13,7 +13,7 @@ source of truth**. `skill add`/`update` compiles each skill into every coding ag
 **native** custom-command format via `scripts/compile-skill-targets.mjs`, so the same
 skill is first-party under whichever model you drive.
 
-targets: claude, gemini, codex
+targets: claude, gemini
 
 - **claude** → `.claude/skills/<name>/SKILL.md` (markdown + YAML `description`; the
   v2.1.x "skills" path — the legacy `.claude/commands/` discovery is broken, see
@@ -21,10 +21,12 @@ targets: claude, gemini, codex
 - **gemini** → `.gemini/commands/<name>.toml` (TOML `description` + `prompt`;
   `$ARGUMENTS`→`{{args}}`; subdirs namespace as `/a:b`). Invoked `/<name>`,
   reload with `/commands reload`. *Version-controlled.*
-- **codex** → `~/.codex/prompts/<name>.md` (markdown; `$ARGUMENTS` native). Invoked
-  `/prompts:<name>`. **User-global (written to your home dir, NOT version-controlled), and
-  OpenAI marks custom prompts deprecated** — it's a per-machine side effect, so each machine
-  that compiles re-emits its own copy. Drop `codex` from the `targets:` line to disable.
+- **codex** *(per-machine opt-in — deliberately NOT in the committed `targets:` default)* →
+  `~/.codex/prompts/<name>.md` (markdown; `$ARGUMENTS` native). Invoked `/prompts:<name>`.
+  **User-global (written to your home dir, NOT version-controlled), and OpenAI marks custom
+  prompts deprecated.** Kept out of the committed default so a clone never dumps files into an
+  unaware machine's home dir. Enable it on a machine you actually drive Codex on with
+  `node scripts/compile-skill-targets.mjs --targets codex` (or add `codex` to `targets:`).
 
 The neutral arg token is `$ARGUMENTS`; emitters map it per agent. Two Gemini caveats the
 compiler handles automatically: positional `$1`/`$2` have no Gemini equivalent (it warns),
