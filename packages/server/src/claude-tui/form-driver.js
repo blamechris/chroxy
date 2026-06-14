@@ -238,6 +238,27 @@ export class FormDriver {
     // key), and the success paths re-arm with a fresh post-write window (the
     // Other-freeform IIFE with its longer second-stage window).
     this._host._armAskUserQuestionWatchdog(prevToolUseId)
+    // #5771: a SINGLE multi-select question is denied at the permission hook
+    // (permission-hook.sh) because claude TUI is keyboard-only and has no
+    // reliable single-toggle+submit keystroke sequence (0/7 production success —
+    // swarm audit 2026-06-13, see docs/audit-results/claude-tui-askuserquestion-
+    // form-driving/). Defense in depth: if a single multiSelect question reaches
+    // the driver anyway (hook failed open on a parse error, or a client bypassed
+    // it), refuse to drive it rather than write a wrong single digit, and tear
+    // down NOW so the turn recovers immediately instead of waiting out the 30s
+    // stall watchdog. (Multi-question forms are denied separately at the hook
+    // since #4648 and still flow through the assembler below if hook-bypassed —
+    // that dead path is removed in the follow-up cleanup.)
+    if (pendingQuestions.length <= 1 && pendingQuestions.some((q) => q && q.multiSelect === true)) {
+      ;(this._host._log || log).warn(`respondToQuestion: refusing single multiSelect AskUserQuestion (tool=${prevToolUseId || '?'}) — multi-select is denied at the permission hook; not driving keystrokes`)
+      this._teardownAskUserQuestion(prevToolUseId, {
+        synthResult: 'Multi-select questions aren\'t supported by the TUI provider. Ask one single-select question at a time.',
+        emitResultReason: 'ask_user_question_multiselect_unsupported',
+        errorCode: 'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED',
+        errorMessage: 'Multi-select questions aren\'t supported here. Tap Retry to resend your request.',
+      })
+      return
+    }
     // Single-question / free-text path requires a non-empty `text`. The
     // multi-question path is driven from answersMap (text is ignored when
     // a map is present) so an empty string is permitted there.
