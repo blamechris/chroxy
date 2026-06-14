@@ -120,8 +120,8 @@ export function computeCanSubmit(
  * (`QuestionPrompt.tsx` and the app's `MessageBubble.tsx`).
  */
 export function isSingleMultiSelectForm(
-  questions: ChatMessageQuestion[] | undefined,
-): boolean {
+  questions: ChatMessageQuestion[] | undefined | null,
+): questions is ChatMessageQuestion[] {
   return (
     Array.isArray(questions) &&
     questions.length === 1 &&
