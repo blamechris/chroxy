@@ -133,12 +133,13 @@ note in the report that hashes may be stale. Record which source you used.
    issues and re-lint before recording the lockfile — do not lock a skill that fails lint.
    Consumers can run the same linter as a pre-commit hook or in CI.
 7. **Compile to native targets.** Ensure the compiler exists in this repo (create `scripts/` if
-   absent). If `scripts/compile-skill-targets.mjs` is missing, obtain it from the registry: from a
-   local clone, `cp "$REG/assets/compile-skill-targets.mjs" scripts/`; on the network-only path
-   (no local clone), fetch it like the templates —
+   absent). If `scripts/compile-skill-targets.mjs` is missing — or you're running `update`, so it
+   stays current with the registry — (re)fetch it: from a local clone,
+   `cp "$REG/assets/compile-skill-targets.mjs" scripts/`; on the network-only path (no local
+   clone), fetch it like the templates —
    `gh api repos/blamechris/skill-templates/contents/assets/compile-skill-targets.mjs --jq '.content' | base64 -d > scripts/compile-skill-targets.mjs`.
-   Write it to `scripts/` and track it in VCS so it travels with the repo (on `update`, refresh it
-   from the registry too). Read the `targets:` line from `.claude/skill-profile.md`;
+   Write it to `scripts/` and track it in VCS so it travels with the repo. Read the `targets:` line
+   from `.claude/skill-profile.md`;
    if there is none, **ask the user** which agents to compile for (claude / gemini / codex) and
    offer to record the choice in the profile (the compiler falls back to `claude` if unset). Then
    run `node scripts/compile-skill-targets.mjs --name <name>` (it reads the profile targets), or
@@ -170,7 +171,9 @@ note in the report that hashes may be stale. Record which source you used.
      with no such field is treated as "unknown" — fall back to disk inspection, never flagged just
      for the field's absence): the profile's `targets:` list has an agent not in the lock entry's
      `targets` (added to the profile but never compiled), or a recorded target's native artifact is
-     missing on disk. A plain recompile fixes it — no registry fetch needed.
+     missing on disk — **excluding targets the compiler intentionally skips** (e.g. Gemini for a
+     body containing `{{…}}` / `!{…}` / `@{…}`, which is never emitted and so isn't real drift). A
+     plain recompile fixes genuine target drift — no registry fetch needed.
 3. Print the drifted skills with the reason, e.g. `name  abc1234 → def5678 (version)` or
    `name  (guard miss: idempotency)` or `name  (target drift: gemini not compiled)`. If none, say
    so. (This is the consumer-side port of the registry's `sync.sh` drift check — version stamp
