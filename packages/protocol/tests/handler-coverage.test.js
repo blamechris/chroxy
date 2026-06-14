@@ -44,6 +44,7 @@ const SYNTHETIC_TYPES = new Set([
   'conversations_list',    // legacy alias for list response
   'search_results',        // legacy alias for search response
   'budget_resumed',        // budget resume ack (server-internal)
+  'budget_resume_ack',     // #5752 resume_budget positive ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the shared store-core dispatch table
   'cancel_activity_ack',   // #5277 cancel correlation ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard
   'thinking_level_changed', // thinking level change ack (server-internal)
   'permission_timeout',     // handled by both clients for the future permission timeout event (not yet in protocol; dashboard gained parity in #5454)
