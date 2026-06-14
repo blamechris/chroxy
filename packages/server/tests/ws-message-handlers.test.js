@@ -529,6 +529,9 @@ describe('handleSessionMessage', () => {
       const ctx = makeCtx()
       const client = makeClient({ activeSessionId: 'sess-1' })
       const entry = addSession(ctx, 'sess-1')
+      // #5753 — a real toolUseId is registered at dispatch; seed it so routing
+      // resolves (an unmapped toolUseId is now dropped, not active-fallback'd).
+      ctx.permissions.questionSessionMap.set('tool-xyz', 'sess-1')
       await handleSessionMessage(WS, client, {
         type: 'user_question_response',
         toolUseId: 'tool-xyz',
@@ -549,6 +552,8 @@ describe('handleSessionMessage', () => {
       const client = makeClient({ activeSessionId: 'sess-1' })
       const entry = addSession(ctx, 'sess-1')
       const answersMap = { 'Allow?': 'yes' }
+      // #5753 — seed the dispatch-time route for this toolUseId.
+      ctx.permissions.questionSessionMap.set('tool-abc', 'sess-1')
       await handleSessionMessage(WS, client, {
         type: 'user_question_response',
         toolUseId: 'tool-abc',

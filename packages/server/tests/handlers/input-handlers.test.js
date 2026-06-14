@@ -867,6 +867,9 @@ describe('input-handlers', () => {
       const session = createMockSession()
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
+      // #5753 — a real toolUseId is always registered at dispatch; seed it so
+      // routing resolves to the question's session.
+      ctx.permissions.questionSessionMap.set('tool-1', 's1')
       const client = makeClient({ activeSessionId: 's1' })
 
       inputHandlers.user_question_response(makeWs(), client, {
@@ -886,6 +889,8 @@ describe('input-handlers', () => {
       const session = createMockSession()
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
+      // #5753 — seed the dispatch-time route for this toolUseId.
+      ctx.permissions.questionSessionMap.set('tool-2', 's1')
       const client = makeClient({ activeSessionId: 's1' })
 
       inputHandlers.user_question_response(makeWs(), client, {
@@ -1090,6 +1095,76 @@ describe('input-handlers', () => {
 
         assert.equal(sessionA.respondToQuestion.callCount, 0,
           'undefined subscribedSessionIds + non-matching active must drop')
+      })
+
+      // #5753 — a toolUseId that's PRESENT but no longer mapped means the
+      // question is already gone (answered / expired-cleared / double-submit;
+      // the entry is pruned on answer + on session destroy). The old code fell
+      // back to client.activeSessionId, mis-delivering the stale answer to
+      // whatever DIFFERENT question that session was waiting on (a deny meant
+      // for one tool landing on another). Fail closed: drop it.
+      it('drops a stale/unmapped toolUseId instead of routing to the active session (#5753)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession() // the (gone) question's real session
+        const sessionB = createMockSession() // now-active, waiting on a DIFFERENT question
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // The map does NOT contain 'stale-tool' — its question was already
+        // answered, so the entry was pruned. The client is now active on s2.
+        const client = makeClient({
+          id: 'late-answerer',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'allow',
+          toolUseId: 'stale-tool',
+        }, ctx)
+
+        assert.equal(sessionB.respondToQuestion.callCount, 0,
+          'a stale answer must NOT bleed onto the active session B')
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'and must not reach A either — the question is gone')
+      })
+
+      // The absent-toolUseId path is unchanged: legacy single-session mode and
+      // clients that never send a toolUseId still fall back to the active
+      // session (one question in flight, no cross-question mis-route risk).
+      it('still falls back to the active session when NO toolUseId is supplied (#5753)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ id: 'legacy', boundSessionId: null, activeSessionId: 's1' })
+
+        inputHandlers.user_question_response(makeWs(), client, { answer: 'yes' }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 1,
+          'no toolUseId → active-session fallback preserved')
+        assert.equal(sessionA.respondToQuestion.lastCall[0], 'yes')
+      })
+
+      // #5753 (Copilot) — the wire schema allows an empty-string toolUseId.
+      // Empty string is falsy, but it IS a supplied toolUseId, so it must be
+      // treated as "supplied but unmapped" → dropped, NOT routed to the active
+      // session (the `typeof === 'string'` gate, not truthiness).
+      it('drops an empty-string toolUseId rather than active-fallback (#5753)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ id: 'empty-tid', boundSessionId: null, activeSessionId: 's1' })
+
+        inputHandlers.user_question_response(makeWs(), client, {
+          answer: 'yes',
+          toolUseId: '',
+        }, ctx)
+
+        assert.equal(sessionA.respondToQuestion.callCount, 0,
+          'empty-string toolUseId is supplied-but-unmapped → dropped, not active-fallback')
       })
     })
   })
