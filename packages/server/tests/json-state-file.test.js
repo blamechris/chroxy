@@ -126,4 +126,36 @@ describe('JsonStateFile (#5580)', () => {
       assert.throws(() => saveJsonState(dir, { a: 1 }), /EISDIR|illegal operation|EEXIST|EPERM/)
     })
   })
+
+  describe('saveJsonState — durable fsync variant (#5620)', () => {
+    it('writes identical bytes to the default path (pretty + trailing newline)', () => {
+      saveJsonState(filePath, { a: 1, items: ['x'] }, { fsync: true })
+      const raw = readFileSync(filePath, 'utf8')
+      assert.ok(raw.endsWith('\n'))
+      assert.deepEqual(JSON.parse(raw), { a: 1, items: ['x'] })
+      assert.ok(raw.includes('\n  '), 'pretty-printed (2-space indent)')
+    })
+
+    it('writes the file at mode 0600 (POSIX)', { skip: process.platform === 'win32' }, () => {
+      saveJsonState(filePath, { a: 1 }, { fsync: true })
+      assert.equal(statSync(filePath).mode & 0o777, 0o600)
+    })
+
+    it('creates the parent directory and renames the temp away', () => {
+      const nested = join(dir, 'deep', 'state.json')
+      saveJsonState(nested, { a: 1 }, { fsync: true, tmpSuffix: `.${process.pid}.abc.tmp` })
+      assert.ok(existsSync(nested))
+      assert.ok(!existsSync(`${nested}.${process.pid}.abc.tmp`), 'durable temp renamed away')
+    })
+
+    it('round-trips through loadJsonState', () => {
+      saveJsonState(filePath, { version: 2, ok: true }, { fsync: true })
+      assert.deepEqual(loadJsonState(filePath, () => ({}), { log: noopLog }), { version: 2, ok: true })
+    })
+
+    it('re-throws on a write failure and leaves no temp orphan (target is a directory)', () => {
+      assert.throws(() => saveJsonState(dir, { a: 1 }, { fsync: true, tmpSuffix: '.x.tmp' }))
+      assert.ok(!existsSync(`${dir}.x.tmp`), 'temp cleaned up on failure')
+    })
+  })
 })
