@@ -4,7 +4,7 @@ import { statSync, mkdirSync, rmSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { homedir } from 'os'
 import { execFileSync } from 'child_process'
-import { getProvider, getProviderAuthInfo } from './providers.js'
+import { getProvider, getProviderAuthInfo, DEFAULT_PROVIDER } from './providers.js'
 import { isClaudeProvider } from './models.js'
 import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
@@ -205,7 +205,10 @@ export class SessionManager extends EventEmitter {
     // TUI session boots already in unmediated mode without requiring the
     // dashboard checkbox round-trip.
     defaultSkipPermissions = false,
-    providerType = 'claude-sdk',
+    // Shadowed in production (server-cli.js always passes providerType
+    // explicitly), but kept on the single source of truth so the fallback
+    // can't silently diverge from the server's default (#5819).
+    providerType = DEFAULT_PROVIDER,
 
     // Session behavior
     sessionTimeout,
