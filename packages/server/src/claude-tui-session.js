@@ -1078,6 +1078,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #5777 (#5788): cancel a pending first-turn submit nudge directly here.
+    // _onPtyGone is the one teardown path that does NOT route through
+    // _clearFirstOutputWatchdog, so without this an armed nudge would only be
+    // saved by the tick's !_isBusy guard — fragile. Clear before the
+    // _destroying early-return so it runs on both the destroy and respawn paths.
+    this._clearFirstTurnSubmitNudge()
     if (this._destroying) return
     // #5311 review — the socket 'close'/'error' paths have no exit info, so
     // render a clear "unknown" instead of a bare "code=undefined". The

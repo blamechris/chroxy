@@ -3680,6 +3680,26 @@ describe('ClaudeTuiSession', () => {
       s2.destroy?.()
     })
 
+    it('cancels a live armed nudge on PTY death (_onPtyGone) (#5788)', async () => {
+      session = nudgeSession({ _destroying: true })  // _destroying → _onPtyGone returns early after clearing
+      session._scheduleFirstTurnSubmitNudge('m1')
+      assert.ok(session._firstTurnSubmitNudgeTimer, 'nudge armed')
+      session._onPtyGone({ exitCode: 1 }, 'test')
+      assert.equal(session._firstTurnSubmitNudgeTimer, null, 'nudge cancelled by _onPtyGone')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.equal(session._termWrites.length, 0, 'no \\r after PTY death')
+    })
+
+    it('cancels a live armed nudge on destroy() (via _clearFirstOutputWatchdog)', async () => {
+      session = nudgeSession()
+      session._scheduleFirstTurnSubmitNudge('m1')
+      assert.ok(session._firstTurnSubmitNudgeTimer, 'nudge armed')
+      session.destroy()
+      assert.equal(session._firstTurnSubmitNudgeTimer, null, 'nudge cancelled by destroy()')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.equal(session._termWrites.length, 0, 'no \\r after destroy')
+    })
+
     it('is disabled when _firstTurnSubmitNudgeMs <= 0', async () => {
       session = nudgeSession({ _firstTurnSubmitNudgeMs: 0 })
       session._scheduleFirstTurnSubmitNudge('m1')
