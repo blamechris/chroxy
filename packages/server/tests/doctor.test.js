@@ -63,6 +63,55 @@ describe('runDoctorChecks', () => {
     assert.ok(configCheck)
   })
 
+  describe('Billing check (#5821)', () => {
+    const AFTER = Date.UTC(2026, 5, 16) // one day into the programmatic-credit era
+    const BEFORE = Date.UTC(2026, 5, 1) // before the cutover
+
+    // The claude-sdk billing class depends on ANTHROPIC_API_KEY (env → api-key
+    // billing). Pin the env per test so results don't depend on the dev/CI shell.
+    const withEnv = async (apiKey, fn) => {
+      const saved = process.env.ANTHROPIC_API_KEY
+      if (apiKey === null) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = apiKey
+      try { return await fn() } finally {
+        if (saved === undefined) delete process.env.ANTHROPIC_API_KEY
+        else process.env.ANTHROPIC_API_KEY = saved
+      }
+    }
+
+    it('warns when the default provider meters silently on/after the cutover', async () => {
+      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: AFTER }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'warn')
+      assert.match(billing.message, /metered programmatic-credit pool/)
+    })
+
+    it('does NOT warn for claude-sdk when ANTHROPIC_API_KEY is set (BYOK)', async () => {
+      const { checks } = await withEnv('sk-test-key', () => runDoctorChecks({ providers: ['claude-sdk'], now: AFTER }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /API key/) // billingDetailForClass(api-key)
+    })
+
+    it('passes for a subscription default (claude-tui) in the era', async () => {
+      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-tui'], now: AFTER }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /claude-tui/)
+    })
+
+    it('passes before the cutover and surfaces the upcoming date', async () => {
+      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: BEFORE }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /cutover: 2026-06-15/)
+    })
+  })
+
   it('dependencies check is present', async () => {
     const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const depsCheck = checks.find(c => c.name === 'Dependencies')
