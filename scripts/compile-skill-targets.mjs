@@ -26,11 +26,20 @@ const ALL_TARGETS = ['claude', 'gemini', 'codex']
 
 function parseArgs(argv) {
   const out = { repo: process.cwd(), dryRun: false }
+  // Require a value after a value-taking flag, with a clear error instead of an
+  // `undefined.split` stack trace.
+  const need = (i, flag) => {
+    if (i + 1 >= argv.length) {
+      console.error(`Missing value for ${flag}`)
+      process.exit(1)
+    }
+    return argv[i + 1]
+  }
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i]
-    if (a === '--name') out.name = argv[++i]
-    else if (a === '--targets') out.targets = argv[++i].split(',').map((s) => s.trim()).filter(Boolean)
-    else if (a === '--repo') out.repo = argv[++i]
+    if (a === '--name') out.name = need(i++, a)
+    else if (a === '--targets') out.targets = need(i++, a).split(',').map((s) => s.trim()).filter(Boolean)
+    else if (a === '--repo') out.repo = need(i++, a)
     else if (a === '--dry-run') out.dryRun = true
   }
   return out
@@ -42,7 +51,14 @@ function targetsFromProfile(repo) {
   if (!existsSync(p)) return null
   const m = readFileSync(p, 'utf8').match(/^\s*targets:\s*(.+)$/m)
   if (!m) return null
-  const list = m[1].replace(/[[\]]/g, '').split(',').map((s) => s.trim()).filter(Boolean)
+  // Drop unfilled template placeholders (`<comma-separated agents…>`) so a profile
+  // that still carries the placeholder degrades to the `claude` fallback rather than
+  // erroring on an "unknown target".
+  const list = m[1]
+    .replace(/[[\]]/g, '')
+    .split(',')
+    .map((s) => s.trim())
+    .filter((s) => s && !s.includes('<') && !s.includes('>'))
   return list.length ? list : null
 }
 
