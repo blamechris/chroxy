@@ -202,6 +202,24 @@ describe('buildChatViewMessages', () => {
       const out = buildChatViewMessages(messages, null)
       expect(out.stalledPromptIds.size).toBe(0)
     })
+
+    // #5793 — the multi-select / multi-question teardown codes carry the same
+    // "Tap Retry" affordance as ASK_USER_QUESTION_STALL, so they must also
+    // suppress the now-dead prompt.
+    it.each([
+      'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED',
+      'ASK_USER_QUESTION_MULTISELECT_UNAVAILABLE',
+      'ASK_USER_QUESTION_MULTISELECT_EMPTY',
+      'ASK_USER_QUESTION_MULTISELECT_BUSY',
+      'ASK_USER_QUESTION_MULTI_QUESTION_UNSUPPORTED',
+    ])('marks unanswered prompts before a %s error as stalled', (code) => {
+      const messages: ChatMessage[] = [
+        msg({ id: 'p1', type: 'prompt', content: 'q1' }),
+        msg({ id: 'e1', type: 'error', content: 'teardown', code }),
+      ]
+      const out = buildChatViewMessages(messages, null)
+      expect(out.stalledPromptIds.has('p1')).toBe(true)
+    })
   })
 
   // #4975 — when the LLM interrupts a text content block to call a tool,

@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE, bumpRenderCount } from '@chroxy/store-core';
+import { OTHER_OPTION_VALUE, bumpRenderCount, isRetryableAskUserQuestionError } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -297,19 +297,30 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
     );
   }
 
-  // #4496: distinct chip for stream-stall errors (server PR #4475 emits
-  // `error{code: 'stream_stall'}` after the configured inactivity window).
-  // Generic red bubble reads as "broken"; this affordance signals
+  // #4496 / #5793: distinct chip for stream-stall errors (server PR #4475
+  // emits `error{code: 'stream_stall'}` after the configured inactivity
+  // window) AND for the retryable AskUserQuestion teardown codes
+  // (ASK_USER_QUESTION_STALL + five MULTISELECT/MULTI_QUESTION codes — see
+  // `isRetryableAskUserQuestionError`). Both end in "Tap Retry" copy; a
+  // generic red bubble reads as "broken", so this affordance signals
   // "recoverable, just retry". `onRetryStreamStall` is only wired by
-  // ChatView when this stall is the tail message — historical replayed
-  // stalls render the chip text with the raw error reachable on
-  // long-press, but no retry button (resending an ancient user_input
-  // from a long-finished turn would be misleading).
-  if (isError && message.code === 'stream_stall') {
+  // ChatView when this is the tail message — historical replayed stalls
+  // render the chip text with the raw error reachable on long-press, but no
+  // retry button (resending an ancient user_input from a long-finished turn
+  // would be misleading).
+  if (isError && (message.code === 'stream_stall' || isRetryableAskUserQuestionError(message.code))) {
     return (
       <StreamStallChip
         errorText={message.content?.trim() || ''}
         onRetry={onRetryStreamStall}
+        // #5793: the AskUserQuestion teardown codes are a question-delivery
+        // failure, not a stream stall — use copy that matches the dashboard's
+        // AskUserQuestionStallChip ("Question delivery failed — retry?").
+        headline={
+          isRetryableAskUserQuestionError(message.code)
+            ? 'Question delivery failed — retry?'
+            : undefined
+        }
       />
     );
   }

@@ -32,9 +32,18 @@ export interface StreamStallChipProps {
    * misleading.
    */
   onRetry?: () => void;
+  /**
+   * #5793 — chip headline + accessibility label. Defaults to the
+   * stream-stall copy; callers reuse this same amber "recoverable, retry"
+   * chip for the AskUserQuestion teardown codes by passing the
+   * question-delivery copy (the dashboard has a separate
+   * AskUserQuestionStallChip; mobile reuses this one with a different
+   * headline to avoid duplicating the whole amber-chip layout).
+   */
+  headline?: string;
 }
 
-export function StreamStallChip({ errorText, onRetry }: StreamStallChipProps) {
+export function StreamStallChip({ errorText, onRetry, headline = 'Stream stalled — retry?' }: StreamStallChipProps) {
   const [detailVisible, setDetailVisible] = useState(false);
 
   const handleRetry = useCallback(() => {
@@ -50,7 +59,7 @@ export function StreamStallChip({ errorText, onRetry }: StreamStallChipProps) {
       testID="stream-stall-chip"
       accessibilityRole="alert"
       accessibilityLiveRegion="polite"
-      accessibilityLabel="Stream stalled — retry?"
+      accessibilityLabel={headline}
       accessibilityHint={errorText}
       // Long-press reveals the underlying server diagnostic text without
       // an always-on text wall on the chip — preserves the "raw error
@@ -59,7 +68,7 @@ export function StreamStallChip({ errorText, onRetry }: StreamStallChipProps) {
       style={styles.container}
     >
       <View style={styles.dot} />
-      <Text style={styles.label}>Stream stalled — retry?</Text>
+      <Text style={styles.label}>{headline}</Text>
       {onRetry && (
         <Pressable
           testID="stream-stall-chip-retry"

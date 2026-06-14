@@ -45,6 +45,7 @@ import {
   applyStreamingOverlay,
   type DisplayGroup,
 } from './group-messages'
+import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 import type { ChatMessage } from './types'
 
 /**
@@ -175,19 +176,22 @@ export function buildChatViewMessages(
   // can look up system events too.
   const storeMsgMap = new Map(storeMessages.map(m => [m.id, m]))
 
-  // #4615: track which `type: 'prompt'` bubbles have been invalidated by
-  // a subsequent ASK_USER_QUESTION_STALL error. The server emits the
-  // error when the Claude TUI never acknowledges an AskUserQuestion
-  // answer — typically a multi-question form wedge. The pending
-  // QuestionPrompt is now dead, so submitting it would fire keystrokes
-  // into a session that already discarded the prompt context. We
-  // suppress the interactive prompt render (the AskUserQuestionStallChip
-  // rendered for the error bubble below it carries the retry affordance).
+  // #4615 / #5793: track which `type: 'prompt'` bubbles have been
+  // invalidated by a subsequent retryable AskUserQuestion teardown error.
+  // The server emits one of these codes (ASK_USER_QUESTION_STALL plus the
+  // five MULTISELECT/MULTI_QUESTION codes — see
+  // `isRetryableAskUserQuestionError`) when the Claude TUI never
+  // acknowledges an AskUserQuestion answer or denies a multi-select /
+  // multi-question form. The pending QuestionPrompt is now dead, so
+  // submitting it would fire keystrokes into a session that already
+  // discarded the prompt context. We suppress the interactive prompt
+  // render (the AskUserQuestionStallChip rendered for the error bubble
+  // below it carries the retry affordance).
   const stalledPromptIds = new Set<string>()
   let lastStallIndex = -1
   for (let i = storeMessages.length - 1; i >= 0; i -= 1) {
     const m = storeMessages[i]!
-    if (m.type === 'error' && m.code === 'ASK_USER_QUESTION_STALL') {
+    if (m.type === 'error' && isRetryableAskUserQuestionError(m.code)) {
       lastStallIndex = i
       break
     }
