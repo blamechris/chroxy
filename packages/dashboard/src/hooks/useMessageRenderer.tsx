@@ -1,6 +1,7 @@
 import { useCallback } from 'react'
 import type { ReactNode } from 'react'
 import type { ChatMessage, SessionInfo } from '@chroxy/store-core'
+import { providerSupportsSingleMultiSelect } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
 import { ToolGroup } from '../components/ToolGroup'
@@ -150,12 +151,12 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           allowMultiQuestion={allowMultiQuestionForm}
           // #5776 — render a SINGLE-question multiSelect as a checkbox form.
           // True wherever a structured multi-answer can be consumed: the
-          // SDK-family providers (already gated by allowMultiQuestionForm) AND
-          // claude-tui via the multi-select reinject path. claude-cli is
-          // excluded (allowMultiQuestionForm is false for it and it isn't
-          // claude-tui) because its respondToQuestion takes only a single
-          // text answer with no answersMap channel.
-          allowSingleMultiSelect={allowMultiQuestionForm || activeSessionProvider === 'claude-tui'}
+          // SDK-family providers AND claude-tui via the multi-select reinject
+          // path. The plain CLI providers (claude-cli, docker-cli) are excluded
+          // because their respondToQuestion takes only a single text answer
+          // with no answersMap channel. #5795 — single source of truth in
+          // @chroxy/store-core (keyed off the registered provider `type`).
+          allowSingleMultiSelect={providerSupportsSingleMultiSelect(activeSessionProvider)}
           // #4685 — gate the question content render on the matching
           // AskUserQuestion permission_request being resolved. Pre-fix
           // the user_question card rendered the moment the wire event

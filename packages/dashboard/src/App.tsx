@@ -12,6 +12,7 @@ import {
   formatTokensCompact,
   expandPasteMarkers,
   resolveContextWindow,
+  providerSupportsMultiQuestion,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -255,8 +256,11 @@ export function App() {
   // submits per-question answers (including multi-select arrays) on the
   // widened wire. Reuses the `activeSessionProvider` selector declared
   // above (#4603) so we don't re-derive the same value.
+  // #5795 — provider capability lives in @chroxy/store-core (single source of
+  // truth, keyed off the registered provider `type`), not a hand-rolled
+  // name check duplicated across the app + dashboard.
   const allowMultiQuestionForm = useMemo(
-    () => activeSessionProvider != null && activeSessionProvider !== 'claude-tui' && activeSessionProvider !== 'claude-cli',
+    () => providerSupportsMultiQuestion(activeSessionProvider),
     [activeSessionProvider],
   )
 

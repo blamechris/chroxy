@@ -6,6 +6,8 @@ export {
   PROVIDER_LABELS,
   getProviderLabel,
   getProviderInfo,
+  providerSupportsMultiQuestion,
+  providerSupportsSingleMultiSelect,
 } from '@chroxy/store-core'
 
 export type {
