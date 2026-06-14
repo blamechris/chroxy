@@ -39,7 +39,7 @@ function makeEnv() {
 }
 
 describe('chroxy init provider picker', () => {
-  it('defaults to claude-sdk provider when user accepts default (empty input)', async () => {
+  it('defaults to claude-tui provider when user accepts default (empty input) (#5819)', async () => {
     const mock = makePrompt(['', ''])
     const env = makeEnv()
 
@@ -59,14 +59,15 @@ describe('chroxy init provider picker', () => {
     const written = env.getWritten()
     assert.ok(written, 'config file should be written')
     const parsed = JSON.parse(written.contents)
-    assert.deepEqual(parsed.providers, ['claude-sdk'])
+    assert.deepEqual(parsed.providers, ['claude-tui'])
     assert.equal(parsed.port, 8765)
   })
 
   it('persists selected providers by number list', async () => {
     // Prompts: port, provider selection
-    // Accept default port, then "1,2,3" to select claude + codex + gemini
-    const mock = makePrompt(['', '1,2,3'])
+    // Accept default port, then "2,3,4" to select claude-sdk + codex + gemini
+    // (menu is 1=claude-tui, 2=claude-sdk, 3=codex, 4=gemini since #5819)
+    const mock = makePrompt(['', '2,3,4'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -89,8 +90,8 @@ describe('chroxy init provider picker', () => {
     )
   })
 
-  it('persists only gemini when user types "3"', async () => {
-    const mock = makePrompt(['', '3'])
+  it('persists only gemini when user types "4"', async () => {
+    const mock = makePrompt(['', '4'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -111,7 +112,7 @@ describe('chroxy init provider picker', () => {
   })
 
   it('shows next-step hint for codex (OPENAI_API_KEY)', async () => {
-    const mock = makePrompt(['', '2'])
+    const mock = makePrompt(['', '3'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -132,7 +133,7 @@ describe('chroxy init provider picker', () => {
   })
 
   it('shows next-step hint for gemini (GEMINI_API_KEY)', async () => {
-    const mock = makePrompt(['', '3'])
+    const mock = makePrompt(['', '4'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -172,11 +173,11 @@ describe('chroxy init provider picker', () => {
     const parsed = JSON.parse(env.getWritten().contents)
     assert.deepEqual(
       parsed.providers.sort(),
-      ['claude-sdk', 'codex', 'gemini'].sort(),
+      ['claude-tui', 'claude-sdk', 'codex', 'gemini'].sort(),
     )
   })
 
-  it('falls back to claude-sdk default when input is invalid (no valid numbers)', async () => {
+  it('falls back to claude-tui default when input is invalid (no valid numbers) (#5819)', async () => {
     const mock = makePrompt(['', 'xyz'])
     const env = makeEnv()
 
@@ -194,11 +195,12 @@ describe('chroxy init provider picker', () => {
     })
 
     const parsed = JSON.parse(env.getWritten().contents)
-    assert.deepEqual(parsed.providers, ['claude-sdk'])
+    assert.deepEqual(parsed.providers, ['claude-tui'])
   })
 
   it('ignores out-of-range numbers but keeps valid ones', async () => {
-    const mock = makePrompt(['', '1,9,3'])
+    // menu since #5819: 1=claude-tui, 2=claude-sdk, 3=codex, 4=gemini
+    const mock = makePrompt(['', '2,9,4'])
     const env = makeEnv()
 
     await runInitCmd({
@@ -220,10 +222,11 @@ describe('chroxy init provider picker', () => {
 
   it('drops tokens that mix digits and letters (e.g. "2abc")', () => {
     // "2abc" must be treated as invalid, not silently parsed as 2.
-    // Mixed-digit result should fall back to the default.
-    assert.deepEqual(parseProviderSelection('2abc'), ['claude-sdk'])
-    // Mixed with a valid token, only the valid one survives.
-    assert.deepEqual(parseProviderSelection('1,2abc,3'), ['claude-sdk', 'gemini'])
+    // Mixed-digit result should fall back to the default (claude-tui since #5819).
+    assert.deepEqual(parseProviderSelection('2abc'), ['claude-tui'])
+    // Mixed with valid tokens, only the valid ones survive.
+    // menu: 1=claude-tui, 2=claude-sdk, 3=codex, 4=gemini
+    assert.deepEqual(parseProviderSelection('2,3abc,4'), ['claude-sdk', 'gemini'])
   })
 
   it('writes the port provided by the user', async () => {

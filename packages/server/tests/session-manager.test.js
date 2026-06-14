@@ -874,9 +874,12 @@ describe('SessionManager.restoreState', () => {
       version: 1,
       timestamp: Date.now(),
       sessions: [
-        { name: 'StdinDisabled', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: true },
-        { name: 'StdinOk', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: false },
-        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // stdinForwardingDisabled is an SdkSession-specific latch, so pin the
+        // provider rather than rely on the manager default (claude-tui since
+        // #5819) — these fixtures predate the per-session provider field.
+        { name: 'StdinDisabled', cwd: '/tmp', model: null, permissionMode: 'approve', provider: 'claude-sdk', sdkSessionId: null, stdinForwardingDisabled: true },
+        { name: 'StdinOk', cwd: '/tmp', model: null, permissionMode: 'approve', provider: 'claude-sdk', sdkSessionId: null, stdinForwardingDisabled: false },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', provider: 'claude-sdk', sdkSessionId: null },
       ],
     }))
 
@@ -1532,9 +1535,9 @@ describe('SessionManager.listSessions includes pendingBackgroundShells (#4307)',
 })
 
 describe('SessionManager provider support', () => {
-  it('defaults to claude-sdk provider', () => {
+  it('defaults to the shared DEFAULT_PROVIDER (claude-tui since #5819)', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    assert.equal(mgr._providerType, 'claude-sdk')
+    assert.equal(mgr._providerType, 'claude-tui')
   })
 
   it('accepts providerType parameter', () => {

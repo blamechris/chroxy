@@ -508,7 +508,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   primaryClientId: null,
   followMode: false,
   activeTheme: loadPersistedSetting('chroxy_persist_theme', 'default'),
-  defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-sdk'),
+  // #5819: default to claude-tui ahead of the 2026-06-15 programmatic-credit
+  // cutover so the dashboard's new-session picker doesn't pre-select a provider
+  // that silently draws metered credits. Mirrors the server's DEFAULT_PROVIDER
+  // (packages/server/src/providers.js). Users who explicitly chose a provider
+  // keep their persisted value.
+  defaultProvider: loadPersistedSetting('chroxy_default_provider', 'claude-tui'),
   defaultModel: loadPersistedSetting('chroxy_default_model', ''),
   // #5184: header cost-badge display mode. Validated through the badge's
   // own `isCostBadgeMode` guard so a stale / corrupt localStorage value
