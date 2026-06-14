@@ -13,6 +13,7 @@ export default [
         setInterval: 'readonly',
         clearInterval: 'readonly',
         setImmediate: 'readonly',
+        clearImmediate: 'readonly',
         URL: 'readonly',
         Buffer: 'readonly',
         AbortController: 'readonly',

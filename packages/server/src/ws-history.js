@@ -75,6 +75,7 @@ const BACKPRESSURE_MAX_WAIT_MS = 30_000
 const MAX_EAGER_DERIVATIONS_PER_TICK = 8
 let _eagerDerivationsThisTick = 0
 let _eagerResetScheduled = false
+let _eagerResetHandle = null
 
 /**
  * Reserve a slot for one synchronous eager key derivation in the current
@@ -90,9 +91,12 @@ export function _reserveEagerDerivationSlot() {
   _eagerDerivationsThisTick++
   if (!_eagerResetScheduled) {
     _eagerResetScheduled = true
-    setImmediate(() => {
+    // Retain the handle so the test reset helper can cancel a still-pending
+    // reset and keep test isolation tight (#5764 review).
+    _eagerResetHandle = setImmediate(() => {
       _eagerDerivationsThisTick = 0
       _eagerResetScheduled = false
+      _eagerResetHandle = null
     })
   }
   return true
@@ -105,6 +109,12 @@ export function _reserveEagerDerivationSlot() {
  * exhausts the budget would otherwise leak into the next. Call in a `beforeEach`.
  */
 export function _resetEagerDerivationBudgetForTests() {
+  // Cancel any reset still queued from a prior test/tick so it can't fire mid
+  // test (after an `await`) and mutate the budget unexpectedly (#5764 review).
+  if (_eagerResetHandle) {
+    clearImmediate(_eagerResetHandle)
+    _eagerResetHandle = null
+  }
   _eagerDerivationsThisTick = 0
   _eagerResetScheduled = false
 }
