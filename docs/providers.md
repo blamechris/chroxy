@@ -104,14 +104,14 @@ If `claude` is reported "Not found", ensure it's in one of the paths listed abov
 | Thinking level control | Yes | No | No |
 | Live streaming (`stream_delta`) | Yes | Yes | No (deliver-on-complete) |
 | Auth | API key or `claude login` | API key or `claude login` | `claude login` only (`ANTHROPIC_API_KEY` rejected) |
-| Billing | Programmatic credits / API | Programmatic credits / API | **Subscription interactive allowance** |
+| Billing | Programmatic credits / API | Programmatic credits / API | **Subscription interactive allowance** (today; best-effort, not guaranteed) |
 | Startup overhead | None (in-process) | One `claude -p` spawn per session | One `claude` PTY warmup (~3.5s) per session |
 
 Pick by billing surface and required features:
 
 - **`claude-sdk` (default)** — the right choice for most users. Programmatic billing, fastest startup, live model/mode switching, resume, thinking-level control.
 - **`claude-cli`** — pick this only when you need plan mode. Same billing as the SDK, but a `claude -p` subprocess per session.
-- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
+- **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits — a best-effort bet that bills this way *today*, not a guarantee (Anthropic may reclassify or enforce against third-party automation of a subscription login; keep BYOK as a fallback). Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 
 ### `CHROXY_TUI_MULTISELECT_REINJECT` env override (experimental, #5797)
 
@@ -167,7 +167,8 @@ dictionary (then reload the agent).
 drives Claude through Anthropic's first-party **channels MCP protocol**
 (`claude --channels`) — a documented protocol — instead of scraping the
 interactive TUI (`claude-tui`). It bills the same way `claude-tui` does (against
-your Claude subscription's interactive allowance) but trades the fragile visual
+your Claude subscription's interactive allowance — best-effort, not guaranteed; see
+the `claude-tui` billing caveat above) but trades the fragile visual
 contract for a structured MCP event stream, adds **live streaming**, and uses
 Anthropic's **first-party permission relay** (`claude/channel/permission`)
 instead of a sidecar hook script.
@@ -629,7 +630,8 @@ For capability rows, "—" means the provider's `capabilities` object reports `f
   [`PACKAGING.md`](../packages/server/src/channels/PACKAGING.md) for the path
   that removes it.
 - **Subscription only** — `ANTHROPIC_API_KEY` is not accepted (subscription /
-  OAuth auth, same as `claude-tui`). Bills against the interactive allowance.
+  OAuth auth, same as `claude-tui`). Bills the same way as `claude-tui` — best-effort,
+  not guaranteed (see its billing caveat).
 - **No live model switch, no permission-mode switch, no plan mode, no resume,
   no thinking-level control** — the channel surface does not expose these
   (same gaps as `claude-tui`, except `claude-tui` fakes permission-mode via a
