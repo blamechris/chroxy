@@ -148,3 +148,96 @@ describe('permission-hook.sh — multi-question AskUserQuestion deny (#4648)', (
       'non-array questions value must not trip the guard — defensive against shape drift')
   })
 })
+
+describe('permission-hook.sh — single multi-select AskUserQuestion deny (#5771)', () => {
+  // The multi-select guard is an orthogonal axis to the #4648 multi-question
+  // guard: a single question can still be unanswerable if it sets
+  // multiSelect:true (claude TUI is keyboard-only, no reliable multi-toggle
+  // sequence — 0/7 production, swarm audit 2026-06-13). Pin its reason on the
+  // load-bearing semantics ("multi-select" + "single-select"), not exact copy.
+  const firedMultiSelectGuard = (decision) => {
+    const d = decision.hookSpecificOutput
+    return d.permissionDecision === 'deny' && /multi-?select/i.test(d.permissionDecisionReason || '')
+      && /single-?select/i.test(d.permissionDecisionReason || '')
+  }
+
+  const singleMultiSelect = {
+    tool_name: 'AskUserQuestion',
+    tool_input: {
+      questions: [
+        {
+          question: 'Pick toppings',
+          header: 'Toppings',
+          multiSelect: true,
+          options: [{ label: 'Cheese', value: 'cheese' }, { label: 'Onion', value: 'onion' }],
+        },
+      ],
+    },
+  }
+
+  it('denies a single multiSelect question and steers toward single-select', async () => {
+    const { stdout, status } = await runHook(JSON.stringify(singleMultiSelect))
+    assert.equal(status, 0, 'exits cleanly')
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny')
+    assert.ok(firedMultiSelectGuard(decision),
+      'reason must name multi-select as unsupported and single-select as the fix')
+  })
+
+  it('denies single multiSelect REGARDLESS of permission mode', async () => {
+    for (const mode of ['auto', 'approve', 'acceptEdits', 'plan']) {
+      const { stdout } = await runHook(JSON.stringify(singleMultiSelect), { CHROXY_PERMISSION_MODE: mode })
+      const decision = JSON.parse(stdout.trim())
+      assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny',
+        `mode=${mode} must deny single multiSelect regardless`)
+    }
+  })
+
+  it('allows a single-select question (multiSelect:false) — no regression', async () => {
+    const payload = {
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'one?', header: 'One', multiSelect: false, options: [{ label: 'A', value: 'a' }] }] },
+    }
+    const { stdout } = await runHook(JSON.stringify(payload), { CHROXY_PERMISSION_MODE: 'auto' })
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'allow',
+      'explicit multiSelect:false single-q stays on the v0.9.4 happy path')
+  })
+
+  it('allows a single-select question with NO multiSelect key — no regression', async () => {
+    const payload = {
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'one?', header: 'One', options: [{ label: 'A', value: 'a' }] }] },
+    }
+    const { stdout } = await runHook(JSON.stringify(payload), { CHROXY_PERMISSION_MODE: 'auto' })
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'allow',
+      'omitted multiSelect (today\'s single-select shape) still allows')
+  })
+
+  it('does NOT trip the multi-select guard on malformed payload (parse failure defaults safe)', async () => {
+    const { stdout } = await runHook(JSON.stringify({ tool_name: 'AskUserQuestion' }))
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(firedMultiSelectGuard(decision), false,
+      'a parse failure must not deny every AskUserQuestion via the multi-select guard')
+  })
+
+  it('a multiSelect form with >1 questions trips the multi-question guard FIRST (order)', async () => {
+    // Both guards would deny, but the multi-question check runs first. Assert
+    // the user-facing reason is the multi-question one so the model gets the
+    // "one at a time" steer rather than the multi-select copy.
+    const payload = {
+      tool_name: 'AskUserQuestion',
+      tool_input: {
+        questions: [
+          { question: 'a?', header: 'A', multiSelect: true, options: [{ label: 'x', value: 'x' }] },
+          { question: 'b?', header: 'B', multiSelect: true, options: [{ label: 'y', value: 'y' }] },
+        ],
+      },
+    }
+    const { stdout } = await runHook(JSON.stringify(payload))
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny')
+    assert.match(decision.hookSpecificOutput.permissionDecisionReason, /one question at a time/i)
+  })
+})

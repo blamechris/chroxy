@@ -69,23 +69,41 @@ esac
 REQUEST=$(cat -)
 TOOL_NAME=$(echo "$REQUEST" | grep -o '"tool_name":"[^"]*"' | head -1 | cut -d'"' -f4)
 if [ "$TOOL_NAME" = "AskUserQuestion" ]; then
-  # Count `questions[]` length via python3 (stock macOS has it at /usr/bin/python3
-  # 3.9.6; Homebrew at /opt/homebrew/bin). On parse failure or python3 absence
-  # we get empty output → fall through to normal handling rather than
-  # crash/deny-everything. Worst case: same as today (the v0.9.23 watchdog
-  # catches the wedge), so this defaults safe.
-  QUESTION_COUNT=$(printf '%s' "$REQUEST" | python3 -c '
+  # Parse `questions[]` length AND whether any question is multiSelect via
+  # python3 (stock macOS has it at /usr/bin/python3 3.9.6; Homebrew at
+  # /opt/homebrew/bin). On parse failure or python3 absence we get empty
+  # output → fall through to normal handling rather than crash/deny-everything.
+  # Worst case: same as today (the v0.9.23 watchdog + the form-driver multiSelect
+  # guard catch the wedge), so this defaults safe.
+  #
+  # #5771: deny single-question multiSelect too. claude TUI is keyboard-only and
+  # has no reliable multi-toggle+submit keystroke sequence (0/7 production
+  # success — swarm audit 2026-06-13). Single-select single-questions stay on the
+  # empirically-validated happy path; everything multiSelect is refused here so
+  # the model decomposes into single-select asks. Output is "<count> <hasMulti>".
+  PARSED=$(printf '%s' "$REQUEST" | python3 -c '
 import sys, json
 try:
     d = json.load(sys.stdin)
     q = d.get("tool_input", {}).get("questions", [])
-    print(len(q) if isinstance(q, list) else 0)
+    if not isinstance(q, list):
+        q = []
+    has_multi = 1 if any(isinstance(x, dict) and x.get("multiSelect") is True for x in q) else 0
+    print(f"{len(q)} {has_multi}")
 except Exception:
     pass
 ' 2>/dev/null)
+  QUESTION_COUNT=$(printf '%s' "$PARSED" | cut -d' ' -f1)
+  HAS_MULTISELECT=$(printf '%s' "$PARSED" | cut -d' ' -f2)
   if [ -n "$QUESTION_COUNT" ] && [ "$QUESTION_COUNT" -gt 1 ]; then
     cat <<'EOF'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy currently delivers AskUserQuestion forms one question at a time. Please re-issue this call as separate AskUserQuestion tool calls, ONE AT A TIME — issue the next one only after the previous one's tool_result has been returned. Do NOT issue multiple AskUserQuestion tool_use blocks in parallel within the same assistant turn."}}
+EOF
+    exit 0
+  fi
+  if [ "$QUESTION_COUNT" = "1" ] && [ "$HAS_MULTISELECT" = "1" ]; then
+    cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy's TUI provider does not support multi-select questions (multiSelect:true). Re-issue this as a single-select question (multiSelect:false), or — if the user genuinely needs to choose several items — ask one single-select AskUserQuestion per item (e.g. an include/skip choice for each), ONE AT A TIME, issuing the next only after the previous tool_result returns."}}
 EOF
     exit 0
   fi

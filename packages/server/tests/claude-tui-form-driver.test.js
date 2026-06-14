@@ -57,6 +57,18 @@ function seedSingle(host, toolUseId, optionLabels) {
   })
 }
 
+// A single multiSelect question — denied at the permission hook (#5771), so the
+// driver should never see it in production. Used to assert the defense-in-depth
+// refusal guard in respondToQuestion.
+function seedSingleMultiSelect(host, toolUseId, optionLabels) {
+  const options = optionLabels.map((label) => ({ label, value: label }))
+  host._pendingUserAnswers.set(toolUseId, {
+    toolUseId,
+    questions: [{ question: 'Pick toppings', options, multiSelect: true }],
+    options,
+  })
+}
+
 describe('FormDriver — injected collaborator (#5617)', () => {
   it('single-question: writes the 1-indexed digit for a matched option', () => {
     const host = makeMockHost()
@@ -79,6 +91,31 @@ describe('FormDriver — injected collaborator (#5617)', () => {
 
     assert.deepEqual(host._writes, ['2'])
     assert.ok(host._arms.some((a) => a.id === 't1'), 'watchdog armed for t1')
+  })
+
+  it('single multi-select: refuses to drive keystrokes and tears the turn down (#5771)', () => {
+    // multiSelect is denied at the permission hook (claude TUI is keyboard-only
+    // with no reliable multi-toggle+submit sequence — 0/7 production, swarm
+    // audit 2026-06-13). The driver is the defense-in-depth backstop: if a
+    // multiSelect entry reaches it anyway, it must NOT write a wrong single
+    // digit — it tears the turn down so the dashboard recovers immediately.
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Mushroom', 'Onion', 'Pepper'])
+    const fd = new FormDriver(host)
+    // Spy on teardown (its internals are covered by the session tests); here we
+    // assert only the routing decision: refuse + tear down with the right code.
+    const tornDown = []
+    fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
+
+    // The dashboard would send an empty text + an answers map for a checkbox
+    // form; either way the guard fires on the entry's multiSelect flag.
+    fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+
+    assert.deepEqual(host._writes, [], 'no single-digit throttled write')
+    assert.deepEqual(host._multiSeqs, [], 'no multi-question keystroke sequence')
+    assert.equal(tornDown.length, 1, 'tore the turn down exactly once')
+    assert.equal(tornDown[0].id, 't1')
+    assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED')
   })
 
   it('single-question: an unmatched label falls through to the literal text', () => {
