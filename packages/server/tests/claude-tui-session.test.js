@@ -3728,6 +3728,91 @@ describe('ClaudeTuiSession', () => {
       await new Promise((r) => setTimeout(r, 35))
       assert.equal(session._termWrites.length, 0, 'no \\r when disabled')
     })
+
+    // #5794 (3): slow-but-healthy first turn. The submit DID land — the TUI
+    // re-rendered (output landed in _outputTail) — but the first hook arrives
+    // after the nudge window. The no-progress guard must NOT fire a stray \r.
+    it('does NOT nudge a slow-but-healthy first turn (output grew, hook not yet drained) (#5794)', async () => {
+      session = nudgeSession()
+      session._totalOutputBytes = 0 // armed with no output yet
+      session._scheduleFirstTurnSubmitNudge('m1')
+      // Submit landed: claude re-renders the composer + spinner, which arrives as
+      // PTY output BEFORE its first hook file is written (_firstOutputDisarmed
+      // still false). #5809: use the uncapped byte total, not _outputTail.length.
+      session._totalOutputBytes += 14
+      await new Promise((r) => setTimeout(r, 120))
+      assert.equal(session._termWrites.filter((w) => w === '\r').length, 0, 'no stray \\r when output grew since arm')
+    })
+
+    // #5809: the cap case — _outputTail is already pinned at PTY_TAIL_BYTES (long
+    // resume transcript) so its length can't grow, but _totalOutputBytes still
+    // does, so the guard correctly suppresses the nudge on a healthy turn.
+    it('does NOT nudge when the tail is at cap but total output still grew (#5809)', async () => {
+      session = nudgeSession()
+      session._outputTail = 'x'.repeat(ClaudeTuiSession.PTY_TAIL_BYTES) // pinned at cap
+      session._totalOutputBytes = ClaudeTuiSession.PTY_TAIL_BYTES
+      session._scheduleFirstTurnSubmitNudge('m1')
+      // More output arrives; _outputTail.length stays at the cap, _totalOutputBytes grows.
+      session._totalOutputBytes += 50
+      await new Promise((r) => setTimeout(r, 120))
+      assert.equal(session._termWrites.filter((w) => w === '\r').length, 0, 'no stray \\r when total output grew despite a capped tail')
+    })
+
+    // #5794 (3): the no-progress guard only suppresses when output GREW. A
+    // genuinely wedged turn (no new output) still gets nudged.
+    it('still nudges when output has NOT grown since arm (#5794)', async () => {
+      session = nudgeSession()
+      session._totalOutputBytes = 100 // some prior output, but none after arm
+      session._scheduleFirstTurnSubmitNudge('m1')
+      await new Promise((r) => setTimeout(r, 35))
+      assert.ok(session._termWrites.includes('\r'), 'wedged turn (no output growth) still nudged')
+    })
+  })
+
+  // #5794 (1) + (2): the sendMessage-level arming gates — bracketed-paste path
+  // is never nudged, and the nudge re-arms on the first message of each spawn.
+  describe('first-turn submit nudge arming gates (#5794)', () => {
+    // Mirrors the gate in sendMessage so we can assert it without driving a full
+    // PTY turn. sendMessage arms iff: !_firstTurnNudgedForSpawn && !hasNewlines,
+    // and flips the latch true when it arms. _spawnPty resets the latch to false.
+    function wouldArm(s, promptToSend) {
+      const hasNewlines = /\r?\n/.test(promptToSend || '')
+      if (!s._firstTurnNudgedForSpawn && !hasNewlines) {
+        s._firstTurnNudgedForSpawn = true
+        return true
+      }
+      return false
+    }
+
+    it('arms for a single-line first message', () => {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s._firstTurnNudgedForSpawn, false, 'latch starts unset')
+      assert.equal(wouldArm(s, 'hello world'), true, 'single-line first message arms')
+      assert.equal(s._firstTurnNudgedForSpawn, true, 'latch set after arming')
+    })
+
+    it('does NOT arm for a multi-line (bracketed-paste) first message', () => {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(wouldArm(s, 'line one\nline two'), false, 'multi-line first message takes the bracketed-paste path — not nudged')
+      assert.equal(s._firstTurnNudgedForSpawn, false, 'latch stays unset so a later single-line message can still arm')
+      // CRLF also counts as multi-line (matches _writePtyTextThrottled).
+      assert.equal(wouldArm(s, 'a\r\nb'), false, 'CRLF first message not nudged either')
+    })
+
+    it('arms only once per spawn (second message does not re-arm)', () => {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(wouldArm(s, 'first'), true, 'first message arms')
+      assert.equal(wouldArm(s, 'second'), false, 'second message of the same spawn does not re-arm')
+    })
+
+    it('re-arms on the first message after a (re)spawn resets the latch (#5794)', () => {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(wouldArm(s, 'first'), true, 'lifetime-first message arms')
+      assert.equal(wouldArm(s, 'second'), false, 'subsequent same-spawn message does not')
+      // _spawnPty resets the latch on every successful (re)spawn.
+      s._firstTurnNudgedForSpawn = false
+      assert.equal(wouldArm(s, 'post-respawn first'), true, 'first message after respawn re-arms even though _messageCounter > 1')
+    })
   })
 
   describe('first-output watchdog (#4732)', () => {
