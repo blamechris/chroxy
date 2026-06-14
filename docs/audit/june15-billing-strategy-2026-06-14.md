@@ -1,8 +1,9 @@
 > **Ported to `main` and verified 2026-06-14 (blamechris).** Re-checked every load-bearing
 > *internal* claim against `main` at port time: the default provider was `claude-sdk`
 > (`server-cli.js:531`), the `billing-class.js` era boundary
-> (`PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026,5,15)`; claude-sdk/claude-cli → programmatic,
-> claude-tui → subscription), and the `docs/providers.md:9` "bypasses the programmatic credit
+> (`PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026,5,15)` — **on/after** which claude-sdk/claude-cli
+> flip to programmatic-credit and before which they still bill as flat subscription; claude-tui is
+> subscription in both eras), and the `docs/providers.md:9` "bypasses the programmatic credit
 > pool" copy — all confirmed. One correction: **#3951 (channels spike) is CLOSED**, so rec #5's
 > durable-successor work lives in its impl sub-issues (#3952–#3956), not the spike.
 > External/competitor claims are trusted at the confidence levels the doc states.
@@ -85,7 +86,7 @@ The strategy lives or dies on which model is true:
 
 ## Part 2 — Time‑critical gap (decide today)
 
-`packages/server/src/server-cli.js:508` → `const providerType = config.provider || 'claude-sdk'`. The **default is `claude-sdk`**, one of the two providers `billing-class.js` flips to `programmatic-credit` at `Date.UTC(2026, 5, 15)`. `docs/providers.md` frames `claude-sdk` as *"the right choice for most users."*
+At audit time, `packages/server/src/server-cli.js:531` → `const providerType = config.provider || 'claude-sdk'`. The **default was `claude-sdk`**, one of the two providers `billing-class.js` flips to `programmatic-credit` **on/after** the `Date.UTC(2026, 5, 15)` boundary (before it, claude-sdk/claude-cli still bill as flat subscription). `docs/providers.md` framed `claude-sdk` as *"the right choice for most users."* **(Resolved since — the default was flipped to `claude-tui` and now lives in `@chroxy/protocol` `DEFAULT_PROVIDER`; see the "Decisions taken" addendum at the top.)**
 
 - Epic **#5338** (TUI hardening) migration gate — Phases 0–4 + WP‑3.1/4.1 — is **essentially complete** (verified: `--resume`, per‑session respawn, daemon‑crash guard, and auth‑failure detection all landed). `claude-tui` is *ready* to be primary by chroxy's own gate.
 - Yet **no issue or PR** flips the default or prompts existing users at the boundary (PR search empty).
