@@ -91,6 +91,21 @@ export function multiSelectReinjectEnabled() {
   return process.env.CHROXY_TUI_MULTISELECT_REINJECT === '1'
 }
 
+// #5796 — sanitize an untrusted reinject label before it is TYPED into the live
+// claude TUI PTY. Multi-select labels (and the freeform/"Other" text) arrive from
+// the client over the wire, so a crafted value could contain control characters:
+// a bare CR/LF (\r/\n) would submit the composer early, and ESC (\x1b) + the rest
+// of a C0/C1 sequence could inject terminal escape codes or corrupt the prompt.
+// Replace every run of control chars (C0 \x00-\x1f, DEL \x7f, C1 \x80-\x9f — which
+// covers \r, \n, \x1b) with a single space, then collapse and trim surrounding
+// whitespace so the visible label stays clean. Printable unicode is preserved.
+// Pure + never throws: non-string input coerces to '' (drop it).
+function sanitizeReinjectLabel(s) {
+  if (typeof s !== 'string') return ''
+  // eslint-disable-next-line no-control-regex
+  return s.replace(/[\x00-\x1f\x7f-\x9f]+/g, ' ').replace(/\s+/g, ' ').trim()
+}
+
 // #5776 — parse a single question's answersMap value into an array of selected
 // option LABELS. Accepts the three wire shapes the dashboard may send: a native
 // array (post-#4735), a JSON-encoded array string, or a comma-joined fallback.
@@ -115,7 +130,12 @@ export function formatMultiSelectReinject(questions, answersMap) {
   const lines = []
   for (const q of questions) {
     if (!q || !q.question) continue
+    // #5796 — sanitize each label before it joins the text that gets typed into
+    // the live PTY (strip control chars, notably CR/LF/ESC); drop any that
+    // sanitize down to empty so they don't leave stray separators.
     const labels = parseSelectedLabels(map[q.question])
+      .map(sanitizeReinjectLabel)
+      .filter(Boolean)
     if (labels.length === 0) continue
     lines.push(`For "${q.question}": ${labels.join(', ')}`)
   }
@@ -192,9 +212,14 @@ export class FormDriver {
     // ~150 ms for the prompt swap, then writes the freeform text + Enter
     // to submit. Mutually exclusive with answersMap (multi-question
     // Other is out of scope per #4648).
-    const freeformText = (opts && typeof opts.freeformText === 'string' && opts.freeformText.length > 0)
-      ? opts.freeformText
-      : null
+    // #5796 — the freeform/"Other" text is untrusted client input that gets
+    // TYPED into the live claude TUI PTY (stage-2 write below). Sanitize control
+    // chars (notably CR/LF/ESC) out of it the same way as multi-select labels so
+    // a crafted value can't submit the composer early or inject escape sequences.
+    const rawFreeform = (opts && typeof opts.freeformText === 'string' && opts.freeformText.length > 0)
+      ? sanitizeReinjectLabel(opts.freeformText)
+      : ''
+    const freeformText = rawFreeform.length > 0 ? rawFreeform : null
     let entry = null
     if (toolUseId && this._host._pendingUserAnswers.has(toolUseId)) {
       entry = this._host._pendingUserAnswers.get(toolUseId)

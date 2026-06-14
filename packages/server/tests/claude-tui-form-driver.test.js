@@ -254,6 +254,47 @@ describe('FormDriver — injected collaborator (#5617)', () => {
       formatMultiSelectReinject(questions, {}), '', 'no selection → empty string')
   })
 
+  it('formatMultiSelectReinject: sanitizes control chars out of labels before PTY type (#5796)', () => {
+    const questions = [{ question: 'Pick toppings', multiSelect: true }]
+
+    // CR / LF in a label must not survive — a bare \r would submit the composer
+    // early when typed into the PTY. The control run collapses to a single space.
+    const crlf = formatMultiSelectReinject(questions, { 'Pick toppings': ['Chee\rse', 'On\nion'] })
+    assert.ok(!crlf.includes('\r'), 'no bare CR reaches output')
+    // \n only appears as the line separator between questions; with one question
+    // there is none, so the label's \n must be gone.
+    assert.ok(!crlf.includes('\n'), 'no bare LF reaches output (single question)')
+    assert.equal(crlf, 'For "Pick toppings": Chee se, On ion', 'control run → single space')
+
+    // ESC + an ANSI color sequence must be stripped (no terminal escape injection).
+    const esc = formatMultiSelectReinject(questions, { 'Pick toppings': ['\x1b[31mRed'] })
+    assert.ok(!esc.includes('\x1b'), 'ESC stripped')
+    assert.equal(esc, 'For "Pick toppings": [31mRed', 'only the ESC byte goes, rest is printable text')
+
+    // Backspace (\x08) and DEL (\x7f) are C0/DEL controls → removed.
+    const bs = formatMultiSelectReinject(questions, { 'Pick toppings': ['A\x08B\x7fC'] })
+    assert.equal(bs, 'For "Pick toppings": A B C', 'backspace + DEL → spaces')
+
+    // Normal unicode / printable text is untouched.
+    const uni = formatMultiSelectReinject(questions, { 'Pick toppings': ['Café ☕ 日本語'] })
+    assert.equal(uni, 'For "Pick toppings": Café ☕ 日本語', 'printable unicode preserved')
+
+    // A label that is ONLY control chars sanitizes to empty and is dropped (no
+    // stray separator); with all labels dropped the question yields no line.
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': ['\r\n\x1b', 'Cheese'] }),
+      'For "Pick toppings": Cheese', 'all-control label dropped, no stray comma')
+    assert.equal(
+      formatMultiSelectReinject(questions, { 'Pick toppings': ['\r\n'] }),
+      '', 'question with only control-char labels → no line')
+
+    // Non-string entries inside the parsed array are already filtered out, but
+    // weird answersMap values must not throw.
+    assert.doesNotThrow(() => formatMultiSelectReinject(questions, { 'Pick toppings': null }))
+    assert.doesNotThrow(() => formatMultiSelectReinject(questions, { 'Pick toppings': undefined }))
+    assert.doesNotThrow(() => formatMultiSelectReinject(questions, { 'Pick toppings': 42 }))
+  })
+
   it('single multi-select REINJECT (flag on): busy session → no send, retryable teardown (#5776 busy-race)', () => {
     // If the answer races ahead of the denied turn's Stop-hook teardown, the
     // session is still _isBusy. The real sendMessage would silently drop the
