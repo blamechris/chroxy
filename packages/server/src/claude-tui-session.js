@@ -424,6 +424,14 @@ export class ClaudeTuiSession extends BaseSession {
     // don't re-arm the first-output timer. Reset to false on each new
     // turn via `_resetFirstOutputWatchdogForTurn` (sendMessage entry path).
     this._firstOutputDisarmed = false
+    // #5777: first-message submit nudge. A freshly-spawned TUI can report
+    // status:idle (ready) before its composer actually accepts the submit, so
+    // the FIRST message's trailing \r lands on a not-yet-interactive prompt and
+    // the text sits unsent until a second message nudges it (the manual "go"
+    // workaround). On the first turn only, a one-shot timer re-sends a bare \r
+    // if no hook output has arrived within the window. 0 disables.
+    this._firstTurnSubmitNudgeMs = ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MS
+    this._firstTurnSubmitNudgeTimer = null
     // #5431: incremental transcript scanner for outstanding background work
     // (run_in_background Bash/Agent, Monitor, ScheduleWakeup). Created
     // lazily by getBackgroundTaskSnapshot() once the per-PID session file
@@ -670,6 +678,16 @@ export class ClaudeTuiSession extends BaseSession {
   // dashboard chip surfaces within a minute or two of a real stall so
   // the user can retry without waiting for the 2h hard cap.
   static get FIRST_OUTPUT_TIMEOUT_MS() { return 90 * 1000 }
+
+  // #5777: first-turn submit-nudge interval (ms) and max attempts. A freshly-
+  // spawned TUI can report ready before its composer accepts the submit, so the
+  // first message's \r is dropped. If no hook output arrives within this window
+  // the nudge re-sends a bare \r. 1.5s is long enough that a normally-submitted
+  // turn has usually produced its first hook (so the nudge no-ops), short enough
+  // that a real wedge unsticks in seconds instead of waiting for the 90s
+  // first-output watchdog. Two attempts (≈1.5s, ≈3s) then defer to the watchdog.
+  static get FIRST_TURN_SUBMIT_NUDGE_MS() { return 1500 }
+  static get FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS() { return 2 }
 
   // #4276: per-char throttling is O(N) blocking latency. For huge
   // prompts (pasted file contents, JSON dumps) the cumulative cost
@@ -1060,6 +1078,12 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #5777 (#5788): cancel a pending first-turn submit nudge directly here.
+    // _onPtyGone is the one teardown path that does NOT route through
+    // _clearFirstOutputWatchdog, so without this an armed nudge would only be
+    // saved by the tick's !_isBusy guard — fragile. Clear before the
+    // _destroying early-return so it runs on both the destroy and respawn paths.
+    this._clearFirstTurnSubmitNudge()
     if (this._destroying) return
     // #5311 review — the socket 'close'/'error' paths have no exit info, so
     // render a clear "unknown" instead of a bare "code=undefined". The
@@ -1912,6 +1936,17 @@ export class ClaudeTuiSession extends BaseSession {
     // hard fires after the full window of silence → force-clear + error.
     this._armResultTimeout()
 
+    // #5777: on the FIRST turn of the session, schedule the submit nudge. A
+    // freshly-spawned TUI sometimes reports ready before its composer accepts
+    // the trailing \r, so the prompt sits typed-but-unsent. If no hook output
+    // arrives within the window, _scheduleFirstTurnSubmitNudge re-sends a bare
+    // \r (a no-op on an already-submitted/empty composer, a submit on a stuck
+    // one). Later turns don't wedge — the composer is warm — so this is gated
+    // to the first turn to keep the blast radius minimal.
+    if (this._messageCounter === 1) {
+      this._scheduleFirstTurnSubmitNudge(messageId)
+    }
+
     // Poll the sink dir for new hook files. mktemp-named filenames make each
     // turn's Stop / Pre / Post events distinct from previous turns'; the
     // session-level _consumedFiles Set ensures we never re-process a file
@@ -2657,6 +2692,12 @@ export class ClaudeTuiSession extends BaseSession {
       clearTimeout(this._firstOutputTimeout)
       this._firstOutputTimeout = null
     }
+    // #5777: first output (or any teardown) means the submit landed / the turn
+    // is over — cancel any pending first-turn submit nudge so a late \r can't
+    // land on an idle composer. _clearFirstOutputWatchdog is called from the
+    // hook-drain loop on first consumed event and from every teardown path, so
+    // this one site covers all of them.
+    this._clearFirstTurnSubmitNudge()
     this._firstOutputDisarmed = true
   }
 
@@ -2669,6 +2710,59 @@ export class ClaudeTuiSession extends BaseSession {
    */
   _resetFirstOutputWatchdogForTurn() {
     this._firstOutputDisarmed = false
+  }
+
+  /**
+   * #5777: schedule the first-turn submit nudge. A freshly-spawned claude TUI
+   * can write status:idle (readiness is a session-FILE check, decoupled from
+   * what's rendered) before its composer is actually interactive, so the first
+   * message's trailing \r is swallowed and the prompt sits typed-but-unsent
+   * until a later keystroke submits it (the manual "go" workaround). This
+   * re-sends a bare \r after the nudge window if no hook output has been
+   * consumed yet (`!_firstOutputDisarmed`). A bare \r is a no-op on an
+   * already-submitted (empty) composer and a submit on a stuck one, so it is
+   * safe either way. Retries up to FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS, then
+   * defers to the longer first-output watchdog. Cancelled by
+   * _clearFirstOutputWatchdog (first output / any teardown / destroy).
+   *
+   * @param {string} messageId
+   */
+  _scheduleFirstTurnSubmitNudge(messageId) {
+    if (!(this._firstTurnSubmitNudgeMs > 0)) return
+    this._clearFirstTurnSubmitNudge()
+    let attempts = 0
+    const tick = () => {
+      this._firstTurnSubmitNudgeTimer = null
+      // Nothing to nudge if the turn ended/aborted, the PTY died, the composer
+      // is gone, or first output already arrived (the submit landed).
+      if (!this._isBusy) return
+      if (this._activeTurn?.aborted) return
+      if (this._ptyExited || !this._term) return
+      if (this._firstOutputDisarmed) return
+      attempts += 1
+      try {
+        this._term.write('\r')
+        ;(this._log || log).info(`first-turn submit nudge #${attempts} (#5777, msg=${messageId}) — no hook output yet, re-sent \\r`)
+      } catch (err) {
+        ;(this._log || log).warn(`first-turn submit nudge write failed (#5777, msg=${messageId}): ${err.message}`)
+        return
+      }
+      if (attempts < ClaudeTuiSession.FIRST_TURN_SUBMIT_NUDGE_MAX_ATTEMPTS) {
+        this._firstTurnSubmitNudgeTimer = setTimeout(tick, this._firstTurnSubmitNudgeMs)
+      }
+    }
+    this._firstTurnSubmitNudgeTimer = setTimeout(tick, this._firstTurnSubmitNudgeMs)
+  }
+
+  /**
+   * #5777: cancel any pending first-turn submit nudge. Idempotent and safe to
+   * call when no nudge was ever scheduled.
+   */
+  _clearFirstTurnSubmitNudge() {
+    if (this._firstTurnSubmitNudgeTimer) {
+      clearTimeout(this._firstTurnSubmitNudgeTimer)
+      this._firstTurnSubmitNudgeTimer = null
+    }
   }
 
   _handleInactivityWarning() {
