@@ -86,7 +86,6 @@ import {
   handleFileContent as sharedFileContent,
   buildSessionListPatches as sharedBuildSessionListPatches,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
-  handleSessionContext as sharedSessionContext,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
@@ -3249,13 +3248,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_context': {
-      const { sessionId: ctxSessionId, patch } = sharedSessionContext(msg, get().activeSessionId);
-      if (ctxSessionId && get().sessionStates[ctxSessionId]) {
-        updateSession(ctxSessionId, () => patch);
-      }
-      break;
-    }
+    // session_context — migrated to the shared store-core dispatch table (#5618)
 
     case 'monthly_budget': {
       // #5665 — machine-wide monthly programmatic-credit meter snapshot/event.

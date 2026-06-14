@@ -73,6 +73,7 @@ import {
   handleInactivityWarning,
   handleMcpServers,
   handleSessionUsage,
+  handleSessionContext,
   handleSessionCostThresholdCrossed,
   handleDevPreview,
   handleDevPreviewStopped,
@@ -325,6 +326,14 @@ export interface DispatchMessageMap {
     type: 'session_usage'
     sessionId?: string
     cumulativeUsage?: Record<string, unknown>
+  }
+  session_context: {
+    type: 'session_context'
+    sessionId?: string
+    gitBranch?: unknown
+    gitDirty?: unknown
+    gitAhead?: unknown
+    projectName?: unknown
   }
   session_cost_threshold_crossed: {
     type: 'session_cost_threshold_crossed'
@@ -671,6 +680,20 @@ function dispatchSessionUsage<S extends DispatchSessionBase>(
   }
 }
 
+/** `session_context` — merge the per-session git/project context patch. */
+function dispatchSessionContext<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_context'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handleSessionContext(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => patch as Partial<S>)
+  }
+}
+
 /** `session_cost_threshold_crossed` — store the one-shot cost-warning banner. */
 function dispatchSessionCostThresholdCrossed<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['session_cost_threshold_crossed'],
@@ -945,6 +968,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     inactivity_warning: dispatchInactivityWarning,
     mcp_servers: dispatchMcpServers,
     session_usage: dispatchSessionUsage,
+    session_context: dispatchSessionContext,
     session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
     dev_preview: dispatchDevPreview,
     dev_preview_stopped: dispatchDevPreviewStopped,
@@ -987,6 +1011,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'inactivity_warning',
   'mcp_servers',
   'session_usage',
+  'session_context',
   'session_cost_threshold_crossed',
   'dev_preview',
   'dev_preview_stopped',
