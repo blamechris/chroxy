@@ -28,7 +28,16 @@
  */
 import React, { useState, useRef } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import type { ChatMessageQuestion } from '@chroxy/store-core';
+import {
+  // #5800 — the multi-question form state machine now lives in store-core,
+  // shared with the dashboard's MultiQuestionForm.
+  buildAnswersMap,
+  computeCanSubmit,
+  setSingleSelect,
+  toggleMultiSelect,
+  type ChatMessageQuestion,
+  type MultiQuestionAnswersMap as SharedMultiQuestionAnswersMap,
+} from '@chroxy/store-core';
 import { COLORS } from '../../constants/colors';
 
 /**
@@ -36,8 +45,11 @@ import { COLORS } from '../../constants/colors';
  * Values are either a string (single-select chosen value) or a string[]
  * (multi-select chosen values). Mirrors the dashboard's
  * `MultiQuestionAnswersMap`.
+ *
+ * #5800 — the canonical declaration now lives in `@chroxy/store-core`;
+ * re-exported here under the same name so existing importers are unchanged.
  */
-export type MultiQuestionAnswersMap = Record<string, string | string[]>;
+export type MultiQuestionAnswersMap = SharedMultiQuestionAnswersMap;
 
 export interface MultiQuestionFormProps {
   questions: ChatMessageQuestion[];
@@ -64,45 +76,24 @@ export function MultiQuestionForm({ questions, onSubmit }: MultiQuestionFormProp
   // one `user_question_response`.
   const submittedRef = useRef(false);
 
+  // #5800 — selection state + canSubmit derivation + answersMap-builder now
+  // live in `@chroxy/store-core` (shared with the dashboard's
+  // MultiQuestionForm). Markup, testIDs, and the emitted answersMap shape are
+  // unchanged; only the logic moved.
   const handleRadioSelect = (idx: number, value: string) => {
-    setSingleSelectByIdx((prev) => ({ ...prev, [idx]: value }));
+    setSingleSelectByIdx((prev) => setSingleSelect(prev, idx, value));
   };
 
   const handleCheckboxToggle = (idx: number, value: string) => {
-    setMultiSelectByIdx((prev) => {
-      const curr = prev[idx] ?? [];
-      const next = curr.includes(value)
-        ? curr.filter((v) => v !== value)
-        : [...curr, value];
-      return { ...prev, [idx]: next };
-    });
+    setMultiSelectByIdx((prev) => toggleMultiSelect(prev, idx, value));
   };
 
-  // Submit enabled only when every single-select question has a choice.
-  // Multi-select is allowed to be empty (claude SDK accepts zero
-  // selections for multi-select) — parity with the dashboard's
-  // `canSubmit`.
-  const canSubmit = questions.every((q, idx) => {
-    if (q.multiSelect) return true;
-    return singleSelectByIdx[idx] != null;
-  });
+  const canSubmit = computeCanSubmit(questions, { singleSelectByIdx, multiSelectByIdx });
 
   const handleSubmit = () => {
     if (submittedRef.current || !canSubmit) return;
     submittedRef.current = true;
-    const answersMap: MultiQuestionAnswersMap = {};
-    questions.forEach((q, idx) => {
-      if (q.multiSelect) {
-        // #4621 / #4735 — emit multi-select as a native `string[]` via the
-        // widened wire shape; the server passes the array through to the
-        // SDK canUseTool callback unchanged.
-        answersMap[q.question] = multiSelectByIdx[idx] ?? [];
-      } else {
-        const chosen = singleSelectByIdx[idx];
-        if (chosen != null) answersMap[q.question] = chosen;
-      }
-    });
-    onSubmit(answersMap);
+    onSubmit(buildAnswersMap(questions, { singleSelectByIdx, multiSelectByIdx }));
   };
 
   return (

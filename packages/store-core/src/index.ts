@@ -709,6 +709,31 @@ export type {
   MemoryStore,
 } from './handshake-e2e/fake-ws'
 
+// #5800 — shared AskUserQuestion multi-question form state machine. Both the
+// dashboard's `QuestionPrompt.MultiQuestionForm` and the app's
+// `MultiQuestionForm` render against these pure helpers (store-core has no
+// `react` dependency, so this exports pure reducers/derivers rather than a
+// hook; each client keeps its own tiny `useState`). `isSingleMultiSelectForm`
+// replaces the shape-check that was computed independently in both renderers.
+export {
+  toggleMultiSelect,
+  setSingleSelect,
+  buildAnswersMap,
+  computeCanSubmit,
+  isSingleMultiSelectForm,
+} from './multi-question-form'
+export type {
+  MultiQuestionAnswersMap,
+  MultiQuestionFormState,
+} from './multi-question-form'
+
+// #5800 — shared tool-result-envelope unwrap, hoisted from the dashboard's
+// `lib/tool-result-text.ts` so the app gains the same `{stdout,stderr}` →
+// terminal-text normalisation. Zero behavior change for the dashboard.
+export {
+  unwrapToolResultText,
+} from './tool-result-text'
+
 // #5759 — shared pending-permission derivation (single source of truth for the
 // "live, unanswered permission prompt" predicate across both clients).
 export {

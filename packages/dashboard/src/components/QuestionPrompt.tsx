@@ -33,7 +33,18 @@ import { useId, useState, useRef, useEffect } from 'react'
 // converge on a single declaration paired with the shared
 // `isFreeformAnswer` guard. Re-exported below for the existing dashboard
 // call sites that import it from this file.
-import { OTHER_OPTION_VALUE, type ChatMessageQuestion, type OtherFreeformAnswer } from '@chroxy/store-core'
+import {
+  OTHER_OPTION_VALUE,
+  // #5800 — the multi-question form state machine now lives in store-core.
+  buildAnswersMap,
+  computeCanSubmit,
+  isSingleMultiSelectForm,
+  setSingleSelect,
+  toggleMultiSelect,
+  type ChatMessageQuestion,
+  type OtherFreeformAnswer,
+  type MultiQuestionAnswersMap as SharedMultiQuestionAnswersMap,
+} from '@chroxy/store-core'
 
 /**
  * #4735 — per-question answer payload emitted by the multi-question form.
@@ -43,8 +54,12 @@ import { OTHER_OPTION_VALUE, type ChatMessageQuestion, type OtherFreeformAnswer 
  * (`PermissionManager.respondToQuestion`, `ClaudeTuiSession`) accept
  * both shapes; pre-#4735 builds used to JSON-stringify the array into a
  * single string for back-compat, but the native form is preferred.
+ *
+ * #5800 — the canonical declaration now lives in `@chroxy/store-core`
+ * (alongside the shared form state machine); re-exported here under the
+ * same name so existing dashboard importers keep working unchanged.
  */
-export type MultiQuestionAnswersMap = Record<string, string | string[]>
+export type MultiQuestionAnswersMap = SharedMultiQuestionAnswersMap
 
 /**
  * #4651 — payload shape emitted when the user picks "Other" on a single-
@@ -172,8 +187,7 @@ export function QuestionPrompt({ question, options, answered, questions, allowMu
   // it would fall through to SingleQuestionPrompt's radio buttons and the user
   // could only pick one. Gated by allowSingleMultiSelect so claude-cli (no
   // structured-answer channel) keeps the single-select fallback.
-  const isSingleMultiSelect =
-    Array.isArray(questions) && questions.length === 1 && questions[0]?.multiSelect === true
+  const isSingleMultiSelect = isSingleMultiSelectForm(questions)
   if (isSingleMultiSelect && answered == null && allowSingleMultiSelect) {
     return <MultiQuestionForm questions={questions} onSelect={onSelect} />
   }
@@ -249,50 +263,25 @@ export function MultiQuestionForm({ questions, onSelect }: MultiQuestionFormProp
   // and screen readers can announce the group label.
   const labelIdPrefix = useId()
 
+  // #5800 — selection state + answersMap-builder + canSubmit derivation
+  // now live in `@chroxy/store-core` (shared with the app's
+  // MultiQuestionForm). Markup, testIDs, and the emitted answersMap shape
+  // are unchanged; only the logic moved.
   const handleRadioChange = (idx: number, value: string) => {
-    setSingleSelectByIdx((prev) => ({ ...prev, [idx]: value }))
+    setSingleSelectByIdx((prev) => setSingleSelect(prev, idx, value))
   }
 
   const handleCheckboxToggle = (idx: number, value: string) => {
-    setMultiSelectByIdx((prev) => {
-      const curr = prev[idx] || []
-      const next = curr.includes(value)
-        ? curr.filter((v) => v !== value)
-        : [...curr, value]
-      return { ...prev, [idx]: next }
-    })
+    setMultiSelectByIdx((prev) => toggleMultiSelect(prev, idx, value))
   }
 
   const handleSubmit = () => {
     if (submittedRef.current) return
     submittedRef.current = true
-    const answersMap: MultiQuestionAnswersMap = {}
-    questions.forEach((q, idx) => {
-      if (q.multiSelect) {
-        // #4621 / #4735 — emit multi-select as a native `string[]` via
-        // the widened wire shape. Pre-#4621 dashboards JSON.stringified
-        // the array so the schema (`Record<string,string>`) accepted
-        // it; the server side already handled both forms (the TUI
-        // driver parses JSON or comma-joined strings; the SDK path
-        // passes the value through unchanged). Sending arrays natively
-        // gives the SDK canUseTool callback the structured shape it
-        // expects without a JSON.parse hop.
-        answersMap[q.question] = multiSelectByIdx[idx] || []
-      } else {
-        const chosen = singleSelectByIdx[idx]
-        if (chosen != null) answersMap[q.question] = chosen
-      }
-    })
-    onSelect(answersMap)
+    onSelect(buildAnswersMap(questions, { singleSelectByIdx, multiSelectByIdx }))
   }
 
-  // Submit enabled only when every single-select question has a choice
-  // (multi-select is allowed to be empty — claude SDK accepts zero
-  // selections for multi-select).
-  const canSubmit = questions.every((q, idx) => {
-    if (q.multiSelect) return true
-    return singleSelectByIdx[idx] != null
-  })
+  const canSubmit = computeCanSubmit(questions, { singleSelectByIdx, multiSelectByIdx })
 
   return (
     <div className="question-prompt question-prompt--multi" data-testid="question-prompt-multi">
