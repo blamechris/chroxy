@@ -1,0 +1,145 @@
+description = 'Launch a panel of specialized agents to audit a pull request from multiple perspectives before merge.'
+prompt = '''
+# /agentic-audit
+
+Launch a panel of specialized agents to audit a pull request from multiple perspectives before merge.
+
+## Arguments
+
+- `{{args}}` - PR number (optional, defaults to current branch's PR), plus optional agent count (default: 5). Examples:
+  - `42` (PR #42, 5 agents)
+  - `42 7` (PR #42, 7 agents)
+  - `3` (PR #3 or 3 agents — resolved by checking if a PR with that number exists)
+
+## Instructions
+
+### 1. Gather PR Context
+
+```bash
+PR_NUM=${1:-$(gh pr view --json number -q .number)}
+AGENT_COUNT=${2:-5}  # min: 3, max: 8
+REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
+
+# PR metadata
+gh pr view ${PR_NUM} --json title,body,headRefName,baseRefName,files,additions,deletions
+
+# Full diff
+gh pr diff ${PR_NUM}
+
+# Changed file list
+gh pr view ${PR_NUM} --json files -q '.files[].path'
+```
+
+Build a context bundle for agents containing: PR title, description, branch names, full diff, and the list of changed files.
+
+### 2. Select Agents
+
+Pick AGENT_COUNT agents from the roster. Always include the core 3. Fill remaining slots from the extended roster based on what the diff touches.
+
+#### Core (always included)
+
+| Agent | Lens | Personality |
+|-------|------|-------------|
+| Skeptic | Correctness, false assumptions, logic errors, what will break | Cynical engineer who has seen too many PRs ship bugs. Reads every line of the diff looking for what's wrong. |
+| Builder | Completeness, missing edge cases, integration gaps, unfinished work | Pragmatic dev who has to maintain this code. Finds what's missing, incomplete, or will cause follow-up PRs. |
+| Minimalist | Over-engineering, unnecessary changes, scope creep, simpler alternatives | Believes the best PR is the smallest PR. Finds what to cut and proposes leaner approaches. |
+
+#### Extended (pick by relevance to the diff)
+
+| Agent | Lens | Include When |
+|-------|------|--------------|
+| Guardian | Failure modes, race conditions, data integrity, error handling | Changes touch concurrency, state management, data persistence, or error paths |
+| Operator | UX impact, user-facing regressions, accessibility, error states | Changes touch UI, user flows, or output formatting |
+| Futurist | Tech debt introduced, maintainability cost, extensibility impact | Changes introduce new patterns, abstractions, or architectural decisions |
+| Adversary | Security holes, input validation, auth bypass, injection vectors | Changes touch auth, user input, API boundaries, or external data |
+| Tester | Test coverage, untested paths, edge cases, test quality | Changes include complex logic, new features, or modify existing tests |
+
+### 3. Launch Agents
+
+Launch all agents in parallel using the Task tool. Each agent receives the full PR context bundle and their persona.
+
+**Agent prompt:**
+
+```
+You are "{AGENT_NAME}" — {PERSONALITY}
+
+Audit this pull request from the lens of **{LENS}**.
+
+## PR Context
+- **Title**: {PR_TITLE}
+- **Branch**: {HEAD} → {BASE}
+- **Changed files**: {FILE_LIST}
+
+## Diff
+{FULL_DIFF}
+
+## PR Description
+{PR_BODY}
+
+## Your Review
+1. Rate the PR overall 1–5
+2. List your top findings (up to 5), each with:
+   - Severity: critical / major / minor / nit
+   - File and line reference
+   - What's wrong and why it matters
+   - Suggested fix (concrete, not vague)
+3. Note anything done well worth preserving
+4. One-paragraph verdict
+
+## Rules
+- Review the DIFF, but also read surrounding code in changed files for context.
+- Be specific. Reference exact lines. "This might be a problem" is useless.
+- Be opinionated. Strong views, loosely held.
+- 3/5 = adequate, would merge with minor comments. 5/5 = exemplary. 1/5 = should not merge.
+```
+
+Run agents as foreground Task calls. If more than 4 agents, batch: first 4 in parallel, then the rest.
+
+### 4. Synthesize and Report
+
+After all agents return, output a single synthesis directly to the user (no files written):
+
+```markdown
+## Agentic Audit: PR #{PR_NUM} — {TITLE}
+
+**Agents**: {count} | **Aggregate**: {average}/5
+
+### Agent Panel
+| Agent | Rating | Top Finding |
+|-------|--------|-------------|
+| Skeptic | X/5 | One-line summary |
+| Builder | X/5 | One-line summary |
+| ... | ... | ... |
+
+### Consensus Findings
+Issues where 3+ agents agree. These are high-confidence and should be addressed.
+
+1. **{Finding}** (Skeptic, Builder, Guardian) — {description + file:line}
+2. ...
+
+### Contested Points
+Where agents disagree. Present both sides, assess who's right.
+
+### Action Items
+Prioritized list of recommended changes before merge, ordered by severity.
+
+### Verdict
+One paragraph: merge as-is, merge with changes, or rework needed.
+```
+
+### 5. Offer Next Steps
+
+After presenting the synthesis, ask the user:
+
+> Want me to fix any of the findings? I can address them as commits on this branch.
+
+## Rating Scale
+
+| Rating | Meaning |
+|:------:|---------|
+| 5 | Exemplary — would merge without comment |
+| 4 | Good — minor issues, none blocking |
+| 3 | Adequate — merge with changes |
+| 2 | Concerning — significant issues to resolve first |
+| 1 | Do not merge — needs rework |
+'''

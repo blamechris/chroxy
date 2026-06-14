@@ -1,3 +1,7 @@
+---
+description: "The package manager for Claude Code skills — `npm`/`brew` for the skill registry"
+---
+
 # /skill
 
 The package manager for Claude Code skills — `npm`/`brew` for the skill registry
@@ -207,5 +211,3 @@ codex was a target) `~/.codex/prompts/<name>.md`. Report what was removed.
   for a moved template updates it. Safe to run anytime.
 - **Self-contained on first use.** `/skill` needs no customization to work — it ships
   with sane registry defaults so it can bootstrap a repo that has nothing else installed.
-
-<!-- skill-templates: skill 18b9f3e 2026-06-04 -->

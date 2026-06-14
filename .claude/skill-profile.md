@@ -6,6 +6,34 @@
 - **Main branch:** main
 - **CI:** Copilot review + CodeQL ruleset
 
+## Skill Targets (model-agnostic compile)
+
+`.claude/commands/<name>.md` (the repo-customized install) is the **provider-neutral
+source of truth**. `skill add`/`update` compiles each skill into every coding agent's
+**native** custom-command format via `scripts/compile-skill-targets.mjs`, so the same
+skill is first-party under whichever model you drive.
+
+targets: claude, gemini, codex
+
+- **claude** → `.claude/skills/<name>/SKILL.md` (markdown + YAML `description`; the
+  v2.1.x "skills" path — the legacy `.claude/commands/` discovery is broken, see
+  GH #31846). Invoked `/<name>`. *Version-controlled.*
+- **gemini** → `.gemini/commands/<name>.toml` (TOML `description` + `prompt`;
+  `$ARGUMENTS`→`{{args}}`; subdirs namespace as `/a:b`). Invoked `/<name>`,
+  reload with `/commands reload`. *Version-controlled.*
+- **codex** → `~/.codex/prompts/<name>.md` (markdown; `$ARGUMENTS` native). Invoked
+  `/prompts:<name>`. **User-global (written to your home dir, NOT version-controlled), and
+  OpenAI marks custom prompts deprecated** — it's a per-machine side effect, so each machine
+  that compiles re-emits its own copy. Drop `codex` from the `targets:` line to disable.
+
+The neutral arg token is `$ARGUMENTS`; emitters map it per agent. Two Gemini caveats the
+compiler handles automatically: positional `$1`/`$2` have no Gemini equivalent (it warns),
+and a body containing active template sequences (`{{…}}`, `!{…}`, `@{…}` — e.g. an HTML
+template's `{{TITLE}}` or `{{CUSTOMIZE}}` docs) is **skipped** for Gemini rather than emitted
+corrupt (currently: visual-brief, decompose-issue, create-issue, skill — Claude/Codex still
+get them). After editing a skill's generic source by hand, recompile:
+`node scripts/compile-skill-targets.mjs --name <name>`.
+
 ## Repo-memory exploration protocol (cross-cutting)
 This repo has the `repo-memory` MCP (~1,500 files pre-indexed, AST summaries, warm cache via a `post-merge` hook). It is heavily underused. Any skill that **spawns code-exploring subagents or reads source heavily** must carry the exploration protocol so spawned agents (fresh context, don't inherit CLAUDE.md) actually use it:
 - Before `Read` → `get_file_summary` / `batch_file_summaries` (a fraction of a full Read).

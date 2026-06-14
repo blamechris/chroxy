@@ -78,14 +78,32 @@ Skills live in the `blamechris/skill-templates` **registry** and install **on de
 
 - **`/skill add <name>`** — resolve from the registry → fetch `generic/<name>.md` → fill its
   `{{CUSTOMIZE: ...}}` markers from this repo's `CLAUDE.md` + `.claude/skill-profile.md` + code →
-  write a version-stamped `.claude/commands/<name>.md` → record in `.claude/skills.lock`.
+  write a version-stamped `.claude/commands/<name>.md` → **compile to native targets** → record
+  in `.claude/skills.lock`.
 - **`/skill list` / `/skill outdated` / `/skill update [name]` / `/skill remove <name>`** — manage installed skills.
-- **Install-on-miss is a rule:** if `/X` is requested but absent from `.claude/commands/`, run
-  `/skill add X` first, then invoke it.
+- **Install-on-miss is a rule:** if `/X` is requested but not installed (no
+  `.claude/skills/X/SKILL.md`), run `/skill add X` first, then invoke it.
 
-This repo carries `.claude/skill-profile.md` (the customization profile) and `.claude/skills.lock`
-(what's installed, at which template hash). Maintainers edit templates in the registry's `generic/`
-and run its `scripts/build-index.sh`; consumers pick changes up on the next `/skill update`.
+**Model-agnostic compile (multi-target).** `.claude/commands/<name>.md` is the provider-NEUTRAL
+source; `scripts/compile-skill-targets.mjs` compiles each skill into every coding agent's NATIVE
+custom-command format, so the same skill is first-party under whichever model you drive:
+- **claude** → `.claude/skills/<name>/SKILL.md` (the v2.1.x "skills" path; the legacy
+  `.claude/commands/` slash-command discovery is broken — GH anthropics/claude-code#31846 — so
+  Claude loads from `.claude/skills/`). *Version-controlled.*
+- **gemini** → `.gemini/commands/<name>.toml` (TOML; `$ARGUMENTS`→`{{args}}`). *Version-controlled.*
+- **codex** *(opt-in)* → `~/.codex/prompts/<name>.md` (invoked `/prompts:<name>`; user-global,
+  not version-controlled, deprecated upstream).
+
+The active target list is the `targets:` line in `.claude/skill-profile.md` (default
+`claude, gemini`). After editing a skill's generic source by hand, recompile:
+`node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` to preview).
+
+This repo carries `.claude/skill-profile.md` (the customization profile + `targets:`) and
+`.claude/skills.lock` (what's installed, at which template hash). Maintainers edit templates in
+the registry's `generic/` and run its `scripts/build-index.sh`; consumers pick changes up on the
+next `/skill update`. **Registry follow-up:** the multi-target compile step should also land in the
+registry's `generic/skill.md` so other repos inherit it (this repo's `/skill` is ahead of the
+template until then).
 
 ## Git Workflow
 
