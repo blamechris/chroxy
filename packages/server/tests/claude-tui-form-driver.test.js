@@ -38,12 +38,19 @@ function makeMockHost(overrides = {}) {
   const wdCleared = []       // #5773 _clearAskUserQuestionWatchdog ids
   const locksCleared = []    // #5773 _clearAskUserQuestionLock calls
   const sent = []            // #5773 sendMessage payloads (reinject)
+  const warns = []           // #5773 _log.warn messages
+  const errors = []          // #5773 emit('error', ...) payloads from sendMessage guard
   const host = {
     _pendingUserAnswers: new Map(),
     _term: {},               // truthy = a live PTY
     _destroying: false,
+    // #5773 — model the real sendMessage busy contract. Defaults idle (false),
+    // which is the designed reinject state (model stopped on the deny → Stop hook
+    // drained → idle by the time the human answers). Tests flip it to exercise the
+    // busy-race guard.
+    _isBusy: false,
     _activeTurn: { hexDumpEmitted: false, aborted: false, messageId: 'm1' },
-    _log: { info() {}, warn() {} },
+    _log: { info() {}, warn: (m) => warns.push(m) },
     _outputTailHexDump: () => '',
     _writePtyTextThrottled: (t) => { writes.push(t); return Promise.resolve(true) },
     _writePtyMultiQuestionSequence: (seq) => { multiSeqs.push(seq); return Promise.resolve(true) },
@@ -53,7 +60,14 @@ function makeMockHost(overrides = {}) {
     // #5773 — surface the multi-select reinject path touches on success.
     _clearAskUserQuestionWatchdog: (id) => { wdCleared.push(id) },
     _clearAskUserQuestionLock: () => { locksCleared.push(true) },
-    sendMessage: (text) => { sent.push(text); return Promise.resolve() },
+    // #5773 — mirror claude-tui-session.js sendMessage's busy guard: when busy it
+    // emit('error') + returns WITHOUT sending (and resolves, not rejects), so a
+    // .catch can't observe the drop. The form-driver guards on _isBusy before
+    // calling, so this stub primarily proves the call is not made when busy.
+    sendMessage: (text) => {
+      if (host._isBusy) { errors.push('Already processing a message'); return Promise.resolve() }
+      sent.push(text); return Promise.resolve()
+    },
     // Back-compat getter: most-recently-set entry (the no-toolUseId path).
     get _pendingUserAnswer() {
       const vals = [...host._pendingUserAnswers.values()]
@@ -69,6 +83,8 @@ function makeMockHost(overrides = {}) {
   host._wdCleared = wdCleared
   host._locksCleared = locksCleared
   host._sent = sent
+  host._warns = warns
+  host._errors = errors
   return host
 }
 
@@ -212,6 +228,83 @@ describe('FormDriver — injected collaborator (#5617)', () => {
       'For "Pick toppings": Cheese, Onion', 'comma-joined fallback')
     assert.equal(
       formatMultiSelectReinject(questions, {}), '', 'no selection → empty string')
+  })
+
+  it('single multi-select REINJECT (flag on): busy session → no send, retryable teardown (#5773 busy-race)', () => {
+    // If the answer races ahead of the denied turn's Stop-hook teardown, the
+    // session is still _isBusy. The real sendMessage would silently drop the
+    // selection (emit error + return, no throw), wedging until the 2h hard cap.
+    // The driver must instead NOT send and surface a retryable error.
+    const host = makeMockHost()
+    host._isBusy = true
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    const tornDown = []
+    fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+
+    assert.deepEqual(host._sent, [], 'does NOT call sendMessage while busy')
+    assert.deepEqual(host._errors, [], 'never reached the sendMessage busy guard')
+    assert.equal(tornDown.length, 1, 'tears down with a retryable error instead of silently dropping')
+    assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_BUSY')
+  })
+
+  it('single multi-select REINJECT (flag on): drops freeformText but still sends the labels (#5773 option B deferral)', () => {
+    const host = makeMockHost()
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => { throw new Error('should not tear down') }
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese'] }, 't1', { freeformText: 'extra anchovies' })
+    })
+
+    assert.deepEqual(host._sent, ['For "Pick toppings": Cheese'],
+      'freeformText is NOT appended to the reinjected answer (Phase 1)')
+    assert.ok(host._warns.some((w) => /dropping freeformText/.test(w)),
+      'logs that the custom answer was dropped rather than silently discarding it')
+  })
+
+  it('single multi-select REINJECT (flag on): a rejecting sendMessage is caught, not thrown (#5773)', async () => {
+    const host = makeMockHost({ sendMessage: () => Promise.reject(new Error('boom')) })
+    seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+    const fd = new FormDriver(host)
+    fd._teardownAskUserQuestion = () => { throw new Error('should not tear down on the send path') }
+
+    withReinjectFlag('1', () => {
+      // Must not throw synchronously — the send is fire-and-forget.
+      fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+    })
+    await Promise.resolve()  // let the .catch microtask run
+    await Promise.resolve()
+    assert.ok(host._warns.some((w) => /reinject sendMessage failed/.test(w)),
+      'the rejection is logged via the .catch, not surfaced as an unhandled throw')
+  })
+
+  it('multi-QUESTION (length>1) multiSelect never takes the reinject path — single-question only (#5773)', () => {
+    // The reinject guard is `pendingQuestions.length <= 1 && some(multiSelect)`.
+    // A >1-question form (denied separately at the hook since #4648) must NOT
+    // reinject even with the flag on — pins the single-question-only boundary.
+    const host = makeMockHost()
+    const options = [{ label: 'A' }, { label: 'B' }]
+    host._pendingUserAnswers.set('t1', {
+      toolUseId: 't1',
+      questions: [
+        { question: 'Q1', options, multiSelect: true },
+        { question: 'Q2', options, multiSelect: false },
+      ],
+      options,
+    })
+    const fd = new FormDriver(host)
+
+    withReinjectFlag('1', () => {
+      fd.respondToQuestion('', { Q1: ['A'], Q2: 'B' }, 't1')
+    })
+
+    assert.deepEqual(host._sent, [], 'reinject path is single-question only')
   })
 
   it('single-question: an unmatched label falls through to the literal text', () => {

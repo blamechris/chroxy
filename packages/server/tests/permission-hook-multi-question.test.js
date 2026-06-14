@@ -241,3 +241,62 @@ describe('permission-hook.sh — single multi-select AskUserQuestion deny (#5771
     assert.match(decision.hookSpecificOutput.permissionDecisionReason, /one question at a time/i)
   })
 })
+
+describe('permission-hook.sh — single multi-select reinject deny-reason (#5773)', () => {
+  // With CHROXY_TUI_MULTISELECT_REINJECT=1 the multi-select form is STILL denied
+  // (that suppresses claude TUI's un-drivable form) but the reason steers the
+  // model to STOP and wait for the selection as its next message instead of
+  // decomposing into single-select asks. This reason is the only thing steering
+  // the reinject flow, so it's load-bearing and deserves its own coverage.
+  const ON = { CHROXY_TUI_MULTISELECT_REINJECT: '1' }
+  const singleMultiSelect = {
+    tool_name: 'AskUserQuestion',
+    tool_input: {
+      questions: [{
+        question: 'Pick toppings', header: 'Toppings', multiSelect: true,
+        options: [{ label: 'Cheese', value: 'cheese' }, { label: 'Onion', value: 'onion' }],
+      }],
+    },
+  }
+
+  it('flag on: still DENIES the multi-select (the un-drivable form must be suppressed)', async () => {
+    const { stdout, status } = await runHook(JSON.stringify(singleMultiSelect), ON)
+    assert.equal(status, 0)
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'deny')
+  })
+
+  it('flag on: reason steers STOP-and-wait, not single-select decomposition', async () => {
+    const { stdout } = await runHook(JSON.stringify(singleMultiSelect), ON)
+    const reason = JSON.parse(stdout.trim()).hookSpecificOutput.permissionDecisionReason
+    assert.match(reason, /next user message/i, 'tells the model the selection arrives as its next message')
+    assert.match(reason, /do not re-ask/i, 'tells the model to stop, not re-ask')
+  })
+
+  it('flag on: single-select question is unaffected (must not deny via the multiSelect branch)', async () => {
+    const payload = {
+      tool_name: 'AskUserQuestion',
+      tool_input: { questions: [{ question: 'one?', header: 'One', multiSelect: false, options: [{ label: 'A', value: 'a' }] }] },
+    }
+    const { stdout } = await runHook(JSON.stringify(payload), { ...ON, CHROXY_PERMISSION_MODE: 'auto' })
+    const decision = JSON.parse(stdout.trim())
+    assert.equal(decision.hookSpecificOutput.permissionDecision, 'allow',
+      'the reinject flag must only affect multiSelect questions')
+  })
+
+  it('flag on: a >1-question multiSelect still trips the multi-question guard FIRST', async () => {
+    const payload = {
+      tool_name: 'AskUserQuestion',
+      tool_input: {
+        questions: [
+          { question: 'a?', header: 'A', multiSelect: true, options: [{ label: 'x', value: 'x' }] },
+          { question: 'b?', header: 'B', multiSelect: true, options: [{ label: 'y', value: 'y' }] },
+        ],
+      },
+    }
+    const { stdout } = await runHook(JSON.stringify(payload), ON)
+    const reason = JSON.parse(stdout.trim()).hookSpecificOutput.permissionDecisionReason
+    assert.match(reason, /one question at a time/i,
+      'multi-question guard runs before the single-question reinject branch')
+  })
+})

@@ -325,6 +325,29 @@ export class FormDriver {
           })
           return
         }
+        // #5773 — the reinject only works once the in-flight (denied) turn has
+        // wound down to idle. sendMessage() early-returns (emit 'error' + bare
+        // return — NOT a Promise rejection, so the .catch below can't observe it)
+        // when _isBusy is still true. In the normal flow the model stops on the
+        // deny, its Stop hook drains, and the session is idle by the time the
+        // human answers seconds later (verified live 2026-06-13). But if the
+        // answer races ahead of that Stop-hook teardown, or the model ignored the
+        // deny, the turn is still busy — and silently dropping the selection would
+        // wedge the session until the 2h hard cap. Surface a retryable error
+        // instead so the user can resend once the turn has settled (the teardown
+        // is a no-op-safe interleave with the Stop-hook drain via the poll loop's
+        // !_isBusy early return). A future Phase 1 robustness pass can await-idle
+        // and deliver seamlessly; for the spike, fail loud + recoverable.
+        if (this._host._isBusy) {
+          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject deferred — session still busy (tool=${prevToolUseId || '?'}); the answer raced the turn teardown`)
+          this._teardownAskUserQuestion(prevToolUseId, {
+            synthResult: 'Multi-select answer arrived before the previous turn finished; not delivered.',
+            emitResultReason: 'ask_user_question_multiselect_busy',
+            errorCode: 'ASK_USER_QUESTION_MULTISELECT_BUSY',
+            errorMessage: 'Your selection arrived while the previous turn was still finishing. Tap Retry to resend it.',
+          })
+          return
+        }
         ;(this._host._log || log).info(`respondToQuestion: multiSelect reinject (flag on) tool=${prevToolUseId || '?'} text="${reinjectText.slice(0, 80)}"`)
         // The denied form left a pending entry + armed watchdog; clear both, plus
         // the sibling lock, before starting the new turn.
