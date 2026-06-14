@@ -40,7 +40,16 @@ function streamsToText(obj: Record<string, unknown>): string | null {
  * loosely-typed wire values — non-string inputs are coerced to a safe string.
  */
 export function unwrapToolResultText(resultText: unknown): string {
-  if (typeof resultText !== 'string') return String(resultText ?? '')
+  if (typeof resultText !== 'string') {
+    // String() can throw for exotic values (e.g. Object.create(null), which has
+    // no toString/valueOf), so guard the coercion to honor the never-throws
+    // contract for all inputs.
+    try {
+      return String(resultText ?? '')
+    } catch {
+      return ''
+    }
+  }
 
   const trimmed = resultText.trim()
   // Only attempt a parse when it looks like a JSON object — avoids munging

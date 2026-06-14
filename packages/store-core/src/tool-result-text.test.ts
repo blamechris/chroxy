@@ -35,6 +35,11 @@ describe('unwrapToolResultText (#5778 / #5800)', () => {
     expect(unwrapToolResultText(42 as unknown as string)).toBe('42')
   })
 
+  it('never throws on exotic non-string values (null-prototype object)', () => {
+    // Object.create(null) has no toString/valueOf, so String() would throw.
+    expect(unwrapToolResultText(Object.create(null) as unknown as string)).toBe('')
+  })
+
   it('renders stderr alone when stdout is empty', () => {
     const envelope = JSON.stringify({ stdout: '', stderr: 'boom' })
     expect(unwrapToolResultText(envelope)).toBe('boom')
