@@ -281,4 +281,46 @@ describe('MessageBubble single-question multiSelect (#5776)', () => {
     expect(present(tree, 'approval-button-Cheese')).toBe(true);
     expect(present(tree, 'approval-button-Onion')).toBe(true);
   });
+
+  // #5791 review: the React.memo comparator must compare allowSingleMultiSelect,
+  // or the bubble keeps stale gating when the prop flips under a LIVE prompt
+  // (same message ref) — e.g. claude-tui's multiSelectReinject capability
+  // arriving in availableProviders after the prompt mounted. Render with it
+  // false, then re-render the SAME message with it true, and assert the form
+  // appears (the memo no longer blocks the update).
+  it('re-renders the checkbox form when allowSingleMultiSelect flips true under a live prompt (#5791)', () => {
+    const message = singleMultiSelectPrompt();
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <MessageBubble
+          message={message}
+          isSelected={false}
+          isSelecting={false}
+          onLongPress={() => {}}
+          onPress={() => {}}
+          onOpenDetail={() => {}}
+          onSelectOption={jest.fn()}
+          allowSingleMultiSelect={false}
+        />,
+      );
+    });
+    expect(present(tree, 'question-prompt-multi')).toBe(false);
+    // Same message ref; only allowSingleMultiSelect changes.
+    act(() => {
+      tree.update(
+        <MessageBubble
+          message={message}
+          isSelected={false}
+          isSelecting={false}
+          onLongPress={() => {}}
+          onPress={() => {}}
+          onOpenDetail={() => {}}
+          onSelectOption={jest.fn()}
+          allowSingleMultiSelect={true}
+        />,
+      );
+    });
+    expect(present(tree, 'question-prompt-multi')).toBe(true);
+  });
 });

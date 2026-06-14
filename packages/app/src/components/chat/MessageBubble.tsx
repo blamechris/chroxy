@@ -657,6 +657,13 @@ export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
     prev.isSelected === next.isSelected &&
     prev.isSelecting === next.isSelecting &&
     prev.allowMultiQuestion === next.allowMultiQuestion &&
+    // #5791 — allowSingleMultiSelect gates the single-question multiSelect
+    // checkbox form and (unlike allowMultiQuestion) depends on the provider's
+    // server-advertised multiSelectReinject capability, which can flip under a
+    // live prompt when availableProviders updates. Must be compared or the
+    // bubble keeps stale gating (the dashboard re-renders via useMessageRenderer's
+    // deps; the app relies on this comparator).
+    prev.allowSingleMultiSelect === next.allowSingleMultiSelect &&
     (prev.onRetryStreamStall == null) === (next.onRetryStreamStall == null)
   );
 });
