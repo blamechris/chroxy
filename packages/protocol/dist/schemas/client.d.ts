@@ -472,7 +472,8 @@ export declare const GitCommitSchema: z.ZodObject<{
 export declare const ResumeBudgetSchema: z.ZodObject<{
     type: z.ZodLiteral<"resume_budget">;
     sessionId: z.ZodOptional<z.ZodString>;
-}, z.core.$strip>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const ListCheckpointsSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_checkpoints">;
 }, z.core.$strip>;
@@ -875,7 +876,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"resume_budget">;
     sessionId: z.ZodOptional<z.ZodString>;
-}, z.core.$strip>, z.ZodObject<{
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_checkpoints">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"restore_checkpoint">;

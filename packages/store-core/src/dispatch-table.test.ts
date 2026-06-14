@@ -215,6 +215,40 @@ describe('shared dispatch table', () => {
     })
   })
 
+  describe('budget_resume_ack', () => {
+    it('appends a "nothing to resume" note when the session was not paused', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, { type: 'budget_resume_ack', sessionId: 's1', wasPaused: false })
+      expect(env.sessions.s1.messages).toHaveLength(1)
+      expect(env.sessions.s1.messages[0]).toMatchObject({
+        type: 'system',
+        content: 'Budget was not paused — nothing to resume',
+      })
+      expect(env.addedMessages).toHaveLength(0)
+    })
+
+    it('is a no-op when the session was actually paused (budget_resumed already noted it)', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, { type: 'budget_resume_ack', sessionId: 's1', wasPaused: true })
+      expect(env.sessions.s1.messages).toHaveLength(0)
+      expect(env.addedMessages).toHaveLength(0)
+    })
+
+    it('falls back to addMessage for the not-paused note when there is no target session', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'budget_resume_ack', wasPaused: false })
+      expect(env.addedMessages).toHaveLength(1)
+      expect(env.addedMessages[0]).toMatchObject({
+        type: 'system',
+        content: 'Budget was not paused — nothing to resume',
+      })
+    })
+  })
+
   describe('conversation_id', () => {
     it('stamps the conversation id onto the explicit session', () => {
       const env = makeAdapter({

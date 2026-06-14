@@ -217,6 +217,33 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { added: [sysMsg('Cost budget override — session resumed')] },
   },
 
+  // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
+  // session was not paused; no-op when it was (budget_resumed already noted it)
+  {
+    name: 'budget_resume_ack appends the "nothing to resume" note when not paused',
+    type: 'budget_resume_ack',
+    init: { sessions: { s1: {} } },
+    message: { type: 'budget_resume_ack', sessionId: 's1', wasPaused: false },
+    expect: {
+      sessions: {
+        s1: { messages: [sysMsg('Budget was not paused — nothing to resume')] },
+      },
+    },
+  },
+  {
+    name: 'budget_resume_ack falls back to addMessage for the not-paused note',
+    type: 'budget_resume_ack',
+    message: { type: 'budget_resume_ack', wasPaused: false },
+    expect: { added: [sysMsg('Budget was not paused — nothing to resume')] },
+  },
+  {
+    name: 'budget_resume_ack is a no-op when the session was actually paused',
+    type: 'budget_resume_ack',
+    init: { sessions: { s1: {} } },
+    message: { type: 'budget_resume_ack', sessionId: 's1', wasPaused: true },
+    expect: { noop: true },
+  },
+
   // 5. conversation_id — stamp onto explicit session (NO active fallback)
   {
     name: 'conversation_id stamps the conversation id onto the explicit session',

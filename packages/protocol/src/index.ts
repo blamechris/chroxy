@@ -57,6 +57,8 @@ export type {
   ServerActivitySnapshotMessage,
   ServerActivityDeltaMessage,
   ServerCancelActivityAckMessage,
+  // #5752: resume_budget positive-ack contract.
+  ServerBudgetResumeAckMessage,
 } from './schemas/server.ts'
 
 // #5171: pin the Host/Repo Status Control Room contract (#5170 epic) at the

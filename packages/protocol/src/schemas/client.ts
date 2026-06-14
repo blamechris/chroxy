@@ -690,7 +690,13 @@ export const GitCommitSchema = z.object({
 export const ResumeBudgetSchema = z.object({
   type: z.literal('resume_budget'),
   sessionId: z.string().max(256).optional(),
-})
+  // #5752: opaque client-generated correlation id echoed back on the
+  // `budget_resume_ack`, so a client can tie a specific Resume click to its
+  // outcome. Capped at 128 inbound (single enforcement point) so the echoed
+  // ack always satisfies ServerBudgetResumeAckSchema — clones the
+  // `cancel_activity` correlation contract (#5277).
+  requestId: z.string().max(128).optional(),
+}).passthrough()
 
 export const ListCheckpointsSchema = z.object({
   type: z.literal('list_checkpoints'),

@@ -2138,6 +2138,12 @@ export declare const ServerBudgetExceededSchema: z.ZodObject<{
     percent: z.ZodNumber;
     message: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerBudgetResumeAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"budget_resume_ack">;
+    sessionId: z.ZodOptional<z.ZodString>;
+    wasPaused: z.ZodBoolean;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const ServerMonthlyBudgetSchema: z.ZodObject<{
     type: z.ZodLiteral<"monthly_budget">;
     month: z.ZodString;
@@ -2322,6 +2328,7 @@ export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapshotSchema>;
 export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>;
 export type ServerCancelActivityAckMessage = z.infer<typeof ServerCancelActivityAckSchema>;
+export type ServerBudgetResumeAckMessage = z.infer<typeof ServerBudgetResumeAckSchema>;
 export type RepoVerdict = z.infer<typeof RepoVerdictSchema>;
 export type RepoTree = z.infer<typeof RepoTreeSchema>;
 export type RepoStatus = z.infer<typeof RepoStatusSchema>;

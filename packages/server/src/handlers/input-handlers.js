@@ -669,11 +669,28 @@ function handleResumeBudget(ws, client, msg, ctx) {
     sendSessionError(ws, ctx, 'No valid session for budget resume')
     return
   }
-  if (ctx.sessions.sessionManager.isBudgetPaused(budgetSessionId)) {
+  // #5752: only un-pause + broadcast `budget_resumed` (which injects a "session
+  // resumed" chat note) when the session was actually paused. Always ack the
+  // requesting client so the resume control is never a dead button — a click on
+  // an already-resumed session (a second client in a shared session, or a stale
+  // tap) resolves cleanly with wasPaused:false instead of silence.
+  const wasPaused = ctx.sessions.sessionManager.isBudgetPaused(budgetSessionId)
+  if (wasPaused) {
     ctx.sessions.sessionManager.resumeBudget(budgetSessionId)
     ctx.transport.broadcastToSession(budgetSessionId, { type: 'budget_resumed', sessionId: budgetSessionId })
     log.info(`Budget resumed for session ${budgetSessionId} by ${client.id}`)
+  } else {
+    log.info(`resume_budget no-op for session ${budgetSessionId} (not paused) by ${client.id}`)
   }
+  ctx.transport.send(ws, {
+    type: 'budget_resume_ack',
+    sessionId: budgetSessionId,
+    wasPaused,
+    // Echo requestId for correlation. The inbound ResumeBudgetSchema caps it at
+    // 128 (#5752), so the ack always satisfies ServerBudgetResumeAckSchema —
+    // same single-enforcement-point pattern as cancel_activity_ack (#5277).
+    ...(typeof msg.requestId === 'string' ? { requestId: msg.requestId } : {}),
+  })
 }
 
 function handleRegisterPushToken(ws, client, msg, ctx) {

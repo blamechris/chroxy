@@ -60,6 +60,7 @@ import {
   handleSessionUpdated,
   handleAgentBusy,
   handleBudgetResumed,
+  handleBudgetResumeAck,
   handleConversationId,
   handlePermissionRulesUpdated,
   handleConfirmPermissionMode,
@@ -259,6 +260,12 @@ export interface DispatchMessageMap {
     type: 'budget_resumed'
     sessionId?: string
   }
+  budget_resume_ack: {
+    type: 'budget_resume_ack'
+    sessionId?: string
+    // Required, matching ServerBudgetResumeAckSchema — the server always sends it.
+    wasPaused: boolean
+  }
   conversation_id: {
     type: 'conversation_id'
     sessionId?: string
@@ -446,6 +453,32 @@ function dispatchBudgetResumed<S extends DispatchSessionBase>(
   adapter: ClientStoreAdapter<S>,
 ): void {
   const { systemMessage } = handleBudgetResumed()
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(
+      targetId,
+      (ss) =>
+        ({
+          messages: [...ss.messages, systemMessage],
+        } as Partial<S>),
+    )
+  } else {
+    adapter.addMessage(systemMessage)
+  }
+}
+
+/**
+ * `budget_resume_ack` (#5752) — acknowledge an actioned `resume_budget`. A
+ * no-op when the session was actually paused (the accompanying `budget_resumed`
+ * broadcast already showed the "resumed" note); appends a quiet "nothing to
+ * resume" note otherwise, so the resume control is never silently dead.
+ */
+function dispatchBudgetResumeAck<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['budget_resume_ack'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { systemMessage } = handleBudgetResumeAck(msg as Record<string, unknown>)
+  if (!systemMessage) return
   const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
   if (targetId && adapter.hasSession(targetId)) {
     adapter.updateSession(
@@ -899,6 +932,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_updated: dispatchSessionUpdated,
     agent_busy: dispatchAgentBusy,
     budget_resumed: dispatchBudgetResumed,
+    budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
     permission_rules_updated: dispatchPermissionRulesUpdated,
     confirm_permission_mode: dispatchConfirmPermissionMode,
@@ -940,6 +974,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'session_updated',
   'agent_busy',
   'budget_resumed',
+  'budget_resume_ack',
   'conversation_id',
   'permission_rules_updated',
   'confirm_permission_mode',

@@ -2262,6 +2262,23 @@ export const ServerBudgetExceededSchema = z.object({
   message: z.string(),
 })
 
+// #5752: positive ack for an actioned `resume_budget` request. The substantive
+// state change (un-pausing) is still broadcast as `budget_resumed` — but ONLY
+// when the session was actually paused, because that message injects a "session
+// resumed" chat note. The ack is sent to the *requesting* client unconditionally
+// so the resume control is never a dead button: a click on an already-resumed
+// session (e.g. a second client in a shared session, or a stale tap) resolves
+// cleanly with `wasPaused: false` instead of silence. Mirrors the
+// `cancel_activity_ack` correlation contract (#5277).
+export const ServerBudgetResumeAckSchema = z.object({
+  type: z.literal('budget_resume_ack'),
+  sessionId: z.string().optional(),
+  // True when this request actually un-paused the session (a `budget_resumed`
+  // broadcast accompanied it); false when the session was not paused (no-op).
+  wasPaused: z.boolean(),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
 // #5665: machine-wide monthly programmatic-credit budget meter. Broadcast to
 // ALL clients after each programmatic-credit-billed turn, and sent once on
 // connect as a snapshot. `budgetUsd`/`percent` are null when no cap is
@@ -2509,6 +2526,8 @@ export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapsho
 export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>
 // #5277: positive ack for an actioned cancel_activity request.
 export type ServerCancelActivityAckMessage = z.infer<typeof ServerCancelActivityAckSchema>
+// #5752: positive ack for an actioned resume_budget request.
+export type ServerBudgetResumeAckMessage = z.infer<typeof ServerBudgetResumeAckSchema>
 // #5171: Host/Repo Status Control Room wire contract (#5170 epic). Consumed by
 // the server emitter, store-core reducer, and dashboard panel in sibling issues.
 export type RepoVerdict = z.infer<typeof RepoVerdictSchema>

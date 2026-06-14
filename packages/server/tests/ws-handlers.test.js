@@ -384,7 +384,7 @@ describe('WS handler: resume_budget', () => {
   let server
   afterEach(() => { if (server) { server.close(); server = null } })
 
-  it('resumes a paused budget and broadcasts', async () => {
+  it('resumes a paused budget, broadcasts, and acks with wasPaused:true', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Default', cwd: '/tmp' },
     ])
@@ -404,11 +404,15 @@ describe('WS handler: resume_budget', () => {
     const resumed = await waitForMessage(messages, 'budget_resumed')
     assert.ok(resumed, 'Should receive budget_resumed')
     assert.equal(manager.resumeBudget.callCount, 1)
+    // #5752: the requesting client also gets a dedicated ack.
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.wasPaused, true)
 
     ws.close()
   })
 
-  it('does nothing when budget is not paused', async () => {
+  it('acks with wasPaused:false without broadcasting when budget is not paused', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Default', cwd: '/tmp' },
     ])
@@ -425,11 +429,39 @@ describe('WS handler: resume_budget', () => {
     messages.length = 0
     send(ws, { type: 'resume_budget' })
 
-    // Wait a bit to ensure no message is sent
-    await new Promise(r => setTimeout(r, 200))
+    // #5752: even when not paused, the client gets a dedicated ack so the resume
+    // control is never silently dead — deterministic instead of a sleep+poll.
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.wasPaused, false)
+    // But NO un-pause and NO budget_resumed (which would inject a false note).
     const resumed = messages.find(m => m.type === 'budget_resumed')
     assert.equal(resumed, undefined, 'Should NOT receive budget_resumed when not paused')
     assert.equal(manager.resumeBudget.callCount, 0)
+
+    ws.close()
+  })
+
+  it('echoes a within-cap requestId for correlation', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Default', cwd: '/tmp' },
+    ])
+    manager.isBudgetPaused = () => false
+    manager.resumeBudget = createSpy()
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'resume_budget', requestId: 'req-42' })
+
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.requestId, 'req-42')
 
     ws.close()
   })
