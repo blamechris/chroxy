@@ -39,8 +39,8 @@ const PROVIDERS = {
   // #3953 — research-preview `claude --channels` MCP transport. Scaffold
   // only: ClaudeChannelSession.start() throws until the bridge lands in
   // #3954. Registered so the dashboard can list it + `chroxy doctor` runs
-  // its preflight; gated as a preview option (never default — server-cli's
-  // default stays `claude-sdk`).
+  // its preflight; gated as a preview option (never default — see
+  // DEFAULT_PROVIDER below).
   'claude-channel': ClaudeChannelSession,
   'claude-byok': ClaudeByokSession,
   'deepseek': DeepSeekSession,
@@ -51,6 +51,26 @@ const PROVIDERS = {
   'gemini': GeminiSession,
   'codex': CodexSession,
 }
+
+/**
+ * The provider used when neither `--provider` nor `config.provider` is set.
+ *
+ * Flipped from `claude-sdk` to `claude-tui` ahead of the 2026-06-15
+ * programmatic-credit cutover (#5819). On/after that boundary the host
+ * claude-sdk / claude-cli providers draw from Anthropic's monthly metered
+ * programmatic-credit pool (see billing-class.js `PROGRAMMATIC_CREDIT_ERA_START`),
+ * so a zero-config session would silently start spending metered credits.
+ * `claude-tui` drives the interactive CLI, which bills against the flat Claude
+ * subscription allowance today — keeping the out-of-the-box default off the
+ * metered pool. This is a best-effort bet, not a sanctioned path (the
+ * subscription-billing of a daemon-driven TUI is ToS-adverse and may be
+ * reclassified/enforced against) — operators who want a guaranteed billing
+ * model should set `--provider claude-byok` with their own ANTHROPIC_API_KEY.
+ *
+ * The single source of truth for the default — server-cli.js (runtime +
+ * banner) and doctor.js import this rather than re-hardcoding the literal.
+ */
+export const DEFAULT_PROVIDER = 'claude-tui'
 
 // Names hidden from listProviders() (backward-compat aliases, etc.)
 const HIDDEN = new Set()

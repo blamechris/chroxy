@@ -6,7 +6,7 @@ import { homedir, platform } from 'os'
 import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
-import { getProvider } from './providers.js'
+import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { checkDependencies } from './utils/check-dependencies.js'
 
@@ -19,12 +19,6 @@ const __filename = fileURLToPath(import.meta.url)
 const SERVER_PKG_DIR = dirname(dirname(__filename))
 
 const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
-
-/**
- * Default provider used when no config file exists and no explicit
- * provider is passed. Mirrors server-cli.js `config.provider || 'claude-sdk'`.
- */
-const DEFAULT_PROVIDER = 'claude-sdk'
 
 /**
  * Parse the leading `major.minor.patch` semver out of an arbitrary version
@@ -101,7 +95,7 @@ export function isBundledOrSupervisedContext() {
  * Precedence:
  *   1. Explicit `providers` option (array of provider names)
  *   2. `provider` field from loaded config file
- *   3. DEFAULT_PROVIDER ('claude-sdk')
+ *   3. DEFAULT_PROVIDER (see providers.js)
  *
  * Returns an array of provider name strings.
  */

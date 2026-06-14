@@ -151,7 +151,9 @@ For per-provider feature support (Claude Agent SDK, legacy `claude -p`, Gemini, 
 
 Per-provider feature support. Capability-contract rows (Permission handling, Live model switching, Permission mode switching, Plan mode, Conversation resume) reflect each session class's `static get capabilities()` in `packages/server/src/`. The remaining rows (Attachments, Backing binary / SDK, Required env) are provider notes documented here rather than fields on the capabilities contract. See [docs/providers.md](providers.md) for setup instructions, env vars, and model lists.
 
-| Capability | `claude-sdk` (default) | `claude-cli` | `gemini` | `codex` |
+> The zero-config default provider is `claude-tui` (since #5819), chosen to keep out-of-the-box setups off the metered programmatic-credit pool at the 2026-06-15 cutover. The columns below cover the feature-richer providers; see [docs/providers.md](providers.md#claude-tui) for `claude-tui`'s capabilities and trade-offs.
+
+| Capability | `claude-sdk` | `claude-cli` | `gemini` | `codex` |
 |------------|------------------------|--------------|----------|---------|
 | Permission handling | Y (in-process) | Y (HTTP hook) | — | — |
 | Live model switching | Y | Y | Y | Y |

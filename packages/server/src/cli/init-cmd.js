@@ -23,9 +23,18 @@ import { setToken, isKeychainAvailable } from '../keychain.js'
  */
 export const PROVIDER_CHOICES = [
   {
+    // #5819 — default. Bills against the flat Claude subscription allowance
+    // today (best-effort, not guaranteed), keeping a zero-config setup off the
+    // metered programmatic-credit pool that claude-sdk/-cli draw from on/after
+    // 2026-06-15. See providers.js DEFAULT_PROVIDER.
+    id: 'claude-tui',
+    label: 'Claude (TUI · subscription)',
+    hint: 'Drives the interactive CLI; bills against your Claude subscription today. Run \'claude login\' first.',
+  },
+  {
     id: 'claude-sdk',
     label: 'Claude (Agent SDK)',
-    hint: 'Run \'claude login\' (or set ANTHROPIC_API_KEY) if not already authenticated.',
+    hint: 'On/after 2026-06-15 draws metered programmatic credits unless ANTHROPIC_API_KEY is set. Run \'claude login\' (or set the key) if not already authenticated.',
   },
   {
     id: 'codex',
@@ -43,7 +52,7 @@ export const PROVIDER_CHOICES = [
  * Parse a comma-separated provider selection answer from the init prompt.
  *
  * Accepted forms:
- *   - empty / whitespace     → default (claude-sdk)
+ *   - empty / whitespace     → default (claude-tui)
  *   - "all"                  → every known provider
  *   - "1", "2", "1,3", "1, 3" → numeric indices (1-based) into PROVIDER_CHOICES
  *

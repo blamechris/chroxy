@@ -33,7 +33,7 @@ import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopback
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
-import { registerDockerProvider, resolveProviderLabel } from './providers.js'
+import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
@@ -122,7 +122,7 @@ export function buildTunnelReadyStatus({ tunnelUrl, tunnelMode }) {
  * @returns {string} Banner line (no outer box, no padding)
  */
 export function buildServerBanner({ version, provider }) {
-  const providerType = provider || 'claude-sdk'
+  const providerType = provider || DEFAULT_PROVIDER
   const modeStr = resolveProviderLabel(providerType)
   return `Chroxy Server v${version} (${modeStr})`
 }
@@ -528,7 +528,7 @@ export async function startCliServer(config) {
   // and skipped; valid siblings still register.
   registerAnthropicCompatibleProviders(config)
 
-  const providerType = config.provider || 'claude-sdk'
+  const providerType = config.provider || DEFAULT_PROVIDER
 
   // #4209 / #4246: resolve the effective skip-permissions setting from the
   // merged config (CLI flag > canonical `dangerouslySkipPermissions` >
