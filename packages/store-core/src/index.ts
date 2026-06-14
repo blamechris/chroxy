@@ -312,6 +312,16 @@ export {
   toChatViewMessage,
 } from './buildChatViewMessages'
 
+// #5793: single source of truth for "is this an AskUserQuestion teardown
+// error the user can recover from by resending?" The server's form-driver
+// emits ASK_USER_QUESTION_STALL + five MULTISELECT/MULTI_QUESTION codes whose
+// copy ends in "Tap Retry"; both clients narrow off this predicate so all of
+// them get the stall-chip / retry path (not a dead generic error bubble).
+export {
+  RETRYABLE_ASK_USER_QUESTION_ERROR_CODES,
+  isRetryableAskUserQuestionError,
+} from './ask-user-question-errors'
+
 // #4243: shared tool-input summary helpers — both dashboard and mobile
 // ToolBubble derive the collapsed-preview string from the same
 // field-priority extraction (`command` → `file_path` → `path` →

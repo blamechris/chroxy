@@ -82,3 +82,46 @@ describe('MessageBubble stream-stall handling (#4496)', () => {
     expect(retries).toHaveLength(0);
   });
 });
+
+describe('MessageBubble retryable AskUserQuestion errors (#5793)', () => {
+  function makeAskMessage(code: string): ChatMessage {
+    return {
+      id: 'err-3',
+      type: 'error',
+      code,
+      content: "Couldn't deliver your answers. Tap Retry to resend your request.",
+      timestamp: Date.now(),
+    } as ChatMessage;
+  }
+
+  // The five new codes (plus the long-handled STALL) all carry "Tap Retry"
+  // copy — they must render the StreamStallChip, not the generic red bubble.
+  it.each([
+    'ASK_USER_QUESTION_STALL',
+    'ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED',
+    'ASK_USER_QUESTION_MULTISELECT_UNAVAILABLE',
+    'ASK_USER_QUESTION_MULTISELECT_EMPTY',
+    'ASK_USER_QUESTION_MULTISELECT_BUSY',
+    'ASK_USER_QUESTION_MULTI_QUESTION_UNSUPPORTED',
+  ])('renders the StreamStallChip for error{code: "%s"}', (code) => {
+    const tree = render(makeAskMessage(code));
+    const chip = tree.root.findByProps({ testID: 'stream-stall-chip' });
+    expect(chip).toBeDefined();
+  });
+
+  it('forwards onRetryStreamStall to the chip for a new code (tail)', () => {
+    const onRetry = jest.fn();
+    const tree = render(makeAskMessage('ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED'), onRetry);
+    const retry = tree.root.findByProps({ testID: 'stream-stall-chip-retry' });
+    act(() => {
+      retry.props.onPress?.();
+    });
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it('uses question-delivery copy (not stream-stall copy) for the ask-question codes', () => {
+    const tree = render(makeAskMessage('ASK_USER_QUESTION_MULTI_QUESTION_UNSUPPORTED'));
+    const chip = tree.root.findByProps({ testID: 'stream-stall-chip' });
+    expect(chip.props.accessibilityLabel).toBe('Question delivery failed — retry?');
+  });
+});

@@ -23,7 +23,7 @@ import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
 import type { SelectOptionValue } from './chat/MessageBubble';
 import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
-import { buildChatViewMessages } from '@chroxy/store-core';
+import { buildChatViewMessages, isRetryableAskUserQuestionError } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { usePermissionAnnouncer } from '../hooks/usePermissionAnnouncer';
 
@@ -423,10 +423,13 @@ export function ChatView({
               getInitialExpanded={getInitialExpanded}
               onExpandedChange={handleExpandedChange}
               onRetryStreamStall={
-                // #4496: only wire retry when this stall is the tail bubble
-                // AND there's a user_input to resend.
+                // #4496 / #5793: only wire retry when this stall/teardown is
+                // the tail bubble AND there's a user_input to resend. Covers
+                // stream_stall plus the retryable AskUserQuestion codes
+                // (ASK_USER_QUESTION_STALL + the MULTISELECT/MULTI_QUESTION
+                // teardown codes) so all of them get the resend affordance.
                 msg.type === 'error' &&
-                msg.code === 'stream_stall' &&
+                (msg.code === 'stream_stall' || isRetryableAskUserQuestionError(msg.code)) &&
                 msg.id === chatTailMessageId &&
                 lastUserInputContent != null
                   ? () => sendInput(lastUserInputContent)

@@ -1,7 +1,7 @@
 import { useCallback } from 'react'
 import type { ReactNode } from 'react'
 import type { ChatMessage, SessionInfo } from '@chroxy/store-core'
-import { providerSupportsSingleMultiSelect } from '@chroxy/store-core'
+import { providerSupportsSingleMultiSelect, isRetryableAskUserQuestionError } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
 import type { ProviderCapabilities } from '../store/types'
@@ -258,16 +258,18 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
       )
     }
 
-    // #4615: dedicated chip for ASK_USER_QUESTION_STALL errors. The server
-    // emits `error{code: 'ASK_USER_QUESTION_STALL'}` (PR #4614) when the
-    // Claude TUI never acknowledges an AskUserQuestion answer — typically
-    // a multi-question form wedge. Generic red toast reads as "broken";
-    // this affordance signals "recoverable, just retry your original
-    // request" and offers a one-tap resend of the last user message.
-    // Mirrors the StreamStallChip pattern (#4476): retry only on tail
-    // entries so replayed historical stalls show the chip + tooltip for
-    // diagnostics but don't offer a misleading resend button.
-    if (storeMsg.type === 'error' && storeMsg.code === 'ASK_USER_QUESTION_STALL') {
+    // #4615 / #5793: dedicated chip for retryable AskUserQuestion teardown
+    // errors. The server emits ASK_USER_QUESTION_STALL (PR #4614) plus five
+    // MULTISELECT/MULTI_QUESTION codes (see `isRetryableAskUserQuestionError`)
+    // when the Claude TUI never acknowledges an AskUserQuestion answer or
+    // denies a multi-select / multi-question form — all carry "Tap Retry" in
+    // their copy. Generic red toast reads as "broken"; this affordance
+    // signals "recoverable, just retry your original request" and offers a
+    // one-tap resend of the last user message. Mirrors the StreamStallChip
+    // pattern (#4476): retry only on tail entries so replayed historical
+    // stalls show the chip + tooltip for diagnostics but don't offer a
+    // misleading resend button.
+    if (storeMsg.type === 'error' && isRetryableAskUserQuestionError(storeMsg.code)) {
       const isTail = msg.id === chatTailMessageId
       const lastUserInput = isTail
         ? [...storeMessages].reverse().find(m => m.type === 'user_input')
