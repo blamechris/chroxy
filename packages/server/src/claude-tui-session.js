@@ -1773,13 +1773,23 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   async sendMessage(prompt, attachments, _options = {}) {
+    // #5800: these two guards signal failure to callers via a typed result
+    // ({ ok: false, reason }) IN ADDITION to the legacy emit('error', ...).
+    // The emit is unchanged (existing error surfacing relies on it); the
+    // typed return lets a caller (e.g. the multi-select reinject path in
+    // form-driver.js) observe the failure via the call result instead of
+    // mirroring these host internals from the outside. The happy path
+    // returns undefined as before — callers branch only on the failure
+    // shape. input-handlers.js (the non-reinject caller) ignores the
+    // resolved value entirely; it only attaches a defensive .catch, which a
+    // resolved typed object never trips.
     if (this._isBusy) {
       this.emit('error', { message: 'Already processing a message' })
-      return
+      return { ok: false, reason: 'busy' }
     }
     if (!this._processReady || !this._term || this._ptyExited) {
       this.emit('error', { message: 'Session not started or PTY no longer alive' })
-      return
+      return { ok: false, reason: 'not_runnable' }
     }
 
     this._isBusy = true
