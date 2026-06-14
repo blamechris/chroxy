@@ -33,25 +33,10 @@ import { useEffect, useRef } from 'react';
 import { AccessibilityInfo } from 'react-native';
 
 import type { ChatMessage } from '@chroxy/store-core';
+// #5759 — the live-permission-prompt predicate is shared with the dashboard via
+// store-core so the two clients can't drift on what counts as "pending".
+import { livePermissionPrompts } from '@chroxy/store-core';
 import { getPermissionSummary } from '../components/PermissionDetail';
-
-/** True iff `m` is a live, unanswered permission prompt (not an AskUserQuestion). */
-function isLivePermissionPrompt(m: ChatMessage, now: number): boolean {
-  return m.type === 'prompt' && !!m.requestId && !!m.expiresAt && m.expiresAt > now && !m.answered;
-}
-
-/** The first live, unanswered permission prompt in `messages`, or null. */
-export function firstLivePermissionPrompt(messages: ChatMessage[], now: number): ChatMessage | null {
-  for (const m of messages) {
-    if (isLivePermissionPrompt(m, now)) return m;
-  }
-  return null;
-}
-
-/** All live, unanswered permission prompts in `messages`, in order. */
-export function livePermissionPrompts(messages: ChatMessage[], now: number): ChatMessage[] {
-  return messages.filter((m) => isLivePermissionPrompt(m, now));
-}
 
 export function usePermissionAnnouncer(messages: ChatMessage[], sessionKey: string | null): void {
   // requestIds we've already announced. A Set (not a single id) because more

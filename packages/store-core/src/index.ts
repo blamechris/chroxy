@@ -695,3 +695,16 @@ export type {
   HandshakeClientOptions,
   MemoryStore,
 } from './handshake-e2e/fake-ws'
+
+// #5759 — shared pending-permission derivation (single source of truth for the
+// "live, unanswered permission prompt" predicate across both clients).
+export {
+  isLivePermissionPrompt,
+  firstLivePermissionPrompt,
+  livePermissionPrompts,
+  countLivePermissionPrompts,
+  derivePendingPermissionCounts,
+  derivePendingPermissionSessions,
+  totalPendingPermissions,
+  selectNextPendingSession,
+} from './pending-permissions'

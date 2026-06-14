@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import type { ChatMessage } from '@chroxy/store-core';
-import { countLivePermissionPrompts } from '../../components/SessionPicker';
+// #5759 — the predicate now lives in store-core (shared with the dashboard).
+import { countLivePermissionPrompts } from '@chroxy/store-core';
 
 /**
  * SessionPicker pill — "needs your permission" dot (#5750).

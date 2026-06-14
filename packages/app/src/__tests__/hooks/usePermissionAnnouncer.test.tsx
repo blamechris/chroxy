@@ -18,10 +18,9 @@ import renderer, { act } from 'react-test-renderer';
 import { AccessibilityInfo } from 'react-native';
 import type { ChatMessage } from '@chroxy/store-core';
 
-import {
-  usePermissionAnnouncer,
-  firstLivePermissionPrompt,
-} from '../../hooks/usePermissionAnnouncer';
+import { usePermissionAnnouncer } from '../../hooks/usePermissionAnnouncer';
+// #5759 — the predicate now lives in store-core (shared with the dashboard).
+import { firstLivePermissionPrompt } from '@chroxy/store-core';
 
 jest.spyOn(AccessibilityInfo, 'announceForAccessibility');
 const announceMock = AccessibilityInfo.announceForAccessibility as jest.Mock;
