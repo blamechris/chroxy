@@ -113,6 +113,48 @@ Pick by billing surface and required features:
 - **`claude-cli`** — pick this only when you need plan mode. Same billing as the SDK, but a `claude -p` subprocess per session.
 - **`claude-tui`** — pick this when you want sessions to bill against your Claude.ai Pro / Max / Team subscription instead of programmatic credits. Trade-offs: no live streaming (responses arrive as one burst at turn end), no live model switch, no plan mode, no attachments, no agent tracking, no cost reporting. See [Known limits → `claude-tui`](#claude-tui) for the full list, and [Billing & API usage](../README.md#billing--api-usage) for the billing distinction.
 
+### `CHROXY_TUI_MULTISELECT_REINJECT` env override (experimental, #5797)
+
+The interactive `claude` TUI is keyboard-only and exposes no structured answer
+channel, so a **single multi-select** AskUserQuestion has no reliable
+toggle-and-submit keystroke sequence. By default `claude-tui` refuses it.
+`CHROXY_TUI_MULTISELECT_REINJECT` is an **experimental, default-OFF** flag that
+swaps the refusal for a text-injection workaround.
+
+- **Default (`unset` or `0`) — OFF:** a single multi-select AskUserQuestion is
+  torn down immediately with a visible, retryable error — *"Multi-select
+  questions aren't supported here. Tap Retry to resend your request."* (error
+  code `ASK_USER_QUESTION_MULTISELECT_UNSUPPORTED`). This fails loudly rather
+  than driving a wrong keystroke or wedging the turn.
+- **`1` — ON:** the provider accepts the single-question multi-select form by
+  re-injecting the chosen labels as the *next user message* to the TUI,
+  formatted as `For "<question>": <label1>, <label2>` (one such line per
+  question, joined by newlines). The form was already denied at the permission
+  hook before it rendered, so Claude has stopped and is waiting for input. The
+  model reads a multi-select answer as comma-joined text anyway, so this matches
+  the structured-channel result.
+- **Multi-question forms (more than one question) are always refused**,
+  regardless of this flag — they are denied at the permission hook and never
+  driven.
+
+> **Why it's still default-OFF.** There is a flag/UI desync (issue
+> [#5791](https://github.com/blamechris/chroxy/issues/5791)): the client renders
+> the multi-select form regardless of the server flag, so flipping this on
+> per-server is currently the only way to actually use the feature end-to-end.
+> Resolving #5791 and the deny-reason steering validation in
+> [#5798](https://github.com/blamechris/chroxy/issues/5798) are the gates before
+> this can go default-ON. Treat it as experimental until then.
+
+It is read from the **daemon process environment** at request time. Set it where
+the daemon is launched, e.g. exported in the shell that runs `chroxy start`:
+
+```bash
+CHROXY_TUI_MULTISELECT_REINJECT=1 npx chroxy start --provider claude-tui
+```
+
+or, for a launchd-started daemon, in the plist's `EnvironmentVariables`
+dictionary (then reload the agent).
+
 ### Common pitfalls
 
 - **GUI launch on macOS**: Tauri-spawned servers start with `cwd=/` and a minimal PATH. Chroxy probes absolute paths, but custom install locations need credentials supplied out-of-band. The simplest fix is the **Settings → Provider Credentials** pane (see [Setting credentials from the dashboard](#setting-credentials-from-the-dashboard)) — the server reads from its own `~/.chroxy/credentials.json` store, so you no longer have to rely on shell rc files, `~/.zshenv`, or `launchctl setenv`. A working `claude login` also satisfies the Claude providers.
