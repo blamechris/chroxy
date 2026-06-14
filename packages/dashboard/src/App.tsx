@@ -401,8 +401,9 @@ export function App() {
   const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
-  // #5780 — nonce bumped on explicit "jump to latest" user actions (send,
-  // approve, answer). Passed to every ChatView so it snaps to the bottom even
+  // #5780 — nonce bumped on the explicit "jump to latest" user action. Today
+  // that is send (handleSend); wiring approve/answer is tracked in #5786.
+  // Passed to every ChatView so it snaps to the bottom even
   // when the user had scrolled up to read history — see ChatView's
   // scrollToBottomSignal effect.
   const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0)

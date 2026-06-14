@@ -136,9 +136,9 @@ export interface ChatViewProps {
   hidden?: boolean
   /**
    * #5780 — monotonically-increasing nonce the parent bumps when the user
-   * performs an explicit "jump to the latest" action (sending a message,
-   * approving a plan, answering a question). Unlike the count-change
-   * auto-follow — which deliberately leaves a scrolled-up reader in place —
+   * performs an explicit "jump to the latest" action. Today that is sending a
+   * message; wiring approve/answer flows is tracked in #5786. Unlike the
+   * count-change auto-follow — which deliberately leaves a scrolled-up reader in place —
    * a bump here ALWAYS snaps the view to the bottom and clears
    * `userScrolledUp`, because the user just acted on the conversation and
    * expects to see their input plus the incoming response. A nonce (rather
@@ -527,8 +527,9 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
     }
   }, [dedupedMessages.length, userScrolledUp, isBusy])
 
-  // #5780 — explicit "jump to latest" on a user action (send / approve /
-  // answer). Watches the parent's `scrollToBottomSignal` nonce: whenever it
+  // #5780 — explicit "jump to latest" on a user action (currently send;
+  // approve/answer wiring tracked in #5786). Watches the parent's
+  // `scrollToBottomSignal` nonce: whenever it
   // changes we force the view to the bottom and clear `userScrolledUp`, even if
   // the user had scrolled up to read history. This is the deliberate exception
   // to the count-change auto-follow above — sending a message is the user
