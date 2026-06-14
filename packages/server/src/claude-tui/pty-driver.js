@@ -457,61 +457,6 @@ export class PtyDriverMixin {
   }
 
   /**
-   * Write a sequence of single-char keystrokes (digits, Tab, etc.) to
-   * the PTY for the multi-question AskUserQuestion form driver
-   * (#4604 Chunk B). The sequence is wrapped in bracketed-paste-disable /
-   * re-enable exactly once (same defense as _writePtyTextThrottled) and
-   * every char is throttled by PROMPT_CHAR_DELAY_MS so claude TUI's
-   * paste detector doesn't reject the rapid digit burst. Unlike
-   * _writePtyTextThrottled this writer does NOT append \r — the form
-   * driver supplies its own navigation keys (Tab between multi-select
-   * questions, '1' at Submit).
-   *
-   * #4635 — sequence entries may be either strings (chars to write) or
-   * numbers (ms to sleep). Numeric entries let the driver insert a
-   * render-settling pause between keystrokes (e.g. the Submit screen
-   * needs a beat after the last single-select auto-advance — see
-   * MULTI_QUESTION_SUBMIT_SETTLE_MS).
-   *
-   * #4884 — sequence entries may also be `{ type: 'mark', label, toolUseId }`
-   * marker objects. Markers are not written to the PTY; they record the
-   * wall-clock at the point the writer reaches them (after any preceding
-   * settle has elapsed but BEFORE the next byte is written) into
-   * `_multiQuestionSubmitAt`. PostToolUse for that toolUseId logs the
-   * delta — forensic evidence the defensive trailing '\r' lands harmlessly.
-   *
-   * @param {Array<string|number|{type:'mark',label:string,toolUseId:string}>} sequence — strings to write, numbers to sleep, marker objects to timestamp
-   * @returns {Promise<boolean>} true if completed, false if PTY aborted mid-write
-   */
-  async _writePtyMultiQuestionSequence(sequence) {
-    if (!this._term) return false
-    this._term.write('\x1b[?2004l')
-    try {
-      for (const item of sequence) {
-        if (this._activeTurn?.aborted || this._ptyExited) return false
-        if (typeof item === 'number') {
-          if (item > 0) await new Promise((resolve) => setTimeout(resolve, item))
-          continue
-        }
-        if (item && typeof item === 'object' && item.type === 'mark') {
-          // #4884 — record submit-time marker for the PostToolUse delta log.
-          if (item.label === 'submit' && item.toolUseId) {
-            this._multiQuestionSubmitAt.set(item.toolUseId, this._nowMonotonic())
-          }
-          continue
-        }
-        this._term.write(item)
-        if (ClaudeTuiSession.PROMPT_CHAR_DELAY_MS > 0) {
-          await new Promise((resolve) => setTimeout(resolve, ClaudeTuiSession.PROMPT_CHAR_DELAY_MS))
-        }
-      }
-      return true
-    } finally {
-      try { this._term.write('\x1b[?2004h') } catch {}
-    }
-  }
-
-  /**
    * Write an arrow-key navigation sequence for the single-question
    * AskUserQuestion form when the user picked an option beyond the
    * single-digit hotkey range (idx >= 9). Emits `targetIdx` Down arrow
@@ -520,7 +465,7 @@ export class PtyDriverMixin {
    * followed by Enter (`\r`) to commit (#4848).
    *
    * Wrapped in bracketed-paste-disable / re-enable exactly once (same
-   * defense as _writePtyTextThrottled and _writePtyMultiQuestionSequence).
+   * defense as _writePtyTextThrottled).
    * A PROMPT_CHAR_DELAY_MS pause runs BETWEEN each Down-arrow write so
    * claude TUI's paste detector doesn't reject the burst. The trailing
    * Enter (`\r`) and the bracketed-paste re-enable write fire
