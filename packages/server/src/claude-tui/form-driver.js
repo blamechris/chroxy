@@ -677,6 +677,15 @@ export class FormDriver {
       Promise.resolve(this._host.sendMessage(reinjectText)).catch((err) => {
         ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject sendMessage failed: ${err?.message || err} (tool=${prevToolUseId || '?'})`)
       })
+      // #5798 (observability-only): open the stop-and-wait watch window. The
+      // deny reason steered the model to STOP its turn so this reinjected
+      // selection lands as a fresh turn; if instead the model emits another
+      // tool_use before the reinjected turn's first output clears this marker,
+      // _emitToolHookEvent(PreToolUse) logs a loud WARN (reinject_stop_wait_
+      // violation / #5798). Set ONLY here on the flag-on reinject path — never on
+      // the flag-off refusal. No behavior change: just a marker field the session
+      // reads to decide whether to emit a measurement WARN.
+      this._host._reinjectStopWaitWatch = { deniedToolUseId: prevToolUseId, at: this._host._nowMonotonic() }
       return
     }
     this._refuseReinject(prevToolUseId, 'unsupported',

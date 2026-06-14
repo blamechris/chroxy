@@ -4383,6 +4383,82 @@ describe('ClaudeTuiSession', () => {
       session._emitToolHookEvent('PreToolUse', { tool_name: 'Bash' }, 'msg-1')
     })
 
+    // #5798 — observability-only: detect when the model ignores the multi-select
+    // reinject "stop and wait" steer (emits a tool_use instead of stopping).
+    describe('#5798 — reinject stop-and-wait violation telemetry', () => {
+      function captureWarns() {
+        const warns = []
+        const logSpy = (entry) => { if (entry.level === 'warn') warns.push(entry.message) }
+        addLogListener(logSpy)
+        return { warns, stop: () => removeLogListener(logSpy) }
+      }
+
+      it('WARNs (greppable #5798 / reinject_stop_wait_violation) when a PreToolUse arrives while the watch is open', () => {
+        // Simulate the FormDriver having opened the window after a flag-on reinject.
+        session._reinjectStopWaitWatch = { deniedToolUseId: 'toolu_denied', at: session._nowMonotonic() }
+        const { warns, stop } = captureWarns()
+        try {
+          session._emitToolHookEvent('PreToolUse', {
+            tool_use_id: 'toolu_after',
+            tool_name: 'Bash',
+            tool_input: { command: 'ls' },
+          }, 'msg-violation')
+        } finally {
+          stop()
+        }
+        const hit = warns.find((w) => /reinject_stop_wait_violation/.test(w))
+        assert.ok(hit, 'a violation WARN fired')
+        assert.match(hit, /#5798/, 'WARN carries the issue token')
+        assert.match(hit, /deniedToolUseId=toolu_denied/, 'WARN names the denied tool id')
+        assert.match(hit, /newTool=Bash/, 'WARN names the offending tool')
+        assert.match(hit, /newToolUseId=toolu_after/, 'WARN names the offending tool id')
+        assert.match(hit, /deltaMs=\d+/, 'WARN includes a deltaMs')
+        // One-shot: the marker is cleared so a later tool_use does not re-fire.
+        assert.equal(session._reinjectStopWaitWatch, null, 'marker cleared after the WARN')
+      })
+
+      it('fires the violation WARN exactly once (one-shot per reinject)', () => {
+        session._reinjectStopWaitWatch = { deniedToolUseId: 'toolu_denied', at: session._nowMonotonic() }
+        const { warns, stop } = captureWarns()
+        try {
+          session._emitToolHookEvent('PreToolUse', { tool_use_id: 'a', tool_name: 'Bash' }, 'm')
+          session._emitToolHookEvent('PreToolUse', { tool_use_id: 'b', tool_name: 'Read' }, 'm')
+        } finally {
+          stop()
+        }
+        const hits = warns.filter((w) => /reinject_stop_wait_violation/.test(w))
+        assert.equal(hits.length, 1, 'only the first post-reinject tool_use trips the WARN')
+      })
+
+      it('does NOT WARN when the watch was never opened', () => {
+        assert.equal(session._reinjectStopWaitWatch, null, 'precondition: no watch open')
+        const { warns, stop } = captureWarns()
+        try {
+          session._emitToolHookEvent('PreToolUse', { tool_use_id: 'x', tool_name: 'Bash' }, 'm')
+        } finally {
+          stop()
+        }
+        assert.ok(!warns.some((w) => /reinject_stop_wait_violation/.test(w)), 'no spurious violation WARN')
+      })
+
+      it('does NOT WARN when the legit turn-start clear runs BEFORE any tool_use', () => {
+        // The reinjected turn legitimately starts (first consumed hook →
+        // _clearFirstOutputWatchdog) before the model tool-calls; the window
+        // closes, so a subsequent tool_use is a normal in-turn tool, not a
+        // violation.
+        session._reinjectStopWaitWatch = { deniedToolUseId: 'toolu_denied', at: session._nowMonotonic() }
+        session._clearFirstOutputWatchdog()
+        assert.equal(session._reinjectStopWaitWatch, null, 'turn-start clear closed the window')
+        const { warns, stop } = captureWarns()
+        try {
+          session._emitToolHookEvent('PreToolUse', { tool_use_id: 'legit', tool_name: 'Edit' }, 'm')
+        } finally {
+          stop()
+        }
+        assert.ok(!warns.some((w) => /reinject_stop_wait_violation/.test(w)), 'no violation after a legit turn-start clear')
+      })
+    })
+
     // #4307: parity with SdkSession — PreToolUse with Bash +
     // run_in_background stashes the command; PostToolUse with the
     // canonical "Command running in background with ID:" text
