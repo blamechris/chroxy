@@ -31,6 +31,14 @@ describe('isProgrammaticCreditEra(now)', () => {
   it('is true one second after the boundary', () => {
     assert.equal(isProgrammaticCreditEra(ONE_SEC_AFTER), true)
   })
+  // #5825 — pin the inclusivity to the exact millisecond tick, not just a
+  // whole second clear of the boundary. This is what makes a future `>=` → `>`
+  // off-by-one (or a date drift) fail CI: at START the era is on; at START-1ms
+  // it is not.
+  it('is true AT the constant instant and false exactly one ms before it', () => {
+    assert.equal(isProgrammaticCreditEra(PROGRAMMATIC_CREDIT_ERA_START), true)
+    assert.equal(isProgrammaticCreditEra(PROGRAMMATIC_CREDIT_ERA_START - 1), false)
+  })
 })
 
 describe('billingClassForProvider — era-independent classes', () => {
@@ -66,6 +74,11 @@ describe('billingClassForProvider — era-gated programmatic providers', () => {
     })
     it(`${p} is programmatic-credit AFTER the boundary`, () => {
       assert.equal(billingClassForProvider(p, ONE_SEC_AFTER), BILLING_CLASSES.PROGRAMMATIC_CREDIT)
+    })
+    // #5825 — millisecond-precision flip at the exact constant.
+    it(`${p} flips exactly at the constant instant (START vs START-1ms)`, () => {
+      assert.equal(billingClassForProvider(p, PROGRAMMATIC_CREDIT_ERA_START), BILLING_CLASSES.PROGRAMMATIC_CREDIT)
+      assert.equal(billingClassForProvider(p, PROGRAMMATIC_CREDIT_ERA_START - 1), BILLING_CLASSES.SUBSCRIPTION)
     })
   }
 })
