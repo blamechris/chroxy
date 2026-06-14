@@ -107,3 +107,42 @@ export function getProviderInfo(provider: string): ProviderDisplayInfo {
   const short = provider.replace(/^claude-/, '').toUpperCase()
   return { ...FALLBACK, label: short, short }
 }
+
+// #5795 — single source of truth for "which AskUserQuestion render shapes can
+// this provider's answer channel consume?". Previously these predicates were
+// hand-rolled four times across the dashboard and app with two different
+// spellings of the same boolean, which (a) drifts on the next provider and
+// (b) silently mishandled docker-cli/docker (cli-type, single-text answer
+// channel like claude-cli, yet they fell through the bare `!= claude-cli`
+// checks and were treated as structured-capable). Keying off the registered
+// `type` fixes both: cli-type providers take a single TEXT answer only.
+
+/**
+ * Can this provider render a multi-QUESTION AskUserQuestion form (several
+ * questions at once, per-question answers incl. multi-select arrays)?
+ *
+ * Only providers with a structured answer channel can — i.e. NOT the
+ * cli-type providers (claude-cli, claude-tui, docker-cli, docker), whose
+ * respondToQuestion accepts a single text answer with no answersMap.
+ */
+export function providerSupportsMultiQuestion(provider: string | null | undefined): boolean {
+  if (!provider) return false
+  return getProviderInfo(provider).type !== 'cli'
+}
+
+/**
+ * Can this provider render a SINGLE-question multi-select AskUserQuestion as a
+ * checkbox form? True for every structured-channel provider PLUS claude-tui,
+ * which re-injects the chosen labels as text via the #5776 reinject path.
+ * The plain CLI providers (claude-cli, docker-cli, docker) cannot.
+ *
+ * Note: claude-tui's reinject is itself gated server-side by
+ * CHROXY_TUI_MULTISELECT_REINJECT (default OFF). Wiring that capability to the
+ * client so the form is only offered when the server will honor it is tracked
+ * separately in #5791; this predicate preserves the existing name-based gate.
+ */
+export function providerSupportsSingleMultiSelect(provider: string | null | undefined): boolean {
+  if (!provider) return false
+  if (provider === 'claude-tui') return true
+  return getProviderInfo(provider).type !== 'cli'
+}

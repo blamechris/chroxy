@@ -25,7 +25,7 @@ import type { SessionIntervention } from '@chroxy/store-core';
 // 'freeformText' in`) with the same 5-condition guard the store layer
 // uses, so widening `SelectOptionValue` to a third object shape can't
 // silently misroute it as freeform.
-import { isFreeformAnswer } from '@chroxy/store-core';
+import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect } from '@chroxy/store-core';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
@@ -260,21 +260,18 @@ export function SessionScreen() {
       permissionModeSwitchSupported: caps?.permissionModeSwitch !== false,
     };
   }, [availableProviders, activeSessionProvider]);
+  // #5795 — provider capability lives in @chroxy/store-core (single source of
+  // truth, keyed off the registered provider `type`), shared with the
+  // dashboard so the two clients can't drift. Multi-QUESTION forms need a
+  // structured answersMap (SDK family); a single multiSelect also renders for
+  // claude-tui via the #5776 reinject path. The plain CLI providers
+  // (claude-cli, docker-cli) are excluded — single text answer, no answersMap.
   const allowMultiQuestion = useMemo(
-    () =>
-      activeSessionProvider != null &&
-      activeSessionProvider !== 'claude-tui' &&
-      activeSessionProvider !== 'claude-cli',
+    () => providerSupportsMultiQuestion(activeSessionProvider),
     [activeSessionProvider],
   );
-  // #5776 — a single-question multiSelect renders as a checkbox form on every
-  // provider that can consume a structured/text multi-answer: the SDK family
-  // AND claude-tui (via the multi-select reinject path). Only claude-cli is
-  // excluded — its respondToQuestion takes a single text answer with no
-  // answersMap channel. (= everything except claude-cli, which is
-  // allowMultiQuestion || claude-tui.)
   const allowSingleMultiSelect = useMemo(
-    () => activeSessionProvider != null && activeSessionProvider !== 'claude-cli',
+    () => providerSupportsSingleMultiSelect(activeSessionProvider),
     [activeSessionProvider],
   );
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);

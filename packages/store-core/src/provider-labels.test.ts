@@ -3,6 +3,8 @@ import {
   PROVIDER_LABELS,
   getProviderLabel,
   getProviderInfo,
+  providerSupportsMultiQuestion,
+  providerSupportsSingleMultiSelect,
 } from './provider-labels'
 
 describe('PROVIDER_LABELS', () => {
@@ -120,5 +122,76 @@ describe('getProviderInfo', () => {
       const info = getProviderInfo(key)
       expect(info.label).toBe(PROVIDER_LABELS[key])
     }
+  })
+})
+
+// #5795 — single source of truth for AskUserQuestion render capability,
+// hoisted out of four hand-rolled client derivations.
+describe('providerSupportsMultiQuestion', () => {
+  it('is true for structured-channel (sdk / other) providers', () => {
+    expect(providerSupportsMultiQuestion('claude-sdk')).toBe(true)
+    expect(providerSupportsMultiQuestion('claude-byok')).toBe(true)
+    expect(providerSupportsMultiQuestion('docker-byok')).toBe(true)
+    expect(providerSupportsMultiQuestion('docker-sdk')).toBe(true)
+    expect(providerSupportsMultiQuestion('gemini')).toBe(true)
+    expect(providerSupportsMultiQuestion('codex')).toBe(true)
+  })
+
+  it('is false for cli-type providers (single text answer, no answersMap)', () => {
+    expect(providerSupportsMultiQuestion('claude-cli')).toBe(false)
+    expect(providerSupportsMultiQuestion('claude-tui')).toBe(false)
+  })
+
+  it('is false for docker-cli and its docker alias (the #5795 latent bug)', () => {
+    // docker-cli is DockerSession extends CliSession — single-text
+    // respondToQuestion like claude-cli. The old `!= claude-cli && != claude-tui`
+    // checks let it fall through to true; keying off `type: cli` fixes it.
+    expect(providerSupportsMultiQuestion('docker-cli')).toBe(false)
+    expect(providerSupportsMultiQuestion('docker')).toBe(false)
+  })
+
+  it('is false for null/undefined/empty', () => {
+    expect(providerSupportsMultiQuestion(null)).toBe(false)
+    expect(providerSupportsMultiQuestion(undefined)).toBe(false)
+    expect(providerSupportsMultiQuestion('')).toBe(false)
+  })
+
+  it('treats unknown providers as structured-capable (matches the prior fallback)', () => {
+    expect(providerSupportsMultiQuestion('my-custom-sdk')).toBe(true)
+    expect(providerSupportsMultiQuestion('my-provider')).toBe(true)
+  })
+})
+
+describe('providerSupportsSingleMultiSelect', () => {
+  it('is true for structured-channel providers AND claude-tui (reinject)', () => {
+    expect(providerSupportsSingleMultiSelect('claude-sdk')).toBe(true)
+    expect(providerSupportsSingleMultiSelect('claude-byok')).toBe(true)
+    expect(providerSupportsSingleMultiSelect('docker-sdk')).toBe(true)
+    expect(providerSupportsSingleMultiSelect('gemini')).toBe(true)
+    expect(providerSupportsSingleMultiSelect('codex')).toBe(true)
+    // claude-tui: cli-type, but supported via the #5776 multi-select reinject.
+    expect(providerSupportsSingleMultiSelect('claude-tui')).toBe(true)
+  })
+
+  it('is false for the plain CLI providers', () => {
+    expect(providerSupportsSingleMultiSelect('claude-cli')).toBe(false)
+    expect(providerSupportsSingleMultiSelect('docker-cli')).toBe(false)
+    expect(providerSupportsSingleMultiSelect('docker')).toBe(false)
+  })
+
+  it('is false for null/undefined/empty', () => {
+    expect(providerSupportsSingleMultiSelect(null)).toBe(false)
+    expect(providerSupportsSingleMultiSelect(undefined)).toBe(false)
+    expect(providerSupportsSingleMultiSelect('')).toBe(false)
+  })
+
+  it('matches the prior "everything except claude-cli" behavior for all known non-docker-cli providers', () => {
+    // Regression guard: the two old client formulas were both "not claude-cli"
+    // (modulo the docker-cli bug). Confirm parity for the providers that were
+    // never buggy.
+    for (const key of ['claude-sdk', 'claude-tui', 'claude-byok', 'docker-byok', 'docker-sdk', 'gemini', 'codex']) {
+      expect(providerSupportsSingleMultiSelect(key)).toBe(true)
+    }
+    expect(providerSupportsSingleMultiSelect('claude-cli')).toBe(false)
   })
 })

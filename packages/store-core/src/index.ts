@@ -337,6 +337,8 @@ export {
   PROVIDER_LABELS,
   getProviderLabel,
   getProviderInfo,
+  providerSupportsMultiQuestion,
+  providerSupportsSingleMultiSelect,
 } from './provider-labels'
 
 export type {
