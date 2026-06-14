@@ -18,10 +18,25 @@ function withReinjectFlag(value, fn) {
   const prev = process.env.CHROXY_TUI_MULTISELECT_REINJECT
   if (value === undefined) delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
   else process.env.CHROXY_TUI_MULTISELECT_REINJECT = value
-  try { return fn() } finally {
+  const restore = () => {
     if (prev === undefined) delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
     else process.env.CHROXY_TUI_MULTISELECT_REINJECT = prev
   }
+  // #5781 review: restore synchronously for sync callbacks, but if fn() returns
+  // a thenable, defer the restore to .finally() so an async callback doesn't get
+  // the flag reverted out from under it before its promise settles.
+  let result
+  try {
+    result = fn()
+  } catch (err) {
+    restore()
+    throw err
+  }
+  if (result && typeof result.then === 'function') {
+    return result.finally(restore)
+  }
+  restore()
+  return result
 }
 
 /**
@@ -43,6 +58,11 @@ function makeMockHost(overrides = {}) {
   const host = {
     _pendingUserAnswers: new Map(),
     _term: {},               // truthy = a live PTY
+    // #5781 review: model sendMessage's SECOND guard (runnable session). Defaults
+    // to a started, alive session; tests flip these to exercise the not-runnable
+    // reinject guard.
+    _processReady: true,
+    _ptyExited: false,
     _destroying: false,
     // #5776 — model the real sendMessage busy contract. Defaults idle (false),
     // which is the designed reinject state (model stopped on the deny → Stop hook
@@ -254,6 +274,30 @@ describe('FormDriver — injected collaborator (#5617)', () => {
     assert.deepEqual(host._errors, [], 'never reached the sendMessage busy guard')
     assert.equal(tornDown.length, 1, 'tears down with a retryable error instead of silently dropping')
     assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_BUSY')
+  })
+
+  it('single multi-select REINJECT (flag on): not-runnable session → no send, retryable teardown (#5781 review)', () => {
+    // sendMessage has a SECOND fail-open guard beyond _isBusy: if the session is
+    // not runnable (PTY exited / not started) it emit('error')s + returns without
+    // starting a turn. Reaching it after the pending entry was cleared would drop
+    // the selection with no retry path. The driver must preflight and tear down
+    // with a retryable error instead of clearing state then dropping silently.
+    for (const notRunnable of [{ _ptyExited: true }, { _processReady: false }, { _term: null }]) {
+      const host = makeMockHost(notRunnable)
+      seedSingleMultiSelect(host, 't1', ['Cheese', 'Onion'])
+      const fd = new FormDriver(host)
+      const tornDown = []
+      fd._teardownAskUserQuestion = (id, payload) => { tornDown.push({ id, payload }) }
+
+      withReinjectFlag('1', () => {
+        fd.respondToQuestion('', { 'Pick toppings': ['Cheese', 'Onion'] }, 't1')
+      })
+
+      assert.deepEqual(host._sent, [], `does NOT call sendMessage when not runnable (${JSON.stringify(notRunnable)})`)
+      assert.deepEqual(host._cleared, [], 'does NOT clear the pending entry before bailing — selection stays retryable')
+      assert.equal(tornDown.length, 1, 'tears down with a retryable error')
+      assert.equal(tornDown[0].payload.errorCode, 'ASK_USER_QUESTION_MULTISELECT_UNAVAILABLE')
+    }
   })
 
   it('single multi-select REINJECT (flag on): drops freeformText but still sends the labels (#5776 option B deferral)', () => {

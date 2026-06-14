@@ -348,6 +348,24 @@ export class FormDriver {
           })
           return
         }
+        // sendMessage() has a SECOND fail-open guard beyond _isBusy: if the
+        // session isn't runnable (!_processReady / no _term / _ptyExited) it
+        // emit('error')s + bare-returns without starting a turn. We clear the
+        // pending entry + watchdog + lock just below, so reaching sendMessage in
+        // that state would drop the selection with no retry path (same wedge
+        // class the _isBusy guard closes). Mirror that guard here: tear down with
+        // a retryable error BEFORE clearing state so the user can resend once the
+        // session is back. (#5781 review / #5784)
+        if (!this._host._processReady || !this._host._term || this._host._ptyExited) {
+          ;(this._host._log || log).warn(`respondToQuestion: multiSelect reinject deferred — session not runnable (tool=${prevToolUseId || '?'}); PTY exited or not yet started`)
+          this._teardownAskUserQuestion(prevToolUseId, {
+            synthResult: 'Multi-select answer could not be delivered; the session was not running.',
+            emitResultReason: 'ask_user_question_multiselect_unavailable',
+            errorCode: 'ASK_USER_QUESTION_MULTISELECT_UNAVAILABLE',
+            errorMessage: 'Your selection could not be delivered — the session wasn\'t running. Tap Retry once it\'s back.',
+          })
+          return
+        }
         ;(this._host._log || log).info(`respondToQuestion: multiSelect reinject (flag on) tool=${prevToolUseId || '?'} text="${reinjectText.slice(0, 80)}"`)
         // The denied form left a pending entry + armed watchdog; clear both, plus
         // the sibling lock, before starting the new turn.

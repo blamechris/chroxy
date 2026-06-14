@@ -1578,7 +1578,10 @@ export class ClaudeTuiSession extends BaseSession {
       // untouched; one-shot latch so even when enabled it logs at most once.
       if (ready && !this._readyTailDumped && process.env.CHROXY_TUI_DUMP_READY_TAIL === '1') {
         this._readyTailDumped = true
-        const tail = (this._outputTail || '').slice(-1500)
+        // #5322 redaction: route through _outputTailDiagnostic() (redactSensitive
+        // + bounded slice) instead of dumping raw _outputTail, so an enabled
+        // diagnostic can't leak token-shaped secrets into the server log.
+        const tail = this._outputTailDiagnostic()
         log.info(`waitForPrompt ready-path tail (FIX-0 #5777, msg=${this._activeTurn?.messageId ?? 'none'}):\n${tail}`)
       }
       return ready
