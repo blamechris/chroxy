@@ -84,8 +84,12 @@ function makeMockHost(overrides = {}) {
     // emit('error') + returns WITHOUT sending (and resolves, not rejects), so a
     // .catch can't observe the drop. The form-driver guards on _isBusy before
     // calling, so this stub primarily proves the call is not made when busy.
+    // #5800 — sendMessage now also returns a typed result on its guard paths
+    // ({ ok:false, reason } on busy/not-runnable; undefined on the happy path).
+    // The stub mirrors that contract; the form-driver still preflights before
+    // calling, so the typed shape is consumed only by callers that branch on it.
     sendMessage: (text) => {
-      if (host._isBusy) { errors.push('Already processing a message'); return Promise.resolve() }
+      if (host._isBusy) { errors.push('Already processing a message'); return Promise.resolve({ ok: false, reason: 'busy' }) }
       sent.push(text); return Promise.resolve()
     },
     // Back-compat getter: most-recently-set entry (the no-toolUseId path).
