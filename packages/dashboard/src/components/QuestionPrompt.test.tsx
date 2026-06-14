@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
-import { OTHER_OPTION_VALUE } from '@chroxy/store-core'
+import { OTHER_OPTION_VALUE, type ChatMessageQuestion } from '@chroxy/store-core'
 import { QuestionPrompt, MultiQuestionForm } from './QuestionPrompt'
 
 afterEach(cleanup)
@@ -952,5 +952,68 @@ describe('QuestionPrompt', () => {
       // And nothing leaks elsewhere in the rendered tree either.
       expect(screen.queryByText(/LEAK_ME/)).not.toBeInTheDocument()
     })
+  })
+})
+
+// #5776 — a SINGLE-question multiSelect must render as a checkbox form so the
+// user can pick several, gated by allowSingleMultiSelect (the multi-select
+// reinject path enables it for claude-tui; SDK-family providers via
+// allowMultiQuestion; claude-cli stays on single-select).
+describe('QuestionPrompt — single-question multiSelect (#5776)', () => {
+  const singleMultiOptions = [
+    { label: 'Cheese', value: 'Cheese' },
+    { label: 'Onion', value: 'Onion' },
+    { label: 'Pepper', value: 'Pepper' },
+  ]
+  const singleMulti: ChatMessageQuestion[] = [{ question: 'Pick toppings', multiSelect: true, options: singleMultiOptions }]
+
+  it('renders the checkbox form and emits a string[] answersMap when allowed', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="Pick toppings"
+        options={singleMultiOptions}
+        questions={singleMulti}
+        allowSingleMultiSelect
+        onSelect={onSelect}
+      />
+    )
+    expect(screen.getByTestId('question-prompt-multi')).toBeInTheDocument()
+    fireEvent.click(screen.getByTestId('question-multi-option-0-Cheese').querySelector('input')!)
+    fireEvent.click(screen.getByTestId('question-multi-option-0-Pepper').querySelector('input')!)
+    fireEvent.click(screen.getByTestId('question-multi-submit'))
+    expect(onSelect).toHaveBeenCalledTimes(1)
+    expect(onSelect.mock.calls[0]?.[0]).toEqual({ 'Pick toppings': ['Cheese', 'Pepper'] })
+  })
+
+  it('falls back to single-select buttons when NOT allowed (e.g. claude-cli)', () => {
+    const onSelect = vi.fn()
+    render(
+      <QuestionPrompt
+        question="Pick toppings"
+        options={singleMultiOptions}
+        questions={singleMulti}
+        onSelect={onSelect}
+      />
+    )
+    // No checkbox form; the legacy single-select card renders instead.
+    expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
+    expect(screen.getByTestId('question-prompt')).toBeInTheDocument()
+    fireEvent.click(screen.getByText('Cheese'))
+    expect(onSelect).toHaveBeenCalledWith('Cheese')
+  })
+
+  it('does not render the checkbox form once answered', () => {
+    render(
+      <QuestionPrompt
+        question="Pick toppings"
+        options={singleMultiOptions}
+        questions={singleMulti}
+        allowSingleMultiSelect
+        answered="Cheese, Pepper"
+        onSelect={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('question-prompt-multi')).not.toBeInTheDocument()
   })
 })

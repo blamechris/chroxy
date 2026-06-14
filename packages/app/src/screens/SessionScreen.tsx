@@ -267,6 +267,16 @@ export function SessionScreen() {
       activeSessionProvider !== 'claude-cli',
     [activeSessionProvider],
   );
+  // #5776 — a single-question multiSelect renders as a checkbox form on every
+  // provider that can consume a structured/text multi-answer: the SDK family
+  // AND claude-tui (via the multi-select reinject path). Only claude-cli is
+  // excluded — its respondToQuestion takes a single text answer with no
+  // answersMap channel. (= everything except claude-cli, which is
+  // allowMultiQuestion || claude-tui.)
+  const allowSingleMultiSelect = useMemo(
+    () => activeSessionProvider != null && activeSessionProvider !== 'claude-cli',
+    [activeSessionProvider],
+  );
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);
@@ -1418,6 +1428,7 @@ export function SessionScreen() {
                   onSelectOption={handleSelectOption}
                   onSubmitMultiQuestion={handleSubmitMultiQuestion}
                   allowMultiQuestion={allowMultiQuestion}
+              allowSingleMultiSelect={allowSingleMultiSelect}
                   isCliMode={isCliMode}
                   selectedIds={selectedIds}
                   isSelecting={isSelecting}
@@ -1451,6 +1462,7 @@ export function SessionScreen() {
               onSelectOption={handleSelectOption}
               onSubmitMultiQuestion={handleSubmitMultiQuestion}
               allowMultiQuestion={allowMultiQuestion}
+              allowSingleMultiSelect={allowSingleMultiSelect}
               isCliMode={isCliMode}
               selectedIds={selectedIds}
               isSelecting={isSelecting}
@@ -1478,6 +1490,7 @@ export function SessionScreen() {
               onSelectOption={handleSelectOption}
               onSubmitMultiQuestion={handleSubmitMultiQuestion}
               allowMultiQuestion={allowMultiQuestion}
+              allowSingleMultiSelect={allowSingleMultiSelect}
               isCliMode={isCliMode}
               selectedIds={selectedIds}
               isSelecting={isSelecting}

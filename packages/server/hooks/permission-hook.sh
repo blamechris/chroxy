@@ -102,6 +102,17 @@ EOF
     exit 0
   fi
   if [ "$QUESTION_COUNT" = "1" ] && [ "$HAS_MULTISELECT" = "1" ]; then
+    # #5776 (Phase 0) — when the multi-select reinject spike is enabled, the
+    # Chroxy client renders the multi-select form itself and delivers the user's
+    # selection as a follow-up message. Steer the model to STOP and wait for that
+    # message rather than decompose into single-select asks. Still a deny (that is
+    # what suppresses claude TUI's own un-drivable form); only the reason differs.
+    if [ "$CHROXY_TUI_MULTISELECT_REINJECT" = "1" ]; then
+      cat <<'EOF'
+{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"The Chroxy client is collecting this multi-select choice from the user directly. Do NOT re-ask, do NOT decompose into single-select questions, and do NOT call any further tools. Stop here — the user's selection will arrive as your next user message; continue from it then."}}
+EOF
+      exit 0
+    fi
     cat <<'EOF'
 {"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":"Chroxy's TUI provider does not support multi-select questions (multiSelect:true). Re-issue this as a single-select question (multiSelect:false), or — if the user genuinely needs to choose several items — ask one single-select AskUserQuestion per item (e.g. an include/skip choice for each), ONE AT A TIME, issuing the next only after the previous tool_result returns."}}
 EOF

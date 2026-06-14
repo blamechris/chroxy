@@ -217,11 +217,13 @@ describe('ClaudeTuiSession', () => {
         `expected a /tmp-ish trust entry, got: ${entries.map(([k]) => k).join(', ')}`)
     })
 
-    it('is idempotent when cwd is already trusted', async () => {
+    it('is idempotent when cwd is already trusted AND onboarded (#5777)', async () => {
       const cwdReal = '/tmp'
       const initial = { projects: {} }
       const { realpathSync } = await import('fs')
-      initial.projects[realpathSync(cwdReal)] = { hasTrustDialogAccepted: true }
+      // #5777 FIX-2: the early-return now requires BOTH flags, so a fully
+      // configured entry (trust + onboarding) must not be rewritten.
+      initial.projects[realpathSync(cwdReal)] = { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true }
       writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify(initial))
       const before = readFileSync(join(fakeHome, '.claude.json'), 'utf8')
 
@@ -229,7 +231,25 @@ describe('ClaudeTuiSession', () => {
       await session.start()
 
       const after = readFileSync(join(fakeHome, '.claude.json'), 'utf8')
-      assert.equal(before, after, 'no rewrite when already trusted')
+      assert.equal(before, after, 'no rewrite when already trusted + onboarded')
+    })
+
+    it('adds hasCompletedProjectOnboarding to a trusted-but-unonboarded cwd (#5777 FIX-2)', async () => {
+      const cwdReal = '/tmp'
+      const initial = { projects: {} }
+      const { realpathSync } = await import('fs')
+      // Trusted but NOT onboarded — the worktree-isolation hole that rendered
+      // claude's project-onboarding interstitial and swallowed the first prompt.
+      initial.projects[realpathSync(cwdReal)] = { hasTrustDialogAccepted: true }
+      writeFileSync(join(fakeHome, '.claude.json'), JSON.stringify(initial))
+
+      session = new ClaudeTuiSession({ cwd: cwdReal, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      await session.start()
+
+      const config = JSON.parse(readFileSync(join(fakeHome, '.claude.json'), 'utf8'))
+      const entry = config.projects[realpathSync(cwdReal)]
+      assert.equal(entry.hasTrustDialogAccepted, true, 'trust preserved')
+      assert.equal(entry.hasCompletedProjectOnboarding, true, 'onboarding flag added by FIX-2')
     })
 
     it('creates sink dir, writes settings.json, and assigns a session uuid', async () => {

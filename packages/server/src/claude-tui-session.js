@@ -1565,6 +1565,25 @@ export class ClaudeTuiSession extends BaseSession {
         this._activeTurn.waitForPromptSawStatus = this._lastProbeSawStatus
       }
       log.info(`waitForPrompt (msg=${this._activeTurn?.messageId ?? 'none'} elapsedMs=${elapsedMs} sawStatus=${this._lastProbeSawStatus} ready=${ready})`)
+      // #5777 FIX-0 (diagnostic) — readiness is a session-FILE status check,
+      // decoupled from what the TUI renders, so claude can report status:idle
+      // (ready=true) WHILE a one-shot startup interstitial (trust dialog,
+      // release-notes / opus-notice / remote-control upsell / onboarding) is
+      // on screen and silently swallowing the injected first prompt → the
+      // consumed=0 first_output_timeout wedge (#5777). The existing tail dumps
+      // only fire on !ready, so that wedged-but-"ready" screen was invisible.
+      // Dump the readable tail ONCE per session on the first ready so the exact
+      // interstitial can be named and FIX-1's detector anchored on a real
+      // token. Opt-in (CHROXY_TUI_DUMP_READY_TAIL=1) so healthy sessions are
+      // untouched; one-shot latch so even when enabled it logs at most once.
+      if (ready && !this._readyTailDumped && process.env.CHROXY_TUI_DUMP_READY_TAIL === '1') {
+        this._readyTailDumped = true
+        // #5322 redaction: route through _outputTailDiagnostic() (redactSensitive
+        // + bounded slice) instead of dumping raw _outputTail, so an enabled
+        // diagnostic can't leak token-shaped secrets into the server log.
+        const tail = this._outputTailDiagnostic()
+        log.info(`waitForPrompt ready-path tail (FIX-0 #5777, msg=${this._activeTurn?.messageId ?? 'none'}):\n${tail}`)
+      }
       return ready
     }
     const pid = this._term && this._term.pid

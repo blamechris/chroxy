@@ -140,11 +140,21 @@ export function ensureCwdTrusted(cwd) {
     config.projects = {}
   }
   const existing = config.projects[realCwd]
-  if (existing && existing.hasTrustDialogAccepted === true) return
+  // #5777 FIX-2 — also require hasCompletedProjectOnboarding. Pre-#5777 the
+  // early-return fired on trust alone, so a trusted-but-unonboarded cwd (every
+  // fresh worktree-isolated spawn — ensureCwdTrusted set trust but never the
+  // onboarding flag) still rendered claude's project-onboarding interstitial,
+  // which swallows the injected first prompt → the consumed=0 first_output
+  // wedge. Pre-writing both flags suppresses that screen. NOTE: this does NOT
+  // cover account-level one-shot notices (release notes / opus / remote-control
+  // upsell) which render even on a fully-onboarded trusted folder — those are
+  // gated/surfaced by FIX-1, not by per-project config.
+  if (existing && existing.hasTrustDialogAccepted === true && existing.hasCompletedProjectOnboarding === true) return
 
   config.projects[realCwd] = {
     ...(existing || {}),
     hasTrustDialogAccepted: true,
+    hasCompletedProjectOnboarding: true,
     projectOnboardingSeenCount: existing?.projectOnboardingSeenCount ?? 0,
   }
   // Atomic write via temp + rename. Use a per-call random suffix rather

@@ -102,6 +102,17 @@ export interface QuestionPromptProps {
    */
   allowMultiQuestion?: boolean
   /**
+   * #5776 — opt-in to render a SINGLE-question multiSelect as a checkbox
+   * form (reusing MultiQuestionForm) instead of single-select buttons.
+   * A multi-select AskUserQuestion from the TUI is almost always one
+   * question, so without this it renders as radio buttons and the user
+   * can't pick several. True for providers that can consume a structured
+   * multi-answer: SDK/BYOK/Codex/Gemini natively, and claude-tui via the
+   * multi-select reinject path (CHROXY_TUI_MULTISELECT_REINJECT). Defaults
+   * off so the legacy single-select rendering is unchanged.
+   */
+  allowSingleMultiSelect?: boolean
+  /**
    * Fires with one of three shapes:
    * - `string` — legacy single-question / free-text-only path (back-compat).
    * - `MultiQuestionAnswersMap` (`Record<string, string | string[]>`) —
@@ -115,7 +126,7 @@ export interface QuestionPromptProps {
   onSelect: (answer: string | MultiQuestionAnswersMap | OtherFreeformAnswer) => void
 }
 
-export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, pendingPermission, onSelect }: QuestionPromptProps) {
+export function QuestionPrompt({ question, options, answered, questions, allowMultiQuestion, allowSingleMultiSelect, pendingPermission, onSelect }: QuestionPromptProps) {
   // #4685 — gate ALL question content (text, options, multi-question
   // form, deferred notice, free-text input) behind the
   // `pendingPermission` flag. Render only a neutral placeholder until
@@ -153,6 +164,18 @@ export function QuestionPrompt({ question, options, answered, questions, allowMu
       return <MultiQuestionForm questions={questions} onSelect={onSelect} />
     }
     return <MultiQuestionDeferredNotice count={questions.length} />
+  }
+
+  // #5776 — a SINGLE-question multiSelect renders as a checkbox form (reusing
+  // MultiQuestionForm, which handles a length-1 array and emits an answersMap
+  // keyed by question text with the chosen labels as a string[]). Without this
+  // it would fall through to SingleQuestionPrompt's radio buttons and the user
+  // could only pick one. Gated by allowSingleMultiSelect so claude-cli (no
+  // structured-answer channel) keeps the single-select fallback.
+  const isSingleMultiSelect =
+    Array.isArray(questions) && questions.length === 1 && questions[0]?.multiSelect === true
+  if (isSingleMultiSelect && answered == null && allowSingleMultiSelect) {
+    return <MultiQuestionForm questions={questions} onSelect={onSelect} />
   }
 
   return (
