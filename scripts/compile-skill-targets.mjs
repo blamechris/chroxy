@@ -18,7 +18,7 @@
 //        [--repo <root>] [--dry-run]
 //
 // Exit non-zero on emit failure so /skill and CI can gate on it.
-import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync } from 'node:fs'
+import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
 
@@ -92,6 +92,9 @@ function emitClaude(name, body, description, repo) {
 }
 
 function emitGemini(name, body, description, repo) {
+  // Always report the path (even on skip) so the caller can clean up a stale
+  // artifact from a previous compile.
+  const path = join(repo, '.gemini/commands', `${name}.toml`)
   // $ARGUMENTS is the neutral arg token; Gemini uses {{args}}.
   const prompt = body.replace(/\$ARGUMENTS\b/g, '{{args}}')
   // Gemini's prompt engine is active: it interprets {{...}}, !{...} (shell), and
@@ -101,7 +104,7 @@ function emitGemini(name, body, description, repo) {
   // skill for Gemini and let the caller log the drop (no silent corruption).
   const otherMustache = prompt.replace(/\{\{args\}\}/g, '').match(/\{\{|!\{|@\{/)
   if (otherMustache) {
-    return { skip: `gemini: body contains an active template sequence ("${otherMustache[0]}…") that Gemini would interpret; not Gemini-safe` }
+    return { path, skip: `gemini: body contains an active template sequence ("${otherMustache[0]}…") that Gemini would interpret; not Gemini-safe` }
   }
   // TOML literal triple-string ('''…''') needs no escaping; bail to a basic
   // string only if the body itself contains ''' (vanishingly rare).
@@ -118,7 +121,7 @@ function emitGemini(name, body, description, repo) {
   // arg-mapping concern, and would be a noisy false positive.
   const prose = prompt.replace(/```[\s\S]*?```/g, '')
   return {
-    path: join(repo, '.gemini/commands', `${name}.toml`),
+    path,
     content: `description = ${descToml}\n${promptBlock}\n`,
     warn: /\$[1-9]\b/.test(prose) ? `gemini: positional $N args have no Gemini equivalent (only {{args}})` : null,
   }
@@ -150,7 +153,14 @@ function compileOne(name, srcPath, targets, repo, dryRun) {
     }
     const { path, content, warn, note, skip } = emit(name, body, description, repo)
     if (skip) {
-      results.push({ target: t, skip })
+      // Remove any artifact left by a previous compile so a now-unsafe skill
+      // can't keep loading a stale/broken native command.
+      let removedStale = false
+      if (!dryRun && path && existsSync(path)) {
+        rmSync(path)
+        removedStale = true
+      }
+      results.push({ target: t, skip, removedStale })
       continue
     }
     if (!dryRun) {
@@ -202,7 +212,7 @@ function main() {
         console.error(`      [${r.target}] ERROR: ${r.error}`)
         failed++
       } else if (r.skip) {
-        console.log(`      [${r.target}] SKIPPED — ${r.skip}`)
+        console.log(`      [${r.target}] SKIPPED — ${r.skip}${r.removedStale ? ' (removed stale artifact)' : ''}`)
         skipped++
       } else {
         const rel = r.path.replace(homedir(), '~').replace(repo + '/', '')

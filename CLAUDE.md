@@ -81,8 +81,11 @@ Skills live in the `blamechris/skill-templates` **registry** and install **on de
   write a version-stamped `.claude/commands/<name>.md` → **compile to native targets** → record
   in `.claude/skills.lock`.
 - **`/skill list` / `/skill outdated` / `/skill update [name]` / `/skill remove <name>`** — manage installed skills.
-- **Install-on-miss is a rule:** if `/X` is requested but not installed (no
-  `.claude/skills/X/SKILL.md`), run `/skill add X` first, then invoke it.
+- **Install-on-miss is a rule:** if `/X` is requested but unavailable, distinguish two
+  cases by the **neutral source** `.claude/commands/X.md`: if it's missing, the skill isn't
+  installed — run `/skill add X` (fetch + customize + compile). If the source exists but the
+  native artifact (`.claude/skills/X/SKILL.md`) is missing, it's just not compiled — run
+  `node scripts/compile-skill-targets.mjs --name X` (no registry fetch needed). Then invoke.
 
 **Model-agnostic compile (multi-target).** `.claude/commands/<name>.md` is the provider-NEUTRAL
 source; `scripts/compile-skill-targets.mjs` compiles each skill into every coding agent's NATIVE

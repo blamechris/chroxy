@@ -197,8 +197,11 @@ codex was a target) `~/.codex/prompts/<name>.md`. Report what was removed.
   tailors the template with full repo context, which is richer than a context-blind
   batch job. The self-validation step replaces the registry's automated `validate_output`.
 - **Auto-install on miss.** A repo or global `CLAUDE.md` rule should say: *asked to run
-  `/X` and it's not installed (no `.claude/skills/X/SKILL.md`)? Run `skill add X` first,
-  then invoke.* That makes "use /full-review in a repo that lacks it" just work.
+  `/X`? Check the neutral source `.claude/commands/X.md` first. Missing → not installed →
+  `skill add X`. Present but the native artifact (`.claude/skills/X/SKILL.md`) is missing →
+  just not compiled → recompile with `compile-skill-targets.mjs --name X` (no registry
+  fetch). Then invoke.* That makes "use /full-review in a repo that lacks it" just work
+  without re-fetching when a recompile suffices.
 - **Compile is deterministic.** The generic→native transform lives in
   `scripts/compile-skill-targets.mjs`, not in agent judgment — so the native artifacts are
   reproducible. Editing a skill's generic source (`.claude/commands/<name>.md`) by hand?
