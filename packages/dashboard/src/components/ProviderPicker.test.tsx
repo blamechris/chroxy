@@ -57,8 +57,14 @@ describe('Provider picker in session creation (#1366)', () => {
     expect(connectionSrc).toMatch(/create_session[\s\S]*?provider/)
   })
 
-  test('default provider is claude-sdk', () => {
-    expect(modalSrc).toMatch(/claude-sdk/)
+  test('modal sources its default provider from the store, not a hardcoded id (#5823)', () => {
+    // The default lives in the shared @chroxy/protocol DEFAULT_PROVIDER and
+    // flows through the store's defaultProvider; the modal must read it from
+    // there so a default flip never needs a modal edit.
+    expect(modalSrc).toMatch(/useConnectionStore\(\s*s\s*=>\s*s\.defaultProvider\s*\)/)
+    expect(modalSrc).toMatch(/useState\(\s*defaultProvider\s*\)/)
+    // And the store seeds defaultProvider from the protocol constant.
+    expect(connectionSrc).toMatch(/loadPersistedSetting\(\s*'chroxy_default_provider',\s*DEFAULT_PROVIDER\s*\)/)
   })
 
   // --- New tests for dynamic provider list ---

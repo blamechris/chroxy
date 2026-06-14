@@ -7,6 +7,7 @@
 import { useState, useCallback, useRef, useMemo } from 'react'
 import type { CumulativeUsage, SessionInfo, SessionVisualStatus, SessionRole } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
+import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 import { ConversationSearch } from './ConversationSearch'
 import { ServerPicker } from './ServerPicker'
 import { ViewersIndicator } from './ViewersIndicator'
@@ -866,7 +867,7 @@ export function Sidebar({
                                 W
                               </span>
                             )}
-                            {session.provider && session.provider !== 'claude-sdk' && (
+                            {session.provider && session.provider !== DEFAULT_PROVIDER && (
                               <span className="sidebar-provider-badge" title={session.provider}>
                                 {session.provider.replace(/^claude-/, '').toUpperCase()}
                               </span>

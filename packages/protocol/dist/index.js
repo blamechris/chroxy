@@ -29,6 +29,23 @@ export const CLIENT_CAPABILITIES = {
  * Clients below this version are rejected during auth.
  */
 export const MIN_PROTOCOL_VERSION = 1;
+/**
+ * The session provider used when neither `--provider` nor `config.provider`
+ * is set. Single source of truth shared by the server (`providers.js`
+ * re-exports this), the dashboard, and the mobile app, so the "which provider
+ * is the default?" decision lives in exactly one place.
+ *
+ * Flipped from `claude-sdk` to `claude-tui` ahead of the 2026-06-15
+ * programmatic-credit cutover (#5819): on/after that boundary the host
+ * claude-sdk / claude-cli providers draw from Anthropic's metered
+ * programmatic-credit pool, so a zero-config session would silently spend
+ * metered credits. `claude-tui` bills against the flat Claude subscription
+ * allowance today (a best-effort bet, not a sanctioned path — see the
+ * provider docs). Clients suppress the per-session provider badge for this
+ * value, so keeping it here means the next default flip doesn't reintroduce
+ * the drift fixed in #5823.
+ */
+export const DEFAULT_PROVIDER = 'claude-tui';
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from "./schemas/index.js";
 // Re-export client-side error-category detection (#3151)

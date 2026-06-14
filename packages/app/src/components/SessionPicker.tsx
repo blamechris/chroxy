@@ -16,6 +16,7 @@ import type { SessionInfo, SessionHealth } from '../store/connection';
 // #5759 — shared with the dashboard so the "live permission prompt" rule can't
 // drift between clients (it operates on the shared ChatMessage).
 import { countLivePermissionPrompts } from '@chroxy/store-core';
+import { DEFAULT_PROVIDER } from '@chroxy/protocol';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { getProviderInfo } from '../constants/providers';
@@ -87,12 +88,13 @@ function SessionPill({ session, isActive, health, notificationCount, pendingShel
   const showPendingShells = !isCrashed && !showBusy && !showPendingPermission && pendingShellCount > 0;
   const hasIndicators = isCrashed || showPendingPermission || showBusy || hasNotification || showPendingShells;
   // Mobile parity with dashboard SessionBar chips (#3940): surface the
-  // provider's short label as a small badge on the pill so claude-tui,
-  // codex, gemini, docker-cli, etc. are distinguishable at-a-glance
-  // without long-pressing. Same gate as the long-press alert title from
-  // #3937 — skip the claude-sdk default and any session with no provider.
+  // provider's short label as a small badge on the pill so codex, gemini,
+  // claude-sdk, docker-cli, etc. are distinguishable at-a-glance without
+  // long-pressing. Same gate as the long-press alert title from #3937 —
+  // skip the current default provider (#5823) and any session with no
+  // provider.
   const providerInfo =
-    session.provider && session.provider !== 'claude-sdk'
+    session.provider && session.provider !== DEFAULT_PROVIDER
       ? getProviderInfo(session.provider)
       : null;
   return (
@@ -234,10 +236,10 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     }
 
     // Suffix the alert title with the provider's short label for any
-    // non-default provider (default is claude-sdk). Pre-#3937 this only
-    // covered claude-cli; now it covers claude-tui, codex, gemini, and
-    // any future provider getProviderInfo knows about.
-    const providerLabel = session.provider && session.provider !== 'claude-sdk'
+    // non-default provider (the default is DEFAULT_PROVIDER, #5823).
+    // Pre-#3937 this only covered claude-cli; now it covers every
+    // non-default provider getProviderInfo knows about.
+    const providerLabel = session.provider && session.provider !== DEFAULT_PROVIDER
       ? ` (${getProviderInfo(session.provider).short})`
       : '';
     Alert.alert(
