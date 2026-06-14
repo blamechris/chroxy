@@ -4,6 +4,7 @@ import type { ChatMessage, SessionInfo } from '@chroxy/store-core'
 import { providerSupportsSingleMultiSelect } from '@chroxy/store-core'
 import type { ChatViewMessage } from '../components/ChatView'
 import type { ConnectionState } from '../store/connection'
+import type { ProviderCapabilities } from '../store/types'
 import { ToolGroup } from '../components/ToolGroup'
 import { ToolBubble } from '../components/ToolBubble'
 import { PermissionPrompt } from '../components/PermissionPrompt'
@@ -26,6 +27,9 @@ export interface UseMessageRendererArgs {
   streamStallTimeoutMs: number | null
   allowMultiQuestionForm: boolean
   activeSessionProvider: string | null
+  // #5791 — the active provider's advertised capabilities, used to gate the
+  // claude-tui single-multiSelect form on the server's `multiSelectReinject` bit.
+  activeSessionCaps?: ProviderCapabilities | null
   setViewMode: ConnectionState['setViewMode']
   stalledPromptIds: Set<string>
   hasPendingAskUserQuestionPermission: boolean
@@ -76,6 +80,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
     streamStallTimeoutMs,
     allowMultiQuestionForm,
     activeSessionProvider,
+    activeSessionCaps,
     setViewMode,
     stalledPromptIds,
     hasPendingAskUserQuestionPermission,
@@ -156,7 +161,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           // because their respondToQuestion takes only a single text answer
           // with no answersMap channel. #5795 — single source of truth in
           // @chroxy/store-core (keyed off the registered provider `type`).
-          allowSingleMultiSelect={providerSupportsSingleMultiSelect(activeSessionProvider)}
+          allowSingleMultiSelect={providerSupportsSingleMultiSelect(activeSessionProvider, activeSessionCaps)}
           // #4685 — gate the question content render on the matching
           // AskUserQuestion permission_request being resolved. Pre-fix
           // the user_question card rendered the moment the wire event
@@ -305,5 +310,5 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
 
     // Default rendering
     return null
-  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
+  }, [storeMsgMap, chatToolGroupPayloads, chatTailMessageId, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered, storeMessages, sendInput, streamStallTimeoutMs, allowMultiQuestionForm, activeSessionProvider, activeSessionCaps, setViewMode, stalledPromptIds, hasPendingAskUserQuestionPermission, sessions])
 }

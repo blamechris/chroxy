@@ -42,6 +42,7 @@ import {
 import {
   ASK_USER_QUESTION_WATCHDOG_MS,
   FormDriver,
+  multiSelectReinjectEnabled,
 } from './claude-tui/form-driver.js'
 
 // Re-export the public writeHookSettings helper so existing
@@ -113,6 +114,13 @@ export class ClaudeTuiSession extends BaseSession {
       thinkingLevel: false,
       streaming: false,
       tools: true,
+      // #5791 — advertise whether the server will actually honor a single
+      // multi-select AskUserQuestion (the #5776 reinject path, gated by
+      // CHROXY_TUI_MULTISELECT_REINJECT, default OFF). Clients gate the
+      // checkbox-form affordance on this so they don't render a form the
+      // server is wired to refuse. Read at access time (listProviders is
+      // called per connection), so it reflects the daemon's env.
+      multiSelectReinject: multiSelectReinjectEnabled(),
     }
   }
 

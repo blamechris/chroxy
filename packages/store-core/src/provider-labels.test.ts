@@ -163,14 +163,31 @@ describe('providerSupportsMultiQuestion', () => {
 })
 
 describe('providerSupportsSingleMultiSelect', () => {
-  it('is true for structured-channel providers AND claude-tui (reinject)', () => {
+  it('is true for structured-channel providers regardless of caps', () => {
     expect(providerSupportsSingleMultiSelect('claude-sdk')).toBe(true)
     expect(providerSupportsSingleMultiSelect('claude-byok')).toBe(true)
     expect(providerSupportsSingleMultiSelect('docker-sdk')).toBe(true)
     expect(providerSupportsSingleMultiSelect('gemini')).toBe(true)
     expect(providerSupportsSingleMultiSelect('codex')).toBe(true)
-    // claude-tui: cli-type, but supported via the #5776 multi-select reinject.
-    expect(providerSupportsSingleMultiSelect('claude-tui')).toBe(true)
+  })
+
+  it('claude-tui is gated on the multiSelectReinject capability (#5791)', () => {
+    // Without the cap (server flag off / unknown) the client must NOT offer the
+    // form — the server refuses it (was the #5791 split-brain).
+    expect(providerSupportsSingleMultiSelect('claude-tui')).toBe(false)
+    expect(providerSupportsSingleMultiSelect('claude-tui', null)).toBe(false)
+    expect(providerSupportsSingleMultiSelect('claude-tui', {})).toBe(false)
+    expect(providerSupportsSingleMultiSelect('claude-tui', { multiSelectReinject: false })).toBe(false)
+    // With the cap the form is offered (server will reinject the answer).
+    expect(providerSupportsSingleMultiSelect('claude-tui', { multiSelectReinject: true })).toBe(true)
+  })
+
+  it('ignores the cap for non-claude-tui providers', () => {
+    // The cap only gates claude-tui; SDK providers are always structured-capable
+    // and CLI providers are never (the cap can't enable them).
+    expect(providerSupportsSingleMultiSelect('claude-sdk', { multiSelectReinject: false })).toBe(true)
+    expect(providerSupportsSingleMultiSelect('claude-cli', { multiSelectReinject: true })).toBe(false)
+    expect(providerSupportsSingleMultiSelect('docker-cli', { multiSelectReinject: true })).toBe(false)
   })
 
   it('is false for the plain CLI providers', () => {
@@ -183,15 +200,5 @@ describe('providerSupportsSingleMultiSelect', () => {
     expect(providerSupportsSingleMultiSelect(null)).toBe(false)
     expect(providerSupportsSingleMultiSelect(undefined)).toBe(false)
     expect(providerSupportsSingleMultiSelect('')).toBe(false)
-  })
-
-  it('matches the prior "everything except claude-cli" behavior for all known non-docker-cli providers', () => {
-    // Regression guard: the two old client formulas were both "not claude-cli"
-    // (modulo the docker-cli bug). Confirm parity for the providers that were
-    // never buggy.
-    for (const key of ['claude-sdk', 'claude-tui', 'claude-byok', 'docker-byok', 'docker-sdk', 'gemini', 'codex']) {
-      expect(providerSupportsSingleMultiSelect(key)).toBe(true)
-    }
-    expect(providerSupportsSingleMultiSelect('claude-cli')).toBe(false)
   })
 })

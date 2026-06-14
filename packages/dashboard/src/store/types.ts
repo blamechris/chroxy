@@ -152,6 +152,11 @@ export interface ProviderCapabilities {
   // this with a visual badge + container settings knobs (image / memory /
   // cpu / containerUser) in the New Session modal's advanced section.
   containerized?: boolean;
+  // #5791 — claude-tui only: true when the daemon will reinject a single
+  // multi-select AskUserQuestion answer (CHROXY_TUI_MULTISELECT_REINJECT).
+  // Gates the multi-select checkbox affordance so the client doesn't offer a
+  // form the server refuses.
+  multiSelectReinject?: boolean;
 }
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing panel.

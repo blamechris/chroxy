@@ -344,6 +344,7 @@ export {
 export type {
   ProviderType,
   ProviderDisplayInfo,
+  ProviderRenderCapabilities,
 } from './provider-labels'
 
 // #4569: curated IANA timezone short-list for the notification

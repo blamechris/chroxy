@@ -1562,6 +1562,16 @@ export function App() {
     startServer()
   }, [])
 
+  // #5791 — the active provider's advertised capabilities, so the renderer can
+  // gate the claude-tui single-multiSelect form on the server's
+  // `multiSelectReinject` bit (the CHROXY_TUI_MULTISELECT_REINJECT flag) rather
+  // than the provider name alone — the client must not offer a form the server
+  // would refuse.
+  const activeSessionCaps = useMemo(
+    () => availableProviders.find(p => p.name === activeSessionProvider)?.capabilities ?? null,
+    [availableProviders, activeSessionProvider],
+  )
+
   // #5560 — the custom chat-message renderer (permission prompts, question
   // prompts, tool bubbles/groups, evaluator banner, stall / resume chips) is
   // built by `useMessageRenderer`. Same deps array, same per-branch JSX.
@@ -1578,6 +1588,7 @@ export function App() {
     streamStallTimeoutMs,
     allowMultiQuestionForm,
     activeSessionProvider,
+    activeSessionCaps,
     setViewMode,
     stalledPromptIds,
     hasPendingAskUserQuestionPermission,

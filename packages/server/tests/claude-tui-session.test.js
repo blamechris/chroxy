@@ -90,6 +90,27 @@ describe('ClaudeTuiSession', () => {
         'resume must be advertised so SessionManager round-trips the conversation uuid')
     })
 
+    it('capabilities.multiSelectReinject reflects CHROXY_TUI_MULTISELECT_REINJECT (#5791)', () => {
+      // The client gates its multi-select checkbox form on this bit, so it must
+      // track the daemon's actual reinject flag — not be hard-coded. Read at
+      // access time (listProviders calls the getter per connection).
+      const prev = process.env.CHROXY_TUI_MULTISELECT_REINJECT
+      try {
+        delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
+        assert.equal(ClaudeTuiSession.capabilities.multiSelectReinject, false,
+          'default (flag unset) → false, matching the server refusing the form')
+        process.env.CHROXY_TUI_MULTISELECT_REINJECT = '1'
+        assert.equal(ClaudeTuiSession.capabilities.multiSelectReinject, true,
+          'flag on → true, so the client may offer the form')
+        process.env.CHROXY_TUI_MULTISELECT_REINJECT = '0'
+        assert.equal(ClaudeTuiSession.capabilities.multiSelectReinject, false,
+          'explicit 0 → false')
+      } finally {
+        if (prev === undefined) delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
+        else process.env.CHROXY_TUI_MULTISELECT_REINJECT = prev
+      }
+    })
+
     it('fresh session: mints a uuid, exposes it via resumeSessionId, spawns with --session-id', async () => {
       session = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: emptySkillsDir, repoSkillsDir: null })
       assert.equal(session._sessionId, null, 'no uuid before start on a fresh session')
