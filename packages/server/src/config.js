@@ -659,6 +659,47 @@ export function isFatalConfigWarning(warning) {
 }
 
 /**
+ * Declarative range checks for the simple numeric config fields (audit P2-6).
+ * Each entry replaces a hand-rolled `if (Number.isFinite(value) ...)` block that
+ * was copy-pasted ~6 times — a shape where a forgotten `Number.isFinite` guard,
+ * a missed `allowZero`, or an inverted comparison silently flips validation.
+ *
+ * `belowMessage`/`aboveMessage` are the EXACT operator-facing suffixes (appended
+ * after `${value} `); wording is per-field by design (different unit labels).
+ * Only the `Invalid value` PREFIX is load-bearing — it must never become
+ * `Invalid type`, which the CLI treats as fatal (see FATAL_CONFIG_WARNING_PREFIX).
+ *
+ * Fields with extra logic stay bespoke in validateConfig: `sessionTimeout`
+ * (duration-string parse), `hardTimeoutMs` (cross-field vs resultTimeoutMs), and
+ * `providerStreamStallTimeoutMs` (per-entry map iteration).
+ */
+const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000
+const NUMERIC_RANGE_CHECKS = [
+  { key: 'port', min: 1, max: 65535, belowMessage: '(must be 1-65535)', aboveMessage: '(must be 1-65535)' },
+  { key: 'maxSessions', min: 1, belowMessage: '(must be >= 1)' },
+  { key: 'maxPayload', min: 1024, max: 100 * 1024 * 1024, belowMessage: '(minimum 1KB / 1024 bytes)', aboveMessage: '(maximum 100MB)' },
+  { key: 'resultTimeoutMs', min: 30_000, max: TWENTY_FOUR_HOURS_MS, belowMessage: '(minimum 30000 / 30s)', aboveMessage: '(maximum 86400000 / 24h)' },
+  { key: 'streamStallTimeoutMs', min: 5_000, max: TWENTY_FOUR_HOURS_MS, allowZero: true, belowMessage: '(minimum 5000 / 5s; set 0 to disable)', aboveMessage: '(maximum 86400000 / 24h)' },
+  { key: 'backgroundShellHardQuiesceMs', min: 60_000, max: TWENTY_FOUR_HOURS_MS, allowZero: true, belowMessage: '(minimum 60000 / 60s; set 0 to disable)', aboveMessage: '(maximum 86400000 / 24h)' },
+]
+
+/**
+ * Push an `Invalid value` warning when finite numeric `value` falls outside
+ * [min, max]. No-ops on a non-finite value (the type-check loop already warned)
+ * and on an explicit 0 when `allowZero` (the "disable" sentinel). `min`/`max`
+ * are each optional (maxSessions has only a lower bound).
+ */
+function validateRange(warnings, key, value, { min, max, allowZero = false, belowMessage, aboveMessage }) {
+  if (!Number.isFinite(value)) return
+  if (allowZero && value === 0) return
+  if (min != null && value < min) {
+    warnings.push(`Invalid value for '${key}': ${value} ${belowMessage}`)
+  } else if (max != null && value > max) {
+    warnings.push(`Invalid value for '${key}': ${value} ${aboveMessage}`)
+  }
+}
+
+/**
  * Validate config object against schema.
  * Logs warnings for unknown keys and type mismatches.
  *
@@ -691,13 +732,12 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
-  // Range validation for numeric and duration fields (only when type is correct)
-  if (typeof config.port === 'number' && (config.port < 1 || config.port > 65535)) {
-    warnings.push(`Invalid value for 'port': ${config.port} (must be 1-65535)`)
-  }
-
-  if (typeof config.maxSessions === 'number' && config.maxSessions < 1) {
-    warnings.push(`Invalid value for 'maxSessions': ${config.maxSessions} (must be >= 1)`)
+  // Range validation for the simple numeric fields (audit P2-6) — declarative
+  // table + shared validateRange; the Number.isFinite guard skips fields whose
+  // type the loop above already flagged. Duration/cross-field/map cases below
+  // stay bespoke.
+  for (const check of NUMERIC_RANGE_CHECKS) {
+    validateRange(warnings, check.key, config[check.key], check)
   }
 
   if (typeof config.sessionTimeout === 'string' && config.sessionTimeout.length > 0) {
@@ -706,26 +746,6 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid duration format for 'sessionTimeout': '${config.sessionTimeout}'`)
     } else if (ms < 30_000) {
       warnings.push(`Value for 'sessionTimeout' is too low: '${config.sessionTimeout}' (minimum 30s)`)
-    }
-  }
-
-  if (typeof config.maxPayload === 'number') {
-    if (config.maxPayload < 1024) {
-      warnings.push(`Invalid value for 'maxPayload': ${config.maxPayload} (minimum 1KB / 1024 bytes)`)
-    } else if (config.maxPayload > 100 * 1024 * 1024) {
-      warnings.push(`Invalid value for 'maxPayload': ${config.maxPayload} (maximum 100MB)`)
-    }
-  }
-
-  // #3749: result-timeout range. Below 30s a slow tool reliably tips into
-  // false positives; above 24h the safety net is effectively disabled.
-  // Number.isFinite rejects NaN/Infinity (typeof both === 'number') so a
-  // sentinel-like sentinel can't silently slip past the bounds check.
-  if (Number.isFinite(config.resultTimeoutMs)) {
-    if (config.resultTimeoutMs < 30_000) {
-      warnings.push(`Invalid value for 'resultTimeoutMs': ${config.resultTimeoutMs} (minimum 30000 / 30s)`)
-    } else if (config.resultTimeoutMs > 24 * 60 * 60 * 1000) {
-      warnings.push(`Invalid value for 'resultTimeoutMs': ${config.resultTimeoutMs} (maximum 86400000 / 24h)`)
     }
   }
 
@@ -742,26 +762,6 @@ export function validateConfig(config, verbose = false) {
       warnings.push(`Invalid value for 'hardTimeoutMs': ${config.hardTimeoutMs} (maximum 86400000 / 24h)`)
     } else if (Number.isFinite(config.resultTimeoutMs) && config.hardTimeoutMs < config.resultTimeoutMs) {
       warnings.push(`'hardTimeoutMs' (${config.hardTimeoutMs}) is less than 'resultTimeoutMs' (${config.resultTimeoutMs}) — the soft warning will never fire before the hard kill`)
-    }
-  }
-
-  // #4467: stream-stall range. 0 is valid (disable). Otherwise 5s-24h.
-  if (Number.isFinite(config.streamStallTimeoutMs) && config.streamStallTimeoutMs !== 0) {
-    if (config.streamStallTimeoutMs < 5_000) {
-      warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (minimum 5000 / 5s; set 0 to disable)`)
-    } else if (config.streamStallTimeoutMs > 24 * 60 * 60 * 1000) {
-      warnings.push(`Invalid value for 'streamStallTimeoutMs': ${config.streamStallTimeoutMs} (maximum 86400000 / 24h)`)
-    }
-  }
-
-  // #5288: background-shell hard-quiesce range. 0 is valid (disable). Otherwise
-  // 60s-24h — below the 60s advisory quiesce window makes no sense, above 24h
-  // is the shared ceiling.
-  if (Number.isFinite(config.backgroundShellHardQuiesceMs) && config.backgroundShellHardQuiesceMs !== 0) {
-    if (config.backgroundShellHardQuiesceMs < 60_000) {
-      warnings.push(`Invalid value for 'backgroundShellHardQuiesceMs': ${config.backgroundShellHardQuiesceMs} (minimum 60000 / 60s; set 0 to disable)`)
-    } else if (config.backgroundShellHardQuiesceMs > 24 * 60 * 60 * 1000) {
-      warnings.push(`Invalid value for 'backgroundShellHardQuiesceMs': ${config.backgroundShellHardQuiesceMs} (maximum 86400000 / 24h)`)
     }
   }
 
