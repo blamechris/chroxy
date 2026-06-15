@@ -433,6 +433,28 @@ function validateRancherBlock(rancher, warnings) {
 /** #5413: decimal 24-bit RGB range for Discord embed sidebar colors. */
 const MAX_DISCORD_COLOR = 16777215
 
+// #5453: the recognised `notifications.discord` config knobs. The unknown-key
+// check warns on anything outside this set so a typo (e.g. `botname`) or a
+// test-injection seam (`resolveWebhookUrl`/`sleepImpl`/`now`, reachable via the
+// `{ ...config.notifications.discord }` spread into the sink) surfaces instead of
+// silently no-op'ing / failing the sink closed. Keep in sync with the per-key
+// validation below. The webhook URL is a SECRET (its own warning) — not a knob.
+const DISCORD_SUPPORTED_KEYS = new Set([
+  'botName', 'billingAlerts', 'defaultColor', 'permissionColor', 'errorColor',
+  'colors', 'updateThrottleMs', 'heartbeatIntervalMs', 'pruneAfterMs',
+  // #5676 status-watchdog tunables — the sink reads these from the config spread
+  // (discord-webhook-sink.js: staleAfterMs/offlineAfterMs, default 10m/30m), so
+  // they are real config knobs, not test seams (PR #5845 review).
+  'staleAfterMs', 'offlineAfterMs',
+  // State-store paths: the caller (server-cli.js / supervisor.js) defaults these
+  // then lets the config spread override them, and push.js honors them
+  // (statePath → DiscordWebhookSink, billingStatePath → DiscordBillingSink). They
+  // are string value knobs (override → works), unlike the function test seams, so
+  // an operator relocating them must not warn as unknown (PR #5845 review).
+  'statePath', 'billingStatePath',
+])
+const DISCORD_SECRET_KEYS = ['webhookUrl', 'webhook', 'url']
+
 /**
  * #5413: validate the `notifications.discord` block (the Discord
  * status-embed sink's non-secret knobs). Every field is optional; only
@@ -508,7 +530,7 @@ function validateDiscordNotificationsBlock(discord, warnings) {
 
   // Secrets do not belong in config.json (not permission-restricted, echoed
   // in verbose output). Warn loudly and point at the right place.
-  for (const key of ['webhookUrl', 'webhook', 'url']) {
+  for (const key of DISCORD_SECRET_KEYS) {
     if (Object.prototype.hasOwnProperty.call(discord, key)) {
       warnings.push(
         `'notifications.discord.${key}' is not supported: the webhook URL is a secret — set CHROXY_DISCORD_WEBHOOK_URL or add "discordWebhookUrl" to ~/.chroxy/credentials.json (mode 0600) instead`,
@@ -575,6 +597,27 @@ function validateDiscordNotificationsBlock(discord, warnings) {
     } else if (v !== 0 && v < 60_000) {
       warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': ${v} (minimum 60000 / 60s; set 0 to disable pruning — the sink falls back to its default)`)
     }
+  }
+
+  // #5676 status-watchdog tunables: the sink honors any finite >= 0 value, else
+  // falls back to its default (10m stale / 30m offline). Validate to keep
+  // DISCORD_SUPPORTED_KEYS in sync with the per-key checks (PR #5845 review).
+  for (const key of ['staleAfterMs', 'offlineAfterMs']) {
+    if (Object.prototype.hasOwnProperty.call(discord, key)) {
+      const v = discord[key]
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+        warnings.push(`Invalid value for 'notifications.discord.${key}': expected a number >= 0 (the sink falls back to its default), got ${JSON.stringify(v)}`)
+      }
+    }
+  }
+
+  // #5453: warn on any unrecognised key. A typo'd knob is silently ignored
+  // (operator gets default behavior with no hint), and a test-seam key spread
+  // into the sink constructor fails it closed — both silent foot-guns. Skip the
+  // secret keys, which already got their specific "it's a secret" warning above.
+  for (const key of Object.keys(discord)) {
+    if (DISCORD_SUPPORTED_KEYS.has(key) || DISCORD_SECRET_KEYS.includes(key)) continue
+    warnings.push(`Invalid value for 'notifications.discord.${key}': unknown key (supported: ${[...DISCORD_SUPPORTED_KEYS].join(', ')})`)
   }
 }
 
