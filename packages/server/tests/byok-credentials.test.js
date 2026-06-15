@@ -1,29 +1,36 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, statSync, readFileSync, existsSync, readdirSync } from 'node:fs'
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
   resolveAnthropicApiKey,
   maskApiKey,
-  writeAnthropicApiKey,
-  clearAnthropicApiKey,
   getAnthropicApiKeyStatus,
   hasStoredCredentials,
 } from '../src/byok-credentials.js'
+import {
+  setStoredCredential,
+  deleteStoredCredential,
+  _setCredentialKeychainForTests,
+} from '../src/credential-store.js'
 
 /**
- * Tests for byok-credentials.js — env-var precedence, file-fallback,
- * permission enforcement (0600 required), key masking.
+ * Tests for byok-credentials.js — env-var precedence, store-backed file
+ * fallback (#5867: reads now go through the cipher-aware credential-store), the
+ * 0600 permission boundary, and key masking.
  *
  * Run with HOME pointed at a tmpdir so we never touch the real
- * ~/.chroxy/credentials.json on the dev machine.
+ * ~/.chroxy/credentials.json. The test bootstrap (_setup.mjs) sets
+ * CHROXY_CRED_DISABLE_KEYCHAIN=1, so the store writes 0600 plaintext by
+ * default; the encrypted round-trip test injects an in-memory keychain.
  */
 
 describe('byok-credentials', () => {
   let tmpHome
   let originalHome
   let originalApiKey
+  const credPath = () => join(tmpHome, '.chroxy', 'credentials.json')
 
   beforeEach(() => {
     tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-byok-cred-test-'))
@@ -34,6 +41,7 @@ describe('byok-credentials', () => {
   })
 
   afterEach(() => {
+    _setCredentialKeychainForTests(null)
     if (originalHome) process.env.HOME = originalHome
     else delete process.env.HOME
     if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
@@ -57,23 +65,31 @@ describe('byok-credentials', () => {
       assert.match(result.reason, /does not exist/)
     })
 
-    it('reads file when env not set and file is mode 0600', () => {
-      const chroxyDir = join(tmpHome, '.chroxy')
-      const credPath = join(chroxyDir, 'credentials.json')
-      mkdirSync(chroxyDir, { recursive: true })
-      writeFileSync(credPath, JSON.stringify({ anthropicApiKey: 'sk-ant-from-file' }))
-      chmodSync(credPath, 0o600)
+    it('reads a key stored via the canonical store (mode 0600)', () => {
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-from-store')
       const result = resolveAnthropicApiKey()
-      assert.equal(result.key, 'sk-ant-from-file')
+      assert.equal(result.key, 'sk-ant-from-store')
       assert.equal(result.source, 'file')
     })
 
-    it('refuses to read a 0644 credentials file (security boundary)', () => {
+    it('reads a legacy { anthropicApiKey } file written by the pre-#5867 path', () => {
       const chroxyDir = join(tmpHome, '.chroxy')
-      const credPath = join(chroxyDir, 'credentials.json')
       mkdirSync(chroxyDir, { recursive: true })
-      writeFileSync(credPath, JSON.stringify({ anthropicApiKey: 'sk-ant-should-not-load' }))
-      chmodSync(credPath, 0o644)
+      writeFileSync(credPath(), JSON.stringify({ anthropicApiKey: 'sk-ant-legacy-alias' }))
+      chmodSync(credPath(), 0o600)
+      const result = resolveAnthropicApiKey()
+      assert.equal(result.key, 'sk-ant-legacy-alias')
+      assert.equal(result.source, 'file')
+    })
+
+    // POSIX-only: the canonical store's readStore() skips the mode check on
+    // win32 (NTFS ACLs don't map to POSIX bits, #4144), so a 0644 file IS read
+    // there — the same posture every other credential already has on Windows.
+    it('refuses to read a 0644 credentials file (security boundary)', { skip: process.platform === 'win32' }, () => {
+      const chroxyDir = join(tmpHome, '.chroxy')
+      mkdirSync(chroxyDir, { recursive: true })
+      writeFileSync(credPath(), JSON.stringify({ anthropicApiKey: 'sk-ant-should-not-load' }))
+      chmodSync(credPath(), 0o644)
       const result = resolveAnthropicApiKey()
       assert.equal(result.key, null)
       assert.match(result.reason, /mode 644/)
@@ -82,38 +98,79 @@ describe('byok-credentials', () => {
 
     it('returns "none" when credentials.json is unparseable', () => {
       const chroxyDir = join(tmpHome, '.chroxy')
-      const credPath = join(chroxyDir, 'credentials.json')
       mkdirSync(chroxyDir, { recursive: true })
-      writeFileSync(credPath, 'not valid json {')
-      chmodSync(credPath, 0o600)
+      writeFileSync(credPath(), 'not valid json {')
+      chmodSync(credPath(), 0o600)
       const result = resolveAnthropicApiKey()
       assert.equal(result.key, null)
       assert.match(result.reason, /unreadable or not valid JSON/)
     })
 
-    it('returns "none" when credentials.json lacks anthropicApiKey field', () => {
-      const chroxyDir = join(tmpHome, '.chroxy')
-      const credPath = join(chroxyDir, 'credentials.json')
-      mkdirSync(chroxyDir, { recursive: true })
-      writeFileSync(credPath, JSON.stringify({ otherKey: 'sk-other' }))
-      chmodSync(credPath, 0o600)
+    it('returns "none" when the store has no Anthropic credential', () => {
+      // A valid, 0600 store with only a sibling key — the file exists and reads
+      // fine, but there is no ANTHROPIC_API_KEY / anthropicApiKey in it.
+      setStoredCredential('GEMINI_API_KEY', 'gem-sibling-value')
       const result = resolveAnthropicApiKey()
       assert.equal(result.key, null)
-      assert.match(result.reason, /missing or empty "anthropicApiKey"/)
+      assert.match(result.reason, /no Anthropic credential is stored/)
     })
 
-    it('prefers env var over file when both are present', () => {
-      // Demonstrates the priority order — env wins. Allows users to
-      // override a saved file by exporting the env var temporarily.
-      const chroxyDir = join(tmpHome, '.chroxy')
-      const credPath = join(chroxyDir, 'credentials.json')
-      mkdirSync(chroxyDir, { recursive: true })
-      writeFileSync(credPath, JSON.stringify({ anthropicApiKey: 'sk-ant-from-file' }))
-      chmodSync(credPath, 0o600)
+    it('prefers env var over store when both are present', () => {
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-from-store')
       process.env.ANTHROPIC_API_KEY = 'sk-ant-from-env'
       const result = resolveAnthropicApiKey()
       assert.equal(result.key, 'sk-ant-from-env')
       assert.equal(result.source, 'env')
+    })
+  })
+
+  // #5867 — the BYOK set/clear path now uses the canonical store. These tests
+  // pin the two acceptance criteria the legacy whole-file overwrite/unlink
+  // violated: sibling credentials survive, and a set→read round-trip works in
+  // BOTH plaintext and encrypted (keychain) modes.
+  describe('canonical-store integration (#5867)', () => {
+    it('setting the BYOK key preserves a sibling provider credential', () => {
+      setStoredCredential('GEMINI_API_KEY', 'gem-keep-me')
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-byok-set')
+      const parsed = JSON.parse(readFileSync(credPath(), 'utf8'))
+      assert.equal(parsed.GEMINI_API_KEY, 'gem-keep-me', 'sibling key must survive the BYOK write')
+      assert.equal(resolveAnthropicApiKey().key, 'sk-ant-byok-set')
+    })
+
+    it('clearing the BYOK key preserves a sibling and leaves the file intact', () => {
+      setStoredCredential('GEMINI_API_KEY', 'gem-keep-me')
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-byok-set')
+      deleteStoredCredential('ANTHROPIC_API_KEY')
+      assert.ok(existsSync(credPath()), 'file must remain while a sibling exists')
+      const parsed = JSON.parse(readFileSync(credPath(), 'utf8'))
+      assert.equal(parsed.GEMINI_API_KEY, 'gem-keep-me')
+      assert.equal(resolveAnthropicApiKey().key, null, 'Anthropic key is gone')
+    })
+
+    it('clearing the only credential removes the file', () => {
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-only')
+      deleteStoredCredential('ANTHROPIC_API_KEY')
+      assert.equal(existsSync(credPath()), false)
+    })
+
+    it('round-trips a set→read in ENCRYPTED mode and never writes plaintext', () => {
+      // Drive the encrypted-at-rest path with an in-memory keychain (the
+      // getToken/setToken interface credential-cipher.js uses).
+      const store = new Map()
+      _setCredentialKeychainForTests({
+        isKeychainAvailable: () => true,
+        getToken: (service) => store.get(service) ?? null,
+        setToken: (token, service) => { store.set(service, token) },
+        deleteToken: (service) => { store.delete(service) },
+      })
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-encrypted-roundtrip')
+      // On-disk bytes must be an envelope, NOT the plaintext key.
+      const raw = readFileSync(credPath(), 'utf8')
+      assert.equal(raw.includes('sk-ant-encrypted-roundtrip'), false, 'key must not be on disk in plaintext')
+      // Decryption-aware read resolves it.
+      const result = resolveAnthropicApiKey()
+      assert.equal(result.key, 'sk-ant-encrypted-roundtrip')
+      assert.equal(result.source, 'file')
     })
   })
 
@@ -122,7 +179,6 @@ describe('byok-credentials', () => {
       const masked = maskApiKey('sk-ant-api03-abcdefghijklmnopqrstuvwxyz')
       assert.match(masked, /^sk-ant-api03/)
       assert.match(masked, /\[\d+ chars redacted\]$/)
-      // Critical: the full key must not appear in the masked output.
       assert.equal(masked.includes('abcdefghijklmnopqrstuvwxyz'), false)
     })
 
@@ -134,14 +190,10 @@ describe('byok-credentials', () => {
     })
 
     it('never echoes the full key — even for unexpectedly short inputs', () => {
-      // Pre-fix, slice(0, 12) returned the entire string for any input
-      // shorter than 12 chars, leaking the whole secret into logs.
-      // Caught by Copilot review on PR #4055.
       const short = 'sk-ant-x'  // 8 chars
       const masked = maskApiKey(short)
       assert.equal(masked.includes(short), false, 'must not contain the full short key')
       assert.match(masked, /\[\d+ chars redacted\]$/)
-      // The visible prefix should be at most one-third of the input.
       const visibleSegment = masked.split('...')[0]
       assert.ok(visibleSegment.length <= Math.floor(short.length / 3),
         `visible prefix (${visibleSegment.length}) must be <= 1/3 of input (${Math.floor(short.length / 3)})`)
@@ -150,100 +202,13 @@ describe('byok-credentials', () => {
     it('still produces a useful prefix for normal-length keys', () => {
       const real = 'sk-ant-api03-' + 'a'.repeat(95)  // ~108 chars, claude length
       const masked = maskApiKey(real)
-      // Still 12 chars of useful prefix for grepping logs.
       assert.match(masked, /^sk-ant-api03/)
       assert.match(masked, /\[\d+ chars redacted\]$/)
       assert.equal(masked.includes(real.slice(15)), false)
     })
   })
 
-  // POSIX-only: chmod / 0o600 don't map cleanly to NTFS ACLs, so the file
-  // mode assertions are skipped on win32. The behavior under test still
-  // runs there (the rename + write); only the strict 0o600 check is POSIX.
-  const isPosix = process.platform !== 'win32'
-
-  describe('writeAnthropicApiKey (#4052)', () => {
-    it('writes the key to ~/.chroxy/credentials.json with mode 0600 (POSIX only)', { skip: !isPosix }, () => {
-      const credPath = join(tmpHome, '.chroxy', 'credentials.json')
-      writeAnthropicApiKey('sk-ant-paste-test')
-      assert.ok(existsSync(credPath), 'file must exist after write')
-      const mode = statSync(credPath).mode & 0o777
-      assert.equal(mode, 0o600, `mode must be 0600, got ${mode.toString(8)}`)
-      const parsed = JSON.parse(readFileSync(credPath, 'utf8'))
-      assert.equal(parsed.anthropicApiKey, 'sk-ant-paste-test')
-    })
-
-    it('writes the key file regardless of platform (cross-platform)', () => {
-      const credPath = join(tmpHome, '.chroxy', 'credentials.json')
-      writeAnthropicApiKey('sk-ant-cross-platform')
-      assert.ok(existsSync(credPath))
-      const parsed = JSON.parse(readFileSync(credPath, 'utf8'))
-      assert.equal(parsed.anthropicApiKey, 'sk-ant-cross-platform')
-    })
-
-    it('creates the ~/.chroxy directory if missing', () => {
-      assert.equal(existsSync(join(tmpHome, '.chroxy')), false)
-      writeAnthropicApiKey('sk-ant-mkdir-test')
-      assert.ok(existsSync(join(tmpHome, '.chroxy')))
-      if (isPosix) {
-        assert.equal(statSync(join(tmpHome, '.chroxy')).mode & 0o777, 0o700,
-          '.chroxy dir should be 0700 so creds aren\'t enumerable')
-      }
-    })
-
-    it('overwrites an existing credentials file atomically', () => {
-      writeAnthropicApiKey('sk-ant-first')
-      writeAnthropicApiKey('sk-ant-second')
-      const parsed = JSON.parse(readFileSync(join(tmpHome, '.chroxy', 'credentials.json'), 'utf8'))
-      assert.equal(parsed.anthropicApiKey, 'sk-ant-second')
-      if (isPosix) {
-        const mode = statSync(join(tmpHome, '.chroxy', 'credentials.json')).mode & 0o777
-        assert.equal(mode, 0o600, 'mode must remain 0600 on overwrite')
-      }
-    })
-
-    it('rejects empty / non-string keys', () => {
-      assert.throws(() => writeAnthropicApiKey(''), /required/i)
-      assert.throws(() => writeAnthropicApiKey(null), /required/i)
-      assert.throws(() => writeAnthropicApiKey(undefined), /required/i)
-      assert.throws(() => writeAnthropicApiKey(123), /required/i)
-    })
-
-    it('writes a key that resolveAnthropicApiKey can then read back', () => {
-      writeAnthropicApiKey('sk-ant-roundtrip')
-      const result = resolveAnthropicApiKey()
-      assert.equal(result.key, 'sk-ant-roundtrip')
-      assert.equal(result.source, 'file')
-    })
-
-    it('does not leave any .tmp.* files in ~/.chroxy after a successful write', () => {
-      // The atomic-rename path uses a temp file; after a normal success
-      // there should be no leftover *.tmp.* entries.
-      writeAnthropicApiKey('sk-ant-no-tmp-leftover')
-      const credDir = join(tmpHome, '.chroxy')
-      const entries = readDir(credDir)
-      const stale = entries.filter((e) => e.includes('.tmp.'))
-      assert.equal(stale.length, 0, `unexpected tmp files: ${stale.join(', ')}`)
-    })
-  })
-
-  describe('clearAnthropicApiKey (#4052)', () => {
-    it('removes the credentials file', () => {
-      writeAnthropicApiKey('sk-ant-to-be-cleared')
-      const credPath = join(tmpHome, '.chroxy', 'credentials.json')
-      assert.ok(existsSync(credPath))
-      clearAnthropicApiKey()
-      assert.equal(existsSync(credPath), false)
-    })
-
-    it('is a no-op if the file does not exist', () => {
-      // Should not throw.
-      clearAnthropicApiKey()
-      assert.equal(existsSync(join(tmpHome, '.chroxy', 'credentials.json')), false)
-    })
-  })
-
-  describe('getAnthropicApiKeyStatus (#4052)', () => {
+  describe('getAnthropicApiKeyStatus', () => {
     it('reports "missing" when neither env nor file present', () => {
       const s = getAnthropicApiKeyStatus()
       assert.equal(s.status, 'missing')
@@ -253,8 +218,6 @@ describe('byok-credentials', () => {
     })
 
     it('reports "set" with source=env when env var is set', () => {
-      // Use a realistic-length key so maskApiKey emits the full 12-char prefix
-      // (short keys cap visible at floor(len/3) by design).
       const longKey = 'sk-ant-api03-' + 'a'.repeat(95)
       process.env.ANTHROPIC_API_KEY = longKey
       const s = getAnthropicApiKeyStatus()
@@ -264,9 +227,8 @@ describe('byok-credentials', () => {
       assert.equal(s.masked.includes(longKey.slice(15)), false, 'must not echo full key')
     })
 
-    it('reports "set" with source=file when key is in credentials.json', () => {
-      const longKey = 'sk-ant-api03-' + 'b'.repeat(95)
-      writeAnthropicApiKey(longKey)
+    it('reports "set" with source=file when key is in the store', () => {
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-api03-' + 'b'.repeat(95))
       const s = getAnthropicApiKeyStatus()
       assert.equal(s.status, 'set')
       assert.equal(s.source, 'file')
@@ -274,14 +236,11 @@ describe('byok-credentials', () => {
     })
 
     it('reports fileExists=false when no credentials file is on disk (#4144)', () => {
-      const s = getAnthropicApiKeyStatus()
-      assert.equal(s.fileExists, false)
+      assert.equal(getAnthropicApiKeyStatus().fileExists, false)
     })
 
     it('reports fileExists=true when env wins precedence but file is on disk (#4144 stale-file)', () => {
-      // Plant a file and an env var. Env wins; the dashboard still needs
-      // to know the shadowed file exists so it can offer Remove.
-      writeAnthropicApiKey('sk-ant-api03-' + 'c'.repeat(95))
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-api03-' + 'c'.repeat(95))
       process.env.ANTHROPIC_API_KEY = 'sk-ant-env-' + 'd'.repeat(95)
       const s = getAnthropicApiKeyStatus()
       assert.equal(s.status, 'set')
@@ -290,7 +249,7 @@ describe('byok-credentials', () => {
     })
 
     it('reports fileExists=true when only the file is the key source (#4144 consistency)', () => {
-      writeAnthropicApiKey('sk-ant-api03-' + 'e'.repeat(95))
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-api03-' + 'e'.repeat(95))
       const s = getAnthropicApiKeyStatus()
       assert.equal(s.source, 'file')
       assert.equal(s.fileExists, true)
@@ -302,24 +261,17 @@ describe('byok-credentials', () => {
       assert.equal(hasStoredCredentials(), false)
     })
 
-    it('returns true after writeAnthropicApiKey lands a file', () => {
-      writeAnthropicApiKey('sk-ant-api03-' + 'f'.repeat(95))
+    it('returns true after a store write lands a file', () => {
+      setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-api03-' + 'f'.repeat(95))
       assert.equal(hasStoredCredentials(), true)
     })
 
     it('returns true even when the file mode is wrong (resolve would refuse it)', () => {
-      // Plant a file with mode 0644 — resolveAnthropicApiKey will refuse
-      // to read it, but the user still has a file on disk to clear.
-      const credsPath = join(tmpHome, '.chroxy', 'credentials.json')
-      mkdirSync(join(tmpHome, '.chroxy'), { recursive: true })
-      writeFileSync(credsPath, '{"anthropicApiKey":"x"}', { mode: 0o644 })
-      chmodSync(credsPath, 0o644)
-      assert.equal(hasStoredCredentials(), true,
-        'presence is independent of resolution validity')
+      const chroxyDir = join(tmpHome, '.chroxy')
+      mkdirSync(chroxyDir, { recursive: true })
+      writeFileSync(credPath(), '{"anthropicApiKey":"x"}', { mode: 0o644 })
+      chmodSync(credPath(), 0o644)
+      assert.equal(hasStoredCredentials(), true, 'presence is independent of resolution validity')
     })
   })
 })
-
-function readDir(p) {
-  try { return readdirSync(p) } catch { return [] }
-}

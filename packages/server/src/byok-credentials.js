@@ -3,19 +3,24 @@
  *
  * Priority order:
  *   1. process.env.ANTHROPIC_API_KEY
- *   2. ~/.chroxy/credentials.json — { anthropicApiKey: "sk-ant-..." }
- *      File MUST be mode 0600. We refuse to read it otherwise (security
- *      boundary: API keys are user-pasted secrets and should not be
- *      world-readable; if the user accidentally chmodded the file to 0644
- *      we'd rather fail loudly than silently expose the key).
+ *   2. the canonical credential store (`credential-store.js`,
+ *      ~/.chroxy/credentials.json, mode 0600) — decryption-aware (#5154) and
+ *      honoring the legacy `anthropicApiKey` alias for files written by the
+ *      pre-#5867 single-key BYOK path.
+ *
+ * #5867: writes/clears now go through `setStoredCredential` /
+ * `deleteStoredCredential` (merge + at-rest encryption), so a BYOK set/clear no
+ * longer clobbers sibling provider keys or downgrades an encrypted store to
+ * plaintext. This module is now read-only (resolve + status + mask); the WS
+ * handlers call the store directly.
  *
  * Never logged. The redactor at logger.js scrubs `sk-ant-` and `Bearer`
  * patterns before any log line lands on disk.
  */
-import { statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
-import { join, dirname } from 'path'
+import { existsSync } from 'fs'
+import { join } from 'path'
 import { homedir } from 'os'
-import { readCredentialJsonField } from './credentials-file.js'
+import { resolveStoredCredentialWithMeta } from './credential-store.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home; if this were captured at module load, the
@@ -25,7 +30,10 @@ function credentialsFilePath() {
 }
 
 /**
- * Resolve the Anthropic API key for a BYOK session.
+ * Resolve the Anthropic API key for a BYOK session. Env var wins; otherwise the
+ * cipher-aware credential store. The `reason` (when missing) preserves the
+ * store's read distinctions: bad mode, keychain-locked, corrupt envelope,
+ * file-absent, or present-but-no-Anthropic-credential.
  *
  * @returns {{ key: string, source: 'env' | 'file' } | { key: null, source: 'none', reason: string }}
  */
@@ -35,96 +43,20 @@ export function resolveAnthropicApiKey() {
     return { key: envKey, source: 'env' }
   }
 
+  const { value, fileExists, error } = resolveStoredCredentialWithMeta('ANTHROPIC_API_KEY')
+  if (value) {
+    return { key: value, source: 'file' }
+  }
   const CREDENTIALS_FILE = credentialsFilePath()
-  const result = readCredentialJsonField(CREDENTIALS_FILE, 'anthropicApiKey')
-  if (result.key !== null) {
-    return { key: result.key, source: 'file' }
+  let reason
+  if (error) {
+    reason = error
+  } else if (!fileExists) {
+    reason = `ANTHROPIC_API_KEY not set and ${CREDENTIALS_FILE} does not exist`
+  } else {
+    reason = `ANTHROPIC_API_KEY not set and no Anthropic credential is stored in ${CREDENTIALS_FILE}`
   }
-  // Preserve the env-var-prefixed ENOENT hint; every other reason is verbatim.
-  const reason = result.code === 'enoent'
-    ? `ANTHROPIC_API_KEY not set and ${CREDENTIALS_FILE} does not exist`
-    : result.reason
   return { key: null, source: 'none', reason }
-}
-
-/**
- * Persist the user's Anthropic API key to ~/.chroxy/credentials.json
- * atomically with mode 0600.
- *
- * Atomicity: write to `credentials.json.tmp.<pid>.<rand>`, chmod 0600,
- * fsync isn't strictly needed for this size, then rename over the
- * target. A crash between write and rename leaves the old file intact.
- *
- * Post-write the mode is re-stat'd and we throw if it didn't take. This
- * guards against an unexpected umask making the file world-readable even
- * after chmod (rare). The security boundary is: refuse a bad state, do
- * not log a warning and continue.
- *
- * Windows note: chmod / 0600 don't map cleanly to NTFS ACLs, so the mode
- * verification is POSIX-only. On win32 the rename and chmod still run
- * (best-effort) but the strict 0o600 assertion is skipped — see #4144.
- *
- * @param {string} key  the `sk-ant-...` API key
- * @throws if key is missing/non-string, or if the post-write mode != 0600 on POSIX
- */
-export function writeAnthropicApiKey(key) {
-  if (typeof key !== 'string' || key.length === 0) {
-    throw new Error('writeAnthropicApiKey: key is required (non-empty string)')
-  }
-  const target = credentialsFilePath()
-  const dir = dirname(target)
-  // 0o700 on the dir so creds aren't enumerable to other local users.
-  mkdirSync(dir, { recursive: true, mode: 0o700 })
-  // Existing dir may have a more-permissive mode from before this code
-  // existed — tighten it. POSIX-only (Windows ACLs handle differently).
-  if (process.platform !== 'win32') {
-    try { chmodSync(dir, 0o700) } catch { /* best-effort */ }
-  }
-
-  const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`
-  let renamed = false
-  try {
-    // Open with mode 0600 directly so the brief window before chmod
-    // doesn't expose the key as 0644 (umask-dependent default).
-    writeFileSync(tmp, JSON.stringify({ anthropicApiKey: key }, null, 2), { mode: 0o600 })
-    if (process.platform !== 'win32') {
-      chmodSync(tmp, 0o600)
-    }
-    // win32 renameSync can't atomically replace an existing destination —
-    // unlink the target first so the move semantics match POSIX. The
-    // window between unlink and rename is tiny; an OS-level crash there
-    // can leave the file missing but never world-readable.
-    if (process.platform === 'win32' && existsSync(target)) {
-      try { unlinkSync(target) } catch { /* */ }
-    }
-    renameSync(tmp, target)
-    renamed = true
-    // Verify the mode survived the rename. POSIX-only: on win32 the mode
-    // bits don't reflect NTFS ACLs, so a strict 0o600 check would always
-    // fail and refuse to write valid credentials.
-    if (process.platform !== 'win32') {
-      const perms = statSync(target).mode & 0o777
-      if (perms !== 0o600) {
-        try { unlinkSync(target) } catch { /* */ }
-        throw new Error(`credentials file ended up with mode ${perms.toString(8)} after write; refused`)
-      }
-    }
-  } finally {
-    if (!renamed && existsSync(tmp)) {
-      try { unlinkSync(tmp) } catch { /* */ }
-    }
-  }
-}
-
-/**
- * Remove the stored credentials file. No-op when missing. Does not touch
- * the parent ~/.chroxy directory.
- */
-export function clearAnthropicApiKey() {
-  const target = credentialsFilePath()
-  try { unlinkSync(target) } catch (err) {
-    if (err.code !== 'ENOENT') throw err
-  }
 }
 
 /**

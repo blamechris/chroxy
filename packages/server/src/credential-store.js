@@ -428,6 +428,43 @@ export function getStoredCredential(key) {
 }
 
 /**
+ * #5867 — resolve a KNOWN credential's value AND the read metadata in one
+ * cipher-aware, alias-aware read. Like `getStoredCredential` but also returns
+ * the `readStore` metadata (`fileExists`, `error`, `keychainUnavailable`) so a
+ * caller can build a status `reason` that preserves the bad-mode /
+ * keychain-locked / corrupt-envelope / file-absent distinctions WITHOUT this
+ * module logging or echoing the value. The raw `value` is returned only to the
+ * caller. Honors the legacy `anthropicApiKey` alias like `getStoredCredential`.
+ *
+ * Used by byok-credentials.resolveAnthropicApiKey so the BYOK paid-auth read
+ * path goes through the encryption-aware store instead of a plaintext re-read.
+ *
+ * @param {string} key
+ * @returns {{ value: string | null, fileExists: boolean, error: string | null, keychainUnavailable: boolean }}
+ */
+export function resolveStoredCredentialWithMeta(key) {
+  if (!isKnownCredentialKey(key)) {
+    return { value: null, fileExists: false, error: null, keychainUnavailable: false }
+  }
+  const { data, fileExists, error, keychainUnavailable } = readStore()
+  if (error) {
+    return { value: null, fileExists, error, keychainUnavailable: Boolean(keychainUnavailable) }
+  }
+  const canonical = data[key]
+  if (typeof canonical === 'string' && canonical.length > 0) {
+    return { value: canonical, fileExists, error: null, keychainUnavailable: false }
+  }
+  const legacyField = LEGACY_FIELD_BY_KEY[key]
+  if (legacyField) {
+    const legacy = data[legacyField]
+    if (typeof legacy === 'string' && legacy.length > 0) {
+      return { value: legacy, fileExists, error: null, keychainUnavailable: false }
+    }
+  }
+  return { value: null, fileExists, error: null, keychainUnavailable: false }
+}
+
+/**
  * #5490 — read a single string field out of the credentials store, going
  * through the SAME cipher-aware reader (`readStore`) the API-key resolvers use:
  * 0600 mode enforcement, encrypted-envelope decryption, and the
