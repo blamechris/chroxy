@@ -433,6 +433,18 @@ function validateRancherBlock(rancher, warnings) {
 /** #5413: decimal 24-bit RGB range for Discord embed sidebar colors. */
 const MAX_DISCORD_COLOR = 16777215
 
+// #5453: the recognised `notifications.discord` config knobs. The unknown-key
+// check warns on anything outside this set so a typo (e.g. `botname`) or a
+// test-injection seam (`resolveWebhookUrl`/`sleepImpl`/`now`, reachable via the
+// `{ ...config.notifications.discord }` spread into the sink) surfaces instead of
+// silently no-op'ing / failing the sink closed. Keep in sync with the per-key
+// validation below. The webhook URL is a SECRET (its own warning) — not a knob.
+const DISCORD_SUPPORTED_KEYS = new Set([
+  'botName', 'billingAlerts', 'defaultColor', 'permissionColor', 'errorColor',
+  'colors', 'updateThrottleMs', 'heartbeatIntervalMs', 'pruneAfterMs',
+])
+const DISCORD_SECRET_KEYS = ['webhookUrl', 'webhook', 'url']
+
 /**
  * #5413: validate the `notifications.discord` block (the Discord
  * status-embed sink's non-secret knobs). Every field is optional; only
@@ -508,7 +520,7 @@ function validateDiscordNotificationsBlock(discord, warnings) {
 
   // Secrets do not belong in config.json (not permission-restricted, echoed
   // in verbose output). Warn loudly and point at the right place.
-  for (const key of ['webhookUrl', 'webhook', 'url']) {
+  for (const key of DISCORD_SECRET_KEYS) {
     if (Object.prototype.hasOwnProperty.call(discord, key)) {
       warnings.push(
         `'notifications.discord.${key}' is not supported: the webhook URL is a secret — set CHROXY_DISCORD_WEBHOOK_URL or add "discordWebhookUrl" to ~/.chroxy/credentials.json (mode 0600) instead`,
@@ -575,6 +587,15 @@ function validateDiscordNotificationsBlock(discord, warnings) {
     } else if (v !== 0 && v < 60_000) {
       warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': ${v} (minimum 60000 / 60s; set 0 to disable pruning — the sink falls back to its default)`)
     }
+  }
+
+  // #5453: warn on any unrecognised key. A typo'd knob is silently ignored
+  // (operator gets default behavior with no hint), and a test-seam key spread
+  // into the sink constructor fails it closed — both silent foot-guns. Skip the
+  // secret keys, which already got their specific "it's a secret" warning above.
+  for (const key of Object.keys(discord)) {
+    if (DISCORD_SUPPORTED_KEYS.has(key) || DISCORD_SECRET_KEYS.includes(key)) continue
+    warnings.push(`Invalid value for 'notifications.discord.${key}': unknown key (supported: ${[...DISCORD_SUPPORTED_KEYS].join(', ')})`)
   }
 }
 
