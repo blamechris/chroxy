@@ -92,6 +92,11 @@ export const STDIN_DROPPED_ESCALATION_EVERY_N = 10
 export const REFUSED_SENDMESSAGE_WARN_INTERVAL_MS = 30 * 1000
 
 export class SdkSession extends BaseSession {
+  // #5858: marks this as a Claude-family provider — the single source of truth
+  // for `isClaudeProvider()` (drives the createSession soft-fallback for stale
+  // model ids + the shared models registry). Docker subclasses inherit it.
+  static claudeFamily = true
+
   /**
    * Human-readable label shown in the startup banner and anywhere else the
    * server needs to name this provider (#2953). Each provider owns its own

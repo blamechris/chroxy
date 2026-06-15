@@ -71,6 +71,11 @@ const OLLAMA_FALLBACK_MODELS = Object.freeze([
 const OLLAMA_ZERO_PRICING = Object.freeze({ input: 0, output: 0, cacheRead: 0, cacheWrite: 0 })
 
 export class OllamaSession extends ClaudeByokSession {
+  // #5858: NOT Claude-family — Ollama rides ClaudeByokSession's agent loop but
+  // serves locally-pulled models (getAllowedModels() returns null, #5418), so
+  // override the inherited flag to false (never soft-fall-back to claude).
+  static claudeFamily = false
+
   static get displayLabel() {
     return 'Ollama (local)'
   }

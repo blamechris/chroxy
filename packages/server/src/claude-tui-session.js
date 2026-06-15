@@ -78,6 +78,10 @@ const log = createLogger('claude-tui-session')
  *   error         { message }
  */
 export class ClaudeTuiSession extends BaseSession {
+  // #5858: Claude-family flag — single source of truth for isClaudeProvider().
+  // This is the DEFAULT_PROVIDER, so its membership is load-bearing (#5855).
+  static claudeFamily = true
+
   static get displayLabel() {
     return 'Claude Code (TUI · subscription)'
   }
