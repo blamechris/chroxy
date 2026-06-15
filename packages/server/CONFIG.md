@@ -518,7 +518,8 @@ The non-secret knobs live under `notifications.discord` in `config.json`:
       "errorColor": 15158332,
       "updateThrottleMs": 15000,
       "heartbeatIntervalMs": 300000,
-      "pruneAfterMs": 86400000
+      "pruneAfterMs": 86400000,
+      "billingAlerts": true
     }
   }
 }
@@ -534,9 +535,11 @@ The non-secret knobs live under `notifications.discord` in `config.json`:
 | `updateThrottleMs` | number | Minimum interval between same-state routine embed updates per project (default `15000`; state changes always go out) |
 | `heartbeatIntervalMs` | number | Elapsed-time footer refresh interval for live embeds — offline embeds are final and never re-PATCHed (default `300000`; `0` disables; minimum `10000`) |
 | `pruneAfterMs` | number | Retention for state-store entries: entries untouched longer than this are dropped on load (default `86400000` / 24h; `0` disables; minimum `60000` / 60s — smaller values fall back to the default, since a retention shorter than the gap between events prunes the tracked message id in between and turns the embed into message-per-event spam; the last Discord message is kept). Heartbeat refreshes don't reset the clock — only real pipeline events do |
+| `billingAlerts` | boolean | Kill-switch for the daemon-global billing-alert message (the 2026-06-15 billing canary). Default `true` when a webhook is configured; `false` keeps billing alerts off Discord while the per-project status embed stays on |
 
 Status-message state (message ids, current state per project) persists in
-`~/.chroxy/discord-webhook-state.json`. Full setup walkthrough:
+`~/.chroxy/discord-webhook-state.json`; the billing-alert message tracks its own
+id in `~/.chroxy/discord-billing-state.json`. Full setup walkthrough:
 [docs/guides/discord-notifications.md](../../docs/guides/discord-notifications.md).
 
 ## Examples

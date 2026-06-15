@@ -37,6 +37,7 @@ import {
   BACKOFF_BASE_MS,
 } from './notifications/expo-push-sink.js'
 import { DiscordWebhookSink } from './notifications/discord-webhook-sink.js'
+import { DiscordBillingSink } from './notifications/discord-billing-sink.js'
 
 const log = createLogger('push')
 
@@ -103,6 +104,9 @@ export class PushManager {
    *   off by default — `isConfigured()` is true only when a webhook URL
    *   resolves from CHROXY_DISCORD_WEBHOOK_URL or the 0600
    *   ~/.chroxy/credentials.json, so unconfigured setups never touch it.
+   *   #5828: also feeds DiscordBillingSink — `billingStatePath` (its own state
+   *   file, kept separate from the status store) and `billingAlerts` (kill-switch,
+   *   default on when a webhook resolves).
    */
   constructor({ storagePath, prefsPath, discord = {} } = {}) {
     // #4541: notification-prefs path. Optional — when omitted PushManager
@@ -125,6 +129,21 @@ export class PushManager {
     // Expo, gated on configuration via the registry's isConfigured() skip.
     this._discordSink = new DiscordWebhookSink(discord)
     this._sinks.register(this._discordSink)
+    // #5828: the Discord billing-alert sink. Separate from the status sink (a
+    // billing warning is daemon-global, not a per-project session state), with
+    // its OWN state file so it never collides with the status store. Shares the
+    // same webhook + gating; off when no webhook resolves or billingAlerts is
+    // false.
+    this._discordBillingSink = new DiscordBillingSink({
+      statePath: discord.billingStatePath || null,
+      botName: discord.botName,
+      billingAlerts: discord.billingAlerts,
+      // Same channel as the status sink — forward the resolver injection seam so
+      // both sinks see the same webhook (undefined in production → the cached
+      // env/credentials resolver).
+      resolveWebhookUrl: discord.resolveWebhookUrl,
+    })
+    this._sinks.register(this._discordBillingSink)
   }
 
   /**

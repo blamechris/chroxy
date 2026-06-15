@@ -45,7 +45,10 @@ export class BillingCanaryMonitor {
    * @param {() => string[]} [opts.getDatacenterPrefixes] - extra IPv4 prefixes
    *   (config.billing.datacenterPrefixes) merged into the egress classifier.
    * @param {(warnings: Array) => void} [opts.notify] - #5828: fired when the warning
-   *   SET changes to a non-empty state (e.g. push notification). Not fired on all-clear.
+   *   SET changes (e.g. push notification). Called with the non-empty warning array
+   *   for each distinct alert state, and once with an EMPTY array on the
+   *   non-empty→empty (all-clear) transition so a sink can repaint "resolved". Not
+   *   fired on an unchanged re-broadcast, nor on a clear that follows startup.
    */
   constructor({ getSessions, getDefaultProvider, getApiKeyAuth, broadcast, intervalMs = DEFAULT_INTERVAL_MS, nowFn = Date.now, logger, resolveEgressIp, getDatacenterPrefixes, notify } = {}) {
     this._getSessions = getSessions || (() => [])
@@ -107,21 +110,33 @@ export class BillingCanaryMonitor {
         this._log?.warn?.(`billing-canary broadcast failed: ${String(err?.message || err)}`)
       }
     }
-    // #5828: fire `notify` (e.g. push) when the warning SET changes to a
-    // non-empty state — once per distinct warning state, NOT on all-clear and
-    // NOT on an unchanged re-broadcast. Signature includes the message so a
-    // meaning change with the same code re-notifies (e.g. DATACENTER_EGRESS with
-    // a new egress IP, or SILENT_METERED_DEFAULT for a different provider) —
-    // mirrors the dashboard dismissal signature.
+    // #5828: fire `notify` (e.g. push) when the warning SET changes — once per
+    // distinct non-empty state, AND once on the non-empty→empty (all-clear)
+    // transition with an empty array, so a downstream sink can repaint a
+    // "resolved" state. NOT fired on an unchanged re-broadcast, and NOT fired on
+    // a clear that follows startup (never warned → no spurious all-clear). The
+    // signature includes the message so a meaning change with the same code
+    // re-notifies (e.g. DATACENTER_EGRESS with a new egress IP, or
+    // SILENT_METERED_DEFAULT for a different provider) — mirrors the dashboard
+    // dismissal signature.
     const warnKey = snapshot.warnings
       .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''} ${w.message ?? ''}`)
       .sort()
       .join('|')
     if (warnKey !== this._lastWarnKey) {
+      const prevKey = this._lastWarnKey // null on startup; a non-empty signature otherwise
       this._lastWarnKey = warnKey
-      if (snapshot.warnings.length > 0 && this._notify) {
+      if (this._notify) {
         try {
-          this._notify(snapshot.warnings)
+          if (snapshot.warnings.length > 0) {
+            this._notify(snapshot.warnings)
+          } else if (prevKey) {
+            // Transition from a non-empty set to all-clear. prevKey is null only
+            // at startup (never warned), so a fresh clean daemon never fires a
+            // spurious all-clear; prevKey can never be '' here (that would equal
+            // the current empty warnKey and skip this branch).
+            this._notify([])
+          }
         } catch (err) {
           this._log?.warn?.(`billing-canary notify failed: ${String(err?.message || err)}`)
         }

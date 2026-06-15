@@ -520,6 +520,13 @@ function validateDiscordNotificationsBlock(discord, warnings) {
     warnings.push(`Invalid value for 'notifications.discord.botName': expected a non-empty string`)
   }
 
+  // #5828: kill-switch for the Discord billing-alert sink. Default ON when a
+  // webhook resolves; set false to keep billing alerts off Discord while the
+  // status embed stays on.
+  if (Object.prototype.hasOwnProperty.call(discord, 'billingAlerts') && typeof discord.billingAlerts !== 'boolean') {
+    warnings.push(`Invalid value for 'notifications.discord.billingAlerts': expected a boolean, got ${JSON.stringify(discord.billingAlerts)}`)
+  }
+
   const isValidColor = (v) => Number.isInteger(v) && v >= 0 && v <= MAX_DISCORD_COLOR
   for (const key of ['defaultColor', 'permissionColor', 'errorColor']) {
     if (Object.prototype.hasOwnProperty.call(discord, key) && !isValidColor(discord[key])) {

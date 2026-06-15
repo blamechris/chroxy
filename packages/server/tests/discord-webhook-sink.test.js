@@ -1034,7 +1034,7 @@ describe('PushManager integration (#5413 Phase 2)', () => {
     const pm = new PushManager({
       discord: { resolveWebhookUrl: () => ({ url: null, source: 'none' }) },
     })
-    assert.deepEqual(pm._sinks.sinks.map((s) => s.name), ['expo-push', 'discord-webhook'])
+    assert.deepEqual(pm._sinks.sinks.map((s) => s.name), ['expo-push', 'discord-webhook', 'discord-billing'])
     assert.equal(pm.hasConfiguredSinks(), false)
     pm.destroy()
   })
