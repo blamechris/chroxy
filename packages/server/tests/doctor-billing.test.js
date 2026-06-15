@@ -88,9 +88,9 @@ test('classifyEgressIp flags a known IPv6 datacenter range, not residential v6 (
   assert.equal(classifyEgressIp('2a01:4f8::1').code, 'DATACENTER_EGRESS')
   assert.equal(classifyEgressIp('2a01:04f8:0:1::dead').datacenter, true)
   assert.equal(classifyEgressIp('2a01:4ff:f0:b1::1').datacenter, true) // Hetzner Cloud /32
-  // Residential / non-datacenter IPv6 is NOT flagged.
-  assert.equal(classifyEgressIp('2601:200:c000:1::5').datacenter, false) // Comcast
-  assert.equal(classifyEgressIp('2606:4700::1111').datacenter, false)    // Cloudflare DNS
+  // Non-datacenter IPv6 (residential ISP + a non-listed network) is NOT flagged.
+  assert.equal(classifyEgressIp('2601:200:c000:1::5').datacenter, false) // Comcast residential
+  assert.equal(classifyEgressIp('2606:4700::1111').datacenter, false)    // Cloudflare (anycast, not a listed range)
   // Malformed v6 is a silent non-hit, never a false positive.
   assert.equal(classifyEgressIp('2a01:4f8:zzzz::1').datacenter, false)
 })

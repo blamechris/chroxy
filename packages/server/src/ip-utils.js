@@ -69,6 +69,11 @@ export function isIpv6(s) {
  * address matches regardless of how the operator spelled the groups. A partial
  * prefix is not a full address, so this only pads each group — it does not
  * expand `::`.
+ *
+ * Operator prefixes must be WHOLE `:`-delimited groups: a partial trailing group
+ * pads on its own boundary and won't match across the group, e.g. `2a02:13` →
+ * `2a02:0013` does NOT match `2a02:1300::…`. Prefixes ending in `:` (the
+ * built-in list, and the natural way to write a block) are immune.
  */
 export function normalizeIpv6Prefix(prefix) {
   if (typeof prefix !== 'string') return ''
