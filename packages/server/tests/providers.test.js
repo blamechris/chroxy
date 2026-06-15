@@ -354,16 +354,23 @@ describe('Provider Registry', () => {
       }
     })
 
-    it('claude-cli reports source=oauth regardless of env (subscription always)', () => {
+    it('claude-cli reports source=oauth regardless of env (CLI strips the key)', () => {
       try {
         clearKeys()
         process.env.ANTHROPIC_API_KEY = 'sk-test'
         const list = listProviders()
         const cli = list.find(p => p.name === 'claude-cli')
-        // CLI strips ANTHROPIC_API_KEY before spawn — billing is always subscription
+        // CLI strips ANTHROPIC_API_KEY before spawn, so it always auths via the
+        // host OAuth/subscription pool — never the raw-API account, even with a
+        // key set. That's the invariant under test here.
         assert.equal(cli.auth.source, 'oauth')
         assert.equal(cli.auth.ready, true)
-        assert.match(cli.auth.detail, /subscription/i)
+        // The billing DETAIL is era-dependent (flat subscription before the
+        // 2026-06-15 cutover, metered programmatic-credit on/after) and listProviders
+        // reads the real clock — so accept either rather than coupling this test to
+        // the wall date. The exact era flip is pinned with injected time in
+        // billing-class.test.js.
+        assert.match(cli.auth.detail, /subscription|programmatic|credit/i)
       } finally {
         restoreKeys()
       }
