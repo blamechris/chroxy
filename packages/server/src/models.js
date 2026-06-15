@@ -1085,9 +1085,14 @@ const providerRegistryCache = new Map()
  * @returns {boolean}
  */
 export function isClaudeProvider(providerName, ProviderClass = null) {
-  if (ProviderClass && ProviderClass.claudeFamily === true) {
-    return true
+  // A passed class is AUTHORITATIVE: trust its boolean flag, so an explicit
+  // `static claudeFamily = false` opts out even when the name would otherwise
+  // resolve to a Claude class (name/class can only disagree on a caller bug,
+  // but the class the caller handed us is the ground truth).
+  if (ProviderClass && typeof ProviderClass.claudeFamily === 'boolean') {
+    return ProviderClass.claudeFamily
   }
+  // No class (or no flag on it) — resolve the class by name via the registry.
   if (typeof providerName === 'string') {
     const resolved = nameToProviderClass.get(providerName)
     if (resolved && resolved.claudeFamily === true) {

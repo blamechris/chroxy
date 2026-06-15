@@ -11,6 +11,8 @@ import '../src/providers.js'
 import { DockerSession } from '../src/docker-session.js'
 import { DockerSdkSession } from '../src/docker-sdk-session.js'
 import { DockerByokSession } from '../src/docker-byok-session.js'
+import { DeepSeekSession } from '../src/deepseek-session.js'
+import { OllamaSession } from '../src/ollama-session.js'
 
 describe('FALLBACK_MODELS (default registry)', () => {
   it('is deep-frozen so getModels() callers cannot mutate the constant', () => {
@@ -872,11 +874,29 @@ describe('isClaudeProvider — Claude-family provider allowlist', () => {
     }
   })
 
+  it('the non-Claude ClaudeByokSession subclasses keep the explicit false override', () => {
+    // Drift guard: these extend ClaudeByokSession (claudeFamily=true) for the
+    // agent loop and MUST override to false. If an override is dropped, this
+    // fails directly (not only via the name-based check above).
+    assert.equal(DeepSeekSession.claudeFamily, false)
+    assert.equal(OllamaSession.claudeFamily, false)
+  })
+
   it('honours the static claudeFamily flag passed directly (external providers)', () => {
     // Match the real call site: createSession passes the provider class.
     class ClaudeFamilyProvider { static claudeFamily = true }
     class NonClaudeProvider { static claudeFamily = false }
     assert.equal(isClaudeProvider('some-external', ClaudeFamilyProvider), true)
     assert.equal(isClaudeProvider('some-external', NonClaudeProvider), false)
+  })
+
+  it('a passed class is authoritative — explicit false opts out even for a Claude name', () => {
+    // #5890 (Copilot): when name and class disagree (a caller bug), the class
+    // the caller handed us wins, including an explicit opt-out.
+    class OptedOut { static claudeFamily = false }
+    assert.equal(isClaudeProvider('claude-tui', OptedOut), false)
+    // A class with no flag falls through to the name resolution.
+    class NoFlag {}
+    assert.equal(isClaudeProvider('claude-tui', NoFlag), true)
   })
 })
