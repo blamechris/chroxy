@@ -82,7 +82,10 @@ describe('byok-credentials', () => {
       assert.equal(result.source, 'file')
     })
 
-    it('refuses to read a 0644 credentials file (security boundary)', () => {
+    // POSIX-only: the canonical store's readStore() skips the mode check on
+    // win32 (NTFS ACLs don't map to POSIX bits, #4144), so a 0644 file IS read
+    // there — the same posture every other credential already has on Windows.
+    it('refuses to read a 0644 credentials file (security boundary)', { skip: process.platform === 'win32' }, () => {
       const chroxyDir = join(tmpHome, '.chroxy')
       mkdirSync(chroxyDir, { recursive: true })
       writeFileSync(credPath(), JSON.stringify({ anthropicApiKey: 'sk-ant-should-not-load' }))
