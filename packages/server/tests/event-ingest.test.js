@@ -641,4 +641,48 @@ describe('deriveProjectFromCwd', () => {
   it('does not throw on a nonexistent path (still walks the string)', () => {
     assert.equal(deriveProjectFromCwd('/nonexistent/zzz/abc'), 'abc')
   })
+
+  // #5483/#5850: a cwd inside a chroxy session worktree (~/.chroxy/worktrees/<id>)
+  // must resolve to the PARENT repo, never the opaque hex session id. This mirrors
+  // the hook-side fix (#5483) so the server fallback can't re-mint the id.
+  describe('chroxy session worktree (#5483/#5850)', () => {
+    const ID = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4'
+
+    // git: 'valid' writes a real `git worktree add` .git file pointing back at
+    // the repo; 'corrupt' writes garbage; 'missing' writes no file.
+    function makeChroxyWorktree({ git = 'valid' } = {}) {
+      const root = mkdtempSync(join(tmpdir(), 'cwt-root-'))
+      const repo = mkdtempSync(join(tmpdir(), 'cwt-repo-'))
+      const wt = join(root, ID)
+      mkdirSync(wt, { recursive: true })
+      if (git === 'valid') writeFileSync(join(wt, '.git'), `gitdir: ${join(repo, '.git', 'worktrees', ID)}\n`)
+      else if (git === 'corrupt') writeFileSync(join(wt, '.git'), 'not a gitdir line\n')
+      const env = { ...process.env, CHROXY_WORKTREES_ROOT: root }
+      return { root, repo, wt, env }
+    }
+
+    it('recovers the parent repo basename, not the opaque session id', () => {
+      const { repo, wt, env } = makeChroxyWorktree()
+      const got = deriveProjectFromCwd(wt, env)
+      assert.equal(got, repo.split('/').pop())
+      assert.notEqual(got, ID, 'must not return the opaque session id')
+    })
+
+    it('recovers from a nested cwd inside the worktree too', () => {
+      const { repo, wt, env } = makeChroxyWorktree()
+      const nested = join(wt, 'packages', 'app')
+      mkdirSync(nested, { recursive: true })
+      assert.equal(deriveProjectFromCwd(nested, env), repo.split('/').pop())
+    })
+
+    it('returns null (not the id) when the worktree .git file is corrupt', () => {
+      const { wt, env } = makeChroxyWorktree({ git: 'corrupt' })
+      assert.equal(deriveProjectFromCwd(wt, env), null)
+    })
+
+    it('returns null (not the id) when the worktree .git file is missing', () => {
+      const { wt, env } = makeChroxyWorktree({ git: 'missing' })
+      assert.equal(deriveProjectFromCwd(wt, env), null)
+    })
+  })
 })

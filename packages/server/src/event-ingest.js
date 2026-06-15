@@ -26,7 +26,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
 import { basename, dirname, join, resolve } from 'node:path'
 import { homedir } from 'node:os'
 import { safeTokenCompare } from './token-compare.js'
@@ -194,19 +194,92 @@ export function ensureIngestSecret(secretPath = defaultIngestSecretPath()) {
 }
 
 /**
+ * #5483/#5850: chroxy's SECOND worktree source — session worktrees the daemon
+ * creates at `~/.chroxy/worktrees/<sessionId>`. Their basename is an OPAQUE hex
+ * session id, so the plain git-root walk below would name the project after the
+ * id instead of the real repo. This mirrors the hook-side handling in
+ * packages/claude-hooks/src/project.js (which already shipped, #5483) so the
+ * server's fallback derivation can't re-mint the opaque id the hook now avoids
+ * sending. The two copies are slated to merge into one shared module (#5850 /
+ * audit P2-2); until then, keep them in sync.
+ *
+ * Test surface: CHROXY_WORKTREES_ROOT lets a test point the root at a temp dir
+ * (os.tmpdir() classification differs across platforms). Never set in prod.
+ */
+function chroxyWorktreesRoot(env = process.env) {
+  const override = env?.CHROXY_WORKTREES_ROOT
+  if (typeof override === 'string' && override.trim().startsWith('/')) {
+    return realResolve(override.trim().replace(/\/+$/, ''))
+  }
+  const home = typeof env?.HOME === 'string' && env.HOME.length > 0 ? env.HOME : homedir()
+  if (!home) return null
+  return realResolve(join(home, '.chroxy', 'worktrees'))
+}
+
+/** resolve() then realpath (macOS: /tmp → /private/tmp); best-effort, never throws. */
+function realResolve(p) {
+  let dir
+  try { dir = resolve(p) } catch { return null }
+  try { return realpathSync(dir) } catch { return dir }
+}
+
+/**
+ * If `dir` (already real-resolved) is inside a chroxy session worktree, return
+ * that worktree's top dir (`<root>/<id>`); else null. The root itself is not one.
+ */
+function chroxyWorktreeTopDir(dir, env = process.env) {
+  const root = chroxyWorktreesRoot(env)
+  if (!root || !dir.startsWith(root + '/')) return null
+  const id = dir.slice(root.length + 1).split('/')[0]
+  return id.length > 0 ? join(root, id) : null
+}
+
+/**
+ * Recover the parent project for a chroxy session worktree from its `.git` FILE:
+ * `git worktree add` writes `gitdir: <repo>/.git/worktrees/<id>`, so the repo
+ * root (the parent project) is three segments up. Returns null on any read/shape
+ * surprise — a tampered `.git` file then can't misattribute the project.
+ */
+function chroxyWorktreeParentProject(worktreeDir) {
+  let raw
+  try { raw = readFileSync(join(worktreeDir, '.git'), 'utf8') } catch { return null }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(raw)
+  if (!match) return null
+  let linkedGitDir
+  try { linkedGitDir = resolve(worktreeDir, match[1]) } catch { return null }
+  const worktreesDir = dirname(linkedGitDir) // <repo>/.git/worktrees
+  if (basename(worktreesDir) !== 'worktrees') return null
+  const gitDir = dirname(worktreesDir) // <repo>/.git
+  if (basename(gitDir) !== '.git') return null
+  const name = basename(dirname(gitDir))
+  return name.length > 0 ? name : null
+}
+
+/**
  * Derive a project name from a working directory by walking up to the
  * nearest `.git` (directory OR file — worktrees use a `.git` file) and
  * taking that directory's basename. Falls back to `basename(cwd)` when no
  * git root is found, and `null` for unusable input. Pure fs probing — never
  * shells out (this runs per ingested event).
+ *
+ * #5483/#5850: a cwd inside a chroxy session worktree (`~/.chroxy/worktrees/<id>`)
+ * is handled FIRST — the git walk there would name the project after the opaque
+ * session id (the worktree's `.git` is a file pointing back at the real repo), so
+ * recover the parent repo from that file, or return null (defer to the explicit
+ * `event.project` / nothing) rather than mint the id.
  */
-export function deriveProjectFromCwd(cwd) {
+export function deriveProjectFromCwd(cwd, env = process.env) {
   if (typeof cwd !== 'string' || cwd.length === 0) return null
   let dir
   try {
     dir = resolve(cwd)
   } catch {
     return null
+  }
+  // chroxy session worktree → parent repo (or null), never the opaque id.
+  const resolved = realResolve(cwd)
+  if (resolved && chroxyWorktreeTopDir(resolved, env)) {
+    return chroxyWorktreeParentProject(chroxyWorktreeTopDir(resolved, env))
   }
   let current = dir
   // Bounded walk — terminates at the fs root anyway; the cap is paranoia
