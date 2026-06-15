@@ -678,19 +678,26 @@ const NUMERIC_RANGE_CHECKS = [
   { key: 'port', min: 1, max: 65535, belowMessage: '(must be 1-65535)', aboveMessage: '(must be 1-65535)' },
   { key: 'maxSessions', min: 1, belowMessage: '(must be >= 1)' },
   { key: 'maxPayload', min: 1024, max: 100 * 1024 * 1024, belowMessage: '(minimum 1KB / 1024 bytes)', aboveMessage: '(maximum 100MB)' },
-  { key: 'resultTimeoutMs', min: 30_000, max: TWENTY_FOUR_HOURS_MS, belowMessage: '(minimum 30000 / 30s)', aboveMessage: '(maximum 86400000 / 24h)' },
-  { key: 'streamStallTimeoutMs', min: 5_000, max: TWENTY_FOUR_HOURS_MS, allowZero: true, belowMessage: '(minimum 5000 / 5s; set 0 to disable)', aboveMessage: '(maximum 86400000 / 24h)' },
-  { key: 'backgroundShellHardQuiesceMs', min: 60_000, max: TWENTY_FOUR_HOURS_MS, allowZero: true, belowMessage: '(minimum 60000 / 60s; set 0 to disable)', aboveMessage: '(maximum 86400000 / 24h)' },
+  { key: 'resultTimeoutMs', min: 30_000, max: TWENTY_FOUR_HOURS_MS, finiteOnly: true, belowMessage: '(minimum 30000 / 30s)', aboveMessage: '(maximum 86400000 / 24h)' },
+  { key: 'streamStallTimeoutMs', min: 5_000, max: TWENTY_FOUR_HOURS_MS, allowZero: true, finiteOnly: true, belowMessage: '(minimum 5000 / 5s; set 0 to disable)', aboveMessage: '(maximum 86400000 / 24h)' },
+  { key: 'backgroundShellHardQuiesceMs', min: 60_000, max: TWENTY_FOUR_HOURS_MS, allowZero: true, finiteOnly: true, belowMessage: '(minimum 60000 / 60s; set 0 to disable)', aboveMessage: '(maximum 86400000 / 24h)' },
 ]
 
 /**
- * Push an `Invalid value` warning when finite numeric `value` falls outside
- * [min, max]. No-ops on a non-finite value (the type-check loop already warned)
- * and on an explicit 0 when `allowZero` (the "disable" sentinel). `min`/`max`
- * are each optional (maxSessions has only a lower bound).
+ * Push an `Invalid value` warning when numeric `value` falls outside [min, max].
+ * Skips non-number / NaN (the type-check loop already warned). `allowZero` skips
+ * an explicit 0 (the "disable" sentinel). `min`/`max` are each optional
+ * (maxSessions has only a lower bound).
+ *
+ * `finiteOnly` selects the original per-field guard exactly: port/maxSessions/
+ * maxPayload historically used `typeof === 'number'`, so a parseFloat'd env like
+ * `PORT=Infinity` reaches the comparison and trips the bound — keep that. The
+ * timeout fields used `Number.isFinite`, which skips Infinity entirely — keep
+ * that too (finiteOnly: true).
  */
-function validateRange(warnings, key, value, { min, max, allowZero = false, belowMessage, aboveMessage }) {
-  if (!Number.isFinite(value)) return
+function validateRange(warnings, key, value, { min, max, allowZero = false, finiteOnly = false, belowMessage, aboveMessage }) {
+  if (typeof value !== 'number' || Number.isNaN(value)) return
+  if (finiteOnly && !Number.isFinite(value)) return
   if (allowZero && value === 0) return
   if (min != null && value < min) {
     warnings.push(`Invalid value for '${key}': ${value} ${belowMessage}`)
