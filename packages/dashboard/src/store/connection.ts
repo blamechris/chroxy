@@ -675,10 +675,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // the primary owner / sole viewer drives; an observer's keystroke is rejected
   // with input_conflict). The dashboard also gates locally on role, so an
   // observer's keys never reach here, avoiding per-keystroke input_conflict toasts.
+  //
+  // Chunk large payloads (Copilot review): a single keystroke is a few bytes, but
+  // a bracketed paste fires one onData with the whole clipboard, which can exceed
+  // TerminalInputSchema's 100k cap — the server would reject that frame and drop
+  // the paste. Split into sub-cap frames (the PTY is an ordered byte stream, so
+  // splitting is transparent), and never split a UTF-16 surrogate pair across a
+  // boundary so an emoji at the seam can't corrupt into lone surrogates.
   sendTerminalInput: (sessionId: string, data: string) => {
     const { socket } = get();
-    if (sessionId && data && socket && socket.readyState === WebSocket.OPEN) {
+    if (!sessionId || !data || !socket || socket.readyState !== WebSocket.OPEN) return;
+    const MAX = 65536; // comfortably under TerminalInputSchema.data.max(100000)
+    if (data.length <= MAX) {
       wsSend(socket, { type: 'terminal_input', sessionId, data });
+      return;
+    }
+    let i = 0;
+    while (i < data.length) {
+      let end = Math.min(i + MAX, data.length);
+      // If the boundary lands on a high surrogate, defer it to the next chunk so a
+      // surrogate pair is never split (which would write lone surrogates to the PTY).
+      if (end < data.length) {
+        const code = data.charCodeAt(end - 1);
+        if (code >= 0xd800 && code <= 0xdbff) end -= 1;
+      }
+      wsSend(socket, { type: 'terminal_input', sessionId, data: data.slice(i, end) });
+      i = end;
     }
   },
 
