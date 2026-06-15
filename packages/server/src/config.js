@@ -637,6 +637,28 @@ export function sanitizeConfig(config) {
 }
 
 /**
+ * The SINGLE source of the fatal-vs-warn config policy (audit P1-9). A config
+ * problem is FATAL (the CLI exits 1) iff its warning is a schema TYPE mismatch
+ * — wording prefix "Invalid type ..." — because a wrong-typed field is a real
+ * misconfiguration the operator must fix. Everything else ("Invalid value ...",
+ * "Unknown config key ...", range/format warnings) is non-fatal: the runtime
+ * clamps/ignores it, so a cosmetic typo never blocks startup.
+ *
+ * This used to be inlined as `w.startsWith('Invalid type')` in cli/shared.js,
+ * divorced from where the warnings are produced — so a new fatal/non-fatal
+ * decision had no single home and a mis-prefixed message could silently flip
+ * a field's severity. Centralizing it here (with the invariant test in
+ * config.test.js asserting no "Invalid value" warning is ever fatal) keeps the
+ * policy and the wording convention in lockstep.
+ */
+export const FATAL_CONFIG_WARNING_PREFIX = 'Invalid type'
+
+/** True iff this validateConfig warning should abort startup. See FATAL_CONFIG_WARNING_PREFIX. */
+export function isFatalConfigWarning(warning) {
+  return typeof warning === 'string' && warning.startsWith(FATAL_CONFIG_WARNING_PREFIX)
+}
+
+/**
  * Validate config object against schema.
  * Logs warnings for unknown keys and type mismatches.
  *

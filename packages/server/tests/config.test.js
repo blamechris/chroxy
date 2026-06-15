@@ -3,7 +3,38 @@ import assert from 'node:assert/strict'
 import { writeFileSync, mkdtempSync, rmSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig, sanitizeConfig } from '../src/config.js'
+import { validateConfig, mergeConfig, readReposFromConfig, writeReposToConfig, sanitizeConfig, isFatalConfigWarning } from '../src/config.js'
+
+// audit P1-9: fatality must come from the single isFatalConfigWarning policy,
+// and the wording convention (type=fatal, value=non-fatal) must hold — a typo
+// in a value should never abort startup.
+describe('isFatalConfigWarning (config fatal-vs-warn policy)', () => {
+  it('treats "Invalid type" warnings as fatal and "Invalid value" as non-fatal', () => {
+    assert.equal(isFatalConfigWarning("Invalid type for 'port': expected number, got string"), true)
+    assert.equal(isFatalConfigWarning("Invalid value for 'environments.k8s.connectMode': 'x'"), false)
+    assert.equal(isFatalConfigWarning('Unknown config key: foo'), false)
+    assert.equal(isFatalConfigWarning(''), false)
+    assert.equal(isFatalConfigWarning(undefined), false)
+  })
+
+  it('INVARIANT: no "Invalid value" warning validateConfig produces is ever fatal', () => {
+    // A config that trips many value-level checks at once (range + format +
+    // enum + unknown key). None must be classified fatal.
+    const bad = validateConfig({
+      port: 70000,                                   // out of range (Invalid value)
+      maxSessions: 0,                                // < 1 (Invalid value)
+      totallyUnknownKey: true,                       // Unknown config key
+      environments: { k8s: { imagePullPolicy: 'Sometimes', connectMode: 'telepathy' } }, // enum (Invalid value)
+    })
+    const fatalValueWarnings = bad.warnings.filter(
+      (w) => w.startsWith('Invalid value') && isFatalConfigWarning(w),
+    )
+    assert.deepEqual(fatalValueWarnings, [], `no "Invalid value" warning may be fatal; got: ${JSON.stringify(fatalValueWarnings)}`)
+    // And a genuine type error IS fatal.
+    const typed = validateConfig({ port: { nested: true } }) // wrong type for port
+    assert.ok(typed.warnings.some(isFatalConfigWarning), 'a type mismatch must be fatal')
+  })
+})
 
 describe('validateConfig', () => {
   it('accepts valid config with all known keys', () => {

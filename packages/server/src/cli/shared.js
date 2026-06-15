@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import readline from 'readline'
-import { validateConfig, mergeConfig } from '../config.js'
+import { validateConfig, mergeConfig, isFatalConfigWarning } from '../config.js'
 
 export const CONFIG_DIR = join(homedir(), '.chroxy')
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -174,7 +174,9 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
 
   const validation = validateConfig(config, options.verbose)
   if (!validation.valid) {
-    const typeErrors = validation.warnings.filter(w => w.startsWith('Invalid type'))
+    // Fatality comes from the single policy in config.js (isFatalConfigWarning),
+    // not an inlined string match here — see audit P1-9.
+    const typeErrors = validation.warnings.filter(isFatalConfigWarning)
     if (typeErrors.length > 0) {
       console.error('❌ Configuration has type errors:')
       for (const err of typeErrors) {
