@@ -126,6 +126,13 @@ import { createHash, randomBytes } from 'crypto'
 import { homedir, tmpdir } from 'os'
 import { isAbsolute, join, posix, resolve, sep } from 'path'
 import { ClaudeByokSession } from './byok-session.js'
+import {
+  applyEdit,
+  GLOB_PATTERN_SHELL_METACHARS,
+  buildGlobCommand,
+  buildGrepArgs,
+  buildGrepCommand,
+} from './built-in-tools/tool-transforms.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import { classifyDockerError } from './docker-session.js'
 import { buildPoolKey, getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
@@ -1927,8 +1934,6 @@ export class DockerByokSession extends ClaudeByokSession {
   async _containerEdit(input) {
     const containerPath = remapToContainerPath(input?.file_path, this.cwd)
     const oldString = typeof input?.old_string === 'string' ? input.old_string : ''
-    const newString = typeof input?.new_string === 'string' ? input.new_string : ''
-    const replaceAll = input?.replace_all === true
     if (oldString.length === 0) {
       return { content: 'Edit refused: old_string is required', isError: true }
     }
@@ -1941,40 +1946,29 @@ export class DockerByokSession extends ClaudeByokSession {
     if (readErr && readErr.trim()) {
       return { content: `Edit failed: ${readErr.trim()}`, isError: true }
     }
-    let replacements = 0
-    let updated
-    if (replaceAll) {
-      const parts = existing.split(oldString)
-      replacements = parts.length - 1
-      updated = parts.join(newString)
-    } else {
-      const idx = existing.indexOf(oldString)
-      if (idx === -1) {
-        return {
-          content: `Edit failed: old_string not found in ${input.file_path}`,
-          isError: true,
-        }
-      }
-      const dup = existing.indexOf(oldString, idx + oldString.length)
-      if (dup !== -1) {
-        return {
-          content: `Edit failed: old_string matches multiple sites in ${input.file_path}; add context or pass replace_all`,
-          isError: true,
-        }
-      }
-      replacements = 1
-      updated = existing.slice(0, idx) + newString + existing.slice(idx + oldString.length)
+    // Strict-unique-match + NO_CHANGE guard + LITERAL replacement via the shared
+    // transform (same one the host file-ops Edit uses) — #5882 closes the drift
+    // where this path lacked the NO_CHANGE guard and used slice vs the host's
+    // replace. Map the codes to this provider's existing message wording.
+    const result = applyEdit(existing, {
+      oldString,
+      newString: typeof input?.new_string === 'string' ? input.new_string : '',
+      replaceAll: input?.replace_all === true,
+    })
+    if (!result.ok) {
+      const msg = result.code === 'NOT_FOUND'
+        ? `Edit failed: old_string not found in ${input.file_path}`
+        : result.code === 'NOT_UNIQUE'
+          ? `Edit failed: old_string matches multiple sites in ${input.file_path}; add context or pass replace_all`
+          : result.code === 'NO_CHANGE'
+            ? 'Edit refused: old_string and new_string are identical'
+            : 'Edit refused: old_string is required'
+      return { content: msg, isError: true }
     }
-    if (replacements === 0) {
-      return {
-        content: `Edit failed: old_string not found in ${input.file_path}`,
-        isError: true,
-      }
-    }
-    const writeResult = await this._containerWrite({ file_path: input.file_path, content: updated })
+    const writeResult = await this._containerWrite({ file_path: input.file_path, content: result.next })
     if (writeResult.isError) return writeResult
     return {
-      content: `Replaced ${replacements} occurrence(s) in ${input.file_path}.`,
+      content: `Replaced ${result.replacements} occurrence(s) in ${input.file_path}.`,
       isError: false,
     }
   }
@@ -2010,7 +2004,7 @@ export class DockerByokSession extends ClaudeByokSession {
     if (typeof pattern !== 'string' || pattern.length === 0) {
       return { content: 'EINVAL: pattern is required', isError: true }
     }
-    if (/[$`;|&><()\\\n\r]/.test(pattern)) {
+    if (GLOB_PATTERN_SHELL_METACHARS.test(pattern)) {
       return {
         content: 'EINVAL: glob pattern contains shell-dangerous characters',
         isError: true,
@@ -2022,7 +2016,7 @@ export class DockerByokSession extends ClaudeByokSession {
     const root = input?.path
       ? remapToContainerPath(input.path, this.cwd)
       : CONTAINER_WORKSPACE
-    const cmd = `shopt -s globstar nullglob; cd ${shellQuote(root)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
+    const cmd = buildGlobCommand(pattern, root)
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
     if (!stdout && stderr && stderr.trim()) {
       return { content: `Glob failed: ${stderr.trim()}`, isError: true }
@@ -2043,20 +2037,13 @@ export class DockerByokSession extends ClaudeByokSession {
     const root = input?.path
       ? remapToContainerPath(input.path, this.cwd)
       : CONTAINER_WORKSPACE
-    const ci = input?.['-i'] === true ? '-i' : ''
-    const ln = input?.['-n'] !== false ? '-n' : ''
-    const globArg = typeof input?.glob === 'string' && input.glob.length > 0
-      ? ` --glob ${shellQuote(input.glob)}` : ''
-    const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(root)}`
-    const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(root)}`
-    // Fix for PR #5021 review (Copilot, comment id 3348029186): rg and
-    // grep -r both exit 1 on "no matches", and execInEnvironment rejects
-    // on any non-zero exit, so the "No matches for ${pattern}" branch
-    // was unreachable. Mask the exit code so we can distinguish
-    // legitimate "no matches" (empty stdout, empty stderr) from real
-    // failures (non-empty stderr). The host-side equivalent
-    // (byok-tool-executor.js) uses the same `|| true` pattern.
-    const cmd = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi; true`
+    // Shared builders (#5882) — identical rg/grep shaping as the host Grep.
+    // `maskExit:true` appends `; true` because execInEnvironment rejects on any
+    // non-zero exit, and both rg and grep -r exit 1 on "no matches" (PR #5021
+    // review, Copilot comment 3348029186) — without the mask the legitimate
+    // "No matches" branch below would be unreachable.
+    const { ci, ln, globArg } = buildGrepArgs(input)
+    const cmd = buildGrepCommand({ pattern, root, ci, ln, globArg, maskExit: true })
     const { stdout, stderr } = await this._execAsContainerUser({ cmd, timeout: 30_000 })
     if (!stdout && stderr && stderr.trim()) {
       return { content: `Grep failed: ${stderr.trim()}`, isError: true }

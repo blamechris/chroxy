@@ -22,6 +22,12 @@ import { lookup as dnsLookup } from 'node:dns/promises'
 import { validatePathWithinCwd } from './ws-file-ops/common.js'
 import { executeBash, DEFAULT_BASH_TIMEOUT_MS } from './built-in-tools/bash-exec.js'
 import { readFileTool, writeFileTool, editFileTool } from './built-in-tools/file-ops.js'
+import {
+  GLOB_PATTERN_SHELL_METACHARS,
+  buildGlobCommand,
+  buildGrepArgs,
+  buildGrepCommand,
+} from './built-in-tools/tool-transforms.js'
 import { TODO_STATUSES, BUILTIN_TOOL_NAMES } from './byok-tools.js'
 // #4186: SSRF block-list lives in its own module so the (ip, expected)
 // table can grow without bloating this file's WebFetch integration tests.
@@ -232,11 +238,9 @@ async function runBash({ input, cwd, signal }) {
 }
 
 // Characters in a glob pattern that allow shell-side command substitution
-// or piping. Glob patterns legitimately need *, ?, [], {}, /, ., alnum,
-// _, and -. They never need any of these. Refuse them to prevent the
-// "for f in <pattern>" interpolation from running an attacker payload
-// (caught by /agent-review on PR #4060 — see #4070).
-const GLOB_PATTERN_SHELL_METACHARS = /[$`;|&><()\\\n\r]/
+// or piping (GLOB_PATTERN_SHELL_METACHARS + the command builders live in the
+// shared tool-transforms.js, so the host and the docker-byok container reject
+// and shell out identically — #4070 / #5882).
 
 async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   const pattern = input?.pattern
@@ -257,7 +261,7 @@ async function runGlob({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   // Shell expansion of `for f in <pattern>` is what produces the file
   // paths. Pattern is now whitelist-validated above, so interpolation
   // is safe.
-  const cmd = `shopt -s globstar nullglob; cd ${shellQuote(realRoot)} && for f in ${pattern}; do printf '%s\\n' "$f"; done`
+  const cmd = buildGlobCommand(pattern, realRoot)
   const result = await executeBash({
     command: cmd,
     cwd: realRoot,
@@ -280,20 +284,13 @@ async function runGrep({ input, cwd, cwdRealCache, cwdCacheTtl, signal }) {
   }
   const realRoot = await safeResolveRoot(input?.path, cwd, cwdRealCache, cwdCacheTtl)
 
-  // Prefer ripgrep; fall back to grep. Both honor -i and -n.
-  const ci = input?.['-i'] === true ? '-i' : ''
-  const ln = input?.['-n'] !== false ? '-n' : ''
-  const globArg = typeof input?.glob === 'string' && input.glob.length > 0
-    ? ` --glob ${shellQuote(input.glob)}` : ''
-
-  // Pick rg if available, else grep -r. Pre-fix this was `rg || grep`
-  // which re-ran the search with grep on the COMMON no-match case
-  // (rg exits 1 on no matches → `||` triggers grep), doubling work
-  // (Copilot review on #4060). Use if/then/else so grep only runs
-  // when rg is truly unavailable.
-  const rgCmd = `rg ${ci} ${ln} --no-heading${globArg} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
-  const grepCmd = `grep -r ${ci} ${ln} ${shellQuote(pattern)} ${shellQuote(realRoot)}`
-  const cmd = `if command -v rg >/dev/null 2>&1; then ${rgCmd}; else ${grepCmd}; fi`
+  // Prefer ripgrep; fall back to grep. Both honor -i and -n. The if/then/else
+  // (NOT `rg || grep`) keeps a no-match rg exit-1 from re-running the search
+  // under grep (Copilot review on #4060). executeBash captures the exit code
+  // (doesn't reject), so no `; true` mask is needed here. Builders are shared
+  // with the docker-byok container Grep (#5882).
+  const { ci, ln, globArg } = buildGrepArgs(input)
+  const cmd = buildGrepCommand({ pattern, root: realRoot, ci, ln, globArg })
 
   const result = await executeBash({
     command: cmd,
@@ -340,16 +337,6 @@ async function safeResolveRoot(p, cwd, cwdRealCache, cwdCacheTtl) {
     )
   }
   return realPath
-}
-
-/**
- * Quote a string for inclusion in a `bash -c` command. Uses single-quote
- * shell escaping which is the safest form (no expansion at all inside).
- * Embedded single quotes are escaped as `'\''`.
- */
-function shellQuote(s) {
-  if (typeof s !== 'string') return "''"
-  return `'${s.replace(/'/g, `'\\''`)}'`
 }
 
 const WEBFETCH_DEFAULT_TIMEOUT_MS = 30_000
