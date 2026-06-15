@@ -180,7 +180,8 @@ let _credFileCache = {
   // must not re-stat/re-parse the file per probe.
   discord: { envValue: null, path: null, mtimeMs: null, size: null, mode: null, result: null },
   // #5461: config-driven Anthropic-compatible entries add dynamic
-  // `compat:<apiKeyEnv>:<credentialsKey>` slots lazily on first use —
+  // `compat:<JSON [apiKeyEnv, credentialsKey]>` slots lazily on first use
+  // (#5486: JSON-encoded so the key is collision-proof for any charset) —
   // bounded by the configured entries, dropped by resetCachesForTest().
 }
 
@@ -209,7 +210,7 @@ const _SLOT_ENV_VAR = {
  * for a file-only credential spec — the env clause is omitted); fixed slots
  * keep their `_SLOT_ENV_VAR` mapping and don't pass it.
  *
- * @param {string} slot - 'byok' | 'deepseek' | 'discord' | dynamic (e.g. 'compat:ZAI_API_KEY:zaiApiKey')
+ * @param {string} slot - 'byok' | 'deepseek' | 'discord' | dynamic (e.g. 'compat:["ZAI_API_KEY","zaiApiKey"]')
  * @param {string | undefined} envValue - current value of the relevant env var
  * @param {() => object} resolve - the underlying *-credentials resolver
  * @param {string | null} [envVarName] - env var to name in the ENOENT reason (dynamic slots only)

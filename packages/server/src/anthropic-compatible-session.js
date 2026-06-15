@@ -144,7 +144,17 @@ export function resolveAnthropicCompatibleApiKey(entry) {
     return resolveAnthropicCompatibleApiKeyUncached(entry)
   }
   return cachedResolveCredentialFile(
-    `compat:${apiKeyEnv || ''}:${credentialsKey}`,
+    // #5486: encode the (apiKeyEnv, credentialsKey) pair with JSON so the slot key
+    // is collision-proof for ANY input charset. The plain `compat:<env>:<key>`
+    // form is unambiguous only for config-validated entries (ENV_VAR_NAME_RE /
+    // CREDENTIALS_KEY_RE both exclude `:` — #5458). But createAnthropicCompatibleSessionClass
+    // is exported for embedders/tests and its defensive normalization only checks
+    // "non-empty string", so a `:`-bearing value (apiKeyEnv 'A:B' + key 'C' vs
+    // 'A' + 'B:C') would mint the same `compat:A:B:C` slot and cross-serve cached
+    // credentials between two different specs. JSON.stringify quotes/escapes the
+    // delimiter, so distinct specs get distinct slots; an identical spec still
+    // produces an identical key (the intentional sharing from #5461 is preserved).
+    `compat:${JSON.stringify([apiKeyEnv || '', credentialsKey])}`,
     apiKeyEnv ? process.env[apiKeyEnv] : undefined,
     () => resolveAnthropicCompatibleApiKeyUncached(entry),
     apiKeyEnv || null,
