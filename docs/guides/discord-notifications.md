@@ -99,7 +99,8 @@ The non-secret knobs live in `~/.chroxy/config.json` under
       "errorColor": 15158332,
       "updateThrottleMs": 15000,
       "heartbeatIntervalMs": 300000,
-      "pruneAfterMs": 86400000
+      "pruneAfterMs": 86400000,
+      "billingAlerts": true
     }
   }
 }
@@ -139,8 +140,32 @@ The non-secret knobs live in `~/.chroxy/config.json` under
   Pruning only drops the bookkeeping entry — the last Discord message
   (typically the final offline embed) stays in the channel as a record.
 
+- **`billingAlerts`** — kill-switch for the billing-alert message (see below).
+  Default `true` when a webhook is configured; set `false` to keep billing
+  alerts off Discord while the per-project status embed stays on.
+
 See [packages/server/CONFIG.md](../../packages/server/CONFIG.md#discord-notifications-notificationsdiscord)
 for the full key reference.
+
+## Billing alerts
+
+Separate from the per-project status embed, chroxy posts a single **daemon-global
+billing-alert message** when the billing canary (the 2026-06-15
+programmatic-credit early-warning system) fires — for example a silently-metered
+default provider, a `claude-tui` session reclassified to metered credits, or a
+datacenter-egress ban signal. This is *not* a session state, so it does not touch
+the status embed: it is its own message.
+
+- A new or changed warning set **deletes the old alert and posts a fresh one**, so
+  Discord re-notifies and the alert surfaces at the bottom of the channel.
+- The same warning set again is a no-op (no repeat spam).
+- When the warnings clear, the alert message is **edited in place to a green
+  "Billing alerts cleared" embed**, so the channel reflects the resolved state.
+
+Billing alerts flow through the same pipeline gating as everything else — mute
+the `billing_warning` category or set quiet hours and they fall silent like any
+other category. The datacenter-egress part of the canary is itself opt-in
+(`billing.egressCheck`); see the billing canary docs.
 
 ## Where state lives
 
@@ -150,6 +175,11 @@ atomically. Deleting the file is safe — the next event posts a fresh status
 message. Entries untouched for longer than `pruneAfterMs` (24h by default)
 are swept automatically — on startup and on every subsequent load — so the
 file stays bounded even under heavy project/session rotation.
+
+The billing-alert message tracks its own id separately in
+`~/.chroxy/discord-billing-state.json` (one message, not per-project), so it
+never collides with the status store. Deleting it is safe — the next billing
+warning posts fresh.
 
 ## External sessions via `POST /api/events`
 

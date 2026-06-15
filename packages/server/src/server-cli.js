@@ -746,6 +746,9 @@ export async function startCliServer(config) {
     // notification state in ~/.chroxy.
     discord: {
       statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+      // #5828: the billing-alert sink keeps its own state file, separate from
+      // the per-project status store above.
+      billingStatePath: join(homedir(), '.chroxy', 'discord-billing-state.json'),
       ...(config.notifications?.discord || {}),
     },
   })
@@ -920,6 +923,20 @@ export async function startCliServer(config) {
     resolveEgressIp: egressCheckEnabled ? () => resolvePublicIp() : undefined,
     getDatacenterPrefixes: () => config.billing?.datacenterPrefixes || [],
     notify: (warnings) => {
+      // #5828: the monitor fires this once per distinct warning SET, plus once
+      // on the non-empty→empty (all-clear) transition with an empty array. An
+      // empty set is the all-clear: send a `resolved` push so the Discord
+      // billing sink repaints its message green (and mobile gets a cleared
+      // note). settlePush (#5702) logs both a thrown error AND a `false`
+      // not-delivered return that a bare `.catch()` would drop.
+      if (warnings.length === 0) {
+        settlePush(
+          pushManager.send('billing_warning', 'Billing alert cleared', 'All billing warnings have cleared.', { resolved: true }),
+          'billing-canary-clear',
+          log,
+        )
+        return
+      }
       // One aggregate push per distinct warning set — billing_warning has no
       // rate limit (RATE_LIMITS), so the monitor's own change-detection is the
       // throttle. Codes ride in `data` for clients that key off them.
@@ -927,8 +944,6 @@ export async function startCliServer(config) {
       const title = count > 1 ? `Billing alert (${count})` : 'Billing alert'
       const body = warnings.map((w) => w.message).join('\n\n')
       const codes = warnings.map((w) => w.code)
-      // settlePush (#5702) logs both a thrown error AND a `false` not-delivered
-      // return (a half-open link), which a bare `.catch()` would drop silently.
       settlePush(pushManager.send('billing_warning', title, body, { codes }), 'billing-canary', log)
     },
   })

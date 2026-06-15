@@ -46,26 +46,34 @@ import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { writeFileRestricted } from '../platform.js'
 import { createLogger } from '../logger.js'
-import { sleep, backoffDelay } from '../utils/sleep.js'
+import { sleep } from '../utils/sleep.js'
 import { NotificationSink } from './sink.js'
 import {
   cachedResolveDiscordWebhookUrl,
   isValidDiscordWebhookUrl,
-  extractWebhookIdToken,
 } from '../discord-credentials.js'
+// #5828: the channel-level wire primitives (fetch policy, 429 handling, id/token
+// extraction, markdown escaping, embed colors) moved to a shared client so the
+// billing-alert sink can reuse them. The status sink delegates to them below —
+// this is a pure-swap of the previous private helpers.
+import {
+  DEFAULT_PROJECT_COLOR,
+  DEFAULT_PERMISSION_COLOR,
+  DEFAULT_ERROR_COLOR,
+  DEFAULT_ONLINE_COLOR,
+  DEFAULT_OFFLINE_COLOR,
+  isValidColor,
+  escapeAndCap,
+  formatDuration,
+  apiBase,
+  fetchWithDiscordRetry,
+} from './discord-webhook-client.js'
 
 const log = createLogger('discord')
 
-// Same envelope as the Expo sink's fetch policy; the 429 handling is the
-// Discord-specific addition.
-const FETCH_TIMEOUT_MS = 10_000
-const MAX_RETRIES = 3
-const BACKOFF_BASE_MS = 1_000
-// Ceiling on how long a single 429 retry_after is honoured. Discord webhook
-// buckets are normally sub-second; a multi-minute retry_after means we're
-// globally limited and should give up (send() resolves false; the pipeline
-// retries on the next event) rather than hold the fan-out hostage.
-const MAX_RETRY_AFTER_MS = 30_000
+// Re-exported for back-compat: the status sink's test imports formatDuration
+// from here. The implementation now lives in discord-webhook-client.js.
+export { formatDuration }
 
 // #5429/#5434: retention for state-store entries. Project keys fall back to
 // session ids (and Phase 3 ingest accepts arbitrary project names), so
@@ -97,16 +105,6 @@ const MIN_PRUNE_AFTER_MS = 60_000 // 60s
 // state, resetting the silence clock automatically.
 const DEFAULT_STALE_AFTER_MS = 10 * 60_000   // 10m
 const DEFAULT_OFFLINE_AFTER_MS = 30 * 60_000 // 30m
-
-// Embed sidebar color defaults — ported from claude-code-notify
-// (colors.conf.example + the CLAUDE_NOTIFY_*_COLOR defaults).
-const DEFAULT_PROJECT_COLOR = 5793266   // Discord blurple #5865F2
-const DEFAULT_PERMISSION_COLOR = 16753920 // orange #FFA500
-const DEFAULT_ERROR_COLOR = 15158332    // red #E74C3C
-// #5413 Phase 3 — session lifecycle states (bash CLAUDE_NOTIFY_*_COLOR defaults)
-const DEFAULT_ONLINE_COLOR = 3066993    // green #2ECC71
-const DEFAULT_OFFLINE_COLOR = 15158332  // red #E74C3C
-const MAX_COLOR = 16777215              // 24-bit RGB
 
 // Pipeline notification category → embed state. Phase 2 maps chroxy's own
 // session events (the categories PushManager.send is called with). The
@@ -148,75 +146,6 @@ const STATE_TITLES = {
   stale: (project) => `\u{23F3} ${project} — Quiet for a while`,
   online: (project) => `\u{1F7E2} ${project} — Session Online`,
   offline: (project) => `\u{1F534} ${project} — Session Offline`,
-}
-
-/** Format seconds into a human-readable duration (port of format_duration). */
-export function formatDuration(seconds) {
-  if (!Number.isFinite(seconds) || seconds < 0) return '0s'
-  seconds = Math.floor(seconds)
-  if (seconds < 60) return `${seconds}s`
-  if (seconds < 3600) return `${Math.floor(seconds / 60)}m ${seconds % 60}s`
-  return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`
-}
-
-function isValidColor(color) {
-  return Number.isInteger(color) && color >= 0 && color <= MAX_COLOR
-}
-
-function truncate(text, max = 1000) {
-  if (typeof text !== 'string') return ''
-  return text.length > max ? `${text.slice(0, max - 3)}...` : text
-}
-
-/**
- * Escape Discord markdown metacharacters so free-text user/transcript content
- * (task descriptions, ScheduleWakeup reasons, session names) renders literally
- * in an embed field instead of being styled or swallowed (#5475).
- *
- * Example: a task described as `watch dist/*_test.js` would otherwise render
- * with the `*…*`/`_…_` runs interpreted as italics, eating characters.
- *
- * The sink is webhook-based and intentionally dependency-free, so this is a
- * local 5-liner rather than pulling in discord.js's escapeMarkdown. We escape
- * the inline-format set (`\\ * _ ~ \` |`) plus a leading `>` (blockquote — only
- * meaningful at line start; we escape every `>` for simplicity, which is
- * harmless mid-line). Backslash is escaped FIRST so we don't double-escape the
- * escapes we then insert.
- *
- * Escaping the already-truncated string keeps every inserted `\X` pair intact
- * (escaping first could split a `\X` across the cut and leave a dangling `\`),
- * so callers truncate FIRST and escape SECOND — see escapeAndCap.
- */
-function escapeMarkdown(text) {
-  if (typeof text !== 'string') return ''
-  return text.replace(/[\\*_~`|>]/g, '\\$&')
-}
-
-/**
- * Truncate a free-text field, escape its markdown, and clamp the FINAL escaped
- * string to `max` chars — the value that actually goes on the wire (#5475).
- *
- * Escaping after truncation can up to double the length (all-metachar input →
- * ~2×). Discord's embed-field hard limit is 1024, so an un-clamped escaped
- * value could exceed it and get the whole webhook PATCH/POST rejected with a
- * 400. We re-truncate the escaped result to `max`; if the cut lands on a lone
- * `\` inserted by escaping (i.e. the escape backslash without its metachar),
- * we drop it so the field never ends in a dangling backslash.
- *
- * The inner truncate() appends a plain `...` marker (no metacharacters), so it
- * is neither escaped nor split by the re-truncate.
- */
-function escapeAndCap(text, max = 1000) {
-  const escaped = escapeMarkdown(truncate(text, max))
-  if (escaped.length <= max) return escaped
-  const cut = escaped.slice(0, max)
-  // escapeMarkdown emits `\` only immediately before a metacharacter, so every
-  // backslash in `escaped` belongs to a `\X` pair. A run of trailing backslashes
-  // of ODD length means the final `\` is a lone escape whose metachar fell past
-  // the cut; drop it so the field never ends in a dangling escape. An EVEN run
-  // is whole `\\` pairs (escaped literal backslashes) and stays intact.
-  const trailing = cut.length - cut.replace(/\\+$/, '').length
-  return trailing % 2 === 1 ? cut.slice(0, -1) : cut
 }
 
 export class DiscordWebhookSink extends NotificationSink {
@@ -580,10 +509,8 @@ export class DiscordWebhookSink extends NotificationSink {
   // -- Discord message operations -------------------------------------------
 
   _apiBase(webhookUrl) {
-    const parts = extractWebhookIdToken(webhookUrl)
-    // _configuredUrl() already validated the shape; belt-and-braces.
-    if (!parts) throw new Error('webhook URL failed id/token extraction')
-    return `https://discord.com/api/webhooks/${parts.id}/${parts.token}`
+    // _configuredUrl() already validated the shape; apiBase belt-and-braces.
+    return apiBase(webhookUrl)
   }
 
   /** DELETE the old status message (best effort) + POST a fresh one → re-ping. */
@@ -677,66 +604,11 @@ export class DiscordWebhookSink extends NotificationSink {
   }
 
   /**
-   * Fetch with timeout + bounded retry, Discord flavor:
-   *   - 429 → honour retry_after (JSON body seconds, or Retry-After header),
-   *     capped at MAX_RETRY_AFTER_MS, then retry
-   *   - 5xx / network error / timeout → exponential backoff retry
-   *   - other 4xx → return immediately (not retryable)
-   * Throws only when the LAST attempt threw (caller maps that to `false`).
+   * Delegate to the shared client's fetch policy (429/backoff/timeout), passing
+   * this sink's injected sleep seam so existing tests keep working unchanged.
    */
-  async _discordFetch(url, options, { retries = MAX_RETRIES } = {}) {
-    let res
-    for (let attempt = 1; attempt <= retries; attempt++) {
-      const controller = new AbortController()
-      const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS)
-      try {
-        res = await fetch(url, { ...options, signal: controller.signal })
-      } catch (err) {
-        clearTimeout(timer)
-        if (attempt < retries) {
-          await this._sleep(backoffDelay(attempt, BACKOFF_BASE_MS))
-          continue
-        }
-        throw err
-      }
-      clearTimeout(timer)
-
-      if (res.status === 429) {
-        if (attempt < retries) {
-          await this._sleep(await this._retryAfterMs(res))
-          continue
-        }
-        return res
-      }
-      if (res.ok || (res.status >= 400 && res.status < 500)) return res
-      // 5xx
-      if (attempt < retries) {
-        await this._sleep(backoffDelay(attempt, BACKOFF_BASE_MS))
-        continue
-      }
-      return res
-    }
-    return res
-  }
-
-  /**
-   * Extract the wait from a 429 response. Discord sends `retry_after` in
-   * SECONDS (float) in the JSON body and a Retry-After header (also
-   * seconds). Defaults to 2s when unparsable; clamped to MAX_RETRY_AFTER_MS.
-   */
-  async _retryAfterMs(res) {
-    let seconds = NaN
-    try {
-      const header = res.headers?.get?.('retry-after')
-      if (header != null) seconds = Number.parseFloat(header)
-    } catch { /* fall through to body */ }
-    if (!Number.isFinite(seconds)) {
-      try {
-        seconds = Number.parseFloat((await res.json())?.retry_after)
-      } catch { /* fall through to default */ }
-    }
-    if (!Number.isFinite(seconds) || seconds < 0) seconds = 2
-    return Math.min(seconds * 1000, MAX_RETRY_AFTER_MS)
+  async _discordFetch(url, options, opts = {}) {
+    return fetchWithDiscordRetry(url, options, { sleepImpl: this._sleep, ...opts })
   }
 
   // -- Embed building --------------------------------------------------------

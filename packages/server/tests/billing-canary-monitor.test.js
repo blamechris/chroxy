@@ -145,7 +145,7 @@ test('getDatacenterPrefixes extends the built-in egress list', async () => {
   assert.ok(monitor.current().warnings.some((w) => w.code === 'DATACENTER_EGRESS'))
 })
 
-test('notify fires once per distinct non-empty warning set, not on all-clear', () => {
+test('notify fires once per distinct non-empty set, then once on the clear transition (#5828)', () => {
   const notified = []
   let provider = 'claude-sdk' // metered default → warning
   const { monitor } = make({
@@ -160,9 +160,24 @@ test('notify fires once per distinct non-empty warning set, not on all-clear', (
   monitor.refresh() // unchanged warning set → no re-notify
   assert.equal(notified.length, 1)
 
-  provider = 'claude-tui' // clears → must NOT notify on all-clear
+  provider = 'claude-tui' // clears → fire the all-clear once with an empty array
   monitor.refresh()
-  assert.equal(notified.length, 1)
+  assert.equal(notified.length, 2)
+  assert.deepEqual(notified[1], [])
+
+  monitor.refresh() // stays clear → no repeated all-clear
+  assert.equal(notified.length, 2)
+})
+
+test('notify does NOT fire a spurious all-clear at startup (never warned)', () => {
+  const notified = []
+  const { monitor } = make({
+    getDefaultProvider: () => 'claude-tui', // clean from the start
+    extra: { notify: (w) => notified.push(w) },
+  })
+  monitor.refresh()
+  monitor.refresh()
+  assert.equal(notified.length, 0)
 })
 
 test('notify re-fires when the warning set changes (new code appears)', async () => {
