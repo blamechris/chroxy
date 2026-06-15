@@ -12,9 +12,10 @@
  * Never logged. The redactor at logger.js scrubs `sk-ant-` and `Bearer`
  * patterns before any log line lands on disk.
  */
-import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
+import { statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
+import { readCredentialJsonField } from './credentials-file.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home; if this were captured at module load, the
@@ -35,57 +36,15 @@ export function resolveAnthropicApiKey() {
   }
 
   const CREDENTIALS_FILE = credentialsFilePath()
-  let stat
-  try {
-    stat = statSync(CREDENTIALS_FILE)
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      return {
-        key: null,
-        source: 'none',
-        reason: `ANTHROPIC_API_KEY not set and ${CREDENTIALS_FILE} does not exist`,
-      }
-    }
-    return {
-      key: null,
-      source: 'none',
-      reason: `unable to stat ${CREDENTIALS_FILE}: ${err.message}`,
-    }
+  const result = readCredentialJsonField(CREDENTIALS_FILE, 'anthropicApiKey')
+  if (result.key !== null) {
+    return { key: result.key, source: 'file' }
   }
-
-  // Refuse anything more permissive than 0600. Permissions check uses the
-  // low 9 bits (mode & 0o777). On macOS a file pasted in from elsewhere
-  // commonly arrives as 0644; we want to fail with a clear hint rather
-  // than read the key from a world-readable file.
-  const perms = stat.mode & 0o777
-  if (perms !== 0o600) {
-    return {
-      key: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600 — run: chmod 600 ${CREDENTIALS_FILE})`,
-    }
-  }
-
-  let parsed
-  try {
-    parsed = JSON.parse(readFileSync(CREDENTIALS_FILE, 'utf8'))
-  } catch (err) {
-    return {
-      key: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} unreadable or not valid JSON: ${err.message}`,
-    }
-  }
-
-  if (typeof parsed?.anthropicApiKey !== 'string' || parsed.anthropicApiKey.length === 0) {
-    return {
-      key: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} missing or empty "anthropicApiKey" field`,
-    }
-  }
-
-  return { key: parsed.anthropicApiKey, source: 'file' }
+  // Preserve the env-var-prefixed ENOENT hint; every other reason is verbatim.
+  const reason = result.code === 'enoent'
+    ? `ANTHROPIC_API_KEY not set and ${CREDENTIALS_FILE} does not exist`
+    : result.reason
+  return { key: null, source: 'none', reason }
 }
 
 /**

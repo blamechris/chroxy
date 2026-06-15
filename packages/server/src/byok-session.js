@@ -18,7 +18,7 @@ import Anthropic, { APIUserAbortError } from '@anthropic-ai/sdk'
 import { join } from 'path'
 import { homedir } from 'os'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
-import { PermissionManager } from './permission-manager.js'
+import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { createLogger } from './logger.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import {
@@ -244,20 +244,11 @@ export class ClaudeByokSession extends BaseSession {
     // AbortController for the active stream so interrupt() can cancel.
     this._abortController = null
 
-    // PermissionManager + event re-emission. Same wiring as
-    // sdk-session.js:254-275 so the dashboard / mobile permission UI
-    // and the audit log work uniformly across providers.
+    // PermissionManager + event re-emission via the shared wiring (P2-9) so the
+    // dashboard / mobile permission UI and the audit log work uniformly across
+    // providers. ByokSession passes no pause/resume hooks (no result-timeout).
     this._permissions = new PermissionManager({ log })
-    this._permissions.on('permission_request', (data) => this.emit('permission_request', data))
-    this._permissions.on('user_question', (data) => this.emit('user_question', data))
-    this._permissions.on('permission_resolved', (data) => {
-      if (data && (data.requestId || data.toolUseId)) {
-        this.emit('permission_resolved', data)
-      }
-    })
-    // Backward-compatible accessors used by ws-permissions.js + settings-handlers.js.
-    this._pendingPermissions = this._permissions._pendingPermissions
-    this._lastPermissionData = this._permissions._lastPermissionData
+    wirePermissionManager(this, this._permissions)
 
     // Realpath cache used by the tool executor's path-safety check. One
     // cache per session — fresh sessions don't reuse a stale cwd.
