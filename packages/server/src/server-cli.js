@@ -11,7 +11,7 @@ import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 // moved to tunnel-lifecycle-handler.js with the tunnel block; createTunnel +
 // waitForTunnel are still passed into the handler.
 import { waitForTunnel } from './tunnel-check.js'
-import { PushManager } from './push.js'
+import { PushManager, settlePush } from './push.js'
 import { ensureIngestSecret } from './event-ingest.js'
 import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
 import { StartupDisplay } from './server-cli/startup-display.js'
@@ -927,9 +927,9 @@ export async function startCliServer(config) {
       const title = count > 1 ? `Billing alert (${count})` : 'Billing alert'
       const body = warnings.map((w) => w.message).join('\n\n')
       const codes = warnings.map((w) => w.code)
-      pushManager.send('billing_warning', title, body, { codes }).catch((err) => {
-        log?.warn?.(`billing-canary push failed: ${String(err?.message || err)}`)
-      })
+      // settlePush (#5702) logs both a thrown error AND a `false` not-delivered
+      // return (a half-open link), which a bare `.catch()` would drop silently.
+      settlePush(pushManager.send('billing_warning', title, body, { codes }), 'billing-canary', log)
     },
   })
   wsServer.setBillingCanaryProvider(() => billingCanaryMonitor.current())

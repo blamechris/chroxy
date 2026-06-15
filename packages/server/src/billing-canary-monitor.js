@@ -63,6 +63,7 @@ export class BillingCanaryMonitor {
     this._lastKey = null      // JSON of the last snapshot, for broadcast change-detection
     this._lastWarnKey = null  // signature of the last warning SET, for notify change-detection
     this._egressIp = null     // cached public egress IP (null until resolved / when disabled)
+    this._stopped = false     // true after stop(); guards an in-flight egress tick from refreshing
   }
 
   /**
@@ -140,6 +141,11 @@ export class BillingCanaryMonitor {
         this._egressIp = null
       }
     }
+    // The egress lookup is async (up to ~5s); if stop() landed while it was in
+    // flight, skip the trailing refresh so a shut-down monitor doesn't broadcast.
+    // `_stopped` (not `_timer`) is the signal — `_timer` is briefly null during
+    // start()'s first tick, before setInterval runs.
+    if (this._stopped) return
     try {
       this.refresh()
     } catch (err) {
@@ -154,6 +160,7 @@ export class BillingCanaryMonitor {
 
   /** Start the periodic recompute. Initial refresh runs immediately. */
   start() {
+    this._stopped = false
     // Immediate synchronous refresh so current() is populated for the auth_ok
     // seed right away (egress, if enabled, folds in on the async tick below).
     this.refresh()
@@ -170,6 +177,7 @@ export class BillingCanaryMonitor {
 
   /** Stop the periodic recompute. Idempotent. */
   stop() {
+    this._stopped = true
     if (this._timer) {
       clearInterval(this._timer)
       this._timer = null

@@ -181,6 +181,23 @@ test('notify re-fires when the warning set changes (new code appears)', async ()
   assert.deepEqual(notified[1], ['DATACENTER_EGRESS', 'SILENT_METERED_DEFAULT'])
 })
 
+test('_tick after stop() does not refresh (in-flight egress lookup during shutdown)', async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const { monitor, broadcasts } = make({
+    getDefaultProvider: () => 'claude-sdk',
+    extra: { resolveEgressIp: async () => { await gate; return '5.9.1.2' } },
+  })
+  monitor.start()
+  const before = broadcasts.length
+  // start() kicks an async _tick whose egress lookup is parked on `gate`.
+  monitor.stop()      // shutdown lands mid-lookup
+  release('go')       // resolver completes after stop()
+  await new Promise((r) => setTimeout(r, 0))
+  // No extra broadcast from the post-stop tick.
+  assert.equal(broadcasts.length, before)
+})
+
 test('notify failure is swallowed (does not break refresh)', () => {
   const { monitor, broadcasts } = make({
     getDefaultProvider: () => 'claude-sdk',
