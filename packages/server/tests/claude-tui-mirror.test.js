@@ -29,6 +29,7 @@ test('coalesces onData chunks into one terminal_output flush per tick', () => {
   mock.timers.enable({ apis: ['setTimeout'] })
   try {
     const s = makeSession()
+    s.setTerminalMirrorActive(true) // #5837: coalescer is gated on a subscriber
     const emitted = []
     s.on('terminal_output', (e) => emitted.push(e.data))
 
@@ -53,6 +54,7 @@ test('preserves raw bytes (ANSI intact) — no stripping in the mirror path', ()
   mock.timers.enable({ apis: ['setTimeout'] })
   try {
     const s = makeSession()
+    s.setTerminalMirrorActive(true) // #5837
     const emitted = []
     s.on('terminal_output', (e) => emitted.push(e.data))
     s._feedTerminalMirror('\x1b[?1049h\x1b[31mred\x1b[0m')
@@ -67,6 +69,7 @@ test('_clearTerminalMirror cancels a pending flush and drops the buffer', () => 
   mock.timers.enable({ apis: ['setTimeout'] })
   try {
     const s = makeSession()
+    s.setTerminalMirrorActive(true) // #5837
     const emitted = []
     s.on('terminal_output', (e) => emitted.push(e.data))
     s._feedTerminalMirror('x')
@@ -84,6 +87,63 @@ test('flush with an empty buffer is a no-op (stray flush after teardown)', () =>
   s.on('terminal_output', (e) => emitted.push(e.data))
   s._flushTerminalMirror()
   assert.equal(emitted.length, 0)
+})
+
+// #5837: the coalescer is gated on having a subscriber. Default OFF.
+
+test('mirror is inactive by default — _feedTerminalMirror does no work and emits nothing', () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const s = makeSession()
+    const emitted = []
+    s.on('terminal_output', (e) => emitted.push(e.data))
+    s._feedTerminalMirror('a')
+    s._feedTerminalMirror('b')
+    assert.equal(s._mirrorBuffer, '', 'nothing buffered while inactive')
+    assert.equal(s._mirrorTimer, null, 'no flush timer armed while inactive')
+    mock.timers.tick(ClaudeTuiSession.MIRROR_FLUSH_MS)
+    assert.equal(emitted.length, 0, 'no terminal_output when nobody is subscribed')
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('setTerminalMirrorActive(true) turns the coalescer on; (false) turns it off + drops pending', () => {
+  mock.timers.enable({ apis: ['setTimeout'] })
+  try {
+    const s = makeSession()
+    const emitted = []
+    s.on('terminal_output', (e) => emitted.push(e.data))
+
+    s.setTerminalMirrorActive(true)
+    s._feedTerminalMirror('hi')
+    mock.timers.tick(ClaudeTuiSession.MIRROR_FLUSH_MS)
+    assert.deepEqual(emitted, ['hi'], 'active → coalesces + flushes')
+
+    // Going inactive drops any pending buffer/timer (no trailing flush for nobody).
+    s._feedTerminalMirror('pending')
+    s.setTerminalMirrorActive(false)
+    assert.equal(s._mirrorBuffer, '', 'pending buffer dropped on deactivate')
+    assert.equal(s._mirrorTimer, null, 'pending timer cleared on deactivate')
+    mock.timers.tick(ClaudeTuiSession.MIRROR_FLUSH_MS)
+    assert.deepEqual(emitted, ['hi'], 'nothing else flushes after deactivate')
+
+    // And feeding while inactive again is a no-op.
+    s._feedTerminalMirror('more')
+    mock.timers.tick(ClaudeTuiSession.MIRROR_FLUSH_MS)
+    assert.deepEqual(emitted, ['hi'])
+  } finally {
+    mock.timers.reset()
+  }
+})
+
+test('setTerminalMirrorActive is idempotent for the same value', () => {
+  const s = makeSession()
+  s.setTerminalMirrorActive(true)
+  // Re-asserting true must not clear an in-flight buffer.
+  s._feedTerminalMirror('x')
+  s.setTerminalMirrorActive(true)
+  assert.equal(s._mirrorBuffer, 'x', 'same-value activate is a no-op, buffer intact')
 })
 
 // #5835 Phase 2: resize sync. resizeTerminal clamps, records the size (so it

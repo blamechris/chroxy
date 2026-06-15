@@ -32,6 +32,7 @@
  * @property {(sessionId: string) => string|undefined} getPrimary - Current primary clientId for a session, or undefined (#5563).
  * @property {(sessionId: string, clientId: string) => boolean} isPrimary - True iff clientId is the session's primary (#5563).
  * @property {(sessionId: string) => void} clearPrimary - Vacate a session's primary slot, announcing the vacancy (#5563).
+ * @property {(sessionId: string) => void} syncTerminalMirror - Re-evaluate the terminal-mirror coalescer gate for a session after its subscriber set changes (#5837).
  * @property {(ws: any, sessionId: string) => void} sendSessionInfo - Send a session_info envelope.
  * @property {(ws: any, sessionId: string) => void} replayHistory - Replay a session's history to a client.
  * @property {Map} clients - WebSocket → client-state Map (the WsClientManager's Map).
@@ -103,6 +104,7 @@ export const CTX_NAMESPACES = {
     'getPrimary',
     'isPrimary',
     'clearPrimary',
+    'syncTerminalMirror',
     'sendSessionInfo',
     'replayHistory',
     'clients',

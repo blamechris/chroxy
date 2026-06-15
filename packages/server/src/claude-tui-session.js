@@ -384,6 +384,14 @@ export class ClaudeTuiSession extends BaseSession {
     // on flush and cleared on teardown.
     this._mirrorBuffer = ''
     this._mirrorTimer = null
+    // #5837: gate the coalescer on having ≥1 subscriber. The mirror is OFF until a
+    // client opts in (terminal_subscribe), so a claude-tui session nobody is
+    // watching pays nothing per PTY redraw (no string concat, no timer, no
+    // session_event). WsServer toggles this via setTerminalMirrorActive when the
+    // terminal-subscriber count for the session crosses 0↔1 (subscribe / unsubscribe
+    // / client departure). Forward-only: a subscriber sees redraws from when it
+    // subscribed onward — same as Phase 1, the mirror was never a snapshot.
+    this._terminalMirrorActive = false
     // #5835 Phase 2: the live PTY's current grid size. Spawns at the shared
     // default and tracks every applied resize so a respawn re-spawns at the
     // operator's chosen size (not back to the default), and so a newly-
@@ -1754,11 +1762,30 @@ export class ClaudeTuiSession extends BaseSession {
    * stripped or transformed: faithful reproduction is the whole point.
    */
   _feedTerminalMirror(data) {
+    // #5837: skip ALL coalescer work when nobody is subscribed to this session's
+    // mirror. This is the common case (the Output tab is closed), and onData fires
+    // very frequently — gating here saves the per-redraw string concat + timer +
+    // session_event for the whole life of an unwatched session.
+    if (!this._terminalMirrorActive) return
     this._mirrorBuffer += String(data)
     if (this._mirrorTimer) return
     this._mirrorTimer = setTimeout(() => this._flushTerminalMirror(), ClaudeTuiSession.MIRROR_FLUSH_MS)
     // Don't keep the event loop alive for a mirror flush — teardown clears it.
     if (typeof this._mirrorTimer.unref === 'function') this._mirrorTimer.unref()
+  }
+
+  /**
+   * #5837: turn the live mirror coalescer on/off based on whether any client is
+   * subscribed to this session's terminal. WsServer calls this when the
+   * terminal-subscriber count crosses 0↔1. When turning OFF, drop any pending
+   * buffer/timer (nobody is watching, so a trailing flush is pure waste) — this
+   * reuses the same teardown as _clearTerminalMirror.
+   */
+  setTerminalMirrorActive(active) {
+    const next = !!active
+    if (next === this._terminalMirrorActive) return
+    this._terminalMirrorActive = next
+    if (!next) this._clearTerminalMirror()
   }
 
   /**
