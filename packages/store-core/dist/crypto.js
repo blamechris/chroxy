@@ -213,9 +213,12 @@ export function decrypt(envelope, sharedKey, expectedNonce, direction) {
         return JSON.parse(new TextDecoder().decode(plaintext));
     }
     catch (cause) {
-        // Preserve the original SyntaxError as `cause` (Node 22) for debugging
-        // while keeping the documented 'Decryption failed: …' message contract.
-        throw new Error('Decryption failed: plaintext is not valid JSON', { cause });
+        // Preserve the original SyntaxError as `cause` for debugging while keeping
+        // the documented 'Decryption failed: …' message contract. Set via
+        // Object.assign rather than the two-arg Error ctor so this compiles under
+        // every consumer's tsconfig lib (the dashboard pulls this source in under a
+        // lib without ES2022's Error-cause overload).
+        throw Object.assign(new Error('Decryption failed: plaintext is not valid JSON'), { cause });
     }
 }
 /**
