@@ -379,6 +379,18 @@ export class Supervisor extends EventEmitter {
       this._restartTimer = null
     }
 
+    // Free the port BEFORE forking the replacement child. After a crash the
+    // exit handler starts a standby health server bound to `this._port`; if it
+    // is still listening when the new child forks, the child's own `listen()`
+    // fails with EADDRINUSE and it exits before sending `ready` — so the
+    // `_stopStandbyServer()` on `ready` (below) never runs, the standby stays
+    // up, and every restart attempt hits the same EADDRINUSE until the restart
+    // cap, silently bricking the daemon on the first crash. Stopping standby
+    // here (idempotent when none is running, e.g. the first start) guarantees
+    // the port is available for the child to bind. `close()` releases the
+    // listening socket; the standby has no keep-alive clients to drain.
+    this._stopStandbyServer()
+
     const childScript = resolve(__dirname, 'server-cli-child.js')
     const childEnv = {
       ...process.env,
