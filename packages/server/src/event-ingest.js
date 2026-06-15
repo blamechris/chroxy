@@ -27,7 +27,7 @@
 
 import { randomBytes } from 'node:crypto'
 import { existsSync, mkdirSync, readFileSync, realpathSync } from 'node:fs'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path'
 import { homedir } from 'node:os'
 import { safeTokenCompare } from './token-compare.js'
 import { sendOversizeResponse } from './http-oversize.js'
@@ -207,9 +207,10 @@ export function ensureIngestSecret(secretPath = defaultIngestSecretPath()) {
  * (os.tmpdir() classification differs across platforms). Never set in prod.
  */
 function chroxyWorktreesRoot(env = process.env) {
-  const override = env?.CHROXY_WORKTREES_ROOT
-  if (typeof override === 'string' && override.trim().startsWith('/')) {
-    return realResolve(override.trim().replace(/\/+$/, ''))
+  const override = typeof env?.CHROXY_WORKTREES_ROOT === 'string' ? env.CHROXY_WORKTREES_ROOT.trim() : ''
+  // isAbsolute()/replace cover both POSIX (`/…`) and Windows (`C:\…`, `\\…`) roots.
+  if (override.length > 0 && isAbsolute(override)) {
+    return realResolve(override.replace(/[/\\]+$/, ''))
   }
   const home = typeof env?.HOME === 'string' && env.HOME.length > 0 ? env.HOME : homedir()
   if (!home) return null
@@ -229,8 +230,12 @@ function realResolve(p) {
  */
 function chroxyWorktreeTopDir(dir, env = process.env) {
   const root = chroxyWorktreesRoot(env)
-  if (!root || !dir.startsWith(root + '/')) return null
-  const id = dir.slice(root.length + 1).split('/')[0]
+  if (!root) return null
+  // relative()/sep are separator-agnostic (POSIX `/` and Windows `\`). `dir`
+  // must be strictly inside root — a '..'/absolute relative means it escaped.
+  const rel = relative(root, dir)
+  if (!rel || rel.startsWith('..') || isAbsolute(rel)) return null
+  const id = rel.split(sep)[0]
   return id.length > 0 ? join(root, id) : null
 }
 
@@ -277,8 +282,10 @@ export function deriveProjectFromCwd(cwd, env = process.env) {
     return null
   }
   // chroxy session worktree → parent repo (or null), never the opaque id.
-  const resolved = realResolve(cwd)
-  const chroxyTop = resolved ? chroxyWorktreeTopDir(resolved, env) : null
+  // Reuse the already-resolved `dir`; realpath best-effort (macOS /tmp → /private/tmp).
+  let resolved
+  try { resolved = realpathSync(dir) } catch { resolved = dir }
+  const chroxyTop = chroxyWorktreeTopDir(resolved, env)
   if (chroxyTop) return chroxyWorktreeParentProject(chroxyTop)
   let current = dir
   // Bounded walk — terminates at the fs root anyway; the cap is paranoia

@@ -20,7 +20,7 @@ import { createServer } from 'node:http'
 import { once } from 'node:events'
 import { mkdtempSync, mkdirSync, writeFileSync, statSync, existsSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { basename, join } from 'node:path'
 import { createHttpHandler } from '../src/http-routes.js'
 import {
   loadOrCreateIngestSecret,
@@ -472,8 +472,8 @@ describe('event-ingest', () => {
       const res = await post(event)
       assert.equal(res.status, 200)
       const body = await res.json()
-      assert.equal(body.project, repo.split('/').pop())
-      assert.equal(mockServer.pushManager.calls[0].data.project, repo.split('/').pop())
+      assert.equal(body.project, basename(repo))
+      assert.equal(mockServer.pushManager.calls[0].data.project, basename(repo))
     })
 
     it('uses data.title / data.message as the notification text when provided', async () => {
@@ -606,7 +606,7 @@ describe('deriveProjectFromCwd', () => {
     mkdirSync(join(repo, '.git'))
     const nested = join(repo, 'a', 'b', 'c')
     mkdirSync(nested, { recursive: true })
-    assert.equal(deriveProjectFromCwd(nested), repo.split('/').pop())
+    assert.equal(deriveProjectFromCwd(nested), basename(repo))
   })
 
   it('treats a .git FILE as a git root (worktrees)', () => {
@@ -614,7 +614,7 @@ describe('deriveProjectFromCwd', () => {
     writeFileSync(join(wt, '.git'), 'gitdir: /somewhere/else\n')
     const nested = join(wt, 'src')
     mkdirSync(nested)
-    assert.equal(deriveProjectFromCwd(nested), wt.split('/').pop())
+    assert.equal(deriveProjectFromCwd(nested), basename(wt))
   })
 
   it('prefers the NEAREST .git when nested repos exist', () => {
@@ -664,7 +664,7 @@ describe('deriveProjectFromCwd', () => {
     it('recovers the parent repo basename, not the opaque session id', () => {
       const { repo, wt, env } = makeChroxyWorktree()
       const got = deriveProjectFromCwd(wt, env)
-      assert.equal(got, repo.split('/').pop())
+      assert.equal(got, basename(repo))
       assert.notEqual(got, ID, 'must not return the opaque session id')
     })
 
@@ -672,7 +672,7 @@ describe('deriveProjectFromCwd', () => {
       const { repo, wt, env } = makeChroxyWorktree()
       const nested = join(wt, 'packages', 'app')
       mkdirSync(nested, { recursive: true })
-      assert.equal(deriveProjectFromCwd(nested, env), repo.split('/').pop())
+      assert.equal(deriveProjectFromCwd(nested, env), basename(repo))
     })
 
     it('returns null (not the id) when the worktree .git file is corrupt', () => {
