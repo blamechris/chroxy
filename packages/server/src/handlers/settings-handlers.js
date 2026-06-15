@@ -546,6 +546,30 @@ function rejectCredentialWriteIfBound(ws, client, msg, ctx) {
 }
 
 /**
+ * Reject skill-trust mutations from a bound (pairing-issued) client. A skill is
+ * EXECUTABLE CODE that runs on the host; granting trust (`skill_trust_grant`) or
+ * re-accepting changed content (`skill_trust_accept`) whitelists that code to
+ * run, which is a host-level integrity decision — the same class of escalation
+ * as flipping auto permission mode or writing provider credentials. A bound
+ * (share-a-session) token is scoped to USE the session, not to extend what code
+ * the host will execute, so these require host-level authority (unbound client).
+ *
+ * Note: skill_activate / skill_deactivate are deliberately NOT gated here — they
+ * only toggle ALREADY-installed, already-trusted local skills into the session,
+ * which is no more capability than the input a bound client can already send.
+ *
+ * Returns true and sends the rejection if the client is bound (caller must
+ * early-return); false to proceed. See docs/security/bearer-token-authority.md.
+ */
+function rejectSkillTrustIfBound(ws, client, msg, ctx) {
+  if (!client?.boundSessionId) return false
+  loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to modify skill trust (${msg?.type}) — rejected`)
+  sendError(ws, msg?.requestId, 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT',
+    'Pairing-issued session tokens cannot grant or accept skill trust (a skill is host-executable code). Use the primary API token from a device with physical access to this machine.', undefined, ctx)
+  return true
+}
+
+/**
  * BYOK credentials handlers (#4052).
  *
  * Three message types: get status, set the key, clear the key. The full
@@ -974,6 +998,7 @@ function handleSkillDeactivate(ws, client, msg, ctx) {
  * operator wants: re-trust now, the skill loads on next session start.
  */
 function handleSkillTrustAccept(ws, client, msg, ctx) {
+  if (rejectSkillTrustIfBound(ws, client, msg, ctx)) return
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
     sendSessionError(ws, ctx, 'skill_trust_accept requires a non-empty `skillName`')
     return
@@ -1185,6 +1210,7 @@ function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
  *   - `TRUST_FLUSH_FAILED` — granted in memory but the trust ledger could not be persisted
  */
 function handleSkillTrustGrant(ws, client, msg, ctx) {
+  if (rejectSkillTrustIfBound(ws, client, msg, ctx)) return
   if (typeof msg.skillName !== 'string' || msg.skillName === '') {
     sendError(ws, msg?.requestId, 'INVALID_SKILL_NAME', 'skill_trust_grant requires a non-empty `skillName`', undefined, ctx)
     return
