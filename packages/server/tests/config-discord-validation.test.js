@@ -36,8 +36,14 @@ describe('validateConfig — notifications.discord unknown keys (#5453)', () => 
       botName: 'Bot', billingAlerts: true, defaultColor: 0, permissionColor: 1, errorColor: 2,
       colors: {}, updateThrottleMs: 0, heartbeatIntervalMs: 0, pruneAfterMs: 0,
       staleAfterMs: 600000, offlineAfterMs: 1800000,
+      statePath: '/tmp/state.json', billingStatePath: '/tmp/billing.json',
     })
     assert.ok(!ws.some(w => w.includes('unknown key')), `recognised knobs should not warn as unknown, got: ${JSON.stringify(ws)}`)
+  })
+
+  it('does NOT warn on the runtime-honored state-store paths (statePath/billingStatePath)', () => {
+    const ws = discordWarnings({ statePath: '/custom/state.json', billingStatePath: '/custom/billing.json' })
+    assert.ok(!ws.some(w => w.includes('unknown key')), `state-store paths are config-overridable runtime knobs, got: ${JSON.stringify(ws)}`)
   })
 
   it('validates the #5676 watchdog tunables as numbers >= 0 (not unknown)', () => {

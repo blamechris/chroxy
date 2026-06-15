@@ -446,6 +446,12 @@ const DISCORD_SUPPORTED_KEYS = new Set([
   // (discord-webhook-sink.js: staleAfterMs/offlineAfterMs, default 10m/30m), so
   // they are real config knobs, not test seams (PR #5845 review).
   'staleAfterMs', 'offlineAfterMs',
+  // State-store paths: the caller (server-cli.js / supervisor.js) defaults these
+  // then lets the config spread override them, and push.js honors them
+  // (statePath → DiscordWebhookSink, billingStatePath → DiscordBillingSink). They
+  // are string value knobs (override → works), unlike the function test seams, so
+  // an operator relocating them must not warn as unknown (PR #5845 review).
+  'statePath', 'billingStatePath',
 ])
 const DISCORD_SECRET_KEYS = ['webhookUrl', 'webhook', 'url']
 
