@@ -313,9 +313,12 @@ describe('Supervisor', () => {
       const port = await findFreePort()
       const { supervisor } = setup({ port })
 
-      // Stand up a real standby health server, as the crash path does.
+      // Stand up a real standby health server, as the crash path does. Keep a
+      // handle to the server object — _stopStandbyServer() nulls the field, but
+      // we still need to observe its 'close' to prove the port is released.
       supervisor._startStandbyServer()
-      await new Promise((resolve) => supervisor._standbyServer.once('listening', resolve))
+      const standby = supervisor._standbyServer
+      await new Promise((resolve) => standby.once('listening', resolve))
 
       // Sanity: the standby genuinely holds the port (real-listener check) — a
       // fresh listener on it must fail, mirroring what the forked child sees.
@@ -331,8 +334,17 @@ describe('Supervisor', () => {
 
       supervisor.startChild()
 
-      // The port must have been released before the fork, so the child can bind.
+      // startChild() must stop the standby before forking.
       assert.equal(standbyAtForkTime, null, 'standby server must be stopped before the replacement child forks')
+
+      // …and the stop must ACTUALLY release the port, not just null the field:
+      // once the standby socket finishes closing, the port is bindable again
+      // (server.close() releases the listening socket; the real child cannot
+      // call listen() before this tick — it is a separate forked process that
+      // must spawn + init Node + load modules first, far longer than one loop
+      // tick). This closes the "test passes while the port is still bound" gap.
+      await new Promise((resolve) => standby.once('close', resolve))
+      assert.equal(await tryListen(port), null, 'standby close must release the port for the child to bind')
 
       // No pending restart timer to leak into other tests.
       if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
