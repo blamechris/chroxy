@@ -146,3 +146,51 @@ test('a _term.resize throw is swallowed (no crash) and the size is still recorde
   assert.deepEqual(applied, { cols: 90, rows: 30 })
   assert.deepEqual(s.getTerminalSize(), { cols: 90, rows: 30 })
 })
+
+// #5835 Phase 3: writeTerminalInput forwards raw bytes to the live PTY as-is.
+
+test('writeTerminalInput writes raw bytes verbatim to a live PTY', () => {
+  const s = makeSession()
+  const writes = []
+  s._term = { write: (d) => writes.push(d) }
+  s._ptyExited = false
+  s._destroying = false
+  assert.equal(s.writeTerminalInput('a'), true)
+  assert.equal(s.writeTerminalInput('\x03'), true) // Ctrl-C control byte, untransformed
+  assert.equal(s.writeTerminalInput('\x1b[A'), true) // arrow-up escape sequence
+  assert.deepEqual(writes, ['a', '\x03', '\x1b[A'])
+})
+
+test('writeTerminalInput is a no-op with no live PTY / after exit / during teardown', () => {
+  const s = makeSession()
+  s._term = null
+  assert.equal(s.writeTerminalInput('x'), false)
+  const writes = []
+  s._term = { write: (d) => writes.push(d) }
+  s._ptyExited = true
+  assert.equal(s.writeTerminalInput('x'), false)
+  s._ptyExited = false
+  s._destroying = true
+  assert.equal(s.writeTerminalInput('x'), false)
+  assert.deepEqual(writes, [], 'nothing reaches a dead/exiting/tearing-down PTY')
+})
+
+test('writeTerminalInput ignores empty / non-string data', () => {
+  const s = makeSession()
+  const writes = []
+  s._term = { write: (d) => writes.push(d) }
+  s._ptyExited = false
+  s._destroying = false
+  assert.equal(s.writeTerminalInput(''), false)
+  assert.equal(s.writeTerminalInput(undefined), false)
+  assert.equal(s.writeTerminalInput(42), false)
+  assert.deepEqual(writes, [])
+})
+
+test('a _term.write throw is swallowed (no crash), returns false', () => {
+  const s = makeSession()
+  s._term = { write: () => { throw new Error('pty gone') } }
+  s._ptyExited = false
+  s._destroying = false
+  assert.equal(s.writeTerminalInput('x'), false)
+})

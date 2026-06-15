@@ -1905,4 +1905,76 @@ describe('input-handlers', () => {
       assert.equal(ctx.transport.updatePrimary.callCount, 1)
     })
   })
+
+  // #5835 Phase 3: raw keystroke forwarding → live PTY (true remote control).
+  describe('terminal_input', () => {
+    function makeTuiCtx() {
+      const sessions = new Map()
+      const writes = []
+      const session = { writeTerminalInput: createSpy((d) => { writes.push(d) }) }
+      sessions.set('s1', { session, name: 'S', cwd: '/work' })
+      const ctx = makeCtx(sessions)
+      return { ctx, writes, session }
+    }
+
+    it('claims an unclaimed session for the sender and writes the bytes', () => {
+      const { ctx, writes } = makeTuiCtx()
+      const client = makeClient({ id: 'me', activeSessionId: 's1' })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: '\x03' }, ctx)
+      assert.equal(ctx.transport.getPrimary('s1'), 'me', 'first keystroke claims primary')
+      assert.deepEqual(writes, ['\x03'])
+    })
+
+    it('writes when the sender is already primary (no spurious reject)', () => {
+      const { ctx, writes } = makeTuiCtx()
+      ctx.transport.claimPrimary('s1', 'me', { force: true })
+      const client = makeClient({ id: 'me', activeSessionId: 's1' })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: 'ls\r' }, ctx)
+      assert.deepEqual(writes, ['ls\r'])
+    })
+
+    it("rejects an observer's keystroke with input_conflict and does NOT write or steal primary", () => {
+      const { ctx, writes } = makeTuiCtx()
+      ctx.transport.claimPrimary('s1', 'owner', { force: true })
+      const observer = makeClient({ id: 'observer', activeSessionId: 's1' })
+      inputHandlers.terminal_input(makeWs(), observer, { sessionId: 's1', data: 'x' }, ctx)
+      assert.equal(writes.length, 0, 'no bytes written')
+      assert.equal(ctx.transport.getPrimary('s1'), 'owner', 'primary unchanged — no force-steal')
+      const err = ctx._sent.find(m => m.type === 'session_error')
+      assert.ok(err && err.category === 'input_conflict')
+    })
+
+    it('rejects a bound client aiming at a different session with SESSION_TOKEN_MISMATCH', () => {
+      const { ctx, writes } = makeTuiCtx()
+      const client = makeClient({ id: 'me', boundSessionId: 'other', activeSessionId: 'other' })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: 'x' }, ctx)
+      assert.equal(writes.length, 0)
+      const err = ctx._sent.find(m => m.type === 'session_error')
+      assert.ok(err, 'a SESSION_TOKEN_MISMATCH envelope was sent')
+    })
+
+    it('is a no-op (no throw) for a non-claude-tui session (no writeTerminalInput)', () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: {}, name: 'S', cwd: '/work' }) // no PTY method
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ id: 'me', activeSessionId: 's1' })
+      assert.doesNotThrow(() =>
+        inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: 'x' }, ctx))
+    })
+
+    it('ignores empty data — does not write or claim primary', () => {
+      const { ctx, writes } = makeTuiCtx()
+      const client = makeClient({ id: 'me', activeSessionId: 's1' })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: '' }, ctx)
+      assert.equal(writes.length, 0)
+      assert.equal(ctx.transport.getPrimary('s1'), undefined, 'empty keystroke must not claim primary')
+    })
+
+    it('is a no-op for a missing session', () => {
+      const ctx = makeCtx(new Map())
+      const client = makeClient({ id: 'me', activeSessionId: 's1' })
+      assert.doesNotThrow(() =>
+        inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: 'x' }, ctx))
+    })
+  })
 })
