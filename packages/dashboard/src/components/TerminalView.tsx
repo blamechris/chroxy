@@ -63,8 +63,12 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
   // recreates the closure each render, but the terminal lifecycle is mount-once).
   const onMeasureRef = useRef(onMeasure)
   onMeasureRef.current = onMeasure
-  // Whether this terminal is a fixed-size letterboxed mirror. Captured per render
-  // for the mount effect; the live resize effect below reads fixedSize directly.
+  // Whether this terminal is a fixed-size letterboxed mirror. Mode is fixed at
+  // MOUNT — the xterm is constructed with mode-specific options (convertEol,
+  // initial cols/rows) and the mount-once onResize handler closes over this — so
+  // a caller must NOT toggle `fixedSize` between defined/undefined for a live
+  // terminal (the size VALUE may change freely; that's the resize effect below).
+  // The only consumer (MultiTerminalView) always passes a fixedSize.
   const isMirror = !!fixedSize
 
   const flush = useCallback(() => {

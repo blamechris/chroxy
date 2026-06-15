@@ -454,6 +454,14 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage({ type: 'terminal_size', cols: 80, rows: 24 }, ctx() as any)
       expect((store.getState() as any)._terminalSizeCalls).toEqual([])
     })
+
+    it('ignores terminal_size with non-positive dimensions', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 0, rows: 24 }, ctx() as any)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 80, rows: -1 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([])
+    })
   })
 
   describe('error dispatch', () => {
