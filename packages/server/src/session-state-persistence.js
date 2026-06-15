@@ -218,7 +218,14 @@ export class SessionStatePersistence {
       }
     }
     if (dropped.length > 0) {
-      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${dropped.join(', ')}`)
+      // Bound + escape the name list: session names are user-controlled
+      // (renameSession), so a newline-bearing name could inject log lines and
+      // a large drop could blow the line length. Cap to a small sample and
+      // JSON-stringify each so control chars are escaped. (Copilot review)
+      const MAX_NAMES = 10
+      const sample = dropped.slice(0, MAX_NAMES).map((n) => JSON.stringify(String(n)))
+      const more = dropped.length > MAX_NAMES ? `, …+${dropped.length - MAX_NAMES} more` : ''
+      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
     }
     if (fresh.length === 0) {
       log.info('All restored sessions are stale, starting fresh')

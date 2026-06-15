@@ -24,6 +24,7 @@
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { homedir } from 'node:os'
+import { isIPv6 } from 'node:net'
 
 /** Matches server-cli.js: `config.port || parseInt(process.env.PORT || '8765')`. */
 export const DEFAULT_PORT = 8765
@@ -49,9 +50,13 @@ function resolveHost(env, cfg) {
   return '127.0.0.1'
 }
 
-/** Bracket IPv6 literals so the URL authority is well-formed. */
+/**
+ * Bracket IPv6 literals so the URL authority is well-formed. Mirrors the
+ * server's bind-host.js formatHostForUrl — only ACTUAL IPv6 literals are
+ * bracketed (an accidental `host:port` string must not be mis-bracketed).
+ */
 function formatHostForUrl(host) {
-  return host.includes(':') && !host.startsWith('[') ? `[${host}]` : host
+  return isIPv6(host) ? `[${host}]` : host
 }
 
 /** Full URL for POST /api/events on the local daemon. */

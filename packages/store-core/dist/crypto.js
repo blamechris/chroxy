@@ -212,8 +212,10 @@ export function decrypt(envelope, sharedKey, expectedNonce, direction) {
     try {
         return JSON.parse(new TextDecoder().decode(plaintext));
     }
-    catch {
-        throw new Error('Decryption failed: plaintext is not valid JSON');
+    catch (cause) {
+        // Preserve the original SyntaxError as `cause` (Node 22) for debugging
+        // while keeping the documented 'Decryption failed: …' message contract.
+        throw new Error('Decryption failed: plaintext is not valid JSON', { cause });
     }
 }
 /**

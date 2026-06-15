@@ -256,8 +256,10 @@ export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expe
   // handling stays uniform. (audit P2-12)
   try {
     return JSON.parse(new TextDecoder().decode(plaintext))
-  } catch {
-    throw new Error('Decryption failed: plaintext is not valid JSON')
+  } catch (cause) {
+    // Preserve the original SyntaxError as `cause` (Node 22) for debugging
+    // while keeping the documented 'Decryption failed: …' message contract.
+    throw new Error('Decryption failed: plaintext is not valid JSON', { cause })
   }
 }
 
