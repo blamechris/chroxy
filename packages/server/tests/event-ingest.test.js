@@ -25,13 +25,15 @@ import { createHttpHandler } from '../src/http-routes.js'
 import {
   loadOrCreateIngestSecret,
   defaultIngestSecretPath,
-  deriveProjectFromCwd,
   handleEventIngest,
   ingestEventClass,
   INGEST_CATEGORY_FOR_TYPE,
   MAX_INGEST_BODY_BYTES,
 } from '../src/event-ingest.js'
 import { INGEST_EVENT_TYPES } from '@chroxy/protocol'
+// deriveProjectFromCwd moved to the shared module (audit P2-2, #5850); the
+// server now imports it from here too.
+import { deriveProjectFromCwd } from '@chroxy/protocol/project'
 import { RateLimiter } from '../src/rate-limiter.js'
 
 const SECRET = 'test-ingest-secret-0123456789abcdef'

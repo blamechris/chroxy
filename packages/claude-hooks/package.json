@@ -18,7 +18,8 @@
     "directory": "packages/claude-hooks"
   },
   "license": "MIT",
-  "devDependencies": {
+  "comment-dependencies": "Runtime dep on the workspace @chroxy/protocol via its Zod-free ./project subpath (audit P2-2). Resolves through workspace hoisting; chroxy is monorepo-installed only (README). If this package is ever published to npm standalone, @chroxy/protocol must be published too or its ./project module bundled in.",
+  "dependencies": {
     "@chroxy/protocol": "*"
   }
 }
