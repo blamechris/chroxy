@@ -970,6 +970,9 @@ export interface ConnectionState {
   // live PTY (terminal_resize) when the viewer pane can fit a different grid.
   setTerminalSize: (sessionId: string, cols: number, rows: number) => void;
   requestTerminalResize: (sessionId: string, cols: number, rows: number) => void;
+  // #5835 Phase 3: forward raw keystrokes to a session's live PTY (true remote
+  // control). Best-effort; the server enforces the single-driver authority.
+  sendTerminalInput: (sessionId: string, data: string) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   /**

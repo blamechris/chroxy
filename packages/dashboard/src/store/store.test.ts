@@ -705,6 +705,47 @@ describe('useConnectionStore', () => {
     expect(sent).toHaveLength(0);
     useConnectionStore.setState({ socket: null });
   });
+
+  it('sendTerminalInput sends terminal_input over an open socket; empty data is a no-op', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().sendTerminalInput('sess-1', '\x03');
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0]!)).toMatchObject({ type: 'terminal_input', sessionId: 'sess-1', data: '\x03' });
+    useConnectionStore.getState().sendTerminalInput('sess-1', '');
+    expect(sent).toHaveLength(1);
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('sendTerminalInput chunks a large paste into sub-cap frames without splitting surrogate pairs', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+
+    const MAX = 65536;
+    // 150k chars → 3 frames; put an emoji (surrogate pair) exactly straddling the
+    // first 64k boundary so the surrogate-safe split is exercised.
+    const big = 'a'.repeat(MAX - 1) + '😀' + 'b'.repeat(90000);
+    useConnectionStore.getState().sendTerminalInput('sess-1', big);
+
+    expect(sent.length).toBeGreaterThan(1);
+    let reassembled = '';
+    for (const raw of sent) {
+      const m = JSON.parse(raw);
+      expect(m.type).toBe('terminal_input');
+      expect(m.sessionId).toBe('sess-1');
+      expect(m.data.length).toBeLessThanOrEqual(MAX);
+      // No chunk ends on a lone high surrogate (would mean a split pair).
+      const last = m.data.charCodeAt(m.data.length - 1);
+      expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+      reassembled += m.data;
+    }
+    expect(reassembled).toBe(big); // lossless
+    useConnectionStore.setState({ socket: null });
+  });
 });
 
 // ---------------------------------------------------------------------------

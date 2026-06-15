@@ -34,6 +34,7 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   const handlesRef = useRef(new Map<string, TerminalHandle>())
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
   const requestTerminalResize = useConnectionStore(s => s.requestTerminalResize)
+  const sendTerminalInput = useConnectionStore(s => s.sendTerminalInput)
   // #5835 Phase 2: per-session authoritative sizes (server terminal_size). Reads
   // the whole map so a size change re-renders and the new fixedSize flows to the
   // affected TerminalView (which resizes its xterm in place).
@@ -65,6 +66,16 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
     lastSentRef.current.set(sessionId, key)
     requestTerminalResize(sessionId, cols, rows)
   }, [requestTerminalResize])
+
+  // #5835 Phase 3: forward a keystroke from a terminal to the server. Only the
+  // ACTIVE (visible, focusable) session can emit onData, but guard on live
+  // activeSessionId anyway. Role gating happens upstream (TerminalView's
+  // `interactive` disables stdin for an observer, so onData never fires), and the
+  // server is the final authority — this is the thin forwarding seam.
+  const handleInput = useCallback((sessionId: string, data: string) => {
+    if (useConnectionStore.getState().activeSessionId !== sessionId) return
+    sendTerminalInput(sessionId, data)
+  }, [sendTerminalInput])
 
   // Get initial data for a session from the store (one-time, at mount)
   const getInitialData = useCallback((sessionId: string) => {
@@ -109,6 +120,11 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
     }
   }, [sessions])
 
+  // #5835 Phase 3: the active session is read-only iff this client observes it
+  // (another device holds primary) — same predicate as each pane's `interactive`,
+  // named once for the badge.
+  const activeIsObserver = !!activeSessionId && sessionStates[activeSessionId]?.sessionRole === 'observer'
+
   return (
     <div className={className} data-testid="multi-terminal-container" style={{ position: 'relative' }}>
       {sessions.map(session => (
@@ -127,9 +143,20 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
             onReady={(handle) => handleReady(session.sessionId, handle)}
             fixedSize={sessionStates[session.sessionId]?.terminalSize ?? MIRROR_DEFAULT}
             onMeasure={(cols, rows) => handleMeasure(session.sessionId, cols, rows)}
+            // #5835 Phase 3: interactive (keystrokes → PTY) unless this client is
+            // an OBSERVER of the session — another device holds primary. The
+            // server is the final authority; this keeps an observer's keys from
+            // spamming input_conflict and reflects read-only in the cursor/focus.
+            interactive={sessionStates[session.sessionId]?.sessionRole !== 'observer'}
+            onInput={(data) => handleInput(session.sessionId, data)}
           />
         </div>
       ))}
+      {activeIsObserver && (
+        <div className="terminal-readonly-badge" data-testid="terminal-readonly-badge">
+          Read-only — another device is driving this session
+        </div>
+      )}
       {!activeBuffer && (
         <div className="terminal-empty-state" data-testid="terminal-empty-state">
           <p>No terminal output yet.</p>
