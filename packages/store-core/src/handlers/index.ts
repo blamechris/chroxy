@@ -5073,6 +5073,29 @@ export function sharedStreamDelta(
     ctx.reorderEmptyResponseSlot(deltaId, capturedSessionId)
   }
 
+  // audit P2-7 / #5556 — the captured→active session-resolution chain is needed
+  // by BOTH the defensive `-response` suffix branch and the post-tool split
+  // block below. It was previously copy-pasted with renamed locals (captured*
+  // vs split*); a missed copy silently misroutes deltas to the wrong session/
+  // slot, so it lives in one closure. Re-invoked (NOT cached) at each site: the
+  // suffix branch's appendResponseSlot mutates the message array before the
+  // split block reads it, so each call must re-read getSessionMessages fresh.
+  // Each site keeps its own `?? getFlatMessages()` + target derivation because
+  // they run at different times (the split's getFlatMessages stays gated behind
+  // the !isReplaying check).
+  const resolveSession = (): {
+    sessionMessages: readonly ChatMessage[] | null
+    effectiveSessionId: string | null
+  } => {
+    const capturedMessages = capturedSessionId ? ctx.getSessionMessages(capturedSessionId) : null
+    const sessionMessages =
+      capturedMessages ||
+      (ctx.activeSessionId ? ctx.getSessionMessages(ctx.activeSessionId) : null) ||
+      null
+    const effectiveSessionId = capturedMessages ? capturedSessionId : ctx.activeSessionId
+    return { sessionMessages, effectiveSessionId }
+  }
+
   // Permission boundary split: first delta after a split creates a new message.
   if (ctx.postPermissionSplits.has(deltaId)) {
     ctx.postPermissionSplits.delete(deltaId)
@@ -5106,12 +5129,7 @@ export function sharedStreamDelta(
     // the captured session when it has state, else the active session; fall
     // through to the flat messages when neither has session state (dashboard
     // only — the app's `getSessionMessages`/`getFlatMessages` keep it inert).
-    const capturedMessages = capturedSessionId ? ctx.getSessionMessages(capturedSessionId) : null
-    const sessionMessages =
-      capturedMessages ||
-      (ctx.activeSessionId ? ctx.getSessionMessages(ctx.activeSessionId) : null) ||
-      null
-    const effectiveSessionId = capturedMessages ? capturedSessionId : ctx.activeSessionId
+    const { sessionMessages, effectiveSessionId } = resolveSession()
     const resolvedMessages = sessionMessages ?? ctx.getFlatMessages()
     const targetForSuffix = sessionMessages ? effectiveSessionId : null
     const existing = resolvedMessages.find((m) => m.id === deltaId)
@@ -5143,12 +5161,7 @@ export function sharedStreamDelta(
   // while the session is replaying — replayed history is reassembled
   // server-side and must not be re-split on the client.
   {
-    const splitCapturedMessages = capturedSessionId ? ctx.getSessionMessages(capturedSessionId) : null
-    const splitSessionMessages =
-      splitCapturedMessages ||
-      (ctx.activeSessionId ? ctx.getSessionMessages(ctx.activeSessionId) : null) ||
-      null
-    const splitEffectiveId = splitCapturedMessages ? capturedSessionId : ctx.activeSessionId
+    const { sessionMessages: splitSessionMessages, effectiveSessionId: splitEffectiveId } = resolveSession()
     const isReplaying = splitEffectiveId ? ctx.replayingSessions.has(splitEffectiveId) : false
     if (!isReplaying) {
       const splitMessages = splitSessionMessages ?? ctx.getFlatMessages()
