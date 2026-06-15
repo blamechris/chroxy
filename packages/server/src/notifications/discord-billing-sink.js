@@ -188,15 +188,22 @@ export class DiscordBillingSink extends NotificationSink {
     const webhookUrl = this._configuredUrl()
     if (!webhookUrl || !this._enabled) return true // unconfigured — registry normally skips us anyway
 
+    const data = notification.data || {}
+    const resolved = data.resolved === true
+
     const now0 = context.now ?? this._now()
     const isCategoryEnabled = context.isCategoryEnabled ?? (() => true)
     const isInQuietHours = context.isInQuietHours ?? (() => false)
     const shouldBypassQuietHours = context.shouldBypassQuietHours ?? (() => false)
     if (!isCategoryEnabled(BILLING_CATEGORY, null)) return true
-    if (isInQuietHours(now0, null) && !shouldBypassQuietHours(BILLING_CATEGORY, null)) return true
+    // Quiet hours gate a NEW alert (a ping), NOT the all-clear: the resolved
+    // repaint is a silent in-place PATCH of an existing message (state
+    // reconciliation, not a notification), so suppressing it would leave a stale
+    // red embed when warnings clear overnight, until the next distinct alert. The
+    // monitor fires the all-clear exactly once, so a dropped one is never retried
+    // — it must not be gated here (#5833). A NEW alert still respects quiet hours.
+    if (!resolved && isInQuietHours(now0, null) && !shouldBypassQuietHours(BILLING_CATEGORY, null)) return true
 
-    const data = notification.data || {}
-    const resolved = data.resolved === true
     const state = this._loadState()
 
     try {
@@ -292,6 +299,9 @@ export class DiscordBillingSink extends NotificationSink {
       fields.push({ name: resolved ? 'Resolved' : 'Warnings', value: escapeAndCap(body), inline: false })
     }
     if (!resolved && codes.length > 0) {
+      // 200 is a deliberate short cap — codes are short identifiers
+      // (SILENT_METERED_DEFAULT, …); a handful never approaches the 1024 field
+      // limit, and a runaway list is fine to truncate.
       fields.push({ name: 'Codes', value: escapeAndCap(codes.join(', '), 200), inline: false })
     }
     const title = resolved

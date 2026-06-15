@@ -931,7 +931,7 @@ export async function startCliServer(config) {
       // not-delivered return that a bare `.catch()` would drop.
       if (warnings.length === 0) {
         settlePush(
-          pushManager.send('billing_warning', 'Billing alert cleared', 'All billing warnings have cleared.', { resolved: true, codes: [] }),
+          pushManager.send('billing_warning', 'Billing alert cleared', 'All billing warnings have cleared.', { resolved: true }),
           'billing-canary-clear',
           log,
         )

@@ -232,6 +232,19 @@ describe('DiscordBillingSink — delivery', () => {
     assert.equal(calls.length, 0)
   })
 
+  it('all-clear repaint bypasses quiet hours (state reconciliation, not a ping) (#5833)', async () => {
+    const calls = scriptFetch([
+      { status: 200, body: { id: 'msg-1' } }, // alert POST (outside quiet hours)
+      { status: 200 },                         // resolved PATCH must still fire in quiet hours
+    ])
+    const { sink } = makeSink()
+    await sink.send(alert(['SILENT_METERED_DEFAULT']))
+    const ok = await sink.send(cleared(), { isInQuietHours: () => true, shouldBypassQuietHours: () => false })
+    assert.equal(ok, true)
+    assert.equal(calls.length, 2)
+    assert.equal(calls[1].method, 'PATCH')
+  })
+
   it('escapes markdown in the warning body', async () => {
     const calls = scriptFetch([{ status: 200, body: { id: 'msg-1' } }])
     const { sink } = makeSink()
