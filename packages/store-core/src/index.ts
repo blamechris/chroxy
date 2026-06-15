@@ -18,6 +18,7 @@ export { DEFAULT_CONTEXT_WINDOW } from './types'
 export {
   isClaudeBackedProvider,
   resolveContextWindow,
+  CLAUDE_BACKED_DOCKER_IDS,
 } from './context-window'
 
 // #4853: runtime type-guard for `VoiceInputMode` — keyed off an

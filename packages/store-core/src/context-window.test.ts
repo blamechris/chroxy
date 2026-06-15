@@ -7,7 +7,7 @@
  * "unknown window" state instead of a misleading "% of 200k" meter.
  */
 import { describe, it, expect } from 'vitest'
-import { isClaudeBackedProvider, resolveContextWindow } from './context-window'
+import { isClaudeBackedProvider, resolveContextWindow, CLAUDE_BACKED_DOCKER_IDS } from './context-window'
 import { DEFAULT_CONTEXT_WINDOW } from './types'
 
 describe('isClaudeBackedProvider (#5424)', () => {
@@ -38,6 +38,23 @@ describe('isClaudeBackedProvider (#5424)', () => {
     // 'claudette' / 'dockerish' must not ride the claude/docker defaults.
     expect(isClaudeBackedProvider('claudette')).toBe(false)
     expect(isClaudeBackedProvider('dockerish')).toBe(false)
+  })
+
+  it('FAILS CLOSED for an unknown docker-* provider (#5448)', () => {
+    // The docker family is an explicit allowlist, not a `docker-*` prefix — a
+    // future non-Claude containerized provider must NOT inherit the Claude 200k
+    // default (the #5424 failure mode) just because its id starts with `docker-`.
+    for (const p of ['docker-ollama', 'docker-vllm', 'docker-llamacpp', 'docker-future']) {
+      expect(isClaudeBackedProvider(p)).toBe(false)
+    }
+    // resolveContextWindow consequently returns null (real "unknown window"),
+    // not a fabricated 200k meter.
+    expect(resolveContextWindow(null, 'docker-ollama')).toBe(null)
+    expect(resolveContextWindow({}, 'docker-ollama')).toBe(null)
+  })
+
+  it('the docker allowlist exactly matches the known Claude docker wrappers (#5448)', () => {
+    expect([...CLAUDE_BACKED_DOCKER_IDS].sort()).toEqual(['docker', 'docker-byok', 'docker-cli', 'docker-sdk'])
   })
 })
 

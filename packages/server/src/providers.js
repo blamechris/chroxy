@@ -354,6 +354,17 @@ export function _resetCredsCacheForTest() {
  *
  * @param {object} config - Merged server config
  */
+// #5448: every docker provider id registered below. store-core's
+// CLAUDE_BACKED_DOCKER_IDS allowlist assumes ALL of these run Claude sessions
+// (so a missing model contextWindow resolves to the Claude 200k default). That
+// is true today — each maps to a Claude wrapper (DockerSession/DockerSdkSession
+// extend the Claude CLI/SDK sessions; DockerByokSession runs the Claude BYOK
+// loop). If you register a NON-Claude provider under a `docker-*` name, you MUST
+// add it here AND decide its context-window story in store-core — otherwise the
+// providers test (every DOCKER_PROVIDER_ID must be Claude-backed) trips, instead
+// of the session silently regressing to a fabricated "% of 200k" meter.
+export const DOCKER_PROVIDER_IDS = ['docker-cli', 'docker-sdk', 'docker-byok', 'docker']
+
 export async function registerDockerProvider(config) {
   if (!config?.environments?.enabled) return
 
@@ -386,5 +397,5 @@ export async function registerDockerProvider(config) {
   // Backward compatibility: 'docker' maps to 'docker-cli' (hidden from listProviders)
   registerProvider('docker', DockerSession, { alias: true })
 
-  log.info('Docker providers registered (docker-cli, docker-sdk, docker-byok)')
+  log.info(`Docker providers registered (${DOCKER_PROVIDER_IDS.filter((id) => id !== 'docker').join(', ')})`)
 }

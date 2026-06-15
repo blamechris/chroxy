@@ -18,16 +18,30 @@ import { DEFAULT_CONTEXT_WINDOW } from './types'
 import type { ModelInfo } from './types'
 
 /**
- * Providers whose sessions are backed by Claude models and therefore
- * genuinely have the 200k default: the claude-* family plus the docker-*
- * wrappers (docker-cli / docker-sdk / docker-byok / docker all run a Claude
- * session inside the container — see provider-labels.ts).
+ * Claude-backed docker provider ids — an EXPLICIT allowlist, not a `docker-*`
+ * prefix (#5448). Every id here runs a Claude session inside the container
+ * (docker-cli / docker-sdk / docker-byok, plus the `docker` alias for docker-cli
+ * — see provider-labels.ts and the server's registerDockerProvider). It is an
+ * allowlist so a FUTURE non-Claude containerized provider registered under a
+ * `docker-*` name (e.g. `docker-ollama`) FAILS CLOSED — it does NOT inherit the
+ * Claude 200k default and instead resolves to a real `null` meter (the failure
+ * mode #5424 fixed for ollama). The server side asserts every registered
+ * `docker-*` provider is listed here (DOCKER_PROVIDER_IDS in providers.js), so
+ * adding a non-Claude docker provider trips a test instead of silently
+ * regressing the context-window meter.
  */
-const CLAUDE_BACKED_PREFIXES = ['claude', 'docker'] as const
+export const CLAUDE_BACKED_DOCKER_IDS: ReadonlySet<string> = new Set([
+  'docker', 'docker-cli', 'docker-sdk', 'docker-byok',
+])
 
 /**
  * Whether `provider` runs Claude models (and so may assume the Claude
  * 200k default when a model's `contextWindow` is missing).
+ *
+ * The claude-* family is matched by prefix (open-ended — every claude-* is
+ * Claude). The docker family is matched by the EXPLICIT CLAUDE_BACKED_DOCKER_IDS
+ * allowlist (#5448), NOT a `docker-*` prefix, so an unknown `docker-*` fails
+ * closed rather than fabricating a 200k meter.
  *
  * `null`/`undefined` counts as Claude-backed: servers that predate
  * per-session provider reporting only ran claude, so the legacy fallback
@@ -35,9 +49,8 @@ const CLAUDE_BACKED_PREFIXES = ['claude', 'docker'] as const
  */
 export function isClaudeBackedProvider(provider: string | null | undefined): boolean {
   if (provider == null) return true
-  return CLAUDE_BACKED_PREFIXES.some(
-    (prefix) => provider === prefix || provider.startsWith(`${prefix}-`),
-  )
+  if (provider === 'claude' || provider.startsWith('claude-')) return true
+  return CLAUDE_BACKED_DOCKER_IDS.has(provider)
 }
 
 /**
