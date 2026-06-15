@@ -1221,7 +1221,11 @@ function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: Ms
 // new session's terminal.
 function handleTerminalOutput(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   if (typeof msg.data !== 'string') return;
-  if (msg.sessionId && msg.sessionId !== get().activeSessionId) return;
+  // Require an explicit string sessionId that matches the active session. The
+  // server always stamps one (ws-forwarding.js); dropping a frame without one
+  // (malformed/legacy/empty) keeps it from bleeding into whatever terminal is
+  // currently active, matching the typeof guard the rest of this file uses.
+  if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
   get().appendTerminalData(msg.data);
 }
 

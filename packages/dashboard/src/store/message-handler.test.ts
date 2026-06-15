@@ -413,6 +413,13 @@ describe('dashboard message-handler dispatch', () => {
       handleMessage({ type: 'terminal_output', sessionId: 'sess-1', data: 123 }, ctx() as any)
       expect((store.getState() as any)._terminalWrites).toEqual([])
     })
+
+    it('ignores a terminal_output with a missing sessionId (no bleed into active terminal)', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_output', data: 'orphan' }, ctx() as any)
+      expect((store.getState() as any)._terminalWrites).toEqual([])
+    })
   })
 
   describe('error dispatch', () => {

@@ -441,16 +441,24 @@ export function App() {
   // non-tui session (e.g. after switching), fall back to chat — the tab is
   // hidden there, so the user shouldn't be stranded on it.
   useEffect(() => {
-    const isTui = activeSessionProvider === DEFAULT_PROVIDER
-    if (viewMode === 'terminal' && !isTui) {
+    // Only force away from the Output tab once we KNOW the active session is
+    // non-tui. During the initial-load / reconnect window the provider is still
+    // null/unknown — force-switching then would kick the operator out of a
+    // persisted Output view for a claude-tui session (Copilot #5838).
+    if (viewMode === 'terminal' && activeSessionProvider != null && activeSessionProvider !== DEFAULT_PROVIDER) {
       setViewMode('chat')
       return
     }
-    if (viewMode === 'terminal' && isTui && activeSessionId) {
+    // Gate the opt-in on a live socket and depend on connectionPhase, so a
+    // reconnect (which clears the server-side terminalSessionIds set) re-runs
+    // this effect and re-subscribes — otherwise the mirror silently stops
+    // updating until the user toggles tabs (Copilot #5838).
+    const isTui = activeSessionProvider === DEFAULT_PROVIDER
+    if (viewMode === 'terminal' && isTui && activeSessionId && connectionPhase === 'connected') {
       subscribeTerminalMirror(activeSessionId)
       return () => unsubscribeTerminalMirror(activeSessionId)
     }
-  }, [viewMode, activeSessionId, activeSessionProvider, subscribeTerminalMirror, unsubscribeTerminalMirror, setViewMode])
+  }, [viewMode, activeSessionId, activeSessionProvider, connectionPhase, subscribeTerminalMirror, unsubscribeTerminalMirror, setViewMode])
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
