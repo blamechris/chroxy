@@ -754,6 +754,58 @@ describe('credential file read caching (#5461)', () => {
     assert.doesNotMatch(fileOnly.reason, /not set/, 'no env clause when no apiKeyEnv is configured')
     assert.match(fileOnly.reason, /credentials\.json does not exist/)
   })
+
+  // #5486: the cache slot key must be collision-proof for ANY input charset.
+  // createAnthropicCompatibleSessionClass is exported for embedders/tests and its
+  // defensive normalization only checks "non-empty string" — so a `:`-bearing
+  // apiKeyEnv/credentialsKey could bypass the #5458 config charset regexes. The
+  // plain `compat:<env>:<key>` form was ambiguous there; the JSON-encoded form
+  // is not.
+  it('delimiter-bearing specs never share a slot — no cross-serve (#5486)', () => {
+    // Two distinct specs that BOTH minted `compat:AA:BB:C` under the old plain
+    // delimiter: ('AA:BB','C') and ('AA','BB:C'). Their env vars are unset, so
+    // both take the file path and (file unchanged) the old shared slot would
+    // cross-serve the first's cached result to the second.
+    writeRawCredentialsFile(JSON.stringify({ C: 'value-of-C', 'BB:C': 'value-of-BC' }))
+    const a = resolveAnthropicCompatibleApiKey({ apiKeyEnv: 'AA:BB', credentialsKey: 'C' })
+    const b = resolveAnthropicCompatibleApiKey({ apiKeyEnv: 'AA', credentialsKey: 'BB:C' })
+    assert.equal(a.key, 'value-of-C')
+    assert.equal(b.key, 'value-of-BC', 'second spec must resolve its OWN key, not cross-serve the first (collision)')
+    // Order-independence: the reverse order must also stay independent.
+    resetCachesForTest()
+    const b2 = resolveAnthropicCompatibleApiKey({ apiKeyEnv: 'AA', credentialsKey: 'BB:C' })
+    const a2 = resolveAnthropicCompatibleApiKey({ apiKeyEnv: 'AA:BB', credentialsKey: 'C' })
+    assert.equal(b2.key, 'value-of-BC')
+    assert.equal(a2.key, 'value-of-C')
+  })
+
+  it('two entries with the identical spec DO share one slot (intentional #5461 sharing)', () => {
+    // The slot key is derived ONLY from (apiKeyEnv, credentialsKey) — never the
+    // entry id — so two config entries with the same credential spec reuse one
+    // cache slot. Proof: the second resolve returns the stale cached value after
+    // the file content changed but (mtime,size,mode) was restored.
+    const original = JSON.stringify({ compatApiKey: 'sk-shared-aaaa' })
+    const renamed = JSON.stringify({ compatXpiKey: 'sk-shared-aaaa' })
+    // The cache invalidation keys on the file stat (mtime/size/mode), not content,
+    // so the fixtures only need EQUAL SIZE (not identical bytes) — with mtime+mode
+    // restored below, a same-size content swap still reads as a cache hit.
+    assert.equal(original.length, renamed.length, 'fixtures must be equal-length so the restored (mtime,size,mode) reads as a cache hit')
+    const file = writeRawCredentialsFile(original)
+    const pinned = pinnedDate()
+    utimesSync(file, pinned, pinned)
+
+    const first = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(first.key, 'sk-shared-aaaa')
+
+    writeFileSync(file, renamed)
+    chmodSync(file, 0o600)
+    utimesSync(file, pinned, pinned)
+
+    // A SECOND entry with the identical (apiKeyEnv, credentialsKey) — a different
+    // config entry.id is irrelevant to the slot — hits the shared cached slot.
+    const second = resolveAnthropicCompatibleApiKey({ apiKeyEnv: null, credentialsKey: 'compatApiKey' })
+    assert.equal(second.key, 'sk-shared-aaaa', 'identical spec reused the shared slot (no re-read of the changed file)')
+  })
 })
 
 describe('registerAnthropicCompatibleProviders', () => {
