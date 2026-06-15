@@ -9,19 +9,23 @@ import { render, screen, cleanup, act } from '@testing-library/react'
 import { MultiTerminalView, type MultiTerminalViewProps } from './MultiTerminalView'
 import type { SessionInfo } from '../store/types'
 
-// #5835 Phase 2: capture each rendered TerminalView's onMeasure so tests can
-// drive a pane measurement, and the fixedSize it received.
+// #5835 Phase 2/3: capture each rendered TerminalView's onMeasure/onInput so tests
+// can drive a measurement / keystroke, plus the fixedSize + interactive it received.
 const capturedOnMeasure: Array<(cols: number, rows: number) => void> = []
+const capturedOnInput: Array<((data: string) => void) | undefined> = []
 const capturedFixedSize: Array<{ cols: number; rows: number } | undefined> = []
+const capturedInteractive: Array<boolean | undefined> = []
 
 // Mock TerminalView — we don't want real xterm.js in unit tests
 vi.mock('./TerminalView', () => ({
-  TerminalView: ({ className, initialData, onReady, fixedSize, onMeasure }: {
+  TerminalView: ({ className, initialData, onReady, fixedSize, onMeasure, interactive, onInput }: {
     className?: string
     initialData?: string
     onReady?: (handle: { write: (d: string) => void; clear: () => void; fit: () => void }) => void
     fixedSize?: { cols: number; rows: number }
     onMeasure?: (cols: number, rows: number) => void
+    interactive?: boolean
+    onInput?: (data: string) => void
   }) => {
     // Auto-fire onReady on mount (simulates terminal initialization)
     if (onReady) {
@@ -32,13 +36,16 @@ vi.mock('./TerminalView', () => ({
       }), 0)
     }
     if (onMeasure) capturedOnMeasure.push(onMeasure)
+    capturedOnInput.push(onInput)
     capturedFixedSize.push(fixedSize)
+    capturedInteractive.push(interactive)
     return (
       <div
         data-testid="mock-terminal"
         data-classname={className}
         data-initial-data={initialData || ''}
         data-fixed-size={fixedSize ? `${fixedSize.cols}x${fixedSize.rows}` : ''}
+        data-interactive={interactive ? '1' : '0'}
       />
     )
   },
@@ -47,6 +54,7 @@ vi.mock('./TerminalView', () => ({
 // Mock store
 const mockSetTerminalWriteCallback = vi.fn()
 const mockRequestTerminalResize = vi.fn()
+const mockSendTerminalInput = vi.fn()
 const mockGetState = vi.fn()
 
 let mockStoreState: Record<string, unknown> = {}
@@ -57,6 +65,7 @@ vi.mock('../store/connection', () => ({
       const state = {
         setTerminalWriteCallback: mockSetTerminalWriteCallback,
         requestTerminalResize: mockRequestTerminalResize,
+        sendTerminalInput: mockSendTerminalInput,
         sessionStates: mockStoreState.sessionStates ?? {},
         terminalRawBuffer: mockStoreState.terminalRawBuffer ?? '',
       }
@@ -72,7 +81,9 @@ afterEach(() => {
   cleanup()
   vi.clearAllMocks()
   capturedOnMeasure.length = 0
+  capturedOnInput.length = 0
   capturedFixedSize.length = 0
+  capturedInteractive.length = 0
 })
 
 function makeSessions(count: number): SessionInfo[] {
@@ -297,6 +308,61 @@ describe('MultiTerminalView', () => {
       mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: { s1: { sessionRole: 'primary' } } })
       capturedOnMeasure[0]!(200, 50)
       expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
+    })
+  })
+
+  // #5835 Phase 3: interactive remote control — role-gated input.
+  describe('interactive input (#5835 Phase 3)', () => {
+    it('marks a non-observer session interactive and an observer session read-only', () => {
+      mockStoreState = {
+        sessionStates: {
+          s1: { terminalRawBuffer: 'd', sessionRole: 'primary' },
+          s2: { terminalRawBuffer: 'd', sessionRole: 'observer' },
+        },
+        terminalRawBuffer: 'd',
+      }
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal()
+      const terminals = screen.getAllByTestId('mock-terminal')
+      expect(terminals[0]!.dataset.interactive).toBe('1') // primary → interactive
+      expect(terminals[1]!.dataset.interactive).toBe('0') // observer → read-only
+    })
+
+    it('treats an unclaimed (null role) session as interactive', () => {
+      mockStoreState = { sessionStates: { s1: { terminalRawBuffer: 'd' } }, terminalRawBuffer: 'd' }
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal({ sessions: makeSessions(1) })
+      const terminals = screen.getAllByTestId('mock-terminal')
+      expect(terminals[0]!.dataset.interactive).toBe('1')
+    })
+
+    it('forwards a keystroke from the ACTIVE session to sendTerminalInput', () => {
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal({ activeSessionId: 's1' })
+      // capturedOnInput[0] belongs to s1 (first rendered session)
+      capturedOnInput[0]!('\x03')
+      expect(mockSendTerminalInput).toHaveBeenCalledWith('s1', '\x03')
+    })
+
+    it('ignores a keystroke from a NON-active session', () => {
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal({ activeSessionId: 's1' })
+      capturedOnInput[1]!('x') // s2 (hidden)
+      expect(mockSendTerminalInput).not.toHaveBeenCalled()
+    })
+
+    it('shows the read-only badge when the active session is an observer', () => {
+      mockStoreState = { sessionStates: { s1: { terminalRawBuffer: 'd', sessionRole: 'observer' } }, terminalRawBuffer: 'd' }
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal({ activeSessionId: 's1', sessions: makeSessions(1) })
+      expect(screen.getByTestId('terminal-readonly-badge')).toBeTruthy()
+    })
+
+    it('hides the read-only badge when the active session can drive', () => {
+      mockStoreState = { sessionStates: { s1: { terminalRawBuffer: 'd', sessionRole: 'primary' } }, terminalRawBuffer: 'd' }
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal({ activeSessionId: 's1', sessions: makeSessions(1) })
+      expect(screen.queryByTestId('terminal-readonly-badge')).toBeNull()
     })
   })
 })

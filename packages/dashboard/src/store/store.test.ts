@@ -705,6 +705,19 @@ describe('useConnectionStore', () => {
     expect(sent).toHaveLength(0);
     useConnectionStore.setState({ socket: null });
   });
+
+  it('sendTerminalInput sends terminal_input over an open socket; empty data is a no-op', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().sendTerminalInput('sess-1', '\x03');
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0]!)).toMatchObject({ type: 'terminal_input', sessionId: 'sess-1', data: '\x03' });
+    useConnectionStore.getState().sendTerminalInput('sess-1', '');
+    expect(sent).toHaveLength(1);
+    useConnectionStore.setState({ socket: null });
+  });
 });
 
 // ---------------------------------------------------------------------------

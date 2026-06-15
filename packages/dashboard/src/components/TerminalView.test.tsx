@@ -17,6 +17,10 @@ const resizeSpy = vi.fn()
 // #5835 Phase 2: mirror mode measures the pane via FitAddon.proposeDimensions().
 // Tests can override this to simulate different pane sizes.
 let proposeDimensionsResult: { cols: number; rows: number } | undefined = { cols: 200, rows: 50 }
+// #5835 Phase 3: capture the most-recently-constructed terminal's onData callback
+// so tests can simulate a keystroke, and the live `options` (for disableStdin).
+let lastOnData: ((data: string) => void) | null = null
+let lastTermOptions: Record<string, unknown> | null = null
 
 // Mock xterm.js since jsdom can't render canvas
 vi.mock('@xterm/xterm', () => {
@@ -29,6 +33,7 @@ vi.mock('@xterm/xterm', () => {
 
     constructor(opts?: Record<string, unknown>) {
       this.options = opts || {}
+      lastTermOptions = this.options
     }
     open(el: HTMLElement) { this._element = el }
     write(data: string) { writeSpy(data); this._written.push(data) }
@@ -36,7 +41,7 @@ vi.mock('@xterm/xterm', () => {
     reset() { this._written = []; this._element = null }
     dispose() { disposeSpy(); this._disposed = true }
     loadAddon(addon: unknown) { this._addons.push(addon) }
-    onData(_cb: (data: string) => void) { return { dispose: () => {} } }
+    onData(cb: (data: string) => void) { lastOnData = cb; return { dispose: () => {} } }
     resize(cols: number, rows: number) { resizeSpy(cols, rows) }
   }
   return { Terminal: MockTerminal }
@@ -61,6 +66,8 @@ describe('TerminalView', () => {
   beforeEach(() => {
     vi.clearAllMocks()
     proposeDimensionsResult = { cols: 200, rows: 50 }
+    lastOnData = null
+    lastTermOptions = null
   })
 
   it('renders a container div', () => {
@@ -254,6 +261,48 @@ describe('TerminalView', () => {
       const { rerender } = render(<TerminalView />)
       rerender(<TerminalView />)
       expect(resizeSpy).not.toHaveBeenCalled()
+    })
+  })
+
+  // #5835 Phase 3: interactive remote control — keystrokes → onInput, role-driven
+  // disableStdin toggle.
+  describe('interactive mode (#5835 Phase 3)', () => {
+    it('forwards keystrokes via onInput when interactive', () => {
+      const onInput = vi.fn()
+      render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} interactive onInput={onInput} />)
+      expect(lastOnData).toBeTypeOf('function')
+      lastOnData!('\x03') // Ctrl-C
+      lastOnData!('ls\r')
+      expect(onInput).toHaveBeenNthCalledWith(1, '\x03')
+      expect(onInput).toHaveBeenNthCalledWith(2, 'ls\r')
+    })
+
+    it('enables stdin when interactive, disables it when not (mirror mode)', () => {
+      const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} interactive />)
+      expect(lastTermOptions!.disableStdin).toBe(false)
+      rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} interactive={false} />)
+      expect(lastTermOptions!.disableStdin).toBe(true)
+      // …and back, without remount (role flip primary↔observer)
+      rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} interactive />)
+      expect(lastTermOptions!.disableStdin).toBe(false)
+    })
+
+    it('normal (non-mirror) mode is never interactive and wires no input path', () => {
+      const onInput = vi.fn()
+      render(<TerminalView interactive onInput={onInput} />)
+      // No fixedSize → not a mirror → no onData wiring, stdin stays disabled.
+      expect(lastOnData).toBeNull()
+      expect(lastTermOptions!.disableStdin).toBe(true)
+    })
+
+    it('uses the latest onInput across re-renders (ref-backed, mount-once safe)', () => {
+      const first = vi.fn()
+      const second = vi.fn()
+      const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} interactive onInput={first} />)
+      rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} interactive onInput={second} />)
+      lastOnData!('k')
+      expect(first).not.toHaveBeenCalled()
+      expect(second).toHaveBeenCalledWith('k')
     })
   })
 })

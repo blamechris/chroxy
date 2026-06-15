@@ -41,6 +41,20 @@ export interface TerminalViewProps {
    * comes back via `fixedSize`. No-op in normal fit-to-pane mode.
    */
   onMeasure?: (cols: number, rows: number) => void
+  /**
+   * #5835 Phase 3: when true (mirror mode only), the terminal accepts keystrokes
+   * and forwards them via `onInput` — true remote control. When false the mirror
+   * stays read-only (an observer, or a non-claude-tui pane). Toggled at runtime
+   * (xterm `disableStdin`) so a role change (primary↔observer) flips interactivity
+   * without remounting / losing scrollback.
+   */
+  interactive?: boolean
+  /**
+   * #5835 Phase 3: called with raw terminal bytes for each keystroke (xterm
+   * `onData`) when interactive. The parent forwards them to the server as
+   * `terminal_input`. Only fires in mirror mode while interactive.
+   */
+  onInput?: (data: string) => void
 }
 
 export const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
@@ -51,18 +65,20 @@ function safeFit(fit: FitAddon) {
   try { fit.fit() } catch { /* container not visible */ }
 }
 
-export function TerminalView({ className, initialData, onReady, fixedSize, onMeasure }: TerminalViewProps) {
+export function TerminalView({ className, initialData, onReady, fixedSize, onMeasure, interactive = false, onInput }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const batchRef = useRef<string[]>([])
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const disposedRef = useRef(false)
-  // #5835 Phase 2: keep the latest onMeasure callback in a ref so the mount-once
-  // effect's resize/measure handler always calls the current one (the parent
-  // recreates the closure each render, but the terminal lifecycle is mount-once).
+  // #5835 Phase 2/3: keep the latest onMeasure/onInput callbacks in refs so the
+  // mount-once effect's handlers always call the current ones (the parent recreates
+  // the closures each render, but the terminal lifecycle is mount-once).
   const onMeasureRef = useRef(onMeasure)
   onMeasureRef.current = onMeasure
+  const onInputRef = useRef(onInput)
+  onInputRef.current = onInput
   // Whether this terminal is a fixed-size letterboxed mirror. Mode is fixed at
   // MOUNT — the xterm is constructed with mode-specific options (convertEol,
   // initial cols/rows) and the mount-once onResize handler closes over this — so
@@ -150,6 +166,14 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
     // the local `fitAddon` directly, so it still works in mirror mode.
     fitRef.current = fixedSize ? null : fitAddon
 
+    // #5835 Phase 3: forward keystrokes (true remote control). onData fires only
+    // when stdin is enabled (the interactive effect below toggles disableStdin),
+    // so an observer / non-interactive mirror never reaches here. Mirror mode only;
+    // the normal read-only output pane has no input path.
+    if (fixedSize) {
+      term.onData((data) => onInputRef.current?.(data))
+    }
+
     // Write initial data if provided
     if (initialData) {
       term.write(initialData)
@@ -226,6 +250,16 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
       termRef.current.resize(fixedSize.cols, fixedSize.rows)
     } catch { /* terminal not ready / disposed */ }
   }, [fixedSize?.cols, fixedSize?.rows]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // #5835 Phase 3: toggle interactivity at runtime so a role change (primary↔
+  // observer) flips the mirror between remote-control and read-only WITHOUT
+  // remounting (which would lose scrollback). Only mirror mode (fixedSize) can be
+  // interactive; the normal output pane and any non-interactive mirror stay
+  // read-only (disableStdin = true).
+  useEffect(() => {
+    if (disposedRef.current || !termRef.current) return
+    termRef.current.options.disableStdin = !(fixedSize && interactive)
+  }, [fixedSize, interactive]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div

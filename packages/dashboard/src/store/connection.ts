@@ -670,6 +670,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #5835 Phase 3: forward raw keystrokes to a session's live PTY (true remote
+  // control). Best-effort — the server enforces the single-driver authority (only
+  // the primary owner / sole viewer drives; an observer's keystroke is rejected
+  // with input_conflict). The dashboard also gates locally on role, so an
+  // observer's keys never reach here, avoiding per-keystroke input_conflict toasts.
+  sendTerminalInput: (sessionId: string, data: string) => {
+    const { socket } = get();
+    if (sessionId && data && socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'terminal_input', sessionId, data });
+    }
+  },
+
   // Web tasks (Claude Code Web)
   webFeatures: { available: false, remote: false, teleport: false },
   webTasks: [],

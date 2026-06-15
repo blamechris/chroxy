@@ -5692,6 +5692,22 @@ button.sidebar-token-view-session-row:hover {
   opacity: 0.6;
 }
 
+/* #5835 Phase 3: read-only badge shown over the mirror when this client is an
+   observer (another device holds primary) — keystrokes won't reach the PTY. */
+.terminal-readonly-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  pointer-events: none;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm, 4px);
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+}
+
 /* ---- Command Palette ---- */
 .command-palette {
   position: fixed;
