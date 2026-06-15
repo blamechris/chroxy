@@ -745,20 +745,29 @@ describe('session-handlers', () => {
       assert.ok(client.terminalSessionIds.has('sess-bound'))
     })
 
-    it('terminal_subscribe sends the current terminal_size to the new subscriber', () => {
+    it('terminal_subscribe sends the current terminal_size to a viewer of the session', () => {
       const ctx = makeCtx()
       ctx._sessions.set('sess-1', { session: { getTerminalSize: () => ({ cols: 160, rows: 48 }) }, cwd: '/tmp', name: 'S1' })
-      const client = makeClient()
+      const client = makeClient({ activeSessionId: 'sess-1' })
       sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
       const sizeMsg = ctx._sent.find(m => m.type === 'terminal_size')
       assert.ok(sizeMsg, 'expected a terminal_size sent on subscribe')
       assert.deepEqual(sizeMsg, { type: 'terminal_size', sessionId: 'sess-1', cols: 160, rows: 48 })
     })
 
+    it('terminal_subscribe by a NON-viewer does not leak terminal_size', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-1', { session: { getTerminalSize: () => ({ cols: 160, rows: 48 }) }, cwd: '/tmp', name: 'S1' })
+      const client = makeClient() // not active, not subscribed → not a viewer
+      sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
+      assert.ok(client.terminalSessionIds.has('sess-1'), 'opt-in is still recorded')
+      assert.ok(!ctx._sent.some(m => m.type === 'terminal_size'), 'but no size leaks to a non-viewer')
+    })
+
     it('terminal_subscribe to a session without a live PTY sends no terminal_size', () => {
       const ctx = makeCtx()
       ctx._sessions.set('sess-1', { session: {}, cwd: '/tmp', name: 'S1' }) // non-tui: no getTerminalSize
-      const client = makeClient()
+      const client = makeClient({ activeSessionId: 'sess-1' })
       sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
       assert.ok(!ctx._sent.some(m => m.type === 'terminal_size'))
     })
@@ -772,17 +781,31 @@ describe('session-handlers', () => {
       return { ctx, calls }
     }
 
-    it('an unclaimed session lets any viewer drive the resize (single-operator case)', () => {
+    it('an unclaimed session lets a viewer drive the resize (single-operator case)', () => {
       const { ctx, calls } = ctxWithResizableSession()
-      const client = makeClient()
+      const client = makeClient({ activeSessionId: 'sess-1' })
       sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 160, rows: 48 }, ctx)
       assert.deepEqual(calls, [[160, 48]])
+    })
+
+    it('a NON-viewer cannot resize even an unclaimed session', () => {
+      const { ctx, calls } = ctxWithResizableSession()
+      const stranger = makeClient() // knows the id but is not viewing it
+      sessionHandlers.terminal_resize(makeWs(), stranger, { type: 'terminal_resize', sessionId: 'sess-1', cols: 160, rows: 48 }, ctx)
+      assert.equal(calls.length, 0)
+    })
+
+    it('a subscribed (non-active) viewer may drive the resize', () => {
+      const { ctx, calls } = ctxWithResizableSession()
+      const client = makeClient({ subscribedSessionIds: new Set(['sess-1']) })
+      sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 120, rows: 36 }, ctx)
+      assert.deepEqual(calls, [[120, 36]])
     })
 
     it('the primary owner may drive the resize', () => {
       const { ctx, calls } = ctxWithResizableSession()
       ctx.transport.claimPrimary('sess-1', 'client-1')
-      const client = makeClient({ id: 'client-1' })
+      const client = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
       sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 100, rows: 40 }, ctx)
       assert.deepEqual(calls, [[100, 40]])
     })
@@ -790,21 +813,21 @@ describe('session-handlers', () => {
     it('an observer (another client holds primary) cannot drive the resize — it rides along', () => {
       const { ctx, calls } = ctxWithResizableSession()
       ctx.transport.claimPrimary('sess-1', 'other-client')
-      const observer = makeClient({ id: 'client-1' })
+      const observer = makeClient({ id: 'client-1', activeSessionId: 'sess-1' })
       sessionHandlers.terminal_resize(makeWs(), observer, { type: 'terminal_resize', sessionId: 'sess-1', cols: 200, rows: 60 }, ctx)
       assert.equal(calls.length, 0)
     })
 
     it('resize to a non-existent session is a no-op', () => {
       const ctx = makeCtx()
-      const client = makeClient()
+      const client = makeClient({ activeSessionId: 'ghost' })
       assert.doesNotThrow(() =>
         sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'ghost', cols: 80, rows: 24 }, ctx))
     })
 
     it('a bound client cannot resize a different session', () => {
       const { ctx, calls } = ctxWithResizableSession('sess-other')
-      const client = makeClient({ boundSessionId: 'sess-bound' })
+      const client = makeClient({ boundSessionId: 'sess-bound', activeSessionId: 'sess-other' })
       sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-other', cols: 80, rows: 24 }, ctx)
       assert.equal(calls.length, 0)
     })
@@ -812,7 +835,7 @@ describe('session-handlers', () => {
     it('resize on a non-tui session (no resizeTerminal) is a no-op, not a throw', () => {
       const ctx = makeCtx()
       ctx._sessions.set('sess-1', { session: {}, cwd: '/tmp', name: 'S1' })
-      const client = makeClient()
+      const client = makeClient({ activeSessionId: 'sess-1' })
       assert.doesNotThrow(() =>
         sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 80, rows: 24 }, ctx))
     })
