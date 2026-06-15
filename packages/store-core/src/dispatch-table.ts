@@ -630,9 +630,9 @@ function dispatchBackgroundWorkChanged<S extends DispatchSessionBase>(
  * mcp_servers, session_usage, session_context). A missed copy silently misroutes
  * a session patch, so the shape lives here once. `handle` parses the wire message
  * (with the active-session fallback) and returns the target id + patch; the
- * dispatcher applies it only when the session exists. `session_cost_threshold_
- * crossed` stays a one-off (no active-session fallback, different cast) and
- * `inactivity_warning` stays separate (its handler result is nullable).
+ * dispatcher applies it only when the session exists.
+ * `session_cost_threshold_crossed` stays a one-off (no active-session fallback,
+ * different cast) and `inactivity_warning` stays separate (nullable result).
  */
 function sessionPatchDispatcher<S extends DispatchSessionBase>(
   handle: (msg: Record<string, unknown>, activeSessionId: string | null) => { sessionId: string | null; patch: unknown },
