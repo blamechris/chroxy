@@ -217,6 +217,39 @@ describe('handleSetPermissionRules — validation failures', () => {
   })
 })
 
+describe('handleSetPermissionRules — bound (pairing) client rejection', () => {
+  // A bound (share-a-session / pairing-issued) token must not be able to
+  // self-grant auto-allow rules for execution-capable tools — that is the same
+  // privilege escalation the auto-mode gate blocks. sendError only emits to a
+  // live socket, so use a ws with readyState:1.
+  const LIVE_WS = { readyState: 1 }
+
+  it('rejects a bound client with PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT and does not apply the rules', () => {
+    const session = makeSession()
+    const ctx = makeCtx({ session, cwd: '/tmp', name: 'test' })
+    const client = makeClient({ boundSessionId: 'sess-1' })
+
+    handler(LIVE_WS, client, { type: 'set_permission_rules', requestId: 'req-1', rules: [{ tool: 'Write', decision: 'allow' }] }, ctx)
+
+    const errMsg = ctx.transport.send.mock.calls[0]?.arguments[1]
+    assert.equal(errMsg?.type, 'error')
+    assert.equal(errMsg?.code, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT')
+    assert.equal(errMsg?.requestId, 'req-1')
+    assert.equal(session.setPermissionRules.mock.callCount(), 0, 'bound client must not apply rules')
+    assert.equal(ctx.transport.broadcastToSession.mock.callCount(), 0, 'no broadcast on rejection')
+  })
+
+  it('still allows an unbound (primary) client to set rules', () => {
+    const session = makeSession()
+    const ctx = makeCtx({ session, cwd: '/tmp', name: 'test' })
+    const client = makeClient() // no boundSessionId
+
+    handler(LIVE_WS, client, { type: 'set_permission_rules', rules: [{ tool: 'Write', decision: 'allow' }] }, ctx)
+
+    assert.equal(session.setPermissionRules.mock.callCount(), 1, 'primary client unaffected')
+  })
+})
+
 describe('handleSetPermissionRules — missing session / unsupported provider', () => {
   it('returns session_error when no active session', () => {
     const ctx = makeCtx(null)  // no sessions

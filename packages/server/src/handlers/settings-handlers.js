@@ -1449,6 +1449,20 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
 }
 
 function handleSetPermissionRules(ws, client, msg, ctx) {
+  // Bound (pairing-issued) session tokens are scoped to USE existing
+  // permissions, never to escalate — the same principle that blocks them from
+  // flipping to auto mode in handleSetPermissionMode. Permission rules can
+  // auto-allow execution-capable tools (Write, Edit, …), so letting a bound
+  // (share-a-session) client set them is exactly that escalation. Only the
+  // primary API token may manage permission rules.
+  if (client.boundSessionId) {
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to set permission rules — rejected`)
+    sendError(ws, msg?.requestId, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT',
+      'Pairing-issued session tokens cannot modify permission rules. Use the primary API token from a device with physical access to this machine.',
+      undefined, ctx)
+    return
+  }
+
   const rules = msg.rules
 
   // Validate: must be an array
