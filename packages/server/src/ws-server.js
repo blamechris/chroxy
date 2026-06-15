@@ -737,6 +737,10 @@ export class WsServer {
         getPrimary: (sid) => self._clientManager.getPrimary(sid),
         isPrimary: (sid, cid) => self._clientManager.isPrimary(sid, cid),
         clearPrimary: (sid) => self._clearPrimary(sid),
+        // #5837: re-evaluate the terminal-mirror coalescer gate for a session
+        // after its subscriber set changes (handlers call this on subscribe/
+        // unsubscribe; departure is handled server-side in _handleClientDeparture).
+        syncTerminalMirror: (sid) => self._syncTerminalMirror(sid),
         sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
         replayHistory: (ws, sid, opts) => self._replayHistory(ws, sid, opts),
         get clients() { return self.clients },
@@ -2096,6 +2100,16 @@ export class WsServer {
       this._announcePrimary(sessionId, null)
     }
 
+    // #5837: this client's terminal subscriptions are gone. Clear them first (the
+    // client is still in `this.clients` until removeClient runs after departure),
+    // then re-sync each watched session's mirror so the coalescer stops when this
+    // was the last viewer.
+    if (departingClient.terminalSessionIds && departingClient.terminalSessionIds.size > 0) {
+      const watched = [...departingClient.terminalSessionIds]
+      departingClient.terminalSessionIds.clear()
+      for (const sessionId of watched) this._syncTerminalMirror(sessionId)
+    }
+
     // Release this client's ownership of any push tokens it registered.
     // Uses ref-counted release so a token registered by multiple
     // concurrent connections (multi-device or reconnect-race) isn't
@@ -2163,6 +2177,36 @@ export class WsServer {
     if (!sessionId) return
     const prev = this._clientManager.clearPrimary(sessionId)
     if (prev !== undefined) this._announcePrimary(sessionId, null)
+  }
+
+  /**
+   * #5837: recompute whether ANY connected client is subscribed to a session's
+   * live terminal mirror, and toggle the session's coalescer accordingly. Called
+   * after every terminal-subscription change (subscribe / unsubscribe / client
+   * departure) so the mirror runs only while at least one viewer is watching.
+   * Only claude-tui sessions expose setTerminalMirrorActive; others have no PTY.
+   */
+  _syncTerminalMirror(sessionId) {
+    if (!sessionId) return
+    const entry = this.sessionManager.getSession?.(sessionId)
+    if (typeof entry?.session?.setTerminalMirrorActive !== 'function') return
+    let active = false
+    for (const client of this.clients.values()) {
+      // Count a client only if it would actually RECEIVE terminal_output — i.e. it
+      // matches ws-forwarding's terminalSubscriberFilter: opted into the terminal
+      // (terminalSessionIds) AND a viewer of the session (active or subscribed).
+      // An opted-in-but-not-viewing client gets nothing, so it must not keep the
+      // coalescer running (#5844 review — align the gate with the delivery audience).
+      if (
+        client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
+        (client.activeSessionId === sessionId ||
+          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId)))
+      ) {
+        active = true
+        break
+      }
+    }
+    entry.session.setTerminalMirrorActive(active)
   }
 
   /**

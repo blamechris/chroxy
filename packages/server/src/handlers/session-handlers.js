@@ -357,7 +357,12 @@ function handleTerminalSubscribe(ws, client, msg, ctx) {
   const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
   if (!entry) return
   if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
+  const alreadySubscribed = client.terminalSessionIds.has(sid)
   client.terminalSessionIds.add(sid)
+  // #5837: re-evaluate the coalescer gate only on an ACTUAL new subscription
+  // (symmetric with terminal_unsubscribe, which syncs only when it removed one) —
+  // a re-subscribe is a no-op for the gate. This may be the first viewer → ON.
+  if (!alreadySubscribed) ctx?.transport?.syncTerminalMirror?.(sid)
   // #5835 Phase 2: tell the new subscriber the authoritative PTY size up front so
   // it can letterbox to the right grid immediately (the size may already differ
   // from the default if another viewer resized it). Gate on the same viewing
@@ -397,8 +402,11 @@ function handleTerminalResize(ws, client, msg, ctx) {
 
 // #5835 Phase 1: opt the client OUT of a session's live PTY mirror (e.g. the
 // dashboard leaving the Output tab). Idempotent.
-function handleTerminalUnsubscribe(ws, client, msg) {
-  if (client.terminalSessionIds) client.terminalSessionIds.delete(msg.sessionId)
+function handleTerminalUnsubscribe(ws, client, msg, ctx) {
+  if (!client.terminalSessionIds) return
+  if (!client.terminalSessionIds.delete(msg.sessionId)) return
+  // #5837: this may have been the LAST subscriber — turn the coalescer off if so.
+  ctx?.transport?.syncTerminalMirror?.(msg.sessionId)
 }
 
 // #3404: mobile app sends this when foreground/background state changes so

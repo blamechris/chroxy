@@ -28,6 +28,7 @@ function makeCtx(overrides = {}) {
     broadcastSessionList: createSpy(),
     sendSessionInfo: createSpy(),
     replayHistory: createSpy(),
+    syncTerminalMirror: createSpy(),
     ...indexCtx,
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
@@ -708,12 +709,14 @@ describe('session-handlers', () => {
   })
 
   describe('terminal_subscribe / terminal_unsubscribe (#5835)', () => {
-    it('terminal_subscribe adds an existing session to the client terminal set', () => {
+    it('terminal_subscribe adds an existing session to the client terminal set + syncs the mirror gate', () => {
       const ctx = makeCtx()
       ctx._sessions.set('sess-1', { session: {}, cwd: '/tmp', name: 'S1' })
       const client = makeClient()
       sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
       assert.ok(client.terminalSessionIds.has('sess-1'))
+      // #5837: subscribing may be the first viewer → re-evaluate the coalescer gate.
+      assert.ok(ctx.transport.syncTerminalMirror.calls.some(c => c[0] === 'sess-1'))
     })
 
     it('terminal_subscribe to a non-existent session is a no-op (no junk-id growth)', () => {
@@ -723,14 +726,18 @@ describe('session-handlers', () => {
       assert.ok(!client.terminalSessionIds || !client.terminalSessionIds.has('ghost'))
     })
 
-    it('terminal_unsubscribe removes the session and is idempotent', () => {
+    it('terminal_unsubscribe removes the session, syncs the gate, and is idempotent', () => {
       const ctx = makeCtx()
       const client = makeClient({ terminalSessionIds: new Set(['sess-1']) })
       sessionHandlers.terminal_unsubscribe(makeWs(), client, { type: 'terminal_unsubscribe', sessionId: 'sess-1' }, ctx)
       assert.ok(!client.terminalSessionIds.has('sess-1'))
-      // idempotent — unsubscribing again does not throw
+      // #5837: removing a subscriber re-evaluates the coalescer gate (may be the last).
+      assert.equal(ctx.transport.syncTerminalMirror.callCount, 1)
+      assert.equal(ctx.transport.syncTerminalMirror.lastCall[0], 'sess-1')
+      // idempotent — unsubscribing again does not throw AND does not re-sync (nothing removed).
       sessionHandlers.terminal_unsubscribe(makeWs(), client, { type: 'terminal_unsubscribe', sessionId: 'sess-1' }, ctx)
       assert.ok(!client.terminalSessionIds.has('sess-1'))
+      assert.equal(ctx.transport.syncTerminalMirror.callCount, 1, 'no re-sync when nothing was removed')
     })
 
     it('a bound client cannot subscribe to a different session', () => {
