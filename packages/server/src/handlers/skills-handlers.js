@@ -395,7 +395,7 @@ function handleSkillTrustAccept(ws, client, msg, ctx) {
     try {
       trustStore.flush()
     } catch (err) {
-      // #4828: session-scoped — `sessionId` is in scope (L772 above).
+      // #4828: session-scoped — `sessionId` is in scope here.
       loggerForSession('ws', sessionId).warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
       sendError(
         ws,
@@ -553,7 +553,6 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
   if (sessionRepoDir) skillsRoots.push(sessionRepoDir)
 
   let resolvedPath = null
-  let dirReal = null
   // #3307: track when the lookup resolves to a real file but lands under a
   // different community author than the caller claims. Distinguishes
   // "skill missing entirely" (SKILL_NOT_FOUND) from "skill exists under
@@ -599,7 +598,6 @@ function handleSkillTrustGrant(ws, client, msg, ctx) {
       continue
     }
     resolvedPath = candidateReal
-    dirReal = rootReal
     break
   }
 
