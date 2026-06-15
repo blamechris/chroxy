@@ -521,6 +521,69 @@ describe('ClaudeTuiSession', () => {
     })
   })
 
+  // Audit P1-1 — per-turn teardown consolidation. The success path used to
+  // hand-roll its clears and had drifted from _finishTurnError, omitting the
+  // AskUserQuestion sibling-lock + stall-watchdog clears. _clearTurnEndState()
+  // is the shared helper both now route through.
+  describe('_clearTurnEndState (per-turn teardown helper)', () => {
+    function makeSession() {
+      const s = new ClaudeTuiSession({ cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      s.on('error', () => {})
+      session = s
+      return s
+    }
+
+    it('clears the busy triple, inactivity timers, AskUserQuestion lock and stall watchdogs', () => {
+      const s = makeSession()
+      // Arm a full turn's worth of per-turn state.
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      s._activeTurn = { messageId: 'msg-1', startedAt: Date.now() - 50, aborted: false, synthSeq: 0 }
+      s._resultTimeout = setTimeout(() => {}, 60_000)
+      s._hardTimeout = setTimeout(() => {}, 60_000)
+      s._streamStallTimeout = setTimeout(() => {}, 60_000)
+      // A real sink dir with the sibling lock the permission hook leaves behind.
+      s._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-'))
+      const lockPath = join(s._sinkDir, 'askuserquestion-active')
+      writeFileSync(lockPath, '1')
+      // An armed per-toolUseId stall watchdog.
+      s._askUserQuestionWatchdogs.set('tool-1', setTimeout(() => {}, 60_000))
+
+      s._clearTurnEndState()
+
+      assert.equal(s._isBusy, false, '_isBusy cleared')
+      assert.equal(s._currentMessageId, null, '_currentMessageId cleared')
+      assert.equal(s._activeTurn, null, '_activeTurn cleared')
+      assert.equal(s._resultTimeout, null, 'result timer cleared')
+      assert.equal(s._hardTimeout, null, 'hard timer cleared')
+      assert.equal(s._streamStallTimeout, null, 'stream-stall timer cleared')
+      assert.equal(existsSync(lockPath), false, 'askuserquestion-active sibling lock removed (#4604)')
+      assert.equal(s._askUserQuestionWatchdogs.size, 0, 'all stall watchdogs cleared (#5319)')
+
+      rmSync(s._sinkDir, { recursive: true, force: true })
+    })
+
+    it('does NOT clear _pendingBackgroundCommands (the #4307 cross-turn invariant)', () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-1'
+      s._activeTurn = { messageId: 'msg-1', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      s._pendingBackgroundCommands.set('bg-tool-1', 'npm run dev')
+
+      s._clearTurnEndState()
+
+      assert.equal(s._pendingBackgroundCommands.get('bg-tool-1'), 'npm run dev',
+        'background-shell entries persist across turns (#4307) — cleared only by PostToolUse/BashOutput or destroy')
+    })
+
+    it('is idempotent (safe to call when nothing is armed)', () => {
+      const s = makeSession()
+      assert.doesNotThrow(() => { s._clearTurnEndState(); s._clearTurnEndState() })
+      assert.equal(s._isBusy, false)
+      assert.equal(s._askUserQuestionWatchdogs.size, 0)
+    })
+  })
+
   // #5322 (WP-4.2, security) — the PTY diagnostic dumps (hex + readable tail)
   // ride into log lines AND client-facing `error` events. A pasted/echoed OAuth
   // token or API key in claude's output must not leak through them.
