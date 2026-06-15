@@ -563,17 +563,30 @@ describe('ClaudeTuiSession', () => {
       rmSync(s._sinkDir, { recursive: true, force: true })
     })
 
-    it('does NOT clear _pendingBackgroundCommands (the #4307 cross-turn invariant)', () => {
+    it('clears the ephemeral intra-turn _pendingBackgroundCommands map (#4307 leak)', () => {
       const s = makeSession()
       s._isBusy = true
       s._currentMessageId = 'msg-1'
       s._activeTurn = { messageId: 'msg-1', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      // A run_in_background tool_use whose result never landed this turn.
       s._pendingBackgroundCommands.set('bg-tool-1', 'npm run dev')
 
       s._clearTurnEndState()
 
-      assert.equal(s._pendingBackgroundCommands.get('bg-tool-1'), 'npm run dev',
-        'background-shell entries persist across turns (#4307) — cleared only by PostToolUse/BashOutput or destroy')
+      assert.equal(s._pendingBackgroundCommands.size, 0,
+        'stranded intra-turn command map dropped at turn-end, matching base _clearMessageState (#4307)')
+    })
+
+    it('does NOT touch the cross-turn background-shell tracker', () => {
+      const s = makeSession()
+      // The _backgroundShellTracker is the cross-turn "waiting on shell" state —
+      // transient-by-design and quiesced separately, never per-turn-cleared here.
+      assert.ok(s._backgroundShellTracker, 'tracker exists')
+      const trackerBefore = s._backgroundShellTracker
+      s._isBusy = true
+      s._activeTurn = { messageId: 'm', startedAt: Date.now(), aborted: false, synthSeq: 0 }
+      s._clearTurnEndState()
+      assert.strictEqual(s._backgroundShellTracker, trackerBefore, 'tracker instance untouched')
     })
 
     it('is idempotent (safe to call when nothing is armed)', () => {
@@ -581,6 +594,32 @@ describe('ClaudeTuiSession', () => {
       assert.doesNotThrow(() => { s._clearTurnEndState(); s._clearTurnEndState() })
       assert.equal(s._isBusy, false)
       assert.equal(s._askUserQuestionWatchdogs.size, 0)
+    })
+
+    // End-to-end linkage (review #5862): prove a REAL teardown path routes
+    // through the helper, so a refactor that drops the _clearTurnEndState() call
+    // from a turn-end path is caught — not just the helper-in-isolation test.
+    it('_finishTurnError routes through the helper (clears lock, watchdogs, bg map, busy triple)', () => {
+      const s = makeSession()
+      s._isBusy = true
+      s._currentMessageId = 'msg-err'
+      s._activeTurn = { messageId: 'msg-err', startedAt: Date.now() - 10, aborted: false, synthSeq: 0 }
+      s._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-'))
+      const lockPath = join(s._sinkDir, 'askuserquestion-active')
+      writeFileSync(lockPath, '1')
+      s._askUserQuestionWatchdogs.set('tool-1', setTimeout(() => {}, 60_000))
+      s._pendingBackgroundCommands.set('bg-1', 'sleep 99')
+
+      s._finishTurnError('boom', 'msg-err')
+
+      assert.equal(s._isBusy, false, '_finishTurnError cleared busy via the helper')
+      assert.equal(s._currentMessageId, null)
+      assert.equal(s._activeTurn, null)
+      assert.equal(existsSync(lockPath), false, 'AskUserQuestion lock cleared')
+      assert.equal(s._askUserQuestionWatchdogs.size, 0, 'stall watchdogs cleared')
+      assert.equal(s._pendingBackgroundCommands.size, 0, 'intra-turn bg map cleared')
+
+      rmSync(s._sinkDir, { recursive: true, force: true })
     })
   })
 

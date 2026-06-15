@@ -1124,6 +1124,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #4307: the PTY is gone, so the ephemeral intra-turn run_in_background
+    // tool_use→command map can never be resolved by a result on this PTY — drop
+    // it (matches _clearTurnEndState / base _clearMessageState). On respawn the
+    // next turn starts clean; on destroy _clearMessageState would clear it anyway.
+    this._pendingBackgroundCommands.clear()
     // #5777 (#5788): cancel a pending first-turn submit nudge directly here.
     // _onPtyGone is the one teardown path that does NOT route through
     // _clearFirstOutputWatchdog, so without this an armed nudge would only be
@@ -2706,9 +2711,17 @@ export class ClaudeTuiSession extends BaseSession {
    * issues Ctrl-C, so a sibling AskUserQuestion answer already on the wire can
    * still validly consume its entry (#4802). The Ctrl-C / kill paths
    * (`_teardownTurn`, `interrupt`, `destroy`) clear pending answers themselves.
-   * Also does NOT touch `_pendingBackgroundCommands`: run-in-background shells
-   * persist across turns by design (the #4307 invariant) and are dropped only
-   * by their own PostToolUse/BashOutput or at `destroy()`.
+   *
+   * DOES clear `_pendingBackgroundCommands` — the ephemeral intra-turn
+   * tool_use→command lookup (#4307). Per its base-session contract that map is
+   * dropped every turn (CLI/SDK do so via `_clearMessageState`): once a turn
+   * ends, any run_in_background `tool_use` that never saw its result this turn is
+   * stranded, and the agent re-emits a fresh `tool_use` next turn if it still
+   * cares. This is NOT the cross-turn "waiting on background shell" state — that
+   * lives in `_backgroundShellTracker` (transient-by-design, quiesced
+   * separately) and is untouched here. Leaving the map uncleared per-turn was
+   * the leak audit P1-1 flagged: ClaudeTuiSession is the only subclass that
+   * didn't run the base per-turn reset.
    */
   _clearTurnEndState() {
     if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
@@ -2721,6 +2734,7 @@ export class ClaudeTuiSession extends BaseSession {
     this._currentMessageId = null
     this._clearAskUserQuestionLock()
     this._clearAllAskUserQuestionWatchdogs()
+    this._pendingBackgroundCommands.clear()
   }
 
   _finishTurnError(message, callerMessageId) {
@@ -3274,6 +3288,9 @@ export class ClaudeTuiSession extends BaseSession {
     // `_handleHardTimeout` / `_handleStreamStall` / `_handleFirstOutputTimeout`
     // can never leak a live handle that would re-fire on a torn-down turn.
     this._clearFirstOutputWatchdog()
+    // #4307: drop the ephemeral intra-turn run_in_background tool_use→command
+    // map on this turn-end too (matches _clearTurnEndState / base _clearMessageState).
+    this._pendingBackgroundCommands.clear()
     // 5. Error + result emit, in the order the caller requests. The two
     // existing callers disagree (hard-timeout: error first; stream-stall:
     // result first), and that asymmetry is preserved exactly.
