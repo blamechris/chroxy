@@ -264,6 +264,37 @@ describe('CloudflareTunnelAdapter', () => {
     })
   })
 
+  describe('cold-start timeout', () => {
+    // Regression: the 30s cold-start timeout used to set the instance-wide
+    // `intentionalShutdown` kill switch. That (a) made start()'s retry loop give
+    // up on the very transient failure it exists to absorb, and (b) suppressed
+    // ALL future recovery for the adapter's lifetime. The timeout must scope its
+    // suppression to the timed-out process only.
+    it('does not set intentionalShutdown or trigger recovery (#5851)', async () => {
+      // A process that never emits a URL and never closes on its own, so only
+      // the 30s timeout can resolve the start promise.
+      const proc = createMockProcess({ skipDefaultUrl: true })
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mode: 'quick', mockSpawn: () => proc })
+
+      let recoveryCalled = false
+      tunnel._handleUnexpectedExit = async () => { recoveryCalled = true }
+
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        const startP = tunnel._startQuickTunnel()
+        mock.timers.tick(30_000) // fire the cold-start timeout
+        await assert.rejects(startP, /timed out after 30s/)
+        // The timeout's proc.kill() emits 'close' on a setImmediate (real timer).
+        await new Promise((resolve) => setImmediate(resolve))
+      } finally {
+        mock.timers.reset()
+      }
+
+      assert.equal(tunnel.intentionalShutdown, false, 'cold-start timeout must not poison the instance-wide kill switch')
+      assert.equal(recoveryCalled, false, 'a timeout-killed process must not be treated as a mid-session outage')
+    })
+  })
+
   describe('stop', () => {
     it('sets intentionalShutdown and does NOT trigger recovery', async () => {
       const mockSpawn = () => createMockProcess()

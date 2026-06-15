@@ -95,6 +95,13 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       this.process = proc
       let resolved = false
+      // Per-attempt cold-start timeout flag. Must NOT reuse the instance-wide
+      // `intentionalShutdown` kill switch: a 30s cold-start timeout is exactly
+      // the transient failure the `start()` retry loop exists to absorb, but
+      // setting `intentionalShutdown` makes that loop give up (base.js:95) AND
+      // suppresses every future recovery. Scope the suppression to this one
+      // process so the retry budget and post-success recovery both survive.
+      let timedOut = false
 
       const httpUrl = `https://${this.tunnelHostname}`
       const wsUrl = `wss://${this.tunnelHostname}`
@@ -137,7 +144,10 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
         if (!resolved) {
           const tail = redactSensitive(outputTailRaw).trim()
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel${tail ? `. Last output: ${tail}` : ''}`))
-        } else {
+        } else if (!timedOut) {
+          // A cold-start timeout already rejected and killed the process; the
+          // `start()` retry loop owns the retry decision, so don't treat that
+          // kill as a mid-session outage to recover from.
           void this._handleUnexpectedExit(code, signal).catch((err) => {
             log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
           })
@@ -152,7 +162,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       const timeoutHandle = setTimeout(() => {
         if (!resolved) {
           resolved = true
-          this.intentionalShutdown = true
+          timedOut = true
           proc.kill()
           const tail = redactSensitive(outputTailRaw).trim()
           reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)${tail ? ` Last output: ${tail}` : ''}`))
@@ -178,6 +188,9 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       this.process = proc
       let resolved = false
+      // Per-attempt cold-start timeout flag — see _startNamedTunnel for why this
+      // must not reuse the instance-wide `intentionalShutdown` kill switch.
+      let timedOut = false
 
       const handleOutput = (data) => {
         const text = data.toString()
@@ -214,7 +227,10 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       proc.on('close', (code, signal) => {
         if (!resolved) {
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
-        } else {
+        } else if (!timedOut) {
+          // A cold-start timeout already rejected and killed the process; the
+          // `start()` retry loop owns the retry decision, so don't treat that
+          // kill as a mid-session outage to recover from.
           void this._handleUnexpectedExit(code, signal).catch((err) => {
             log.error(`Error while handling unexpected cloudflared exit: ${err.stack || err.message || err}`)
           })
@@ -226,7 +242,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       const timeoutHandle = setTimeout(() => {
         if (!resolved) {
           resolved = true
-          this.intentionalShutdown = true
+          timedOut = true
           proc.kill()
           reject(new Error('Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)'))
         }
