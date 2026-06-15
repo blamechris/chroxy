@@ -22,17 +22,51 @@
  * `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT`, and `CHROXY_HOOKS_TMP_PREFIXES`).
  */
 import { existsSync, readFileSync, realpathSync } from 'node:fs';
-import { homedir } from 'node:os';
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
+import { homedir, platform, tmpdir } from 'node:os';
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from 'node:path';
 /** Default to process.env without depending on the `process` global type (tsconfig `types: []`). */
 function defaultEnv() {
     const g = globalThis;
     return g.process?.env ?? {};
 }
-/** Agent worktree checkouts live under <parent>/.claude/worktrees/<name>. */
-const WORKTREE_MARKER = '/.claude/worktrees/';
-/** Temp roots (plus their macOS /private realpaths) — never project sessions. */
-const TMP_PREFIXES = ['/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'];
+/**
+ * Agent worktree checkouts live under <parent>/.claude/worktrees/<name>. The
+ * marker is matched separator-agnostically (`/` or `\`) so a Windows path
+ * (realpathSync returns backslashes) still folds into the parent project rather
+ * than mis-attributing to the `agent-*` basename (#5886). On POSIX paths the
+ * regex matches at the exact same index as the old `/.claude/worktrees/` literal.
+ */
+const WORKTREE_MARKER_RE = /[/\\]\.claude[/\\]worktrees[/\\]/;
+/** Index of the agent-worktree marker in `dir`, or -1. Exported for cross-platform tests. */
+export function _worktreeMarkerIndex(dir) {
+    return dir.search(WORKTREE_MARKER_RE);
+}
+/** POSIX temp roots (plus their macOS /private realpaths) — never project sessions. */
+const POSIX_TMP_PREFIXES = ['/tmp', '/private/tmp', '/var/tmp', '/private/var/tmp'];
+/**
+ * Built-in temp roots for the RUNNING platform. The POSIX literals never match
+ * a Windows path, so on win32 use the real temp dir (`os.tmpdir()`),
+ * realpath-resolved. Platform-conditional so POSIX behavior is unchanged (#5886).
+ */
+function defaultTmpPrefixes() {
+    if (platform() === 'win32') {
+        const t = realResolve(tmpdir());
+        return t ? [t] : [];
+    }
+    return POSIX_TMP_PREFIXES;
+}
+/**
+ * True if `dir` equals `prefix` or is nested directly under it. Separator-
+ * agnostic (normalizes `\`→`/` for the boundary check) and trailing-separator
+ * tolerant, so a Windows path matches a Windows prefix. On POSIX forward-slash
+ * paths this is a no-op normalization → identical to the old
+ * `dir === prefix || dir.startsWith(prefix + '/')`. Exported for cross-platform tests.
+ */
+export function _pathWithinPrefix(prefix, dir) {
+    const np = prefix.replace(/[/\\]+$/, '').replace(/\\/g, '/');
+    const nd = dir.replace(/\\/g, '/');
+    return nd === np || nd.startsWith(np + '/');
+}
 /** resolve() then realpath (macOS: /tmp → /private/tmp); best-effort, never throws. */
 function realResolve(p) {
     let dir;
@@ -50,22 +84,25 @@ function realResolve(p) {
     }
 }
 /**
- * Test-surface override (colon-separated) for the tmp classification. On Linux
- * os.tmpdir() IS /tmp, so test fixtures built under the OS temp dir would
- * classify as 'tmp' and legit-repo tests fail on CI but pass on macOS. Tests
- * point this at a path that doesn't exist so their fixtures classify by the real
- * rules. Never set in production. An unusable override (no absolute prefixes)
- * falls back to the built-in list rather than silently disabling suppression.
+ * Test-surface override (split on `path.delimiter`) for the tmp classification.
+ * On Linux os.tmpdir() IS /tmp, so test fixtures built under the OS temp dir
+ * would classify as 'tmp' and legit-repo tests fail on CI but pass on macOS.
+ * Tests point this at a path that doesn't exist so their fixtures classify by
+ * the real rules. Never set in production. An unusable override (no absolute
+ * prefixes) falls back to the built-in list rather than silently disabling
+ * suppression.
  */
 function tmpPrefixes(env) {
     const raw = env?.CHROXY_HOOKS_TMP_PREFIXES;
     if (typeof raw !== 'string' || raw.length === 0)
-        return TMP_PREFIXES;
+        return defaultTmpPrefixes();
     const prefixes = raw
-        .split(':')
-        .map((p) => p.trim().replace(/\/+$/, ''))
-        .filter((p) => p.startsWith('/'));
-    return prefixes.length > 0 ? prefixes : TMP_PREFIXES;
+        // `path.delimiter` is `:` on POSIX (unchanged) and `;` on Windows, so a
+        // drive-letter override like `C:\Temp;D:\Tmp` splits correctly (#5886).
+        .split(delimiter)
+        .map((p) => p.trim().replace(/[/\\]+$/, ''))
+        .filter((p) => isAbsolute(p));
+    return prefixes.length > 0 ? prefixes : defaultTmpPrefixes();
 }
 /**
  * chroxy's SECOND worktree source — session worktrees the daemon creates at
@@ -165,7 +202,7 @@ export function worktreeParent(cwd, env = defaultEnv()) {
     const chroxyTop = chroxyWorktreeTopDir(dir, env);
     if (chroxyTop)
         return chroxyWorktreeParentProject(chroxyTop);
-    const idx = dir.indexOf(WORKTREE_MARKER);
+    const idx = _worktreeMarkerIndex(dir);
     if (idx <= 0)
         return null;
     const name = basename(dir.slice(0, idx));
@@ -189,13 +226,13 @@ export function classifyNonProjectCwd(cwd, env = defaultEnv()) {
     if (!dir)
         return null;
     for (const prefix of tmpPrefixes(env)) {
-        if (dir === prefix || dir.startsWith(prefix + '/'))
+        if (_pathWithinPrefix(prefix, dir))
             return 'tmp';
     }
     // Path-shape only — never gated on the .git gitdir parse succeeding: a session
     // in a chroxy worktree must stay suppressed even when the parent can't be
     // recovered (it would otherwise mint an opaque-id embed).
-    if (dir.includes(WORKTREE_MARKER) || chroxyWorktreeTopDir(dir, env))
+    if (WORKTREE_MARKER_RE.test(dir) || chroxyWorktreeTopDir(dir, env))
         return 'worktree';
     const homeRaw = typeof env.HOME === 'string' && env.HOME.length > 0 ? env.HOME : homedir();
     if (homeRaw) {

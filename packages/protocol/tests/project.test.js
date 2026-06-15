@@ -8,6 +8,8 @@ import {
   deriveProjectFromCwd,
   classifyNonProjectCwd,
   worktreeParent,
+  _worktreeMarkerIndex,
+  _pathWithinPrefix,
 } from '../src/project.ts'
 
 /**
@@ -143,5 +145,61 @@ describe('classifyNonProjectCwd', () => {
   it('returns null for unusable input', () => {
     assert.equal(classifyNonProjectCwd(''), null)
     assert.equal(classifyNonProjectCwd(null), null)
+  })
+})
+
+/**
+ * Cross-platform (#5886) — the public functions can't be driven with Windows
+ * paths on a POSIX runner (resolve()/realpathSync are platform-coupled), so the
+ * separator-agnostic STRING helpers are unit-tested directly with both `/` and
+ * `\` forms. POSIX behavior is pinned to be identical to the old `/`-literal logic.
+ */
+describe('_worktreeMarkerIndex (separator-agnostic worktree marker)', () => {
+  it('finds the marker in a POSIX path at the same index as the old literal', () => {
+    const dir = '/home/proj/.claude/worktrees/agent-1/src'
+    const idx = _worktreeMarkerIndex(dir)
+    assert.equal(idx, dir.indexOf('/.claude/worktrees/'))
+    assert.equal(basename(dir.slice(0, idx)), 'proj')
+  })
+
+  it('finds the marker in a Windows (backslash) path', () => {
+    const dir = 'C:\\Users\\me\\proj\\.claude\\worktrees\\agent-1\\src'
+    const idx = _worktreeMarkerIndex(dir)
+    assert.ok(idx > 0)
+    assert.equal(dir.slice(0, idx), 'C:\\Users\\me\\proj')
+  })
+
+  it('returns -1 when no marker is present (either separator)', () => {
+    assert.equal(_worktreeMarkerIndex('/home/proj/src'), -1)
+    assert.equal(_worktreeMarkerIndex('C:\\Users\\me\\proj\\src'), -1)
+  })
+
+  it('returns 0 for a marker at the very start (guarded by idx <= 0 in callers)', () => {
+    assert.equal(_worktreeMarkerIndex('/.claude/worktrees/x'), 0)
+  })
+})
+
+describe('_pathWithinPrefix (separator-agnostic tmp-prefix containment)', () => {
+  it('matches a nested path and the prefix itself (POSIX)', () => {
+    assert.equal(_pathWithinPrefix('/tmp', '/tmp/sess'), true)
+    assert.equal(_pathWithinPrefix('/tmp', '/tmp'), true)
+  })
+
+  it('does not match a sibling that merely shares the prefix string (POSIX)', () => {
+    assert.equal(_pathWithinPrefix('/tmp', '/tmpfoo'), false)
+  })
+
+  it('matches a nested path and the prefix itself (Windows backslash)', () => {
+    assert.equal(_pathWithinPrefix('C:\\Users\\me\\Temp', 'C:\\Users\\me\\Temp\\sess'), true)
+    assert.equal(_pathWithinPrefix('C:\\Users\\me\\Temp', 'C:\\Users\\me\\Temp'), true)
+  })
+
+  it('does not match a Windows sibling sharing the prefix string', () => {
+    assert.equal(_pathWithinPrefix('C:\\Temp', 'C:\\Tempfoo'), false)
+  })
+
+  it('tolerates a trailing separator on the prefix (both platforms)', () => {
+    assert.equal(_pathWithinPrefix('/tmp/', '/tmp/x'), true)
+    assert.equal(_pathWithinPrefix('C:\\Temp\\', 'C:\\Temp\\x'), true)
   })
 })
