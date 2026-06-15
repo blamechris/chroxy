@@ -17,8 +17,9 @@
 >   #5872). See §4 P2 table.
 >
 > Lives in `docs/audit/` alongside the other tracked strategic audits (`tui-hardening-2026-06-07.md`,
-> `june15-billing-strategy-2026-06-14.md`); the `.gitignore` only masks `docs/audits/` and
-> `docs/audit-results/`.
+> `june15-billing-strategy-2026-06-14.md`); `.gitignore` masks the plural `docs/audits/` and
+> `docs/audit-results/` (plus `docs/qa-log.md`, `docs/smoke-test.md`) but not this singular
+> `docs/audit/` path, so it is tracked.
 
 ---
 
