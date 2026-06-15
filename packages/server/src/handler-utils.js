@@ -202,6 +202,18 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
  * trailing separator first to normalize. Found by Copilot review on
  * PR #2808.
  */
+// #5835: a client "views" a session iff it's its active session or in its
+// subscribed set — the SAME viewing clause ws-forwarding's terminalSubscriberFilter
+// uses to scope terminal_output/terminal_size broadcasts. Every PTY-touching
+// terminal handler (terminal_size send, terminal_resize, terminal_input) gates on
+// this so a client that merely knows a session id — but isn't watching it — can't
+// drive or leak its terminal (#5840 review; extended to terminal_input in #5842).
+// Shared here so the session-handlers and input-handlers copies can't drift.
+export function isSessionViewer(client, sid) {
+  return client.activeSessionId === sid ||
+    Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
+}
+
 export function isPathWithin(absPath, baseDir) {
   if (absPath === baseDir) return true
   // Normalize: strip a trailing separator so filesystem root and

@@ -300,6 +300,7 @@ function _isSecureRequest(req) {
  *   { type: 'terminal_subscribe', sessionId }           — #5835 opt IN to a session's live PTY mirror (terminal_output); only opted-in clients receive raw bytes
  *   { type: 'terminal_unsubscribe', sessionId }         — #5835 opt OUT of a session's live PTY mirror
  *   { type: 'terminal_resize', sessionId, cols, rows }  — #5835 Phase 2 request to resize the live claude-tui PTY; applied only for the session's primary owner (or an unclaimed session), then broadcast back as terminal_size
+ *   { type: 'terminal_input', sessionId, data }         — #5835 Phase 3 raw keystrokes → live claude-tui PTY (true remote control); authority mirrors `input` (bound-session check + single-driver primary gate; an observer's keystroke is rejected with input_conflict)
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)

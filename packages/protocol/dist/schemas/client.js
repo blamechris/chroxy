@@ -708,6 +708,18 @@ export const TerminalResizeSchema = z.object({
     cols: z.number().int().min(1).max(1000),
     rows: z.number().int().min(1).max(1000),
 });
+// #5835 Phase 3: raw keystroke forwarding to a session's live PTY — true remote
+// control (the mirror becomes interactive). `data` is opaque terminal bytes (a
+// keypress, an escape sequence, or a bracketed-paste chunk) written verbatim to
+// the PTY. Authority mirrors `input`: a pairing-bound token may only drive its
+// bound session, and the server's primary-ownership gate keeps a single driver
+// (an observer's keystroke is rejected with input_conflict). The 100k cap bounds
+// a single message (a keystroke is a few bytes; the ceiling covers a paste).
+export const TerminalInputSchema = z.object({
+    type: z.literal('terminal_input'),
+    sessionId: z.string().max(256),
+    data: z.string().max(100000),
+});
 // #3404: client signals foreground/background state. Mobile app sends
 // {visible:false} on AppState background/inactive so the server stops
 // treating its still-alive WS connection as an active viewer and lets
@@ -1003,6 +1015,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     TerminalSubscribeSchema,
     TerminalUnsubscribeSchema,
     TerminalResizeSchema,
+    TerminalInputSchema,
     ClientVisibleSchema,
     ClaimPrimarySchema,
     ListProvidersSchema,

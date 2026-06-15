@@ -1820,6 +1820,28 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #5835 Phase 3: write raw client keystrokes to the live PTY — true remote
+   * control (the read-only mirror becomes interactive). Bytes are written AS-IS:
+   * no prompt throttle (interactive keys arrive naturally paced over the wire;
+   * the throttle exists only for bulk programmatic prompts) and no transform
+   * (faithful remote keyboard, including control bytes like \x03 / escape seqs).
+   * The handler enforces authority (bound session + primary-ownership gate); this
+   * just writes. No-op (returns false) when there is no live PTY.
+   * @returns {boolean} true if the bytes were written to a live PTY.
+   */
+  writeTerminalInput(data) {
+    if (typeof data !== 'string' || data.length === 0) return false
+    if (!this._term || this._ptyExited || this._destroying) return false
+    try {
+      this._term.write(data)
+      return true
+    } catch (err) {
+      log.warn(`claude-tui terminal input write failed: ${err?.message || err}`)
+      return false
+    }
+  }
+
+  /**
    * Drop any pending mirror flush + buffered bytes. Called on teardown so a
    * dead PTY's leftover frame never broadcasts and no timer leaks.
    */

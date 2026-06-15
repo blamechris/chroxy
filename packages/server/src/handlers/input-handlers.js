@@ -6,7 +6,7 @@
  *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger, sessionLogger } from '../logger.js'
@@ -921,9 +921,68 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   }
 }
 
+// #5835 Phase 3: forward raw client keystrokes to the live claude-tui PTY — true
+// remote control (the read-only mirror becomes interactive). Authority mirrors
+// handleInput, deliberately reusing this file's gate primitives:
+//   - resolveSession enforces the pairing-bound session binding (a bound token may
+//     only drive its own session); a mismatch surfaces the canonical
+//     SESSION_TOKEN_MISMATCH envelope (same disambiguation as handleInput/interrupt).
+//   - The primary-ownership gate keeps a SINGLE driver: claimPrimary (NON-force)
+//     claims an unclaimed session for this client, no-ops if already primary, and
+//     REJECTS (input_conflict) if another client owns it. Unlike a chat send — which
+//     force-adopts an idle session — a stray keystroke must NOT silently steal a live
+//     TUI from its driver; taking over is the explicit claim_primary hand-off, and an
+//     observer rides along on the read-only mirror.
+// Only claude-tui sessions expose writeTerminalInput; other providers have no PTY,
+// so the keystroke is silently dropped for them.
+function handleTerminalInput(ws, client, msg, ctx) {
+  const sid = msg.sessionId || client.activeSessionId
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    // Disambiguate a binding mismatch from a truly-missing session (same as
+    // handleInput/handleInterrupt) so a bound client aiming elsewhere sees the
+    // canonical SESSION_TOKEN_MISMATCH rather than a silent drop. A truly-missing
+    // session returns silently (no SESSION_NOT_FOUND envelope, unlike handleInput):
+    // terminal_input is a high-frequency keystroke stream, so a per-key error toast
+    // would be noise — the dashboard already clears stale ids off the chat path.
+    if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+      log.info(`terminal_input rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+      ctx.transport.send(ws, {
+        type: 'session_error',
+        ...buildSessionTokenMismatchPayload({
+          sessionManager: ctx.sessions.sessionManager,
+          boundSessionId: client.boundSessionId,
+        }),
+      })
+    }
+    return
+  }
+  if (typeof entry.session.writeTerminalInput !== 'function') return
+  // Must be VIEWING the session to drive its PTY (#5842 review) — parity with
+  // terminal_resize/terminal_size (#5840): keystrokes are strictly more powerful
+  // than a resize, so they require at least the same viewer precondition. A client
+  // that merely knows an (even unclaimed) session id can't silently become its
+  // driver without watching it. The normal flow (Output tab open → activeSessionId
+  // === sid) passes; this only blocks blind cross-session poking.
+  if (!isSessionViewer(client, sid)) return
+  if (typeof msg.data !== 'string' || msg.data.length === 0) return
+  // Single-driver gate: claim (or confirm) primary; reject an observer's keystroke.
+  const res = ctx.transport.claimPrimary(sid, client.id)
+  if (res?.rejected) {
+    ctx.transport.send(ws, buildInputConflictError(
+      sid,
+      undefined,
+      'Another device is driving this session. Take over from the session menu to type into the terminal.',
+    ))
+    return
+  }
+  entry.session.writeTerminalInput(msg.data)
+}
+
 export const inputHandlers = {
   input: handleInput,
   interrupt: handleInterrupt,
+  terminal_input: handleTerminalInput,
   cancel_activity: handleCancelActivity,
   resume_budget: handleResumeBudget,
   register_push_token: handleRegisterPushToken,
