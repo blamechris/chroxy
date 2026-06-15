@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd } from '../src/models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider } from '../src/models.js'
+import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 
 describe('FALLBACK_MODELS (default registry)', () => {
   it('is deep-frozen so getModels() callers cannot mutate the constant', () => {
@@ -811,5 +812,39 @@ describe('computePromptCostUsd()', () => {
       // 300K * 1/Mtok = 0.3 (Haiku base input rate, NOT a doubled 0.6)
       assert.ok(Math.abs(cost - 0.3) < 1e-6, `Haiku 300K must stay on base, got ${cost}`)
     })
+  })
+})
+
+describe('isClaudeProvider — Claude-family provider allowlist', () => {
+  // Every Claude-family provider runs the real `claude` against the moving model
+  // allowlist the Agent SDK pushes live, so createSession must soft-fall-back an
+  // unknown initial model (not hard-reject). The set must cover ALL of them.
+  const CLAUDE_FAMILY = [
+    'claude-sdk', 'claude-cli', 'claude-tui', 'claude-channel', 'claude-byok',
+    'docker', 'docker-sdk', 'docker-cli', 'docker-byok',
+  ]
+
+  for (const name of CLAUDE_FAMILY) {
+    it(`treats ${name} as a Claude-family provider`, () => {
+      assert.equal(isClaudeProvider(name), true)
+    })
+  }
+
+  it('treats the DEFAULT_PROVIDER as Claude-family (so the default never hard-rejects a stale model)', () => {
+    // Regression guard: claude-tui became the default but was missing from the
+    // set, so the default provider hard-rejected stale dashboard model ids.
+    // If the default ever flips again, this fails until the set is updated.
+    assert.equal(isClaudeProvider(DEFAULT_PROVIDER), true, `DEFAULT_PROVIDER ${DEFAULT_PROVIDER} must be in CLAUDE_PROVIDER_NAMES`)
+  })
+
+  it('does not treat non-Claude providers as Claude-family', () => {
+    for (const name of ['codex', 'gemini', 'deepseek', 'ollama', 'unknown-provider']) {
+      assert.equal(isClaudeProvider(name), false, `${name} must not be Claude-family`)
+    }
+  })
+
+  it('honours the static claudeFamily flag for external providers', () => {
+    assert.equal(isClaudeProvider('some-external', { claudeFamily: true }), true)
+    assert.equal(isClaudeProvider('some-external', { claudeFamily: false }), false)
   })
 })

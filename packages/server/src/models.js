@@ -1059,12 +1059,25 @@ const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
  */
 const providerRegistryCache = new Map()
 
+// Every Claude-family provider id registered in providers.js. These all run the
+// real `claude` against the moving-target model allowlist that the Agent SDK
+// pushes live, so an unknown initial model must soft-fall-back to the provider
+// default rather than hard-reject (see isClaudeProvider). Keep in sync with the
+// claude-* / docker-* entries in the PROVIDERS literal — notably claude-tui,
+// the DEFAULT_PROVIDER (@chroxy/protocol): omitting it made the default
+// provider hard-reject a stale dashboard model id where every other Claude
+// provider recovers. (Longer-term this set should derive from a single
+// `static claudeFamily = true` on the provider classes — audit P2.)
 const CLAUDE_PROVIDER_NAMES = new Set([
   'claude-sdk',
   'claude-cli',
+  'claude-tui',
+  'claude-channel',
+  'claude-byok',
   'docker',
   'docker-sdk',
   'docker-cli',
+  'docker-byok',
 ])
 
 /**
