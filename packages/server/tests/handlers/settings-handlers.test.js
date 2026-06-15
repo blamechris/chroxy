@@ -1692,6 +1692,38 @@ describe('settings-handlers', () => {
       assert.ok(err, 'expected session_error for missing session')
     })
 
+    // #5857: skill trust whitelists host-executable code — a bound (pairing)
+    // token must not be able to grant it. Guard runs first, before any mutation.
+    it('rejects a bound (pairing) client with SKILL_TRUST_FORBIDDEN_BOUND_CLIENT and grants nothing', () => {
+      const sessions = new Map()
+      const trustStore = makeCommunityTrustStore()
+      const session = createMockSession()
+      session.getTrustStore = () => trustStore
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1', boundSessionId: 's1' }), { type: 'skill_trust_grant', skillName: 'foo', author: 'alice' }, ctx)
+      assert.ok(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), 'expected bound rejection')
+      assert.equal(trustStore.grants.length, 0, 'bound client must not grant trust')
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
+    })
+
+    it('still allows an unbound (primary) client to reach the grant path', () => {
+      const ctx = makeCtx(new Map())
+      const ws = makeWs()
+      // No bound id → passes the guard; falls through to the no-session error,
+      // proving the guard did NOT short-circuit an unbound client.
+      settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: null }), { skillName: 'foo', author: 'alice' }, ctx)
+      assert.equal(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), undefined, 'unbound client must not be rejected by the bound guard')
+    })
+
+    it('rejects a bound client on skill_trust_accept too', () => {
+      const ctx = makeCtx(new Map())
+      const ws = makeWs()
+      settingsHandlers.skill_trust_accept(ws, makeClient({ activeSessionId: 's1', boundSessionId: 's1' }), { type: 'skill_trust_accept', skillName: 'foo' }, ctx)
+      assert.ok(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), 'expected bound rejection on accept')
+    })
+
     it('returns TRUST_NOT_ENABLED when session has no trust store', () => {
       const sessions = new Map()
       const session = createMockSession()
