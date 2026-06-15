@@ -383,6 +383,9 @@ function handleTerminalResize(ws, client, msg, ctx) {
   const primary = ctx.transport.getPrimary?.(sid)
   if (primary && primary !== client.id) return
   if (typeof entry.session?.resizeTerminal !== 'function') return
+  // Return value unused: resizeTerminal emits terminal_resize, which
+  // ws-forwarding broadcasts back as terminal_size. A no-op (unchanged size)
+  // returns null and simply emits nothing — nothing for the handler to do.
   entry.session.resizeTerminal(msg.cols, msg.rows)
 }
 

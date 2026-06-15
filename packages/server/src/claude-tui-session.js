@@ -1796,6 +1796,9 @@ export class ClaudeTuiSession extends BaseSession {
   resizeTerminal(cols, rows) {
     const c = Math.max(1, Math.min(1000, Math.floor(Number(cols))))
     const r = Math.max(1, Math.min(1000, Math.floor(Number(rows))))
+    // Load-bearing guard: NaN (e.g. resizeTerminal('x', 'y')) survives
+    // Math.floor/min/max unchanged, so the clamp above does NOT guarantee
+    // finiteness — without this a NaN would reach _term.resize. Don't remove.
     if (!Number.isFinite(c) || !Number.isFinite(r)) return null
     if (c === this._ptyCols && r === this._ptyRows) return null
     this._ptyCols = c

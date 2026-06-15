@@ -105,6 +105,23 @@ export function setupForwarding(ctx) {
   }
 }
 
+/**
+ * #5835: the single recipient predicate for a session's live-terminal traffic
+ * (terminal_output bytes AND terminal_size). A custom broadcastToSession filter
+ * OVERRIDES the default session scoping, so this re-asserts it: deliver only to a
+ * client that is BOTH a viewer of the session (activeSessionId / subscribedSessionIds)
+ * AND opted into its terminal mirror (terminal_subscribe). Opt-in alone must not
+ * bypass scoping, and unsubscribing must stop the traffic. Shared so the size
+ * broadcast can never reach a different audience than the bytes (#5840 review S2).
+ */
+function terminalSubscriberFilter(sessionId) {
+  return (client) => Boolean(
+    client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
+    (client.activeSessionId === sessionId ||
+      (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))),
+  )
+}
+
 /** Multi-session forwarding via normalizer */
 function setupSessionForwarding(normalizer, ctx) {
   const { sessionManager, devPreview, checkpointManager, broadcast, broadcastToSession } = ctx
@@ -150,40 +167,23 @@ function setupSessionForwarding(normalizer, ctx) {
     // subscriber — so a Chat-tab client never pays for raw PTY bytes it isn't
     // rendering. Transient: no history, no normalizer, no serverTs.
     if (event === 'terminal_output') {
-      // A custom filter OVERRIDES broadcastToSession's default session scoping,
-      // so re-assert it here: deliver only to a client that is BOTH a viewer of
-      // the session (activeSessionId / subscribedSessionIds) AND opted into its
-      // terminal mirror. Opt-in alone must not bypass scoping, and unsubscribing
-      // from the session must stop the bytes. #5835 Phase 2 reuses this exact
-      // audience for terminal_size below — keep them sharing one predicate so the
-      // size broadcast can never reach a different set than the bytes.
-      const isTerminalSubscriber = (client) => Boolean(
-        client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
-        (client.activeSessionId === sessionId ||
-          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))),
-      )
       broadcastToSession(
         sessionId,
         { type: 'terminal_output', sessionId, data: typeof data?.data === 'string' ? data.data : '' },
-        isTerminalSubscriber,
+        terminalSubscriberFilter(sessionId),
       )
       return
     }
 
     // #5835 Phase 2: the authoritative live-PTY grid size changed (a primary
-    // viewer drove a resize). Tell every terminal subscriber so observers can
-    // re-letterbox to the new size — the SAME audience as terminal_output above,
-    // re-deriving the predicate here since each event invocation is its own
-    // closure over `sessionId`. cols/rows are already clamped by resizeTerminal.
+    // viewer drove a resize). Tell every terminal subscriber — the SAME audience
+    // as terminal_output (shared terminalSubscriberFilter) — so observers can
+    // re-letterbox. cols/rows are already clamped by resizeTerminal.
     if (event === 'terminal_resize') {
       broadcastToSession(
         sessionId,
         { type: 'terminal_size', sessionId, cols: data?.cols, rows: data?.rows },
-        (client) => Boolean(
-          client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
-          (client.activeSessionId === sessionId ||
-            (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))),
-        ),
+        terminalSubscriberFilter(sessionId),
       )
       return
     }
