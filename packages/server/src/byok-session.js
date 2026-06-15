@@ -64,6 +64,13 @@ const MAX_TOOL_ROUNDS = 25
 const CWD_CACHE_TTL_MS = 30_000
 
 export class ClaudeByokSession extends BaseSession {
+  // #5858: Claude-family flag — single source of truth for isClaudeProvider().
+  // DockerByokSession (docker-byok) extends this and correctly inherits it.
+  // NOTE: non-Claude providers that ALSO extend this for the agent loop
+  // (DeepSeekSession, OllamaSession, AnthropicCompatibleSession) MUST override
+  // `static claudeFamily = false` — their model ids validate strictly.
+  static claudeFamily = true
+
   static get displayLabel() {
     return 'Claude (API key — BYOK)'
   }

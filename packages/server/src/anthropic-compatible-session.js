@@ -270,6 +270,12 @@ export function createAnthropicCompatibleSessionClass(rawEntry) {
   )
 
   class AnthropicCompatibleSession extends ClaudeByokSession {
+    // #5858: NOT Claude-family — config-driven Anthropic-compatible endpoints
+    // ride ClaudeByokSession's agent loop but have their own model allowlists,
+    // so override the inherited flag to false (validate strictly, never
+    // soft-fall-back to claude).
+    static claudeFamily = false
+
     /** The validated config entry this class was built from (introspection/tests). */
     static get compatEntry() {
       return entry

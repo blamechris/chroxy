@@ -189,6 +189,10 @@ export function buildClaudeCliArgs({ model, permissionMode, allowedTools, skills
  */
 
 export class CliSession extends BaseSession {
+  // #5858: Claude-family flag — single source of truth for isClaudeProvider().
+  // DockerSession (docker-cli / docker) extends this and inherits it.
+  static claudeFamily = true
+
   /**
    * Human-readable label shown in the startup banner and anywhere else the
    * server needs to name this provider (#2953). Each provider owns its own

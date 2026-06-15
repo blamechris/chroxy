@@ -34,6 +34,9 @@ export const CLAUDE_CHANNEL_MIN_VERSION = '2.1.80'
  * permission-mode switch — those stay `false`, same gap `claude-tui` has.
  */
 export class ClaudeChannelSession extends BaseSession {
+  // #5858: Claude-family flag — single source of truth for isClaudeProvider().
+  static claudeFamily = true
+
   // Single source of truth for the scaffold's "not yet implemented" error
   // so start()/sendMessage()/interrupt() stay in lockstep and tests can
   // assert on the same string.

@@ -1059,53 +1059,45 @@ const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
  */
 const providerRegistryCache = new Map()
 
-// Every Claude-family provider id registered in providers.js. These all run the
-// real `claude` against the moving-target model allowlist that the Agent SDK
-// pushes live, so an unknown initial model must soft-fall-back to the provider
-// default rather than hard-reject (see isClaudeProvider). Keep in sync with the
-// claude-* / docker-* entries in the PROVIDERS literal — notably claude-tui,
-// the DEFAULT_PROVIDER (@chroxy/protocol): omitting it made the default
-// provider hard-reject a stale dashboard model id where every other Claude
-// provider recovers. (Longer-term this set should derive from a single
-// `static claudeFamily = true` on the provider classes — audit P2.)
-const CLAUDE_PROVIDER_NAMES = new Set([
-  'claude-sdk',
-  'claude-cli',
-  'claude-tui',
-  'claude-channel',
-  'claude-byok',
-  'docker',
-  'docker-sdk',
-  'docker-cli',
-  'docker-byok',
-])
-
 /**
- * True when the given provider name is a Claude-family provider (and so
- * shares the default models registry, which is fed by the Agent SDK's live
- * `supportedModels()` push). Non-Claude providers (Codex, Gemini, custom)
- * have their own static allowlists and should be validated strictly.
+ * True when the given provider is a Claude-family provider (and so shares the
+ * default models registry, which is fed by the Agent SDK's live
+ * `supportedModels()` push). Non-Claude providers (Codex, Gemini, custom) have
+ * their own static allowlists and should be validated strictly.
  *
- * Used by `SessionManager.createSession` (#3403) to decide whether an
- * unknown initial model should be a hard rejection or a soft fall-back to
- * the provider default — Claude's allowlist is a moving target driven by
- * a stale dashboard `defaultModel` (e.g. `opus-4-6` after `opus-4-7` ships)
- * so a hard error breaks otherwise-valid session creation.
+ * Used by `SessionManager.createSession` (#3403) to decide whether an unknown
+ * initial model should be a hard rejection or a soft fall-back to the provider
+ * default — Claude's allowlist is a moving target driven by a stale dashboard
+ * `defaultModel` (e.g. `opus-4-6` after `opus-4-7` ships) so a hard error breaks
+ * otherwise-valid session creation.
  *
- * Also honours an opt-in static flag on the provider class
- * (`static claudeFamily = true`) so external/test providers can mark
- * themselves as Claude-style without extending the hard-coded name set.
+ * #5858: membership is the SINGLE `static claudeFamily = true` flag on the
+ * provider class (inherited by docker-* subclasses), not a hand-maintained name
+ * literal that drifted from the registry (#5855). When the class isn't passed,
+ * it is resolved via the `nameToProviderClass` map (populated for every provider
+ * at registration). Docker-* resolve once `registerDockerProvider()` has run —
+ * which is always before a docker session is created; `getRegistryForProvider`
+ * is unaffected pre-registration because its unknown-name branch also returns
+ * the default registry.
  *
  * @param {string|undefined|null} providerName
  * @param {Function} [ProviderClass] - optional provider class for the name
  * @returns {boolean}
  */
 export function isClaudeProvider(providerName, ProviderClass = null) {
-  if (typeof providerName === 'string' && CLAUDE_PROVIDER_NAMES.has(providerName)) {
-    return true
+  // A passed class is AUTHORITATIVE: trust its boolean flag, so an explicit
+  // `static claudeFamily = false` opts out even when the name would otherwise
+  // resolve to a Claude class (name/class can only disagree on a caller bug,
+  // but the class the caller handed us is the ground truth).
+  if (ProviderClass && typeof ProviderClass.claudeFamily === 'boolean') {
+    return ProviderClass.claudeFamily
   }
-  if (ProviderClass && ProviderClass.claudeFamily === true) {
-    return true
+  // No class (or no flag on it) — resolve the class by name via the registry.
+  if (typeof providerName === 'string') {
+    const resolved = nameToProviderClass.get(providerName)
+    if (resolved && resolved.claudeFamily === true) {
+      return true
+    }
   }
   return false
 }
@@ -1168,7 +1160,7 @@ export function _resetProviderRegistryCacheForTests(providerName) {
  * @returns {ReturnType<typeof createModelsRegistry>}
  */
 export function getRegistryForProvider(providerName) {
-  if (!providerName || CLAUDE_PROVIDER_NAMES.has(providerName)) {
+  if (!providerName || isClaudeProvider(providerName)) {
     return defaultRegistry
   }
 

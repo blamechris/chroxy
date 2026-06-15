@@ -58,6 +58,11 @@ const DEEPSEEK_MODELS = Object.freeze([
 const DEEPSEEK_MODEL_IDS = Object.freeze(DEEPSEEK_MODELS.map((m) => m.id))
 
 export class DeepSeekSession extends ClaudeByokSession {
+  // #5858: NOT Claude-family — DeepSeek rides ClaudeByokSession's agent loop but
+  // has its own static model allowlist, so override the inherited flag to false
+  // (its model ids must validate strictly, never soft-fall-back to claude).
+  static claudeFamily = false
+
   static get displayLabel() {
     return 'DeepSeek (API key)'
   }
