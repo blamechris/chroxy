@@ -2166,6 +2166,16 @@ export class SessionManager extends EventEmitter {
     const sessionLog = log.withSession(sessionId)
     // Events worth logging to the System tab (skip noisy delta/tool_result)
     const LOGGED_EVENTS = new Set(['ready', 'stream_start', 'stream_end', 'result', 'error'])
+
+    // #5835 Phase 1: claude-tui live PTY mirror (the "remote viewer" / authenticity
+    // surface). These are transient, high-frequency redraw bytes — proxy them to
+    // subscribed clients but keep them OUT of _recordHistory (not conversation
+    // history) and OUT of touchActivity (a mirror frame is not user activity).
+    // Wired separately from PROXIED_EVENTS for exactly that reason.
+    session.on('terminal_output', (data) => {
+      this.emit('session_event', { sessionId, event: 'terminal_output', data })
+    })
+
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)

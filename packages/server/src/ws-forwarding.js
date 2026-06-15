@@ -144,6 +144,20 @@ function setupSessionForwarding(normalizer, ctx) {
       return
     }
 
+    // #5835 Phase 1: claude-tui live PTY mirror (the remote-viewer / authenticity
+    // surface). Broadcast ONLY to clients that explicitly opted into terminal
+    // output for THIS session (terminal_subscribe) — not every session
+    // subscriber — so a Chat-tab client never pays for raw PTY bytes it isn't
+    // rendering. Transient: no history, no normalizer, no serverTs.
+    if (event === 'terminal_output') {
+      broadcastToSession(
+        sessionId,
+        { type: 'terminal_output', sessionId, data: typeof data?.data === 'string' ? data.data : '' },
+        (client) => Boolean(client.terminalSessionIds && client.terminalSessionIds.has(sessionId)),
+      )
+      return
+    }
+
     // Sidebar activity feed: lightweight status broadcast to ALL authenticated clients
     if (event === 'stream_start') {
       broadcast({ type: 'session_activity', sessionId, isBusy: true, lastCost: null })

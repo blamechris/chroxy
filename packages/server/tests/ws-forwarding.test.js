@@ -1423,3 +1423,46 @@ describe('forwarding listener throw containment (#5313)', () => {
     assert.ok(errLog, 'expected an error log naming the event and the containment site')
   })
 })
+
+describe('terminal_output forwarding (#5835)', () => {
+  it('broadcasts terminal_output ONLY to clients opted into the session terminal', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+
+    ctx.sessionManager.emit('session_event', {
+      sessionId: 'sess-1',
+      event: 'terminal_output',
+      data: { data: '\x1b[31mhi\x1b[0m' },
+    })
+
+    assert.equal(ctx.broadcastToSession.mock.callCount(), 1)
+    const [sid, msg, filter] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal(sid, 'sess-1')
+    assert.equal(msg.type, 'terminal_output')
+    assert.equal(msg.sessionId, 'sess-1')
+    assert.equal(msg.data, '\x1b[31mhi\x1b[0m')
+    // The filter admits only a client that opted into THIS session's terminal.
+    assert.equal(typeof filter, 'function')
+    assert.equal(filter({ terminalSessionIds: new Set(['sess-1']) }), true)
+    assert.equal(filter({ terminalSessionIds: new Set(['other']) }), false)
+    assert.equal(filter({ subscribedSessionIds: new Set(['sess-1']) }), false) // chat-only subscriber excluded
+    assert.equal(filter({}), false)
+  })
+
+  it('coerces a non-string/absent data payload to an empty string', () => {
+    const ctx = makeCtx()
+    setupForwarding(ctx)
+    ctx.sessionManager.emit('session_event', { sessionId: 'sess-1', event: 'terminal_output', data: {} })
+    const [, msg] = ctx.broadcastToSession.mock.calls[0].arguments
+    assert.equal(msg.data, '')
+  })
+
+  it('does not record terminal_output to history or touch activity', () => {
+    const ctx = makeCtx()
+    // session_event for terminal_output must not go through the normalizer path
+    // (no history write). It returns early — only broadcastToSession fires.
+    setupForwarding(ctx)
+    ctx.sessionManager.emit('session_event', { sessionId: 'sess-1', event: 'terminal_output', data: { data: 'x' } })
+    assert.equal(ctx.broadcast.mock.callCount(), 0) // not a global broadcast (no session_activity)
+  })
+})

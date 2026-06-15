@@ -776,6 +776,21 @@ export const UnsubscribeSessionsSchema = z.object({
   sessionIds: z.array(z.string().max(256)).min(1).max(20),
 })
 
+// #5835 Phase 1: opt in / out of LIVE TERMINAL output (the claude-tui PTY
+// remote-viewer mirror) for a single session. Kept separate from
+// subscribe_sessions so a client viewing the Chat tab doesn't receive a
+// session's raw PTY bytes — only a client actually viewing the terminal does.
+// Single sessionId (you watch one terminal at a time); send again to switch.
+export const TerminalSubscribeSchema = z.object({
+  type: z.literal('terminal_subscribe'),
+  sessionId: z.string().max(256),
+})
+
+export const TerminalUnsubscribeSchema = z.object({
+  type: z.literal('terminal_unsubscribe'),
+  sessionId: z.string().max(256),
+})
+
 // #3404: client signals foreground/background state. Mobile app sends
 // {visible:false} on AppState background/inactive so the server stops
 // treating its still-alive WS connection as an active viewer and lets
@@ -1098,6 +1113,8 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RequestCostSummarySchema,
   SubscribeSessionsSchema,
   UnsubscribeSessionsSchema,
+  TerminalSubscribeSchema,
+  TerminalUnsubscribeSchema,
   ClientVisibleSchema,
   ClaimPrimarySchema,
   ListProvidersSchema,

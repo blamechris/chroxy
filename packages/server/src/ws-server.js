@@ -297,6 +297,8 @@ function _isSecureRequest(req) {
  *   { type: 'search_conversations', query }             — search saved conversations
  *   { type: 'subscribe_sessions' }                      — subscribe to session discovery events
  *   { type: 'unsubscribe_sessions' }                    — unsubscribe from session discovery
+ *   { type: 'terminal_subscribe', sessionId }           — #5835 opt IN to a session's live PTY mirror (terminal_output); only opted-in clients receive raw bytes
+ *   { type: 'terminal_unsubscribe', sessionId }         — #5835 opt OUT of a session's live PTY mirror
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
@@ -325,6 +327,7 @@ function _isSecureRequest(req) {
  *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
+ *   { type: 'terminal_output', sessionId, data }       — #5835 live claude-tui PTY mirror (raw, ANSI-intact, coalesced ~50ms); emitted from ws-forwarding.js to clients that opted in via terminal_subscribe; the remote-viewer / authenticity surface
  *   { type: 'tool_start',   messageId, toolUseId, tool, input, serverName? } — tool invocation (serverName present for MCP tools)
  *   { type: 'tool_input_delta', messageId, toolUseId, partialJson } — #4080/#4081: incremental partial JSON for the streaming tool_use `input`; concatenate per-toolUseId for the live bubble preview
  *   { type: 'tool_result',  toolUseId, result, truncated, images? }  — tool result (images: [{mediaType, data}])
@@ -1479,6 +1482,11 @@ export class WsServer {
         mode: 'chat', // default to chat view
         activeSessionId: null,
         subscribedSessionIds: new Set(),
+        // #5835 Phase 1: sessions this client opted into LIVE TERMINAL output for
+        // (terminal_subscribe). Kept separate from subscribedSessionIds so a
+        // Chat-tab client subscribed to a session doesn't receive its raw PTY
+        // mirror bytes — only clients actually viewing the terminal do.
+        terminalSessionIds: new Set(),
         isAlive: true,
         deviceInfo: null,
         ip,

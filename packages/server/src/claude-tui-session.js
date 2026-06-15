@@ -376,6 +376,13 @@ export class ClaudeTuiSession extends BaseSession {
     // UTF-8 strings already decoded, but the relevant control bytes
     // are 7-bit ASCII and survive the decode unchanged.
     this._outputTailRaw = Buffer.alloc(0)
+    // #5835 Phase 1: live remote-viewer mirror. PTY onData fires very frequently
+    // during a TUI redraw, so coalesce bytes into a buffer and flush one
+    // `terminal_output` event per tick (MIRROR_FLUSH_MS) — bounding the broadcast
+    // rate to the tunnel rather than emitting per byte. Buffer + timer are reset
+    // on flush and cleared on teardown.
+    this._mirrorBuffer = ''
+    this._mirrorTimer = null
     // #4278: when claude TUI calls AskUserQuestion, chroxy's PreToolUse
     // hook emits user_question and stashes the toolUseId here. The
     // dashboard's QuestionPrompt UI eventually sends a
@@ -664,6 +671,12 @@ export class ClaudeTuiSession extends BaseSession {
   // Tail length to keep + length to include in error diagnostics.
   static get PTY_TAIL_BYTES() { return 4096 }
   static get PTY_TAIL_DIAGNOSTIC_BYTES() { return 1024 }
+
+  // #5835 Phase 1: coalescing window for the live remote-viewer mirror. PTY
+  // onData fires many times per redraw; flushing one `terminal_output` per
+  // ~50ms caps the broadcast rate (the deliberate latency-for-bandwidth trade —
+  // a faithful-but-slightly-laggy mirror) without dropping any bytes.
+  static get MIRROR_FLUSH_MS() { return 50 }
 
   // #4269: per-character delay when writing the prompt to the PTY.
   // claude TUI's paste detector triggers on byte-arrival rate, not DEC
@@ -1083,6 +1096,9 @@ export class ClaudeTuiSession extends BaseSession {
     // the escalation only fires when onExit NEVER arrives, i.e. the process is
     // genuinely still alive, so the captured pid can't have been recycled.
     if (this._killTimer) { clearTimeout(this._killTimer); this._killTimer = null }
+    // #5835: drop any pending live-mirror flush so a dead PTY's leftover frame
+    // never broadcasts and the timer doesn't leak.
+    this._clearTerminalMirror()
     // Reset turn state so the next sendMessage() sees a clean idle.
     const hadActiveTurn = this._activeTurn !== null
     // #4022: clean up the in-flight turn's attachment dir BEFORE nulling
@@ -1500,7 +1516,13 @@ export class ClaudeTuiSession extends BaseSession {
     // the destroy-race guard above so an aborted (re)spawn doesn't clear it.
     this._firstTurnNudgedForSpawn = false
 
-    this._term.onData((data) => this._appendToOutputTail(data))
+    this._term.onData((data) => {
+      this._appendToOutputTail(data)
+      // #5835 Phase 1: feed the live remote-viewer mirror (the authenticity
+      // surface). Same raw bytes that go to _outputTail, but coalesced and
+      // broadcast to subscribed clients so they can watch the real TUI redraw.
+      this._feedTerminalMirror(data)
+    })
     this._term.onExit((info) => this._onPtyGone(info, 'exit'))
 
     // #5311 (WP-1.1) — keep a per-session PTY fault from crashing the WHOLE
@@ -1713,6 +1735,44 @@ export class ClaudeTuiSession extends BaseSession {
       .toString('utf8')
       .replace(ANSI_STRIP, '')
       .slice(-ClaudeTuiSession.PTY_TAIL_BYTES)
+  }
+
+  /**
+   * #5835 Phase 1: feed the live remote-viewer mirror. Appends a raw PTY chunk
+   * (ANSI intact — the viewer xterm renders it) to the coalescing buffer and
+   * arms a single flush timer if one isn't already pending. The bytes are NOT
+   * stripped or transformed: faithful reproduction is the whole point.
+   */
+  _feedTerminalMirror(data) {
+    this._mirrorBuffer += String(data)
+    if (this._mirrorTimer) return
+    this._mirrorTimer = setTimeout(() => this._flushTerminalMirror(), ClaudeTuiSession.MIRROR_FLUSH_MS)
+    // Don't keep the event loop alive for a mirror flush — teardown clears it.
+    if (typeof this._mirrorTimer.unref === 'function') this._mirrorTimer.unref()
+  }
+
+  /**
+   * Emit the coalesced mirror buffer as one `terminal_output` event and reset.
+   * No-op when the buffer is empty (e.g. a stray flush after teardown).
+   */
+  _flushTerminalMirror() {
+    this._mirrorTimer = null
+    const data = this._mirrorBuffer
+    if (!data) return
+    this._mirrorBuffer = ''
+    this.emit('terminal_output', { data })
+  }
+
+  /**
+   * Drop any pending mirror flush + buffered bytes. Called on teardown so a
+   * dead PTY's leftover frame never broadcasts and no timer leaks.
+   */
+  _clearTerminalMirror() {
+    if (this._mirrorTimer) {
+      clearTimeout(this._mirrorTimer)
+      this._mirrorTimer = null
+    }
+    this._mirrorBuffer = ''
   }
 
   /**
