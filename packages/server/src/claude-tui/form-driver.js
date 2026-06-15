@@ -367,7 +367,7 @@ export class FormDriver {
     const slog = this._host._log || log
     const turn = this._host._activeTurn
     if (turn && !turn.hexDumpEmitted) {
-      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._host._outputTailHexDump()}`)
+      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._host._outputTailLogDump()}`)
       turn.hexDumpEmitted = true
     } else if (turn) {
       slog.info(`respondToQuestion PTY tail hex dump skipped (tool=${prevToolUseId || '?'}) — already emitted for turn msg=${turn.messageId || '?'}`)
@@ -375,7 +375,7 @@ export class FormDriver {
       // No active turn (defensive — tests that drive respondToQuestion
       // directly without sendMessage(), late watchdog teardown races).
       // Emit the dump so the diagnostic is still useful in those paths.
-      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._host._outputTailHexDump()}`)
+      slog.info(`respondToQuestion PTY tail before write (tool=${prevToolUseId || '?'}):\n${this._host._outputTailLogDump()}`)
     }
 
     const armWatchdog = () => {

@@ -198,12 +198,40 @@ export class SessionStatePersistence {
       return null
     }
 
-    // Reject stale state (older than TTL, default 24h)
-    if (state.timestamp && Date.now() - state.timestamp > this._stateTtlMs) {
-      log.info(`Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
+    // Reject stale sessions PER ENTRY (older than TTL, default 24h). A single
+    // whole-file `state.timestamp` check used to discard EVERY session + its
+    // history the moment the file aged past the TTL — a user returning after a
+    // weekend lost the entire list. Each entry already persists its own
+    // `lastActivityAt` (#5309), so filter individually and fall back to the
+    // file timestamp only for an entry that predates that field. (audit P2-12)
+    const now = Date.now()
+    const fresh = []
+    const dropped = []
+    for (const saved of state.sessions) {
+      const activityAt = (typeof saved.lastActivityAt === 'number' && saved.lastActivityAt > 0)
+        ? saved.lastActivityAt
+        : state.timestamp
+      if (activityAt && now - activityAt > this._stateTtlMs) {
+        dropped.push(saved.name || saved.id || '<unknown>')
+      } else {
+        fresh.push(saved)
+      }
+    }
+    if (dropped.length > 0) {
+      // Bound + escape the name list: session names are user-controlled
+      // (renameSession), so a newline-bearing name could inject log lines and
+      // a large drop could blow the line length. Cap to a small sample and
+      // JSON-stringify each so control chars are escaped. (Copilot review)
+      const MAX_NAMES = 10
+      const sample = dropped.slice(0, MAX_NAMES).map((n) => JSON.stringify(String(n)))
+      const more = dropped.length > MAX_NAMES ? `, …+${dropped.length - MAX_NAMES} more` : ''
+      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
+    }
+    if (fresh.length === 0) {
+      log.info('All restored sessions are stale, starting fresh')
       return null
     }
-
+    state.sessions = fresh
     return state
   }
 

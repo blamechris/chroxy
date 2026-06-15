@@ -73,12 +73,15 @@ function readJsonBodyCapped(req, res, maxBytes) {
 }
 
 // #5683 — security headers for every Chroxy Pages response. The `/p/<slug>`
-// route is intentionally UNAUTHENTICATED (the slug is the capability), and
-// chroxy auth accepts a `chroxy_auth` cookie, so a same-origin served page in a
-// logged-in browser could otherwise script authed `/api/*` calls. `script-src
-// 'none'` + `connect-src 'none'` + `sandbox` make served pages fully static (no
-// JS, no network), neutralizing that risk — which is also exactly right for the
-// HTML reports this serves. See docs/security/bearer-token-authority.md.
+// route is intentionally UNAUTHENTICATED (the slug is the capability).
+// `script-src 'none'` + `connect-src 'none'` + `sandbox` make served pages
+// fully static (no JS, no network) — exactly right for the HTML reports this
+// serves, and defence-in-depth so a served page can never script same-origin
+// `/api/*` calls. (Note: `_validateBearerAuth` is HEADER-only — it does not
+// read a cookie; the `chroxy_auth` cookie `_authenticateDashboardRequest` sets
+// is `Path=/dashboard`-scoped + HttpOnly, so it never reaches `/p/*` or
+// `/api/*`. The CSP is belt-and-suspenders, not the sole guard.) See
+// docs/security/bearer-token-authority.md.
 const PAGE_SECURITY_HEADERS = {
   'Content-Security-Policy':
     "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; script-src 'none'; base-uri 'none'; form-action 'none'; sandbox",

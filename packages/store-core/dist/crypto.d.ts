@@ -99,6 +99,7 @@ export declare function encrypt(jsonString: string, sharedKey: Uint8Array, nonce
  *                        used to namespace the nonce and prevent cross-direction replays.
  * @throws {Error} `'Unexpected nonce: got <n>, expected <e>'` when `envelope.n !== expectedNonce`
  * @throws {Error} `'Decryption failed: message tampered or wrong key'` when MAC verification fails
+ * @throws {Error} `'Decryption failed: plaintext is not valid JSON'` when the verified plaintext does not parse as JSON
  * @throws {TypeError} `'decrypt: envelope.d must be a base64 string'` / `'decrypt: envelope.n must be a number'`
  */
 export declare function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expectedNonce: number, direction: number): Record<string, unknown>;

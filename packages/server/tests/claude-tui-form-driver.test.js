@@ -79,6 +79,7 @@ function makeMockHost(overrides = {}) {
     // #5798 — observability-only marker; starts unset, set by the flag-on reinject.
     _reinjectStopWaitWatch: null,
     _outputTailHexDump: () => '',
+    _outputTailLogDump: () => '',
     _writePtyTextThrottled: (t) => { writes.push(t); return Promise.resolve(true) },
     _writePtyMultiQuestionSequence: (seq) => { multiSeqs.push(seq); return Promise.resolve(true) },
     _writePtyArrowNavSequence: (idx) => { arrowNavs.push(idx); return Promise.resolve(true) },
