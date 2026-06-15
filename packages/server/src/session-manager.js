@@ -1565,9 +1565,15 @@ export class SessionManager extends EventEmitter {
       } catch (destroyErr) {
         log.error(`Error destroying session ${sessionId} "${entry.name}" during destroyAll(): ${destroyErr?.stack || destroyErr}`)
       }
-      if (entry.worktreePath) {
-        this._removeWorktree(entry.worktreePath, entry.worktreeRepoDir, sessionId)
-      }
+      // Do NOT remove the worktree here. destroyAll() is a process-shutdown
+      // teardown, not a user-initiated session destroy: the session was just
+      // serialized as live above, and on the next start restoreState() rebinds
+      // it to this exact worktree dir (#5310). Deleting it now orphaned the
+      // restore — the worktree session came back pointing at a directory that
+      // no longer existed, losing any uncommitted work in it. Worktree removal
+      // belongs only in destroySessionLocked() (the explicit per-session
+      // destroy). Orphan worktrees from sessions that DON'T come back are
+      // swept at boot — see worktree-gc (P1-7 follow-up).
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()

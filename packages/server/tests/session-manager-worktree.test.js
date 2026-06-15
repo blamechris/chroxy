@@ -155,7 +155,12 @@ describe('SessionManager worktree isolation', () => {
     mgr.destroyAll()
   })
 
-  it('destroyAll removes all worktrees', () => {
+  // destroyAll() is a process-shutdown teardown, NOT a user destroy. It must
+  // PRESERVE worktrees so restoreState() can rebind them on the next start.
+  // Pre-fix it deleted them, so on restart the serialized worktree sessions
+  // pointed at directories that no longer existed and could never restore
+  // (losing any uncommitted work in them).
+  it('destroyAll PRESERVES worktrees for restore (does not delete them)', () => {
     const mgr = makeManager(gitRepo)
 
     const id1 = mgr.createSession({ cwd: gitRepo, worktree: true })
@@ -169,8 +174,41 @@ describe('SessionManager worktree isolation', () => {
 
     mgr.destroyAll()
 
-    assert.ok(!existsSync(path1), 'worktree 1 should be removed after destroyAll')
-    assert.ok(!existsSync(path2), 'worktree 2 should be removed after destroyAll')
+    assert.ok(existsSync(path1), 'worktree 1 must survive a shutdown destroyAll')
+    assert.ok(existsSync(path2), 'worktree 2 must survive a shutdown destroyAll')
+  })
+
+  // End-to-end restart regression: a worktree session must survive a full
+  // shutdown (destroyAll) + restart (fresh manager restoreState) cycle. This is
+  // the realistic path destroyAll's worktree deletion broke.
+  it('worktree session survives a destroyAll + restore restart cycle', () => {
+    const mgr = makeManager(gitRepo)
+    const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+    const wtPath = mgr.getSession(id).worktreePath
+    assert.ok(wtPath && existsSync(wtPath), 'worktree created')
+
+    // Drop an uncommitted file into the worktree to prove work is preserved.
+    const scratch = join(wtPath, 'uncommitted-work.txt')
+    writeFileSync(scratch, 'in-progress work that must not be deleted on shutdown')
+
+    // Full shutdown: serializes state, then tears sessions down.
+    mgr.destroyAll()
+    assert.ok(existsSync(wtPath), 'worktree dir survives shutdown')
+    assert.ok(existsSync(scratch), 'uncommitted work survives shutdown')
+
+    // Restart: a fresh manager over the same state file rebinds the session.
+    const mgr2 = makeManager(gitRepo)
+    mgr2.restoreState()
+
+    const r = mgr2.getSession(id)
+    assert.ok(r, 'worktree session restored after restart')
+    assert.equal(r.worktreePath, wtPath, 'rebound to the same worktree')
+    assert.equal(r.isolation, 'worktree', 'isolation preserved across restart')
+    assert.ok(existsSync(scratch), 'uncommitted work intact after restore')
+
+    mgr2.destroySession(id)
+    assert.ok(!existsSync(wtPath), 'explicit destroySession still GCs the worktree')
+    mgr2.destroyAll()
   })
 
   // #5310 (WP-0.4) — the worktree binding must survive a daemon restart.
