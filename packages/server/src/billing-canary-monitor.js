@@ -109,10 +109,12 @@ export class BillingCanaryMonitor {
     }
     // #5828: fire `notify` (e.g. push) when the warning SET changes to a
     // non-empty state — once per distinct warning state, NOT on all-clear and
-    // NOT on an unchanged re-broadcast. Signature over full warning identity so
-    // a session/cost change re-notifies (mirrors the dashboard dismissal logic).
+    // NOT on an unchanged re-broadcast. Signature includes the message so a
+    // meaning change with the same code re-notifies (e.g. DATACENTER_EGRESS with
+    // a new egress IP, or SILENT_METERED_DEFAULT for a different provider) —
+    // mirrors the dashboard dismissal signature.
     const warnKey = snapshot.warnings
-      .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''}`)
+      .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''} ${w.message ?? ''}`)
       .sort()
       .join('|')
     if (warnKey !== this._lastWarnKey) {

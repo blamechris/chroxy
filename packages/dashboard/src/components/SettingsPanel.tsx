@@ -90,6 +90,12 @@ const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?: strin
     label: 'Inactivity warnings',
     hint: 'Heads-up before a long-idle session is auto-paused.',
   },
+  // #5828: billing canary early-warnings (silent metered default, claude-tui
+  // reclassification, datacenter egress).
+  billing_warning: {
+    label: 'Billing alerts',
+    hint: 'Metered-credit and datacenter-egress warnings from the billing canary.',
+  },
   live_activity: {
     label: 'Live Activity (iOS)',
     hint: 'iOS Dynamic Island / lock-screen Live Activity updates.',
@@ -116,6 +122,7 @@ const NOTIFICATION_CATEGORY_ORDER = [
   'activity_error',
   'activity_update',
   'inactivity_warning',
+  'billing_warning',
   'result',
   // External-session categories (#5413) grouped together, ahead of the
   // platform-specific Live Activity entry which stays last.

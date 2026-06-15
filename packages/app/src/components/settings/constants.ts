@@ -20,6 +20,9 @@ export const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?
   activity_waiting: { label: 'Waiting for input', hint: 'Claude paused on a question or prompt.' },
   activity_error: { label: 'Session errors', hint: 'Crashes, tunnel drops, fatal session failures.' },
   inactivity_warning: { label: 'Inactivity warnings', hint: 'Heads-up before a long-idle session is paused.' },
+  // #5828: billing canary early-warnings (silent metered default, claude-tui
+  // reclassification, datacenter egress).
+  billing_warning: { label: 'Billing alerts', hint: 'Metered-credit and datacenter-egress warnings from the billing canary.' },
   live_activity: { label: 'Live Activity (iOS)', hint: 'iOS Dynamic Island / lock-screen updates.' },
   // #5413 Phase 3: external-session categories fed by POST /api/events.
   session_online: { label: 'External session online', hint: 'An external session reported in via /api/events.' },
@@ -34,6 +37,7 @@ export const NOTIFICATION_CATEGORY_ORDER = [
   'activity_error',
   'activity_update',
   'inactivity_warning',
+  'billing_warning',
   'result',
   // External-session categories (#5413) grouped together, ahead of the
   // platform-specific Live Activity entry which stays last.

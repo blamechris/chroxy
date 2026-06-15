@@ -21,6 +21,16 @@ test('returns null when the body is not a plausible IPv4 (captive portal / HTML)
   assert.equal(ip, null)
 })
 
+test('rejects out-of-range octets (999.999.999.999) — 0-255 only', async () => {
+  const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => ({ ok: true, text: async () => '999.999.999.999' })) })
+  assert.equal(ip, null)
+})
+
+test('accepts boundary octets (255.0.1.255)', async () => {
+  const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => ({ ok: true, text: async () => '255.0.1.255' })) })
+  assert.equal(ip, '255.0.1.255')
+})
+
 test('is fail-open: a throwing fetch resolves to null, never rejects', async () => {
   const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => { throw new Error('network down') }) })
   assert.equal(ip, null)

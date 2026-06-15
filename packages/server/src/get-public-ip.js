@@ -14,7 +14,10 @@
 const DEFAULT_IP_ECHO_URL = 'https://api.ipify.org'
 const DEFAULT_TIMEOUT_MS = 5000
 
-const IPV4_RE = /^(\d{1,3}\.){3}\d{1,3}$/
+// Each octet 0-255 — a loose \d{1,3} would accept junk like 999.999.999.999
+// from a captive-portal / error body.
+const OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)'
+const IPV4_RE = new RegExp(`^(${OCTET}\\.){3}${OCTET}$`)
 
 /**
  * Resolve the daemon's public egress IP, best-effort.
