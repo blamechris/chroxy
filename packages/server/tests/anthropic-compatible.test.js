@@ -786,7 +786,10 @@ describe('credential file read caching (#5461)', () => {
     // the file content changed but (mtime,size,mode) was restored.
     const original = JSON.stringify({ compatApiKey: 'sk-shared-aaaa' })
     const renamed = JSON.stringify({ compatXpiKey: 'sk-shared-aaaa' })
-    assert.equal(original.length, renamed.length, 'fixtures must be byte-equal for the cache key to hit')
+    // The cache invalidation keys on the file stat (mtime/size/mode), not content,
+    // so the fixtures only need EQUAL SIZE (not identical bytes) — with mtime+mode
+    // restored below, a same-size content swap still reads as a cache hit.
+    assert.equal(original.length, renamed.length, 'fixtures must be equal-length so the restored (mtime,size,mode) reads as a cache hit')
     const file = writeRawCredentialsFile(original)
     const pinned = pinnedDate()
     utimesSync(file, pinned, pinned)
