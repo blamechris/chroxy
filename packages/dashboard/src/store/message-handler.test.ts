@@ -82,6 +82,7 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
   const infoNotifications: unknown[] = []
   const grantCalls: Array<{ skillName: string; author: string }> = []
   const terminalWrites: string[] = []
+  const terminalSizeCalls: Array<{ sessionId: string; cols: number; rows: number }> = []
   // #4982 — capture every setSessionNotFoundError call (the SESSION_NOT_FOUND
   // branch of session_error wires through this setter; we assert on the
   // shape of the call).
@@ -126,6 +127,7 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
       grantCalls.push({ skillName, author })
     },
     appendTerminalData: (d: string) => { terminalWrites.push(d) },
+    setTerminalSize: (sessionId: string, cols: number, rows: number) => { terminalSizeCalls.push({ sessionId, cols, rows }) },
     // #5281 ③ PR 2 — server registry surface for the pairing auth_ok/pair_fail
     // paths. Captured so tests can assert token persistence + dead-entry cleanup.
     activeServerId: null,
@@ -133,6 +135,7 @@ function baseState(overrides: Partial<ConnectionState> = {}): Partial<Connection
     updateServer: (serverId: string, patch: unknown) => { updateServerCalls.push({ serverId, patch }) },
     removeServer: (serverId: string) => { removeServerCalls.push(serverId) },
     _terminalWrites: terminalWrites,
+    _terminalSizeCalls: terminalSizeCalls,
     _serverErrorActions: serverErrorActions,
     _infoNotifications: infoNotifications,
     _grantCalls: grantCalls,
@@ -419,6 +422,54 @@ describe('dashboard message-handler dispatch', () => {
       setStore(store)
       handleMessage({ type: 'terminal_output', data: 'orphan' }, ctx() as any)
       expect((store.getState() as any)._terminalWrites).toEqual([])
+    })
+  })
+
+  describe('terminal_size dispatch (#5835 Phase 2)', () => {
+    it('records the authoritative size for the active session', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 160, rows: 48 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([{ sessionId: 'sess-1', cols: 160, rows: 48 }])
+    })
+
+    it('ignores terminal_size for a non-active session', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', sessionId: 'other', cols: 100, rows: 40 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([])
+    })
+
+    it('ignores terminal_size with non-number / missing dimensions', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: '80', rows: 24 }, ctx() as any)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 80 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([])
+    })
+
+    it('ignores terminal_size with a missing sessionId', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', cols: 80, rows: 24 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([])
+    })
+
+    it('ignores terminal_size with non-positive dimensions', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 0, rows: 24 }, ctx() as any)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 80, rows: -1 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([])
+    })
+
+    it('ignores terminal_size with NaN / Infinity / non-integer dimensions', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: NaN, rows: 24 }, ctx() as any)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: Infinity, rows: 24 }, ctx() as any)
+      handleMessage({ type: 'terminal_size', sessionId: 'sess-1', cols: 80.5, rows: 24 }, ctx() as any)
+      expect((store.getState() as any)._terminalSizeCalls).toEqual([])
     })
   })
 

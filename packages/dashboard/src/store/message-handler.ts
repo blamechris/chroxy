@@ -1229,6 +1229,22 @@ function handleTerminalOutput(msg: Record<string, unknown>, get: MsgGet, _set: M
   get().appendTerminalData(msg.data);
 }
 
+// #5835 Phase 2: the server's authoritative live-PTY grid size for a session
+// (sent on terminal_subscribe and on every primary-driven resize). Record it so
+// the mirror renders at exactly this size, letterboxed. Same active-session +
+// string-sessionId guard as terminal_output: the server only sends this for a
+// session we're viewing, so an off-session/malformed frame is dropped.
+function handleTerminalSize(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // Positive integers only. The typeof check narrows for the setTerminalSize call
+  // below; Number.isInteger then rejects NaN/Infinity/floats and > 0 keeps a
+  // 0/negative grid out of term.resize. Matches the other numeric guards in this
+  // file (the server sends sane clamped ints; defensive).
+  if (typeof msg.cols !== 'number' || typeof msg.rows !== 'number') return;
+  if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows) || msg.cols <= 0 || msg.rows <= 0) return;
+  if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
+  get().setTerminalSize(msg.sessionId, msg.cols, msg.rows);
+}
+
 function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   // Token parse shared via store-core (#5454); the URL-rewrite side effect
   // stays dashboard-specific.
@@ -2687,6 +2703,7 @@ const HANDLERS: Record<string, Handler> = {
   raw: handleRaw,
   raw_background: handleRawBackground,
   terminal_output: handleTerminalOutput,
+  terminal_size: handleTerminalSize,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
   checkpoint_restored: handleCheckpointRestored,

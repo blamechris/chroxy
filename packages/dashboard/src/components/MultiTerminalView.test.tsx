@@ -9,12 +9,19 @@ import { render, screen, cleanup, act } from '@testing-library/react'
 import { MultiTerminalView, type MultiTerminalViewProps } from './MultiTerminalView'
 import type { SessionInfo } from '../store/types'
 
+// #5835 Phase 2: capture each rendered TerminalView's onMeasure so tests can
+// drive a pane measurement, and the fixedSize it received.
+const capturedOnMeasure: Array<(cols: number, rows: number) => void> = []
+const capturedFixedSize: Array<{ cols: number; rows: number } | undefined> = []
+
 // Mock TerminalView — we don't want real xterm.js in unit tests
 vi.mock('./TerminalView', () => ({
-  TerminalView: ({ className, initialData, onReady }: {
+  TerminalView: ({ className, initialData, onReady, fixedSize, onMeasure }: {
     className?: string
     initialData?: string
     onReady?: (handle: { write: (d: string) => void; clear: () => void; fit: () => void }) => void
+    fixedSize?: { cols: number; rows: number }
+    onMeasure?: (cols: number, rows: number) => void
   }) => {
     // Auto-fire onReady on mount (simulates terminal initialization)
     if (onReady) {
@@ -24,11 +31,14 @@ vi.mock('./TerminalView', () => ({
         fit: vi.fn(),
       }), 0)
     }
+    if (onMeasure) capturedOnMeasure.push(onMeasure)
+    capturedFixedSize.push(fixedSize)
     return (
       <div
         data-testid="mock-terminal"
         data-classname={className}
         data-initial-data={initialData || ''}
+        data-fixed-size={fixedSize ? `${fixedSize.cols}x${fixedSize.rows}` : ''}
       />
     )
   },
@@ -36,6 +46,7 @@ vi.mock('./TerminalView', () => ({
 
 // Mock store
 const mockSetTerminalWriteCallback = vi.fn()
+const mockRequestTerminalResize = vi.fn()
 const mockGetState = vi.fn()
 
 let mockStoreState: Record<string, unknown> = {}
@@ -45,6 +56,7 @@ vi.mock('../store/connection', () => ({
     (selector: (state: unknown) => unknown) => {
       const state = {
         setTerminalWriteCallback: mockSetTerminalWriteCallback,
+        requestTerminalResize: mockRequestTerminalResize,
         sessionStates: mockStoreState.sessionStates ?? {},
         terminalRawBuffer: mockStoreState.terminalRawBuffer ?? '',
       }
@@ -59,6 +71,8 @@ vi.mock('../store/connection', () => ({
 afterEach(() => {
   cleanup()
   vi.clearAllMocks()
+  capturedOnMeasure.length = 0
+  capturedFixedSize.length = 0
 })
 
 function makeSessions(count: number): SessionInfo[] {
@@ -226,5 +240,63 @@ describe('MultiTerminalView', () => {
     const terminals = screen.getAllByTestId('mock-terminal')
     const s2Terminal = terminals[1]! // s2 is the second session
     expect(s2Terminal.dataset.initialData).toBe('')
+  })
+
+  // #5835 Phase 2: authoritative size passthrough + measure→resize glue.
+  describe('resize sync (#5835 Phase 2)', () => {
+    it('passes each session its stored terminalSize as fixedSize (falls back to default)', () => {
+      mockStoreState = {
+        sessionStates: {
+          s1: { terminalRawBuffer: 'd', terminalSize: { cols: 160, rows: 48 } },
+          s2: { terminalRawBuffer: 'd' }, // no terminalSize yet → default
+        },
+        terminalRawBuffer: 'd',
+      }
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal()
+      const terminals = screen.getAllByTestId('mock-terminal')
+      expect(terminals[0]!.dataset.fixedSize).toBe('160x48')
+      expect(terminals[1]!.dataset.fixedSize).toBe('120x30') // CLAUDE_TUI_PTY_SIZE default
+    })
+
+    it('forwards a measurement of the ACTIVE session as a resize request', () => {
+      renderMultiTerminal({ activeSessionId: 's1' })
+      // capturedOnMeasure[0] belongs to s1 (first rendered session)
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledWith('s1', 200, 50)
+    })
+
+    it('ignores a measurement from a NON-active session', () => {
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: mockStoreState.sessionStates })
+      renderMultiTerminal({ activeSessionId: 's1' })
+      // capturedOnMeasure[1] belongs to s2 (hidden) — must not drive the PTY
+      capturedOnMeasure[1]!(200, 50)
+      expect(mockRequestTerminalResize).not.toHaveBeenCalled()
+    })
+
+    it('dedupes identical sizes — the same grid is not re-sent', () => {
+      renderMultiTerminal({ activeSessionId: 's1' })
+      capturedOnMeasure[0]!(200, 50)
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      // a different size DOES send again
+      capturedOnMeasure[0]!(160, 40)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
+    })
+
+    it('re-sends the same grid when the session authority (role) changes', () => {
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: { s1: { sessionRole: 'observer' } } })
+      renderMultiTerminal({ activeSessionId: 's1' })
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      // same size + same role → deduped
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      // role flips observer → primary: the same grid re-sends so claiming primary
+      // takes effect without needing a pane-size change
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: { s1: { sessionRole: 'primary' } } })
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
+    })
   })
 })

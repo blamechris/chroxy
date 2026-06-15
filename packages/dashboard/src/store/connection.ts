@@ -638,6 +638,38 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #5835 Phase 2: record the authoritative PTY grid size the server reported
+  // for a session (terminal_size). Stored per-session so a tab switch shows the
+  // right size immediately; the mirror renders at exactly this size, letterboxed.
+  setTerminalSize: (sessionId: string, cols: number, rows: number) => {
+    // Check BEFORE set(): a Zustand updater returning {} still produces a new
+    // state object and notifies every subscriber (Copilot review) — so for an
+    // unknown session or an unchanged size, skip the set() entirely. JS is
+    // single-threaded with no await here, so the get()→set() read is race-free.
+    const ss = get().sessionStates[sessionId];
+    if (!ss) return;
+    const prev = ss.terminalSize;
+    if (prev && prev.cols === cols && prev.rows === rows) return;
+    set((state) => ({
+      sessionStates: {
+        ...state.sessionStates,
+        [sessionId]: { ...ss, terminalSize: { cols, rows } },
+      },
+    }));
+  },
+
+  // #5835 Phase 2: ask the server to resize a session's live PTY so the real TUI
+  // uses the viewer's available pane. The server enforces the actual authority
+  // (only the primary owner / sole viewer drives the shared PTY) and broadcasts
+  // the applied size back as terminal_size, so this is a best-effort request — a
+  // closed socket or an observer role simply means the size doesn't change.
+  requestTerminalResize: (sessionId: string, cols: number, rows: number) => {
+    const { socket } = get();
+    if (sessionId && cols > 0 && rows > 0 && socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'terminal_resize', sessionId, cols, rows });
+    }
+  },
+
   // Web tasks (Claude Code Web)
   webFeatures: { available: false, remote: false, teleport: false },
   webTasks: [],

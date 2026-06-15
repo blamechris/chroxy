@@ -653,6 +653,58 @@ describe('useConnectionStore', () => {
     expect(terminalBuffer).toContain('ls');
     expect(terminalBuffer).toContain('file.txt');
   });
+
+  // #5835 Phase 2: live-PTY mirror resize actions.
+  it('setTerminalSize records the authoritative size on an existing session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: { 'sess-1': createEmptySessionState() } });
+    useConnectionStore.getState().setTerminalSize('sess-1', 160, 48);
+    expect(useConnectionStore.getState().sessionStates['sess-1']!.terminalSize).toEqual({ cols: 160, rows: 48 });
+    useConnectionStore.setState({ sessionStates: {} });
+  });
+
+  it('setTerminalSize is a no-op for an unknown session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: {} });
+    useConnectionStore.getState().setTerminalSize('ghost', 100, 40);
+    expect(useConnectionStore.getState().sessionStates['ghost']).toBeUndefined();
+  });
+
+  it('setTerminalSize does not produce a new sessionStates object on an unchanged size', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: { 'sess-1': createEmptySessionState() } });
+    useConnectionStore.getState().setTerminalSize('sess-1', 120, 30);
+    const after1 = useConnectionStore.getState().sessionStates;
+    // Same size again — must skip set() entirely (no new ref, no subscriber churn)
+    useConnectionStore.getState().setTerminalSize('sess-1', 120, 30);
+    expect(useConnectionStore.getState().sessionStates).toBe(after1);
+    // An unknown session also must not churn state
+    useConnectionStore.getState().setTerminalSize('ghost', 80, 24);
+    expect(useConnectionStore.getState().sessionStates).toBe(after1);
+    useConnectionStore.setState({ sessionStates: {} });
+  });
+
+  it('requestTerminalResize sends terminal_resize over an open socket', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().requestTerminalResize('sess-1', 120, 36);
+    expect(sent).toHaveLength(1);
+    const parsed = JSON.parse(sent[0]!);
+    expect(parsed).toMatchObject({ type: 'terminal_resize', sessionId: 'sess-1', cols: 120, rows: 36 });
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('requestTerminalResize is a no-op for non-positive dimensions', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().requestTerminalResize('sess-1', 0, 40);
+    expect(sent).toHaveLength(0);
+    useConnectionStore.setState({ socket: null });
+  });
 });
 
 // ---------------------------------------------------------------------------
