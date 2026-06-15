@@ -176,7 +176,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           timedOut = true
           proc.kill()
           const tail = redactedTail(outputTailRaw)
-          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)${tail ? ` Last output: ${tail}` : ''}`))
+          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)${tail ? `. Last output: ${tail}` : ''}`))
         }
       }, 30_000)
       // Don't let the 30s start-timeout timer pin the event loop on success —
@@ -267,7 +267,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           timedOut = true
           proc.kill()
           const tail = redactedTail(outputTailRaw)
-          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)${tail ? ` Last output: ${tail}` : ''}`))
+          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)${tail ? `. Last output: ${tail}` : ''}`))
         }
       }, 30_000)
       // Don't let the 30s start-timeout timer pin the event loop on success.
