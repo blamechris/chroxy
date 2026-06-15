@@ -350,6 +350,7 @@ export function _resetCredsCacheForTest() {
  * Registers:
  *   - 'docker-cli': DockerSession (CLI-based, extends CliSession)
  *   - 'docker-sdk': DockerSdkSession (SDK-based, extends SdkSession)
+ *   - 'docker-byok': DockerByokSession (#4053, Claude BYOK loop on the host)
  *   - 'docker': backward-compatible alias for 'docker-cli'
  *
  * @param {object} config - Merged server config

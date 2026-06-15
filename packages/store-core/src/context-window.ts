@@ -25,10 +25,12 @@ import type { ModelInfo } from './types'
  * allowlist so a FUTURE non-Claude containerized provider registered under a
  * `docker-*` name (e.g. `docker-ollama`) FAILS CLOSED — it does NOT inherit the
  * Claude 200k default and instead resolves to a real `null` meter (the failure
- * mode #5424 fixed for ollama). The server side asserts every registered
- * `docker-*` provider is listed here (DOCKER_PROVIDER_IDS in providers.js), so
- * adding a non-Claude docker provider trips a test instead of silently
- * regressing the context-window meter.
+ * mode #5424 fixed for ollama). The server pins its own DOCKER_PROVIDER_IDS to
+ * this same set (providers.js) — each side's test fails if its list drifts — so
+ * adding a docker provider trips a test and forces a conscious "is it
+ * Claude-backed?" decision in both packages, instead of silently regressing the
+ * context-window meter. (The two lists can't share an import: the server loads
+ * only @chroxy/store-core/crypto, not this TS main entry.)
  */
 export const CLAUDE_BACKED_DOCKER_IDS: ReadonlySet<string> = new Set([
   'docker', 'docker-cli', 'docker-sdk', 'docker-byok',
