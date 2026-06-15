@@ -8,14 +8,16 @@
  * On session switch: hide old → show new → fitAddon.fit().
  */
 import { useEffect, useRef, useCallback } from 'react'
+import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 import { TerminalView, type TerminalHandle } from './TerminalView'
 import { useConnectionStore } from '../store/connection'
 
-// #5835 (PR2): the live claude-tui PTY mirror is a fixed 120×30 grid server-side
-// (claude-tui-session.js spawns the PTY at this size). The Output pane is
-// claude-tui-only, so render every terminal here at that exact size, letterboxed,
-// to keep the mirror 1:1 faithful. Phase 2 (resize sync) will make this dynamic.
-const MIRROR_SIZE = { cols: 120, rows: 30 }
+// #5835 (PR2): the live claude-tui PTY mirror is a fixed grid server-side
+// (claude-tui-session.js spawns the PTY at CLAUDE_TUI_PTY_SIZE). The Output pane
+// is claude-tui-only, so render every terminal here at that exact size,
+// letterboxed, to keep the mirror 1:1 faithful. Single-sourced from @chroxy/
+// protocol (#5839) so server + dashboard can't drift. Phase 2 makes it dynamic.
+const MIRROR_SIZE = CLAUDE_TUI_PTY_SIZE
 
 export interface MultiTerminalViewProps {
   sessions: { sessionId: string }[]

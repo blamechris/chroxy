@@ -46,6 +46,14 @@ export const MIN_PROTOCOL_VERSION = 1;
  * the drift fixed in #5823.
  */
 export const DEFAULT_PROVIDER = 'claude-tui';
+/**
+ * #5835 / #5839: the fixed grid size of the claude-tui PTY. The server spawns
+ * the TUI at this size and the dashboard renders the live mirror at exactly this
+ * size (letterboxed), so the mirror stays 1:1 faithful. Single-sourced here so
+ * the server and dashboard literals can't drift and silently misalign the
+ * mirror. Phase 2 (resize sync) makes the size dynamic and retires this.
+ */
+export const CLAUDE_TUI_PTY_SIZE = Object.freeze({ cols: 120, rows: 30 });
 // Re-export schemas for convenience (also available via '@chroxy/protocol/schemas')
 export * from "./schemas/index.js";
 // Re-export client-side error-category detection (#3151)

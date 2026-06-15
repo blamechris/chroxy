@@ -46,6 +46,17 @@ export declare const MIN_PROTOCOL_VERSION = 1;
  * the drift fixed in #5823.
  */
 export declare const DEFAULT_PROVIDER = "claude-tui";
+/**
+ * #5835 / #5839: the fixed grid size of the claude-tui PTY. The server spawns
+ * the TUI at this size and the dashboard renders the live mirror at exactly this
+ * size (letterboxed), so the mirror stays 1:1 faithful. Single-sourced here so
+ * the server and dashboard literals can't drift and silently misalign the
+ * mirror. Phase 2 (resize sync) makes the size dynamic and retires this.
+ */
+export declare const CLAUDE_TUI_PTY_SIZE: Readonly<{
+    cols: 120;
+    rows: 30;
+}>;
 export * from './schemas/index.ts';
 export type { ServerErrorEnvelopeMessage } from './schemas/server.ts';
 export type { ActivityKind, ActivityStatus, ActivityOutputRef, ActivityEntry, ServerActivitySnapshotMessage, ServerActivityDeltaMessage, ServerCancelActivityAckMessage, ServerBudgetResumeAckMessage, } from './schemas/server.ts';

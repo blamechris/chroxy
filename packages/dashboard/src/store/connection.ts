@@ -428,6 +428,14 @@ export function getCurrentDeviceKey(): string | null {
 const _initialServerId = loadPersistedActiveServer();
 if (_initialServerId) setServerScope(_initialServerId);
 
+// #5835 (PR2): true when the active session is claude-tui — its Output tab shows
+// the live PTY mirror, so the synthetic prompt/answer terminal echoes must be
+// suppressed (they'd inject a line at the altscreen cursor and corrupt the redraw).
+function activeSessionIsClaudeTui(get: () => ConnectionState): boolean {
+  const s = get();
+  return s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider === DEFAULT_PROVIDER;
+}
+
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   connectionPhase: 'disconnected',
   wsUrl: null,
@@ -2049,7 +2057,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // PTY mirror (alternate-screen), where injecting an echo at the cursor would
     // corrupt the redraw. The echo was only ever visible on the Output tab, which
     // is now claude-tui-only, so suppressing it for tui loses nothing elsewhere.
-    if (text && get().sessions.find(s => s.sessionId === get().activeSessionId)?.provider !== DEFAULT_PROVIDER) {
+    if (text && !activeSessionIsClaudeTui(get)) {
       get().appendTerminalData(`\r\n\x1b[33m> ${text}\x1b[0m\r\n\r\n`);
     }
 
@@ -2409,7 +2417,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // wire send so the echo is present even when the socket queues.
     // #5835 (PR2): suppress for claude-tui — same reason as the prompt echo
     // above (the live PTY mirror must not get a synthetic line at its cursor).
-    if (answerSummary && get().sessions.find(s => s.sessionId === get().activeSessionId)?.provider !== DEFAULT_PROVIDER) {
+    if (answerSummary && !activeSessionIsClaudeTui(get)) {
       get().appendTerminalData(`\r\n\x1b[36m> User answered: ${answerSummary}\x1b[0m\r\n`);
     }
     // #4312: optimistically flip the active session into "running" so the

@@ -5,6 +5,7 @@ import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
 import { fileURLToPath } from 'url'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
+import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 // #5417 — the TUI shares CliSession's pinned "unknown resume id" patterns
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
 // merges stdout+stderr, so claude's resume rejection lands in _outputTail.
@@ -1484,8 +1485,9 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       this._term = ptyMod.spawn(CLAUDE, args, {
         name: 'xterm-256color',
-        cols: 120,
-        rows: 30,
+        // #5839: single-sourced so the dashboard mirror renders at the same grid.
+        cols: CLAUDE_TUI_PTY_SIZE.cols,
+        rows: CLAUDE_TUI_PTY_SIZE.rows,
         cwd: cwdReal,
         env,
       })
