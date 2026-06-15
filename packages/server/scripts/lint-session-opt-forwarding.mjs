@@ -277,7 +277,69 @@ function parseBaseSessionOptKeysArray(baseSessionPath) {
 // Subclass scanning
 // ----------------------------------------------------------------------
 
-const CLASS_RE = /export\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+(BaseSession|JsonlSubprocessSession)\b/g
+// Root session base classes. Every class whose `extends` chain reaches one of
+// these — transitively — is a session subclass the opt-forwarding rule applies
+// to. The full set is discovered by fixpoint (discoverSessionBases) so the
+// SECOND middle layer is analyzed too: DockerSdkSession extends SdkSession, the
+// four ClaudeByokSession variants (Anthropic-compatible/DeepSeek/Ollama/
+// docker-byok), and DockerSession extends CliSession (audit P2-1). The old fixed
+// regex matched only the two roots, so those six were invisible to the lint.
+const ROOT_SESSION_BASES = ['BaseSession', 'JsonlSubprocessSession']
+
+// Ancestors whose descendants must NOT forward via the buildBaseSessionOpts()
+// picker: ClaudeByokSession reads provider-local opts (mcpConfigPath /
+// mcpToolCallTimeoutMs / mcpStartCapMs) off the RAW opts object, which the
+// picker — copying only the 20 BASE_SESSION_OPT_KEYS — would silently drop. A
+// spread/positional super forwards them. #5367 moved the middle-layer trap from
+// base opts onto these provider-local opts (audit P2-1, second finding). The ban
+// applies to EVERY transitive descendant (a grandchild via the picker drops the
+// opts one level deeper), not just direct children — ClaudeByokSession itself is
+// exempt: it IS the consumer and correctly uses the picker toward BaseSession.
+const PICKER_FORBIDDEN_ANCESTORS = ['ClaudeByokSession']
+
+// Matches `class X extends Y` (with or without `export`, any indentation — the
+// factory-defined AnthropicCompatibleSession is a plain `class`, not exported).
+const ANY_CLASS_RE = /(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b/g
+
+/** Collect every `class X extends Y` edge ({ child, parent }) across all sources. */
+function collectClassEdges(allStrippedSources) {
+  const edges = []
+  for (const stripped of allStrippedSources) {
+    for (const m of stripped.matchAll(ANY_CLASS_RE)) {
+      edges.push({ child: m[1], parent: m[2] })
+    }
+  }
+  return edges
+}
+
+/**
+ * Transitive descendant closure by fixpoint: starting from `seeds`, repeatedly
+ * add any `class X extends Y` whose Y is a seed or already-collected descendant,
+ * until closure. `includeSeeds` controls whether the seeds themselves are in the
+ * result (true for session-base discovery — the roots ARE bases; false for the
+ * picker ban — the ancestor itself is exempt, only its descendants are banned).
+ */
+function descendantClosure(edges, seeds, { includeSeeds }) {
+  const seedSet = new Set(seeds)
+  const out = new Set(includeSeeds ? seeds : [])
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const { child, parent } of edges) {
+      if ((seedSet.has(parent) || out.has(parent)) && !out.has(child)) {
+        out.add(child)
+        changed = true
+      }
+    }
+  }
+  return out
+}
+
+/** Build a `class X extends <one of baseNames>` global matcher (m[1]=class, m[2]=parent). */
+function buildSessionClassRegex(baseNames) {
+  const alt = [...baseNames].map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  return new RegExp(`(?:export\\s+)?class\\s+([A-Za-z_$][\\w$]*)\\s+extends\\s+(${alt})\\b`, 'g')
+}
 
 function lineOf(src, idx) {
   return src.slice(0, idx).split('\n').length
@@ -474,17 +536,28 @@ function main() {
     }
   }
 
-  const files = walk(SRC_DIR).filter(f => !f.endsWith('/base-session.js'))
+  const allFiles = walk(SRC_DIR)
+  // Collect every class→parent edge across ALL files (incl. base-session.js) so
+  // both fixpoints see the full graph, then derive: the session-base closure
+  // (roots + every transitive subclass → the scan matcher picks up direct AND
+  // second-tier subclasses) and the picker-ban set (every transitive descendant
+  // of a forbidden ancestor, ancestor itself exempt).
+  const classEdges = collectClassEdges(allFiles.map(f => stripComments(readFileSync(f, 'utf8'))))
+  const sessionBases = descendantClosure(classEdges, ROOT_SESSION_BASES, { includeSeeds: true })
+  const pickerForbidden = descendantClosure(classEdges, PICKER_FORBIDDEN_ANCESTORS, { includeSeeds: false })
+  const classRe = buildSessionClassRegex(sessionBases)
+
+  const files = allFiles.filter(f => !f.endsWith('/base-session.js'))
   const offenders = []
   let analyzedCount = 0
 
   for (const file of files) {
     const origSrc = readFileSync(file, 'utf8')
-    if (!CLASS_RE.test(origSrc)) continue
-    CLASS_RE.lastIndex = 0
+    if (!classRe.test(origSrc)) continue
+    classRe.lastIndex = 0
     const strippedSrc = stripComments(origSrc)
     let m
-    while ((m = CLASS_RE.exec(strippedSrc)) !== null) {
+    while ((m = classRe.exec(strippedSrc)) !== null) {
       const className = m[1]
       const classDeclIdx = m.index
       const declLine = lineOf(strippedSrc, classDeclIdx)
@@ -494,9 +567,19 @@ function main() {
       analyzedCount++
 
       // #5367: `super(buildBaseSessionOpts(...))` — compliant by construction
-      // (coverage guaranteed by the array-vs-ctor assertion above + the picker
-      // copying every key). Counts as analyzed-and-ok.
-      if (analysis.compliant === 'picker') continue
+      // for BASE opts (coverage guaranteed by the array-vs-ctor assertion above
+      // + the picker copying every key). Counts as analyzed-and-ok — UNLESS the
+      // parent reads provider-local opts off raw opts (audit P2-1), where the
+      // picker drops them.
+      if (analysis.compliant === 'picker') {
+        // Banned for EVERY transitive descendant of a forbidden ancestor, not
+        // just direct children — a grandchild via the picker drops the
+        // provider-local opts one level deeper.
+        if (pickerForbidden.has(className)) {
+          offenders.push({ file, line: declLine, className, pickerForbidden: true })
+        }
+        continue
+      }
 
       // #5367: an unrecognized super() shape (not the picker, not a bare
       // identifier/spread, not an object literal) could silently drop keys.
@@ -536,7 +619,7 @@ function main() {
         })
       }
     }
-    CLASS_RE.lastIndex = 0
+    classRe.lastIndex = 0
   }
 
   if (offenders.length) {
@@ -544,6 +627,13 @@ function main() {
     console.error('')
     for (const o of offenders) {
       console.error(`  ${o.file}:${o.line}  class ${o.className}`)
+      if (o.pickerForbidden) {
+        console.error('    Uses super(buildBaseSessionOpts(...)) but descends from ClaudeByokSession,')
+        console.error('    which reads provider-local opts (mcpConfigPath / mcpToolCallTimeoutMs /')
+        console.error('    mcpStartCapMs) off raw opts — the picker copies only BASE_SESSION_OPT_KEYS and')
+        console.error('    would silently drop them. Forward with super({ ...opts, <overrides> }) instead.')
+        continue
+      }
       if (o.unrecognizedSuper !== undefined) {
         console.error(`    Unrecognized super() shape: super(${o.unrecognizedSuper}...)`)
         console.error('    Expected super(buildBaseSessionOpts(opts, { ...overrides })), super(opts),')

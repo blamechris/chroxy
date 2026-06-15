@@ -383,6 +383,174 @@ describe('lint-session-opt-forwarding', () => {
     )
   })
 
+  // audit P2-1 — a SECOND-tier subclass (extends a middle layer, not a root)
+  // that drops an opt via an object-literal super. Pre-P2-1 the fixed
+  // `extends (BaseSession|JsonlSubprocessSession)` regex never saw it, so the
+  // trap re-armed silently one layer down. Transitive discovery must flag it.
+  test('flags a second-tier subclass (extends a middle layer) that drops an opt — P2-1', () => {
+    const MID_LAYER_SRC = `
+import { BaseSession } from './base-session.js'
+
+export class MidProviderSession extends BaseSession {
+  constructor(opts = {}) {
+    super({ ...opts })
+  }
+}
+`
+    const SECOND_TIER_DROP_SRC = `
+import { MidProviderSession } from './mid-provider-session.js'
+
+export class LeafProviderSession extends MidProviderSession {
+  constructor({ cwd } = {}) {
+    super({ cwd })
+  }
+}
+`
+    const { dir, srcDir } = setupFixtureTree({
+      'mid-provider-session.js': MID_LAYER_SRC,
+      'leaf-provider-session.js': SECOND_TIER_DROP_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'second-tier object-literal drop must fail via transitive discovery')
+    assert.match(stderr, /LeafProviderSession/, 'error should name the second-tier class')
+    assert.match(stderr, /model|permissionMode|streamStallTimeoutMs/, 'error should name a dropped opt')
+  })
+
+  // audit P2-1 — discovery must match a PLAIN `class` (no `export`), the shape
+  // of the factory-defined AnthropicCompatibleSession. The old regex required
+  // `export class`, so a non-exported session subclass was invisible.
+  test('discovers a non-exported `class` and flags its dropped opt — P2-1', () => {
+    const PLAIN_CLASS_DROP_SRC = `
+import { BaseSession } from './base-session.js'
+
+// not exported — defined for use within this module / a factory
+class PlainLeafSession extends BaseSession {
+  constructor({ cwd } = {}) {
+    super({ cwd })
+  }
+}
+
+export function makePlainLeaf(opts) { return new PlainLeafSession(opts) }
+`
+    const { dir, srcDir } = setupFixtureTree({
+      'plain-leaf-session.js': PLAIN_CLASS_DROP_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'a non-exported session subclass must still be analyzed')
+    assert.match(stderr, /PlainLeafSession/, 'error should name the plain class')
+  })
+
+  // audit P2-1 (second finding) — a class extending ClaudeByokSession must NOT
+  // forward via the buildBaseSessionOpts() picker: ClaudeByokSession reads
+  // provider-local opts off raw opts, which the picker (base keys only) drops.
+  test('bans the picker on a subclass of ClaudeByokSession — P2-1', () => {
+    const BYOK_BASE_SRC = `
+import { BaseSession } from './base-session.js'
+
+export class ClaudeByokSession extends BaseSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: opts.provider || 'claude-byok' })
+  }
+}
+`
+    const BYOK_PICKER_SUBCLASS_SRC = `
+import { buildBaseSessionOpts } from './base-session.js'
+import { ClaudeByokSession } from './byok-session.js'
+
+export class DeepSeekSession extends ClaudeByokSession {
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: 'deepseek' }))
+  }
+}
+`
+    const { dir, srcDir } = setupFixtureTree({
+      'byok-session.js': BYOK_BASE_SRC,
+      'deepseek-session.js': BYOK_PICKER_SUBCLASS_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'picker on a ClaudeByokSession subclass must fail')
+    assert.match(stderr, /DeepSeekSession/, 'error should name the offending subclass')
+    assert.match(stderr, /provider-local|picker|buildBaseSessionOpts/, 'error should explain the picker ban')
+  })
+
+  // audit P2-1 — the picker ban must reach TRANSITIVE descendants, not just
+  // direct children: a grandchild (extends DeepSeekSession extends
+  // ClaudeByokSession) using the picker still drops the provider-local opts one
+  // level deeper. Must be flagged.
+  test('bans the picker on a GRANDCHILD of ClaudeByokSession — P2-1', () => {
+    const BYOK_BASE_SRC = `
+import { BaseSession } from './base-session.js'
+
+export class ClaudeByokSession extends BaseSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: opts.provider || 'claude-byok' })
+  }
+}
+`
+    const MID_BYOK_SRC = `
+import { ClaudeByokSession } from './byok-session.js'
+
+export class DeepSeekSession extends ClaudeByokSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: 'deepseek' })
+  }
+}
+`
+    const GRANDCHILD_PICKER_SRC = `
+import { buildBaseSessionOpts } from './base-session.js'
+import { DeepSeekSession } from './deepseek-session.js'
+
+export class DeepSeekProSession extends DeepSeekSession {
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: 'deepseek-pro' }))
+  }
+}
+`
+    const { dir, srcDir } = setupFixtureTree({
+      'byok-session.js': BYOK_BASE_SRC,
+      'deepseek-session.js': MID_BYOK_SRC,
+      'deepseek-pro-session.js': GRANDCHILD_PICKER_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'picker on a grandchild of ClaudeByokSession must fail')
+    assert.match(stderr, /DeepSeekProSession/, 'error should name the grandchild')
+    assert.match(stderr, /provider-local|ClaudeByokSession|buildBaseSessionOpts/, 'error should explain the picker ban')
+  })
+
+  // audit P2-1 — control: a ClaudeByokSession subclass using a SPREAD super
+  // (the real shape) is fine; the ban targets ONLY the picker.
+  test('allows a spread super on a subclass of ClaudeByokSession — P2-1', () => {
+    const BYOK_BASE_SRC = `
+import { BaseSession } from './base-session.js'
+
+export class ClaudeByokSession extends BaseSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: opts.provider || 'claude-byok' })
+  }
+}
+`
+    const BYOK_SPREAD_SUBCLASS_SRC = `
+import { ClaudeByokSession } from './byok-session.js'
+
+export class OllamaSession extends ClaudeByokSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: 'ollama' })
+  }
+}
+`
+    const { dir, srcDir } = setupFixtureTree({
+      'byok-session.js': BYOK_BASE_SRC,
+      'ollama-session.js': BYOK_SPREAD_SUBCLASS_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stdout, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `spread super on a byok subclass is fine\nstdout:\n${stdout}\nstderr:\n${stderr}`)
+  })
+
   test('per-key allowlist comment suppresses a specific drop', () => {
     // Class can opt-out a specific key via a marker comment placed
     // immediately above the class declaration. Use case: a future
