@@ -20,6 +20,15 @@ export interface TerminalViewProps {
   className?: string
   initialData?: string
   onReady?: (handle: TerminalHandle) => void
+  /**
+   * #5835 (PR2): pin the terminal to a fixed cols×rows and letterbox it
+   * (centered, no FitAddon stretch). Used for the live claude-tui PTY mirror,
+   * whose server-side PTY is a fixed 120×30 grid — rendering at exactly that
+   * size keeps the mirror 1:1 faithful (the authenticity surface) instead of
+   * scaling the xterm to the pane and misaligning the TUI's absolute cursor
+   * positioning. Omit for the normal fit-to-pane behaviour.
+   */
+  fixedSize?: { cols: number; rows: number }
 }
 
 export const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
@@ -30,7 +39,7 @@ function safeFit(fit: FitAddon) {
   try { fit.fit() } catch { /* container not visible */ }
 }
 
-export function TerminalView({ className, initialData, onReady }: TerminalViewProps) {
+export function TerminalView({ className, initialData, onReady, fixedSize }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
@@ -80,10 +89,14 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
 
     const term = new Terminal({
       disableStdin: true,
-      convertEol: true,
+      // A fixed-size mirror reproduces the server PTY's exact line layout, so
+      // DON'T translate \n→\r\n (the PTY already emits the control bytes). For
+      // the normal fit mode keep convertEol for plain text streams.
+      convertEol: !fixedSize,
       scrollback: 5000,
       fontSize: 13,
       fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace",
+      ...(fixedSize ? { cols: fixedSize.cols, rows: fixedSize.rows } : {}),
       theme: {
         background: '#000000',
         foreground: '#e0e0e0',
@@ -92,10 +105,17 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
       },
     })
 
-    const fitAddon = new FitAddon()
-    term.loadAddon(fitAddon)
+    // #5835 (PR2): a fixedSize mirror renders at exactly cols×rows and is
+    // centered/letterboxed by the container — no FitAddon (stretching the xterm
+    // to the pane would make its grid disagree with the server PTY's 120×30 and
+    // misrender the TUI). FitAddon is only for the normal fit-to-pane mode.
+    let fitAddon: FitAddon | null = null
+    if (!fixedSize) {
+      fitAddon = new FitAddon()
+      term.loadAddon(fitAddon)
+    }
     term.open(containerRef.current)
-    safeFit(fitAddon)
+    if (fitAddon) safeFit(fitAddon)
 
     termRef.current = term
     fitRef.current = fitAddon
@@ -108,24 +128,26 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     // Notify parent
     onReady?.({ write, clear, fit })
 
-    // Debounced resize handler — prevents excessive reflows during drag-resize
+    // Debounced resize handler — prevents excessive reflows during drag-resize.
+    // Skipped entirely in fixedSize mode: a letterboxed 120×30 mirror never
+    // re-fits (the container just centers it / adds scroll if the pane is small).
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
+    let resizeObserver: ResizeObserver | undefined
     const debouncedFit = () => {
-      if (disposedRef.current) return
+      if (disposedRef.current || !fitAddon) return
       if (resizeTimer) clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
-        if (disposedRef.current) return
+        if (disposedRef.current || !fitAddon) return
         safeFit(fitAddon)
       }, RESIZE_DEBOUNCE)
     }
 
-    window.addEventListener('resize', debouncedFit)
-
-    // ResizeObserver for container-level resizing
-    let resizeObserver: ResizeObserver | undefined
-    if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(debouncedFit)
-      resizeObserver.observe(containerRef.current)
+    if (fitAddon) {
+      window.addEventListener('resize', debouncedFit)
+      if (typeof ResizeObserver !== 'undefined') {
+        resizeObserver = new ResizeObserver(debouncedFit)
+        resizeObserver.observe(containerRef.current)
+      }
     }
 
     return () => {
@@ -153,7 +175,12 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
       ref={containerRef}
       className={className}
       data-testid="terminal-container"
-      style={{ width: '100%', height: '100%' }}
+      // #5835 (PR2): letterbox a fixed-size mirror — center the 120×30 grid in
+      // the pane, with scroll if the pane is smaller than the grid (faithful
+      // beats wrap-distorted). Normal mode fills the pane for FitAddon.
+      style={fixedSize
+        ? { width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', background: '#000000' }
+        : { width: '100%', height: '100%' }}
     />
   )
 }

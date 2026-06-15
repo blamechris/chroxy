@@ -613,6 +613,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #5835 Phase 1 (PR2): opt in / out of a claude-tui session's live PTY mirror.
+  // Only opted-in clients receive terminal_output (server-side filter), so this
+  // is sent when the Output tab is shown for a claude-tui session and cleared on
+  // leave. Best-effort — a closed socket just means no mirror until reconnect.
+  subscribeTerminalMirror: (sessionId: string) => {
+    const { socket } = get();
+    if (sessionId && socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'terminal_subscribe', sessionId });
+    }
+  },
+  unsubscribeTerminalMirror: (sessionId: string) => {
+    const { socket } = get();
+    if (sessionId && socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'terminal_unsubscribe', sessionId });
+    }
+  },
+
   // Web tasks (Claude Code Web)
   webFeatures: { available: false, remote: false, teleport: false },
   webTasks: [],
@@ -2027,8 +2044,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       timestamp: Date.now(),
     };
 
-    // Write user message to terminal buffer for Output view
-    if (text) {
+    // Write user message to terminal buffer for the Output view. #5835 (PR2):
+    // skip this synthetic echo for claude-tui — its Output tab now shows the live
+    // PTY mirror (alternate-screen), where injecting an echo at the cursor would
+    // corrupt the redraw. The echo was only ever visible on the Output tab, which
+    // is now claude-tui-only, so suppressing it for tui loses nothing elsewhere.
+    if (text && get().sessions.find(s => s.sessionId === get().activeSessionId)?.provider !== DEFAULT_PROVIDER) {
       get().appendTerminalData(`\r\n\x1b[33m> ${text}\x1b[0m\r\n\r\n`);
     }
 
@@ -2386,7 +2407,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // line from yellow user-prompt echoes (\x1b[33m in sendInput). Skipped
     // for empty answers — nothing meaningful to render. Fires before the
     // wire send so the echo is present even when the socket queues.
-    if (answerSummary) {
+    // #5835 (PR2): suppress for claude-tui — same reason as the prompt echo
+    // above (the live PTY mirror must not get a synthetic line at its cursor).
+    if (answerSummary && get().sessions.find(s => s.sessionId === get().activeSessionId)?.provider !== DEFAULT_PROVIDER) {
       get().appendTerminalData(`\r\n\x1b[36m> User answered: ${answerSummary}\x1b[0m\r\n`);
     }
     // #4312: optimistically flip the active session into "running" so the

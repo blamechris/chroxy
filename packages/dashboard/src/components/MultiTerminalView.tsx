@@ -11,6 +11,12 @@ import { useEffect, useRef, useCallback } from 'react'
 import { TerminalView, type TerminalHandle } from './TerminalView'
 import { useConnectionStore } from '../store/connection'
 
+// #5835 (PR2): the live claude-tui PTY mirror is a fixed 120×30 grid server-side
+// (claude-tui-session.js spawns the PTY at this size). The Output pane is
+// claude-tui-only, so render every terminal here at that exact size, letterboxed,
+// to keep the mirror 1:1 faithful. Phase 2 (resize sync) will make this dynamic.
+const MIRROR_SIZE = { cols: 120, rows: 30 }
+
 export interface MultiTerminalViewProps {
   sessions: { sessionId: string }[]
   activeSessionId: string | null
@@ -81,6 +87,7 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
             className="terminal-container"
             initialData={getInitialData(session.sessionId)}
             onReady={(handle) => handleReady(session.sessionId, handle)}
+            fixedSize={MIRROR_SIZE}
           />
         </div>
       ))}

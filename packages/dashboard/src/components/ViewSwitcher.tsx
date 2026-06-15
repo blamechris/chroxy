@@ -10,13 +10,16 @@ export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'cons
 /** Scrollable tab bar with arrow buttons when overflowing */
 export function ViewSwitcher({
   viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
-  showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
+  showTerminalTab = true, showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
 }: {
   viewMode: string
   setViewMode: (m: ViewMode) => void
   splitMode: SplitDirection | null
   setSplitMode: (m: SplitDirection | null) => void
   persistSplitMode: (m: SplitDirection | null) => void
+  // #5835 (PR2): the "Output" tab is the live claude-tui PTY mirror — shown only
+  // for claude-tui sessions (the only provider with a real PTY to mirror).
+  showTerminalTab?: boolean
   showConsoleTab: boolean
   unreadSystemCount: number
   checkpointsOpen: boolean
@@ -99,7 +102,9 @@ export function ViewSwitcher({
         onPointerCancel={onPointerUp}
       >
         <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
-        <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
+        {showTerminalTab && (
+          <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
+        )}
         {/* #5200/#5204: the Control Room is launched from the bottom sidebar
             panel slot (its header "Control Room" button) and opens as its own
             session-independent top-level tab in the SessionBar strip — not a

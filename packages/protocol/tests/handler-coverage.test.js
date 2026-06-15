@@ -76,7 +76,6 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  'terminal_output', // #5835 Phase 1 (server pipe): live claude-tui PTY mirror — the server broadcast + opt-in lands first; the dashboard render handler is PR2 of the epic. Move to PLATFORM_SPECIFIC='dashboard' when PR2 adds the case.
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.
@@ -137,6 +136,7 @@ const PLATFORM_SPECIFIC = {
   // and mobile app (#4764 / PR #4862); no PLATFORM_SPECIFIC entry needed.
   // Coverage test passes because each handler has a
   // `case 'multi_question_intervention':` clause.
+  'terminal_output': 'dashboard', // #5835 (PR2) live claude-tui PTY mirror — the dashboard renders the raw bytes in xterm; the mobile WebView terminal render is a deferred follow-up per the epic
   'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
   'activity_snapshot': 'dashboard', // Control Room live activity tree (#5161 schema / #5160 server / #5162 reducer / #5163 dashboard panel) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5159
   'activity_delta': 'dashboard',    // Control Room activity delta — see activity_snapshot above; dashboard-only for v1, mobile parity is Phase-2 per epic #5159

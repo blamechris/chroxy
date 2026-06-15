@@ -70,6 +70,7 @@ import { useControlRoomState } from './hooks/useControlRoomState'
 import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
+import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
@@ -153,6 +154,10 @@ export function App() {
   const sessionStates = useConnectionStore(s => s.sessionStates)
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const viewMode = useConnectionStore(s => s.viewMode)
+  // #5835 (PR2): live claude-tui PTY mirror — the Output tab is the authenticity
+  // surface only for claude-tui (the only provider with a real PTY).
+  const subscribeTerminalMirror = useConnectionStore(s => s.subscribeTerminalMirror)
+  const unsubscribeTerminalMirror = useConnectionStore(s => s.unsubscribeTerminalMirror)
   const availableModels = useConnectionStore(s => s.availableModels)
   const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
   // #5184: header cost-badge display mode (Settings-driven, persisted).
@@ -430,6 +435,22 @@ export function App() {
   const createSession = useConnectionStore(s => s.createSession)
   const confirmSessionClose = useConnectionStore(s => s.confirmSessionClose)
   const setViewMode = useConnectionStore(s => s.setViewMode)
+  // #5835 (PR2): drive the live PTY mirror's opt-in. While the Output tab is
+  // shown for a claude-tui session, opt into terminal_output; opt out on leave /
+  // session switch / provider change. If the Output tab is somehow active on a
+  // non-tui session (e.g. after switching), fall back to chat — the tab is
+  // hidden there, so the user shouldn't be stranded on it.
+  useEffect(() => {
+    const isTui = activeSessionProvider === DEFAULT_PROVIDER
+    if (viewMode === 'terminal' && !isTui) {
+      setViewMode('chat')
+      return
+    }
+    if (viewMode === 'terminal' && isTui && activeSessionId) {
+      subscribeTerminalMirror(activeSessionId)
+      return () => unsubscribeTerminalMirror(activeSessionId)
+    }
+  }, [viewMode, activeSessionId, activeSessionProvider, subscribeTerminalMirror, unsubscribeTerminalMirror, setViewMode])
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
@@ -1988,6 +2009,7 @@ export function App() {
               splitMode={splitMode}
               setSplitMode={setSplitMode}
               persistSplitMode={persistSplitMode}
+              showTerminalTab={activeSessionProvider === DEFAULT_PROVIDER}
               showConsoleTab={showConsoleTab}
               unreadSystemCount={unreadSystemCount}
               checkpointsOpen={checkpointsOpen}
