@@ -209,6 +209,16 @@ describe('TerminalView', () => {
       expect(fitSpy).not.toHaveBeenCalled()
     })
 
+    it('the exposed fit() handle is a no-op in mirror mode (never stretches the letterbox)', () => {
+      let fitFn: (() => void) | undefined
+      fitSpy.mockClear()
+      render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onReady={({ fit }) => { fitFn = fit }} />)
+      expect(fitFn).toBeInstanceOf(Function)
+      fitSpy.mockClear() // ignore any mount-time activity
+      fitFn!()
+      expect(fitSpy).not.toHaveBeenCalled()
+    })
+
     it('measures the pane via proposeDimensions and reports it through onMeasure on mount', () => {
       proposeDimensionsResult = { cols: 200, rows: 50 }
       const onMeasure = vi.fn()

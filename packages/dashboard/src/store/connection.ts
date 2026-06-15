@@ -642,18 +642,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // for a session (terminal_size). Stored per-session so a tab switch shows the
   // right size immediately; the mirror renders at exactly this size, letterboxed.
   setTerminalSize: (sessionId: string, cols: number, rows: number) => {
-    set((state) => {
-      const ss = state.sessionStates[sessionId];
-      if (!ss) return {};
-      const prev = ss.terminalSize;
-      if (prev && prev.cols === cols && prev.rows === rows) return {};
-      return {
-        sessionStates: {
-          ...state.sessionStates,
-          [sessionId]: { ...ss, terminalSize: { cols, rows } },
-        },
-      };
-    });
+    // Check BEFORE set(): a Zustand updater returning {} still produces a new
+    // state object and notifies every subscriber (Copilot review) — so for an
+    // unknown session or an unchanged size, skip the set() entirely. JS is
+    // single-threaded with no await here, so the get()→set() read is race-free.
+    const ss = get().sessionStates[sessionId];
+    if (!ss) return;
+    const prev = ss.terminalSize;
+    if (prev && prev.cols === cols && prev.rows === rows) return;
+    set((state) => ({
+      sessionStates: {
+        ...state.sessionStates,
+        [sessionId]: { ...ss, terminalSize: { cols, rows } },
+      },
+    }));
   },
 
   // #5835 Phase 2: ask the server to resize a session's live PTY so the real TUI

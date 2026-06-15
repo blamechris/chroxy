@@ -53,8 +53,14 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   // the measurement itself.
   const lastSentRef = useRef(new Map<string, string>())
   const handleMeasure = useCallback((sessionId: string, cols: number, rows: number) => {
-    if (useConnectionStore.getState().activeSessionId !== sessionId) return
-    const key = `${cols}x${rows}`
+    const state = useConnectionStore.getState()
+    if (state.activeSessionId !== sessionId) return
+    // Include the session's authority role in the dedupe key (Copilot review): if
+    // we measured while an observer (the server ignored the resize) and later
+    // become primary/unclaimed, the role flips and the same grid re-sends — so
+    // claiming primary takes effect without needing a pane-size change.
+    const role = state.sessionStates[sessionId]?.sessionRole ?? 'none'
+    const key = `${cols}x${rows}@${role}`
     if (lastSentRef.current.get(sessionId) === key) return
     lastSentRef.current.set(sessionId, key)
     requestTerminalResize(sessionId, cols, rows)

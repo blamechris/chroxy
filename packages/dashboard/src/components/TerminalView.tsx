@@ -142,7 +142,13 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
     if (!fixedSize) safeFit(fitAddon)
 
     termRef.current = term
-    fitRef.current = fitAddon
+    // #5835 Phase 2 (Copilot review): the exposed fit() handle must be a NO-OP in
+    // mirror mode — MultiTerminalView calls handle.fit() on tab switch, and now
+    // that a FitAddon is always loaded (for measurement) that would stretch the
+    // letterboxed mirror and break 1:1 PTY fidelity. Only publish the addon via
+    // fitRef (which fit() uses) in normal fit-to-pane mode; measurement below uses
+    // the local `fitAddon` directly, so it still works in mirror mode.
+    fitRef.current = fixedSize ? null : fitAddon
 
     // Write initial data if provided
     if (initialData) {

@@ -1235,10 +1235,12 @@ function handleTerminalOutput(msg: Record<string, unknown>, get: MsgGet, _set: M
 // string-sessionId guard as terminal_output: the server only sends this for a
 // session we're viewing, so an off-session/malformed frame is dropped.
 function handleTerminalSize(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // Positive numbers only — matches requestTerminalResize's outbound guard so a
-  // malformed 0/negative grid can't reach term.resize (the server sends sane
-  // clamped ints, so this is defensive).
-  if (typeof msg.cols !== 'number' || typeof msg.rows !== 'number' || msg.cols <= 0 || msg.rows <= 0) return;
+  // Positive integers only. The typeof check narrows for the setTerminalSize call
+  // below; Number.isInteger then rejects NaN/Infinity/floats and > 0 keeps a
+  // 0/negative grid out of term.resize. Matches the other numeric guards in this
+  // file (the server sends sane clamped ints; defensive).
+  if (typeof msg.cols !== 'number' || typeof msg.rows !== 'number') return;
+  if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows) || msg.cols <= 0 || msg.rows <= 0) return;
   if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
   get().setTerminalSize(msg.sessionId, msg.cols, msg.rows);
 }

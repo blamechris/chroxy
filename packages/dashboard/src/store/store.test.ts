@@ -670,6 +670,20 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().sessionStates['ghost']).toBeUndefined();
   });
 
+  it('setTerminalSize does not produce a new sessionStates object on an unchanged size', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: { 'sess-1': createEmptySessionState() } });
+    useConnectionStore.getState().setTerminalSize('sess-1', 120, 30);
+    const after1 = useConnectionStore.getState().sessionStates;
+    // Same size again — must skip set() entirely (no new ref, no subscriber churn)
+    useConnectionStore.getState().setTerminalSize('sess-1', 120, 30);
+    expect(useConnectionStore.getState().sessionStates).toBe(after1);
+    // An unknown session also must not churn state
+    useConnectionStore.getState().setTerminalSize('ghost', 80, 24);
+    expect(useConnectionStore.getState().sessionStates).toBe(after1);
+    useConnectionStore.setState({ sessionStates: {} });
+  });
+
   it('requestTerminalResize sends terminal_resize over an open socket', async () => {
     const { useConnectionStore } = await import('./connection');
     const sent: string[] = [];

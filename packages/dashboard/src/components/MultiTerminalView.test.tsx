@@ -283,5 +283,20 @@ describe('MultiTerminalView', () => {
       capturedOnMeasure[0]!(160, 40)
       expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
     })
+
+    it('re-sends the same grid when the session authority (role) changes', () => {
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: { s1: { sessionRole: 'observer' } } })
+      renderMultiTerminal({ activeSessionId: 's1' })
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      // same size + same role → deduped
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(1)
+      // role flips observer → primary: the same grid re-sends so claiming primary
+      // takes effect without needing a pane-size change
+      mockGetState.mockReturnValue({ activeSessionId: 's1', sessionStates: { s1: { sessionRole: 'primary' } } })
+      capturedOnMeasure[0]!(200, 50)
+      expect(mockRequestTerminalResize).toHaveBeenCalledTimes(2)
+    })
   })
 })
