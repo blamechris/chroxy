@@ -56,10 +56,17 @@ export function applyEdit(content, { oldString, newString, replaceAll = false } 
   }
 
   // Count occurrences without allocating a full split for huge files — an
-  // indexOf walk is O(n) and predictable.
+  // indexOf walk is O(n) and predictable. Advance by oldString.length so the
+  // count is NON-overlapping, matching what `split(oldString).join(...)`
+  // actually replaces (so `replacements` and the NOT_UNIQUE guard agree with
+  // the replaceAll path — e.g. 'aa' in 'aaaa' is 2, not the overlapping 3).
   let matchCount = 0
-  let idx = -1
-  while ((idx = content.indexOf(oldString, idx + 1)) !== -1) matchCount++
+  let from = 0
+  let at
+  while ((at = content.indexOf(oldString, from)) !== -1) {
+    matchCount++
+    from = at + oldString.length
+  }
 
   if (matchCount === 0) {
     return { ok: false, code: 'NOT_FOUND', message: 'oldString not found' }

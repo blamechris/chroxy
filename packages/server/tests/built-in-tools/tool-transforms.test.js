@@ -47,6 +47,17 @@ describe('applyEdit', () => {
     assert.equal(applyEdit('x', { oldString: 'x', newString: 42 }).code, 'EINVAL')
   })
 
+  it('counts overlapping patterns NON-overlapping, consistent with split/join (#5888 Copilot)', () => {
+    // 'aa' in 'aaaa' is 2 non-overlapping occurrences (positions 0 and 2), not
+    // the overlapping 3. replaceAll must replace exactly 2 and report 2.
+    const all = applyEdit('aaaa', { oldString: 'aa', newString: 'b', replaceAll: true })
+    assert.deepEqual(all, { ok: true, next: 'bb', replacements: 2 })
+    // Without replaceAll the same input is non-unique (2 > 1).
+    assert.equal(applyEdit('aaaa', { oldString: 'aa', newString: 'b' }).matchCount, 2)
+    // 'aa' in 'aaa' is a single non-overlapping occurrence → a unique edit.
+    assert.deepEqual(applyEdit('aaa', { oldString: 'aa', newString: 'X' }), { ok: true, next: 'Xa', replacements: 1 })
+  })
+
   it('inserts a newString containing $-patterns LITERALLY (not String.replace interpretation)', () => {
     // Single-match path used to be `content.replace(old, new)`, which would
     // expand `$&` to the match. Literal replacement inserts it verbatim.
