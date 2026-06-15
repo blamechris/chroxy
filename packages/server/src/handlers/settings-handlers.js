@@ -1453,8 +1453,9 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   // permissions, never to escalate — the same principle that blocks them from
   // flipping to auto mode in handleSetPermissionMode. Permission rules can
   // auto-allow execution-capable tools (Write, Edit, …), so letting a bound
-  // (share-a-session) client set them is exactly that escalation. Only the
-  // primary API token may manage permission rules.
+  // (share-a-session) client set them is exactly that escalation. The gate is
+  // host-authority = an UNBOUND client (no boundSessionId — the primary token,
+  // or an unbound linking-mode pairing token), mirroring rejectCredentialWriteIfBound.
   if (client.boundSessionId) {
     loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to set permission rules — rejected`)
     sendError(ws, msg?.requestId, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT',
