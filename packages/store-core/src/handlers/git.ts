@@ -26,12 +26,12 @@ import type {
 // today; the app wires all five (with stage/unstage sharing one handler since
 // their payloads are identical — only `error`).
 //
-// Element types (`DiffFile`, `GitFileStatus`, `GitBranch`) live downstream in
-// each consumer — the shared handlers keep entries as `unknown[]` to avoid
-// pulling concrete types up into store-core. Per-element shape is NOT
-// validated here; matches the inline `as DiffFile[]` casts both clients used
-// prior to this migration. Tightening would be a behaviour change and is out
-// of scope for the #2661 mechanical migration.
+// Element types (`DiffFile`, `GitFileStatus`, `GitBranch`, …) are defined in
+// store-core's `../types` ("Git result element types" section). Each handler
+// validates entries per-element fail-soft via `validateGitElements` (#3132,
+// see below): malformed elements are dropped (with a single aggregated debug
+// log) rather than rejecting the whole payload. This replaced the original
+// `as DiffFile[]` casts both clients used in the #2661 mechanical migration.
 // ---------------------------------------------------------------------------
 
 // Per-element validation helpers (#3132). Hand-rolled type guards, fail-soft:
