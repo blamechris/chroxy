@@ -10,7 +10,9 @@
     "esModuleInterop": true,
     "skipLibCheck": true,
     "rewriteRelativeImportExtensions": true,
-    "types": []
+    // "node" is required for the node-only ./project subpath (P2-2); the
+    // browser-consumed barrel must not start using node globals.
+    "types": ["node"]
   },
   "include": ["src"]
 }
