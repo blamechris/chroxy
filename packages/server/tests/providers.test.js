@@ -1526,4 +1526,21 @@ describe('validateProviderClass — inProcessPermissions guard (#5379)', () => {
     const Stub = makeProviderClass({ inProcessPermissions: false, respondToPermission: false, respondToQuestion: false })
     assert.doesNotThrow(() => validateProviderClass(Stub, 'stub-no-inproc'))
   })
+
+  // #5448: store-core's context-window resolver assumes every docker-* provider
+  // is Claude-backed (200k default) via the CLAUDE_BACKED_DOCKER_IDS allowlist.
+  // That coupling lives in a different package than this registry, and the server
+  // can't import store-core's TS main entry under node --test (only the built
+  // /crypto subpath), so the two lists are kept in sync by a literal assertion on
+  // EACH side: this pins DOCKER_PROVIDER_IDS, and store-core's context-window.test
+  // pins CLAUDE_BACKED_DOCKER_IDS to the same set + asserts the resolver fails
+  // closed for an unknown docker-*. Adding a docker provider trips this test,
+  // forcing a conscious "is it Claude-backed?" decision in BOTH places.
+  describe('docker provider id set is pinned (#5448)', () => {
+    it('DOCKER_PROVIDER_IDS matches the known Claude-backed docker wrappers', async () => {
+      const { DOCKER_PROVIDER_IDS } = await import('../src/providers.js')
+      assert.deepEqual([...DOCKER_PROVIDER_IDS].sort(), ['docker', 'docker-byok', 'docker-cli', 'docker-sdk'],
+        'a docker provider changed — keep DOCKER_PROVIDER_IDS in sync with store-core CLAUDE_BACKED_DOCKER_IDS; a NON-Claude docker-* must NOT be added to the store-core allowlist (it would get a fabricated 200k context-window meter)')
+    })
+  })
 })
