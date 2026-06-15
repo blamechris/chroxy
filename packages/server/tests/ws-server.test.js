@@ -4726,4 +4726,60 @@ describe('#5579: production handler ctx is deep-asserted at construction', () =>
     // what closes the gap (the namespace object is still present).
     assert.doesNotThrow(() => assertCtxShape(ctx), 'shallow assert misses a missing key — that is the bug deep closes')
   })
+
+  // #5837: the terminal-mirror coalescer gate. These drive _syncTerminalMirror /
+  // _handleClientDeparture directly (no socket) to lock in the 0↔1 crossing on
+  // the disconnect path — the riskiest one (a stuck-OFF mirror = a viewer sees a
+  // dead terminal; a stuck-ON mirror = wasted work forever).
+  describe('terminal-mirror gate (#5837)', () => {
+    function makeMirrorServer() {
+      const calls = []
+      const session = { setTerminalMirrorActive: (a) => { calls.push(a) } }
+      const sessionsMap = new Map([['s1', { session, name: 'S', cwd: '/tmp', type: 'cli' }]])
+      const manager = new EventEmitter()
+      manager.getSession = (id) => sessionsMap.get(id)
+      manager.listSessions = () => []
+      const srv = new WsServer({ port: 0, apiToken: 't', sessionManager: manager, authRequired: false })
+      return { srv, calls }
+    }
+    function fakeClient(id, terminalSids = []) {
+      return { id, authenticated: true, terminalSessionIds: new Set(terminalSids), subscribedSessionIds: new Set(), _ownedPushTokens: null }
+    }
+    // A ws is the clients-Map KEY; srv.close() calls ws.close()/terminate() on each.
+    const fakeWs = () => ({ readyState: 3, close: () => {}, terminate: () => {} })
+
+    it('_syncTerminalMirror toggles ON iff some connected client subscribes', () => {
+      const { srv, calls } = makeMirrorServer()
+      try {
+        srv._syncTerminalMirror('s1')
+        assert.deepEqual(calls, [false], 'no subscribers → OFF')
+        srv.clients.set(fakeWs(), fakeClient('c1', ['s1']))
+        srv._syncTerminalMirror('s1')
+        assert.deepEqual(calls, [false, true], 'one subscriber → ON')
+      } finally { srv.close() }
+    })
+
+    it('last-viewer departure turns the mirror OFF; a remaining viewer keeps it ON', () => {
+      const { srv, calls } = makeMirrorServer()
+      try {
+        const wsA = fakeWs()
+        const wsB = fakeWs()
+        const a = fakeClient('a', ['s1'])
+        const b = fakeClient('b', ['s1'])
+        srv.clients.set(wsA, a)
+        srv.clients.set(wsB, b)
+
+        // b departs while still in the map (production order: removeClient comes
+        // after departure). a still subscribes → mirror stays ON.
+        srv._handleClientDeparture(b)
+        assert.equal(b.terminalSessionIds.size, 0, 'departing client subs cleared')
+        assert.equal(calls[calls.length - 1], true, 'non-last departure → still ON')
+
+        // removeClient would now drop b; then a (the last viewer) departs → OFF.
+        srv.clients.delete(wsB)
+        srv._handleClientDeparture(a)
+        assert.equal(calls[calls.length - 1], false, 'last-viewer departure → OFF')
+      } finally { srv.close() }
+    })
+  })
 })

@@ -357,9 +357,12 @@ function handleTerminalSubscribe(ws, client, msg, ctx) {
   const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
   if (!entry) return
   if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
+  const alreadySubscribed = client.terminalSessionIds.has(sid)
   client.terminalSessionIds.add(sid)
-  // #5837: this may be the FIRST subscriber — turn the coalescer on.
-  ctx.transport.syncTerminalMirror?.(sid)
+  // #5837: re-evaluate the coalescer gate only on an ACTUAL new subscription
+  // (symmetric with terminal_unsubscribe, which syncs only when it removed one) —
+  // a re-subscribe is a no-op for the gate. This may be the first viewer → ON.
+  if (!alreadySubscribed) ctx?.transport?.syncTerminalMirror?.(sid)
   // #5835 Phase 2: tell the new subscriber the authoritative PTY size up front so
   // it can letterbox to the right grid immediately (the size may already differ
   // from the default if another viewer resized it). Gate on the same viewing
