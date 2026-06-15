@@ -528,6 +528,97 @@ describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
     assert.equal(_dockerBackend.calls.length, 0)
   })
 
+  // #5882 — the container Edit path was previously untested and had drifted
+  // from host-side editFileTool (no NO_CHANGE guard, slice vs replace). It now
+  // delegates the semantics to the shared applyEdit transform.
+  describe('Edit (container, via shared applyEdit) #5882', () => {
+    function editBackend(fileContent) {
+      return backendStub({
+        execResponses: {
+          'cat ': { stdout: fileContent },
+          'wc -c': { stdout: '1\n' },
+        },
+      })
+    }
+    function decodeWrittenContent(calls) {
+      const writeCall = calls.find((c) => c.cmd.includes('base64 -d'))
+      if (!writeCall) return null
+      const m = writeCall.cmd.match(/echo '([^']+)' \| base64 -d/)
+      return m ? Buffer.from(m[1], 'base64').toString('utf8') : null
+    }
+
+    it('applies a unique edit and writes the updated content', async () => {
+      const backend = editBackend('foo bar baz')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'bar', new_string: 'QUX' },
+      })
+      assert.equal(result.isError, false)
+      assert.match(result.content, /Replaced 1 occurrence\(s\) in foo\.txt/)
+      assert.equal(decodeWrittenContent(backend.calls), 'foo QUX baz')
+    })
+
+    it('refuses a no-op edit (old === new) — NO_CHANGE, the drift this closes', async () => {
+      const backend = editBackend('hello hello')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'hello', new_string: 'hello' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /identical/)
+      // It read the file (cat) but must NOT have written it.
+      assert.equal(backend.calls.some((c) => c.cmd.includes('base64 -d')), false)
+    })
+
+    it('refuses a non-unique edit without replace_all', async () => {
+      const backend = editBackend('aa aa aa')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'aa', new_string: 'b' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /matches multiple sites/)
+    })
+
+    it('replaces every occurrence with replace_all', async () => {
+      const backend = editBackend('aa aa aa')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'aa', new_string: 'b', replace_all: true },
+      })
+      assert.equal(result.isError, false)
+      assert.match(result.content, /Replaced 3 occurrence\(s\)/)
+      assert.equal(decodeWrittenContent(backend.calls), 'b b b')
+    })
+
+    it('refuses when old_string is not found', async () => {
+      const backend = editBackend('hello world')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'xyz', new_string: 'abc' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /not found/)
+    })
+
+    it('refuses an empty old_string before touching the container', async () => {
+      const backend = editBackend('whatever')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: '', new_string: 'x' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /old_string is required/)
+      assert.equal(backend.calls.length, 0)
+    })
+  })
+
   it('Bash routes the raw command through docker exec', async () => {
     const _dockerBackend = backendStub({
       defaultResponse: { stdout: 'hello\n', stderr: '' },

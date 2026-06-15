@@ -19,9 +19,12 @@
 
 import { readFile, writeFile, stat, mkdir } from 'node:fs/promises'
 import { dirname } from 'node:path'
+import { applyEdit, formatNumberedLines } from './tool-transforms.js'
 
 export const DEFAULT_READ_MAX_BYTES = 256_000
-export const DEFAULT_READ_LINE_LIMIT = 2_000
+// Single-sourced in tool-transforms.js (shared with the container Read); kept
+// as a re-export for back-compat.
+export { DEFAULT_READ_LINE_LIMIT } from './tool-transforms.js'
 
 /**
  * Read a file, optionally with a line range. Lines are 1-indexed in
@@ -79,30 +82,12 @@ export async function readFileTool({
     return { ok: false, code: 'BINARY', message: `binary content in ${filePath}; Read is text-only` }
   }
 
+  // Slice + line-number via the shared transform (same shape the container
+  // produces via its in-container awk). Match Claude Code's tabular format:
+  // 5-space-padded 1-indexed line number, then arrow, then the line.
   const text = raw.toString('utf8')
-  const allLines = text.split('\n')
-  const totalLines = allLines.length
-
-  const start = Number.isFinite(offset) && offset > 0 ? Math.floor(offset) - 1 : 0
-  const requestedCount = Number.isFinite(limit) && limit > 0
-    ? Math.min(Math.floor(limit), DEFAULT_READ_LINE_LIMIT)
-    : DEFAULT_READ_LINE_LIMIT
-  const slice = allLines.slice(start, start + requestedCount)
-
-  // Match Claude Code's tabular line-numbered format: 5-space-padded
-  // 1-indexed line number, then arrow, then the line. Final trailing
-  // newline preserved when the slice ends at a real EOL.
-  const numbered = slice
-    .map((line, i) => `${String(start + i + 1).padStart(5)}→${line}`)
-    .join('\n')
-
-  return {
-    ok: true,
-    content: numbered,
-    totalLines,
-    linesReturned: slice.length,
-    truncatedByLimit: slice.length < totalLines - start,
-  }
+  const { content, totalLines, linesReturned, truncatedByLimit } = formatNumberedLines(text, { offset, limit })
+  return { ok: true, content, totalLines, linesReturned, truncatedByLimit }
 }
 
 /**
@@ -189,27 +174,25 @@ export async function editFileTool({
     throw err
   }
 
-  // Count occurrences without allocating a full split for huge files —
-  // indexOf walk is O(n) and predictable.
-  let count = 0
-  let idx = -1
-  while ((idx = content.indexOf(oldString, idx + 1)) !== -1) count++
-
-  if (count === 0) {
-    return { ok: false, code: 'NOT_FOUND', message: `oldString not found in ${filePath}` }
-  }
-  if (count > 1 && !replaceAll) {
-    return {
-      ok: false,
-      code: 'NOT_UNIQUE',
-      message: `oldString matched ${count} sites in ${filePath}; pass replaceAll=true or add surrounding context to make it unique`,
+  // Count + strict-uniqueness + LITERAL replacement via the shared transform
+  // (also drives the docker-byok container Edit, so the semantics can't drift).
+  // Type + NO_CHANGE were already handled above; map the remaining codes to the
+  // path-ful messages this tool has always returned.
+  const result = applyEdit(content, { oldString, newString, replaceAll })
+  if (!result.ok) {
+    if (result.code === 'NOT_FOUND') {
+      return { ok: false, code: 'NOT_FOUND', message: `oldString not found in ${filePath}` }
     }
+    if (result.code === 'NOT_UNIQUE') {
+      return {
+        ok: false,
+        code: 'NOT_UNIQUE',
+        message: `oldString matched ${result.matchCount} sites in ${filePath}; pass replaceAll=true or add surrounding context to make it unique`,
+      }
+    }
+    return { ok: false, code: result.code, message: result.message }
   }
 
-  const next = replaceAll
-    ? content.split(oldString).join(newString)
-    : content.replace(oldString, newString)
-
-  await writeFile(filePath, next)
-  return { ok: true, replacements: count, bytesWritten: Buffer.byteLength(next, 'utf8') }
+  await writeFile(filePath, result.next)
+  return { ok: true, replacements: result.replacements, bytesWritten: Buffer.byteLength(result.next, 'utf8') }
 }
