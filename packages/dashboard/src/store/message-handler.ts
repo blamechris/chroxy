@@ -1213,6 +1213,22 @@ function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: Ms
   get().appendTerminalData(sharedRawOutput(msg).data);
 }
 
+// #5835 (PR2): live claude-tui PTY mirror. The server delivers terminal_output
+// only to clients that opted in (terminal_subscribe) for a session they're
+// viewing — i.e. the active session whose Output tab is showing — so route the
+// raw bytes through appendTerminalData (active-session). Guard on the active id
+// anyway so a stale frame arriving just after a session switch can't paint the
+// new session's terminal.
+function handleTerminalOutput(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  if (typeof msg.data !== 'string') return;
+  // Require an explicit string sessionId that matches the active session. The
+  // server always stamps one (ws-forwarding.js); dropping a frame without one
+  // (malformed/legacy/empty) keeps it from bleeding into whatever terminal is
+  // currently active, matching the typeof guard the rest of this file uses.
+  if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
+  get().appendTerminalData(msg.data);
+}
+
 function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   // Token parse shared via store-core (#5454); the URL-rewrite side effect
   // stays dashboard-specific.
@@ -2670,6 +2686,7 @@ const HANDLERS: Record<string, Handler> = {
   pong: handlePong,
   raw: handleRaw,
   raw_background: handleRawBackground,
+  terminal_output: handleTerminalOutput,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
   checkpoint_restored: handleCheckpointRestored,

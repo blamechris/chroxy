@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smoke Test — PR #5769 (FormDriver injected collaborator)</title>
+<style>
+  :root {
+    --bg:#0f1115; --panel:#171a21; --panel2:#1e222b; --ink:#e7eaf0; --muted:#9aa3b2;
+    --accent:#5b9dff; --good:#3fb950; --warn:#d29922; --bad:#f85149; --line:#2a2f3a;
+    --code:#0b0d12; --mono:'SFMono-Regular',Consolas,'Liberation Mono',Menlo,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--ink);
+    font:15px/1.6 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,sans-serif; }
+  .wrap { max-width:920px; margin:0 auto; padding:32px 24px 96px; }
+  header.hero { border:1px solid var(--line); border-radius:14px; padding:22px 24px;
+    background:linear-gradient(135deg,#171a21,#1b2230); margin-bottom:24px; }
+  header.hero h1 { margin:0 0 6px; font-size:22px; }
+  header.hero .sub { color:var(--muted); font-size:14px; }
+  .pill { display:inline-block; font-size:11px; font-weight:600; letter-spacing:.04em;
+    text-transform:uppercase; padding:3px 9px; border-radius:999px; vertical-align:middle; }
+  .pill.gate { background:rgba(91,157,255,.15); color:var(--accent); border:1px solid rgba(91,157,255,.35); }
+  .pill.hold { background:rgba(210,153,34,.15); color:var(--warn); border:1px solid rgba(210,153,34,.35); }
+  h2 { font-size:17px; margin:34px 0 12px; padding-bottom:8px; border-bottom:1px solid var(--line); }
+  h2 .n { display:inline-block; width:26px; height:26px; line-height:26px; text-align:center;
+    background:var(--accent); color:#06122b; border-radius:7px; font-size:14px; font-weight:700; margin-right:10px; }
+  p { margin:10px 0; }
+  .muted { color:var(--muted); }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:12px; padding:18px 20px; margin:14px 0; }
+  .why { border-left:3px solid var(--accent); }
+  code { font-family:var(--mono); font-size:13px; background:#22272f; padding:1px 6px; border-radius:5px; }
+  pre { background:var(--code); border:1px solid var(--line); border-radius:10px; padding:14px 16px;
+    overflow:auto; font-family:var(--mono); font-size:13px; line-height:1.55; position:relative; }
+  pre .cmt { color:#6b7686; }
+  .label { font-size:11px; text-transform:uppercase; letter-spacing:.06em; color:var(--muted);
+    margin:0 0 6px; font-weight:600; }
+  ul.checks { list-style:none; padding:0; margin:8px 0; }
+  ul.checks li { padding:8px 0 8px 32px; position:relative; border-bottom:1px solid var(--line); }
+  ul.checks li:last-child { border-bottom:0; }
+  ul.checks li::before { content:'☐'; position:absolute; left:4px; top:7px; font-size:18px; color:var(--muted); }
+  .test { background:var(--panel2); border:1px solid var(--line); border-radius:12px; margin:16px 0; overflow:hidden; }
+  .test > .head { padding:14px 18px; display:flex; align-items:center; gap:12px; background:#202633; }
+  .test > .head .tag { font-size:11px; font-weight:700; padding:3px 8px; border-radius:6px;
+    background:var(--accent); color:#06122b; }
+  .test > .head h3 { margin:0; font-size:15px; }
+  .test > .body { padding:4px 18px 16px; }
+  .test .row { display:grid; grid-template-columns:130px 1fr; gap:12px; padding:10px 0; border-bottom:1px solid var(--line); align-items:start; }
+  .test .row:last-child { border-bottom:0; }
+  .test .row .k { color:var(--muted); font-size:12px; text-transform:uppercase; letter-spacing:.05em; font-weight:600; padding-top:2px; }
+  .expect { color:var(--good); }
+  .verdict { display:flex; gap:10px; margin-top:6px; }
+  .verdict span { flex:1; text-align:center; padding:8px; border-radius:8px; border:1px solid var(--line);
+    font-size:13px; font-weight:600; color:var(--muted); }
+  .verdict .pass { border-color:rgba(63,185,80,.4); }
+  .verdict .fail { border-color:rgba(248,81,73,.4); }
+  .note { font-size:13px; color:var(--muted); }
+  .danger { border-left:3px solid var(--bad); }
+  .ok { border-left:3px solid var(--good); }
+  kbd { font-family:var(--mono); font-size:12px; background:#2a2f3a; border:1px solid #3a4151;
+    border-bottom-width:2px; border-radius:5px; padding:1px 6px; }
+  a { color:var(--accent); }
+  .foot { margin-top:40px; color:var(--muted); font-size:12px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header class="hero">
+  <div style="margin-bottom:8px">
+    <span class="pill gate">Gate-ready · CLEAN</span>
+    <span class="pill hold">Held for your live-PTY smoke test</span>
+  </div>
+  <h1>Smoke Test — PR #5769</h1>
+  <div class="sub">
+    <code>refactor(server): make claude-tui FormDriver an injected collaborator (#5617)</code><br>
+    Branch <code>refactor/5617-formdriver-injected-collaborator</code> ·
+    <a href="https://github.com/blamechris/chroxy/pull/5769">github.com/blamechris/chroxy/pull/5769</a>
+  </div>
+</header>
+
+<div class="panel why">
+  <p class="label">Why a human has to drive this</p>
+  <p>This PR refactors the <strong>most fragile, empirically-pinned code in the repo</strong> — the
+  AskUserQuestion form driving that types keystrokes into a live <code>claude</code> TUI. The change is a
+  <em>pure receiver swap</em> (mixin → injected collaborator) and is <strong>proven byte-for-byte
+  behavior-preserving by construction</strong> + 6 new isolated unit tests + 340 existing tests + Copilot.</p>
+  <p>But project memory (<code>tui_multi_question_form_keys</code>, <code>multi_question_post_deny_wedge</code>,
+  #4668) is blunt: some form-driving edge cases <strong>only ever surface against a real PTY</strong>. So before
+  we merge, we drive a couple of real AskUserQuestion forms through a live session and watch the TUI actually
+  land on the option you picked. ~10 minutes.</p>
+  <p class="note">The keystroke logic did <strong>not</strong> change in this PR — so if forms behaved correctly on
+  <code>main</code>, they must here. Any misbehavior you see is a real regression and a hard <strong>STOP</strong>
+  on the merge.</p>
+</div>
+
+<h2><span class="n">0</span>Pre-flight (~1 min)</h2>
+<div class="panel">
+  <p class="label">You should already be on the branch — confirm it</p>
+<pre><span class="cmt"># from the repo root: /Users/blamechris/Projects/chroxy</span>
+git branch --show-current   <span class="cmt"># → refactor/5617-formdriver-injected-collaborator</span>
+git status                  <span class="cmt"># → clean working tree</span></pre>
+  <ul class="checks">
+    <li>On branch <code>refactor/5617-formdriver-injected-collaborator</code>, clean tree.</li>
+    <li>The <code>claude</code> CLI is installed and logged in (the TUI provider spawns the real binary).</li>
+    <li>Your menu-bar <strong>Chroxy.app daemon on :8765 stays running</strong> — we use a different port so we never touch it.</li>
+  </ul>
+</div>
+
+<h2><span class="n">1</span>Start the branch server on a throwaway port (loopback only)</h2>
+<div class="panel">
+  <p>This runs <strong>this branch's source</strong> (not the published <code>npx chroxy</code>, not your :8765 daemon)
+  with the <code>claude-tui</code> provider, no tunnel, no auth, bound to loopback, on port <strong>8799</strong>.
+  Run it in its own terminal and leave it streaming logs — you'll watch them during the tests.</p>
+<pre>PORT=8799 PATH="/opt/homebrew/opt/node@22/bin:$PATH" \
+  node packages/server/src/cli.js start \
+  --provider claude-tui \
+  --no-auth \
+  --no-supervisor \
+  --host 127.0.0.1 \
+  --skip-checks \
+  --dangerously-skip-permissions \
+  --log-format text</pre>
+  <p class="note"><code>--no-auth</code> disables the tunnel and token (loopback dev only).
+  <code>--no-supervisor</code> keeps it a single foreground process so <kbd>Ctrl-C</kbd> cleanly stops it.
+  <code>--dangerously-skip-permissions</code> stops chroxy's permission gate from interrupting the form flow —
+  it does <em>not</em> affect FormDriver, it just keeps the run smooth. <code>PORT=8799</code> guarantees no
+  collision with the :8765 daemon.</p>
+  <p class="note">If the dashboard looks stale you can optionally rebuild it first (FormDriver is server-side, so
+  this is rarely needed): <code>npm run build -w @chroxy/dashboard</code></p>
+  <ul class="checks">
+    <li>Server logs <code>provider: claude-tui</code> in the startup banner and is listening on <code>127.0.0.1:8799</code>.</li>
+  </ul>
+</div>
+
+<h2><span class="n">2</span>Open the dashboard &amp; start a live session</h2>
+<div class="panel">
+  <p>Open the server-hosted dashboard in a browser:</p>
+<pre>open http://127.0.0.1:8799/dashboard</pre>
+  <ul class="checks">
+    <li>Dashboard loads (no token prompt, since <code>--no-auth</code>).</li>
+    <li>Start a new session / send a first message — confirm a <strong>real claude TUI session</strong> spins up
+        (you'll see PTY output stream into the terminal view).</li>
+  </ul>
+  <p class="note"><strong>What to watch in the server-log terminal during every answer:</strong> each time you
+  submit an answer you should see a line like<br>
+  <code>respondToQuestion: tool=… dashboardToolUseId=… text.length=… answersMap.keys=… questions=… options=…</code><br>
+  and for multi-question single-selects:
+  <code>AskUserQuestion multi-question: single-select pick at idx=N (option N+1) …</code></p>
+</div>
+
+<h2><span class="n">3</span>Run the four checks</h2>
+<p class="muted">Paste each trigger prompt into the chat as a message to claude. The model will call its built-in
+AskUserQuestion tool; answer it from the chroxy UI; confirm the live TUI lands on exactly what you chose and
+claude continues with that answer.</p>
+
+<!-- TEST A -->
+<div class="test">
+  <div class="head"><span class="tag">A</span><h3>Single multiple-choice question — option select</h3></div>
+  <div class="body">
+    <div class="row"><div class="k">Trigger</div><div>
+      <pre>Use the AskUserQuestion tool to ask me ONE single-select question:
+"Pick a fruit" with options Apple, Banana, Cherry. Then tell me which I picked.</pre>
+    </div></div>
+    <div class="row"><div class="k">Do</div><div>In the chroxy form, pick the <strong>3rd option (Cherry)</strong>.</div></div>
+    <div class="row"><div class="k">Expect</div><div class="expect">The TUI selects Cherry (the 1-indexed hotkey digit <code>3</code> is written — #4290),
+      the form submits, and claude replies confirming <strong>Cherry</strong>. No stray keystrokes, no wedge.</div></div>
+    <div class="row"><div class="k">Verdict</div><div class="verdict"><span class="pass">☐ PASS</span><span class="fail">☐ FAIL</span></div></div>
+  </div>
+</div>
+
+<!-- TEST B -->
+<div class="test">
+  <div class="head"><span class="tag">B</span><h3>Multi-question form — single-select + multi-select</h3></div>
+  <div class="body">
+    <div class="row"><div class="k">Trigger</div><div>
+      <pre>Use the AskUserQuestion tool to ask me TWO questions at once:
+1) single-select "Choose a size": Small, Medium, Large
+2) multi-select "Pick toppings": Cheese, Mushroom, Onion, Pepper
+Then summarize my answers.</pre>
+    </div></div>
+    <div class="row"><div class="k">Do</div><div>Q1 → pick <strong>Large</strong>. Q2 → check <strong>Cheese</strong> and <strong>Onion</strong>. Submit.</div></div>
+    <div class="row"><div class="k">Expect</div><div class="expect">TUI advances through both questions (digit auto-advance on the single-select,
+      Tab/space between the multi-select toggles, then Submit). claude summarizes back <strong>Large + Cheese, Onion</strong> —
+      no extra/missing toppings, no skipped question. This is the #4604/Chunk-B path the pinned byte sequences cover.</div></div>
+    <div class="row"><div class="k">Verdict</div><div class="verdict"><span class="pass">☐ PASS</span><span class="fail">☐ FAIL</span></div></div>
+  </div>
+</div>
+
+<!-- TEST C -->
+<div class="test">
+  <div class="head"><span class="tag">C</span><h3>"Other" / freeform answer — literal fallthrough</h3></div>
+  <div class="body">
+    <div class="row"><div class="k">Trigger</div><div>
+      <pre>Use the AskUserQuestion tool to ask me ONE single-select question:
+"What's your favorite color?" with options Red, Green, Blue.
+Then tell me my answer verbatim.</pre>
+    </div></div>
+    <div class="row"><div class="k">Do</div><div>Choose <strong>Other</strong> and type a freeform value, e.g. <code>chartreuse</code>. Submit.</div></div>
+    <div class="row"><div class="k">Expect</div><div class="expect">The two-stage Other flow fires: the Other hotkey is pressed, the TUI swaps to a
+      text prompt (settle delay #4651), then <code>chartreuse</code> is typed literally and submitted. claude echoes back
+      <strong>chartreuse</strong>. No truncation, no race where text lands before the prompt swap.</div></div>
+    <div class="row"><div class="k">Verdict</div><div class="verdict"><span class="pass">☐ PASS</span><span class="fail">☐ FAIL</span></div></div>
+  </div>
+</div>
+
+<!-- TEST D -->
+<div class="test">
+  <div class="head"><span class="tag">D</span><h3>Deny → retry (the #4668 post-deny wedge edge) — optional but valuable</h3></div>
+  <div class="body">
+    <div class="row"><div class="k">Trigger</div><div>Re-run Test A's prompt, but this time <strong>deny / dismiss</strong> the first
+      form (or let it time out), then ask claude to ask again and answer normally.</div></div>
+    <div class="row"><div class="k">Expect</div><div class="expect">After the deny, the retry form is answered cleanly — the second answer's keystrokes
+      go into the <em>new</em> form, not a stale one (the stale-toolUseId drop, #4668). No wedge, no keystrokes typed
+      into a dead prompt.</div></div>
+    <div class="row"><div class="k">Verdict</div><div class="verdict"><span class="pass">☐ PASS</span><span class="fail">☐ FAIL</span></div></div>
+    <div class="row"><div class="k">Note</div><div class="note">This path is the historically wedgiest one
+      (<code>multi_question_post_deny_wedge</code>). If A–C pass and you're short on time, this is the one worth the extra 2 min.</div></div>
+  </div>
+</div>
+
+<h2><span class="n">4</span>Tear down — never touch :8765</h2>
+<div class="panel danger">
+  <p>Stop <strong>only</strong> the branch server you started in Step 1: focus that terminal and press
+  <kbd>Ctrl-C</kbd> (sends SIGTERM — clean shutdown, flushes state). Your menu-bar Chroxy.app daemon on :8765
+  is a different process and must keep running.</p>
+  <p class="note">Do <strong>not</strong> <code>pkill -9</code> / <code>kill -9</code> anything — SIGKILL bypasses the
+  state-flush handler and wipes session state. Plain <kbd>Ctrl-C</kbd> only.</p>
+</div>
+
+<h2><span class="n">5</span>Verdict → what I do next</h2>
+<div class="panel ok">
+  <p><strong>If A–C (and ideally D) all PASS:</strong> tell me <em>"smoke test passed, merge #5769"</em>. I'll run the
+  final gate (CI green on the head SHA + threads resolved), then synchronously squash-merge and report the SHA.</p>
+  <p><strong>If anything FAILED:</strong> tell me which test and paste the
+  <code>respondToQuestion …</code> log line(s) from the server terminal plus what the TUI actually did. That's a real
+  regression — I'll <strong>STOP the merge</strong>, reopen #5617, and dig in (the reversal proof says it shouldn't
+  happen, so a failure is genuinely informative).</p>
+  <p class="note">Independent of the live test, the by-construction proof still holds — you can re-verify the
+  receiver swap is byte-identical to the #5559 source any time:</p>
+<pre><span class="cmt"># reversing this._host. → this. must reproduce the pre-#5617 file exactly</span>
+git show 8b0c2811b:packages/server/src/claude-tui/form-driver.js &gt; /tmp/base.js
+sed 's/this\._host\./this./g' packages/server/src/claude-tui/form-driver.js \
+  | diff - /tmp/base.js   <span class="cmt"># → method bodies identical (only header/decl differ)</span></pre>
+</div>
+
+<div class="foot">
+  Generated for the #5769 merge gate · chroxy · keep this file out of commits (docs/reports is fine to delete after).
+</div>
+
+</div>
+</body>
+</html>

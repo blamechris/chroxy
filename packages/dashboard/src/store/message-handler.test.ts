@@ -392,6 +392,36 @@ describe('dashboard message-handler dispatch', () => {
     })
   })
 
+  describe('terminal_output dispatch (#5835 PR2)', () => {
+    it('appends terminal_output bytes for the active session to the terminal', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_output', sessionId: 'sess-1', data: '\x1b[31mhi\x1b[0m' }, ctx() as any)
+      expect((store.getState() as any)._terminalWrites).toEqual(['\x1b[31mhi\x1b[0m'])
+    })
+
+    it('ignores a terminal_output for a non-active session (stale post-switch frame)', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_output', sessionId: 'other', data: 'nope' }, ctx() as any)
+      expect((store.getState() as any)._terminalWrites).toEqual([])
+    })
+
+    it('ignores a terminal_output with non-string data', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_output', sessionId: 'sess-1', data: 123 }, ctx() as any)
+      expect((store.getState() as any)._terminalWrites).toEqual([])
+    })
+
+    it('ignores a terminal_output with a missing sessionId (no bleed into active terminal)', () => {
+      store = createMockStore(baseState({ activeSessionId: 'sess-1' }))
+      setStore(store)
+      handleMessage({ type: 'terminal_output', data: 'orphan' }, ctx() as any)
+      expect((store.getState() as any)._terminalWrites).toEqual([])
+    })
+  })
+
   describe('error dispatch', () => {
     it('routes structured error messages to addServerError', () => {
       handleMessage(

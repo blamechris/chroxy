@@ -956,6 +956,10 @@ export interface ConnectionState {
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
+  // #5835 Phase 1 (PR2): opt in / out of a claude-tui session's live PTY mirror
+  // (terminal_output). Sent when the Output tab is shown for a claude-tui session.
+  subscribeTerminalMirror: (sessionId: string) => void;
+  unsubscribeTerminalMirror: (sessionId: string) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   /**
