@@ -88,7 +88,7 @@ All four gates branch on `client.boundSessionId` and reject via `sendError` (a g
 
 The WS path distinguishes a bound token via `client.boundSessionId`. HTTP requests are stateless, so the equivalent gate is **`_validatePrimaryBearerAuth(req, res)`** ([`ws-server.js`](../../packages/server/src/ws-server.js)): it accepts a token only if it validates **and** is NOT a `PairingManager`-issued session token, rejecting bound tokens with `403 { "error": "primary_token_required" }`. This is the HTTP analog of the WS host-authority gate — `403` (not `401`) because the token IS valid, just an insufficient class.
 
-The following HTTP routes ([`http-routes.js`](../../packages/server/src/http-routes.js)) are gated on the primary token class. Each one either **mints/exposes live pairing material** (a bound device could otherwise transitively onboard further peers — "pairing-bound tokens can transitively mint peers") or **discloses the primary token itself**:
+The following HTTP routes ([`http-routes.js`](../../packages/server/src/http-routes.js)) are gated on the primary token class. Each one either **mints/exposes live pairing material** (a bound device could otherwise transitively onboard further peers — "pairing-bound tokens can transitively mint peers"), **discloses the primary token itself**, or **performs a host-level mutation beyond a single session's scope**:
 
 | Route | Why primary-only |
 |---|---|
@@ -97,10 +97,11 @@ The following HTTP routes ([`http-routes.js`](../../packages/server/src/http-rou
 | `GET /pairing-code` | Returns the current typeable linking code (#5512) and extends its grace window. |
 | `GET /connect` | Returns `connection.json`, which carries the **raw primary `apiToken`** and a `connectionUrl` embedding it whenever auth is required. A bound token reaching this escalates straight to the primary token. The body's redaction branch only fires when auth is *disabled*, so it is NOT the boundary. |
 | `POST /pair-discord` | Mints a fresh approval-gated pairing id and posts its `chroxy://` link to Discord (#5513) — gated from day one. |
+| `DELETE /api/snapshots/:slug` | Host-level mutation: removes a docker image + sidecar shared across all sessions, beyond one session's scope (#5074 / audit P1-6). The `GET /api/snapshots` list stays read-only on `_validateBearerAuth`. |
 
-All five are exercised only by the daemon's **own dashboard** (`getAuthToken()` → the host's primary token via `?token=`/cookie) or the local **CLI** (`chroxy pair-code` → `connection.json` apiToken). The desktop LAN client's "Have a code?" flow (#5512) does NOT fetch these over HTTP — it takes a code typed off the host's screen and drives the WebSocket `pair` handshake directly, so no legitimate caller relies on a pairing-bound token reaching these endpoints.
+All six are exercised only by the daemon's **own dashboard** (`getAuthToken()` → the host's primary token via `?token=`/cookie) or the local **CLI** (`chroxy pair-code` → `connection.json` apiToken). The desktop LAN client's "Have a code?" flow (#5512) does NOT fetch these over HTTP — it takes a code typed off the host's screen and drives the WebSocket `pair` handshake directly, so no legitimate caller relies on a pairing-bound token reaching these endpoints.
 
-The remaining bearer-gated HTTP routes (`/version`, `/metrics`, `/diagnostics`, `/api/snapshots*`, `/api/pool/stats`) are read-only operational telemetry that exposes no pairing or credential material, so they stay on `_validateBearerAuth` (any valid token).
+The remaining bearer-gated HTTP routes (`/version`, `/metrics`, `/diagnostics`, `GET /api/snapshots`, `/api/pool/stats`) are read-only operational telemetry that exposes no pairing or credential material, so they stay on `_validateBearerAuth` (any valid token). Note the `DELETE /api/snapshots/:slug` mutation is the exception — it is primary-only (see the table above).
 
 ## 5. Per-Session Hook Secrets
 

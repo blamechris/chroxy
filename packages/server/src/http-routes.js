@@ -455,8 +455,13 @@ export function createHttpHandler(server) {
     // /api/snapshots returns, so the server never has to re-derive it
     // from the tag. Defence-in-depth: snapshots-store re-validates the
     // slug against the filename-safe charset before joining it to a path.
+    //
+    // Host-level mutation (removes a docker image + sidecar shared across all
+    // sessions), so it requires PRIMARY authority — a bound (share-a-session)
+    // token must not delete host snapshots. Mirrors the /api/pages DELETE gate.
+    // The GET list above stays on _validateBearerAuth (reads are open). (#5074 / audit P1-6)
     if (req.method === 'DELETE' && snapPath.startsWith('/api/snapshots/')) {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const rawSlug = snapPath.slice('/api/snapshots/'.length)
       let slug
       try {
