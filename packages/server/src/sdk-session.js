@@ -14,7 +14,7 @@ import {
 } from './background-shells.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { createLogger, loggerForSession } from './logger.js'
-import { PermissionManager } from './permission-manager.js'
+import { PermissionManager, wirePermissionManager } from './permission-manager.js'
 import { formatBytes } from './utils/format-bytes.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { detectThinkingKeyword } from './detect-thinking-keyword.js'
@@ -371,42 +371,17 @@ export class SdkSession extends BaseSession {
     // destroy().
     this._taskIdByToolUseId = new Map()
 
-    // Permission handling — delegated to PermissionManager
+    // Permission handling — delegated to PermissionManager. The pause/resume
+    // hooks keep the inactivity timer suspended while a permission is pending:
+    // waiting on user input is NOT inactivity, and without this a session with
+    // a pending prompt silently goes unresponsive after 5 min (#2831). The
+    // pause uses a reference count so concurrent prompts keep the timer
+    // suspended until the last one resolves. (Shared wiring extracted in P2-9.)
     this._permissions = new PermissionManager({ log })
-    this._permissions.on('permission_request', (data) => {
-      // Pause the inactivity timer: waiting on user input is NOT inactivity.
-      // Without this, sessions with pending permissions silently go
-      // unresponsive after 5 min (#2831). Pause/resume uses a reference
-      // count so concurrent prompts correctly keep the timer suspended
-      // until the last one is resolved.
-      this._pauseResultTimeoutForPermission()
-      this.emit('permission_request', data)
+    wirePermissionManager(this, this._permissions, {
+      onRequest: () => this._pauseResultTimeoutForPermission(),
+      onResolved: () => this._resumeResultTimeoutForPermission(),
     })
-    this._permissions.on('user_question', (data) => {
-      this._pauseResultTimeoutForPermission()
-      this.emit('user_question', data)
-    })
-    this._permissions.on('permission_resolved', (data) => {
-      this._resumeResultTimeoutForPermission()
-      // #3048: re-emit so the unified pipeline (SessionManager → ws-forwarding
-      // → EventNormalizer → broadcast) can fan out the resolution to every
-      // connected client.
-      //
-      // #3736: also re-emit AskUserQuestion resolutions (which carry
-      // `toolUseId` instead of `requestId`) so the EventNormalizer can prune
-      // the questionSessionMap entry. Pre-fix this branch was silently
-      // dropped and the question map leaked one entry per timeout/abort/clear.
-      // The EventNormalizer + ws-forwarding handle both shapes; the
-      // permission-audit listener in ws-server.js gates on `data.requestId`
-      // and ignores the question variant.
-      if (data && (data.requestId || data.toolUseId)) {
-        this.emit('permission_resolved', data)
-      }
-    })
-
-    // Backward-compatible accessors (used by ws-permissions.js, settings-handlers.js)
-    this._pendingPermissions = this._permissions._pendingPermissions
-    this._lastPermissionData = this._permissions._lastPermissionData
 
     // Permission pause bookkeeping for _resultTimeout (#2831)
     this._permissionPauseCount = 0

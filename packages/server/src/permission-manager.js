@@ -674,3 +674,47 @@ function normalizeAnswerValue(value) {
   }
   return ''
 }
+
+/**
+ * Wire a PermissionManager's three events to a session's own EventEmitter and
+ * install the back-compat accessors (`_pendingPermissions` / `_lastPermissionData`,
+ * read by ws-permissions.js + settings-handlers.js). Extracted from the two
+ * in-process providers (SdkSession, ByokSession) that each hand-rolled the same
+ * wiring (audit P2-9); Docker variants inherit from these.
+ *
+ * The only real asymmetry is SdkSession's inactivity-timer pause/resume around a
+ * pending permission (#2831) — passed as optional `onRequest` (fired on both
+ * permission_request and user_question, before the re-emit) and `onResolved`
+ * (fired on every permission_resolved, before the requestId/toolUseId re-emit
+ * guard). ByokSession passes neither.
+ *
+ * @param {import('events').EventEmitter} session  the session to re-emit on
+ * @param {PermissionManager} permissions
+ * @param {{ onRequest?: () => void, onResolved?: () => void }} [hooks]
+ */
+export function wirePermissionManager(session, permissions, { onRequest, onResolved } = {}) {
+  permissions.on('permission_request', (data) => {
+    if (onRequest) onRequest()
+    session.emit('permission_request', data)
+  })
+  permissions.on('user_question', (data) => {
+    if (onRequest) onRequest()
+    session.emit('user_question', data)
+  })
+  permissions.on('permission_resolved', (data) => {
+    if (onResolved) onResolved()
+    // #3048: re-emit so the unified pipeline (SessionManager → ws-forwarding →
+    // EventNormalizer → broadcast) fans the resolution out to every client.
+    // #3736: AskUserQuestion resolutions carry `toolUseId` instead of
+    // `requestId` — re-emit both shapes so the EventNormalizer can prune the
+    // questionSessionMap entry (pre-fix this branch was dropped and the map
+    // leaked one entry per timeout/abort/clear). The permission-audit listener
+    // in ws-server.js gates on `data.requestId` and ignores the question variant.
+    if (data && (data.requestId || data.toolUseId)) {
+      session.emit('permission_resolved', data)
+    }
+  })
+  // Backward-compatible accessors used by ws-permissions.js + settings-handlers.js.
+  session._pendingPermissions = permissions._pendingPermissions
+  session._lastPermissionData = permissions._lastPermissionData
+}

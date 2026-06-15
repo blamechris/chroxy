@@ -36,7 +36,7 @@
  * site.
  */
 
-import { readFileSync, statSync } from 'fs'
+import { readCredentialJsonField } from './credentials-file.js'
 import { join } from 'path'
 import { homedir } from 'os'
 import Anthropic from '@anthropic-ai/sdk'
@@ -69,47 +69,17 @@ function credentialsFilePath() {
 }
 
 /**
- * Read one field out of ~/.chroxy/credentials.json with the same 0600
- * enforcement as byok-credentials.js / deepseek-credentials.js.
+ * Read one field out of ~/.chroxy/credentials.json with 0600 enforcement.
+ * Thin wrapper over the shared reader (P2-9); its reason strings match this
+ * caller's prior format 1:1 (no env-var ENOENT prefix here), so the `code` is
+ * not consulted.
  *
  * @param {string} field - Field name (e.g. 'zaiApiKey')
  * @returns {{ key: string } | { key: null, reason: string }}
  */
 function readCredentialsField(field) {
-  const CREDENTIALS_FILE = credentialsFilePath()
-  let stat
-  try {
-    stat = statSync(CREDENTIALS_FILE)
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      return { key: null, reason: `${CREDENTIALS_FILE} does not exist` }
-    }
-    return { key: null, reason: `unable to stat ${CREDENTIALS_FILE}: ${err.message}` }
-  }
-
-  // Refuse anything more permissive than 0600 — same security boundary
-  // as the BYOK/DeepSeek resolvers. A pasted-in credentials.json
-  // defaulting to 0644 would leak the key to every local user.
-  const perms = stat.mode & 0o777
-  if (perms !== 0o600) {
-    return {
-      key: null,
-      reason: `${CREDENTIALS_FILE} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600 — run: chmod 600 ${CREDENTIALS_FILE})`,
-    }
-  }
-
-  let parsed
-  try {
-    parsed = JSON.parse(readFileSync(CREDENTIALS_FILE, 'utf8'))
-  } catch (err) {
-    return { key: null, reason: `${CREDENTIALS_FILE} unreadable or not valid JSON: ${err.message}` }
-  }
-
-  if (typeof parsed?.[field] !== 'string' || parsed[field].length === 0) {
-    return { key: null, reason: `${CREDENTIALS_FILE} missing or empty "${field}" field` }
-  }
-
-  return { key: parsed[field] }
+  const { key, reason } = readCredentialJsonField(credentialsFilePath(), field)
+  return key !== null ? { key } : { key: null, reason }
 }
 
 /**

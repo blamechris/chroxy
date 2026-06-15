@@ -2,6 +2,7 @@ import { spawn } from 'child_process'
 import { createInterface } from 'readline'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
+import { guardChildStreams } from './child-stream-guard.js'
 
 const log = createLogger('jsonl-subprocess-session')
 
@@ -345,22 +346,10 @@ export class JsonlSubprocessSession extends BaseSession {
       }
     })
 
-    // #5324 (WP-5.2) — guard the child's stdio streams against an unhandled
-    // 'error' event. A stream-level error (EPIPE on a dying child, a read fault)
-    // emitted on proc.stdout/proc.stderr with NO listener throws and crashes the
-    // WHOLE daemon. readline does not attach an error handler to its input, so
-    // proc.stdout needs its own. Log + swallow — the matching process death
-    // surfaces via 'close' (exit code) or 'error' (spawn failure), which already
-    // tear the turn down; the stream error itself carries no extra recoverable
-    // signal beyond "the pipe broke".
-    proc.stdout.on('error', (err) => {
-      if (this._destroying) return
-      log.warn(`[${Klass.providerName}] stdout stream error: ${err?.message || err}`)
-    })
-    proc.stderr.on('error', (err) => {
-      if (this._destroying) return
-      log.warn(`[${Klass.providerName}] stderr stream error: ${err?.message || err}`)
-    })
+    // #5324 (WP-5.2) — guard the child's stdout/stderr streams against an
+    // unhandled 'error' event that would crash the daemon. Shared helper (P2-9);
+    // `_destroying` flips after attach so it is read lazily.
+    guardChildStreams(proc, { destroying: () => this._destroying, log, label: Klass.providerName })
 
     proc.on('close', (code) => {
       this._process = null

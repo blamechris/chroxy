@@ -19,10 +19,10 @@
  * DeepSeek `sk-` prefix overlaps with many other key formats so it isn't
  * special-cased there — masking at the use site is the defense.
  */
-import { readFileSync, statSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import { maskApiKey } from './byok-credentials.js'
+import { readCredentialJsonField } from './credentials-file.js'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as byok-credentials.js).
@@ -42,56 +42,15 @@ export function resolveDeepSeekApiKey() {
   }
 
   const CREDENTIALS_FILE = credentialsFilePath()
-  let stat
-  try {
-    stat = statSync(CREDENTIALS_FILE)
-  } catch (err) {
-    if (err.code === 'ENOENT') {
-      return {
-        key: null,
-        source: 'none',
-        reason: `DEEPSEEK_API_KEY not set and ${CREDENTIALS_FILE} does not exist`,
-      }
-    }
-    return {
-      key: null,
-      source: 'none',
-      reason: `unable to stat ${CREDENTIALS_FILE}: ${err.message}`,
-    }
+  const result = readCredentialJsonField(CREDENTIALS_FILE, 'deepseekApiKey')
+  if (result.key !== null) {
+    return { key: result.key, source: 'file' }
   }
-
-  // Refuse anything more permissive than 0600 — same security boundary
-  // as the BYOK resolver. A pasted-in credentials.json defaulting to 0644
-  // on macOS would otherwise leak the key to every local user.
-  const perms = stat.mode & 0o777
-  if (perms !== 0o600) {
-    return {
-      key: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} has mode ${perms.toString(8).padStart(3, '0')}; refusing to read (must be 0600 — run: chmod 600 ${CREDENTIALS_FILE})`,
-    }
-  }
-
-  let parsed
-  try {
-    parsed = JSON.parse(readFileSync(CREDENTIALS_FILE, 'utf8'))
-  } catch (err) {
-    return {
-      key: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} unreadable or not valid JSON: ${err.message}`,
-    }
-  }
-
-  if (typeof parsed?.deepseekApiKey !== 'string' || parsed.deepseekApiKey.length === 0) {
-    return {
-      key: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} missing or empty "deepseekApiKey" field`,
-    }
-  }
-
-  return { key: parsed.deepseekApiKey, source: 'file' }
+  // Preserve the env-var-prefixed ENOENT hint; every other reason is verbatim.
+  const reason = result.code === 'enoent'
+    ? `DEEPSEEK_API_KEY not set and ${CREDENTIALS_FILE} does not exist`
+    : result.reason
+  return { key: null, source: 'none', reason }
 }
 
 // Re-export the masking helper so callers don't have to import from two
