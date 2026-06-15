@@ -127,8 +127,10 @@ const DATACENTER_IPV6_PREFIXES = [
  */
 export function classifyEgressIp(ip, extraPrefixes = []) {
   if (!ip || typeof ip !== 'string') return { datacenter: false }
+  // Trim operator prefixes — a copy/pasted `" 2a02:1370: "` passes config
+  // validation (non-empty string) but would otherwise never match.
   const extra = Array.isArray(extraPrefixes)
-    ? extraPrefixes.filter((p) => typeof p === 'string' && p.length > 0)
+    ? extraPrefixes.filter((p) => typeof p === 'string').map((p) => p.trim()).filter((p) => p.length > 0)
     : []
 
   let hit = false

@@ -41,6 +41,12 @@ test('returns null for a malformed IPv6 body', async () => {
   assert.equal(ip, null)
 })
 
+test('caps an oversized body before validation (captive portal / error page)', async () => {
+  const big = `${':'.repeat(100)}` // long, colon-laden, not an IP
+  const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => ({ ok: true, text: async () => big })) })
+  assert.equal(ip, null)
+})
+
 test('defaults to a dual-stack echo endpoint so IPv6-only hosts resolve (#5831)', async () => {
   let seen = null
   await resolvePublicIp({ fetchImpl: fakeFetch(async (url) => { seen = url; return { ok: true, text: async () => '2a01:4f8::1' } }) })

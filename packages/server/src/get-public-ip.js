@@ -36,6 +36,11 @@ export async function resolvePublicIp({ url = DEFAULT_IP_ECHO_URL, timeoutMs = D
     const res = await fetchImpl(url, { signal: controller.signal })
     if (!res || !res.ok) return null
     const text = (await res.text()).trim()
+    // Keep this strictly an IP-literal parser: a real IP literal is short (IPv6
+    // tops out at 45 chars), so cap the body BEFORE the validators — a large
+    // captive-portal / error page (which may contain `:`) must not be fed through
+    // isIpv6's splitting work. Over the cap → not an IP.
+    if (text.length > 45) return null
     // Only accept a plausible IPv4 or IPv6 — the classifier handles both — so a
     // junk/HTML body (captive portal, error page) is never treated as an IP.
     return (isIpv4(text) || isIpv6(text)) ? text : null

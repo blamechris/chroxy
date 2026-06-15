@@ -102,6 +102,9 @@ test('classifyEgressIp honours operator-supplied IPv6 prefixes (#5831)', () => {
   // v4 extras do not bleed into v6 matching and vice versa.
   assert.equal(classifyEgressIp('2a02:1370:c000::5', ['203.0.113.']).datacenter, false)
   assert.equal(classifyEgressIp('203.0.113.9', ['2a02:1370:']).datacenter, false)
+  // Copy/paste whitespace around an operator prefix is trimmed (both families).
+  assert.equal(classifyEgressIp('2a02:1370:c000::5', ['  2a02:1370:  ']).datacenter, true)
+  assert.equal(classifyEgressIp('198.51.100.5', [' 198.51.100. ']).datacenter, true)
 })
 
 test('classifyEgressIp honours operator-supplied extra prefixes (#5828)', () => {
