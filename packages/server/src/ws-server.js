@@ -29,6 +29,7 @@ import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
+import { terminalMirrorRecipient } from './handler-utils.js'
 import { getProviderDataDirs } from './providers.js'
 import { assertCtxShape } from './ws-handler-context.js'
 import { isLoopbackHost } from './bind-host.js'
@@ -570,7 +571,18 @@ export class WsServer {
       pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
     })
     this._clientSend = createClientSender(log)
-    this._clientManager = new WsClientManager()
+    // audit P1-2: when a client's active session changes, re-sync the live
+    // terminal mirror gate for BOTH the session it left and the one it joined.
+    // Without this a client opted into session A's terminal that switches to B
+    // would fall out of A's delivery filter while A's coalescer kept running to
+    // nobody (the waste #5837/#5844 set out to kill). _syncTerminalMirror
+    // no-ops on a null id, so passing prev=null is safe.
+    this._clientManager = new WsClientManager({
+      onActiveSessionChanged: (_client, prev, next) => {
+        this._syncTerminalMirror(prev)
+        this._syncTerminalMirror(next)
+      },
+    })
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
     // #4835: per-device active-session memory. Caller can inject a custom
     // store (tests do this with a tmp file path); otherwise we construct
@@ -2192,16 +2204,11 @@ export class WsServer {
     if (typeof entry?.session?.setTerminalMirrorActive !== 'function') return
     let active = false
     for (const client of this.clients.values()) {
-      // Count a client only if it would actually RECEIVE terminal_output — i.e. it
-      // matches ws-forwarding's terminalSubscriberFilter: opted into the terminal
-      // (terminalSessionIds) AND a viewer of the session (active or subscribed).
-      // An opted-in-but-not-viewing client gets nothing, so it must not keep the
-      // coalescer running (#5844 review — align the gate with the delivery audience).
-      if (
-        client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
-        (client.activeSessionId === sessionId ||
-          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId)))
-      ) {
+      // Count a client only if it would actually RECEIVE terminal_output — the
+      // SAME predicate ws-forwarding's terminalSubscriberFilter delivers on, so
+      // the coalescer gate and the delivery audience can never diverge (#5844
+      // review). Shared via terminalMirrorRecipient (audit P1-2).
+      if (terminalMirrorRecipient(client, sessionId)) {
         active = true
         break
       }

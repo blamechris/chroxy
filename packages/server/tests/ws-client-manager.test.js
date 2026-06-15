@@ -635,4 +635,48 @@ describe('WsClientManager', () => {
       assert.strictEqual(manager.getPrimary('s1'), 'observer')
     })
   })
+
+  // audit P1-2: the active-session change hook is the single choke point ws-server
+  // uses to re-sync the live terminal mirror gate for the old + new session, so
+  // every setActiveSession caller (switch_session, checkpoint, conversation,
+  // re-home) inherits the invariant rather than patching each call site.
+  describe('onActiveSessionChanged hook', () => {
+    function createClientInfo(overrides = {}) {
+      return { id: 'c1', authenticated: true, activeSessionId: null, subscribedSessionIds: new Set(), _ws: createMockWs(1), ...overrides }
+    }
+
+    it('fires with (client, prev, next) after a real change, index already settled', () => {
+      const calls = []
+      const mgr = new WsClientManager({ onActiveSessionChanged: (c, prev, next) => calls.push({ id: c.id, prev, next, indexed: [...mgr.getSessionSubscribers(next || '')].length }) })
+      const client = createClientInfo()
+      mgr.addClient(client._ws, client)
+
+      mgr.setActiveSession(client, 's1')
+      mgr.setActiveSession(client, 's2')
+
+      assert.deepStrictEqual(calls, [
+        { id: 'c1', prev: null, next: 's1', indexed: 1 },
+        { id: 'c1', prev: 's1', next: 's2', indexed: 1 },
+      ])
+    })
+
+    it('does NOT fire when the active session is unchanged', () => {
+      let count = 0
+      const mgr = new WsClientManager({ onActiveSessionChanged: () => { count++ } })
+      const client = createClientInfo()
+      mgr.addClient(client._ws, client)
+      mgr.setActiveSession(client, 's1')
+      mgr.setActiveSession(client, 's1') // no-op (prev === next)
+      assert.strictEqual(count, 1)
+    })
+
+    it('a throwing listener does not corrupt the index', () => {
+      const mgr = new WsClientManager({ onActiveSessionChanged: () => { throw new Error('boom') } })
+      const client = createClientInfo()
+      mgr.addClient(client._ws, client)
+      assert.doesNotThrow(() => mgr.setActiveSession(client, 's1'))
+      assert.deepStrictEqual([...mgr.getSessionSubscribers('s1')].map(c => c.id), ['c1'])
+      mgr.verifyIndexIntegrity()
+    })
+  })
 })
