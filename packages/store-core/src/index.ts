@@ -729,8 +729,10 @@ export type {
 } from './multi-question-form'
 
 // #5800 — shared tool-result-envelope unwrap, hoisted from the dashboard's
-// `lib/tool-result-text.ts` so the app gains the same `{stdout,stderr}` →
-// terminal-text normalisation. Zero behavior change for the dashboard.
+// `lib/tool-result-text.ts` so the `{stdout,stderr}` → terminal-text
+// normalisation is AVAILABLE for future app use (#5813: the app has no
+// tool-result-envelope Output surface today and doesn't call it — no current
+// parity gap). Zero behavior change for the dashboard.
 export {
   unwrapToolResultText,
 } from './tool-result-text'
