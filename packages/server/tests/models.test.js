@@ -844,7 +844,11 @@ describe('isClaudeProvider — Claude-family provider allowlist', () => {
   })
 
   it('honours the static claudeFamily flag for external providers', () => {
-    assert.equal(isClaudeProvider('some-external', { claudeFamily: true }), true)
-    assert.equal(isClaudeProvider('some-external', { claudeFamily: false }), false)
+    // Match the real call site: a ProviderClass with a static claudeFamily flag,
+    // not a plain object (createSession passes the provider class).
+    class ClaudeFamilyProvider { static claudeFamily = true }
+    class NonClaudeProvider { static claudeFamily = false }
+    assert.equal(isClaudeProvider('some-external', ClaudeFamilyProvider), true)
+    assert.equal(isClaudeProvider('some-external', NonClaudeProvider), false)
   })
 })
