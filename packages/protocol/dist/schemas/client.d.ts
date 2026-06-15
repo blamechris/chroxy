@@ -532,6 +532,14 @@ export declare const UnsubscribeSessionsSchema: z.ZodObject<{
     type: z.ZodLiteral<"unsubscribe_sessions">;
     sessionIds: z.ZodArray<z.ZodString>;
 }, z.core.$strip>;
+export declare const TerminalSubscribeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_subscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>;
+export declare const TerminalUnsubscribeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_unsubscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>;
 export declare const ClientVisibleSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;
@@ -921,6 +929,12 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"unsubscribe_sessions">;
     sessionIds: z.ZodArray<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_subscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_unsubscribe">;
+    sessionId: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;

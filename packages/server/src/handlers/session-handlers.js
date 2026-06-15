@@ -345,6 +345,26 @@ function handleUnsubscribeSessions(ws, client, msg, ctx) {
   })
 }
 
+// #5835 Phase 1: opt the client IN to a session's live PTY mirror. Only clients
+// in `terminalSessionIds` receive `terminal_output` (ws-forwarding's filter), so
+// a Chat-tab client never pays for raw bytes it isn't rendering. A bound client
+// may only watch its own session, mirroring handleSubscribeSessions.
+function handleTerminalSubscribe(ws, client, msg, ctx) {
+  const sid = msg.sessionId
+  if (client.boundSessionId && client.boundSessionId !== sid) return
+  // Parity with handleSubscribeSessions: only track a REAL session, so a client
+  // can't grow terminalSessionIds unboundedly with junk ids.
+  if (!ctx?.sessions?.sessionManager?.getSession?.(sid)) return
+  if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
+  client.terminalSessionIds.add(sid)
+}
+
+// #5835 Phase 1: opt the client OUT of a session's live PTY mirror (e.g. the
+// dashboard leaving the Output tab). Idempotent.
+function handleTerminalUnsubscribe(ws, client, msg) {
+  if (client.terminalSessionIds) client.terminalSessionIds.delete(msg.sessionId)
+}
+
 // #3404: mobile app sends this when foreground/background state changes so
 // the server can suppress idle/completion pushes only for foreground viewers.
 // Backgrounded clients with still-alive sockets must NOT be treated as active
@@ -427,6 +447,8 @@ export const sessionHandlers = {
   rename_session: handleRenameSession,
   subscribe_sessions: handleSubscribeSessions,
   unsubscribe_sessions: handleUnsubscribeSessions,
+  terminal_subscribe: handleTerminalSubscribe,
+  terminal_unsubscribe: handleTerminalUnsubscribe,
   client_visible: handleClientVisible,
   claim_primary: handleClaimPrimary,
 }
