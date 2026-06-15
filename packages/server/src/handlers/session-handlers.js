@@ -349,9 +349,12 @@ function handleUnsubscribeSessions(ws, client, msg, ctx) {
 // in `terminalSessionIds` receive `terminal_output` (ws-forwarding's filter), so
 // a Chat-tab client never pays for raw bytes it isn't rendering. A bound client
 // may only watch its own session, mirroring handleSubscribeSessions.
-function handleTerminalSubscribe(ws, client, msg) {
+function handleTerminalSubscribe(ws, client, msg, ctx) {
   const sid = msg.sessionId
   if (client.boundSessionId && client.boundSessionId !== sid) return
+  // Parity with handleSubscribeSessions: only track a REAL session, so a client
+  // can't grow terminalSessionIds unboundedly with junk ids.
+  if (!ctx?.sessions?.sessionManager?.getSession?.(sid)) return
   if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
   client.terminalSessionIds.add(sid)
 }

@@ -708,11 +708,19 @@ describe('session-handlers', () => {
   })
 
   describe('terminal_subscribe / terminal_unsubscribe (#5835)', () => {
-    it('terminal_subscribe adds the session to the client terminal set', () => {
+    it('terminal_subscribe adds an existing session to the client terminal set', () => {
       const ctx = makeCtx()
+      ctx._sessions.set('sess-1', { session: {}, cwd: '/tmp', name: 'S1' })
       const client = makeClient()
       sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
       assert.ok(client.terminalSessionIds.has('sess-1'))
+    })
+
+    it('terminal_subscribe to a non-existent session is a no-op (no junk-id growth)', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+      sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'ghost' }, ctx)
+      assert.ok(!client.terminalSessionIds || !client.terminalSessionIds.has('ghost'))
     })
 
     it('terminal_unsubscribe removes the session and is idempotent', () => {
@@ -727,6 +735,8 @@ describe('session-handlers', () => {
 
     it('a bound client cannot subscribe to a different session', () => {
       const ctx = makeCtx()
+      ctx._sessions.set('sess-other', { session: {}, cwd: '/tmp', name: 'O' })
+      ctx._sessions.set('sess-bound', { session: {}, cwd: '/tmp', name: 'B' })
       const client = makeClient({ boundSessionId: 'sess-bound' })
       sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-other' }, ctx)
       assert.ok(!client.terminalSessionIds || !client.terminalSessionIds.has('sess-other'))
