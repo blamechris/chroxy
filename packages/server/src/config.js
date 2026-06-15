@@ -442,6 +442,10 @@ const MAX_DISCORD_COLOR = 16777215
 const DISCORD_SUPPORTED_KEYS = new Set([
   'botName', 'billingAlerts', 'defaultColor', 'permissionColor', 'errorColor',
   'colors', 'updateThrottleMs', 'heartbeatIntervalMs', 'pruneAfterMs',
+  // #5676 status-watchdog tunables — the sink reads these from the config spread
+  // (discord-webhook-sink.js: staleAfterMs/offlineAfterMs, default 10m/30m), so
+  // they are real config knobs, not test seams (PR #5845 review).
+  'staleAfterMs', 'offlineAfterMs',
 ])
 const DISCORD_SECRET_KEYS = ['webhookUrl', 'webhook', 'url']
 
@@ -586,6 +590,18 @@ function validateDiscordNotificationsBlock(discord, warnings) {
       warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': expected a number >= 0 (0 disables pruning), got ${JSON.stringify(v)}`)
     } else if (v !== 0 && v < 60_000) {
       warnings.push(`Invalid value for 'notifications.discord.pruneAfterMs': ${v} (minimum 60000 / 60s; set 0 to disable pruning — the sink falls back to its default)`)
+    }
+  }
+
+  // #5676 status-watchdog tunables: the sink honors any finite >= 0 value, else
+  // falls back to its default (10m stale / 30m offline). Validate to keep
+  // DISCORD_SUPPORTED_KEYS in sync with the per-key checks (PR #5845 review).
+  for (const key of ['staleAfterMs', 'offlineAfterMs']) {
+    if (Object.prototype.hasOwnProperty.call(discord, key)) {
+      const v = discord[key]
+      if (typeof v !== 'number' || !Number.isFinite(v) || v < 0) {
+        warnings.push(`Invalid value for 'notifications.discord.${key}': expected a number >= 0 (the sink falls back to its default), got ${JSON.stringify(v)}`)
+      }
     }
   }
 

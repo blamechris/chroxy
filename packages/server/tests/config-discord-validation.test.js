@@ -31,12 +31,27 @@ describe('validateConfig — notifications.discord unknown keys (#5453)', () => 
     assert.ok(result.warnings.some(w => w.startsWith("Invalid value for 'notifications.discord.botname'")))
   })
 
-  it('does NOT warn-as-unknown for recognised knobs', () => {
+  it('does NOT warn-as-unknown for recognised knobs (incl. #5676 watchdog tunables)', () => {
     const ws = discordWarnings({
       botName: 'Bot', billingAlerts: true, defaultColor: 0, permissionColor: 1, errorColor: 2,
       colors: {}, updateThrottleMs: 0, heartbeatIntervalMs: 0, pruneAfterMs: 0,
+      staleAfterMs: 600000, offlineAfterMs: 1800000,
     })
     assert.ok(!ws.some(w => w.includes('unknown key')), `recognised knobs should not warn as unknown, got: ${JSON.stringify(ws)}`)
+  })
+
+  it('validates the #5676 watchdog tunables as numbers >= 0 (not unknown)', () => {
+    const ws = discordWarnings({ staleAfterMs: -1, offlineAfterMs: 'nope' })
+    assert.ok(ws.some(w => w.includes("'notifications.discord.staleAfterMs'") && w.includes('number >= 0')))
+    assert.ok(ws.some(w => w.includes("'notifications.discord.offlineAfterMs'") && w.includes('number >= 0')))
+    assert.ok(!ws.some(w => w.includes('unknown key')), 'known-but-invalid knobs get a value warning, not unknown-key')
+  })
+
+  it('an empty or non-object discord block produces no unknown-key warnings', () => {
+    assert.ok(!discordWarnings({}).some(w => w.includes('unknown key')), 'empty block → no unknown keys')
+    // a non-object block early-returns with a type warning and never enters the key loop
+    assert.doesNotThrow(() => discordWarnings('nope'))
+    assert.ok(!discordWarnings('nope').some(w => w.includes('unknown key')))
   })
 
   it('does NOT double-warn secret keys as unknown (they get their own secret warning)', () => {
