@@ -5,11 +5,7 @@
  * token is rejected); status reads are open to any authenticated client.
  */
 import { sendError } from '../handler-utils.js'
-import {
-  getAnthropicApiKeyStatus,
-  writeAnthropicApiKey,
-  clearAnthropicApiKey,
-} from '../byok-credentials.js'
+import { getAnthropicApiKeyStatus } from '../byok-credentials.js'
 import {
   getCredentialsStatus,
   setStoredCredential,
@@ -68,6 +64,12 @@ function rejectCredentialWriteIfBound(ws, client, msg, ctx) {
  * Auth posture: status reads are open to any authenticated WS client. WRITES
  * (set/clear) require host-level authority — a pairing-bound session token is
  * rejected via `rejectCredentialWriteIfBound` (#5155).
+ *
+ * #5867: set/clear now go through the canonical `setStoredCredential` /
+ * `deleteStoredCredential` (merge + at-rest encryption) instead of the legacy
+ * whole-file overwrite/unlink, so a BYOK write no longer wipes sibling provider
+ * keys or downgrades an encrypted store to plaintext. The status surface stays
+ * the BYOK-specific `getAnthropicApiKeyStatus` for dashboard back-compat.
  */
 function handleByokGetCredentialsStatus(ws, client, msg, ctx) {
   const status = getAnthropicApiKeyStatus()
@@ -84,16 +86,18 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'anthropicApiKey is required', undefined, ctx)
     return
   }
-  // Reject anything that doesn't even look like a key. The Anthropic key
-  // format starts with `sk-ant-`. We don't validate further — formats can
-  // evolve — but the prefix check catches obvious pastes-of-the-wrong-
-  // thing (e.g. OpenAI keys, OAuth tokens) before we persist them.
+  // Reject anything that doesn't even look like a key BEFORE persisting (the
+  // store validates too, but this gives the nicer BYOK-specific error). The
+  // Anthropic key format starts with `sk-ant-`; the prefix check catches
+  // obvious wrong-thing pastes (OpenAI keys, OAuth tokens).
   if (!key.startsWith('sk-ant-')) {
     sendError(ws, msg?.requestId, 'INVALID_REQUEST', 'API key must start with sk-ant-', undefined, ctx)
     return
   }
   try {
-    writeAnthropicApiKey(key)
+    // Merge into the canonical store (encrypt-at-rest aware) — never the legacy
+    // whole-file overwrite that wiped sibling provider keys (#5867).
+    setStoredCredential('ANTHROPIC_API_KEY', key)
   } catch (err) {
     log.warn(`byok_set_credentials write failed: ${err?.message}`)
     sendError(ws, msg?.requestId, 'CREDENTIALS_WRITE_FAILED', err?.message || 'write failed', undefined, ctx)
@@ -113,7 +117,9 @@ function handleByokSetCredentials(ws, client, msg, ctx) {
 function handleByokClearCredentials(ws, client, msg, ctx) {
   if (rejectCredentialWriteIfBound(ws, client, msg, ctx)) return
   try {
-    clearAnthropicApiKey()
+    // Remove only the Anthropic key from the canonical store — siblings (and
+    // the encrypted envelope) survive; the file is unlinked only when empty.
+    deleteStoredCredential('ANTHROPIC_API_KEY')
   } catch (err) {
     sendError(ws, msg?.requestId, 'CREDENTIALS_CLEAR_FAILED', err?.message || 'clear failed', undefined, ctx)
     return

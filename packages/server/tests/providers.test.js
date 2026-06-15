@@ -1269,7 +1269,9 @@ describe('listProviders credential-file caching (#4658)', () => {
         const afterBlank = listProviders().find(p => p.name === 'claude-byok').auth
         assert.equal(afterBlank.ready, false,
           'cache must refresh on mtime change — otherwise we would still report ready=true after blanking')
-        assert.match(afterBlank.detail, /missing or empty "anthropicApiKey" field/)
+        // #5867: reason wording updated when the BYOK read moved to the
+        // canonical store ("no Anthropic credential is stored").
+        assert.match(afterBlank.detail, /no Anthropic credential is stored/)
       } finally {
         teardown()
       }
