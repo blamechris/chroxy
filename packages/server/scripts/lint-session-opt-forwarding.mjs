@@ -286,43 +286,53 @@ function parseBaseSessionOptKeysArray(baseSessionPath) {
 // regex matched only the two roots, so those six were invisible to the lint.
 const ROOT_SESSION_BASES = ['BaseSession', 'JsonlSubprocessSession']
 
-// Parents whose subclasses must NOT forward via the buildBaseSessionOpts()
+// Ancestors whose descendants must NOT forward via the buildBaseSessionOpts()
 // picker: ClaudeByokSession reads provider-local opts (mcpConfigPath /
 // mcpToolCallTimeoutMs / mcpStartCapMs) off the RAW opts object, which the
 // picker — copying only the 20 BASE_SESSION_OPT_KEYS — would silently drop. A
 // spread/positional super forwards them. #5367 moved the middle-layer trap from
-// base opts onto these provider-local opts (audit P2-1, second finding).
-const PICKER_FORBIDDEN_PARENTS = new Set(['ClaudeByokSession'])
+// base opts onto these provider-local opts (audit P2-1, second finding). The ban
+// applies to EVERY transitive descendant (a grandchild via the picker drops the
+// opts one level deeper), not just direct children — ClaudeByokSession itself is
+// exempt: it IS the consumer and correctly uses the picker toward BaseSession.
+const PICKER_FORBIDDEN_ANCESTORS = ['ClaudeByokSession']
 
 // Matches `class X extends Y` (with or without `export`, any indentation — the
 // factory-defined AnthropicCompatibleSession is a plain `class`, not exported).
 const ANY_CLASS_RE = /(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b/g
 
-/**
- * Transitively discover every session subclass name by fixpoint: seed with the
- * roots, then repeatedly add any `class X extends Y` whose Y is already known
- * until closure. `allStrippedSources` is every session file's comment-stripped
- * source. Returns the full Set of base names (roots included).
- */
-function discoverSessionBases(allStrippedSources) {
+/** Collect every `class X extends Y` edge ({ child, parent }) across all sources. */
+function collectClassEdges(allStrippedSources) {
   const edges = []
   for (const stripped of allStrippedSources) {
     for (const m of stripped.matchAll(ANY_CLASS_RE)) {
       edges.push({ child: m[1], parent: m[2] })
     }
   }
-  const bases = new Set(ROOT_SESSION_BASES)
+  return edges
+}
+
+/**
+ * Transitive descendant closure by fixpoint: starting from `seeds`, repeatedly
+ * add any `class X extends Y` whose Y is a seed or already-collected descendant,
+ * until closure. `includeSeeds` controls whether the seeds themselves are in the
+ * result (true for session-base discovery — the roots ARE bases; false for the
+ * picker ban — the ancestor itself is exempt, only its descendants are banned).
+ */
+function descendantClosure(edges, seeds, { includeSeeds }) {
+  const seedSet = new Set(seeds)
+  const out = new Set(includeSeeds ? seeds : [])
   let changed = true
   while (changed) {
     changed = false
     for (const { child, parent } of edges) {
-      if (bases.has(parent) && !bases.has(child)) {
-        bases.add(child)
+      if ((seedSet.has(parent) || out.has(parent)) && !out.has(child)) {
+        out.add(child)
         changed = true
       }
     }
   }
-  return bases
+  return out
 }
 
 /** Build a `class X extends <one of baseNames>` global matcher (m[1]=class, m[2]=parent). */
@@ -527,10 +537,14 @@ function main() {
   }
 
   const allFiles = walk(SRC_DIR)
-  // Discover the transitive session-base closure across ALL files (incl.
-  // base-session.js) so the fixpoint sees every `class … extends …` edge, then
-  // build the matcher that picks up direct AND second-tier subclasses.
-  const sessionBases = discoverSessionBases(allFiles.map(f => stripComments(readFileSync(f, 'utf8'))))
+  // Collect every class→parent edge across ALL files (incl. base-session.js) so
+  // both fixpoints see the full graph, then derive: the session-base closure
+  // (roots + every transitive subclass → the scan matcher picks up direct AND
+  // second-tier subclasses) and the picker-ban set (every transitive descendant
+  // of a forbidden ancestor, ancestor itself exempt).
+  const classEdges = collectClassEdges(allFiles.map(f => stripComments(readFileSync(f, 'utf8'))))
+  const sessionBases = descendantClosure(classEdges, ROOT_SESSION_BASES, { includeSeeds: true })
+  const pickerForbidden = descendantClosure(classEdges, PICKER_FORBIDDEN_ANCESTORS, { includeSeeds: false })
   const classRe = buildSessionClassRegex(sessionBases)
 
   const files = allFiles.filter(f => !f.endsWith('/base-session.js'))
@@ -545,7 +559,6 @@ function main() {
     let m
     while ((m = classRe.exec(strippedSrc)) !== null) {
       const className = m[1]
-      const parentName = m[2]
       const classDeclIdx = m.index
       const declLine = lineOf(strippedSrc, classDeclIdx)
       const ignore = findIgnoreList(origSrc, declLine)
@@ -559,8 +572,11 @@ function main() {
       // parent reads provider-local opts off raw opts (audit P2-1), where the
       // picker drops them.
       if (analysis.compliant === 'picker') {
-        if (PICKER_FORBIDDEN_PARENTS.has(parentName)) {
-          offenders.push({ file, line: declLine, className, pickerForbidden: parentName })
+        // Banned for EVERY transitive descendant of a forbidden ancestor, not
+        // just direct children — a grandchild via the picker drops the
+        // provider-local opts one level deeper.
+        if (pickerForbidden.has(className)) {
+          offenders.push({ file, line: declLine, className, pickerForbidden: true })
         }
         continue
       }
@@ -612,10 +628,10 @@ function main() {
     for (const o of offenders) {
       console.error(`  ${o.file}:${o.line}  class ${o.className}`)
       if (o.pickerForbidden) {
-        console.error(`    Uses super(buildBaseSessionOpts(...)) but extends ${o.pickerForbidden}, which`)
-        console.error('    reads provider-local opts (mcpConfigPath / mcpToolCallTimeoutMs / mcpStartCapMs)')
-        console.error('    off raw opts — the picker copies only BASE_SESSION_OPT_KEYS and would silently')
-        console.error('    drop them. Forward with super({ ...opts, <overrides> }) instead.')
+        console.error('    Uses super(buildBaseSessionOpts(...)) but descends from ClaudeByokSession,')
+        console.error('    which reads provider-local opts (mcpConfigPath / mcpToolCallTimeoutMs /')
+        console.error('    mcpStartCapMs) off raw opts — the picker copies only BASE_SESSION_OPT_KEYS and')
+        console.error('    would silently drop them. Forward with super({ ...opts, <overrides> }) instead.')
         continue
       }
       if (o.unrecognizedSuper !== undefined) {

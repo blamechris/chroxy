@@ -476,6 +476,51 @@ export class DeepSeekSession extends ClaudeByokSession {
     assert.match(stderr, /provider-local|picker|buildBaseSessionOpts/, 'error should explain the picker ban')
   })
 
+  // audit P2-1 — the picker ban must reach TRANSITIVE descendants, not just
+  // direct children: a grandchild (extends DeepSeekSession extends
+  // ClaudeByokSession) using the picker still drops the provider-local opts one
+  // level deeper. Must be flagged.
+  test('bans the picker on a GRANDCHILD of ClaudeByokSession — P2-1', () => {
+    const BYOK_BASE_SRC = `
+import { BaseSession } from './base-session.js'
+
+export class ClaudeByokSession extends BaseSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: opts.provider || 'claude-byok' })
+  }
+}
+`
+    const MID_BYOK_SRC = `
+import { ClaudeByokSession } from './byok-session.js'
+
+export class DeepSeekSession extends ClaudeByokSession {
+  constructor(opts = {}) {
+    super({ ...opts, provider: 'deepseek' })
+  }
+}
+`
+    const GRANDCHILD_PICKER_SRC = `
+import { buildBaseSessionOpts } from './base-session.js'
+import { DeepSeekSession } from './deepseek-session.js'
+
+export class DeepSeekProSession extends DeepSeekSession {
+  constructor(opts = {}) {
+    super(buildBaseSessionOpts(opts, { provider: 'deepseek-pro' }))
+  }
+}
+`
+    const { dir, srcDir } = setupFixtureTree({
+      'byok-session.js': BYOK_BASE_SRC,
+      'deepseek-session.js': MID_BYOK_SRC,
+      'deepseek-pro-session.js': GRANDCHILD_PICKER_SRC,
+    })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'picker on a grandchild of ClaudeByokSession must fail')
+    assert.match(stderr, /DeepSeekProSession/, 'error should name the grandchild')
+    assert.match(stderr, /provider-local|ClaudeByokSession|buildBaseSessionOpts/, 'error should explain the picker ban')
+  })
+
   // audit P2-1 — control: a ClaudeByokSession subclass using a SPREAD super
   // (the real shape) is fine; the ban targets ONLY the picker.
   test('allows a spread super on a subclass of ClaudeByokSession — P2-1', () => {
