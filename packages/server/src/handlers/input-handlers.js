@@ -6,7 +6,7 @@
  *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger, sessionLogger } from '../logger.js'
@@ -941,7 +941,10 @@ function handleTerminalInput(ws, client, msg, ctx) {
   if (!entry) {
     // Disambiguate a binding mismatch from a truly-missing session (same as
     // handleInput/handleInterrupt) so a bound client aiming elsewhere sees the
-    // canonical SESSION_TOKEN_MISMATCH rather than a silent drop.
+    // canonical SESSION_TOKEN_MISMATCH rather than a silent drop. A truly-missing
+    // session returns silently (no SESSION_NOT_FOUND envelope, unlike handleInput):
+    // terminal_input is a high-frequency keystroke stream, so a per-key error toast
+    // would be noise — the dashboard already clears stale ids off the chat path.
     if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
       log.info(`terminal_input rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
       ctx.transport.send(ws, {
@@ -955,6 +958,13 @@ function handleTerminalInput(ws, client, msg, ctx) {
     return
   }
   if (typeof entry.session.writeTerminalInput !== 'function') return
+  // Must be VIEWING the session to drive its PTY (#5842 review) — parity with
+  // terminal_resize/terminal_size (#5840): keystrokes are strictly more powerful
+  // than a resize, so they require at least the same viewer precondition. A client
+  // that merely knows an (even unclaimed) session id can't silently become its
+  // driver without watching it. The normal flow (Output tab open → activeSessionId
+  // === sid) passes; this only blocks blind cross-session poking.
+  if (!isSessionViewer(client, sid)) return
   if (typeof msg.data !== 'string' || msg.data.length === 0) return
   // Single-driver gate: claim (or confirm) primary; reject an observer's keystroke.
   const res = ctx.transport.claimPrimary(sid, client.id)

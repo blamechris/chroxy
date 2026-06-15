@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
@@ -343,17 +343,6 @@ function handleUnsubscribeSessions(ws, client, msg, ctx) {
     type: 'subscriptions_updated',
     subscribedSessionIds: [...client.subscribedSessionIds],
   })
-}
-
-// #5835 Phase 2: a client views a session iff it's its active session or in its
-// subscribed set — the SAME viewing clause ws-forwarding's terminalSubscriberFilter
-// uses to scope terminal_output/terminal_size broadcasts. Any direct terminal_size
-// send or PTY-mutating resize must gate on this too, so terminal state (incl. that
-// a session is claude-tui) never leaks to a non-viewer who merely knows the id
-// (#5840 Copilot review).
-function isSessionViewer(client, sid) {
-  return client.activeSessionId === sid ||
-    Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
 }
 
 // #5835 Phase 1: opt the client IN to a session's live PTY mirror. Only clients

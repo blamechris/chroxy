@@ -1976,5 +1976,22 @@ describe('input-handlers', () => {
       assert.doesNotThrow(() =>
         inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: 'x' }, ctx))
     })
+
+    it('rejects a NON-viewer (not active, not subscribed) — no write, no primary claim', () => {
+      const { ctx, writes } = makeTuiCtx()
+      // Knows the id but isn't watching the session (activeSessionId is elsewhere).
+      const stranger = makeClient({ id: 'stranger', activeSessionId: 'other' })
+      inputHandlers.terminal_input(makeWs(), stranger, { sessionId: 's1', data: 'x' }, ctx)
+      assert.equal(writes.length, 0, 'no bytes written for a non-viewer')
+      assert.equal(ctx.transport.getPrimary('s1'), undefined, 'non-viewer must not claim primary')
+    })
+
+    it('a subscribed (non-active) viewer may drive', () => {
+      const { ctx, writes } = makeTuiCtx()
+      const client = makeClient({ id: 'me', activeSessionId: 'other', subscribedSessionIds: new Set(['s1']) })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 's1', data: 'k' }, ctx)
+      assert.deepEqual(writes, ['k'])
+      assert.equal(ctx.transport.getPrimary('s1'), 'me')
+    })
   })
 })
