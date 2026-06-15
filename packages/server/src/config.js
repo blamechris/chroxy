@@ -258,8 +258,11 @@ const CONFIG_SCHEMA = {
 
 /**
  * Config keys that should be masked in verbose output and sanitized logs.
+ * `pushToken` was a dead entry — it is never a CONFIG_SCHEMA key; push tokens
+ * are runtime device registrations (`prefs.devices`), masked elsewhere. The
+ * only real config secret is `apiToken`. (audit P2-12)
  */
-const SENSITIVE_KEYS = ['apiToken', 'pushToken']
+const SENSITIVE_KEYS = ['apiToken']
 
 /**
  * #5144: recognised values for `environments.backend`. 'docker' is the default

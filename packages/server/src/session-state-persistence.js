@@ -198,12 +198,33 @@ export class SessionStatePersistence {
       return null
     }
 
-    // Reject stale state (older than TTL, default 24h)
-    if (state.timestamp && Date.now() - state.timestamp > this._stateTtlMs) {
-      log.info(`Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
+    // Reject stale sessions PER ENTRY (older than TTL, default 24h). A single
+    // whole-file `state.timestamp` check used to discard EVERY session + its
+    // history the moment the file aged past the TTL — a user returning after a
+    // weekend lost the entire list. Each entry already persists its own
+    // `lastActivityAt` (#5309), so filter individually and fall back to the
+    // file timestamp only for an entry that predates that field. (audit P2-12)
+    const now = Date.now()
+    const fresh = []
+    const dropped = []
+    for (const saved of state.sessions) {
+      const activityAt = (typeof saved.lastActivityAt === 'number' && saved.lastActivityAt > 0)
+        ? saved.lastActivityAt
+        : state.timestamp
+      if (activityAt && now - activityAt > this._stateTtlMs) {
+        dropped.push(saved.name || saved.id || '<unknown>')
+      } else {
+        fresh.push(saved)
+      }
+    }
+    if (dropped.length > 0) {
+      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${dropped.join(', ')}`)
+    }
+    if (fresh.length === 0) {
+      log.info('All restored sessions are stale, starting fresh')
       return null
     }
-
+    state.sessions = fresh
     return state
   }
 

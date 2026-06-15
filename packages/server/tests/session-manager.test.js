@@ -704,11 +704,14 @@ describe('SessionManager.restoreState', () => {
   })
 
   it('restores lastActivityAt from state file', () => {
+    // A RECENT lastActivityAt so the per-entry TTL filter (audit P2-12) keeps
+    // the session; the test asserts the field round-trips, not staleness.
+    const recentActivity = Date.now() - 60_000
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: Date.now(),
       sessions: [
-        { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: 12_345 },
+        { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: recentActivity },
       ],
     }))
 
@@ -717,7 +720,7 @@ describe('SessionManager.restoreState', () => {
 
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 1)
-    assert.equal(sessions[0].lastActivityAt, 12_345)
+    assert.equal(sessions[0].lastActivityAt, recentActivity)
 
     mgr.destroyAll()
   })

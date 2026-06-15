@@ -750,26 +750,30 @@ describe('sanitizeConfig', () => {
     assert.equal(safe.port, 8765)
   })
 
-  it('masks pushToken with ***', () => {
+  // audit P2-12: `pushToken` is NOT a CONFIG_SCHEMA key — push tokens are
+  // runtime device registrations (`prefs.devices`), masked elsewhere — so it
+  // was dropped from config's SENSITIVE_KEYS. sanitizeConfig leaves an
+  // unrecognized key untouched; only the real config secret `apiToken` is masked.
+  it('does not treat pushToken as a config secret (not a CONFIG_SCHEMA key)', () => {
     const config = { pushToken: 'push-secret-abc', port: 8765 }
     const safe = sanitizeConfig(config)
-    assert.equal(safe.pushToken, '***')
+    assert.equal(safe.pushToken, 'push-secret-abc')
     assert.equal(safe.port, 8765)
   })
 
-  it('masks both apiToken and pushToken when both present', () => {
+  it('masks apiToken but not pushToken when both present', () => {
     const config = { apiToken: 'api-secret', pushToken: 'push-secret', model: 'sonnet' }
     const safe = sanitizeConfig(config)
     assert.equal(safe.apiToken, '***')
-    assert.equal(safe.pushToken, '***')
+    assert.equal(safe.pushToken, 'push-secret')
     assert.equal(safe.model, 'sonnet')
   })
 
   it('does not modify the original config object', () => {
-    const config = { apiToken: 'secret-token-123', pushToken: 'push-secret' }
+    const config = { apiToken: 'secret-token-123', port: 8765 }
     sanitizeConfig(config)
     assert.equal(config.apiToken, 'secret-token-123')
-    assert.equal(config.pushToken, 'push-secret')
+    assert.equal(config.port, 8765)
   })
 
   it('leaves non-sensitive fields unchanged', () => {

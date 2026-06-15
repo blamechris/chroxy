@@ -1589,7 +1589,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (!ready && !this._ptyExited) {
       ;(this._log || log).warn(
         `TUI session file did not reach status=idle within ${ClaudeTuiSession.SPAWN_WARMUP_MAX_MS}ms${this._degradedProbeSuffix()} — proceeding (first sendMessage may stall)\n` +
-        `_outputTail dump:\n${this._outputTailHexDump()}`,
+        `_outputTail dump:\n${this._outputTailLogDump()}`,
       )
     }
   }
@@ -1924,6 +1924,27 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * Log-facing variant of the PTY tail dump. Token-shaped runs are ALWAYS
+   * redacted (#5322/#5358), but the full hex dump still emits prompt/answer
+   * CONTENT verbatim (question text, answer text, attachment names) at info
+   * level — residual content-at-rest exposure in ~/.chroxy/logs. So the full
+   * dump is gated behind CHROXY_DEBUG_PTY_TAIL; by default we emit a compact
+   * structural summary (redacted byte length + a bounded 32-byte hex preview,
+   * mirroring pty-driver.js's #4805 incident-response footprint). Every log
+   * call site routes through here; the unit-tested `_outputTailHexDump()`
+   * remains the full redacted dump. (audit P2-12)
+   */
+  _outputTailLogDump() {
+    if (process.env.CHROXY_DEBUG_PTY_TAIL) return this._outputTailHexDump()
+    const latin1 = this._outputTailRaw.toString('latin1')
+    const redacted = Buffer.from(redactSensitivePreservingEscapes(latin1), 'latin1')
+    if (redacted.length === 0) return '<empty>'
+    const sampleHex = redacted.slice(0, 32).toString('hex')
+    const truncated = redacted.length > 32 ? ',…' : ''
+    return `${redacted.length} bytes redacted (set CHROXY_DEBUG_PTY_TAIL=1 for full dump; sample=${sampleHex}${truncated})`
+  }
+
+  /**
    * #5321 (WP-4.1) — classify the ANSI-stripped PTY tail as a subscription-auth
    * failure (logged out / expired login). Returns true when claude's output
    * matches an AUTH_FAILURE_PATTERNS entry. Called during warmup (before ready)
@@ -2091,7 +2112,7 @@ export class ClaudeTuiSession extends BaseSession {
     if (!ready && !this._ptyExited) {
       ;(this._log || log).warn(
         `TUI session file not at status=idle before turn (msg=${messageId})${this._degradedProbeSuffix()} — writing anyway\n` +
-        `_outputTail dump:\n${this._outputTailHexDump()}`,
+        `_outputTail dump:\n${this._outputTailLogDump()}`,
       )
     }
     if (this._ptyExited) {

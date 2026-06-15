@@ -188,6 +188,39 @@ describe('SessionStatePersistence.restoreState', () => {
     assert.equal(p.restoreState(), null, 'State older than custom 5min TTL should be rejected')
   })
 
+  it('drops only the stale sessions, keeping fresh ones by per-entry lastActivityAt (audit P2-12)', () => {
+    const now = Date.now()
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      // Whole-file timestamp is old enough that the legacy whole-file check
+      // would have discarded EVERYTHING.
+      timestamp: now - 25 * 60 * 60 * 1000,
+      sessions: [
+        { id: 'stale', name: 'Stale', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000 },
+        { id: 'fresh', name: 'Fresh', cwd: '/tmp', lastActivityAt: now - 60 * 1000 },
+      ],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const result = p.restoreState()
+    assert.ok(result, 'fresh session keeps the restore alive')
+    assert.equal(result.sessions.length, 1)
+    assert.equal(result.sessions[0].id, 'fresh')
+  })
+
+  it('returns null when every session is individually stale (audit P2-12)', () => {
+    const now = Date.now()
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: now,
+      sessions: [
+        { id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000 },
+        { id: 'b', name: 'B', cwd: '/tmp', lastActivityAt: now - 26 * 60 * 60 * 1000 },
+      ],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    assert.equal(p.restoreState(), null)
+  })
+
   it('returns parsed state for valid file', () => {
     const state = {
       version: 1,

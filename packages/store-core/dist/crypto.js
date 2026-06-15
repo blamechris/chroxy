@@ -185,6 +185,7 @@ export function encrypt(jsonString, sharedKey, nonceCounter, direction) {
  *                        used to namespace the nonce and prevent cross-direction replays.
  * @throws {Error} `'Unexpected nonce: got <n>, expected <e>'` when `envelope.n !== expectedNonce`
  * @throws {Error} `'Decryption failed: message tampered or wrong key'` when MAC verification fails
+ * @throws {Error} `'Decryption failed: plaintext is not valid JSON'` when the verified plaintext does not parse as JSON
  * @throws {TypeError} `'decrypt: envelope.d must be a base64 string'` / `'decrypt: envelope.n must be a number'`
  */
 export function decrypt(envelope, sharedKey, expectedNonce, direction) {
@@ -203,7 +204,17 @@ export function decrypt(envelope, sharedKey, expectedNonce, direction) {
     if (!plaintext) {
         throw new Error('Decryption failed: message tampered or wrong key');
     }
-    return JSON.parse(new TextDecoder().decode(plaintext));
+    // The MAC verified, so the bytes are authentic — but a peer bug (or a
+    // future protocol change) could still hand us non-JSON plaintext. Re-throw
+    // on the documented `'Decryption failed: …'`-prefixed contract instead of
+    // leaking a raw SyntaxError, so the three call sites' close-the-connection
+    // handling stays uniform. (audit P2-12)
+    try {
+        return JSON.parse(new TextDecoder().decode(plaintext));
+    }
+    catch {
+        throw new Error('Decryption failed: plaintext is not valid JSON');
+    }
 }
 /**
  * Generate a fresh 32-byte random salt for a new connection.

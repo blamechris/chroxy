@@ -189,6 +189,16 @@ describe('encrypt / decrypt round-trip', () => {
     )
   })
 
+  // audit P2-12: a MAC-valid frame whose plaintext is not JSON must throw on
+  // the documented `'Decryption failed: …'` contract, not leak a raw SyntaxError.
+  it('decrypt of authentic but non-JSON plaintext throws the documented error', () => {
+    const key = makeSharedKey()
+    const envelope = encrypt('this is not json{{{', key, 0, DIRECTION_SERVER)
+    expect(() => decrypt(envelope, key, 0, DIRECTION_SERVER)).toThrow(
+      'Decryption failed: plaintext is not valid JSON'
+    )
+  })
+
   it('handles large payloads', () => {
     const key = makeSharedKey()
     const largeObj = { data: 'x'.repeat(10000), nested: { arr: Array.from({ length: 100 }, (_, i) => i) } }

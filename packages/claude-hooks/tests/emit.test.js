@@ -505,6 +505,32 @@ describe('config resolution', () => {
     writeFileSync(join(dir, 'config.json'), JSON.stringify({ port: 99999 }))
     assert.equal(resolveIngestUrl({ CHROXY_CONFIG_DIR: dir }), `http://127.0.0.1:${DEFAULT_PORT}/api/events`)
   })
+
+  // audit P2-12: a daemon bound to a specific non-loopback interface (config.host
+  // / CHROXY_HOST) would otherwise swallow every hook emit (127.0.0.1 unreachable).
+  it('targets an explicit non-wildcard config.host', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hooks-cfg-'))
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ host: '192.168.1.5', port: 4242 }))
+    assert.equal(resolveIngestUrl({ CHROXY_CONFIG_DIR: dir }), 'http://192.168.1.5:4242/api/events')
+  })
+
+  it('CHROXY_HOST wins over config.host', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hooks-cfg-'))
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ host: '192.168.1.5' }))
+    assert.equal(resolveIngestUrl({ CHROXY_CONFIG_DIR: dir, CHROXY_HOST: '10.0.0.2' }), `http://10.0.0.2:${DEFAULT_PORT}/api/events`)
+  })
+
+  it('keeps loopback for a wildcard bind (0.0.0.0 is reachable via 127.0.0.1)', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hooks-cfg-'))
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ host: '0.0.0.0', port: 8765 }))
+    assert.equal(resolveIngestUrl({ CHROXY_CONFIG_DIR: dir }), 'http://127.0.0.1:8765/api/events')
+  })
+
+  it('brackets an IPv6 literal host', () => {
+    const dir = mkdtempSync(join(tmpdir(), 'hooks-cfg-'))
+    writeFileSync(join(dir, 'config.json'), JSON.stringify({ host: 'fd00::1', port: 4242 }))
+    assert.equal(resolveIngestUrl({ CHROXY_CONFIG_DIR: dir }), 'http://[fd00::1]:4242/api/events')
+  })
 })
 
 describe('runEmit', () => {

@@ -48,7 +48,10 @@ export declare const IngestEventDataSchema: z.ZodRecord<z.ZodString, z.ZodUnion<
  * - `source` — who emitted the event (e.g. `claude-hooks`); also the
  *   server-side rate-limit bucket key, hence the tight length cap.
  * - `project` — explicit project name for the per-project status embed.
- *   When absent the server derives it from `data.cwd` (git-root walk).
+ *   When absent the server derives it from `data.cwd` (git-root walk). Caveat:
+ *   the server-side walk does NOT yet recover the parent project for a chroxy
+ *   worktree (it falls back to the opaque hex basename) the way the hook does —
+ *   shared-module consolidation is tracked in #5850.
  * - `sessionId` — the EXTERNAL tool's session id (opaque to chroxy).
  * - `ts` — event time, epoch ms, sanity-bounded.
  */
