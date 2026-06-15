@@ -2192,7 +2192,16 @@ export class WsServer {
     if (typeof entry?.session?.setTerminalMirrorActive !== 'function') return
     let active = false
     for (const client of this.clients.values()) {
-      if (client.terminalSessionIds && client.terminalSessionIds.has(sessionId)) {
+      // Count a client only if it would actually RECEIVE terminal_output — i.e. it
+      // matches ws-forwarding's terminalSubscriberFilter: opted into the terminal
+      // (terminalSessionIds) AND a viewer of the session (active or subscribed).
+      // An opted-in-but-not-viewing client gets nothing, so it must not keep the
+      // coalescer running (#5844 review — align the gate with the delivery audience).
+      if (
+        client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
+        (client.activeSessionId === sessionId ||
+          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId)))
+      ) {
         active = true
         break
       }

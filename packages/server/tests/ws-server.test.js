@@ -4742,20 +4742,34 @@ describe('#5579: production handler ctx is deep-asserted at construction', () =>
       const srv = new WsServer({ port: 0, apiToken: 't', sessionManager: manager, authRequired: false })
       return { srv, calls }
     }
+    // A viewer subscribed to the terminal: opted-in AND subscribed to the session
+    // (the terminalSubscriberFilter audience that actually receives terminal_output).
     function fakeClient(id, terminalSids = []) {
-      return { id, authenticated: true, terminalSessionIds: new Set(terminalSids), subscribedSessionIds: new Set(), _ownedPushTokens: null }
+      return { id, authenticated: true, terminalSessionIds: new Set(terminalSids), subscribedSessionIds: new Set(terminalSids), _ownedPushTokens: null }
     }
     // A ws is the clients-Map KEY; srv.close() calls ws.close()/terminate() on each.
     const fakeWs = () => ({ readyState: 3, close: () => {}, terminate: () => {} })
 
-    it('_syncTerminalMirror toggles ON iff some connected client subscribes', () => {
+    it('_syncTerminalMirror toggles ON iff a connected viewer subscribes', () => {
       const { srv, calls } = makeMirrorServer()
       try {
         srv._syncTerminalMirror('s1')
         assert.deepEqual(calls, [false], 'no subscribers → OFF')
         srv.clients.set(fakeWs(), fakeClient('c1', ['s1']))
         srv._syncTerminalMirror('s1')
-        assert.deepEqual(calls, [false, true], 'one subscriber → ON')
+        assert.deepEqual(calls, [false, true], 'one viewing subscriber → ON')
+      } finally { srv.close() }
+    })
+
+    it('_syncTerminalMirror ignores an opted-in client that is NOT viewing the session (#5844 review)', () => {
+      const { srv, calls } = makeMirrorServer()
+      try {
+        // Opted into the terminal but neither active nor subscribed → receives no
+        // bytes, so it must not keep the coalescer on.
+        const c = { id: 'c1', authenticated: true, terminalSessionIds: new Set(['s1']), subscribedSessionIds: new Set(), activeSessionId: 'other', _ownedPushTokens: null }
+        srv.clients.set(fakeWs(), c)
+        srv._syncTerminalMirror('s1')
+        assert.deepEqual(calls, [false], 'opted-in non-viewer → OFF')
       } finally { srv.close() }
     })
 
