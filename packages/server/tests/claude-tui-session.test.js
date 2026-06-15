@@ -1785,11 +1785,15 @@ describe('ClaudeTuiSession', () => {
         session._ptyExitInfo = { exitCode: 1, signal: null }
       }, 40)
 
-      await session.sendMessage('hello')
+      const result = await session.sendMessage('hello')
 
       assert.ok(errors.find((e) => /exited before prompt write/.test(e.message)),
         `expected "exited before prompt write" error, got: ${errors.map((e) => e.message).join(' | ')}`)
       assert.equal(session._isBusy, false, 'busy cleared after probe-time PTY death')
+      // #5813: the late-failure path returns the typed { ok:false } (like the
+      // up-front guards) so callers keying off result.ok — e.g. the reinject
+      // stop-and-wait watch-close — don't depend on _finishTurnError's side-effect.
+      assert.deepEqual(result, { ok: false, reason: 'pty_exited' })
     })
 
     it('sendMessage bails out via _finishTurnError when interrupt() fires during the probe wait', async () => {

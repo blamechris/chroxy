@@ -2093,7 +2093,11 @@ export class ClaudeTuiSession extends BaseSession {
       const code = this._ptyExitInfo?.exitCode
       const signal = this._ptyExitInfo?.signal
       this._finishTurnError(`Claude PTY exited before prompt write (code=${code}${signal ? ` signal=${signal}` : ''})`, messageId)
-      return
+      // #5813: return the typed failure (like the up-front busy/not_runnable
+      // guards) so callers that key off `result.ok === false` — e.g. the reinject
+      // stop-and-wait watch-close in form-driver.js — don't have to rely on
+      // _finishTurnError's side-effect to know the turn never started.
+      return { ok: false, reason: 'pty_exited' }
     }
     // If the user clicked Stop during the probe wait, interrupt() has
     // already written Ctrl-C to the PTY and marked the turn aborted.
@@ -2103,7 +2107,7 @@ export class ClaudeTuiSession extends BaseSession {
     // still process the bytes once it returns to prompt). Bail cleanly.
     if (this._activeTurn?.aborted) {
       this._finishTurnError('Turn aborted before prompt write', messageId)
-      return
+      return { ok: false, reason: 'aborted' } // #5813: typed failure
     }
 
     // #4732: reset the per-turn pre-first-output watchdog latch so the
@@ -2127,10 +2131,10 @@ export class ClaudeTuiSession extends BaseSession {
       const completed = await this._writePtyTextThrottled(promptToSend, {
         onAbort: () => this._finishTurnError('Turn aborted during prompt write', messageId),
       })
-      if (!completed) return
+      if (!completed) return { ok: false, reason: 'aborted' } // #5813: typed failure (write aborted)
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
-      return
+      return { ok: false, reason: 'write_failed' } // #5813: typed failure
     }
 
     // Arm soft + hard inactivity timers (#3920). Each new hook file the

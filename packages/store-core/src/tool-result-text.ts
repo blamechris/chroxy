@@ -9,8 +9,9 @@
  *
  * #5800: hoisted from `packages/dashboard/src/lib/tool-result-text.ts` into
  * store-core (next to the other shared parsers like `partial-json.ts`) so the
- * app gains the same tool-result-envelope unwrap as the dashboard. Zero
- * behavior change for the dashboard.
+ * unwrap is AVAILABLE for future app use — the app has no tool-result-envelope
+ * Output surface today and does not call this yet, so there is no current parity
+ * gap to close (#5813). Zero behavior change for the dashboard.
  *
  * `unwrapToolResultText` normalises any of those shapes back to the text a
  * terminal should show:
