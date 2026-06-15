@@ -2067,6 +2067,11 @@ export class WsServer {
     this._broadcaster._broadcastClientJoined(newClient, excludeWs)
   }
 
+  /** Broadcast client_left to all OTHER authenticated clients */
+  _broadcastClientLeft(departingClient) {
+    this._broadcaster._broadcastClientLeft(departingClient)
+  }
+
   /**
    * #5555.6 — one keepalive sweep over all authenticated clients.
    *
@@ -2142,12 +2147,7 @@ export class WsServer {
     }
 
     // Broadcast client_left to remaining authenticated clients
-    const message = { type: 'client_left', clientId: departingClient.id }
-    for (const [ws, client] of this.clients) {
-      if (client.id !== departingClient.id && client.authenticated && ws.readyState === 1) {
-        this._send(ws, message)
-      }
-    }
+    this._broadcastClientLeft(departingClient)
   }
 
   /**

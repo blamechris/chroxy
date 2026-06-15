@@ -148,6 +148,29 @@ describe('WsBroadcaster', () => {
       assert.equal(sent.length, 1)
       assert.equal(sent[0].ws, ws2)
     })
+
+    it('a throwing filter does not abort delivery to later clients (audit 3b)', () => {
+      // A filter that throws on one client must skip ONLY that client — the
+      // legacy loop unwound the whole iteration, silently dropping the
+      // broadcast for every later client.
+      const ws1 = createFakeWs()
+      const wsBad = createFakeWs()
+      const ws3 = createFakeWs()
+      clients.set(ws1, createFakeClient({ id: 'c1' }))
+      clients.set(wsBad, createFakeClient({ id: 'bad' }))
+      clients.set(ws3, createFakeClient({ id: 'c3' }))
+
+      assert.doesNotThrow(() => {
+        broadcaster._broadcast({ type: 'x' }, (client) => {
+          if (client.id === 'bad') throw new Error('boom')
+          return true
+        })
+      })
+
+      // c1 and c3 both received it; only the throwing client was skipped.
+      const ids = sent.map((e) => clients.get(e.ws).id).sort()
+      assert.deepEqual(ids, ['c1', 'c3'])
+    })
   })
 
   describe('_broadcastToSession()', () => {
@@ -354,6 +377,59 @@ describe('WsBroadcaster', () => {
       assert.equal(sent[0].message.client.deviceName, null)
       assert.equal(sent[0].message.client.deviceType, 'unknown')
       assert.equal(sent[0].message.client.platform, 'unknown')
+    })
+  })
+
+  describe('_broadcastClientLeft()', () => {
+    it('sends client_left to all except the departing client', () => {
+      const wsGone = createFakeWs()
+      const wsOther1 = createFakeWs()
+      const wsOther2 = createFakeWs()
+      const departing = createFakeClient({ id: 'gone' })
+      clients.set(wsGone, departing)
+      clients.set(wsOther1, createFakeClient({ id: 'c1' }))
+      clients.set(wsOther2, createFakeClient({ id: 'c2' }))
+
+      broadcaster._broadcastClientLeft(departing)
+
+      assert.equal(sent.length, 2)
+      for (const entry of sent) {
+        assert.notEqual(clients.get(entry.ws).id, 'gone')
+        assert.equal(entry.message.type, 'client_left')
+        assert.equal(entry.message.clientId, 'gone')
+      }
+    })
+
+    it('skips unauthenticated and non-OPEN peers', () => {
+      const wsGone = createFakeWs()
+      const wsUnauth = createFakeWs()
+      const wsClosed = createFakeWs({ readyState: 3 })
+      const wsOk = createFakeWs()
+      const departing = createFakeClient({ id: 'gone' })
+      clients.set(wsGone, departing)
+      clients.set(wsUnauth, createFakeClient({ id: 'u', authenticated: false }))
+      clients.set(wsClosed, createFakeClient({ id: 'closed' }))
+      clients.set(wsOk, createFakeClient({ id: 'ok' }))
+
+      broadcaster._broadcastClientLeft(departing)
+
+      assert.equal(sent.length, 1)
+      assert.equal(clients.get(sent[0].ws).id, 'ok')
+    })
+
+    it('routes through backpressure (drops + counter) like other broadcasts', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const wsGone = createFakeWs()
+      const wsBack = createFakeWs({ bufferedAmount: 200 })
+      const departing = createFakeClient({ id: 'gone' })
+      const backClient = createFakeClient({ id: 'back' })
+      clients.set(wsGone, departing)
+      clients.set(wsBack, backClient)
+
+      broadcaster._broadcastClientLeft(departing)
+
+      assert.equal(sent.length, 0)
+      assert.equal(backClient._backpressureDrops, 1)
     })
   })
 
