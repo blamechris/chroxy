@@ -155,6 +155,53 @@ describe('CloudflareTunnelAdapter', () => {
         },
       )
     })
+
+    it('includes the captured cloudflared output in a QUICK-tunnel failure (audit P2-11)', async () => {
+      // The default quick path previously rejected with only "exited with code N",
+      // dropping the real reason — now it retains the same redacted tail the
+      // named path does.
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from('ERR failed to connect to the Cloudflare edge'))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+
+      await assert.rejects(
+        () => tunnel._startQuickTunnel(),
+        /cloudflared exited with code 1 before establishing tunnel\. Last output: .*failed to connect to the Cloudflare edge/,
+      )
+    })
+
+    it('redacts token-shaped runs in the QUICK-tunnel captured output (audit P2-11)', async () => {
+      const secret = 'sk-ant-api03-' + 'A'.repeat(48)
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from(`ERR auth failed with token ${secret}`))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+
+      await tunnel._startQuickTunnel().then(
+        () => assert.fail('expected _startQuickTunnel() to reject'),
+        (err) => {
+          assert.match(err.message, /Last output:/)
+          assert.ok(!err.message.includes(secret), `token must be redacted, got: ${err.message}`)
+        },
+      )
+    })
   })
 
   describe('auto-recovery on unexpected exit', () => {

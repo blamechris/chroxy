@@ -9,6 +9,17 @@ const log = createLogger('tunnel')
 const CLOUDFLARED_OUTPUT_TAIL_CAP = 2000
 
 /**
+ * Redact + trim a raw cloudflared output tail for inclusion in a start-failure
+ * rejection. Centralized so the named AND quick paths redact identically — a
+ * token split across two `data` chunks survives a per-chunk redact, so the
+ * whole accumulated tail is redacted once here (#5366 review). Returns '' when
+ * the tail is empty.
+ */
+function redactedTail(rawTail) {
+  return redactSensitive(rawTail || '').trim()
+}
+
+/**
  * Cloudflare tunnel adapter.
  *
  * Quick mode: spawns `cloudflared tunnel --url` — random URL, no account needed.
@@ -142,7 +153,7 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       proc.on('close', (code, signal) => {
         if (!resolved) {
-          const tail = redactSensitive(outputTailRaw).trim()
+          const tail = redactedTail(outputTailRaw)
           reject(new Error(`cloudflared exited with code ${code} before establishing tunnel${tail ? `. Last output: ${tail}` : ''}`))
         } else if (!timedOut) {
           // A cold-start timeout already rejected and killed the process; the
@@ -164,10 +175,13 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           resolved = true
           timedOut = true
           proc.kill()
-          const tail = redactSensitive(outputTailRaw).trim()
+          const tail = redactedTail(outputTailRaw)
           reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed and logged in? (brew install cloudflared)${tail ? ` Last output: ${tail}` : ''}`))
         }
       }, 30_000)
+      // Don't let the 30s start-timeout timer pin the event loop on success —
+      // it's only cleared on `proc.close`, but a healthy tunnel never closes.
+      timeoutHandle.unref?.()
 
       proc.once('close', () => {
         clearTimeout(timeoutHandle)
@@ -191,9 +205,16 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
       // Per-attempt cold-start timeout flag — see _startNamedTunnel for why this
       // must not reuse the instance-wide `intentionalShutdown` kill switch.
       let timedOut = false
+      // Retain a redacted output tail so a start failure surfaces WHY (the most
+      // common failure mode), matching the named path (#5328/#5366). Accumulate
+      // raw + redact the whole tail once at emit time; stop after `resolved`.
+      let outputTailRaw = ''
 
       const handleOutput = (data) => {
         const text = data.toString()
+        if (!resolved) {
+          outputTailRaw = (outputTailRaw + text).slice(-CLOUDFLARED_OUTPUT_TAIL_CAP)
+        }
         const match = text.match(/https:\/\/[a-z0-9-]+\.trycloudflare\.com/)
         if (match && !resolved) {
           resolved = true
@@ -226,7 +247,8 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
 
       proc.on('close', (code, signal) => {
         if (!resolved) {
-          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel`))
+          const tail = redactedTail(outputTailRaw)
+          reject(new Error(`cloudflared exited with code ${code} before establishing tunnel${tail ? `. Last output: ${tail}` : ''}`))
         } else if (!timedOut) {
           // A cold-start timeout already rejected and killed the process; the
           // `start()` retry loop owns the retry decision, so don't treat that
@@ -244,9 +266,12 @@ export class CloudflareTunnelAdapter extends BaseTunnelAdapter {
           resolved = true
           timedOut = true
           proc.kill()
-          reject(new Error('Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)'))
+          const tail = redactedTail(outputTailRaw)
+          reject(new Error(`Tunnel timed out after 30s. Is cloudflared installed? (brew install cloudflared)${tail ? ` Last output: ${tail}` : ''}`))
         }
       }, 30_000)
+      // Don't let the 30s start-timeout timer pin the event loop on success.
+      timeoutHandle.unref?.()
 
       proc.once('close', () => {
         clearTimeout(timeoutHandle)

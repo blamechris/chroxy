@@ -115,12 +115,20 @@ export class TunnelLifecycleHandler {
     // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
     this._wireTunnelEvents(tunnel, wsServer)
 
+    // Newest-recovery-wins guard (audit P2-11): waitForTunnel can take ~90s, so
+    // a second tunnel_recovered firing during a prior re-verify would overlap —
+    // two loops racing on `currentWsUrl` and double-broadcasting the rotated URL.
+    // Each handler claims a generation; after its (long) await it bails if a
+    // newer recovery has since superseded it.
+    let recoveryGeneration = 0
+
     tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
       // #5314 (WP-1.4) — async event listener: waitForTunnel THROWS on a routine
       // DNS-settle failure, and an unhandled rejection here would hit server-cli's
       // unhandledRejection handler → process.exit(1), crashing the whole server on
       // a recoverable tunnel hiccup. Contain it: log and wait for the next
       // tunnel_recovered retry.
+      const myGeneration = ++recoveryGeneration
       try {
         log.info(`Tunnel recovered after ${attempt} attempt(s)`)
 
@@ -128,6 +136,13 @@ export class TunnelLifecycleHandler {
         await this._waitForTunnel(newHttpUrl, {
           initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
         })
+
+        // A newer tunnel_recovered started while we were re-verifying — let it
+        // own the URL/QR update so the two don't race or double-broadcast.
+        if (myGeneration !== recoveryGeneration) {
+          log.info(`Stale tunnel_recovered (generation ${myGeneration}, newest ${recoveryGeneration}) — superseded, skipping`)
+          return
+        }
 
         // Only display new QR code if URL actually changed
         if (newWsUrl !== startupDisplay.currentWsUrl) {
