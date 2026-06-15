@@ -22,6 +22,16 @@
  * `CHROXY_HOOKS_CHROXY_WORKTREES_ROOT`, and `CHROXY_HOOKS_TMP_PREFIXES`).
  */
 type ProjectEnv = Record<string, string | undefined>;
+/** Index of the agent-worktree marker in `dir`, or -1. Exported for cross-platform tests. */
+export declare function _worktreeMarkerIndex(dir: string): number;
+/**
+ * True if `dir` equals `prefix` or is nested directly under it. Separator-
+ * agnostic (normalizes `\`→`/` for the boundary check) and trailing-separator
+ * tolerant, so a Windows path matches a Windows prefix. On POSIX forward-slash
+ * paths this is a no-op normalization → identical to the old
+ * `dir === prefix || dir.startsWith(prefix + '/')`. Exported for cross-platform tests.
+ */
+export declare function _pathWithinPrefix(prefix: string, dir: string): boolean;
 /**
  * #5439 GAP B: a cwd inside a worktree checkout belongs to the PARENT project —
  * the segment before /.claude/worktrees/ — not the agent-* checkout. #5464
