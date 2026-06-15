@@ -8,6 +8,7 @@ import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { TESTED_CLAUDE_TUI_CLI_VERSION } from './claude-tui/tested-cli-version.js'
 import { detectSilentMeteredDefault } from './doctor-billing.js'
 import {
   billingClassForProvider,
@@ -110,6 +111,71 @@ function resolveProviders({ providers, configProvider }) {
   if (Array.isArray(providers) && providers.length > 0) return providers
   if (typeof configProvider === 'string' && configProvider.length > 0) return [configProvider]
   return [DEFAULT_PROVIDER]
+}
+
+/**
+ * The claude-tui provider's preflight binary candidate paths (homebrew, ~/.local,
+ * npm-global, etc.), so the version-pin check resolves `claude` the same way the
+ * provider preflight does. Best-effort: returns [] if the spec isn't shaped as
+ * expected (the check then falls back to PATH resolution). (#5871)
+ */
+function claudeTuiBinaryCandidates() {
+  try {
+    const Provider = getProvider('claude-tui')
+    const candidates = Provider?.preflight?.binary?.candidates
+    return Array.isArray(candidates) ? candidates : []
+  } catch {
+    return []
+  }
+}
+
+/**
+ * audit P1-3 / #5821: compare the installed claude CLI version against the
+ * version chroxy's claude-tui form-driving was validated against
+ * (TESTED_CLAUDE_TUI_CLI_VERSION). A major.minor drift is a `warn` — the
+ * keystroke driving may mis-resolve forms after a CLI UI change; an exact or
+ * patch-only difference is a `pass`. Returns null when claude can't be run (the
+ * provider binary check already reports a missing claude). Dependency-injected
+ * for tests.
+ *
+ * @param {object} [deps]
+ * @param {(bin: string, args: string[]) => string} [deps.exec]
+ * @param {string} [deps.tested]
+ * @param {string[]} [deps.candidates] - fallback absolute paths for resolveBinary
+ * @returns {{ name: string, status: 'pass'|'warn', message: string } | null}
+ */
+export function checkClaudeTuiCliVersion(deps = {}) {
+  const {
+    exec = (bin, args) => execFileSync(bin, args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }),
+    tested = TESTED_CLAUDE_TUI_CLI_VERSION,
+    // #5871: resolve against the SAME candidate paths the claude-tui provider
+    // preflight uses, so this drift backstop isn't silently skipped in a
+    // minimal-PATH (Tauri/launchd) install where the provider check still finds
+    // claude via its candidate list — exactly the bundled context where a
+    // silent mis-drive would otherwise go unnoticed.
+    candidates = claudeTuiBinaryCandidates(),
+  } = deps
+  let output
+  try {
+    output = exec(resolveBinary('claude', candidates), ['--version'])
+  } catch {
+    return null // claude missing/hung — the provider binary check surfaces that
+  }
+  const NAME = 'claude-tui driving'
+  const found = parseLeadingSemver(output)
+  const testedSemver = parseLeadingSemver(tested)
+  if (found === null) {
+    return { name: NAME, status: 'warn', message: `Could not parse 'claude --version'; TUI form-driving is validated against ${tested}` }
+  }
+  const foundStr = `${found[0]}.${found[1]}.${found[2]}`
+  if (testedSemver && found[0] === testedSemver[0] && found[1] === testedSemver[1]) {
+    return { name: NAME, status: 'pass', message: `claude ${foundStr} matches the tested TUI-driving baseline (${tested})` }
+  }
+  return {
+    name: NAME,
+    status: 'warn',
+    message: `claude ${foundStr} differs from the tested TUI-driving baseline (${tested}) — chroxy drives the TUI by screen-scraping pinned keystrokes, so a CLI UI change can mis-drive AskUserQuestion forms silently. If question prompts misbehave, report it; re-validation will bump the baseline.`,
+  }
 }
 
 /**
@@ -241,6 +307,17 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
         message: `Default provider '${effectiveDefault}' — ${detail}. Programmatic-credit cutover: ${cutover}.`,
       })
     }
+  }
+
+  // 5.6 claude-tui CLI version pin (audit P1-3, #5821 backstop). The claude-tui
+  // provider drives the real `claude` TUI by screen-scraping pinned keystrokes
+  // (no structured answer channel), so a CLI UI change can mis-drive
+  // AskUserQuestion forms SILENTLY. Surface a major.minor drift from the tested
+  // version as a measured warning instead. Only meaningful when the default
+  // provider actually drives the TUI.
+  if (effectiveDefault === 'claude-tui') {
+    const tuiCheck = checkClaudeTuiCliVersion()
+    if (tuiCheck) checks.push(tuiCheck)
   }
 
   // 6. Dependencies

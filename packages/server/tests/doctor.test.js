@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, parse as parsePath, relative } from 'node:path'
-import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion } from '../src/doctor.js'
+import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 
 /**
  * Integration tests for doctor.js.
@@ -641,5 +642,43 @@ describe('isBundledOrSupervisedContext (issue #3023)', () => {
     } finally {
       restoreEnv()
     }
+  })
+})
+
+// audit P1-3 / #5821: claude-tui CLI-version pin — the backstop against silent
+// AskUserQuestion mis-drive after a claude CLI UI change.
+describe('checkClaudeTuiCliVersion', () => {
+  it('passes when the installed claude matches the tested baseline (major.minor)', () => {
+    const tested = '2.1.177'
+    const check = checkClaudeTuiCliVersion({ tested, exec: () => '2.1.177 (Claude Code)' })
+    assert.equal(check.status, 'pass')
+    assert.match(check.message, /matches the tested TUI-driving baseline/)
+  })
+
+  it('passes on a patch-only difference (same major.minor)', () => {
+    const check = checkClaudeTuiCliVersion({ tested: '2.1.177', exec: () => '2.1.200 (Claude Code)' })
+    assert.equal(check.status, 'pass')
+  })
+
+  it('warns on a major.minor drift (a UI change may mis-drive forms)', () => {
+    const check = checkClaudeTuiCliVersion({ tested: '2.1.177', exec: () => '2.2.0 (Claude Code)' })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /differs from the tested TUI-driving baseline/)
+    assert.match(check.message, /mis-drive AskUserQuestion forms silently/)
+  })
+
+  it('warns (does not throw) when claude --version is unparseable', () => {
+    const check = checkClaudeTuiCliVersion({ tested: '2.1.177', exec: () => 'some unexpected output' })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /Could not parse/)
+  })
+
+  it('returns null when claude cannot be run (provider check covers a missing claude)', () => {
+    const check = checkClaudeTuiCliVersion({ exec: () => { throw new Error('ENOENT') } })
+    assert.equal(check, null)
+  })
+
+  it('the shipped baseline constant is a parseable semver', () => {
+    assert.notEqual(parseLeadingSemver(TESTED_CLAUDE_TUI_CLI_VERSION), null)
   })
 })
