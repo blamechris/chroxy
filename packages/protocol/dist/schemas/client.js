@@ -695,6 +695,19 @@ export const TerminalUnsubscribeSchema = z.object({
     type: z.literal('terminal_unsubscribe'),
     sessionId: z.string().max(256),
 });
+// #5835 Phase 2: request a resize of a session's live PTY (the claude-tui
+// remote-viewer mirror). A client whose Output pane is larger than the default
+// grid asks the server to resize the real TUI so it uses the available space.
+// The PTY has ONE size: the server applies this only for the session's primary
+// owner (or an unclaimed session) — observers ride along and re-letterbox to
+// the authoritative `terminal_size` the server broadcasts back. cols/rows are
+// clamped server-side; the bounds here just reject obviously-bogus frames early.
+export const TerminalResizeSchema = z.object({
+    type: z.literal('terminal_resize'),
+    sessionId: z.string().max(256),
+    cols: z.number().int().min(1).max(1000),
+    rows: z.number().int().min(1).max(1000),
+});
 // #3404: client signals foreground/background state. Mobile app sends
 // {visible:false} on AppState background/inactive so the server stops
 // treating its still-alive WS connection as an active viewer and lets
@@ -989,6 +1002,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     UnsubscribeSessionsSchema,
     TerminalSubscribeSchema,
     TerminalUnsubscribeSchema,
+    TerminalResizeSchema,
     ClientVisibleSchema,
     ClaimPrimarySchema,
     ListProvidersSchema,

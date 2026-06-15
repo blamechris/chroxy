@@ -345,6 +345,17 @@ function handleUnsubscribeSessions(ws, client, msg, ctx) {
   })
 }
 
+// #5835 Phase 2: a client views a session iff it's its active session or in its
+// subscribed set — the SAME viewing clause ws-forwarding's terminalSubscriberFilter
+// uses to scope terminal_output/terminal_size broadcasts. Any direct terminal_size
+// send or PTY-mutating resize must gate on this too, so terminal state (incl. that
+// a session is claude-tui) never leaks to a non-viewer who merely knows the id
+// (#5840 Copilot review).
+function isSessionViewer(client, sid) {
+  return client.activeSessionId === sid ||
+    Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
+}
+
 // #5835 Phase 1: opt the client IN to a session's live PTY mirror. Only clients
 // in `terminalSessionIds` receive `terminal_output` (ws-forwarding's filter), so
 // a Chat-tab client never pays for raw bytes it isn't rendering. A bound client
@@ -354,9 +365,45 @@ function handleTerminalSubscribe(ws, client, msg, ctx) {
   if (client.boundSessionId && client.boundSessionId !== sid) return
   // Parity with handleSubscribeSessions: only track a REAL session, so a client
   // can't grow terminalSessionIds unboundedly with junk ids.
-  if (!ctx?.sessions?.sessionManager?.getSession?.(sid)) return
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
   if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
   client.terminalSessionIds.add(sid)
+  // #5835 Phase 2: tell the new subscriber the authoritative PTY size up front so
+  // it can letterbox to the right grid immediately (the size may already differ
+  // from the default if another viewer resized it). Gate on the same viewing
+  // scope as the broadcast (#5840 review) — opting into a terminal you aren't
+  // viewing must not leak its size / that it's a claude-tui session. Only
+  // claude-tui sessions have a live PTY / getTerminalSize; others don't send this.
+  if (isSessionViewer(client, sid) && typeof entry.session?.getTerminalSize === 'function') {
+    const size = entry.session.getTerminalSize()
+    ctx.transport.send(ws, { type: 'terminal_size', sessionId: sid, cols: size.cols, rows: size.rows })
+  }
+}
+
+// #5835 Phase 2: request a resize of a session's live PTY (the remote-viewer
+// mirror). The PTY has ONE size, so only the session's primary owner may drive
+// it — observers ride along and re-letterbox to the `terminal_size` the server
+// broadcasts back (an unclaimed session is open to its first/only viewer, which
+// is the single-operator dashboard case). resizeTerminal clamps + records the
+// size and emits terminal_resize, which ws-forwarding broadcasts to every
+// terminal subscriber. Silent reject: an observer simply doesn't drive the size.
+function handleTerminalResize(ws, client, msg, ctx) {
+  const sid = msg.sessionId
+  if (client.boundSessionId && client.boundSessionId !== sid) return
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
+  // Must be viewing the session to mutate its shared PTY (#5840 review): a
+  // non-viewer who merely knows the id must not be able to resize the grid or
+  // spam terminal_size at real viewers, even when the session is unclaimed.
+  if (!isSessionViewer(client, sid)) return
+  const primary = ctx.transport.getPrimary?.(sid)
+  if (primary && primary !== client.id) return
+  if (typeof entry.session?.resizeTerminal !== 'function') return
+  // Return value unused: resizeTerminal emits terminal_resize, which
+  // ws-forwarding broadcasts back as terminal_size. A no-op (unchanged size)
+  // returns null and simply emits nothing — nothing for the handler to do.
+  entry.session.resizeTerminal(msg.cols, msg.rows)
 }
 
 // #5835 Phase 1: opt the client OUT of a session's live PTY mirror (e.g. the
@@ -449,6 +496,7 @@ export const sessionHandlers = {
   unsubscribe_sessions: handleUnsubscribeSessions,
   terminal_subscribe: handleTerminalSubscribe,
   terminal_unsubscribe: handleTerminalUnsubscribe,
+  terminal_resize: handleTerminalResize,
   client_visible: handleClientVisible,
   claim_primary: handleClaimPrimary,
 }
