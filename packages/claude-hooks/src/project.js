@@ -232,6 +232,22 @@ function gitRootName(cwd) {
 export function deriveProject(cwd, env = process.env) {
   const fromWorktree = worktreeParent(cwd, env)
   if (fromWorktree) return fromWorktree
+  // #5483: inside a chroxy worktree (~/.chroxy/worktrees/<id>), `gitRootName`
+  // can ONLY ever yield the opaque 32-hex session id — the worktree dir's own
+  // basename, via its (possibly malformed) `.git` FILE or the final basename
+  // fallback. We only reach here when `worktreeParent` already returned null,
+  // i.e. the parent `.git` parse failed (corrupt/missing) — the residual path
+  // that still minted the opaque-id embed #5464 set out to eliminate. Skip the
+  // git walk for these and defer to CLAUDE_PROJECT_DIR / server-side derivation.
+  const resolved = realResolve(cwd)
+  if (resolved && chroxyWorktreeTopDir(resolved, env)) {
+    const projectDir = env.CLAUDE_PROJECT_DIR
+    if (typeof projectDir === 'string' && projectDir.length > 0) {
+      const name = basename(resolve(projectDir))
+      if (name.length > 0) return name
+    }
+    return null
+  }
   const fromCwd = gitRootName(cwd)
   if (fromCwd) return fromCwd
   const projectDir = env.CLAUDE_PROJECT_DIR

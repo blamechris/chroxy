@@ -259,6 +259,35 @@ describe('deriveProject', () => {
     assert.equal(deriveProject(join(wt, 'packages', 'server'), env), 'coolproj', 'nested chroxy worktree cwd remaps too')
   })
 
+  // #5483: when the chroxy worktree's .git parse FAILS (corrupt or missing),
+  // worktreeParent returns null. deriveProject must NOT fall through to the git
+  // walk — inside a chroxy worktree it can only ever yield the opaque session id
+  // (the worktree dir's basename), the exact noise embed #5464 eliminated.
+  it('never derives the opaque id when a chroxy worktree .git file is MALFORMED (#5483)', () => {
+    // A shape-surprise gitdir (not <repo>/.git/worktrees/<id>) → parse returns null.
+    const { root, wt, id } = chroxyWorktreeFixture({ gitdir: '/somewhere/bogus/x' })
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+    assert.equal(worktreeParent(wt, env), null, 'precondition: parent parse fails on the malformed .git')
+    assert.notEqual(deriveProject(wt, env), id, 'must not mint the opaque session id')
+    assert.equal(deriveProject(wt, env), null, 'no parent + no CLAUDE_PROJECT_DIR → null (server derives)')
+    assert.equal(deriveProject(join(wt, 'packages', 'server'), env), null, 'nested cwd is suppressed too')
+  })
+
+  it('never derives the opaque id when a chroxy worktree .git file is MISSING (#5483)', () => {
+    const { root, wt, id } = chroxyWorktreeFixture({ noGitFile: true })
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root }
+    assert.equal(worktreeParent(wt, env), null, 'precondition: no .git → no parent')
+    assert.notEqual(deriveProject(wt, env), id)
+    assert.equal(deriveProject(wt, env), null)
+  })
+
+  it('falls back to CLAUDE_PROJECT_DIR (not the opaque id) for an unrecoverable chroxy worktree (#5483)', () => {
+    const { root, wt, id } = chroxyWorktreeFixture({ noGitFile: true })
+    const env = { CHROXY_HOOKS_CHROXY_WORKTREES_ROOT: root, CLAUDE_PROJECT_DIR: '/home/user/realproj' }
+    assert.notEqual(deriveProject(wt, env), id)
+    assert.equal(deriveProject(wt, env), 'realproj', 'CLAUDE_PROJECT_DIR still wins over the opaque id')
+  })
+
   it('resolves the chroxy worktrees root from $HOME when no override is set (#5464)', () => {
     const home = mkdtempSync(join(tmpdir(), 'hooks-chroxyhome-'))
     const id = 'feedfacefeedfacefeedfacefeedface'
