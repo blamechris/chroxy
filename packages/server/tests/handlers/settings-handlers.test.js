@@ -1717,11 +1717,22 @@ describe('settings-handlers', () => {
       assert.equal(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), undefined, 'unbound client must not be rejected by the bound guard')
     })
 
-    it('rejects a bound client on skill_trust_accept too', () => {
-      const ctx = makeCtx(new Map())
+    it('rejects a bound client on skill_trust_accept too (no acceptHash, no broadcast)', () => {
+      // Full happy-path setup (session + trust store + loaded skill) so that,
+      // absent the guard, acceptHash WOULD run — proving the guard blocks the
+      // re-trust mutation, not just that an unrelated error fires first.
+      const accepts = []
+      const trustStore = { acceptHash: (p, b) => accepts.push({ p, b }), flush() {} }
+      const session = createMockSession()
+      session.getTrustStore = () => trustStore
+      session._getSkills = () => [{ name: 'foo', body: 'B', path: '/p/foo.md' }]
+      const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp' }]])
+      const ctx = makeCtx(sessions)
       const ws = makeWs()
       settingsHandlers.skill_trust_accept(ws, makeClient({ activeSessionId: 's1', boundSessionId: 's1' }), { type: 'skill_trust_accept', skillName: 'foo' }, ctx)
       assert.ok(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), 'expected bound rejection on accept')
+      assert.equal(accepts.length, 0, 'bound client must not re-trust (acceptHash) a skill hash')
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
     })
 
     it('returns TRUST_NOT_ENABLED when session has no trust store', () => {
