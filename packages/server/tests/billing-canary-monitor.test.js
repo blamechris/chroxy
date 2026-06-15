@@ -103,3 +103,106 @@ test('start sets an unref-d timer and stop clears it', () => {
   assert.equal(monitor._timer, null, 'timer should be cleared')
   monitor.stop() // idempotent
 })
+
+// #5828 — opt-in datacenter-egress detection.
+
+test('egress check OFF by default: compute makes no egress warning even on a datacenter IP', () => {
+  // No resolveEgressIp wired → _egressIp stays null → no DATACENTER_EGRESS.
+  const { monitor } = make({ getDefaultProvider: () => 'claude-tui' })
+  assert.deepEqual(monitor.compute().warnings, [])
+})
+
+test('_tick resolves the egress IP and folds a datacenter hit into the warnings', async () => {
+  const { monitor, broadcasts } = make({
+    getDefaultProvider: () => 'claude-tui',
+    extra: { resolveEgressIp: async () => '5.9.1.2' }, // Hetzner prefix
+  })
+  await monitor._tick()
+  const codes = monitor.current().warnings.map((w) => w.code)
+  assert.ok(codes.includes('DATACENTER_EGRESS'))
+  assert.ok(broadcasts.some((b) => b.warnings.some((w) => w.code === 'DATACENTER_EGRESS')))
+})
+
+test('_tick is fail-open: a throwing resolver leaves egress null and no warning', async () => {
+  const { monitor } = make({
+    getDefaultProvider: () => 'claude-tui',
+    extra: { resolveEgressIp: async () => { throw new Error('network down') } },
+  })
+  await monitor._tick()
+  assert.equal(monitor._egressIp, null)
+  assert.deepEqual(monitor.current().warnings, [])
+})
+
+test('getDatacenterPrefixes extends the built-in egress list', async () => {
+  const { monitor } = make({
+    getDefaultProvider: () => 'claude-tui',
+    extra: {
+      resolveEgressIp: async () => '203.0.113.4',
+      getDatacenterPrefixes: () => ['203.0.113.'],
+    },
+  })
+  await monitor._tick()
+  assert.ok(monitor.current().warnings.some((w) => w.code === 'DATACENTER_EGRESS'))
+})
+
+test('notify fires once per distinct non-empty warning set, not on all-clear', () => {
+  const notified = []
+  let provider = 'claude-sdk' // metered default → warning
+  const { monitor } = make({
+    getDefaultProvider: () => provider,
+    extra: { notify: (w) => notified.push(w) },
+  })
+
+  monitor.refresh()
+  assert.equal(notified.length, 1)
+  assert.equal(notified[0][0].code, 'SILENT_METERED_DEFAULT')
+
+  monitor.refresh() // unchanged warning set → no re-notify
+  assert.equal(notified.length, 1)
+
+  provider = 'claude-tui' // clears → must NOT notify on all-clear
+  monitor.refresh()
+  assert.equal(notified.length, 1)
+})
+
+test('notify re-fires when the warning set changes (new code appears)', async () => {
+  const notified = []
+  const { monitor } = make({
+    getDefaultProvider: () => 'claude-sdk', // metered default warning from the start
+    extra: {
+      resolveEgressIp: async () => '5.9.1.2', // adds DATACENTER_EGRESS on the tick
+      notify: (w) => notified.push(w.map((x) => x.code).sort()),
+    },
+  })
+  monitor.refresh() // just SILENT_METERED_DEFAULT
+  assert.deepEqual(notified, [['SILENT_METERED_DEFAULT']])
+  await monitor._tick() // egress resolves → set grows
+  assert.equal(notified.length, 2)
+  assert.deepEqual(notified[1], ['DATACENTER_EGRESS', 'SILENT_METERED_DEFAULT'])
+})
+
+test('_tick after stop() does not refresh (in-flight egress lookup during shutdown)', async () => {
+  let release
+  const gate = new Promise((r) => { release = r })
+  const { monitor, broadcasts } = make({
+    getDefaultProvider: () => 'claude-sdk',
+    extra: { resolveEgressIp: async () => { await gate; return '5.9.1.2' } },
+  })
+  monitor.start()
+  const before = broadcasts.length
+  // start() kicks an async _tick whose egress lookup is parked on `gate`.
+  monitor.stop()      // shutdown lands mid-lookup
+  release('go')       // resolver completes after stop()
+  await new Promise((r) => setTimeout(r, 0))
+  // No extra broadcast from the post-stop tick.
+  assert.equal(broadcasts.length, before)
+})
+
+test('notify failure is swallowed (does not break refresh)', () => {
+  const { monitor, broadcasts } = make({
+    getDefaultProvider: () => 'claude-sdk',
+    extra: { notify: () => { throw new Error('push down') } },
+  })
+  assert.doesNotThrow(() => monitor.refresh())
+  assert.equal(broadcasts.length, 1) // broadcast still happened
+})

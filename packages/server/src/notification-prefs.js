@@ -84,6 +84,10 @@ export const ALL_CATEGORIES = Object.freeze([
   'session_online',
   'session_offline',
   'session_activity',
+  // #5828: billing-canary warnings (silent metered default; reclassification
+  // trip; opt-in datacenter egress). Listed so they are mutable in prefs and
+  // visible in snapshots; sanitizeCategoryMap would otherwise strip them as unknown.
+  'billing_warning',
 ])
 
 /**

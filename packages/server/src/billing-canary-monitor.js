@@ -7,13 +7,14 @@
 // connected client renders the banner immediately instead of waiting for the
 // next broadcast.
 //
-// Scope: this monitor runs the two checks that need only local daemon state —
-// `detectSilentMeteredDefault` (the live signal: a programmatic config default
-// without a key) and `detectBillingReclassification` (a zero-false-positive
+// Scope: this monitor always runs the two checks that need only local daemon
+// state — `detectSilentMeteredDefault` (the live signal: a programmatic config
+// default without a key) and `detectBillingReclassification` (a zero-false-positive
 // tripwire, dormant today because claude-tui reports `cost: null` so its
-// cumulative costUsd stays 0). The datacenter-egress check is intentionally
-// NOT run here: it needs an outbound IP lookup, which is deferred to an opt-in
-// follow-up rather than making every daemon phone out by default.
+// cumulative costUsd stays 0). The datacenter-egress check (#5828) is OPT-IN:
+// it needs an outbound public-IP lookup, so it only runs when the caller wires a
+// `resolveEgressIp` resolver (gated on `config.billing.egressCheck`). When a
+// warning set appears it can also fire a `notify` callback (push notification).
 import { runBillingCanary } from './doctor-billing.js'
 import { billingClassForProvider } from './billing-class.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
@@ -36,8 +37,17 @@ export class BillingCanaryMonitor {
    * @param {number} [opts.intervalMs] - recompute cadence (default 10 min).
    * @param {() => number} [opts.nowFn] - injectable clock for tests.
    * @param {{warn?: Function}} [opts.logger]
+   * @param {() => Promise<string|null>} [opts.resolveEgressIp] - #5828: when provided,
+   *   datacenter-egress detection is ON. The monitor resolves the public IP out-of-band
+   *   (best-effort, cached) and folds it into the canary. Absent = egress check OFF
+   *   (default) — the daemon makes no outbound lookup. The CALLER only provides this when
+   *   config.billing.egressCheck is true, so providing it IS the opt-in.
+   * @param {() => string[]} [opts.getDatacenterPrefixes] - extra IPv4 prefixes
+   *   (config.billing.datacenterPrefixes) merged into the egress classifier.
+   * @param {(warnings: Array) => void} [opts.notify] - #5828: fired when the warning
+   *   SET changes to a non-empty state (e.g. push notification). Not fired on all-clear.
    */
-  constructor({ getSessions, getDefaultProvider, getApiKeyAuth, broadcast, intervalMs = DEFAULT_INTERVAL_MS, nowFn = Date.now, logger } = {}) {
+  constructor({ getSessions, getDefaultProvider, getApiKeyAuth, broadcast, intervalMs = DEFAULT_INTERVAL_MS, nowFn = Date.now, logger, resolveEgressIp, getDatacenterPrefixes, notify } = {}) {
     this._getSessions = getSessions || (() => [])
     this._getDefaultProvider = getDefaultProvider || (() => DEFAULT_PROVIDER)
     this._getApiKeyAuth = getApiKeyAuth || (() => false)
@@ -45,9 +55,15 @@ export class BillingCanaryMonitor {
     this._intervalMs = intervalMs
     this._now = nowFn
     this._log = logger
+    this._resolveEgressIp = typeof resolveEgressIp === 'function' ? resolveEgressIp : null
+    this._getDatacenterPrefixes = getDatacenterPrefixes || (() => [])
+    this._notify = typeof notify === 'function' ? notify : null
     this._timer = null
-    this._last = null     // last computed snapshot
-    this._lastKey = null  // JSON of the last snapshot, for change detection
+    this._last = null         // last computed snapshot
+    this._lastKey = null      // JSON of the last snapshot, for broadcast change-detection
+    this._lastWarnKey = null  // signature of the last warning SET, for notify change-detection
+    this._egressIp = null     // cached public egress IP (null until resolved / when disabled)
+    this._stopped = false     // true after stop(); guards an in-flight egress tick from refreshing
   }
 
   /**
@@ -65,8 +81,10 @@ export class BillingCanaryMonitor {
       provider: s.provider,
       totalCostUsd: s && s.cumulativeUsage ? s.cumulativeUsage.costUsd : undefined,
     }))
-    // egressIp omitted on purpose — see the module header.
-    const { eraStarted, warnings } = runBillingCanary({ sessions, defaultProvider, now, apiKeyAuth })
+    // egressIp is the cached value from the out-of-band resolver — null when the
+    // egress check is OFF (default) or not yet resolved, so no egress warning.
+    const datacenterPrefixes = this._getDatacenterPrefixes() || []
+    const { eraStarted, warnings } = runBillingCanary({ sessions, defaultProvider, now, apiKeyAuth, egressIp: this._egressIp, datacenterPrefixes })
     const defaultBillingClass = billingClassForProvider(defaultProvider, now, { apiKeyAuth })
     return { eraStarted, defaultProvider, defaultBillingClass, warnings }
   }
@@ -89,7 +107,52 @@ export class BillingCanaryMonitor {
         this._log?.warn?.(`billing-canary broadcast failed: ${String(err?.message || err)}`)
       }
     }
+    // #5828: fire `notify` (e.g. push) when the warning SET changes to a
+    // non-empty state — once per distinct warning state, NOT on all-clear and
+    // NOT on an unchanged re-broadcast. Signature includes the message so a
+    // meaning change with the same code re-notifies (e.g. DATACENTER_EGRESS with
+    // a new egress IP, or SILENT_METERED_DEFAULT for a different provider) —
+    // mirrors the dashboard dismissal signature.
+    const warnKey = snapshot.warnings
+      .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''} ${w.message ?? ''}`)
+      .sort()
+      .join('|')
+    if (warnKey !== this._lastWarnKey) {
+      this._lastWarnKey = warnKey
+      if (snapshot.warnings.length > 0 && this._notify) {
+        try {
+          this._notify(snapshot.warnings)
+        } catch (err) {
+          this._log?.warn?.(`billing-canary notify failed: ${String(err?.message || err)}`)
+        }
+      }
+    }
     return snapshot
+  }
+
+  /**
+   * One recompute cycle: refresh the cached egress IP first (best-effort, only
+   * when the egress check is enabled), then refresh the snapshot. Async because
+   * the egress lookup is a network call; never rejects (fail-open).
+   */
+  async _tick() {
+    if (this._resolveEgressIp) {
+      try {
+        this._egressIp = await this._resolveEgressIp()
+      } catch {
+        this._egressIp = null
+      }
+    }
+    // The egress lookup is async (up to ~5s); if stop() landed while it was in
+    // flight, skip the trailing refresh so a shut-down monitor doesn't broadcast.
+    // `_stopped` (not `_timer`) is the signal — `_timer` is briefly null during
+    // start()'s first tick, before setInterval runs.
+    if (this._stopped) return
+    try {
+      this.refresh()
+    } catch (err) {
+      this._log?.warn?.(`billing-canary refresh failed: ${String(err?.message || err)}`)
+    }
   }
 
   /** The latest snapshot, for seeding auth_ok. Computes once if never refreshed. */
@@ -99,13 +162,14 @@ export class BillingCanaryMonitor {
 
   /** Start the periodic recompute. Initial refresh runs immediately. */
   start() {
+    this._stopped = false
+    // Immediate synchronous refresh so current() is populated for the auth_ok
+    // seed right away (egress, if enabled, folds in on the async tick below).
     this.refresh()
+    // Kick the first egress-aware tick (no-op extra refresh when egress is off).
+    this._tick().catch(() => {})
     this._timer = setInterval(() => {
-      try {
-        this.refresh()
-      } catch (err) {
-        this._log?.warn?.(`billing-canary refresh failed: ${String(err?.message || err)}`)
-      }
+      this._tick().catch((err) => this._log?.warn?.(`billing-canary tick failed: ${String(err?.message || err)}`))
     }, this._intervalMs)
     // Don't keep the event loop alive for this; clean shutdown calls stop() and
     // the leaked-timer test guard (--test-force-exit) shouldn't trip on it.
@@ -115,6 +179,7 @@ export class BillingCanaryMonitor {
 
   /** Stop the periodic recompute. Idempotent. */
   stop() {
+    this._stopped = true
     if (this._timer) {
       clearInterval(this._timer)
       this._timer = null

@@ -105,11 +105,17 @@ const DATACENTER_IPV4_PREFIXES = [
 
 /**
  * @param {string} ip - public egress IPv4
+ * @param {string[]} [extraPrefixes] - operator-supplied extra IPv4 prefixes
+ *   (config.billing.datacenterPrefixes), merged with the built-in list. Lets a
+ *   user on a known cloud add their provider's ranges without a code change.
  * @returns {{datacenter:boolean, code?:string, message?:string}}
  */
-export function classifyEgressIp(ip) {
+export function classifyEgressIp(ip, extraPrefixes = []) {
   if (!ip || typeof ip !== 'string') return { datacenter: false }
-  const hit = DATACENTER_IPV4_PREFIXES.some((p) => ip.startsWith(p))
+  const prefixes = Array.isArray(extraPrefixes) && extraPrefixes.length > 0
+    ? [...DATACENTER_IPV4_PREFIXES, ...extraPrefixes.filter((p) => typeof p === 'string' && p.length > 0)]
+    : DATACENTER_IPV4_PREFIXES
+  const hit = prefixes.some((p) => ip.startsWith(p))
   if (!hit) return { datacenter: false }
   return {
     datacenter: true,
@@ -124,15 +130,16 @@ export function classifyEgressIp(ip) {
 /**
  * Aggregate the canary. Returns a flat warnings array (empty = all clear).
  *
- * @param {{sessions?:Array, defaultProvider?:string, egressIp?:string, now?:number, apiKeyAuth?:boolean}} input
+ * @param {{sessions?:Array, defaultProvider?:string, egressIp?:string, now?:number, apiKeyAuth?:boolean, datacenterPrefixes?:string[]}} input
  *   `apiKeyAuth: true` forwards billing-class's refinement to the silent-metered
  *   check so a BYOK (claude-sdk + ANTHROPIC_API_KEY) default isn't flagged.
+ *   `datacenterPrefixes` extends the built-in egress prefix list (#5828).
  */
-export function runBillingCanary({ sessions = [], defaultProvider, egressIp, now = Date.now(), apiKeyAuth = false } = {}) {
+export function runBillingCanary({ sessions = [], defaultProvider, egressIp, now = Date.now(), apiKeyAuth = false, datacenterPrefixes = [] } = {}) {
   const warnings = []
   warnings.push(...detectSilentMeteredDefault(defaultProvider, now, { apiKeyAuth }))
   warnings.push(...detectBillingReclassification(sessions, now))
-  const egress = classifyEgressIp(egressIp)
+  const egress = classifyEgressIp(egressIp, datacenterPrefixes)
   if (egress.datacenter) warnings.push({ code: egress.code, message: egress.message })
   return {
     eraStarted: isProgrammaticCreditEra(now),

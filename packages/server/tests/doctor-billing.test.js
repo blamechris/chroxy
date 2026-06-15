@@ -82,6 +82,27 @@ test('classifyEgressIp does NOT flag coarse /8 blocks (false-positive guard)', (
   }
 })
 
+test('classifyEgressIp honours operator-supplied extra prefixes (#5828)', () => {
+  // A residential-looking IP is clean by default but flagged once the operator
+  // adds their cloud's range via config.billing.datacenterPrefixes.
+  assert.equal(classifyEgressIp('203.0.113.9').datacenter, false)
+  assert.equal(classifyEgressIp('203.0.113.9', ['203.0.113.']).datacenter, true)
+  // The built-in list still applies alongside the extras.
+  assert.equal(classifyEgressIp('95.216.1.2', ['203.0.113.']).datacenter, true)
+  // Junk entries in the extras list are ignored, not crashed on.
+  assert.equal(classifyEgressIp('203.0.113.9', ['', null, 42]).datacenter, false)
+})
+
+test('runBillingCanary threads datacenterPrefixes into the egress classifier (#5828)', () => {
+  const out = runBillingCanary({
+    defaultProvider: 'claude-tui',
+    egressIp: '198.51.100.5',
+    datacenterPrefixes: ['198.51.100.'],
+    now: AFTER,
+  })
+  assert.ok(out.warnings.some((w) => w.code === 'DATACENTER_EGRESS'))
+})
+
 test('runBillingCanary aggregates all three signals', () => {
   const out = runBillingCanary({
     sessions: [{ id: 's1', provider: 'claude-tui', totalCostUsd: 1.5 }],
