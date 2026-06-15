@@ -27,7 +27,11 @@ export class BillingCanaryMonitor {
    *   (SessionManager.listSessions() shape: { sessionId, provider, cumulativeUsage:{costUsd} }).
    * @param {() => string} opts.getDefaultProvider - resolved default provider id.
    * @param {() => boolean} [opts.getApiKeyAuth] - whether the default would auth via an
-   *   explicit ANTHROPIC_API_KEY (claude-sdk BYOK) — suppresses the silent-metered warning.
+   *   explicit ANTHROPIC_API_KEY and thus bill raw API (api-key), suppressing the
+   *   silent-metered warning. NOTE: billing-class's apiKeyAuth refinement nominally
+   *   covers both claude-cli and claude-sdk, but only claude-sdk honours an env key —
+   *   claude-cli strips ANTHROPIC_API_KEY before spawn, so it still meters with a key
+   *   set. The caller (server-cli) reflects that by setting this true ONLY for claude-sdk.
    * @param {(message: object) => void} opts.broadcast - global client broadcast.
    * @param {number} [opts.intervalMs] - recompute cadence (default 10 min).
    * @param {() => number} [opts.nowFn] - injectable clock for tests.

@@ -2644,7 +2644,18 @@ function handleBillingCanary(msg: Record<string, unknown>, get: MsgGet, set: Msg
   const { eraStarted, defaultProvider, defaultBillingClass, warnings } = parsed.data;
   const snapshot = { eraStarted, defaultProvider, defaultBillingClass, warnings };
   const prev = get().billingCanary;
-  const sig = (s: typeof snapshot | null) => (s ? s.warnings.map((w) => w.code).sort().join('|') : '');
+  // Signature over the FULL warning content (not just `code`): a reclassification
+  // trip can emit multiple warnings sharing TUI_REPORTED_PROGRAMMATIC_COST but
+  // differing in session/cost, and a code-only signature would mask that change
+  // and leave a dismissed banner stale (#5829 / review). Serialize each warning's
+  // identifying fields, order-independent.
+  const sig = (s: typeof snapshot | null) =>
+    s
+      ? s.warnings
+          .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''} ${w.message}`)
+          .sort()
+          .join('')
+      : '';
   const changed = sig(prev) !== sig(snapshot);
   set(changed ? { billingCanary: snapshot, billingBannerDismissed: false } : { billingCanary: snapshot });
 }
