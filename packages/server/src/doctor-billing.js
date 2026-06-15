@@ -20,6 +20,7 @@ import {
   billingClassForProvider,
   isProgrammaticCreditEra,
 } from './billing-class.js'
+import { expandIpv6, normalizeIpv6Prefix } from './ip-utils.js'
 
 /**
  * Loophole-closed canary. A `claude-tui` session is nominally subscription-billed
@@ -89,33 +90,60 @@ export function detectSilentMeteredDefault(defaultProvider, now = Date.now(), { 
 
 // Datacenter-egress ban-signal. Cloud-hosted daemons behind a tunnel are a documented
 // flag (the audit cites ~20-minute bans on Hetzner ranges). This is a pure classifier
-// over a known-prefix list; the caller supplies the public egress ip.
+// over known-prefix lists (IPv4 and IPv6); the caller supplies the public egress ip.
 //
-// CONSERVATIVE BY DESIGN: only specific, documented datacenter /16-ish ranges are
-// listed. Coarse /8 blocks (e.g. AWS/GCP `13.`, `34.`, `52.`) were deliberately
-// REMOVED — they span large amounts of residential/ISP space too and would fire false
-// positives, training users to ignore the warning. A comprehensive classifier needs a
-// maintained cloud-IP dataset (e.g. the published AWS/GCP/Azure range JSON); until that
-// is plumbed in, a precise-but-narrow list that never cries wolf beats a broad-but-noisy
-// one. A missed datacenter IP is a silent non-warning; a false hit erodes trust.
+// CONSERVATIVE BY DESIGN: only specific, documented datacenter ranges are listed.
+// Coarse blocks (e.g. AWS/GCP /8s `13.`, `34.`, `52.`) were deliberately REMOVED —
+// they span large amounts of residential/ISP space too and would fire false positives,
+// training users to ignore the warning. A comprehensive classifier needs a maintained
+// cloud-IP dataset (e.g. the published AWS/GCP/Azure range JSON); until that is plumbed
+// in, a precise-but-narrow list that never cries wolf beats a broad-but-noisy one. A
+// missed datacenter IP is a silent non-warning; a false hit erodes trust.
 const DATACENTER_IPV4_PREFIXES = [
   // Hetzner (cited in claude-code#21678) — specific allocated /16s.
   '5.9.', '88.99.', '95.216.', '116.202.', '135.181.', '167.235.', '168.119.',
 ]
 
+// #5831: IPv6 datacenter ranges, matched against the CANONICAL expanded form
+// (8 zero-padded groups) so a compressed `2a01:4f8::1` and a padded
+// `2a01:04f8:...` compare equal. Same conservative stance as the IPv4 list —
+// only documented Hetzner blocks. Matching the leading two groups is NARROWER
+// than the announced /29s on purpose: a missed datacenter IP is a silent
+// non-warning, a false hit erodes trust. Listed pre-normalised (lowercase,
+// zero-padded) so they prefix-match expandIpv6 output directly.
+const DATACENTER_IPV6_PREFIXES = [
+  '2a01:04f8:', // Hetzner Online (dedicated)
+  '2a01:04f9:', // Hetzner Online
+  '2a01:04ff:', // Hetzner Cloud
+]
+
 /**
- * @param {string} ip - public egress IPv4
- * @param {string[]} [extraPrefixes] - operator-supplied extra IPv4 prefixes
- *   (config.billing.datacenterPrefixes), merged with the built-in list. Lets a
- *   user on a known cloud add their provider's ranges without a code change.
+ * @param {string} ip - public egress IP (IPv4 or IPv6)
+ * @param {string[]} [extraPrefixes] - operator-supplied extra prefixes
+ *   (config.billing.datacenterPrefixes), merged with the built-in lists. A
+ *   prefix containing `:` is treated as IPv6, otherwise IPv4. Lets a user on a
+ *   known cloud add their provider's ranges without a code change.
  * @returns {{datacenter:boolean, code?:string, message?:string}}
  */
 export function classifyEgressIp(ip, extraPrefixes = []) {
   if (!ip || typeof ip !== 'string') return { datacenter: false }
-  const prefixes = Array.isArray(extraPrefixes) && extraPrefixes.length > 0
-    ? [...DATACENTER_IPV4_PREFIXES, ...extraPrefixes.filter((p) => typeof p === 'string' && p.length > 0)]
-    : DATACENTER_IPV4_PREFIXES
-  const hit = prefixes.some((p) => ip.startsWith(p))
+  const extra = Array.isArray(extraPrefixes)
+    ? extraPrefixes.filter((p) => typeof p === 'string' && p.length > 0)
+    : []
+
+  let hit = false
+  if (ip.includes(':')) {
+    // IPv6: compare canonical expanded forms so spelling doesn't matter.
+    const expanded = expandIpv6(ip)
+    if (expanded) {
+      const v6 = [...DATACENTER_IPV6_PREFIXES, ...extra.filter((p) => p.includes(':')).map(normalizeIpv6Prefix)]
+      hit = v6.some((p) => expanded.startsWith(p))
+    }
+  } else {
+    const v4 = [...DATACENTER_IPV4_PREFIXES, ...extra.filter((p) => !p.includes(':'))]
+    hit = v4.some((p) => ip.startsWith(p))
+  }
+
   if (!hit) return { datacenter: false }
   return {
     datacenter: true,

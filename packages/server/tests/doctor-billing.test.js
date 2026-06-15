@@ -82,6 +82,28 @@ test('classifyEgressIp does NOT flag coarse /8 blocks (false-positive guard)', (
   }
 })
 
+test('classifyEgressIp flags a known IPv6 datacenter range, not residential v6 (#5831)', () => {
+  // Hetzner IPv6 — compressed and padded spellings both match.
+  assert.equal(classifyEgressIp('2a01:4f8::1').datacenter, true)
+  assert.equal(classifyEgressIp('2a01:4f8::1').code, 'DATACENTER_EGRESS')
+  assert.equal(classifyEgressIp('2a01:04f8:0:1::dead').datacenter, true)
+  assert.equal(classifyEgressIp('2a01:4ff:f0:b1::1').datacenter, true) // Hetzner Cloud /32
+  // Residential / non-datacenter IPv6 is NOT flagged.
+  assert.equal(classifyEgressIp('2601:200:c000:1::5').datacenter, false) // Comcast
+  assert.equal(classifyEgressIp('2606:4700::1111').datacenter, false)    // Cloudflare DNS
+  // Malformed v6 is a silent non-hit, never a false positive.
+  assert.equal(classifyEgressIp('2a01:4f8:zzzz::1').datacenter, false)
+})
+
+test('classifyEgressIp honours operator-supplied IPv6 prefixes (#5831)', () => {
+  // A residential-looking v6 is clean by default but flagged once added.
+  assert.equal(classifyEgressIp('2a02:1370:c000::5').datacenter, false)
+  assert.equal(classifyEgressIp('2a02:1370:c000::5', ['2a02:1370:']).datacenter, true)
+  // v4 extras do not bleed into v6 matching and vice versa.
+  assert.equal(classifyEgressIp('2a02:1370:c000::5', ['203.0.113.']).datacenter, false)
+  assert.equal(classifyEgressIp('203.0.113.9', ['2a02:1370:']).datacenter, false)
+})
+
 test('classifyEgressIp honours operator-supplied extra prefixes (#5828)', () => {
   // A residential-looking IP is clean by default but flagged once the operator
   // adds their cloud's range via config.billing.datacenterPrefixes.

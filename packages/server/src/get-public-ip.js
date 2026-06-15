@@ -8,16 +8,17 @@
 // body) resolves to `null`, never throws. A missed lookup just means no egress
 // warning — strictly better than crashing a periodic canary tick.
 
-// ipify returns a bare IPv4/IPv6 string for the text endpoint. Kept as a
-// default so the resolver works out of the box; injectable for tests / for an
-// operator who'd rather point at their own echo service.
-const DEFAULT_IP_ECHO_URL = 'https://api.ipify.org'
-const DEFAULT_TIMEOUT_MS = 5000
+import { isIpv4, isIpv6 } from './ip-utils.js'
 
-// Each octet 0-255 — a loose \d{1,3} would accept junk like 999.999.999.999
-// from a captive-portal / error body.
-const OCTET = '(25[0-5]|2[0-4]\\d|1\\d\\d|[1-9]?\\d)'
-const IPV4_RE = new RegExp(`^(${OCTET}\\.){3}${OCTET}$`)
+// ipify's api64 endpoint returns a bare IP string — the host's IPv6 when it
+// egresses over IPv6, otherwise its IPv4. The dual-stack endpoint matters for
+// #5831: an IPv6-only cloud host (Hetzner increasingly assigns these) cannot
+// reach the IPv4-only `api.ipify.org`, so the datacenter-egress check would
+// never fire on exactly the host it exists to catch. Kept as a default so the
+// resolver works out of the box; injectable for tests / for an operator who'd
+// rather point at their own echo service.
+const DEFAULT_IP_ECHO_URL = 'https://api64.ipify.org'
+const DEFAULT_TIMEOUT_MS = 5000
 
 /**
  * Resolve the daemon's public egress IP, best-effort.
@@ -26,7 +27,7 @@ const IPV4_RE = new RegExp(`^(${OCTET}\\.){3}${OCTET}$`)
  * @param {string} [opts.url] - IP-echo endpoint returning a bare IP string.
  * @param {number} [opts.timeoutMs] - abort the request after this long.
  * @param {typeof fetch} [opts.fetchImpl] - injectable for tests (defaults to global fetch).
- * @returns {Promise<string|null>} the trimmed IPv4 string, or null on any failure.
+ * @returns {Promise<string|null>} the trimmed IPv4 or IPv6 string, or null on any failure.
  */
 export async function resolvePublicIp({ url = DEFAULT_IP_ECHO_URL, timeoutMs = DEFAULT_TIMEOUT_MS, fetchImpl = fetch } = {}) {
   const controller = new AbortController()
@@ -35,9 +36,9 @@ export async function resolvePublicIp({ url = DEFAULT_IP_ECHO_URL, timeoutMs = D
     const res = await fetchImpl(url, { signal: controller.signal })
     if (!res || !res.ok) return null
     const text = (await res.text()).trim()
-    // Only accept a plausible IPv4 — the classifier is IPv4-prefix based, and a
-    // junk/HTML body (captive portal, error page) must not be treated as an IP.
-    return IPV4_RE.test(text) ? text : null
+    // Only accept a plausible IPv4 or IPv6 — the classifier handles both — so a
+    // junk/HTML body (captive portal, error page) is never treated as an IP.
+    return (isIpv4(text) || isIpv6(text)) ? text : null
   } catch {
     return null
   } finally {

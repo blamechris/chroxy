@@ -31,6 +31,22 @@ test('accepts boundary octets (255.0.1.255)', async () => {
   assert.equal(ip, '255.0.1.255')
 })
 
+test('accepts a valid IPv6 body (#5831)', async () => {
+  const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => ({ ok: true, text: async () => '2a01:4f8::1' })) })
+  assert.equal(ip, '2a01:4f8::1')
+})
+
+test('returns null for a malformed IPv6 body', async () => {
+  const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => ({ ok: true, text: async () => '2a01:4f8:zzzz::1' })) })
+  assert.equal(ip, null)
+})
+
+test('defaults to a dual-stack echo endpoint so IPv6-only hosts resolve (#5831)', async () => {
+  let seen = null
+  await resolvePublicIp({ fetchImpl: fakeFetch(async (url) => { seen = url; return { ok: true, text: async () => '2a01:4f8::1' } }) })
+  assert.match(seen, /api64\.ipify\.org/)
+})
+
 test('is fail-open: a throwing fetch resolves to null, never rejects', async () => {
   const ip = await resolvePublicIp({ fetchImpl: fakeFetch(async () => { throw new Error('network down') }) })
   assert.equal(ip, null)
