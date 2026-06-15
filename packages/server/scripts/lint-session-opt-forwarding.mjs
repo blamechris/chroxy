@@ -277,7 +277,59 @@ function parseBaseSessionOptKeysArray(baseSessionPath) {
 // Subclass scanning
 // ----------------------------------------------------------------------
 
-const CLASS_RE = /export\s+class\s+([A-Za-z_$][\w$]*)\s+extends\s+(BaseSession|JsonlSubprocessSession)\b/g
+// Root session base classes. Every class whose `extends` chain reaches one of
+// these — transitively — is a session subclass the opt-forwarding rule applies
+// to. The full set is discovered by fixpoint (discoverSessionBases) so the
+// SECOND middle layer is analyzed too: DockerSdkSession extends SdkSession, the
+// four ClaudeByokSession variants (Anthropic-compatible/DeepSeek/Ollama/
+// docker-byok), and DockerSession extends CliSession (audit P2-1). The old fixed
+// regex matched only the two roots, so those six were invisible to the lint.
+const ROOT_SESSION_BASES = ['BaseSession', 'JsonlSubprocessSession']
+
+// Parents whose subclasses must NOT forward via the buildBaseSessionOpts()
+// picker: ClaudeByokSession reads provider-local opts (mcpConfigPath /
+// mcpToolCallTimeoutMs / mcpStartCapMs) off the RAW opts object, which the
+// picker — copying only the 20 BASE_SESSION_OPT_KEYS — would silently drop. A
+// spread/positional super forwards them. #5367 moved the middle-layer trap from
+// base opts onto these provider-local opts (audit P2-1, second finding).
+const PICKER_FORBIDDEN_PARENTS = new Set(['ClaudeByokSession'])
+
+// Matches `class X extends Y` (with or without `export`, any indentation — the
+// factory-defined AnthropicCompatibleSession is a plain `class`, not exported).
+const ANY_CLASS_RE = /(?:export\s+)?class\s+([A-Za-z_$][\w$]*)\s+extends\s+([A-Za-z_$][\w$]*)\b/g
+
+/**
+ * Transitively discover every session subclass name by fixpoint: seed with the
+ * roots, then repeatedly add any `class X extends Y` whose Y is already known
+ * until closure. `allStrippedSources` is every session file's comment-stripped
+ * source. Returns the full Set of base names (roots included).
+ */
+function discoverSessionBases(allStrippedSources) {
+  const edges = []
+  for (const stripped of allStrippedSources) {
+    for (const m of stripped.matchAll(ANY_CLASS_RE)) {
+      edges.push({ child: m[1], parent: m[2] })
+    }
+  }
+  const bases = new Set(ROOT_SESSION_BASES)
+  let changed = true
+  while (changed) {
+    changed = false
+    for (const { child, parent } of edges) {
+      if (bases.has(parent) && !bases.has(child)) {
+        bases.add(child)
+        changed = true
+      }
+    }
+  }
+  return bases
+}
+
+/** Build a `class X extends <one of baseNames>` global matcher (m[1]=class, m[2]=parent). */
+function buildSessionClassRegex(baseNames) {
+  const alt = [...baseNames].map(n => n.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|')
+  return new RegExp(`(?:export\\s+)?class\\s+([A-Za-z_$][\\w$]*)\\s+extends\\s+(${alt})\\b`, 'g')
+}
 
 function lineOf(src, idx) {
   return src.slice(0, idx).split('\n').length
@@ -474,18 +526,26 @@ function main() {
     }
   }
 
-  const files = walk(SRC_DIR).filter(f => !f.endsWith('/base-session.js'))
+  const allFiles = walk(SRC_DIR)
+  // Discover the transitive session-base closure across ALL files (incl.
+  // base-session.js) so the fixpoint sees every `class … extends …` edge, then
+  // build the matcher that picks up direct AND second-tier subclasses.
+  const sessionBases = discoverSessionBases(allFiles.map(f => stripComments(readFileSync(f, 'utf8'))))
+  const classRe = buildSessionClassRegex(sessionBases)
+
+  const files = allFiles.filter(f => !f.endsWith('/base-session.js'))
   const offenders = []
   let analyzedCount = 0
 
   for (const file of files) {
     const origSrc = readFileSync(file, 'utf8')
-    if (!CLASS_RE.test(origSrc)) continue
-    CLASS_RE.lastIndex = 0
+    if (!classRe.test(origSrc)) continue
+    classRe.lastIndex = 0
     const strippedSrc = stripComments(origSrc)
     let m
-    while ((m = CLASS_RE.exec(strippedSrc)) !== null) {
+    while ((m = classRe.exec(strippedSrc)) !== null) {
       const className = m[1]
+      const parentName = m[2]
       const classDeclIdx = m.index
       const declLine = lineOf(strippedSrc, classDeclIdx)
       const ignore = findIgnoreList(origSrc, declLine)
@@ -494,9 +554,16 @@ function main() {
       analyzedCount++
 
       // #5367: `super(buildBaseSessionOpts(...))` — compliant by construction
-      // (coverage guaranteed by the array-vs-ctor assertion above + the picker
-      // copying every key). Counts as analyzed-and-ok.
-      if (analysis.compliant === 'picker') continue
+      // for BASE opts (coverage guaranteed by the array-vs-ctor assertion above
+      // + the picker copying every key). Counts as analyzed-and-ok — UNLESS the
+      // parent reads provider-local opts off raw opts (audit P2-1), where the
+      // picker drops them.
+      if (analysis.compliant === 'picker') {
+        if (PICKER_FORBIDDEN_PARENTS.has(parentName)) {
+          offenders.push({ file, line: declLine, className, pickerForbidden: parentName })
+        }
+        continue
+      }
 
       // #5367: an unrecognized super() shape (not the picker, not a bare
       // identifier/spread, not an object literal) could silently drop keys.
@@ -536,7 +603,7 @@ function main() {
         })
       }
     }
-    CLASS_RE.lastIndex = 0
+    classRe.lastIndex = 0
   }
 
   if (offenders.length) {
@@ -544,6 +611,13 @@ function main() {
     console.error('')
     for (const o of offenders) {
       console.error(`  ${o.file}:${o.line}  class ${o.className}`)
+      if (o.pickerForbidden) {
+        console.error(`    Uses super(buildBaseSessionOpts(...)) but extends ${o.pickerForbidden}, which`)
+        console.error('    reads provider-local opts (mcpConfigPath / mcpToolCallTimeoutMs / mcpStartCapMs)')
+        console.error('    off raw opts — the picker copies only BASE_SESSION_OPT_KEYS and would silently')
+        console.error('    drop them. Forward with super({ ...opts, <overrides> }) instead.')
+        continue
+      }
       if (o.unrecognizedSuper !== undefined) {
         console.error(`    Unrecognized super() shape: super(${o.unrecognizedSuper}...)`)
         console.error('    Expected super(buildBaseSessionOpts(opts, { ...overrides })), super(opts),')
