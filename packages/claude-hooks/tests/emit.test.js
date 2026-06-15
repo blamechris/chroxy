@@ -261,8 +261,8 @@ describe('deriveProject', () => {
 
   // #5483: when the chroxy worktree's .git parse FAILS (corrupt or missing),
   // worktreeParent returns null. deriveProject must NOT fall through to the git
-  // walk — inside a chroxy worktree it can only ever yield the opaque session id
-  // (the worktree dir's basename), the exact noise embed #5464 eliminated.
+  // walk — with the parent unrecoverable it falls back to the worktree dir's
+  // basename (the opaque session id), the exact noise embed #5464 eliminated.
   it('never derives the opaque id when a chroxy worktree .git file is MALFORMED (#5483)', () => {
     // A shape-surprise gitdir (not <repo>/.git/worktrees/<id>) → parse returns null.
     const { root, wt, id } = chroxyWorktreeFixture({ gitdir: '/somewhere/bogus/x' })
