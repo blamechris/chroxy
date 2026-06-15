@@ -259,7 +259,10 @@ export function TerminalView({ className, initialData, onReady, fixedSize, onMea
   useEffect(() => {
     if (disposedRef.current || !termRef.current) return
     termRef.current.options.disableStdin = !(fixedSize && interactive)
-  }, [fixedSize, interactive]) // eslint-disable-line react-hooks/exhaustive-deps
+    // Depend on the primitive cols/rows (mode is mount-fixed, so fixedSize
+    // presence never changes) + interactive — consistent with the resize effect
+    // above and avoids re-running on an unrelated new {cols,rows} object.
+  }, [fixedSize?.cols, fixedSize?.rows, interactive]) // eslint-disable-line react-hooks/exhaustive-deps
 
   return (
     <div

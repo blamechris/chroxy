@@ -120,6 +120,11 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
     }
   }, [sessions])
 
+  // #5835 Phase 3: the active session is read-only iff this client observes it
+  // (another device holds primary) — same predicate as each pane's `interactive`,
+  // named once for the badge.
+  const activeIsObserver = !!activeSessionId && sessionStates[activeSessionId]?.sessionRole === 'observer'
+
   return (
     <div className={className} data-testid="multi-terminal-container" style={{ position: 'relative' }}>
       {sessions.map(session => (
@@ -147,7 +152,7 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
           />
         </div>
       ))}
-      {activeSessionId && sessionStates[activeSessionId]?.sessionRole === 'observer' && (
+      {activeIsObserver && (
         <div className="terminal-readonly-badge" data-testid="terminal-readonly-badge">
           Read-only — another device is driving this session
         </div>
