@@ -469,6 +469,11 @@ export interface PendingTrustGrant {
 
 export interface SessionState extends BaseSessionState {
   terminalRawBuffer: string;
+  // #5835 Phase 2: the authoritative live-PTY grid size the server last reported
+  // for this session (terminal_size). The mirror renders at exactly this size,
+  // letterboxed. Undefined until the server reports it; the view falls back to
+  // the shared default (CLAUDE_TUI_PTY_SIZE) meanwhile.
+  terminalSize?: { cols: number; rows: number };
   // Files tab: selected file path (persists across tab switches)
   selectedFilePath: string | null;
   thinkingLevel: ThinkingLevel;
@@ -960,6 +965,11 @@ export interface ConnectionState {
   // (terminal_output). Sent when the Output tab is shown for a claude-tui session.
   subscribeTerminalMirror: (sessionId: string) => void;
   unsubscribeTerminalMirror: (sessionId: string) => void;
+  // #5835 Phase 2: record the authoritative PTY size the server reported for a
+  // session (from a terminal_size message), and request a resize of a session's
+  // live PTY (terminal_resize) when the viewer pane can fit a different grid.
+  setTerminalSize: (sessionId: string, cols: number, rows: number) => void;
+  requestTerminalResize: (sessionId: string, cols: number, rows: number) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
   sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   /**

@@ -76,7 +76,6 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  'terminal_size', // #5835 Phase 2 (server PR) emits the authoritative live-PTY size; the dashboard receipt handler (letterbox to it) lands in the Phase 2 dashboard PR, which will move this to PLATFORM_SPECIFIC as 'dashboard' (exactly as terminal_output did across Phase 1's two PRs).
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.
@@ -138,6 +137,7 @@ const PLATFORM_SPECIFIC = {
   // Coverage test passes because each handler has a
   // `case 'multi_question_intervention':` clause.
   'terminal_output': 'dashboard', // #5835 (PR2) live claude-tui PTY mirror — the dashboard renders the raw bytes in xterm; the mobile WebView terminal render is a deferred follow-up per the epic
+  'terminal_size': 'dashboard', // #5835 Phase 2 authoritative live-PTY grid size — the dashboard letterboxes the mirror to it (setTerminalSize); same mobile follow-up as terminal_output
   'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
   'activity_snapshot': 'dashboard', // Control Room live activity tree (#5161 schema / #5160 server / #5162 reducer / #5163 dashboard panel) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5159
   'activity_delta': 'dashboard',    // Control Room activity delta — see activity_snapshot above; dashboard-only for v1, mobile parity is Phase-2 per epic #5159

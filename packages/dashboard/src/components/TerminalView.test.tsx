@@ -13,6 +13,10 @@ import { TerminalView, BATCH_INTERVAL } from './TerminalView'
 const writeSpy = vi.fn()
 const disposeSpy = vi.fn()
 const fitSpy = vi.fn()
+const resizeSpy = vi.fn()
+// #5835 Phase 2: mirror mode measures the pane via FitAddon.proposeDimensions().
+// Tests can override this to simulate different pane sizes.
+let proposeDimensionsResult: { cols: number; rows: number } | undefined = { cols: 200, rows: 50 }
 
 // Mock xterm.js since jsdom can't render canvas
 vi.mock('@xterm/xterm', () => {
@@ -33,6 +37,7 @@ vi.mock('@xterm/xterm', () => {
     dispose() { disposeSpy(); this._disposed = true }
     loadAddon(addon: unknown) { this._addons.push(addon) }
     onData(_cb: (data: string) => void) { return { dispose: () => {} } }
+    resize(cols: number, rows: number) { resizeSpy(cols, rows) }
   }
   return { Terminal: MockTerminal }
 })
@@ -41,6 +46,7 @@ vi.mock('@xterm/addon-fit', () => {
   class MockFitAddon {
     _fitted = false
     fit() { fitSpy(); this._fitted = true }
+    proposeDimensions() { return proposeDimensionsResult }
     dispose() {}
   }
   return { FitAddon: MockFitAddon }
@@ -54,6 +60,7 @@ describe('TerminalView', () => {
 
   beforeEach(() => {
     vi.clearAllMocks()
+    proposeDimensionsResult = { cols: 200, rows: 50 }
   })
 
   it('renders a container div', () => {
@@ -192,5 +199,51 @@ describe('TerminalView', () => {
     // Advance past debounce — fit() should NOT have been called again
     act(() => { vi.advanceTimersByTime(200) })
     expect(fitSpy).toHaveBeenCalledTimes(mountCalls)
+  })
+
+  // #5835 Phase 2: mirror mode — dynamic size + pane measurement.
+  describe('mirror mode (#5835 Phase 2)', () => {
+    it('does NOT auto-fit in fixedSize mode (would stretch the letterboxed grid)', () => {
+      fitSpy.mockClear()
+      render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} />)
+      expect(fitSpy).not.toHaveBeenCalled()
+    })
+
+    it('measures the pane via proposeDimensions and reports it through onMeasure on mount', () => {
+      proposeDimensionsResult = { cols: 200, rows: 50 }
+      const onMeasure = vi.fn()
+      render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} />)
+      expect(onMeasure).toHaveBeenCalledWith(200, 50)
+    })
+
+    it('does not call onMeasure when proposeDimensions returns nothing (hidden/0-size pane)', () => {
+      proposeDimensionsResult = undefined
+      const onMeasure = vi.fn()
+      render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} onMeasure={onMeasure} />)
+      expect(onMeasure).not.toHaveBeenCalled()
+    })
+
+    it('resizes the live terminal in place when fixedSize changes (preserves scrollback)', () => {
+      resizeSpy.mockClear()
+      const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} />)
+      // mount runs the resize effect once with the initial size
+      resizeSpy.mockClear()
+      rerender(<TerminalView fixedSize={{ cols: 160, rows: 48 }} />)
+      expect(resizeSpy).toHaveBeenCalledWith(160, 48)
+    })
+
+    it('does not re-resize when fixedSize object identity changes but values do not', () => {
+      const { rerender } = render(<TerminalView fixedSize={{ cols: 120, rows: 30 }} />)
+      resizeSpy.mockClear()
+      rerender(<TerminalView fixedSize={{ cols: 120, rows: 30 }} />)
+      expect(resizeSpy).not.toHaveBeenCalled()
+    })
+
+    it('normal (non-fixed) mode never resizes the terminal imperatively', () => {
+      resizeSpy.mockClear()
+      const { rerender } = render(<TerminalView />)
+      rerender(<TerminalView />)
+      expect(resizeSpy).not.toHaveBeenCalled()
+    })
   })
 })

@@ -16,8 +16,13 @@ import { useConnectionStore } from '../store/connection'
 // (claude-tui-session.js spawns the PTY at CLAUDE_TUI_PTY_SIZE). The Output pane
 // is claude-tui-only, so render every terminal here at that exact size,
 // letterboxed, to keep the mirror 1:1 faithful. Single-sourced from @chroxy/
-// protocol (#5839) so server + dashboard can't drift. Phase 2 makes it dynamic.
-const MIRROR_SIZE = CLAUDE_TUI_PTY_SIZE
+// protocol (#5839) so server + dashboard can't drift.
+//
+// #5835 Phase 2: the size is now DYNAMIC — the server reports the authoritative
+// grid per session via terminal_size (stored on sessionStates[id].terminalSize),
+// and the viewer measures its pane and asks the server to resize the real PTY
+// (terminal_resize). MIRROR_DEFAULT is just the pre-terminal_size fallback.
+const MIRROR_DEFAULT = CLAUDE_TUI_PTY_SIZE
 
 export interface MultiTerminalViewProps {
   sessions: { sessionId: string }[]
@@ -28,12 +33,32 @@ export interface MultiTerminalViewProps {
 export function MultiTerminalView({ sessions, activeSessionId, className }: MultiTerminalViewProps) {
   const handlesRef = useRef(new Map<string, TerminalHandle>())
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
+  const requestTerminalResize = useConnectionStore(s => s.requestTerminalResize)
+  // #5835 Phase 2: per-session authoritative sizes (server terminal_size). Reads
+  // the whole map so a size change re-renders and the new fixedSize flows to the
+  // affected TerminalView (which resizes its xterm in place).
+  const sessionStates = useConnectionStore(s => s.sessionStates)
 
   // Track whether active session has terminal data for empty state
   const activeBuffer = useConnectionStore(s => {
     if (!activeSessionId) return ''
     return s.sessionStates[activeSessionId]?.terminalRawBuffer || ''
   })
+
+  // #5835 Phase 2: forward a pane measurement to the server as a resize request.
+  // Only the ACTIVE (visible) session drives the shared PTY — hidden panes are
+  // display:none and measure 0, but guard on live activeSessionId anyway. Dedupe
+  // identical sizes so we don't re-send the same grid (the server also no-ops an
+  // unchanged size, but this saves the round trip). TerminalView already debounces
+  // the measurement itself.
+  const lastSentRef = useRef(new Map<string, string>())
+  const handleMeasure = useCallback((sessionId: string, cols: number, rows: number) => {
+    if (useConnectionStore.getState().activeSessionId !== sessionId) return
+    const key = `${cols}x${rows}`
+    if (lastSentRef.current.get(sessionId) === key) return
+    lastSentRef.current.set(sessionId, key)
+    requestTerminalResize(sessionId, cols, rows)
+  }, [requestTerminalResize])
 
   // Get initial data for a session from the store (one-time, at mount)
   const getInitialData = useCallback((sessionId: string) => {
@@ -63,12 +88,17 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
     }
   }, [setTerminalWriteCallback])
 
-  // Clean up handles for removed sessions
+  // Clean up handles + last-sent sizes for removed sessions
   useEffect(() => {
     const currentIds = new Set(sessions.map(s => s.sessionId))
     for (const id of handlesRef.current.keys()) {
       if (!currentIds.has(id)) {
         handlesRef.current.delete(id)
+      }
+    }
+    for (const id of lastSentRef.current.keys()) {
+      if (!currentIds.has(id)) {
+        lastSentRef.current.delete(id)
       }
     }
   }, [sessions])
@@ -89,7 +119,8 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
             className="terminal-container"
             initialData={getInitialData(session.sessionId)}
             onReady={(handle) => handleReady(session.sessionId, handle)}
-            fixedSize={MIRROR_SIZE}
+            fixedSize={sessionStates[session.sessionId]?.terminalSize ?? MIRROR_DEFAULT}
+            onMeasure={(cols, rows) => handleMeasure(session.sessionId, cols, rows)}
           />
         </div>
       ))}
