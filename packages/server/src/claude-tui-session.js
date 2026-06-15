@@ -1124,6 +1124,11 @@ export class ClaudeTuiSession extends BaseSession {
     this._activeTurn = null
     this._isBusy = false
     this._currentMessageId = null
+    // #4307: the PTY is gone, so the ephemeral intra-turn run_in_background
+    // tool_use→command map can never be resolved by a result on this PTY — drop
+    // it (matches _clearTurnEndState / base _clearMessageState). On respawn the
+    // next turn starts clean; on destroy _clearMessageState would clear it anyway.
+    this._pendingBackgroundCommands.clear()
     // #5777 (#5788): cancel a pending first-turn submit nudge directly here.
     // _onPtyGone is the one teardown path that does NOT route through
     // _clearFirstOutputWatchdog, so without this an armed nudge would only be
@@ -2350,24 +2355,12 @@ export class ClaudeTuiSession extends BaseSession {
     // path, matching the one _finishTurnError emits on error paths so
     // every turn lands one grep-able line regardless of outcome.
     this._logSendMessageSummary('success')
-    // Clear inactivity timers — turn done, nothing to backstop (#3920, #4638, #4732).
-    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
-    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
-    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
-    // #4732: clear the pre-first-output watchdog. By the success path we
-    // already saw at least one hook (the Stop hook), so it should be
-    // disarmed via _clearFirstOutputWatchdog already — but the same
-    // belt-and-braces clear the other timers get above also applies here
-    // so a freak ordering can't leak a live handle past turn-end.
-    this._clearFirstOutputWatchdog()
-    // #4022: drop the per-turn attachment dir now that the Stop hook
-    // has fired and the response has streamed back. The Read-tool
-    // results are already in the model's context window, so the bytes
-    // on disk aren't needed for the next turn.
-    this._cleanupTurnAttachments(this._activeTurn)
-    this._activeTurn = null
-    this._isBusy = false
-    this._currentMessageId = null
+    // Per-turn teardown: inactivity timers (#3920, #4638, #4732), pre-first-output
+    // watchdog, per-turn attachment dir (#4022 — Read results are already in the
+    // model's context window), the busy-state triple, and — previously MISSING on
+    // this path — the AskUserQuestion sibling lock + stall watchdogs (#4604/#5319).
+    // Shared with _finishTurnError so the two can't re-diverge. See helper doc.
+    this._clearTurnEndState()
   }
 
   /**
@@ -2699,19 +2692,54 @@ export class ClaudeTuiSession extends BaseSession {
     }
   }
 
+  /**
+   * Common per-turn teardown shared by the success path and `_finishTurnError`
+   * (audit P1-1). Both previously hand-rolled these clears and the success path
+   * had DRIFTED — it omitted the AskUserQuestion sibling-lock clear and the
+   * stall-watchdog clear, so a Stop-hook success whose PostToolUse never fired
+   * could (a) leak the `askuserquestion-active` lock and spuriously deny the
+   * NEXT turn's question inside the 60s stale-reclaim window (#4604), and
+   * (b) leave an armed 30s watchdog that could tear down a later unrelated busy
+   * turn. Routing both paths through one helper keeps them from re-diverging.
+   *
+   * Owns: the inactivity timers, the pre-first-output watchdog, the per-turn
+   * attachment dir (cleaned BEFORE `_activeTurn` is nulled so it still has the
+   * dir), the busy-state triple, the AskUserQuestion sibling lock, and the
+   * per-toolUseId stall watchdogs.
+   *
+   * Deliberately does NOT call `_pendingUserAnswers_clearAll()`: neither caller
+   * issues Ctrl-C, so a sibling AskUserQuestion answer already on the wire can
+   * still validly consume its entry (#4802). The Ctrl-C / kill paths
+   * (`_teardownTurn`, `interrupt`, `destroy`) clear pending answers themselves.
+   *
+   * DOES clear `_pendingBackgroundCommands` — the ephemeral intra-turn
+   * tool_use→command lookup (#4307). Per its base-session contract that map is
+   * dropped every turn (CLI/SDK do so via `_clearMessageState`): once a turn
+   * ends, any run_in_background `tool_use` that never saw its result this turn is
+   * stranded, and the agent re-emits a fresh `tool_use` next turn if it still
+   * cares. This is NOT the cross-turn "waiting on background shell" state — that
+   * lives in `_backgroundShellTracker` (transient-by-design, quiesced
+   * separately) and is untouched here. Leaving the map uncleared per-turn was
+   * the leak audit P1-1 flagged: ClaudeTuiSession is the only subclass that
+   * didn't run the base per-turn reset.
+   */
+  _clearTurnEndState() {
+    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
+    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
+    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
+    this._clearFirstOutputWatchdog()
+    this._cleanupTurnAttachments(this._activeTurn)
+    this._activeTurn = null
+    this._isBusy = false
+    this._currentMessageId = null
+    this._clearAskUserQuestionLock()
+    this._clearAllAskUserQuestionWatchdogs()
+    this._pendingBackgroundCommands.clear()
+  }
+
   _finishTurnError(message, callerMessageId) {
     this._assertBusyHasMessageId('_finishTurnError')
     this._logSendMessageSummary('error')
-    if (this._resultTimeout) { clearTimeout(this._resultTimeout); this._resultTimeout = null }
-    if (this._hardTimeout) { clearTimeout(this._hardTimeout); this._hardTimeout = null }
-    // #4638: clear the stream-stall watchdog so a turn that fails or
-    // aborts before the stall window doesn't fire a stale stream_stall
-    // error into the dashboard mid-recovery.
-    if (this._streamStallTimeout) { clearTimeout(this._streamStallTimeout); this._streamStallTimeout = null }
-    // #4732: clear the pre-first-output watchdog for the same reason —
-    // an aborted/failed turn must not surface a stale first-output stall
-    // into the dashboard mid-recovery.
-    this._clearFirstOutputWatchdog()
     // #4010: balance the early stream_start with stream_end + result so the
     // dashboard's busy state clears (event-normalizer.js:215 synthesizes
     // agent_idle from result). Without this, an aborted/failed TUI turn
@@ -2722,7 +2750,8 @@ export class ClaudeTuiSession extends BaseSession {
     // to here) still pairs stream_end with the stream_start we opened.
     // Without that fallback, the if(messageId) guard would silently skip
     // stream_end, leaving session-message-history._pendingStreams holding
-    // the entry until destroy().
+    // the entry until destroy(). Read messageId/duration BEFORE the teardown
+    // helper nulls the turn fields.
     const messageId = callerMessageId || this._currentMessageId
     const duration = this._activeTurn ? this._nowMonotonic() - this._activeTurn.startedAt : 0
     if (messageId) this.emit('stream_end', { messageId })
@@ -2735,38 +2764,16 @@ export class ClaudeTuiSession extends BaseSession {
       { cost: null, duration, usage: null, sessionId: this._sessionId },
       'turn_finished_with_error',
     )
-    // #4022: drop the per-turn attachment dir on every failure path so
-    // a stalled/aborted/PTY-exited turn doesn't leak the materialized
-    // files until destroy(). No-op when the turn had no attachments.
-    this._cleanupTurnAttachments(this._activeTurn)
-    this._activeTurn = null
-    this._isBusy = false
-    this._currentMessageId = null
-    // #4286 / #4802: deliberately do NOT call
-    // `_pendingUserAnswers_clearAll()` here. The original #4286 fix
-    // wiped the single-field slot to keep late user_question_response
-    // events from writing into a dead turn — but post-#4668 the field is
-    // a Map, and the audit (P1.2 #4802) flagged that the implicit wipe
-    // collapsed sibling AskUserQuestion entries that still had legitimate
-    // answers in flight. `_finishTurnError` runs on PTY-exit / Stop-hook
-    // timeout / prompt-write failure paths that do NOT issue Ctrl-C, so
-    // a parallel sibling's response that's already on the wire (#4668
-    // retry-as-singles shape) can still validly consume its entry. Late
-    // arrivals after the PTY has truly stopped responding will no-op in
-    // `respondToQuestion` (write throws / TUI ignores) — far better than
-    // silently dropping the legitimate response and re-creating the
-    // #4668 wedge. The other turn-ending sites
-    // (`_teardownTurn` / `interrupt()` / `destroy()`) still call
-    // `_pendingUserAnswers_clearAll()` because they DO issue Ctrl-C or
-    // kill the PTY outright.
-    this._clearAskUserQuestionLock()
-    // #4604: same symmetry for the stall watchdog. The guard in
-    // _onAskUserQuestionStall (`!_pendingUserAnswer && !_isBusy`) would
-    // currently no-op the late fire (both are falsy here), but leaving
-    // the setTimeout handles live wastes a callback invocation 30s later.
-    // #5319 (WP-3.2): the turn errored — every per-toolUseId watchdog is moot
-    // (their fires would no-op on !_isBusy), so clear them all.
-    this._clearAllAskUserQuestionWatchdogs()
+    // Shared per-turn teardown: timers, pre-first-output watchdog, attachment
+    // dir (#4022), the busy-state triple, the AskUserQuestion sibling lock
+    // (#4604), and the per-toolUseId stall watchdogs (#5319). The emits above
+    // are synchronous, so deferring the timer clears into the helper (vs the
+    // old before-emit position) cannot let a timer fire in between. The helper
+    // intentionally does NOT clear `_pendingUserAnswers` — see its doc (#4286 /
+    // #4802): this path issues no Ctrl-C, so a sibling answer already on the
+    // wire can still validly consume its entry; the Ctrl-C/kill paths
+    // (`_teardownTurn` / `interrupt()` / `destroy()`) clear pending answers.
+    this._clearTurnEndState()
   }
 
   /**
@@ -3281,6 +3288,9 @@ export class ClaudeTuiSession extends BaseSession {
     // `_handleHardTimeout` / `_handleStreamStall` / `_handleFirstOutputTimeout`
     // can never leak a live handle that would re-fire on a torn-down turn.
     this._clearFirstOutputWatchdog()
+    // #4307: drop the ephemeral intra-turn run_in_background tool_use→command
+    // map on this turn-end too (matches _clearTurnEndState / base _clearMessageState).
+    this._pendingBackgroundCommands.clear()
     // 5. Error + result emit, in the order the caller requests. The two
     // existing callers disagree (hard-timeout: error first; stream-stall:
     // result first), and that asymmetry is preserved exactly.
