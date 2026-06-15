@@ -1,4 +1,7 @@
 import { EventEmitter } from 'node:events'
+import { createLogger } from './logger.js'
+
+const log = createLogger('ws-client-manager')
 
 // #5563: shared immutable empty Set returned by getSessionSubscribers when a
 // session has no indexed clients — avoids allocating per call on the hot path.
@@ -263,8 +266,11 @@ export class WsClientManager extends EventEmitter {
     // observes the new viewer state. Defensive try/catch: a listener failure
     // (e.g. mirror re-sync) must never corrupt the index. (audit P1-2)
     if (this._onActiveSessionChanged) {
+      // Best-effort: index integrity comes first, but log so a failing listener
+      // (e.g. a future _syncTerminalMirror edge case leaving the gate unsynced)
+      // is triageable instead of silently swallowed.
       try { this._onActiveSessionChanged(client, prev, sessionId) }
-      catch { /* listener is best-effort; index integrity comes first */ }
+      catch (err) { log.warn(`onActiveSessionChanged listener threw (index left intact): ${err?.message || err}`) }
     }
   }
 

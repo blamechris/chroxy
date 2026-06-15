@@ -578,7 +578,7 @@ export class WsServer {
     // nobody (the waste #5837/#5844 set out to kill). _syncTerminalMirror
     // no-ops on a null id, so passing prev=null is safe.
     this._clientManager = new WsClientManager({
-      onActiveSessionChanged: (client, prev, next) => {
+      onActiveSessionChanged: (_client, prev, next) => {
         this._syncTerminalMirror(prev)
         this._syncTerminalMirror(next)
       },
