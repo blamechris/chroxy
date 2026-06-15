@@ -573,6 +573,11 @@ export class WsServer {
     // reconnect and updated by session-handlers.handleSwitchSession after
     // every explicit switch.
     this._devicePreferences = devicePreferences || createDevicePreferences()
+    // #5821: provider for the current billing-canary snapshot, wired by
+    // server-cli after the monitor is constructed (the monitor depends on this
+    // WsServer's broadcast, so it's created after — set the provider here once
+    // it exists). null = no seed (older boot / tests); the ctx getter folds this in.
+    this._billingCanaryProvider = null
     // #4849: lazy startup prune. server-cli calls sessionManager.restoreState()
     // before constructing the WsServer, so any device-pref entry whose
     // activeSessionId is missing here is genuinely orphaned (a session
@@ -837,6 +842,14 @@ export class WsServer {
       // surfaced in auth_ok so the dashboard can render a warning banner.
       // null until start() has bound a socket.
       get exposure() { return self.exposure },
+      // #5821: current billing-canary snapshot, seeded into auth_ok so a
+      // freshly-connected client renders the billing banner immediately. null
+      // until a provider is wired (server-cli sets it post-construct) — live
+      // changes still arrive via the `billing_canary` broadcast.
+      get billingCanary() {
+        try { return self._billingCanaryProvider ? self._billingCanaryProvider() : null }
+        catch { return null }
+      },
       // #5555 (auth_bootstrap): file ops + provider agent dirs so the
       // connect-time bootstrap burst can compute the slash-command / agent
       // lists inline (same payloads the list_* request handlers produce),
@@ -1749,6 +1762,16 @@ export class WsServer {
     }, 60_000)
 
     log.info(`Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
+  }
+
+  /**
+   * #5821: wire the billing-canary snapshot provider. server-cli calls this
+   * after constructing the monitor (which depends on this server's broadcast).
+   * The provider is read by the `_historyCtx.billingCanary` getter to seed
+   * `auth_ok`. `fn` returns the current snapshot or null.
+   */
+  setBillingCanaryProvider(fn) {
+    this._billingCanaryProvider = typeof fn === 'function' ? fn : null
   }
 
   /** Delegates to ws-history.js */

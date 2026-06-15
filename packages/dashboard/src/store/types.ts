@@ -862,6 +862,21 @@ export interface ConnectionState {
   exposureBannerDismissed: boolean;
   dismissExposureBanner: () => void;
 
+  // #5821: current billing-canary snapshot — seeded from auth_ok and updated by
+  // `billing_canary` broadcasts. null = server didn't report (older server).
+  // `warnings` empty = all clear (no banner). See the BillingWarningBanner.
+  billingCanary: {
+    eraStarted: boolean;
+    defaultProvider: string;
+    defaultBillingClass: string;
+    warnings: Array<{ code: string; message: string; provider?: string; sessionId?: string; costUsd?: number }>;
+  } | null;
+  // #5821: user dismissed the billing banner. Reset when the warning set
+  // changes (a NEW warning re-surfaces it) and on a fresh connect; preserved
+  // across silent reconnects and unchanged re-broadcasts.
+  billingBannerDismissed: boolean;
+  dismissBillingBanner: () => void;
+
   // Shutdown state (reason + ETA for restarting banner countdown)
   shutdownReason: 'restart' | 'shutdown' | 'crash' | null;
   restartEtaMs: number | null;

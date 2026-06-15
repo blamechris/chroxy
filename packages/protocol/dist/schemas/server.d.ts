@@ -29,6 +29,25 @@ import { z } from 'zod';
  * the sanity ceiling.
  */
 export declare const MAX_SANE_DURATION_MS: number;
+export declare const BillingCanaryWarningSchema: z.ZodObject<{
+    code: z.ZodString;
+    message: z.ZodString;
+    provider: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    costUsd: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const BillingCanarySnapshotSchema: z.ZodObject<{
+    eraStarted: z.ZodBoolean;
+    defaultProvider: z.ZodString;
+    defaultBillingClass: z.ZodString;
+    warnings: z.ZodArray<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+        provider: z.ZodOptional<z.ZodString>;
+        sessionId: z.ZodOptional<z.ZodString>;
+        costUsd: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
 export declare const ServerAuthOkSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth_ok">;
     clientId: z.ZodString;
@@ -63,6 +82,18 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
         lanBind: z.ZodBoolean;
         bindHost: z.ZodNullable<z.ZodString>;
         quickTunnel: z.ZodBoolean;
+    }, z.core.$strip>>;
+    billingCanary: z.ZodOptional<z.ZodObject<{
+        eraStarted: z.ZodBoolean;
+        defaultProvider: z.ZodString;
+        defaultBillingClass: z.ZodString;
+        warnings: z.ZodArray<z.ZodObject<{
+            code: z.ZodString;
+            message: z.ZodString;
+            provider: z.ZodOptional<z.ZodString>;
+            sessionId: z.ZodOptional<z.ZodString>;
+            costUsd: z.ZodOptional<z.ZodNumber>;
+        }, z.core.$strip>>;
     }, z.core.$strip>>;
     serverPublicKey: z.ZodOptional<z.ZodString>;
     serverKeySig: z.ZodOptional<z.ZodString>;
@@ -2138,6 +2169,19 @@ export declare const ServerBudgetExceededSchema: z.ZodObject<{
     percent: z.ZodNumber;
     message: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerBillingCanarySchema: z.ZodObject<{
+    eraStarted: z.ZodBoolean;
+    defaultProvider: z.ZodString;
+    defaultBillingClass: z.ZodString;
+    warnings: z.ZodArray<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+        provider: z.ZodOptional<z.ZodString>;
+        sessionId: z.ZodOptional<z.ZodString>;
+        costUsd: z.ZodOptional<z.ZodNumber>;
+    }, z.core.$strip>>;
+    type: z.ZodLiteral<"billing_canary">;
+}, z.core.$strip>;
 export declare const ServerBudgetResumeAckSchema: z.ZodObject<{
     type: z.ZodLiteral<"budget_resume_ack">;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -2294,6 +2338,9 @@ export declare const ServerEvaluatorClarifySchema: z.ZodObject<{
     evaluatorIterationId: z.ZodString;
     evaluatorIteration: z.ZodNumber;
 }, z.core.$strip>;
+export type BillingCanaryWarning = z.infer<typeof BillingCanaryWarningSchema>;
+export type BillingCanarySnapshot = z.infer<typeof BillingCanarySnapshotSchema>;
+export type ServerBillingCanaryMessage = z.infer<typeof ServerBillingCanarySchema>;
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>;
 export type ServerPairRequestPendingMessage = z.infer<typeof ServerPairRequestPendingSchema>;
 export type ServerPairPendingMessage = z.infer<typeof ServerPairPendingSchema>;

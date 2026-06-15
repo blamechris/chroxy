@@ -567,6 +567,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5356: exposure snapshot from auth_ok + banner dismissal flag.
   serverExposure: null,
   exposureBannerDismissed: false,
+  // #5821: billing-canary snapshot from auth_ok / billing_canary + dismissal.
+  billingCanary: null,
+  billingBannerDismissed: false,
   shutdownReason: null,
   restartEtaMs: null,
   restartingSince: null,
@@ -1882,6 +1885,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // different server can't show a stale banner.
       serverExposure: null,
       exposureBannerDismissed: false,
+      // #5821: clear billing canary on disconnect so a reconnect against a
+      // different server can't show a stale billing banner.
+      billingCanary: null,
+      billingBannerDismissed: false,
       shutdownReason: null,
       restartEtaMs: null,
       restartingSince: null,
@@ -3177,6 +3184,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5356: dismiss the exposure warning banner for this connection.
   dismissExposureBanner: () => {
     set({ exposureBannerDismissed: true });
+  },
+
+  // #5821: dismiss the billing warning banner for this connection. A later
+  // billing_canary broadcast with a CHANGED warning set re-surfaces it.
+  dismissBillingBanner: () => {
+    set({ billingBannerDismissed: true });
   },
 
   addInfoNotification: (message: string) => {
