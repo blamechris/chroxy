@@ -1,6 +1,7 @@
 import { createLogger } from './logger.js'
 import { getDefaultModelId, getRegistryForProvider } from './models.js'
 import { settlePush } from './push.js'
+import { terminalMirrorRecipient } from './handler-utils.js'
 
 const log = createLogger('ws-forwarding')
 
@@ -115,11 +116,7 @@ export function setupForwarding(ctx) {
  * broadcast can never reach a different audience than the bytes (#5840 review S2).
  */
 function terminalSubscriberFilter(sessionId) {
-  return (client) => Boolean(
-    client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
-    (client.activeSessionId === sessionId ||
-      (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))),
-  )
+  return (client) => terminalMirrorRecipient(client, sessionId)
 }
 
 /** Multi-session forwarding via normalizer */

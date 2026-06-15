@@ -28,10 +28,21 @@ const EMPTY_SET = (() => {
  *   - 'client_departed'  ({ client })
  */
 export class WsClientManager extends EventEmitter {
-  constructor() {
+  /**
+   * @param {object} [opts]
+   * @param {(client: object, prev: string|null, next: string|null) => void} [opts.onActiveSessionChanged]
+   *   Invoked AFTER a client's active session actually changes (prev !== next),
+   *   with the index already updated. Lets the owner react to viewer-set changes
+   *   — e.g. re-sync the live terminal mirror gate for the old + new session
+   *   (audit P1-2) — from the single sanctioned mutation point, so every
+   *   setActiveSession caller (switch_session, checkpoint restore, conversation
+   *   switch, destroy re-home) inherits it instead of patching each call site.
+   */
+  constructor({ onActiveSessionChanged } = {}) {
     super()
     /** @type {Map<WebSocket, object>} */
     this.clients = new Map()
+    this._onActiveSessionChanged = typeof onActiveSessionChanged === 'function' ? onActiveSessionChanged : null
     // #5563: reverse index sessionId → Set<client> for O(subscribers) session
     // broadcasts and O(1) subscriber counts, instead of an O(clients) scan per
     // session-scoped message + a SECOND scan per buffered delta. A client is a
@@ -248,6 +259,13 @@ export class WsClientManager extends EventEmitter {
     if (prev) this._indexRemoveIfUnreferenced(client, prev)
     // The new active session always belongs in the index.
     if (sessionId) this._indexAdd(client, sessionId)
+    // Notify after the index + activeSessionId are settled so the listener
+    // observes the new viewer state. Defensive try/catch: a listener failure
+    // (e.g. mirror re-sync) must never corrupt the index. (audit P1-2)
+    if (this._onActiveSessionChanged) {
+      try { this._onActiveSessionChanged(client, prev, sessionId) }
+      catch { /* listener is best-effort; index integrity comes first */ }
+    }
   }
 
   /**

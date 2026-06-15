@@ -36,7 +36,35 @@ import {
   sendError,
   buildSessionTokenMismatchPayload,
   SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
+  isSessionViewer,
+  terminalMirrorRecipient,
 } from '../src/handler-utils.js'
+
+// audit P1-2: the live-terminal mirror recipient predicate. The delivery filter
+// (ws-forwarding) and the coalescer gate (ws-server) must use this same function
+// so the gate can never diverge from who actually receives terminal_output.
+describe('terminalMirrorRecipient', () => {
+  const viewerOpted = { activeSessionId: 's1', subscribedSessionIds: new Set(), terminalSessionIds: new Set(['s1']) }
+  const subscribedOpted = { activeSessionId: null, subscribedSessionIds: new Set(['s1']), terminalSessionIds: new Set(['s1']) }
+  const viewerNotOpted = { activeSessionId: 's1', subscribedSessionIds: new Set(), terminalSessionIds: new Set() }
+  const optedNotViewing = { activeSessionId: 's2', subscribedSessionIds: new Set(), terminalSessionIds: new Set(['s1']) }
+  const noTerminalSet = { activeSessionId: 's1', subscribedSessionIds: new Set() }
+
+  it('is true only when opted into the terminal AND viewing the session', () => {
+    assert.equal(terminalMirrorRecipient(viewerOpted, 's1'), true)
+    assert.equal(terminalMirrorRecipient(subscribedOpted, 's1'), true)
+    assert.equal(terminalMirrorRecipient(viewerNotOpted, 's1'), false, 'viewing but not opted in')
+    assert.equal(terminalMirrorRecipient(optedNotViewing, 's1'), false, 'opted in but viewing a different session')
+    assert.equal(terminalMirrorRecipient(noTerminalSet, 's1'), false, 'no terminalSessionIds set at all')
+  })
+
+  it('equals (opted-in AND isSessionViewer) — the contract the gate and filter share', () => {
+    for (const client of [viewerOpted, subscribedOpted, viewerNotOpted, optedNotViewing]) {
+      const expected = Boolean(client.terminalSessionIds && client.terminalSessionIds.has('s1')) && isSessionViewer(client, 's1')
+      assert.equal(terminalMirrorRecipient(client, 's1'), expected)
+    }
+  })
+})
 
 // -- Temp directory setup --
 let testDir

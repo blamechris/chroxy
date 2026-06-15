@@ -214,6 +214,19 @@ export function isSessionViewer(client, sid) {
     Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
 }
 
+// #5835 / audit P1-2: the single predicate for who RECEIVES a session's live
+// terminal mirror — opted into the terminal (`terminalSessionIds`) AND a viewer
+// of the session (`isSessionViewer`). The delivery filter
+// (ws-forwarding's terminalSubscriberFilter) and the coalescer gate
+// (ws-server's _syncTerminalMirror) MUST use the SAME predicate: gate-true /
+// filter-false wastes the coalescer on nobody, and gate-false / filter-true is
+// a black terminal for a real viewer. Both inlined it before and could drift;
+// shared here so they can't.
+export function terminalMirrorRecipient(client, sid) {
+  return Boolean(client.terminalSessionIds && client.terminalSessionIds.has(sid)) &&
+    isSessionViewer(client, sid)
+}
+
 export function isPathWithin(absPath, baseDir) {
   if (absPath === baseDir) return true
   // Normalize: strip a trailing separator so filesystem root and
