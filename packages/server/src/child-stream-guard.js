@@ -1,3 +1,11 @@
+import { createLogger } from './logger.js'
+
+// Defensive fallback so the guard can NEVER throw a TypeError inside its own
+// error handler if a future caller omits `log` — that would defeat the whole
+// point of a crash-prevention guard (Copilot review). Both current callers
+// pass their own session/provider logger.
+const _fallbackLog = createLogger('child-stream-guard')
+
 /**
  * Shared EPIPE guard for a spawned child's stdout/stderr (#5324/#5361).
  *
@@ -15,9 +23,9 @@
  * so the guard must read it lazily on each error.
  *
  * @param {import('child_process').ChildProcess} child
- * @param {{ destroying: () => boolean, log: { warn: (m: string) => void }, label?: string }} opts
+ * @param {{ destroying: () => boolean, log?: { warn: (m: string) => void }, label?: string }} opts
  */
-export function guardChildStreams(child, { destroying, log, label } = {}) {
+export function guardChildStreams(child, { destroying, log = _fallbackLog, label } = {}) {
   const prefix = label ? `[${label}] ` : ''
   for (const name of ['stdout', 'stderr']) {
     const stream = child?.[name]
