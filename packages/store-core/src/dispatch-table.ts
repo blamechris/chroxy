@@ -624,17 +624,24 @@ function dispatchBackgroundWorkChanged<S extends DispatchSessionBase>(
   }
 }
 
-/** `plan_started` — clear pending-plan state on the target session. */
-function dispatchPlanStarted<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['plan_started'],
-  adapter: ClientStoreAdapter<S>,
-): void {
-  const { sessionId, patch } = handlePlanStarted(
-    msg as Record<string, unknown>,
-    adapter.getActiveSessionId(),
-  )
-  if (sessionId && adapter.hasSession(sessionId)) {
-    adapter.updateSession(sessionId, () => patch as Partial<S>)
+/**
+ * Factory (audit P2-10) for the `{sessionId, patch} → hasSession → updateSession`
+ * dispatchers that were byte-identical modulo handler name (plan_started,
+ * mcp_servers, session_usage, session_context). A missed copy silently misroutes
+ * a session patch, so the shape lives here once. `handle` parses the wire message
+ * (with the active-session fallback) and returns the target id + patch; the
+ * dispatcher applies it only when the session exists.
+ * `session_cost_threshold_crossed` stays a one-off (no active-session fallback,
+ * different cast) and `inactivity_warning` stays separate (nullable result).
+ */
+function sessionPatchDispatcher<S extends DispatchSessionBase>(
+  handle: (msg: Record<string, unknown>, activeSessionId: string | null) => { sessionId: string | null; patch: unknown },
+): (msg: Record<string, unknown>, adapter: ClientStoreAdapter<S>) => void {
+  return (msg, adapter) => {
+    const { sessionId, patch } = handle(msg, adapter.getActiveSessionId())
+    if (sessionId && adapter.hasSession(sessionId)) {
+      adapter.updateSession(sessionId, () => patch as Partial<S>)
+    }
   }
 }
 
@@ -649,48 +656,6 @@ function dispatchInactivityWarning<S extends DispatchSessionBase>(
   )
   if (warning && warning.sessionId && adapter.hasSession(warning.sessionId)) {
     adapter.updateSession(warning.sessionId, () => warning.patch as Partial<S>)
-  }
-}
-
-/** `mcp_servers` — replace the target session's MCP-server list. */
-function dispatchMcpServers<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['mcp_servers'],
-  adapter: ClientStoreAdapter<S>,
-): void {
-  const { sessionId, patch } = handleMcpServers(
-    msg as Record<string, unknown>,
-    adapter.getActiveSessionId(),
-  )
-  if (sessionId && adapter.hasSession(sessionId)) {
-    adapter.updateSession(sessionId, () => patch as Partial<S>)
-  }
-}
-
-/** `session_usage` — store the session's cumulative token/cost usage. */
-function dispatchSessionUsage<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['session_usage'],
-  adapter: ClientStoreAdapter<S>,
-): void {
-  const { sessionId, patch } = handleSessionUsage(
-    msg as Record<string, unknown>,
-    adapter.getActiveSessionId(),
-  )
-  if (sessionId && adapter.hasSession(sessionId)) {
-    adapter.updateSession(sessionId, () => patch as Partial<S>)
-  }
-}
-
-/** `session_context` — merge the per-session git/project context patch. */
-function dispatchSessionContext<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['session_context'],
-  adapter: ClientStoreAdapter<S>,
-): void {
-  const { sessionId, patch } = handleSessionContext(
-    msg as Record<string, unknown>,
-    adapter.getActiveSessionId(),
-  )
-  if (sessionId && adapter.hasSession(sessionId)) {
-    adapter.updateSession(sessionId, () => patch as Partial<S>)
   }
 }
 
@@ -803,113 +768,25 @@ function resolveCallback<S extends DispatchSessionBase>(
   return adapter.getCallback(name)
 }
 
-/** `directory_listing` — invoke the registered directory-listing callback. */
-function dispatchDirectoryListing<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['directory_listing'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'directoryListing')
-  if (cb === DECLINE) return false
-  if (cb) cb(handleDirectoryListing(msg as Record<string, unknown>))
-}
-
-/** `file_listing` — invoke the registered file-browser callback. */
-function dispatchFileListing<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['file_listing'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'fileBrowser')
-  if (cb === DECLINE) return false
-  if (cb) cb(handleFileListing(msg as Record<string, unknown>))
-}
-
-/** `file_content` — invoke the registered file-content callback. */
-function dispatchFileContent<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['file_content'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'fileContent')
-  if (cb === DECLINE) return false
-  if (cb) cb(handleFileContent(msg as Record<string, unknown>))
-}
-
-/** `write_file_result` — invoke the registered file-write callback. */
-function dispatchWriteFileResult<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['write_file_result'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'fileWrite')
-  if (cb === DECLINE) return false
-  if (cb) cb(handleWriteFileResult(msg as Record<string, unknown>))
-}
-
-/** `diff_result` — invoke the registered diff callback. */
-function dispatchDiffResult<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['diff_result'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'diff')
-  if (cb === DECLINE) return false
-  if (cb) {
-    const payload = handleDiffResult(msg as Record<string, unknown>)
-    cb({ files: payload.files, error: payload.error })
+/**
+ * Factory (audit P2-10) for the file-ops / git DECLINE handlers, which were an
+ * identical `resolveCallback(name) → cb === DECLINE ? false : cb(transform(msg))`
+ * template (six bare + three payload-reshaping variants). The `cb === DECLINE`
+ * guard is the load-bearing part — a copy that forgot it would silently take
+ * ownership of a message on a client (e.g. the dashboard) that never registered
+ * the callback, so it lives here once. `transform` parses the wire message into
+ * the callback payload (identity-ish for the bare cases, a reshape for diff /
+ * git-status / git-branches).
+ */
+function callbackDispatcher<S extends DispatchSessionBase>(
+  name: DispatchCallbackName,
+  transform: (msg: Record<string, unknown>) => DispatchCallbackPayload,
+): (msg: Record<string, unknown>, adapter: ClientStoreAdapter<S>) => void | false {
+  return (msg, adapter) => {
+    const cb = resolveCallback(adapter, name)
+    if (cb === DECLINE) return false
+    if (cb) cb(transform(msg))
   }
-}
-
-/** `git_status_result` — invoke the registered git-status callback. */
-function dispatchGitStatusResult<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['git_status_result'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'gitStatus')
-  if (cb === DECLINE) return false
-  if (cb) {
-    const payload = handleGitStatusResult(msg as Record<string, unknown>)
-    cb({
-      branch: payload.branch,
-      staged: payload.staged,
-      unstaged: payload.unstaged,
-      untracked: payload.untracked,
-      error: payload.error,
-    })
-  }
-}
-
-/** `git_branches_result` — invoke the registered git-branches callback. */
-function dispatchGitBranchesResult<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['git_branches_result'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'gitBranches')
-  if (cb === DECLINE) return false
-  if (cb) {
-    const payload = handleGitBranchesResult(msg as Record<string, unknown>)
-    cb({
-      branches: payload.branches,
-      currentBranch: payload.currentBranch,
-      error: payload.error,
-    })
-  }
-}
-
-/** `git_stage_result` / `git_unstage_result` — invoke the git-stage callback. */
-function dispatchGitStageResult<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['git_stage_result'] | DispatchMessageMap['git_unstage_result'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'gitStage')
-  if (cb === DECLINE) return false
-  if (cb) cb(handleGitStageResult(msg as Record<string, unknown>))
-}
-
-/** `git_commit_result` — invoke the registered git-commit callback. */
-function dispatchGitCommitResult<S extends DispatchSessionBase>(
-  msg: DispatchMessageMap['git_commit_result'],
-  adapter: ClientStoreAdapter<S>,
-): void | false {
-  const cb = resolveCallback(adapter, 'gitCommit')
-  if (cb === DECLINE) return false
-  if (cb) cb(handleGitCommitResult(msg as Record<string, unknown>))
 }
 
 // ---------------------------------------------------------------------------
@@ -964,11 +841,11 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     agent_completed: dispatchAgentCompleted,
     agent_event: dispatchAgentEvent,
     background_work_changed: dispatchBackgroundWorkChanged,
-    plan_started: dispatchPlanStarted,
+    plan_started: sessionPatchDispatcher<S>(handlePlanStarted),
     inactivity_warning: dispatchInactivityWarning,
-    mcp_servers: dispatchMcpServers,
-    session_usage: dispatchSessionUsage,
-    session_context: dispatchSessionContext,
+    mcp_servers: sessionPatchDispatcher<S>(handleMcpServers),
+    session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
+    session_context: sessionPatchDispatcher<S>(handleSessionContext),
     session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
     dev_preview: dispatchDevPreview,
     dev_preview_stopped: dispatchDevPreviewStopped,
@@ -976,16 +853,31 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     web_task_list: dispatchWebTaskList,
     notification_prefs: dispatchNotificationPrefs,
     // --- slice 3 (epic #5556) — file-ops / git wrapper cases (#5653) ---
-    directory_listing: dispatchDirectoryListing,
-    file_listing: dispatchFileListing,
-    file_content: dispatchFileContent,
-    write_file_result: dispatchWriteFileResult,
-    diff_result: dispatchDiffResult,
-    git_status_result: dispatchGitStatusResult,
-    git_branches_result: dispatchGitBranchesResult,
-    git_stage_result: dispatchGitStageResult,
-    git_unstage_result: dispatchGitStageResult,
-    git_commit_result: dispatchGitCommitResult,
+    directory_listing: callbackDispatcher<S>('directoryListing', (msg) => handleDirectoryListing(msg)),
+    file_listing: callbackDispatcher<S>('fileBrowser', (msg) => handleFileListing(msg)),
+    file_content: callbackDispatcher<S>('fileContent', (msg) => handleFileContent(msg)),
+    write_file_result: callbackDispatcher<S>('fileWrite', (msg) => handleWriteFileResult(msg)),
+    diff_result: callbackDispatcher<S>('diff', (msg) => {
+      const payload = handleDiffResult(msg)
+      return { files: payload.files, error: payload.error }
+    }),
+    git_status_result: callbackDispatcher<S>('gitStatus', (msg) => {
+      const payload = handleGitStatusResult(msg)
+      return {
+        branch: payload.branch,
+        staged: payload.staged,
+        unstaged: payload.unstaged,
+        untracked: payload.untracked,
+        error: payload.error,
+      }
+    }),
+    git_branches_result: callbackDispatcher<S>('gitBranches', (msg) => {
+      const payload = handleGitBranchesResult(msg)
+      return { branches: payload.branches, currentBranch: payload.currentBranch, error: payload.error }
+    }),
+    git_stage_result: callbackDispatcher<S>('gitStage', (msg) => handleGitStageResult(msg)),
+    git_unstage_result: callbackDispatcher<S>('gitStage', (msg) => handleGitStageResult(msg)),
+    git_commit_result: callbackDispatcher<S>('gitCommit', (msg) => handleGitCommitResult(msg)),
     // --- slice 4 (epic #5556) — web-task upsert ---
     web_task_created: dispatchWebTaskUpsert,
     web_task_updated: dispatchWebTaskUpsert,
