@@ -10,6 +10,7 @@ import { billingClassForProvider, BILLING_CLASSES } from './billing-class.js'
 import { MonthlyProgrammaticBudgetManager } from './billing-budget.js'
 import { runProviderPreflight, ProviderBinaryNotFoundError, ProviderCredentialMissingError } from './utils/preflight.js'
 import { GIT } from './git.js'
+import { sweepOrphanChroxyWorktrees } from './worktree-gc.js'
 import { resolveJsonlPath, readConversationHistoryAsync } from './jsonl-reader.js'
 import { readSessionContext } from './session-context.js'
 import { parseDuration, isOperatorTimeoutInRange } from './duration.js'
@@ -289,6 +290,12 @@ export class SessionManager extends EventEmitter {
     maxMessages,
     maxHistory,
 
+    // #5859 (audit P1-7): opt-in boot-time sweep of orphaned chroxy session
+    // worktrees (dirs under the worktree base whose session id is no longer
+    // live). Off by default — server-cli enables it from config.worktreeGc.autoReap,
+    // mirroring the agent-worktree reaper's opt-in. Always clean-tree-guarded.
+    sweepOrphanWorktrees = false,
+
     // Test-only: skip preflight checks (binary + credential). Production must
     // leave this false so missing providers surface cleanly at createSession.
     skipPreflight = false,
@@ -309,6 +316,7 @@ export class SessionManager extends EventEmitter {
     // partially enable the flag. Forwarded to providerOpts.skipPermissions
     // for every createSession() call that omits the field.
     this._defaultSkipPermissions = !!defaultSkipPermissions
+    this._sweepOrphanWorktrees = !!sweepOrphanWorktrees
     this._providerType = providerType
 
     // Session behavior
@@ -1922,6 +1930,34 @@ export class SessionManager extends EventEmitter {
     // failure — otherwise the next successful save would drop failed-restore
     // entries. (serializeState() re-includes them from _failedRestores.)
     if (firstId || anyFailure) this._flushPersist()
+
+    // #5859 (audit P1-7): now that the live session set is rebuilt, sweep
+    // orphaned chroxy session worktrees — dirs under the worktree base whose
+    // session id is no longer live (left by a SIGKILL / crash / dropped state
+    // file; P0-3 stopped deleting them on clean shutdown, so they accrue). Opt-in
+    // and clean-tree-guarded (never deletes uncommitted/untracked/ignored work);
+    // best-effort so a GC hiccup never affects boot.
+    if (this._sweepOrphanWorktrees) {
+      try {
+        // The live set MUST include FAILED-restore sessions: those are kept in
+        // _failedRestores keyed by their original id (= the worktree dir
+        // basename) with worktreePath preserved on disk for a later retry
+        // (#2954). Treating their clean worktree as an orphan would delete the
+        // very checkout #2954 preserves — and a --detach worktree's commits
+        // would become unreachable. Union both so neither live nor failed-but-
+        // retained sessions are ever swept.
+        const liveSessionIds = new Set([...this._sessions.keys(), ...this._failedRestores.keys()])
+        const report = sweepOrphanChroxyWorktrees({
+          worktreeBase: this._worktreeBase || DEFAULT_WORKTREE_BASE,
+          liveSessionIds,
+        })
+        if (report.removed.length || report.skippedDirty.length || report.skippedError.length) {
+          log.info(`worktree orphan sweep: removed=${report.removed.length} skippedDirty=${report.skippedDirty.length} skippedError=${report.skippedError.length} (scanned ${report.scanned})`)
+        }
+      } catch (err) {
+        log.warn(`worktree orphan sweep failed (non-fatal): ${err?.message || err}`)
+      }
+    }
 
     return firstId
   }

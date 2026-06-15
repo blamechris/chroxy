@@ -85,13 +85,14 @@ function makeGitRepo() {
  * Create a SessionManager backed by the stub provider.
  * Worktrees are created inside the given gitRepo to keep temp files local.
  */
-function makeManager(gitRepo) {
+function makeManager(gitRepo, opts = {}) {
   const stateFile = join(gitRepo, 'session-state.json')
   const mgr = new SessionManager({ skipPreflight: true,
     maxSessions: 5,
     stateFilePath: stateFile,
-    providerType: 'stub-worktree',
+    providerType: opts.providerType || 'stub-worktree',
     defaultCwd: gitRepo,
+    sweepOrphanWorktrees: opts.sweepOrphanWorktrees === true,
   })
   // Redirect worktrees into the temp dir rather than ~/.chroxy/worktrees
   mgr._worktreeBase = join(gitRepo, 'worktrees')
@@ -509,5 +510,54 @@ describe('SessionManager isolation derivation (#2475)', () => {
     assert.equal(plain.isolation, 'none')
     assert.equal(wt.isolation, 'worktree')
     mgr.destroyAll()
+  })
+
+  // audit P1-7 (#5859): the boot-time orphan sweep, exercised through restoreState.
+  describe('orphan worktree boot sweep (sweepOrphanWorktrees)', () => {
+    it('sweeps a genuinely-orphaned clean worktree dir but keeps live sessions', () => {
+      const mgr = makeManager(gitRepo)
+      const liveId = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const liveWt = mgr.getSession(liveId).worktreePath
+      // Fabricate an orphan: a real worktree under the base whose id is in NO
+      // session state (as if its session vanished via SIGKILL).
+      const orphanId = '0000000000000000000000000000dead'
+      const orphanWt = join(mgr._worktreeBase, orphanId)
+      execFileSync(GIT, ['-C', gitRepo, 'worktree', 'add', '--detach', orphanWt, 'HEAD'], { stdio: 'pipe' })
+      mgr.serializeState()
+
+      // Restart with the sweep enabled.
+      const mgr2 = makeManager(gitRepo, { sweepOrphanWorktrees: true })
+      mgr2.restoreState()
+
+      assert.ok(existsSync(liveWt), 'live session worktree preserved')
+      assert.equal(existsSync(orphanWt), false, 'orphaned worktree swept')
+      mgr2.destroyAll()
+    })
+
+    it('does NOT sweep a failed-restore session worktree (#2954 retry preservation)', () => {
+      const mgr = makeManager(gitRepo)
+      const id = mgr.createSession({ cwd: gitRepo, worktree: true })
+      const wtPath = mgr.getSession(id).worktreePath
+      assert.ok(existsSync(wtPath), 'worktree created')
+      mgr.serializeState()
+
+      // Rewrite the persisted provider to the fail-start stub so THIS session's
+      // restore throws (mirrors the #5310 failed-restore test), then restart
+      // with the sweep enabled. The failed session lands in _failedRestores
+      // keyed by its original id (= worktree dir basename) — its clean worktree
+      // must be preserved for retry, not swept as an orphan (#2954).
+      const stateFile = join(gitRepo, 'session-state.json')
+      const persisted = JSON.parse(readFileSync(stateFile, 'utf-8'))
+      persisted.sessions[0].provider = 'stub-worktree-failstart'
+      writeFileSync(stateFile, JSON.stringify(persisted))
+
+      const mgr2 = makeManager(gitRepo, { sweepOrphanWorktrees: true })
+      mgr2.restoreState()
+
+      assert.ok(!mgr2.getSession(id), 'session did not restore (start threw)')
+      assert.ok(mgr2._failedRestores.has(id), 'recorded as a failed restore for retry')
+      assert.ok(existsSync(wtPath), 'failed-restore worktree preserved, not swept (#2954)')
+      mgr2.destroyAll()
+    })
   })
 })

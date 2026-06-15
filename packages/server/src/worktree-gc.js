@@ -25,8 +25,8 @@
 // is fully testable against real temp repos without poking the real home dir.
 
 import { execFileSync } from 'node:child_process'
-import { existsSync, readFileSync, statSync } from 'node:fs'
-import { isAbsolute, resolve as resolvePath } from 'node:path'
+import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
+import { isAbsolute, join as joinPath, resolve as resolvePath, dirname, sep } from 'node:path'
 import { GIT } from './git.js'
 
 // #5706: absolute-age fallback for the PID-liveness check. A dead agent's pid
@@ -248,6 +248,89 @@ function isClean(git, worktreePath) {
   } catch {
     return null
   }
+}
+
+/**
+ * Recover the owning repo path of a chroxy session worktree from its `.git`
+ * FILE: `git worktree add` writes `gitdir: <repo>/.git/worktrees/<id>`, so the
+ * repo root is three segments up. Returns null on any read/shape surprise.
+ */
+function chroxyWorktreeRepoPath(worktreePath, readFile = readFileSync) {
+  let raw
+  try { raw = readFile(joinPath(worktreePath, '.git'), 'utf8') } catch { return null }
+  const match = /^gitdir:\s*(.+?)\s*$/m.exec(raw)
+  if (!match) return null
+  let linkedGitDir
+  try { linkedGitDir = resolvePath(worktreePath, match[1]) } catch { return null }
+  const worktreesDir = dirname(linkedGitDir) // <repo>/.git/worktrees
+  const gitDir = dirname(worktreesDir)       // <repo>/.git
+  // Strict shape: the gitdir must be `<repo>/.git/worktrees/<id>` (the only
+  // form `git worktree add` writes), so a tampered .git file can't point the
+  // removal at an arbitrary path.
+  if (!worktreesDir.endsWith(`${sep}worktrees`) || !gitDir.endsWith(`${sep}.git`)) return null
+  const repo = dirname(gitDir)
+  return repo.length > 0 ? repo : null
+}
+
+/**
+ * #5859 (audit P1-7): boot-time sweep of ORPHANED chroxy session worktrees.
+ *
+ * Unlike the agent worktrees this module's reaper handles, chroxy's OWN session
+ * worktrees (`~/.chroxy/worktrees/<sessionId>`, created `git worktree add
+ * --detach`, NO lock) are never reclaimed by the lock/dead-pid reaper. When a
+ * session vanishes without a clean destroy (SIGKILL, crash, or a dropped
+ * state file) its worktree dir leaks forever.
+ *
+ * Removes a worktree dir ONLY when BOTH hold:
+ *   - its basename (the sessionId) is NOT in `liveSessionIds` (the set
+ *     restoreState rebuilt) — so a live session's worktree is never touched, AND
+ *   - the tree is CLEAN including ignored files — the same hard guard as the
+ *     reaper (`git worktree remove` without --force still deletes gitignored
+ *     content, so any uncommitted/untracked/ignored work means SKIP).
+ * A dirty orphan, or one whose repo/clean-state can't be determined, is skipped
+ * and reported. Never throws; never uses --force.
+ *
+ * Pure + dependency-injected.
+ *
+ * @param {object} args
+ * @param {string} args.worktreeBase - e.g. ~/.chroxy/worktrees
+ * @param {Set<string>} args.liveSessionIds - currently-live session ids (off-limits)
+ * @param {object} [args.deps] - { git, readdir, exists, readFile }
+ * @returns {{ removed: string[], skippedDirty: object[], skippedError: object[], scanned: number }}
+ */
+export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps = {} } = {}) {
+  const {
+    git = (cwd, args) => execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' }),
+    readdir = (p) => readdirSync(p, { withFileTypes: true }),
+    exists = existsSync,
+    readFile = readFileSync,
+  } = deps
+  const report = { removed: [], skippedDirty: [], skippedError: [], scanned: 0 }
+  if (!worktreeBase || !exists(worktreeBase)) return report
+  const live = liveSessionIds instanceof Set ? liveSessionIds : new Set(liveSessionIds || [])
+  let entries
+  try { entries = readdir(worktreeBase) } catch (err) { report.skippedError.push({ path: worktreeBase, error: (err && err.message) || String(err) }); return report }
+  for (const ent of entries) {
+    if (!ent || typeof ent.isDirectory !== 'function' || !ent.isDirectory()) continue
+    const id = ent.name
+    if (live.has(id)) continue // owned by a live session — never touch
+    report.scanned++
+    const wtPath = joinPath(worktreeBase, id)
+    const clean = isClean(git, wtPath)
+    if (clean !== true) {
+      report.skippedDirty.push({ path: wtPath, reason: clean === null ? 'status-unknown' : 'dirty' })
+      continue
+    }
+    const repo = chroxyWorktreeRepoPath(wtPath, readFile)
+    if (!repo) { report.skippedError.push({ path: wtPath, error: 'repo-unrecoverable' }); continue }
+    try {
+      git(repo, ['worktree', 'remove', wtPath]) // NO --force; clean-checked above
+      report.removed.push(wtPath)
+    } catch (err) {
+      report.skippedError.push({ path: wtPath, error: (err && err.message) || String(err) })
+    }
+  }
+  return report
 }
 
 /**
