@@ -623,6 +623,9 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
+    // #5859 (audit P1-7): reclaim orphaned chroxy session worktrees at boot when
+    // the operator opted into worktree auto-reaping. Clean-tree-guarded.
+    sweepOrphanWorktrees: config.worktreeGc?.autoReap === true,
     // #4209 / #4246: seed the auto-created Default session + any
     // subsequent createSession() that omits the field. Only honoured by
     // the claude-tui provider; other providers ignore it harmlessly.

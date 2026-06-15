@@ -22,6 +22,7 @@ import {
   readLockReasonFromAdmin,
   planRepoGc,
   applyPlan,
+  sweepOrphanChroxyWorktrees,
 } from '../src/worktree-gc.js'
 
 // A pid that the fake kill treats as alive; everything else is "dead".
@@ -529,5 +530,73 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
     // Test seam (deps.planDeps) overrides config.
     collectWorktreeGc({}, { configPath, withSizes: false, plan: planSpy, planDeps: { maxLockAgeMs: 12345 } })
     assert.equal(captured.maxLockAgeMs, 12345)
+  })
+})
+
+// #5859 (audit P1-7): boot-time sweep of orphaned chroxy session worktrees
+// (~/.chroxy/worktrees/<id>, --detach, unlocked). Real git repo + a separate
+// worktree base, since these are NOT the .claude/worktrees/agent-* the reaper handles.
+describe('sweepOrphanChroxyWorktrees (real git repo)', () => {
+  let repo, base
+
+  function addChroxyWorktree(id, { dirty, ignoredOnly } = {}) {
+    const wtPath = join(base, id)
+    git(repo, ['worktree', 'add', '--detach', wtPath, 'HEAD'])
+    if (dirty) writeFileSync(join(wtPath, 'scratch.txt'), 'uncommitted work')
+    if (ignoredOnly) {
+      writeFileSync(join(wtPath, '.gitignore'), '.env.local\n')
+      git(wtPath, ['add', '.gitignore'])
+      git(wtPath, ['commit', '-m', 'add gitignore'])
+      writeFileSync(join(wtPath, '.env.local'), 'TOKEN=secret') // clean to porcelain, NOT to --ignored
+    }
+    return wtPath
+  }
+
+  beforeEach(() => {
+    repo = mkdtempSync(join(tmpdir(), 'chroxy-cwt-repo-'))
+    git(repo, ['init', '--initial-branch=main', '.'])
+    git(repo, ['config', 'user.email', 'test@test'])
+    git(repo, ['config', 'user.name', 'Test'])
+    git(repo, ['commit', '--allow-empty', '-m', 'init'])
+    base = mkdtempSync(join(tmpdir(), 'chroxy-cwt-base-'))
+  })
+
+  afterEach(() => {
+    rmSync(repo, { recursive: true, force: true })
+    rmSync(base, { recursive: true, force: true })
+  })
+
+  it('removes a clean orphan, keeps a live session, skips dirty + ignored-only', () => {
+    const orphan = addChroxyWorktree('0000000000000000000000000000aaaa')
+    const live = addChroxyWorktree('0000000000000000000000000000live')
+    const dirty = addChroxyWorktree('0000000000000000000000000000dirt', { dirty: true })
+    const ignored = addChroxyWorktree('0000000000000000000000000000ign0', { ignoredOnly: true })
+
+    const report = sweepOrphanChroxyWorktrees({
+      worktreeBase: base,
+      liveSessionIds: new Set(['0000000000000000000000000000live']),
+    })
+
+    assert.equal(report.removed.map((p) => basename(p)).includes('0000000000000000000000000000aaaa'), true, 'clean orphan removed')
+    assert.equal(existsSync(orphan), false, 'clean orphan dir gone')
+    assert.equal(existsSync(live), true, 'live session worktree untouched')
+    assert.equal(existsSync(dirty), true, 'dirty orphan preserved')
+    assert.equal(existsSync(ignored), true, 'ignored-only orphan preserved (--ignored guard)')
+    assert.equal(report.skippedDirty.length, 2, 'dirty + ignored-only both skipped as not-clean')
+  })
+
+  it('is a no-op when the base does not exist', () => {
+    const report = sweepOrphanChroxyWorktrees({ worktreeBase: join(base, 'nonexistent'), liveSessionIds: new Set() })
+    assert.deepEqual(report, { removed: [], skippedDirty: [], skippedError: [], scanned: 0 })
+  })
+
+  it('skips a dir whose .git cannot be resolved to a repo (no removal)', () => {
+    const bogus = join(base, '0000000000000000000000000000bog0')
+    mkdirSync(bogus, { recursive: true })
+    writeFileSync(join(bogus, '.git'), 'gitdir: /nowhere/bogus\n') // status will fail → status-unknown
+    const report = sweepOrphanChroxyWorktrees({ worktreeBase: base, liveSessionIds: new Set() })
+    assert.equal(existsSync(bogus), true, 'unresolvable orphan left in place')
+    assert.equal(report.removed.length, 0)
+    assert.equal(report.skippedDirty.length + report.skippedError.length, 1)
   })
 })
