@@ -191,6 +191,30 @@ describe('TunnelLifecycleHandler — tunnel_recovered', () => {
     )
   })
 
+  it('newest-recovery-wins: a stale recovered handler bails after its re-verify (audit P2-11)', async () => {
+    // Two tunnel_recovered events fire back-to-back (a flap during a prior
+    // re-verify). Both suspend at their waitForTunnel await with generations
+    // 1 and 2; when the stale (gen-1) handler resumes it must bail so it can't
+    // race the newest on currentWsUrl or double-broadcast the rotated URL.
+    const { handler, tunnel, wsServer, startupDisplay } = build()
+    await handler.createAndStart()
+    startupDisplay.calls.length = 0
+    wsServer.urlChangedPushes.length = 0
+
+    tunnel.emit('tunnel_recovered', { httpUrl: 'https://a.example', wsUrl: 'wss://a.example', attempt: 1 })
+    tunnel.emit('tunnel_recovered', { httpUrl: 'https://b.example', wsUrl: 'wss://b.example', attempt: 2 })
+    // Let both handlers resume past their awaits.
+    await new Promise((r) => setImmediate(r))
+    await new Promise((r) => setImmediate(r))
+
+    // Only the newest (b) updated the URL + rendered its QR; the stale (a) bailed.
+    assert.deepEqual(startupDisplay.calls, [['wss://b.example', 'https://b.example', 'cloudflare:quick']])
+    assert.equal(startupDisplay.currentWsUrl, 'wss://b.example')
+    assert.deepEqual(wsServer.urlChangedPushes, [
+      { url: 'wss://b.example', previousUrl: 'wss://t.example' },
+    ], 'only the newest recovery pushed a url-changed (no stale double-broadcast)')
+  })
+
   it('contains a waitForTunnel throw in the recovered handler (no crash)', async () => {
     let calls = 0
     const { handler, tunnel } = build({
