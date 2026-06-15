@@ -278,9 +278,8 @@ export function deriveProjectFromCwd(cwd, env = process.env) {
   }
   // chroxy session worktree → parent repo (or null), never the opaque id.
   const resolved = realResolve(cwd)
-  if (resolved && chroxyWorktreeTopDir(resolved, env)) {
-    return chroxyWorktreeParentProject(chroxyWorktreeTopDir(resolved, env))
-  }
+  const chroxyTop = resolved ? chroxyWorktreeTopDir(resolved, env) : null
+  if (chroxyTop) return chroxyWorktreeParentProject(chroxyTop)
   let current = dir
   // Bounded walk — terminates at the fs root anyway; the cap is paranoia
   // against pathological/cyclic resolutions.
