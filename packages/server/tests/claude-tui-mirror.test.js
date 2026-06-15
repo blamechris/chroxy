@@ -2,15 +2,25 @@
 // _feedTerminalMirror → _flushTerminalMirror → terminal_output emit path and
 // _clearTerminalMirror teardown WITHOUT spawning a PTY (the coalescer is pure
 // buffer + timer + emit). Timers are faked so the 50ms flush is deterministic.
-import { test, mock } from 'node:test'
+import { test, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync } from 'fs'
+import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 
+// Track the temp skillsDirs makeSession() mints so they don't accumulate under
+// /tmp across the suite (best-effort cleanup).
+const _tmpDirs = []
+afterEach(() => {
+  while (_tmpDirs.length) {
+    try { rmSync(_tmpDirs.pop(), { recursive: true, force: true }) } catch { /* best-effort */ }
+  }
+})
+
 function makeSession() {
   const skillsDir = mkdtempSync(join(tmpdir(), 'tui-mirror-skills-'))
+  _tmpDirs.push(skillsDir)
   return new ClaudeTuiSession({ cwd: '/tmp', port: 0, skillsDir, repoSkillsDir: null })
 }
 

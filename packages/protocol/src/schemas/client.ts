@@ -777,10 +777,12 @@ export const UnsubscribeSessionsSchema = z.object({
 })
 
 // #5835 Phase 1: opt in / out of LIVE TERMINAL output (the claude-tui PTY
-// remote-viewer mirror) for a single session. Kept separate from
-// subscribe_sessions so a client viewing the Chat tab doesn't receive a
-// session's raw PTY bytes — only a client actually viewing the terminal does.
-// Single sessionId (you watch one terminal at a time); send again to switch.
+// remote-viewer mirror) for one session. Kept separate from subscribe_sessions
+// so a client viewing the Chat tab doesn't receive a session's raw PTY bytes —
+// only a client that opted into its terminal does. One message carries one
+// sessionId; the server tracks opt-ins as a SET, so a client may hold more than
+// one (the typical client opts into exactly the terminal it's viewing and opts
+// out on leave). Pair each subscribe with an unsubscribe.
 export const TerminalSubscribeSchema = z.object({
   type: z.literal('terminal_subscribe'),
   sessionId: z.string().max(256),

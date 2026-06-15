@@ -1441,11 +1441,14 @@ describe('terminal_output forwarding (#5835)', () => {
     assert.equal(msg.type, 'terminal_output')
     assert.equal(msg.sessionId, 'sess-1')
     assert.equal(msg.data, '\x1b[31mhi\x1b[0m')
-    // The filter admits only a client that opted into THIS session's terminal.
+    // The filter admits only a client that is BOTH a viewer of the session AND
+    // opted into its terminal — opt-in alone must not bypass session scoping.
     assert.equal(typeof filter, 'function')
-    assert.equal(filter({ terminalSessionIds: new Set(['sess-1']) }), true)
-    assert.equal(filter({ terminalSessionIds: new Set(['other']) }), false)
-    assert.equal(filter({ subscribedSessionIds: new Set(['sess-1']) }), false) // chat-only subscriber excluded
+    assert.equal(filter({ terminalSessionIds: new Set(['sess-1']), subscribedSessionIds: new Set(['sess-1']) }), true)
+    assert.equal(filter({ terminalSessionIds: new Set(['sess-1']), activeSessionId: 'sess-1' }), true) // active counts as viewing
+    assert.equal(filter({ terminalSessionIds: new Set(['sess-1']) }), false) // opted in but NOT subscribed → excluded
+    assert.equal(filter({ terminalSessionIds: new Set(['other']), subscribedSessionIds: new Set(['sess-1']) }), false) // opted into a different session
+    assert.equal(filter({ subscribedSessionIds: new Set(['sess-1']) }), false) // chat-only subscriber, not opted in
     assert.equal(filter({}), false)
   })
 

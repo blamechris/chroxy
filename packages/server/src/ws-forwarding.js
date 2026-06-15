@@ -153,7 +153,16 @@ function setupSessionForwarding(normalizer, ctx) {
       broadcastToSession(
         sessionId,
         { type: 'terminal_output', sessionId, data: typeof data?.data === 'string' ? data.data : '' },
-        (client) => Boolean(client.terminalSessionIds && client.terminalSessionIds.has(sessionId)),
+        // A custom filter OVERRIDES broadcastToSession's default session scoping,
+        // so re-assert it here: deliver only to a client that is BOTH a viewer of
+        // the session (activeSessionId / subscribedSessionIds) AND opted into its
+        // terminal mirror. Opt-in alone must not bypass scoping, and unsubscribing
+        // from the session must stop the bytes.
+        (client) => Boolean(
+          client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
+          (client.activeSessionId === sessionId ||
+            (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))),
+        ),
       )
       return
     }
