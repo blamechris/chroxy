@@ -7,6 +7,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
+import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 import { ClaudeTuiSession } from '../src/claude-tui-session.js'
 
 // Track the temp skillsDirs makeSession() mints so they don't accumulate under
@@ -83,4 +84,65 @@ test('flush with an empty buffer is a no-op (stray flush after teardown)', () =>
   s.on('terminal_output', (e) => emitted.push(e.data))
   s._flushTerminalMirror()
   assert.equal(emitted.length, 0)
+})
+
+// #5835 Phase 2: resize sync. resizeTerminal clamps, records the size (so it
+// survives a respawn), applies it to a live PTY, and emits terminal_resize.
+
+test('getTerminalSize defaults to the shared PTY size before any resize', () => {
+  const s = makeSession()
+  assert.deepEqual(s.getTerminalSize(), { cols: CLAUDE_TUI_PTY_SIZE.cols, rows: CLAUDE_TUI_PTY_SIZE.rows })
+})
+
+test('resizeTerminal records the new size, returns it, and emits terminal_resize', () => {
+  const s = makeSession()
+  const events = []
+  s.on('terminal_resize', (e) => events.push(e))
+  const applied = s.resizeTerminal(160, 48)
+  assert.deepEqual(applied, { cols: 160, rows: 48 })
+  assert.deepEqual(s.getTerminalSize(), { cols: 160, rows: 48 })
+  assert.deepEqual(events, [{ cols: 160, rows: 48 }])
+})
+
+test('resizeTerminal drives a live PTY via _term.resize', () => {
+  const s = makeSession()
+  const calls = []
+  s._term = { resize: (c, r) => calls.push([c, r]) }
+  s._ptyExited = false
+  s.resizeTerminal(100, 40)
+  assert.deepEqual(calls, [[100, 40]])
+})
+
+test('resizeTerminal clamps out-of-range / non-integer dimensions', () => {
+  const s = makeSession()
+  assert.deepEqual(s.resizeTerminal(0, 0), { cols: 1, rows: 1 }, 'floor clamps to 1')
+  assert.deepEqual(s.resizeTerminal(9999, 9999), { cols: 1000, rows: 1000 }, 'ceiling clamps to 1000')
+  assert.deepEqual(s.resizeTerminal(80.9, 24.9), { cols: 80, rows: 24 }, 'floored to ints')
+})
+
+test('resizeTerminal is a no-op (null, no emit) when the size is unchanged', () => {
+  const s = makeSession()
+  s.resizeTerminal(120, 30)
+  const events = []
+  s.on('terminal_resize', (e) => events.push(e))
+  const again = s.resizeTerminal(120, 30)
+  assert.equal(again, null, 'unchanged size returns null so the caller skips a redundant broadcast')
+  assert.equal(events.length, 0, 'no terminal_resize emitted for a no-op resize')
+})
+
+test('resizeTerminal survives a PTY-less / exited session (size still recorded)', () => {
+  const s = makeSession()
+  s._term = null
+  const applied = s.resizeTerminal(200, 50)
+  assert.deepEqual(applied, { cols: 200, rows: 50 }, 'size recorded for the next spawn even with no live PTY')
+  assert.deepEqual(s.getTerminalSize(), { cols: 200, rows: 50 })
+})
+
+test('a _term.resize throw is swallowed (no crash) and the size is still recorded', () => {
+  const s = makeSession()
+  s._term = { resize: () => { throw new Error('pty gone') } }
+  s._ptyExited = false
+  const applied = s.resizeTerminal(90, 30)
+  assert.deepEqual(applied, { cols: 90, rows: 30 })
+  assert.deepEqual(s.getTerminalSize(), { cols: 90, rows: 30 })
 })

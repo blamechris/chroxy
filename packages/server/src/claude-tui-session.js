@@ -384,6 +384,12 @@ export class ClaudeTuiSession extends BaseSession {
     // on flush and cleared on teardown.
     this._mirrorBuffer = ''
     this._mirrorTimer = null
+    // #5835 Phase 2: the live PTY's current grid size. Spawns at the shared
+    // default and tracks every applied resize so a respawn re-spawns at the
+    // operator's chosen size (not back to the default), and so a newly-
+    // subscribing viewer can be told the authoritative size to letterbox to.
+    this._ptyCols = CLAUDE_TUI_PTY_SIZE.cols
+    this._ptyRows = CLAUDE_TUI_PTY_SIZE.rows
     // #4278: when claude TUI calls AskUserQuestion, chroxy's PreToolUse
     // hook emits user_question and stashes the toolUseId here. The
     // dashboard's QuestionPrompt UI eventually sends a
@@ -1485,9 +1491,11 @@ export class ClaudeTuiSession extends BaseSession {
     try {
       this._term = ptyMod.spawn(CLAUDE, args, {
         name: 'xterm-256color',
-        // #5839: single-sourced so the dashboard mirror renders at the same grid.
-        cols: CLAUDE_TUI_PTY_SIZE.cols,
-        rows: CLAUDE_TUI_PTY_SIZE.rows,
+        // #5839: single-sourced default so the dashboard mirror renders at the
+        // same grid. #5835 Phase 2: a prior resize is preserved across respawns
+        // via _ptyCols/_ptyRows (seeded from CLAUDE_TUI_PTY_SIZE on construct).
+        cols: this._ptyCols,
+        rows: this._ptyRows,
         cwd: cwdReal,
         env,
       })
@@ -1763,6 +1771,49 @@ export class ClaudeTuiSession extends BaseSession {
     if (!data) return
     this._mirrorBuffer = ''
     this.emit('terminal_output', { data })
+  }
+
+  /**
+   * #5835 Phase 2: the live PTY's current grid size, for a newly-subscribing
+   * viewer to letterbox to (and for tests). Always reflects the last applied
+   * resize, or the spawn default before any resize.
+   * @returns {{cols: number, rows: number}}
+   */
+  getTerminalSize() {
+    return { cols: this._ptyCols, rows: this._ptyRows }
+  }
+
+  /**
+   * #5835 Phase 2: resize the live PTY (the remote-viewer mirror). Clamps to the
+   * same bounds the protocol schema enforces so a bad caller can't throw inside
+   * node-pty, records the size so it survives a respawn, and applies it to the
+   * running PTY when one exists (a resize requested before/after the PTY is alive
+   * still updates the tracked size, taking effect on the next spawn). The real
+   * TUI redraws at the new size; those bytes flow out through the normal mirror.
+   * @returns {{cols: number, rows: number}|null} the applied size, or null if the
+   *   request was a no-op (unchanged) so the caller can skip a redundant broadcast.
+   */
+  resizeTerminal(cols, rows) {
+    const c = Math.max(1, Math.min(1000, Math.floor(Number(cols))))
+    const r = Math.max(1, Math.min(1000, Math.floor(Number(rows))))
+    if (!Number.isFinite(c) || !Number.isFinite(r)) return null
+    if (c === this._ptyCols && r === this._ptyRows) return null
+    this._ptyCols = c
+    this._ptyRows = r
+    if (this._term && !this._ptyExited) {
+      try {
+        this._term.resize(c, r)
+      } catch (err) {
+        // A resize race against PTY teardown shouldn't crash the daemon; the
+        // tracked size still applies on the next spawn.
+        log.warn(`claude-tui resize failed (${c}x${r}): ${err?.message || err}`)
+      }
+    }
+    // Tell subscribed viewers the new authoritative size (ws-forwarding routes
+    // this to terminal subscribers as `terminal_size`), so observers re-letterbox
+    // and the requesting primary renders the confirmed grid.
+    this.emit('terminal_resize', { cols: c, rows: r })
+    return { cols: c, rows: r }
   }
 
   /**

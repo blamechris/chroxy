@@ -150,14 +150,35 @@ function setupSessionForwarding(normalizer, ctx) {
     // subscriber — so a Chat-tab client never pays for raw PTY bytes it isn't
     // rendering. Transient: no history, no normalizer, no serverTs.
     if (event === 'terminal_output') {
+      // A custom filter OVERRIDES broadcastToSession's default session scoping,
+      // so re-assert it here: deliver only to a client that is BOTH a viewer of
+      // the session (activeSessionId / subscribedSessionIds) AND opted into its
+      // terminal mirror. Opt-in alone must not bypass scoping, and unsubscribing
+      // from the session must stop the bytes. #5835 Phase 2 reuses this exact
+      // audience for terminal_size below — keep them sharing one predicate so the
+      // size broadcast can never reach a different set than the bytes.
+      const isTerminalSubscriber = (client) => Boolean(
+        client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
+        (client.activeSessionId === sessionId ||
+          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))),
+      )
       broadcastToSession(
         sessionId,
         { type: 'terminal_output', sessionId, data: typeof data?.data === 'string' ? data.data : '' },
-        // A custom filter OVERRIDES broadcastToSession's default session scoping,
-        // so re-assert it here: deliver only to a client that is BOTH a viewer of
-        // the session (activeSessionId / subscribedSessionIds) AND opted into its
-        // terminal mirror. Opt-in alone must not bypass scoping, and unsubscribing
-        // from the session must stop the bytes.
+        isTerminalSubscriber,
+      )
+      return
+    }
+
+    // #5835 Phase 2: the authoritative live-PTY grid size changed (a primary
+    // viewer drove a resize). Tell every terminal subscriber so observers can
+    // re-letterbox to the new size — the SAME audience as terminal_output above,
+    // re-deriving the predicate here since each event invocation is its own
+    // closure over `sessionId`. cols/rows are already clamped by resizeTerminal.
+    if (event === 'terminal_resize') {
+      broadcastToSession(
+        sessionId,
+        { type: 'terminal_size', sessionId, cols: data?.cols, rows: data?.rows },
         (client) => Boolean(
           client.terminalSessionIds && client.terminalSessionIds.has(sessionId) &&
           (client.activeSessionId === sessionId ||

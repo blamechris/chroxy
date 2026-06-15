@@ -354,9 +354,36 @@ function handleTerminalSubscribe(ws, client, msg, ctx) {
   if (client.boundSessionId && client.boundSessionId !== sid) return
   // Parity with handleSubscribeSessions: only track a REAL session, so a client
   // can't grow terminalSessionIds unboundedly with junk ids.
-  if (!ctx?.sessions?.sessionManager?.getSession?.(sid)) return
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
   if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
   client.terminalSessionIds.add(sid)
+  // #5835 Phase 2: tell the new subscriber the authoritative PTY size up front so
+  // it can letterbox to the right grid immediately (the size may already differ
+  // from the default if another viewer resized it). Only claude-tui sessions have
+  // a live PTY / getTerminalSize; other providers simply don't send this.
+  if (typeof entry.session?.getTerminalSize === 'function') {
+    const size = entry.session.getTerminalSize()
+    ctx.transport.send(ws, { type: 'terminal_size', sessionId: sid, cols: size.cols, rows: size.rows })
+  }
+}
+
+// #5835 Phase 2: request a resize of a session's live PTY (the remote-viewer
+// mirror). The PTY has ONE size, so only the session's primary owner may drive
+// it — observers ride along and re-letterbox to the `terminal_size` the server
+// broadcasts back (an unclaimed session is open to its first/only viewer, which
+// is the single-operator dashboard case). resizeTerminal clamps + records the
+// size and emits terminal_resize, which ws-forwarding broadcasts to every
+// terminal subscriber. Silent reject: an observer simply doesn't drive the size.
+function handleTerminalResize(ws, client, msg, ctx) {
+  const sid = msg.sessionId
+  if (client.boundSessionId && client.boundSessionId !== sid) return
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
+  const primary = ctx.transport.getPrimary?.(sid)
+  if (primary && primary !== client.id) return
+  if (typeof entry.session?.resizeTerminal !== 'function') return
+  entry.session.resizeTerminal(msg.cols, msg.rows)
 }
 
 // #5835 Phase 1: opt the client OUT of a session's live PTY mirror (e.g. the
@@ -449,6 +476,7 @@ export const sessionHandlers = {
   unsubscribe_sessions: handleUnsubscribeSessions,
   terminal_subscribe: handleTerminalSubscribe,
   terminal_unsubscribe: handleTerminalUnsubscribe,
+  terminal_resize: handleTerminalResize,
   client_visible: handleClientVisible,
   claim_primary: handleClaimPrimary,
 }

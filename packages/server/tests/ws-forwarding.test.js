@@ -287,6 +287,44 @@ describe('setupForwarding', () => {
     })
   })
 
+  // #5835 Phase 2: a terminal_resize session_event broadcasts terminal_size to
+  // the SAME audience as terminal_output (opted-in terminal subscribers who are
+  // also session viewers), so observers re-letterbox to the authoritative grid.
+  describe('terminal_resize → terminal_size broadcast', () => {
+    it('broadcasts terminal_size to terminal subscribers with the resized grid', () => {
+      const ctx = makeCtx()
+      setupForwarding(ctx)
+
+      ctx.sessionManager.emit('session_event', {
+        sessionId: 'sess-1',
+        event: 'terminal_resize',
+        data: { cols: 160, rows: 48 },
+      })
+
+      const call = ctx.broadcastToSession.mock.calls.find(c =>
+        c.arguments[1]?.type === 'terminal_size'
+      )
+      assert.ok(call, 'Expected a terminal_size broadcastToSession call')
+      const [sessionId, msg, filter] = call.arguments
+      assert.equal(sessionId, 'sess-1')
+      assert.deepEqual(
+        { type: msg.type, sessionId: msg.sessionId, cols: msg.cols, rows: msg.rows },
+        { type: 'terminal_size', sessionId: 'sess-1', cols: 160, rows: 48 },
+      )
+
+      // The filter admits only a client opted into THIS session's terminal AND
+      // viewing it; opt-in alone, or viewing without opt-in, must be excluded.
+      const viewerOptedIn = { terminalSessionIds: new Set(['sess-1']), activeSessionId: 'sess-1' }
+      const viewerNoOptIn = { terminalSessionIds: new Set(), activeSessionId: 'sess-1' }
+      const optInNotViewing = { terminalSessionIds: new Set(['sess-1']), activeSessionId: 'other', subscribedSessionIds: new Set() }
+      const optInSubscribed = { terminalSessionIds: new Set(['sess-1']), activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }
+      assert.equal(filter(viewerOptedIn), true)
+      assert.equal(filter(viewerNoOptIn), false)
+      assert.equal(filter(optInNotViewing), false)
+      assert.equal(filter(optInSubscribed), true)
+    })
+  })
+
   describe('session_updated event', () => {
     it('broadcasts session name change to all clients', () => {
       const ctx = makeCtx()

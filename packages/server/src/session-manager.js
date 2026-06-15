@@ -2176,6 +2176,13 @@ export class SessionManager extends EventEmitter {
       this.emit('session_event', { sessionId, event: 'terminal_output', data })
     })
 
+    // #5835 Phase 2: authoritative live-PTY size changes (a primary viewer drove
+    // a resize). Like terminal_output, transient and kept out of history/activity
+    // — ws-forwarding broadcasts it to terminal subscribers as `terminal_size`.
+    session.on('terminal_resize', (data) => {
+      this.emit('session_event', { sessionId, event: 'terminal_resize', data })
+    })
+
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
         if (ACTIVITY_EVENTS.has(event)) this.touchActivity(sessionId)

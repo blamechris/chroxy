@@ -744,5 +744,77 @@ describe('session-handlers', () => {
       sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-bound' }, ctx)
       assert.ok(client.terminalSessionIds.has('sess-bound'))
     })
+
+    it('terminal_subscribe sends the current terminal_size to the new subscriber', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-1', { session: { getTerminalSize: () => ({ cols: 160, rows: 48 }) }, cwd: '/tmp', name: 'S1' })
+      const client = makeClient()
+      sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
+      const sizeMsg = ctx._sent.find(m => m.type === 'terminal_size')
+      assert.ok(sizeMsg, 'expected a terminal_size sent on subscribe')
+      assert.deepEqual(sizeMsg, { type: 'terminal_size', sessionId: 'sess-1', cols: 160, rows: 48 })
+    })
+
+    it('terminal_subscribe to a session without a live PTY sends no terminal_size', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-1', { session: {}, cwd: '/tmp', name: 'S1' }) // non-tui: no getTerminalSize
+      const client = makeClient()
+      sessionHandlers.terminal_subscribe(makeWs(), client, { type: 'terminal_subscribe', sessionId: 'sess-1' }, ctx)
+      assert.ok(!ctx._sent.some(m => m.type === 'terminal_size'))
+    })
+  })
+
+  describe('terminal_resize (#5835 Phase 2)', () => {
+    function ctxWithResizableSession(sid = 'sess-1') {
+      const ctx = makeCtx()
+      const calls = []
+      ctx._sessions.set(sid, { session: { resizeTerminal: (c, r) => { calls.push([c, r]) } }, cwd: '/tmp', name: 'S1' })
+      return { ctx, calls }
+    }
+
+    it('an unclaimed session lets any viewer drive the resize (single-operator case)', () => {
+      const { ctx, calls } = ctxWithResizableSession()
+      const client = makeClient()
+      sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 160, rows: 48 }, ctx)
+      assert.deepEqual(calls, [[160, 48]])
+    })
+
+    it('the primary owner may drive the resize', () => {
+      const { ctx, calls } = ctxWithResizableSession()
+      ctx.transport.claimPrimary('sess-1', 'client-1')
+      const client = makeClient({ id: 'client-1' })
+      sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 100, rows: 40 }, ctx)
+      assert.deepEqual(calls, [[100, 40]])
+    })
+
+    it('an observer (another client holds primary) cannot drive the resize — it rides along', () => {
+      const { ctx, calls } = ctxWithResizableSession()
+      ctx.transport.claimPrimary('sess-1', 'other-client')
+      const observer = makeClient({ id: 'client-1' })
+      sessionHandlers.terminal_resize(makeWs(), observer, { type: 'terminal_resize', sessionId: 'sess-1', cols: 200, rows: 60 }, ctx)
+      assert.equal(calls.length, 0)
+    })
+
+    it('resize to a non-existent session is a no-op', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+      assert.doesNotThrow(() =>
+        sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'ghost', cols: 80, rows: 24 }, ctx))
+    })
+
+    it('a bound client cannot resize a different session', () => {
+      const { ctx, calls } = ctxWithResizableSession('sess-other')
+      const client = makeClient({ boundSessionId: 'sess-bound' })
+      sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-other', cols: 80, rows: 24 }, ctx)
+      assert.equal(calls.length, 0)
+    })
+
+    it('resize on a non-tui session (no resizeTerminal) is a no-op, not a throw', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sess-1', { session: {}, cwd: '/tmp', name: 'S1' })
+      const client = makeClient()
+      assert.doesNotThrow(() =>
+        sessionHandlers.terminal_resize(makeWs(), client, { type: 'terminal_resize', sessionId: 'sess-1', cols: 80, rows: 24 }, ctx))
+    })
   })
 })
