@@ -2131,7 +2131,10 @@ export class ClaudeTuiSession extends BaseSession {
       const completed = await this._writePtyTextThrottled(promptToSend, {
         onAbort: () => this._finishTurnError('Turn aborted during prompt write', messageId),
       })
-      if (!completed) return { ok: false, reason: 'aborted' } // #5813: typed failure (write aborted)
+      // #5813: typed failure. _writePtyTextThrottled returns false for BOTH an
+      // aborted turn AND a mid-write PTY exit, so report the actual cause (#5848
+      // review) rather than always labelling it 'aborted'.
+      if (!completed) return { ok: false, reason: this._ptyExited ? 'pty_exited' : 'aborted' }
     } catch (err) {
       this._finishTurnError(`Failed to write prompt to PTY: ${err.message}`, messageId)
       return { ok: false, reason: 'write_failed' } // #5813: typed failure
