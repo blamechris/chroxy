@@ -14,6 +14,7 @@ const log = createLogger('ws')
  *   - broadcastStatus()     server_status broadcast
  *   - broadcastShutdown()   server_shutdown broadcast
  *   - _broadcastClientJoined()  client_joined to other clients
+ *   - _broadcastClientLeft()    client_left to other clients
  *
  * @param {object} opts
  * @param {Map} opts.clients             ws → client Map (shared reference with WsServer)
@@ -109,12 +110,60 @@ export class WsBroadcaster {
     return true
   }
 
-  /** Broadcast a message to all authenticated clients matching a filter */
+  /**
+   * Broadcast a message to all authenticated clients matching a filter.
+   *
+   * A throwing `filter` must NOT abort delivery to the remaining clients: the
+   * fast path (#5563) already isolates each member, but the legacy full-scan
+   * loops did not, so one bad client could silently drop the broadcast for
+   * every *later* client. We catch a filter throw, warn once per client, and
+   * continue. (No shipping filter throws today — the #4799 fix hardened the
+   * default — but this is the resilient invariant the fast path already has.)
+   */
   _broadcast(message, filter = () => true) {
     for (const [ws, client] of this._clients) {
-      if (client.authenticated && filter(client) && ws.readyState === 1) {
-        this._sendOneWithBackpressure(ws, client, message)
+      if (!client.authenticated || ws.readyState !== 1) continue
+      let matched
+      try {
+        matched = filter(client)
+      } catch (err) {
+        if (!client._broadcastFilterThrewWarned) {
+          log.warn(`Broadcast filter threw for client ${client.id} (${message?.type || 'unknown'}): ${err?.message || err} — skipping client, broadcast continues`)
+          client._broadcastFilterThrewWarned = true
+        }
+        continue
       }
+      if (matched) this._sendOneWithBackpressure(ws, client, message)
+    }
+  }
+
+  /**
+   * Pure recipient predicate for session-scoped broadcasts: does this client's
+   * active session match, or has it explicitly subscribed? Single source of
+   * truth for the full-scan fallbacks of _broadcastToSession /
+   * _countSessionSubscribers / _hasDeflateSubscriber so they can never drift
+   * (deliver vs count vs deflate MUST agree).
+   */
+  _matchesSession(client, sessionId) {
+    if (client.activeSessionId === sessionId) return true
+    return !!(client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))
+  }
+
+  /**
+   * Yield `{ client, sock }` for each authenticated, OPEN member of a session's
+   * reverse index (#5563). Single source of the per-member liveness guard the
+   * three index fast paths (_broadcastToSession / _countSessionSubscribers /
+   * _hasDeflateSubscriber) previously triplicated — they MUST agree, so the
+   * guard lives here once. Yields nothing when no index is wired; callers then
+   * take their full-scan fallback.
+   */
+  * _liveSessionMembers(sessionId) {
+    if (!this._clientManager) return
+    for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
+      if (!client.authenticated) continue
+      const sock = client._ws
+      if (!sock || sock.readyState !== 1) continue
+      yield { client, sock }
     }
   }
 
@@ -158,30 +207,24 @@ export class WsBroadcaster {
       // backpressure. Each client carries a stable `_ws` back-reference set at
       // registration (ws-server.js addClient), so no per-send Map lookup is
       // needed. The index Set holds only this session's viewers.
-      for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
-        if (!client.authenticated) continue
-        const sock = client._ws
-        if (!sock || sock.readyState !== 1) continue
+      for (const { client, sock } of this._liveSessionMembers(sessionId)) {
         this._sendOneWithBackpressure(sock, client, tagged)
       }
       return
     }
 
-    // Full-scan fallback: no index (test fixtures) or a custom filter.
+    // Full-scan fallback: no index (test fixtures) or a custom filter. Route
+    // through _broadcast so the throwing-filter guard + backpressure decision
+    // live in exactly one place.
     const effectiveFilter = filter || ((client) => {
-      if (client.activeSessionId === sessionId) return true
-      if (client.subscribedSessionIds) return client.subscribedSessionIds.has(sessionId)
-      if (client.authenticated && !client._missingSubscribedSessionIdsWarned) {
+      if (this._matchesSession(client, sessionId)) return true
+      if (!client.subscribedSessionIds && !client._missingSubscribedSessionIdsWarned) {
         log.warn(`Client ${client.id} is authenticated but has no subscribedSessionIds Set — falling back to activeSessionId match only (sessionId=${sessionId}, messageType=${message?.type || 'unknown'})`)
         client._missingSubscribedSessionIdsWarned = true
       }
       return false
     })
-    for (const [ws, client] of this._clients) {
-      if (client.authenticated && effectiveFilter(client) && ws.readyState === 1) {
-        this._sendOneWithBackpressure(ws, client, tagged)
-      }
-    }
+    this._broadcast(tagged, effectiveFilter)
   }
 
   /**
@@ -204,22 +247,14 @@ export class WsBroadcaster {
     // total clients).
     if (this._clientManager) {
       let count = 0
-      for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
-        if (!client.authenticated) continue
-        const sock = client._ws
-        if (!sock || sock.readyState !== 1) continue
-        count++
-      }
+      for (const _member of this._liveSessionMembers(sessionId)) count++
       return count
     }
     // Full-scan fallback for fixtures constructed without a clientManager.
     let count = 0
     for (const [ws, client] of this._clients) {
       if (!client.authenticated || ws.readyState !== 1) continue
-      if (client.activeSessionId === sessionId ||
-          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))) {
-        count++
-      }
+      if (this._matchesSession(client, sessionId)) count++
     }
     return count
   }
@@ -247,10 +282,7 @@ export class WsBroadcaster {
    */
   _hasDeflateSubscriber(sessionId) {
     if (this._clientManager) {
-      for (const client of this._clientManager.getSessionSubscribers(sessionId)) {
-        if (!client.authenticated) continue
-        const sock = client._ws
-        if (!sock || sock.readyState !== 1) continue
+      for (const { client } of this._liveSessionMembers(sessionId)) {
         if (client.usesDeflate) return true
       }
       return false
@@ -259,10 +291,7 @@ export class WsBroadcaster {
     for (const [ws, client] of this._clients) {
       if (!client.authenticated || ws.readyState !== 1) continue
       if (!client.usesDeflate) continue
-      if (client.activeSessionId === sessionId ||
-          (client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))) {
-        return true
-      }
+      if (this._matchesSession(client, sessionId)) return true
     }
     return false
   }
@@ -281,6 +310,22 @@ export class WsBroadcaster {
     }
     for (const [ws, client] of this._clients) {
       if (ws !== excludeWs && client.authenticated && ws.readyState === 1) {
+        this._sendOneWithBackpressure(ws, client, message)
+      }
+    }
+  }
+
+  /**
+   * Broadcast client_left to all OTHER authenticated clients. Mirror of
+   * _broadcastClientJoined — excludes the departing client by id (it may still
+   * be in the map mid-teardown) and routes through _sendOneWithBackpressure so
+   * the fan-out shares the same backpressure + metrics path as every other
+   * broadcast (was an open-coded loop in ws-server.js).
+   */
+  _broadcastClientLeft(departingClient) {
+    const message = { type: 'client_left', clientId: departingClient.id }
+    for (const [ws, client] of this._clients) {
+      if (client.id !== departingClient.id && client.authenticated && ws.readyState === 1) {
         this._sendOneWithBackpressure(ws, client, message)
       }
     }
