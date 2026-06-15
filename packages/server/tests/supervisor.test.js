@@ -5,7 +5,33 @@ import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { Readable } from 'stream'
+import { createServer as createNetServer } from 'net'
 import { Supervisor } from '../src/supervisor.js'
+
+// Bind without a host arg so these probes match how the supervisor's standby
+// server binds (`listen(port)` → the unspecified address), otherwise an
+// IPv4-vs-IPv6/dual-stack mismatch makes the EADDRINUSE check flaky.
+
+/** Bind an ephemeral port, read it, release it — a free port for a test. */
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = createNetServer()
+    srv.on('error', reject)
+    srv.listen(0, () => {
+      const { port } = srv.address()
+      srv.close(() => resolve(port))
+    })
+  })
+}
+
+/** Try to listen on a port; resolve with the error code (or null on success). */
+function tryListen(port) {
+  return new Promise((resolve) => {
+    const srv = createNetServer()
+    srv.on('error', (err) => resolve(err.code))
+    srv.listen(port, () => srv.close(() => resolve(null)))
+  })
+}
 
 /**
  * Create a mock child process (EventEmitter with send/kill/stdout/stderr).
@@ -274,6 +300,42 @@ describe('Supervisor', () => {
       // Child restart happens on setTimeout — verify state is correct
       assert.equal(supervisor._child, null)
       assert.equal(supervisor._childReady, false)
+    })
+
+    // Regression: the standby health server that runs while the child is down
+    // binds `this._port`. Before the fix, it kept listening when the next child
+    // forked, so the child hit EADDRINUSE, exited before `ready`, and the
+    // `_stopStandbyServer()` on `ready` never ran — every restart hit the same
+    // EADDRINUSE until the cap, bricking the daemon. startChild() must free the
+    // port BEFORE forking. Uses a REAL listening socket so a mocked fork can't
+    // hide the port conflict.
+    it('frees the standby port before forking the replacement child (no EADDRINUSE crash-loop)', async () => {
+      const port = await findFreePort()
+      const { supervisor } = setup({ port })
+
+      // Stand up a real standby health server, as the crash path does.
+      supervisor._startStandbyServer()
+      await new Promise((resolve) => supervisor._standbyServer.once('listening', resolve))
+
+      // Sanity: the standby genuinely holds the port (real-listener check) — a
+      // fresh listener on it must fail, mirroring what the forked child sees.
+      assert.equal(await tryListen(port), 'EADDRINUSE')
+
+      // Capture the standby state at the moment the child would fork.
+      let standbyAtForkTime = 'unset'
+      const realFork = supervisor._fork.bind(supervisor)
+      supervisor._fork = (script, args, opts) => {
+        standbyAtForkTime = supervisor._standbyServer
+        return realFork(script, args, opts)
+      }
+
+      supervisor.startChild()
+
+      // The port must have been released before the fork, so the child can bind.
+      assert.equal(standbyAtForkTime, null, 'standby server must be stopped before the replacement child forks')
+
+      // No pending restart timer to leak into other tests.
+      if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
     })
 
     it('emits child_exit event on crash', async () => {
