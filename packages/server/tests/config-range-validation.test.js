@@ -113,6 +113,38 @@ describe('validateConfig range validation', () => {
     assert.ok(result.warnings.some(w => w.includes('expected number')))
     assert.ok(!result.warnings.some(w => w.includes('1-65535')))
   })
+
+  // Infinity is a typeof 'number' that parseFloat can mint from an env var
+  // (PORT=Infinity). port/maxPayload historically used `typeof === 'number'`, so
+  // an out-of-range Infinity must still warn (regression guard for the P2-6
+  // validateRange table — the timeout fields below intentionally do NOT).
+  it('warns when port is Infinity (exceeds max via typeof-number guard)', () => {
+    const result = validateConfig({ port: Infinity })
+    assert.ok(result.warnings.some(w => w.includes('port') && w.includes('1-65535')))
+  })
+
+  it('warns when port is -Infinity (below min)', () => {
+    const result = validateConfig({ port: -Infinity })
+    assert.ok(result.warnings.some(w => w.includes('port') && w.includes('1-65535')))
+  })
+
+  it('warns when maxPayload is Infinity (exceeds 100MB)', () => {
+    const result = validateConfig({ maxPayload: Infinity })
+    assert.ok(result.warnings.some(w => w.includes('maxPayload') && w.includes('100MB')))
+  })
+
+  it('warns when maxSessions is -Infinity (below 1)', () => {
+    const result = validateConfig({ maxSessions: -Infinity })
+    assert.ok(result.warnings.some(w => w.includes('maxSessions') && w.includes('>= 1')))
+  })
+
+  // The timeout fields used Number.isFinite originally — Infinity is skipped
+  // (no range warning), preserved via finiteOnly. NaN never warns anywhere.
+  it('does NOT emit a range warning for an Infinity timeout field (finiteOnly)', () => {
+    const result = validateConfig({ resultTimeoutMs: Infinity, streamStallTimeoutMs: Infinity })
+    assert.ok(!result.warnings.some(w => w.includes('resultTimeoutMs')))
+    assert.ok(!result.warnings.some(w => w.includes('streamStallTimeoutMs')))
+  })
 })
 
 /**
