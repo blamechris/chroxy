@@ -82,6 +82,10 @@ const RATE_LIMITS = {
   session_online: 0,
   session_offline: 0,
   session_activity: 30_000,
+  // #5828: billing-canary warnings (silent metered default; reclassification
+  // trip). The monitor only emits on a CHANGED warning set, so this is already
+  // dedup'd at the source — immediate is fine, no extra throttle needed.
+  billing_warning: 0,
 }
 
 // Re-exported for existing importers/tests — the implementation moved to

@@ -5,6 +5,7 @@ import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { WsServer } from './ws-server.js'
 import { BillingCanaryMonitor } from './billing-canary-monitor.js'
+import { resolvePublicIp } from './get-public-ip.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
 // #5368 slice (c): QUICK_TUNNEL_DNS_SETTLE_MS + TUNNEL_STATUS_MIN_PROTOCOL_VERSION
 // moved to tunnel-lifecycle-handler.js with the tunnel block; createTunnel +
@@ -901,14 +902,35 @@ export async function startCliServer(config) {
   // they change, so the dashboard can surface a banner during the 2026-06-15
   // programmatic-credit window. Created after wsServer (it broadcasts through
   // it); the provider is wired back into wsServer so the snapshot also seeds
-  // auth_ok for late joiners. Egress detection is deliberately not run here —
-  // it needs an outbound IP lookup (deferred to an opt-in follow-up).
+  // auth_ok for late joiners.
+  //
+  // #5828: datacenter-egress detection is OPT-IN via `config.billing.egressCheck`
+  // — only then do we pass `resolveEgressIp`, the one place the daemon makes an
+  // outbound IP lookup (consent-gated). `getDatacenterPrefixes` lets an operator
+  // add their cloud's ranges without a code change. `notify` fans a warning set
+  // out as a `billing_warning` push so an away operator hears about a metered
+  // default or a datacenter-egress flag without watching the dashboard.
+  const egressCheckEnabled = config.billing?.egressCheck === true
   const billingCanaryMonitor = new BillingCanaryMonitor({
     getSessions: () => sessionManager.listSessions(),
     getDefaultProvider: () => config.provider || DEFAULT_PROVIDER,
     getApiKeyAuth: () => (config.provider || DEFAULT_PROVIDER) === 'claude-sdk' && Boolean(process.env.ANTHROPIC_API_KEY),
     broadcast: (msg) => { try { wsServer?.broadcast(msg) } catch { /* best-effort */ } },
     logger: log,
+    resolveEgressIp: egressCheckEnabled ? () => resolvePublicIp() : undefined,
+    getDatacenterPrefixes: () => config.billing?.datacenterPrefixes || [],
+    notify: (warnings) => {
+      // One aggregate push per distinct warning set — billing_warning has no
+      // rate limit (RATE_LIMITS), so the monitor's own change-detection is the
+      // throttle. Codes ride in `data` for clients that key off them.
+      const count = warnings.length
+      const title = count > 1 ? `Billing alert (${count})` : 'Billing alert'
+      const body = warnings.map((w) => w.message).join('\n\n')
+      const codes = warnings.map((w) => w.code)
+      pushManager.send('billing_warning', title, body, { codes }).catch((err) => {
+        log?.warn?.(`billing-canary push failed: ${String(err?.message || err)}`)
+      })
+    },
   })
   wsServer.setBillingCanaryProvider(() => billingCanaryMonitor.current())
   // Recompute on session lifecycle (changes the session set the canary reads);

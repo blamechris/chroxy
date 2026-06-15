@@ -479,6 +479,25 @@ function validateBillingBlock(billing, warnings) {
       warnings.push(`Invalid value for 'billing.budgetWarningPercent': expected a number 1-100, got ${JSON.stringify(v)}`)
     }
   }
+  // #5828: opt-in datacenter-egress check for the billing canary. Default OFF
+  // (no field) — when enabled, the daemon makes a best-effort public-IP lookup
+  // so it can warn when a subscription-billed provider runs from a cloud host
+  // (a documented ban signal). Off by default because it's an outbound network
+  // call the operator should consent to.
+  if (Object.prototype.hasOwnProperty.call(billing, 'egressCheck')) {
+    if (typeof billing.egressCheck !== 'boolean') {
+      warnings.push(`Invalid value for 'billing.egressCheck': expected a boolean, got ${JSON.stringify(billing.egressCheck)}`)
+    }
+  }
+  // #5828: operator-supplied extra IPv4 prefixes for the datacenter classifier
+  // (merged with the conservative built-in list). Lets a user on a known cloud
+  // add their provider's ranges without a code change.
+  if (Object.prototype.hasOwnProperty.call(billing, 'datacenterPrefixes')) {
+    const v = billing.datacenterPrefixes
+    if (!Array.isArray(v) || !v.every((p) => typeof p === 'string' && p.length > 0)) {
+      warnings.push(`Invalid value for 'billing.datacenterPrefixes': expected an array of non-empty strings, got ${JSON.stringify(v)}`)
+    }
+  }
 }
 
 function validateDiscordNotificationsBlock(discord, warnings) {

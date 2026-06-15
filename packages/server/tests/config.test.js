@@ -301,6 +301,37 @@ describe('validateConfig', () => {
       assert.ok(result.warnings.some(w => w.includes('mcpToolCallTimeoutMs') && w.includes('number')))
     })
   })
+
+  describe('billing egress check (#5828)', () => {
+    it('accepts egressCheck boolean + datacenterPrefixes array', () => {
+      const result = validateConfig({ billing: { egressCheck: true, datacenterPrefixes: ['203.0.113.'] } })
+      assert.equal(result.valid, true)
+      assert.equal(result.warnings.length, 0)
+    })
+
+    it('accepts a billing block with neither egress field (default off)', () => {
+      const result = validateConfig({ billing: { creditTier: 'pro' } })
+      assert.equal(result.valid, true)
+    })
+
+    it('warns when egressCheck is not a boolean', () => {
+      const result = validateConfig({ billing: { egressCheck: 'yes' } })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('billing.egressCheck') && w.includes('boolean')))
+    })
+
+    it('warns when datacenterPrefixes is not an array', () => {
+      const result = validateConfig({ billing: { datacenterPrefixes: '203.0.113.' } })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('billing.datacenterPrefixes')))
+    })
+
+    it('warns when datacenterPrefixes contains a non-string or empty entry', () => {
+      const result = validateConfig({ billing: { datacenterPrefixes: ['203.0.113.', ''] } })
+      assert.equal(result.valid, false)
+      assert.ok(result.warnings.some(w => w.includes('billing.datacenterPrefixes')))
+    })
+  })
 })
 
 describe('mergeConfig', () => {
