@@ -779,6 +779,28 @@ describe('http-routes', () => {
       assert.equal(existsSync(join(workDir, 'snapshots', 'snap-protected.json')), true)
     })
 
+    // Audit P1-6: deleting a snapshot removes a host docker image + sidecar
+    // shared across all sessions — a host-level mutation that requires PRIMARY
+    // authority. A bound (pairing / share-a-session) token must be rejected.
+    it('DELETE /api/snapshots/:slug rejects a bound (pairing) token with primary_token_required', async () => {
+      writeSidecar('snap-bound', { tag: 'chroxy-byok-snap:bound' })
+      const removed = []
+      const mock = createMockServer({
+        _snapshotRemoveImage: async (tag) => { removed.push(tag) },
+      })
+      await startWith(mock)
+      const res = await globalThis.fetch(`http://127.0.0.1:${port}/api/snapshots/snap-bound`, {
+        method: 'DELETE',
+        headers: { 'Authorization': 'Bearer pairing-bound' },
+      })
+      assert.equal(res.status, 403)
+      const body = await res.json()
+      assert.equal(body.error, 'primary_token_required')
+      // Rejected before any host mutation.
+      assert.deepEqual(removed, [])
+      assert.equal(existsSync(join(workDir, 'snapshots', 'snap-bound.json')), true)
+    })
+
     // #5101 — when env-management is disabled, resolveRemoveImage falls
     // through to lazily constructing a DockerBackend. Caching that init
     // avoids re-running the dynamic `import()` and re-allocating a
