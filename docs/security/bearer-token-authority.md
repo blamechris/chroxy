@@ -98,7 +98,7 @@ The following HTTP routes ([`http-routes.js`](../../packages/server/src/http-rou
 | `POST /pair-discord` | Mints a fresh approval-gated pairing id and posts its `chroxy://` link to Discord (#5513) — gated from day one. |
 | `DELETE /api/snapshots/:slug` | Host-level mutation: removes a docker image + sidecar shared across all sessions, beyond one session's scope (#5074 / audit P1-6). The `GET /api/snapshots` list stays read-only on `_validateBearerAuth`. |
 
-All five are exercised only by the daemon's **own dashboard** (`getAuthToken()` → the host's primary token via `?token=`/cookie) or the local **CLI** (`chroxy pair-code` → `connection.json` apiToken). The desktop LAN client's "Have a code?" flow (#5512) does NOT fetch these over HTTP — it takes a code typed off the host's screen and drives the WebSocket `pair` handshake directly, so no legitimate caller relies on a pairing-bound token reaching these endpoints.
+All six are exercised only by the daemon's **own dashboard** (`getAuthToken()` → the host's primary token via `?token=`/cookie) or the local **CLI** (`chroxy pair-code` → `connection.json` apiToken). The desktop LAN client's "Have a code?" flow (#5512) does NOT fetch these over HTTP — it takes a code typed off the host's screen and drives the WebSocket `pair` handshake directly, so no legitimate caller relies on a pairing-bound token reaching these endpoints.
 
 The remaining bearer-gated HTTP routes (`/version`, `/metrics`, `/diagnostics`, `GET /api/snapshots`, `/api/pool/stats`) are read-only operational telemetry that exposes no pairing or credential material, so they stay on `_validateBearerAuth` (any valid token). Note the `DELETE /api/snapshots/:slug` mutation is the exception — it is primary-only (see the table above).
 
