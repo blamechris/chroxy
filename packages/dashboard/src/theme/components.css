@@ -2462,6 +2462,56 @@ button.sidebar-token-view-session-row:hover {
   line-height: 1;
 }
 
+/* #5939 (epic #5935 ④): a send-while-busy follow-up is held in the server's
+   outgoing queue and flushes on turn-complete. The bubble is dimmed and dashed
+   to read as "not sent yet", with a small "Queued" pill + cancel control. */
+.msg.queued {
+  opacity: 0.72;
+  border: 1px dashed var(--accent-blue);
+}
+
+.msg-queued {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.msg-queued-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 22%, transparent);
+  color: var(--accent-blue);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.msg-queued-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msg-queued-cancel:hover {
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-primary);
+}
+
 .scroll-to-bottom {
   position: absolute;
   bottom: 12px;

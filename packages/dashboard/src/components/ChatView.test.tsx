@@ -65,6 +65,37 @@ describe('ChatView', () => {
     expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
   })
 
+  // #5939 (epic #5935 ④): queued send-while-busy follow-ups render a "Queued"
+  // badge + cancel affordance on the matching user_input bubble.
+  describe('queued-message badge (#5939)', () => {
+    const userMsg: ChatViewMessage = { id: 'uin-1', type: 'user_input', content: 'follow-up', timestamp: Date.now() }
+
+    it('renders a Queued badge on a user bubble whose id is in queuedIds', () => {
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} />)
+      expect(screen.getByTestId('msg-queued-uin-1')).toBeInTheDocument()
+      expect(screen.getByText('Queued')).toBeInTheDocument()
+    })
+
+    it('does NOT render a badge when the id is not queued', () => {
+      render(<ChatView messages={[userMsg]} isStreaming={false} queuedIds={new Set()} />)
+      expect(screen.queryByTestId('msg-queued-uin-1')).not.toBeInTheDocument()
+    })
+
+    it('renders a cancel button that calls onCancelQueued with the message id', () => {
+      const onCancelQueued = vi.fn()
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} onCancelQueued={onCancelQueued} />)
+      fireEvent.click(screen.getByTestId('msg-queued-cancel-uin-1'))
+      expect(onCancelQueued).toHaveBeenCalledTimes(1)
+      expect(onCancelQueued).toHaveBeenCalledWith('uin-1')
+    })
+
+    it('omits the cancel button when no onCancelQueued is supplied', () => {
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} />)
+      expect(screen.getByTestId('msg-queued-uin-1')).toBeInTheDocument()
+      expect(screen.queryByTestId('msg-queued-cancel-uin-1')).not.toBeInTheDocument()
+    })
+  })
+
   it('hides scroll-to-bottom when at bottom', () => {
     const messages = makeMessages(3)
     render(<ChatView messages={messages} isStreaming={false} />)

@@ -964,7 +964,7 @@ export interface ConnectionState {
   clearSavedConnection: () => void;
   setViewMode: (mode: 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool') => void;
   addMessage: (message: ChatMessage) => void;
-  addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
+  addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
   appendTerminalData: (data: string) => void;
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
@@ -996,6 +996,16 @@ export interface ConnectionState {
    * failure surfaces as the existing `session_error` toast.
    */
   sendCancelActivity: (activityId: string, sessionId?: string) => 'sent' | 'queued' | false;
+  /**
+   * #5943 (epic #5935 ④): cancel ONE queued send-while-busy follow-up by its
+   * `clientMessageId` (the optimistic bubble id). Sends `cancel_queued`; the
+   * server removes the queued entry and emits `message_dequeued(reason:
+   * 'cancelled')`, which clears the queued badge. Optimistically removes the
+   * local queued entry too so the badge clears immediately. NOT queued offline
+   * — a cancel that drains seconds later races the flush, so it only fires on a
+   * live socket. Targets `sessionId` if given, else the active session.
+   */
+  sendCancelQueued: (clientMessageId: string, sessionId?: string) => 'sent' | false;
   /** #3068 — Run the prompt evaluator on a draft. Resolves with the verdict
    * payload, or rejects on disconnect / 60s timeout. Errors from the server
    * arrive as the `error` field on the resolved value, not as a Promise reject. */

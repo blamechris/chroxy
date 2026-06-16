@@ -228,6 +228,9 @@ export function App() {
   const {
     messages: storeMessages,
     streamingMessageId,
+    // #5939 (epic #5935 ④): per-session send-while-busy queue, surfaced as a
+    // "Queued" badge on the matching optimistic bubble.
+    queuedMessages,
     activeModel,
     permissionMode,
     contextUsage,
@@ -253,6 +256,17 @@ export function App() {
   const mismatchedSet = useMemo(
     () => new Set(activeMismatched || []),
     [activeMismatched],
+  )
+
+  // #5939 (epic #5935 ④): the ids of currently-queued send-while-busy
+  // follow-ups, as a stable Set so ChatView can render a "Queued" badge on the
+  // matching optimistic bubble. Only entries carrying a clientMessageId can be
+  // matched to a bubble (and cancelled); a server-confirmed entry with no local
+  // id is rare (another device) and simply renders without a badge here.
+  // (`onCancelQueued` is derived below, once the store action is bound.)
+  const queuedIds = useMemo(
+    () => new Set((queuedMessages || []).map(m => m.clientMessageId).filter((id): id is string => !!id)),
+    [queuedMessages],
   )
 
   // #4735 / #4731: the multi-question AskUserQuestion form is gated per
@@ -415,6 +429,12 @@ export function App() {
   const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
+  const sendCancelQueued = useConnectionStore(s => s.sendCancelQueued)
+  // #5939: stable cancel callback so the memoized message rows skip re-render.
+  const onCancelQueued = useCallback(
+    (id: string) => { sendCancelQueued(id) },
+    [sendCancelQueued],
+  )
   // #5780 — nonce bumped on the explicit "jump to latest" user action. Those
   // actions are: send (handleSend), approving a permission/plan, and answering
   // an AskUserQuestion (#5786). Passed to every ChatView so it snaps to the
@@ -2054,6 +2074,8 @@ export function App() {
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
                         scrollToBottomSignal={scrollToBottomSignal}
+                        queuedIds={queuedIds}
+                        onCancelQueued={onCancelQueued}
                       />
                     }
                     second={
@@ -2096,6 +2118,8 @@ export function App() {
                         renderMessage={renderMessage}
                         hidden={viewMode !== 'chat'}
                         scrollToBottomSignal={scrollToBottomSignal}
+                        queuedIds={queuedIds}
+                        onCancelQueued={onCancelQueued}
                       />
                     </div>
                     <div

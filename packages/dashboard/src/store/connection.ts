@@ -161,6 +161,10 @@ import {
   CONNECT_RETRY_DELAYS,
   type ProbeResult,
   type ConnectEndpoint,
+  // #5939 (epic #5935 ④): optimistic queued-message helpers for the
+  // send-while-busy path + per-item cancel.
+  enqueueOptimisticQueuedMessage,
+  removeQueuedMessage,
 } from '@chroxy/store-core';
 import { decrypt, DIRECTION_SERVER, type EncryptedEnvelope } from './crypto';
 // #5184: header cost-badge mode union, default, and runtime guard. Lives in
@@ -2128,13 +2132,38 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // so the same id is shared between the optimistic entry, the server's
     // history record, and any live-echo broadcast. Reconnect replay can
     // then dedup by id instead of by (content, timestamp) equality.
+    const messageId = opts?.clientMessageId || nextMessageId('user');
     const userMsg: ChatMessage = {
-      id: opts?.clientMessageId || nextMessageId('user'),
+      id: messageId,
       type: 'user_input',
       content: text,
       timestamp: Date.now(),
       ...(attachments?.length ? { attachments } : undefined),
     };
+
+    // #5939 (epic #5935 ④): send-while-busy QUEUES instead of starting a new
+    // turn. The server holds the message in its outgoing queue and flushes it
+    // on turn-complete (slice ①); here we add the optimistic user bubble but do
+    // NOT fake a new turn — no thinking indicator, no streamingMessageId reset
+    // (the live turn keeps its own) — and record the message id in the per-
+    // session `queuedMessages` model so the bubble renders a "Queued" badge
+    // (cleared by the server's message_dequeued on flush/cancel). The terminal
+    // echo above still fires so the Output view stays consistent.
+    if (opts?.queued) {
+      const activeId = get().activeSessionId;
+      if (activeId && get().sessionStates[activeId]) {
+        updateActiveSession((ss) => ({
+          messages: [...filterThinking(ss.messages), userMsg],
+          queuedMessages: enqueueOptimisticQueuedMessage(ss.queuedMessages, {
+            clientMessageId: messageId,
+            text,
+            queuedAt: Date.now(),
+          }),
+        }));
+      }
+      return;
+    }
+
     const thinkingMsg: ChatMessage = {
       id: 'thinking',
       type: 'thinking',
@@ -2249,9 +2278,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // instead of (content, timestamp) equality (issue #2902).
     const clientMessageId = nextMessageId('user');
 
-    // Show user message immediately (optimistic update + thinking indicator).
-    // Wire attachments use a different shape than MessageAttachment — pass text only for now.
-    get().addUserMessage(input, undefined, { clientMessageId });
+    // #5939: a send while the turn is in progress (streamingMessageId truthy)
+    // is QUEUED by the server, not concurrently force-sent. Reflect that
+    // optimistically — render the bubble with a "Queued" badge instead of
+    // faking a fresh turn. The server is authoritative (its message_queued /
+    // message_dequeued events reconcile the local model either way), so a
+    // mis-guess here only briefly misrenders before self-correcting.
+    const busy = get().getActiveSessionState().streamingMessageId !== null;
+
+    // Show user message immediately (optimistic update + thinking indicator, or
+    // a queued badge when busy). Wire attachments use a different shape than
+    // MessageAttachment — pass text only for now.
+    get().addUserMessage(input, undefined, { clientMessageId, queued: busy });
 
     const payload: Record<string, unknown> = { type: 'input', data: input, clientMessageId };
     if (activeSessionId) payload.sessionId = activeSessionId;
@@ -2335,6 +2373,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       return 'sent';
     }
     return enqueueMessage('cancel_activity', payload);
+  },
+
+  // #5943 (epic #5935 ④): cancel one QUEUED send-while-busy follow-up by its
+  // clientMessageId (the optimistic bubble id). Like cancel_activity, it is NOT
+  // queued offline — a cancel that drains after a reconnect races the flush — so
+  // it fires only on a live socket. Optimistically removes the local queued
+  // entry so the badge clears immediately; the server's authoritative
+  // message_dequeued(reason: 'cancelled') is idempotent with this removal.
+  sendCancelQueued: (clientMessageId: string, sessionId?: string) => {
+    const { socket, activeSessionId } = get();
+    const sid = sessionId ?? activeSessionId;
+    if (!(socket && socket.readyState === WebSocket.OPEN)) return false;
+    const payload: Record<string, unknown> = { type: 'cancel_queued', clientMessageId };
+    if (sid) payload.sessionId = sid;
+    if (sid && get().sessionStates[sid]) {
+      updateActiveSession((ss) => ({
+        queuedMessages: removeQueuedMessage(ss.queuedMessages, clientMessageId),
+      }));
+    }
+    wsSend(socket, payload);
+    return 'sent';
   },
 
   // #3068 — manual prompt evaluator. Returns a Promise that resolves with the
