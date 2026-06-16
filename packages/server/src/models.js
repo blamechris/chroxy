@@ -67,63 +67,113 @@ export function claudeDeriveId(fullId) {
   return typeof fullId === 'string' && fullId.startsWith('claude-') ? fullId.slice(7) : fullId
 }
 
-// Minimal fallback used only when the SDK has never responded and no disk
-// cache exists. Short aliases (sonnet/opus/haiku) resolve to the latest
-// version in the claude CLI, so these entries stay valid across releases.
-// Dated full IDs are intentionally avoided here — the SDK's supportedModels()
-// is the source of truth for concrete version identifiers.
+// Single source of truth for Claude model metadata (#5930 / #5631 DRY core).
+// Each row describes one known Claude model family head; the two scattered
+// data tables below — FALLBACK_MODELS (cold-start / SDK-merge seed) and
+// CLAUDE_PRICING_USD_PER_MTOK (per-fullId billing rates) — are DERIVED from
+// this array, so adding a model is a single-row edit instead of edits in
+// several hand-synced places. The regex/string heuristics
+// (resolveClaudeContextWindow, humanizeModelId) intentionally stay separate:
+// they are the graceful-degradation path for models NOT in this table.
 //
-// These also seed the merge step in `updateModels()` so that a stale or
-// minimal SDK response (e.g. only reporting 4.6 models) still surfaces the
-// newer 4.7 chip in the picker (#3075).
+// Per-row fields:
+//   shortId, label, fullId — the FALLBACK_MODELS triple. Short aliases
+//     (sonnet/opus/haiku) resolve to the latest version in the claude CLI, so
+//     undated full IDs are used on purpose — the SDK's supportedModels() is the
+//     source of truth for concrete version identifiers, and these rows also
+//     seed the merge step in updateModels() so a stale/minimal SDK response
+//     still surfaces the newer chip in the picker (#3075).
+//   contextWindow — OPTIONAL. When set it overrides the cold-start heuristic
+//     for that known model (symmetric with the on-disk overlay in
+//     computeFallbackModels); when absent (the case for every row today) it is
+//     derived via resolveClaudeContextWindow(fullId), so the derivation is
+//     byte-identical to the prior FALLBACK_MODELS literals.
+//   pricing — base Anthropic rates in USD per million tokens
+//     {input, output, cacheRead, cacheWrite}. ABSENT (e.g. fable, shipped
+//     without verified pricing) emits NO pricing key, so resolveModelPricing
+//     returns null — never $0 — for it.
+//   oneM — the `[1m]` long-context variant's rates, including the `longContext`
+//     premium block (#4087). ABSENT emits no `<fullId>[1m]` pricing key. Kept a
+//     sibling of `pricing` so a [1m] form can carry distinct base rates.
 //
-// Deep-frozen so callers of getModels() can't mutate the module-level constant
-// via the returned array reference.
-export const FALLBACK_MODELS = Object.freeze([
-  Object.freeze({ id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: resolveClaudeContextWindow('claude-sonnet-4-6') }),
-  Object.freeze({ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: resolveClaudeContextWindow('claude-opus-4-7') }),
-  // Fable falls through to the 200k DEFAULT_CONTEXT_WINDOW heuristic on
-  // purpose — the SDK's authoritative modelUsage.contextWindow ratchets it
-  // after the first turn; we don't invent a fable window here.
-  Object.freeze({ id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: resolveClaudeContextWindow('claude-fable-5') }),
-  Object.freeze({ id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: resolveClaudeContextWindow('claude-haiku-4-5') }),
+// Cache-write rates are the 5-minute ephemeral tier (the default; chroxy
+// doesn't opt into the pricier 1-hour tier). Source: Anthropic public pricing
+// page — keep rates in sync on every model change; wrong numbers mislead
+// cumulative-cost displays (#4054). The models.test.js snapshot pins the
+// derived tables to literals, so any rate drift OR derivation regression fails
+// loudly.
+const MODEL_METADATA = Object.freeze([
+  Object.freeze({
+    shortId: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6',
+    pricing: { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
+  }),
+  Object.freeze({
+    shortId: 'opus', label: 'Opus', fullId: 'claude-opus-4-7',
+    pricing: { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
+    // #4087 — long-context (>200K input) premium tier. Below the 200K
+    // threshold the rates match the base entry; above it the published premium
+    // is a uniform 2× across all four rates. Today only Opus 4.x has a 1M
+    // variant in chroxy's set (resolveClaudeContextWindow). Verify against the
+    // Anthropic pricing page on the next periodic check.
+    oneM: {
+      input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
+      longContext: {
+        thresholdInputTokens: 200_000,
+        input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
+      },
+    },
+  }),
+  // Fable falls through to the 200k DEFAULT_CONTEXT_WINDOW heuristic on purpose
+  // — the SDK's authoritative modelUsage.contextWindow ratchets it after the
+  // first turn; we don't invent a fable window here. No `pricing` block: chroxy
+  // doesn't ship unverified fable rates, so it costs "unknown" (null), not $0.
+  Object.freeze({
+    shortId: 'fable', label: 'Fable', fullId: 'claude-fable-5',
+  }),
+  Object.freeze({
+    shortId: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5',
+    pricing: { input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 },
+  }),
 ])
 
-// Public Anthropic pricing in USD per million tokens. Cache-write is the
-// 5-minute ephemeral tier (the default; the 1-hour tier costs more but
-// chroxy doesn't opt into it). Source: Anthropic public pricing page —
-// keep this table in sync when prices change. Numbers wrong here mean
-// cumulative-cost displays mislead users (#4054), so revisit on every
-// model addition.
-//
-// #4087 — long-context (>200K input) premium tier: Anthropic charges a
-// higher rate when the total input (input + cache reads + cache writes)
-// exceeds 200K tokens on the `[1m]` long-context variant. The
-// `longContext` block on the `[1m]` entry captures the premium rates;
-// `computePromptCostUsd` selects between base and longContext rates
-// based on the turn's total input tokens.
-//
-// Today, only Opus 4.x has a 1M-context variant in chroxy's model set
-// (resolveClaudeContextWindow above). Sonnet 4.6 and Haiku 4.5 don't
-// have `[1m]` forms, so their entries have no longContext block.
-const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze({
-  'claude-sonnet-4-6': Object.freeze({ input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 }),
-  'claude-opus-4-7':   Object.freeze({ input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 }),
-  'claude-opus-4-7[1m]': Object.freeze({
-    // Below the 200K threshold the rates match the default-window entry.
-    input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
-    // Above 200K input the published premium is a uniform 2× across all
-    // four rates (input, output, cacheRead, cacheWrite). Verify against
-    // the Anthropic pricing page on the next periodic check — the
-    // numbers are public but easy to drift. Test in `models.test.js`
-    // pins the exact literals so a drift fails loudly.
-    longContext: Object.freeze({
-      thresholdInputTokens: 200_000,
-      input: 30.00, output: 150.00, cacheRead: 3.00, cacheWrite: 37.50,
-    }),
-  }),
-  'claude-haiku-4-5':  Object.freeze({ input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 }),
-})
+// Freeze a pricing block (incl. the nested longContext premium) in place so the
+// derived CLAUDE_PRICING_USD_PER_MTOK keeps the deep-frozen contract callers
+// relied on when the rates were hand-authored as Object.freeze literals.
+function deepFreezePricing(rates) {
+  if (rates && typeof rates === 'object') {
+    for (const v of Object.values(rates)) {
+      if (v && typeof v === 'object') Object.freeze(v)
+    }
+    Object.freeze(rates)
+  }
+  return rates
+}
+
+// Minimal fallback used only when the SDK has never responded and no disk cache
+// exists. Derived from MODEL_METADATA (source order preserved). Deep-frozen so
+// callers of getModels() can't mutate the module-level constant via the
+// returned array reference.
+export const FALLBACK_MODELS = Object.freeze(
+  MODEL_METADATA.map((m) => Object.freeze({
+    id: m.shortId,
+    label: m.label,
+    fullId: m.fullId,
+    contextWindow: m.contextWindow ?? resolveClaudeContextWindow(m.fullId),
+  })),
+)
+
+// Public Anthropic pricing in USD per million tokens, derived from
+// MODEL_METADATA: each row's `pricing` becomes the base `<fullId>` entry and
+// each `oneM` becomes the `<fullId>[1m]` long-context entry (#4087).
+// `computePromptCostUsd` selects between base and longContext rates based on
+// the turn's total input tokens.
+const CLAUDE_PRICING_USD_PER_MTOK = Object.freeze(
+  MODEL_METADATA.reduce((table, m) => {
+    if (m.pricing) table[m.fullId] = deepFreezePricing(m.pricing)
+    if (m.oneM) table[`${m.fullId}${ONE_M_SUFFIX}`] = deepFreezePricing(m.oneM)
+    return table
+  }, {}),
+)
 
 // Short-id → fullId so callers can pass either form. The fallback set is
 // the canonical mapping; new short aliases get picked up automatically.
