@@ -22,6 +22,13 @@ const confirmed = (clientMessageId: string, text: string, queuedAt = 0): QueuedS
   status: 'confirmed',
 })
 
+const pending = (clientMessageId: string, text: string, queuedAt = 0): QueuedSessionMessage => ({
+  clientMessageId,
+  text,
+  queuedAt,
+  status: 'pending',
+})
+
 describe('enqueueOptimisticQueuedMessage', () => {
   it('appends a pending entry', () => {
     const next = enqueueOptimisticQueuedMessage([], { clientMessageId: 'uin-1', text: 'hi', queuedAt: 5 })
@@ -77,16 +84,33 @@ describe('reconcileQueueLength (#5950 orphan-badge safety net)', () => {
     expect(reconcileQueueLength(current, 3)).toBe(current)
   })
 
-  it('trims the oldest (FIFO-head) orphans down to the authoritative count', () => {
+  it('trims the oldest (FIFO-head) confirmed orphans down to the authoritative count', () => {
     const current = [confirmed('uin-1', 'a'), confirmed('uin-2', 'b'), confirmed('uin-3', 'c')]
     // Server says only 1 remains → a dropped message_dequeued left 2 orphans;
     // drop the two oldest, keep the newest.
     expect(reconcileQueueLength(current, 1)).toEqual([confirmed('uin-3', 'c')])
   })
 
-  it('clears the whole queue when the server says zero remain', () => {
+  it('clears all CONFIRMED entries when the server says zero remain', () => {
     const current = [confirmed('uin-1', 'a'), confirmed('uin-2', 'b')]
     expect(reconcileQueueLength(current, 0)).toEqual([])
+  })
+
+  it('NEVER trims pending (optimistic) entries — only confirmed ones count toward queueLength', () => {
+    // Two fast queued sends before the 1st confirms: uin-1 just flipped to
+    // confirmed, uin-2 is still optimistic pending. The server has only seen
+    // uin-1 so queueLength is 1. A blind length trim (len 2 > 1) would drop the
+    // confirmed uin-1 and keep the unconfirmed uin-2 — the regression. Status-
+    // aware: confirmedCount(1) == target(1) → no trim, both survive.
+    const current = [confirmed('uin-1', 'a'), pending('uin-2', 'b')]
+    expect(reconcileQueueLength(current, 1)).toBe(current)
+  })
+
+  it('reaps a confirmed orphan while preserving an interleaved pending entry', () => {
+    // [orphan(confirmed), pending, confirmed] with server queueLength 1 → drop
+    // the oldest confirmed (orphan), keep the pending and the newest confirmed.
+    const current = [confirmed('uin-0', 'orphan'), pending('uin-1', 'live'), confirmed('uin-2', 'a')]
+    expect(reconcileQueueLength(current, 1)).toEqual([pending('uin-1', 'live'), confirmed('uin-2', 'a')])
   })
 
   it('is a no-op (referential) when queueLength is absent/non-finite (older server)', () => {
@@ -114,10 +138,10 @@ describe('queueLength reconciliation through the wire handlers (#5950)', () => {
     expect(builder.applyTo(current)).toEqual({ queuedMessages: [] })
   })
 
-  it('message_queued trims a leftover orphan after appending the new confirmed entry', () => {
+  it('message_queued trims a leftover confirmed orphan after appending the new confirmed entry', () => {
     // Local: one orphan + one confirmed (2). A new queued message arrives; the
     // server's authoritative count is 2 (the orphan already left server-side),
-    // so after appending the new entry (→ 3) we trim back to 2.
+    // so after appending the new entry (→ 3 confirmed) we trim back to 2.
     const current = [confirmed('uin-0', 'orphan'), confirmed('uin-1', 'a')]
     const builder = handleMessageQueued(
       { sessionId: 's1', clientMessageId: 'uin-2', text: 'b', queueLength: 2 },
@@ -125,6 +149,20 @@ describe('queueLength reconciliation through the wire handlers (#5950)', () => {
     )
     const next = builder!.applyTo(current).queuedMessages
     expect(next.map((m) => m.clientMessageId)).toEqual(['uin-1', 'uin-2'])
+  })
+
+  it('does NOT drop a confirmed entry when a 2nd send is still optimistic pending (regression guard)', () => {
+    // Two fast queued sends: both optimistically enqueued as pending. The
+    // server's message_queued for uin-1 arrives first (queueLength: 1) while
+    // uin-2 is still pending locally. Confirming uin-1 must NOT trim it away —
+    // confirmedCount(1) == queueLength(1), the pending uin-2 is not yet counted.
+    const current = [pending('uin-1', 'first'), pending('uin-2', 'second')]
+    const builder = handleMessageQueued(
+      { sessionId: 's1', clientMessageId: 'uin-1', text: 'first', queueLength: 1 },
+      null,
+    )
+    const next = builder!.applyTo(current).queuedMessages
+    expect(next).toEqual([confirmed('uin-1', 'first'), pending('uin-2', 'second')])
   })
 
   it('leaves a correctly-synced queue untouched (referential) when queueLength matches', () => {
