@@ -11,6 +11,8 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     send: createSpy((ws, msg) => { sent.push(msg) }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastSessionList: createSpy(),
+    sendSessionInfo: createSpy(),
+    replayHistory: createSpy(),
     sessionManager: {
       getSession: createSpy((id) => sessions.get(id)),
       createSession: createSpy(async () => 'restored-session-id'),
@@ -171,6 +173,66 @@ describe('checkpoint-handlers', () => {
       const restored = ctx._sent.find(m => m.type === 'checkpoint_restored')
       assert.ok(restored, 'checkpoint_restored not sent')
       assert.equal(restored.newSessionId, 'restored-session-id')
+    })
+
+    it('re-homes OTHER clients viewing the original session onto the rewound session (#5700)', async () => {
+      const sessions = new Map()
+      const orig = createMockSession()
+      orig.isRunning = false
+      sessions.set('s1', { session: orig, name: 'S', cwd: '/tmp' })
+      const rewound = createMockSession()
+      rewound.resumeSessionId = 'conv-1'
+      sessions.set('restored-session-id', { session: rewound, name: 'Rewind: Checkpoint 1', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+
+      // Two clients both actively viewing the original session: the initiator and
+      // an observer (e.g. app restores, dashboard was watching the same session).
+      const initiatorWs = makeWs()
+      const observerWs = makeWs()
+      const initiator = makeClient({ id: 'c1', authenticated: true, activeSessionId: 's1' })
+      const observer = makeClient({ id: 'c2', authenticated: true, activeSessionId: 's1' })
+      ctx.clientManager.addClient(initiatorWs, initiator)
+      ctx.clientManager.addClient(observerWs, observer)
+      ctx.clientManager.setActiveSession(initiator, 's1')
+      ctx.clientManager.setActiveSession(observer, 's1')
+
+      await checkpointHandlers.restore_checkpoint(initiatorWs, initiator, { checkpointId: 'cp-1' }, ctx)
+
+      // The observer must follow the rewind, not keep showing the pre-rewind history.
+      assert.equal(observer.activeSessionId, 'restored-session-id', 'observer re-homed to the rewound session')
+      const switchedToObserver = ctx.transport.send.calls.find(
+        ([w, m]) => w === observerWs && m && m.type === 'session_switched' && m.sessionId === 'restored-session-id',
+      )
+      assert.ok(switchedToObserver, 'observer must receive session_switched to the rewound session')
+      const replayedForObserver = ctx.transport.replayHistory.calls.find(
+        ([w, sid, opts]) => w === observerWs && sid === 'restored-session-id' && opts && opts.forceFull === true,
+      )
+      assert.ok(replayedForObserver, 'observer must get a forced full history replay of the rewound session')
+    })
+
+    it('does not re-home a client viewing a DIFFERENT session during restore (#5700)', async () => {
+      const sessions = new Map()
+      const orig = createMockSession()
+      orig.isRunning = false
+      sessions.set('s1', { session: orig, name: 'S', cwd: '/tmp' })
+      sessions.set('other-session', { session: createMockSession(), name: 'Other', cwd: '/tmp' })
+      sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: Checkpoint 1', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+
+      const initiatorWs = makeWs()
+      const bystanderWs = makeWs()
+      const initiator = makeClient({ id: 'c1', authenticated: true, activeSessionId: 's1' })
+      const bystander = makeClient({ id: 'c2', authenticated: true, activeSessionId: 'other-session' })
+      ctx.clientManager.addClient(initiatorWs, initiator)
+      ctx.clientManager.addClient(bystanderWs, bystander)
+      ctx.clientManager.setActiveSession(initiator, 's1')
+      ctx.clientManager.setActiveSession(bystander, 'other-session')
+
+      await checkpointHandlers.restore_checkpoint(initiatorWs, initiator, { checkpointId: 'cp-1' }, ctx)
+
+      assert.equal(bystander.activeSessionId, 'other-session', 'a client on a different session is untouched')
     })
 
     // #5731 T8 (confirms deferred #5700) — restoring hard-resets the working
