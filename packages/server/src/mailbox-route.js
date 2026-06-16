@@ -14,17 +14,29 @@
  *
  * Both routes accept ONLY the daemon-level ingest secret (never the primary
  * token — see docs/security/bearer-token-authority.md §6), reusing the exact
- * auth used by POST /api/events.
+ * auth used by POST /api/events, behind a pre-auth per-IP rate limit.
  */
 import { createLogger } from './logger.js'
 import { safeTokenCompare } from './token-compare.js'
 import { resolveIngestSecret } from './event-ingest.js'
 import { sendOversizeResponse } from './http-oversize.js'
+import { settlePush } from './push.js'
+import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
 
 const log = createLogger('mailbox-route')
 
 // Mailbox payloads are tiny ({ to, from, id, subject, unread_count }).
 export const MAX_MAILBOX_BODY_BYTES = 8192
+// Cap on log-visible / routing-key fields so a secret-holder can neither bloat
+// the routing map nor inject control chars into logs + notifications.
+const MAX_FIELD_LENGTH = 200
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/
+// Pre-auth per-IP rate limit (mirrors event-ingest.js): bound online
+// brute-force of the secret AND invalid-token warn-log spam, BEFORE the
+// constant-time secret check.
+const MAILBOX_WINDOW_MS = 60_000
+const MAILBOX_IP_MAX = 240
+const MAILBOX_IP_BURST = 30
 
 function sendJson(res, status, body) {
   const payload = JSON.stringify(body)
@@ -36,6 +48,42 @@ function sendJson(res, status, body) {
 function sendUnauthorized(res) {
   res.writeHead(401)
   res.end()
+}
+
+/**
+ * Normalize a log-visible / routing-key field: trim, reject empty, reject
+ * control characters (log/notification injection), and cap the length (keeps
+ * the routing map bounded). Returns the cleaned value, or null when invalid.
+ */
+function cleanField(raw) {
+  if (typeof raw !== 'string') return null
+  const v = raw.trim()
+  if (!v || v.length > MAX_FIELD_LENGTH || CONTROL_CHARS.test(v)) return null
+  return v
+}
+
+/**
+ * Pre-auth per-IP rate limit, lazily created on the server object (mirrors
+ * event-ingest.js). Returns true when the request may proceed; otherwise
+ * responds 429 + Retry-After and returns false.
+ */
+function checkIpRateLimit(server, req, res, routeName) {
+  if (!server._mailboxIpRateLimiter) {
+    server._mailboxIpRateLimiter = new RateLimiter({
+      windowMs: MAILBOX_WINDOW_MS,
+      maxMessages: MAILBOX_IP_MAX,
+      burst: MAILBOX_IP_BURST,
+      name: 'mailbox-ip',
+    })
+  }
+  const clientIp = getRateLimitKey(req.socket?.remoteAddress || '', req)
+  const { allowed, retryAfterMs } = server._mailboxIpRateLimiter.check(clientIp)
+  if (!allowed) {
+    log.warn(`Rate limited ${routeName} from ${clientIp}`)
+    sendJson(res, 429, { error: 'rate limited', retryAfterMs })
+    return false
+  }
+  return true
 }
 
 /**
@@ -103,10 +151,11 @@ function readCappedJson(req, res, maxBytes, onParsed) {
  * Body: { agentCommId, sessionId }
  */
 export function handleMailboxRegister(server, req, res) {
+  if (!checkIpRateLimit(server, req, res, 'POST /api/mailbox/register')) return
   if (!checkIngestAuth(server, req, res)) return
   readCappedJson(req, res, MAX_MAILBOX_BODY_BYTES, (body) => {
-    const agentCommId = typeof body.agentCommId === 'string' ? body.agentCommId.trim() : ''
-    const sessionId = typeof body.sessionId === 'string' ? body.sessionId.trim() : ''
+    const agentCommId = cleanField(body.agentCommId)
+    const sessionId = cleanField(body.sessionId)
     if (!agentCommId || !sessionId) {
       sendJson(res, 400, { error: 'agentCommId and sessionId are required' })
       return
@@ -127,33 +176,40 @@ export function handleMailboxRegister(server, req, res) {
  * Notifies and, when `to` is a live idle claude-tui session, injects a wakeup.
  */
 export function handleMailboxPing(server, req, res) {
+  if (!checkIpRateLimit(server, req, res, 'POST /api/mailbox')) return
   if (!checkIngestAuth(server, req, res)) return
   readCappedJson(req, res, MAX_MAILBOX_BODY_BYTES, (body) => {
-    const to = typeof body.to === 'string' ? body.to.trim() : ''
+    const to = cleanField(body.to)
     if (!to) {
       sendJson(res, 400, { error: 'to is required' })
       return
     }
-    const from = typeof body.from === 'string' ? body.from : 'unknown'
+    const from = cleanField(body.from) || 'unknown'
+    // Non-negative integer only — a negative / fractional count would render
+    // odd notification text and wakeup prompts.
     const unreadCount =
-      typeof body.unread_count === 'number' && Number.isFinite(body.unread_count)
+      typeof body.unread_count === 'number' &&
+      Number.isInteger(body.unread_count) &&
+      body.unread_count >= 0
         ? body.unread_count
         : null
 
-    // Notify (best-effort; a sink failure must never fail the response).
-    let notified = false
-    try {
+    // Notify (fire-and-forget; settlePush logs a failed delivery/rejection
+    // instead of leaving the async send's rejection unhandled).
+    const notified = Boolean(server.pushManager)
+    if (notified) {
       const countText = unreadCount != null ? `${unreadCount} unread` : 'new message'
-      server.pushManager?.send?.('mailbox', 'New mail', `${to}: ${countText} from ${from}`, {
-        to,
-        from,
-        id: typeof body.id === 'string' ? body.id : null,
-        unread_count: unreadCount,
-        external: true,
-      })
-      notified = true
-    } catch (err) {
-      log.warn(`mailbox notify failed: ${err?.message || err}`)
+      settlePush(
+        server.pushManager.send('mailbox', 'New mail', `${to}: ${countText} from ${from}`, {
+          to,
+          from,
+          id: cleanField(body.id),
+          unread_count: unreadCount,
+          external: true,
+        }),
+        'mailbox',
+        log,
+      )
     }
 
     const reason = injectWakeup(server, to, unreadCount)

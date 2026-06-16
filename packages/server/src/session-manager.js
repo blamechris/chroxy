@@ -475,7 +475,7 @@ export class SessionManager extends EventEmitter {
     })
 
     // Internal state
-    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt, agentCommId? }
     this._agentCommIds = new Map() // agentCommId -> sessionId (mailbox live-interrupt routing)
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming

@@ -27,6 +27,7 @@ const bearer = (t) => ({ authorization: `Bearer ${t}` })
 function makeReq({ headers = {}, body = '' }) {
   const req = new Readable({ read() {} })
   req.headers = headers
+  req.socket = { remoteAddress: '127.0.0.1' }
   process.nextTick(() => {
     if (body) req.push(body)
     req.push(null)
@@ -179,6 +180,37 @@ describe('POST /api/mailbox — ping behavior', () => {
       body: JSON.stringify({ from: 'alice' }),
     })
     assert.equal(res.status, 400)
+  })
+
+  it('400s when `to` contains control characters (injection guard)', async () => {
+    const res = await invoke(handleMailboxPing, makeServer(), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'co\nder' }),
+    })
+    assert.equal(res.status, 400)
+  })
+
+  it('treats a negative / fractional unread_count as null (no count in the prompt)', async () => {
+    const session = idleTuiSession()
+    const res = await invoke(handleMailboxPing, makeServer({ coder: session }), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder', unread_count: -5 }),
+    })
+    assert.equal(res.body.reason, 'injected')
+    assert.equal(session.writes.length, 1)
+    // The fixed no-count wording, not "-5 unread".
+    assert.match(session.writes[0], /unread mailbox messages —/)
+    assert.doesNotMatch(session.writes[0], /-5/)
+  })
+
+  it('rejects when the pre-auth per-IP rate limit is exceeded (429)', async () => {
+    const server = makeServer()
+    server._mailboxIpRateLimiter = { check: () => ({ allowed: false, retryAfterMs: 1000 }) }
+    const res = await invoke(handleMailboxPing, server, {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder' }),
+    })
+    assert.equal(res.status, 429)
   })
 })
 
