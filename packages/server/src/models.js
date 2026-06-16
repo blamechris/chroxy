@@ -136,9 +136,13 @@ const MODEL_METADATA = Object.freeze([
   }),
 ])
 
-// Freeze a pricing block (incl. the nested longContext premium) in place so the
+// Freeze a pricing block (incl. the nested longContext premium) IN PLACE so the
 // derived CLAUDE_PRICING_USD_PER_MTOK keeps the deep-frozen contract callers
-// relied on when the rates were hand-authored as Object.freeze literals.
+// relied on when the rates were hand-authored as Object.freeze literals. The
+// derived table deliberately shares object identity with its MODEL_METADATA
+// source row (both are frozen + read-only) — do NOT defensively deep-clone here,
+// that would just reintroduce the two-copies-can-drift problem this consolidation
+// removes.
 function deepFreezePricing(rates) {
   if (rates && typeof rates === 'object') {
     for (const v of Object.values(rates)) {
