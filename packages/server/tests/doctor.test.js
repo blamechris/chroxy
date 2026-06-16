@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, parse as parsePath, relative } from 'node:path'
-import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 
 /**
@@ -680,5 +680,71 @@ describe('checkClaudeTuiCliVersion', () => {
 
   it('the shipped baseline constant is a parseable semver', () => {
     assert.notEqual(parseLeadingSemver(TESTED_CLAUDE_TUI_CLI_VERSION), null)
+  })
+})
+
+describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
+  it('returns null when no named tunnel is configured (quick / none / no hostname)', async () => {
+    assert.equal(await checkTunnelRoutability({ mode: 'quick', hostname: 'x.example.com' }), null)
+    assert.equal(await checkTunnelRoutability({ mode: 'none', hostname: null }), null)
+    assert.equal(await checkTunnelRoutability({ mode: 'named', hostname: '' }), null)
+    assert.equal(await checkTunnelRoutability({}), null)
+  })
+
+  it('passes when the probe reaches the hostname (any HTTP response is routable)', async () => {
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      probe: async () => ({ ok: true, status: 426 }),
+    })
+    assert.equal(check.status, 'pass')
+    assert.match(check.message, /chroxy\.example\.com is reachable/)
+    assert.match(check.message, /HTTP 426/)
+  })
+
+  it('warns when the probe cannot reach the hostname (DNS/route down)', async () => {
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      probe: async () => ({ ok: false, error: 'getaddrinfo ENOTFOUND chroxy.example.com' }),
+    })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /did not respond \(getaddrinfo ENOTFOUND/)
+    assert.match(check.message, /chroxy tunnel setup/)
+  })
+
+  it('warns (never throws) when the probe itself rejects', async () => {
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      probe: async () => { throw new Error('boom') },
+    })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /did not respond \(boom\)/)
+  })
+
+  it('passes the hostname URL and a numeric timeout to the probe', async () => {
+    let seenUrl = null
+    let seenTimeout = null
+    await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      timeoutMs: 1234,
+      probe: async (url, timeoutMs) => { seenUrl = url; seenTimeout = timeoutMs; return { ok: true } },
+    })
+    assert.equal(seenUrl, 'https://chroxy.example.com/')
+    assert.equal(seenTimeout, 1234)
+  })
+
+  it('runDoctorChecks omits the routability check by default (no named tunnel) and never calls the real network', async () => {
+    let probed = false
+    const { checks } = await runDoctorChecks({
+      providers: ['claude-sdk'],
+      tunnelProbe: async () => { probed = true; return { ok: true } },
+    })
+    // The real home config under test has no named tunnel, so the probe must
+    // not fire and no routability check is added.
+    assert.equal(probed, false)
+    assert.equal(checks.find(c => c.name === 'Tunnel routability'), undefined)
   })
 })

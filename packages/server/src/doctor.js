@@ -179,6 +179,69 @@ export function checkClaudeTuiCliVersion(deps = {}) {
 }
 
 /**
+ * #5328 (WP-5.6) — default end-to-end routability probe for a named tunnel:
+ * a HEAD request to the tunnel hostname with a hard timeout. ANY HTTP response
+ * (even 4xx/5xx/426-upgrade) proves the request reached the chroxy origin
+ * through the Cloudflare edge — i.e. the hostname resolves and the route is
+ * live. Only a network/DNS error or a timeout (caught here, returned as
+ * `{ ok: false }`) means the path is broken. Uses the Node 22 global `fetch` +
+ * `AbortController`; no new dependency.
+ */
+async function defaultHttpsProbe(url, timeoutMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal: controller.signal, redirect: 'manual' })
+    return { ok: true, status: res.status }
+  } catch (err) {
+    const error = err?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err?.message || String(err))
+    return { ok: false, error }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * #5328 (WP-5.6) — probe whether a configured NAMED tunnel's hostname is
+ * actually routable end-to-end, so `chroxy doctor` distinguishes "cloudflared
+ * is installed" (the binary check) from "the edge → origin path resolves".
+ *
+ * Skipped (returns null) unless a named tunnel with a hostname is configured —
+ * a quick tunnel's URL is random and runtime-only, so doctor can't know it
+ * ahead of time. A reachable hostname is a `pass`; an unreachable one is a
+ * `warn` (a diagnostic, not a hard failure: the daemon still runs on localhost).
+ *
+ * @param {object} [deps]
+ * @param {string|null} [deps.hostname] - the configured named-tunnel hostname
+ * @param {string|null} [deps.mode] - the configured tunnel mode ('named'|'quick'|'none')
+ * @param {(url: string, timeoutMs: number) => Promise<{ ok: boolean, status?: number, error?: string }>} [deps.probe]
+ * @param {number} [deps.timeoutMs]
+ * @returns {Promise<{ name: string, status: 'pass'|'warn', message: string } | null>}
+ */
+export async function checkTunnelRoutability(deps = {}) {
+  const { hostname = null, mode = null, timeoutMs = 5000, probe = defaultHttpsProbe } = deps
+  if (mode !== 'named' || typeof hostname !== 'string' || hostname.length === 0) return null
+  const NAME = 'Tunnel routability'
+  let result
+  try {
+    result = await probe(`https://${hostname}/`, timeoutMs)
+  } catch (err) {
+    // A probe should resolve { ok: false }, never throw — but never let a
+    // diagnostic crash the whole doctor run.
+    result = { ok: false, error: err?.message || String(err) }
+  }
+  if (result && result.ok) {
+    const code = typeof result.status === 'number' ? ` (HTTP ${result.status})` : ''
+    return { name: NAME, status: 'pass', message: `${hostname} is reachable${code}` }
+  }
+  return {
+    name: NAME,
+    status: 'warn',
+    message: `${hostname} did not respond${result?.error ? ` (${result.error})` : ''} — the DNS route may be missing or the named tunnel is down. Run 'chroxy tunnel setup' to (re)configure.`,
+  }
+}
+
+/**
  * Run all preflight dependency checks and return results.
  *
  * Provider-aware: only runs the binary/credential checks for the
@@ -196,7 +259,7 @@ export function checkClaudeTuiCliVersion(deps = {}) {
  *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now() } = {}) {
+export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe } = {}) {
   const checks = []
   const isMac = platform() === 'darwin'
   const isLinux = platform() === 'linux'
@@ -229,10 +292,15 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 3. Load config (once) — used for both the Config check and provider resolution.
   let configProvider = null
   let configCheck = null
+  // #5328 (WP-5.6): named-tunnel coordinates for the routability probe (step 5.6).
+  let tunnelMode = null
+  let tunnelHostname = null
   if (existsSync(CONFIG_FILE)) {
     try {
       const config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
       if (typeof config.provider === 'string') configProvider = config.provider
+      if (typeof config.tunnel === 'string') tunnelMode = config.tunnel
+      if (typeof config.tunnelHostname === 'string') tunnelHostname = config.tunnelHostname
       // #5419: register config-driven Anthropic-compatible endpoints before
       // provider resolution so a config.provider pointing at one preflights
       // its credential spec instead of failing as "Unknown provider".
@@ -269,6 +337,18 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 5. Config check — appended after provider checks so per-provider
   // sections group together in the output report.
   checks.push(configCheck)
+
+  // 5.6 Tunnel routability (#5328 WP-5.6). For a configured NAMED tunnel, probe
+  // the hostname end-to-end so a broken DNS route / down tunnel is visible here
+  // rather than only as a failed remote connection later. Skipped for quick /
+  // no tunnel (no stable hostname to probe). `tunnelProbe` is injectable so the
+  // check is testable without a real network round-trip.
+  const tunnelCheck = await checkTunnelRoutability({
+    hostname: tunnelHostname,
+    mode: tunnelMode,
+    ...(tunnelProbe ? { probe: tunnelProbe } : {}),
+  })
+  if (tunnelCheck) checks.push(tunnelCheck)
 
   // 5.5 Billing canary (#5821, audit rec #4). Standalone-feasible half of the
   // canary: the silent-metered-default check needs only the resolved default
