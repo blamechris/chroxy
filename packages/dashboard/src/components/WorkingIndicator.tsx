@@ -18,8 +18,16 @@ import { ThinkingDots } from './ThinkingDots'
 export const DEFAULT_WORKING_LABEL = 'Claude is working…'
 
 export function WorkingIndicator({ label }: { label?: string }) {
+  // role="status" + aria-live="polite" so a screen reader announces the working
+  // state + current activity (the visual dots alone are invisible to AT). Polite
+  // (not assertive) so it doesn't interrupt the streamed response being read.
   return (
-    <div className="working-indicator" data-testid="working-indicator">
+    <div
+      className="working-indicator"
+      data-testid="working-indicator"
+      role="status"
+      aria-live="polite"
+    >
       <ThinkingDots />
       <span className="working-label" data-testid="working-label">
         {label && label.length > 0 ? label : DEFAULT_WORKING_LABEL}
