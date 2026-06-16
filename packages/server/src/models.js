@@ -77,11 +77,12 @@ export function claudeDeriveId(fullId) {
 // they are the graceful-degradation path for models NOT in this table.
 //
 // Per-row fields:
-//   shortId, label, fullId — the FALLBACK_MODELS triple. Short aliases
-//     (sonnet/opus/haiku) resolve to the latest version in the claude CLI, so
-//     undated full IDs are used on purpose — the SDK's supportedModels() is the
-//     source of truth for concrete version identifiers, and these rows also
-//     seed the merge step in updateModels() so a stale/minimal SDK response
+//   shortId, label, fullId — the FALLBACK_MODELS triple. The fullIds are
+//     versioned family heads WITHOUT a date suffix (e.g. `claude-opus-4-7`, not
+//     `claude-opus-4-7-20251201`): the short aliases (sonnet/opus/haiku) resolve
+//     to the latest version in the claude CLI, and the SDK's supportedModels()
+//     is the source of truth for concrete date-pinned identifiers. These rows
+//     also seed the merge step in updateModels() so a stale/minimal SDK response
 //     still surfaces the newer chip in the picker (#3075).
 //   contextWindow — OPTIONAL. When set it overrides the cold-start heuristic
 //     for that known model (symmetric with the on-disk overlay in
