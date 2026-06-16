@@ -418,6 +418,38 @@ describe('useConnectionStore', () => {
       expect(payload.clientMessageId).toBe(bubble!.id);
     });
 
+    it('preserves the in-progress turn thinking indicator when queueing a follow-up', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      // streamingMessageId 'pending' = sent, awaiting stream_start; the thinking
+      // bubble for that live turn is present and must survive a queued follow-up.
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            streamingMessageId: 'pending',
+            messages: [
+              { id: 'uin-0', type: 'user_input', content: 'first', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            queuedMessages: [],
+          },
+        },
+      });
+
+      useConnectionStore.getState().sendInput('second');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // The live turn's thinking indicator is NOT stripped...
+      expect(ss.messages.some(m => m.id === 'thinking')).toBe(true);
+      // ...and the queued bubble lands at the tail (queued behind the live turn).
+      expect(ss.messages[ss.messages.length - 1]!.content).toBe('second');
+      expect(ss.queuedMessages).toHaveLength(1);
+    });
+
     it('does NOT queue when idle: normal optimistic turn (thinking + pending stream)', async () => {
       const { useConnectionStore, createEmptySessionState } = await import('./connection');
       const send = vi.fn();

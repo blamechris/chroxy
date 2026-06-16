@@ -2153,7 +2153,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const activeId = get().activeSessionId;
       if (activeId && get().sessionStates[activeId]) {
         updateActiveSession((ss) => ({
-          messages: [...filterThinking(ss.messages), userMsg],
+          // Do NOT filterThinking here: the in-progress turn may still be
+          // showing its thinking indicator (e.g. streamingMessageId === 'pending',
+          // sent but no stream_start yet). Stripping it would blank the current
+          // turn's indicator just because the user queued a follow-up. Append the
+          // queued bubble at the tail — after the existing thinking indicator,
+          // which stays attributed to the live turn — so it reads as "queued
+          // behind" rather than "now processing".
+          messages: [...ss.messages, userMsg],
           queuedMessages: enqueueOptimisticQueuedMessage(ss.queuedMessages, {
             clientMessageId: messageId,
             text,
