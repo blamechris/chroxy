@@ -318,9 +318,11 @@ function warnUnknownKeys(obj, knownSet, prefix, warnings, supportedKeys = knownS
 // the UNION of what the validator checks AND what the wiring layer
 // (createEnvironmentBackend / server-cli / the reaper) forwards to the consumer
 // — a key the consumer reads but the validator omits would otherwise false-warn.
-// Verified against the consumers: K8sBackend wiring (config.js ~1385-1394) +
-// the `workspace` sub-block (#4556); billing-budget.js + billing-canary-monitor;
-// worktree-reaper.js; rancher.js + resolveRancherToken.
+// Verified against the consumers: the K8sBackend wiring in
+// createEnvironmentBackend (the `new K8sBackend({...})` field list) + the
+// `workspace` sub-block (#4556); billing-budget.js + billing-canary (egressCheck
+// / datacenterPrefixes via server-cli); worktree-reaper.js; rancher.js (the
+// RancherBackend ctor) + resolveRancherToken (tokenEnv / tokenFile).
 const K8S_SUPPORTED_KEYS = new Set([
   'namespace', 'inCluster', 'kubeconfigPath', 'sidecarImage', 'imagePullPolicy',
   'connectMode', 'namespaceQuota', 'namespaceLimitRange', 'workspace',
