@@ -173,8 +173,8 @@ export function handleSessionStopped(
   // buggy producer can't poison `stoppedCode` with a fractional value
   // (e.g. rendering "exit 1.5") or with NaN / Infinity. `Number.isInteger`
   // already excludes all three failure modes; matches the existing
-  // protocol-int validation pattern used elsewhere in this file (see
-  // `protoRaw` around line 798). Preserve 0 explicitly — it's the common
+  // protocol-int validation pattern applied to other wire fields (e.g. the
+  // `protocolVersion` guard in handleAuthOk). Preserve 0 explicitly — it's the common
   // clean-SIGINT-exit case and is a meaningful signal, not a "missing"
   // value.
   const code = typeof msg.code === 'number' && Number.isInteger(msg.code) ? msg.code : null
