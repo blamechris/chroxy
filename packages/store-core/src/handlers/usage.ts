@@ -27,12 +27,14 @@ import type { SessionPatch } from './_shared'
  * (including `0`); any non-number — missing, null, string, etc. — becomes
  * null. Matches `typeof msg.sessionCost === 'number' ? msg.sessionCost : null`.
  *
- * Session resolution matches the prior inline behaviour exactly:
- * `(msg.sessionId as string) || activeSessionId` (raw string passthrough; no
- * trim, no whitespace coercion). A whitespace-only `sessionId` is preserved
- * verbatim so the downstream `sessionStates[id]` lookup misses, rather than
- * silently falling back to the active session and applying cost updates to
- * the wrong session. Mirrors the pattern used by `handleHistoryReplayStart`.
+ * Session resolution: `msg.sessionId` is taken when it is a string (raw
+ * passthrough — no trim, no whitespace coercion), otherwise null; the result
+ * then falls back to `activeSessionId` via `||`. So a non-string or
+ * empty-string `sessionId` routes to the active session, while a
+ * whitespace-only `sessionId` is preserved verbatim so the downstream
+ * `sessionStates[id]` lookup misses, rather than silently falling back to the
+ * active session and applying cost updates to the wrong session. Mirrors the
+ * pattern used by `handleHistoryReplayStart`.
  */
 export function handleCostUpdate(
   msg: Record<string, unknown>,
