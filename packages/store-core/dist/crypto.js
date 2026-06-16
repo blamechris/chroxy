@@ -145,6 +145,10 @@ export function verifyExchangeKeySignature(exchangePublicKeyBase64, signatureBas
             return false;
         // Bare form first (the live wire format — the common path); fall back to the
         // domain-separated form so a future signer flip verifies without a re-pair.
+        // TODO(#5959 phase 3): once the signer has emitted ONLY the domain-separated
+        // form for a full release, DROP the bare branch below — leaving it forever
+        // would defeat the domain separation (a context-free signature stays
+        // accepted). This accept-both window is deliberately temporary.
         return (nacl.sign.detached.verify(exchangeKeyBytes, sig, identityPub) ||
             nacl.sign.detached.verify(exchangeKeySigMessage(exchangeKeyBytes, true), sig, identityPub));
     }

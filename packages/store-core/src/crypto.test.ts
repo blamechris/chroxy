@@ -791,6 +791,18 @@ describe('exchange-key signature domain separation (#5604 compat ramp)', () => {
     expect(verifyExchangeKeySignature(otherExchange.publicKey, domain, identity.publicKey)).toBe(false)
   })
 
+  it('a tampered domain-separated signature fails verification', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const domain = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: true })
+    const bytes = decodeBase64(domain)
+    bytes[0] ^= 0xff
+    const tampered = encodeBase64(bytes)
+    // The domain-separated branch must reject a corrupted signature just like
+    // the bare branch — accept-both widens the accepted MESSAGES, not forgeries.
+    expect(verifyExchangeKeySignature(exchange.publicKey, tampered, identity.publicKey)).toBe(false)
+  })
+
   it('exposes a stable, versioned domain label', () => {
     // Pin the exact label — changing it would silently break verification across
     // a version skew, so a change must be deliberate (and bump the version).
