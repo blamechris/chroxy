@@ -733,6 +733,12 @@ export class BaseSession extends EventEmitter {
    * (only the owner's optimistic copy carries one), and a stale/duplicate cancel
    * for an already-flushed item must not emit a spurious dequeue.
    *
+   * Authority is enforced upstream, NOT here: the `cancel_queued` handler
+   * resolves the caller to THIS session via the standard binding gate before
+   * calling in, and the queue is per-session, so reaching this method already
+   * means the caller owns the session. Keep that the ownership boundary if the
+   * queue is ever refactored to a cross-session structure.
+   *
    * @param {string} clientMessageId
    * @returns {boolean} true if an entry was found and removed.
    */
