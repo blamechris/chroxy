@@ -253,7 +253,7 @@ function _isSecureRequest(req) {
  *   { type: 'permission_response', requestId, decision } — respond to permission prompt
  *   { type: 'list_sessions' }                         — request session list
  *   { type: 'switch_session', sessionId }             — switch to a different session
- *   { type: 'create_session', name?, cwd?, provider? } — create a new session
+ *   { type: 'create_session', name?, cwd?, provider?, agentCommId? } — create a new session
  *   { type: 'destroy_session', sessionId }            — destroy a session
  *   { type: 'rename_session', sessionId, name }       — rename a session
  *   { type: 'register_push_token', token }             — register push token for notifications

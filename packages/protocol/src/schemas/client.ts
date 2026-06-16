@@ -397,6 +397,13 @@ export const CreateSessionSchema = z.object({
   // as a TUI-only checkbox with explicit warning copy; the server still
   // applies the flag if a non-TUI provider request includes it (no-op).
   skipPermissions: z.boolean().optional(),
+  // Mailbox (agent-to-agent) — optional mailbox identity (AGENT_COMM_ID) to
+  // register for this session at creation, so the daemon's mailbox
+  // live-interrupt route (POST /api/mailbox) can resolve agent -> session
+  // WITHOUT a separate POST /api/mailbox/register round-trip. Omitted for
+  // sessions that don't participate in the mailbox. Same 200-char bound as the
+  // route's field sanitiser; control chars are rejected server-side.
+  agentCommId: z.string().max(200).optional(),
 })
 
 export const DestroySessionSchema = z.object({

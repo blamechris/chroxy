@@ -340,4 +340,64 @@ describe('SessionManager agent-comm registry', () => {
     assert.equal(mgr.resolveSessionByAgentCommId('coder'), null)
     assert.equal(mgr.unregisterAgentCommId('coder'), false)
   })
+
+  it('rejects an id with control characters (it is injected into a PTY)', () => {
+    makeMgr()
+    mgr._sessions.set('sid-1', { session: idleTuiSession() })
+    // A carriage return would let a crafted id inject an extra PTY line.
+    assert.equal(mgr.registerAgentCommId('sid-1', 'coder\r\nrm -rf'), false)
+    assert.equal(mgr.registerAgentCommId('sid-1', 'tab\tid'), false)
+    assert.equal(mgr.resolveSessionByAgentCommId('coder\r\nrm -rf'), null)
+  })
+
+  it('rejects an over-length id (>200 chars)', () => {
+    makeMgr()
+    mgr._sessions.set('sid-1', { session: idleTuiSession() })
+    assert.equal(mgr.registerAgentCommId('sid-1', 'a'.repeat(201)), false)
+    assert.equal(mgr.registerAgentCommId('sid-1', 'a'.repeat(200)), true)
+  })
+})
+
+describe('createSession auto-registers AGENT_COMM_ID', () => {
+  // createSession spawns a provider, so unit-test the auto-register seam at the
+  // method level by stubbing the spawn: register through the SAME path
+  // createSession uses (entry in _sessions, then registerAgentCommId).
+  let mgr
+  let tmpDir
+
+  afterEach(() => {
+    try {
+      mgr?._sessions?.clear()
+      mgr?.destroyAll?.()
+    } catch {
+      // best-effort teardown
+    }
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
+    mgr = null
+    tmpDir = null
+  })
+
+  it('serializes agentCommId so it survives a restart, and skips it when absent', () => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'sm-mailbox-persist-'))
+    mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 10,
+      defaultCwd: '/tmp',
+      stateFilePath: join(tmpDir, 'state.json'),
+    })
+    // Stand in for a created session entry, then register as createSession does.
+    const session = idleTuiSession()
+    session.resumeSessionId = undefined
+    session.model = null
+    mgr._sessions.set('sid-1', { session, name: 'Coder', cwd: '/tmp', createdAt: 1 })
+    mgr.registerAgentCommId('sid-1', 'coder')
+
+    const serialized = mgr._serializeSessionEntry('sid-1', mgr._sessions.get('sid-1'))
+    assert.equal(serialized.agentCommId, 'coder', 'registered id must persist for restore')
+
+    // A session with no mailbox identity serializes agentCommId: null.
+    mgr._sessions.set('sid-2', { session: idleTuiSession(), name: 'Plain', cwd: '/tmp', createdAt: 2 })
+    const plain = mgr._serializeSessionEntry('sid-2', mgr._sessions.get('sid-2'))
+    assert.equal(plain.agentCommId, null)
+  })
 })

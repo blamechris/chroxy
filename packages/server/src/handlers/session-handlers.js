@@ -119,6 +119,10 @@ function handleCreateSession(ws, client, msg, ctx) {
   // that honours it); we don't gate by provider here — the SessionManager
   // forwards via providerOpts and non-TUI providers ignore the unknown key.
   const skipPermissions = typeof msg.skipPermissions === 'boolean' ? msg.skipPermissions : undefined
+  // Mailbox: optional AGENT_COMM_ID to auto-register for this session (#5914
+  // follow-up). createSession validates + sanitises it (control chars rejected,
+  // trimmed, capped); a bad value is dropped to undefined there, never an error.
+  const agentCommId = (typeof msg.agentCommId === 'string' && msg.agentCommId.trim()) ? msg.agentCommId.trim() : undefined
   // Note: isolation is accepted in the schema but always derived server-side
   // from the actual session state (provider capabilities, worktree, sandbox).
 
@@ -157,7 +161,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionId = ctx.sessions.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, ...envOpts })
+    const sessionId = ctx.sessions.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, agentCommId, ...envOpts })
     // #5563: index-maintaining helpers.
     ctx.transport.setActiveSession(client, sessionId)
     ctx.transport.subscribeClient(client, sessionId)
