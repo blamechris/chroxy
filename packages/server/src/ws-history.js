@@ -170,6 +170,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     serverMode, serverVersion, latestVersion, gitInfo,
     encryptionEnabled, localhostBypass, keyExchangeTimeoutMs,
     protocolVersion, minProtocolVersion, webTaskManager,
+    // #5721: `send` MUST be `WsServer._send` (which returns the delivery
+    // boolean from the client-sender), NOT a wrapper that drops the return —
+    // the eager-handshake gate below reads `authOkDelivered` to decide whether
+    // to mark E2E established. A ctx-wiring refactor that swallows the return
+    // would silently re-open the swallowed-send wedge this fix closes.
     send, broadcast, getConnectedClientList, permissions,
     resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs,
     // #4835: per-device active-session memory. Consulted below before
