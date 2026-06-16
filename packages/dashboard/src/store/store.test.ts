@@ -450,6 +450,30 @@ describe('useConnectionStore', () => {
       expect(ss.queuedMessages).toHaveLength(1);
     });
 
+    it('#5952: queues when the server says busy (isIdle false) even if streamingMessageId is still null', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      // The pre-stream window: the server reported the turn busy (isIdle:false)
+      // but no stream_start has set streamingMessageId yet. The InputBar shows
+      // its busy UI here (isBusy = !isIdle), so a send must QUEUE — not fake a
+      // fresh turn — matching the input affordance.
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), isIdle: false, streamingMessageId: null, messages: [], queuedMessages: [] } },
+      });
+
+      useConnectionStore.getState().sendInput('follow-up');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.queuedMessages).toHaveLength(1);
+      expect(ss.queuedMessages[0]!.status).toBe('pending');
+      // Did NOT fake a new turn.
+      expect(ss.messages.some(m => m.type === 'thinking')).toBe(false);
+      expect(ss.streamingMessageId).toBeNull();
+    });
+
     it('does NOT queue when idle: normal optimistic turn (thinking + pending stream)', async () => {
       const { useConnectionStore, createEmptySessionState } = await import('./connection');
       const send = vi.fn();
