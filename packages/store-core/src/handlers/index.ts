@@ -43,82 +43,23 @@ import { isRateLimitMessage } from '@chroxy/protocol'
 // Established Zod-handler pattern (#3138).
 import { ServerAvailableModelsEntrySchema, ServerNotificationPrefsSchema } from '@chroxy/protocol'
 
+// Shared field parsers + session resolution live in ./_shared (audit P2-3).
+import {
+  parseStringField,
+  parseRawStringField,
+  parseEnumField,
+  resolveSessionId,
+} from './_shared'
+import type { SessionPatch } from './_shared'
 // ---------------------------------------------------------------------------
-// Helpers
+// Shared helpers (parseStringField / parseRawStringField / parseEnumField /
+// resolveSessionId) and the SessionPatch type now live in ./_shared.ts
+// (audit P2-3, imported above). resolveSessionId + SessionPatch are part of
+// the barrel's public surface, so they are re-exported here; the three field
+// parsers were always private and are intentionally not re-exported.
 // ---------------------------------------------------------------------------
-
-/** Parse a string field from a message, returning trimmed value or null. */
-function parseStringField(msg: Record<string, unknown>, field: string): string | null {
-  const val = msg[field]
-  if (typeof val === 'string' && val.trim()) return val.trim()
-  return null
-}
-
-/**
- * Parse a string field WITHOUT trimming or empty-string coercion.
- *
- * Some legacy inline checks used `typeof v === 'string' ? v : null` — that
- * passes through empty strings and whitespace verbatim. `auth_ok.cwd` is one
- * such field; preserve the prior behaviour so this migration is mechanical.
- */
-function parseRawStringField(msg: Record<string, unknown>, field: string): string | null {
-  const val = msg[field]
-  return typeof val === 'string' ? val : null
-}
-
-/**
- * Build a small union-checking helper that returns the value when it matches
- * one of the provided literals, else null. Used for enum fields like
- * `serverMode` and `mode`.
- */
-function parseEnumField<T extends string>(
-  msg: Record<string, unknown>,
-  field: string,
-  allowed: readonly T[],
-): T | null {
-  const val = msg[field]
-  return typeof val === 'string' && (allowed as readonly string[]).includes(val)
-    ? (val as T)
-    : null
-}
-
-// ---------------------------------------------------------------------------
-// Session-scoped state patches
-//
-// Many handlers follow a common pattern: resolve a target session ID from
-// the message (falling back to the active session), then produce a patch
-// for that session's state. The `SessionPatch` type captures this.
-// ---------------------------------------------------------------------------
-
-/** A patch to apply to a specific session's state. */
-export interface SessionPatch {
-  /** Session ID the patch targets (may be null if no session context). */
-  sessionId: string | null
-  /** Partial session state to shallow-merge. */
-  patch: Record<string, unknown>
-}
-
-/**
- * Resolve which session a per-message-event targets — **fallback semantics**.
- *
- * Most server messages include an optional `sessionId`; when absent, the
- * active session ID is used as a fallback. The returned value is non-null
- * unless BOTH `msg.sessionId` and `activeSessionId` are missing/empty.
- *
- * Intended for events that should always be applied somewhere (e.g.
- * `message`, `tool_start`, `tool_result`, `permission_request`): if the
- * server omits the explicit routing tag, route to the user's current session.
- *
- * Distinct from {@link shouldSkipForSessionMismatch}, which uses
- * **broadcast guard** semantics (drop the event when the explicit tag does
- * not match).
- */
-export function resolveSessionId(
-  msg: Record<string, unknown>,
-  activeSessionId: string | null,
-): string | null {
-  return parseStringField(msg, 'sessionId') || activeSessionId
-}
+export { resolveSessionId }
+export type { SessionPatch }
 
 // ---------------------------------------------------------------------------
 // model_changed
