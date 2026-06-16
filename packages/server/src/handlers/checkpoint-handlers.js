@@ -145,6 +145,10 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
       newSessionId,
       name: newEntry?.name || `Rewind: ${checkpoint.name}`,
     })
+    // The initiator's active session moved to the rewound session above; announce
+    // it to presence/Control-Room observers (the loop below does the same for the
+    // other re-homed clients).
+    broadcastFocusChanged(client, newSessionId, ctx)
     // #5700: re-home OTHER clients that were actively viewing the original
     // session onto the rewound session — mirroring the destroy path's
     // client-iteration (session-handlers.js). Without this the initiator
@@ -155,6 +159,12 @@ async function handleRestoreCheckpoint(ws, client, msg, ctx) {
     for (const [otherWs, c] of ctx.transport.clients) {
       if (c === client) continue // initiator already re-homed above
       if (!c.authenticated || c.activeSessionId !== sid) continue
+      // A pairing-bound client is cryptographically scoped to its bound session.
+      // Unlike the destroy path (where the session is gone, so re-homing is
+      // forced), restore leaves the original session intact — so a bound client
+      // must stay on it, never be auto-switched to the rewound session (mirrors
+      // the switch_session boundSessionId enforcement). #5700 review.
+      if (c.boundSessionId) continue
       ctx.transport.setActiveSession(c, newSessionId)
       ctx.transport.send(otherWs, {
         type: 'session_switched',

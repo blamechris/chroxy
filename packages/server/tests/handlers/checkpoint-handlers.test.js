@@ -211,6 +211,31 @@ describe('checkpoint-handlers', () => {
       assert.ok(replayedForObserver, 'observer must get a forced full history replay of the rewound session')
     })
 
+    it('does NOT re-home a pairing-bound client even if it views the original session (#5700)', async () => {
+      const sessions = new Map()
+      const orig = createMockSession()
+      orig.isRunning = false
+      sessions.set('s1', { session: orig, name: 'S', cwd: '/tmp' })
+      sessions.set('restored-session-id', { session: createMockSession(), name: 'Rewind: Checkpoint 1', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      ctx.sessions.sessionManager.createSession = createSpy(async () => 'restored-session-id')
+
+      const initiatorWs = makeWs()
+      const boundWs = makeWs()
+      const initiator = makeClient({ id: 'c1', authenticated: true, activeSessionId: 's1' })
+      // A pairing-bound client scoped to s1 — must NOT be auto-switched off it
+      // (the original session is not destroyed by a restore).
+      const bound = makeClient({ id: 'c2', authenticated: true, activeSessionId: 's1', boundSessionId: 's1' })
+      ctx.clientManager.addClient(initiatorWs, initiator)
+      ctx.clientManager.addClient(boundWs, bound)
+      ctx.clientManager.setActiveSession(initiator, 's1')
+      ctx.clientManager.setActiveSession(bound, 's1')
+
+      await checkpointHandlers.restore_checkpoint(initiatorWs, initiator, { checkpointId: 'cp-1' }, ctx)
+
+      assert.equal(bound.activeSessionId, 's1', 'a pairing-bound client stays on its bound session')
+    })
+
     it('does not re-home a client viewing a DIFFERENT session during restore (#5700)', async () => {
       const sessions = new Map()
       const orig = createMockSession()
