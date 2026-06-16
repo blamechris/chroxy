@@ -1,0 +1,311 @@
+// Mailbox live-interrupt routes (agent-comm-system delivery layer).
+//
+// Pins:
+//   - auth: ONLY the daemon-level ingest secret (constant-time); missing/wrong
+//     token -> 401 with no body detail
+//   - POST /api/mailbox: notifies via PushManager (category 'mailbox') and
+//     injects a wakeup ONLY into a live, idle claude-tui recipient; busy /
+//     non-tui / unknown / pty-dead recipients are notify-only with the right
+//     reason
+//   - POST /api/mailbox/register: maps agentCommId -> sessionId (404 unknown)
+//   - SessionManager registry: register/resolve/unregister + cleanup on removal
+//
+// All SessionManager state paths are temp (#4633 sandbox guard applies).
+
+import { describe, it, afterEach } from 'node:test'
+import assert from 'node:assert/strict'
+import { Readable } from 'node:stream'
+import { mkdtempSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { handleMailboxPing, handleMailboxRegister } from '../src/mailbox-route.js'
+import { SessionManager } from '../src/session-manager.js'
+
+const SECRET = 'test-ingest-secret-mailbox-0123456789'
+const bearer = (t) => ({ authorization: `Bearer ${t}` })
+
+function makeReq({ headers = {}, body = '' }) {
+  const req = new Readable({ read() {} })
+  req.headers = headers
+  process.nextTick(() => {
+    if (body) req.push(body)
+    req.push(null)
+  })
+  return req
+}
+
+function invoke(handler, server, { headers = {}, body = '' } = {}) {
+  return new Promise((resolve) => {
+    const req = makeReq({ headers, body })
+    const res = {
+      statusCode: 0,
+      _body: '',
+      writeHead(status) {
+        this.statusCode = status
+      },
+      end(payload) {
+        if (payload !== undefined) this._body = payload
+        let parsed = null
+        try {
+          parsed = this._body ? JSON.parse(this._body) : null
+        } catch {
+          parsed = this._body
+        }
+        resolve({ status: this.statusCode, body: parsed })
+      },
+    }
+    handler(server, req, res)
+  })
+}
+
+function makePushManager() {
+  const calls = []
+  return {
+    calls,
+    send: (category, title, body, data) => {
+      calls.push({ category, title, body, data })
+      return Promise.resolve(true)
+    },
+  }
+}
+
+function idleTuiSession() {
+  return {
+    isRunning: false,
+    writes: [],
+    writeTerminalInput(text) {
+      this.writes.push(text)
+      return true
+    },
+  }
+}
+
+function makeServer(sessionForId = {}, { pushManager = makePushManager() } = {}) {
+  return {
+    _ingestSecret: SECRET,
+    pushManager,
+    sessionManager: {
+      resolveSessionByAgentCommId: (id) => sessionForId[id] || null,
+      registerAgentCommId: (sid) => sid !== 'no-such-session',
+    },
+  }
+}
+
+describe('POST /api/mailbox — auth', () => {
+  it('rejects a missing bearer with 401', async () => {
+    const res = await invoke(handleMailboxPing, makeServer(), { body: JSON.stringify({ to: 'coder' }) })
+    assert.equal(res.status, 401)
+    assert.equal(res.body, null)
+  })
+
+  it('rejects a wrong bearer with 401', async () => {
+    const res = await invoke(handleMailboxPing, makeServer(), {
+      headers: bearer('nope'),
+      body: JSON.stringify({ to: 'coder' }),
+    })
+    assert.equal(res.status, 401)
+  })
+})
+
+describe('POST /api/mailbox — ping behavior', () => {
+  it('injects a wakeup into a live idle claude-tui recipient and notifies', async () => {
+    const session = idleTuiSession()
+    const push = makePushManager()
+    const server = makeServer({ coder: session }, { pushManager: push })
+    const res = await invoke(handleMailboxPing, server, {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder', from: 'alice', id: 'alice-1', unread_count: 3 }),
+    })
+
+    assert.equal(res.status, 200)
+    assert.equal(res.body.injected, true)
+    assert.equal(res.body.reason, 'injected')
+    assert.equal(session.writes.length, 1)
+    assert.match(session.writes[0], /3 unread mailbox message\(s\)/)
+    assert.match(session.writes[0], /receive_next/)
+    assert.ok(session.writes[0].endsWith('\r'), 'submits with a carriage return')
+
+    assert.equal(push.calls.length, 1)
+    assert.equal(push.calls[0].category, 'mailbox')
+    assert.equal(push.calls[0].data.to, 'coder')
+    assert.equal(push.calls[0].data.unread_count, 3)
+  })
+
+  it('does NOT inject when the recipient is mid-turn (busy) but still notifies', async () => {
+    const session = { isRunning: true, writes: [], writeTerminalInput(t) { this.writes.push(t); return true } }
+    const push = makePushManager()
+    const server = makeServer({ coder: session }, { pushManager: push })
+    const res = await invoke(handleMailboxPing, server, {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder', unread_count: 1 }),
+    })
+
+    assert.equal(res.body.reason, 'busy')
+    assert.equal(res.body.injected, false)
+    assert.equal(session.writes.length, 0)
+    assert.equal(push.calls.length, 1)
+  })
+
+  it('reports not-tui for a session without writeTerminalInput', async () => {
+    const server = makeServer({ coder: { isRunning: false } })
+    const res = await invoke(handleMailboxPing, server, {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder' }),
+    })
+    assert.equal(res.body.reason, 'not-tui')
+    assert.equal(res.body.injected, false)
+  })
+
+  it('reports no-session for an unregistered recipient', async () => {
+    const res = await invoke(handleMailboxPing, makeServer(), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'ghost' }),
+    })
+    assert.equal(res.body.reason, 'no-session')
+  })
+
+  it('reports pty-dead when the PTY write fails', async () => {
+    const session = { isRunning: false, writeTerminalInput: () => false }
+    const res = await invoke(handleMailboxPing, makeServer({ coder: session }), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder' }),
+    })
+    assert.equal(res.body.reason, 'pty-dead')
+  })
+
+  it('400s when `to` is missing', async () => {
+    const res = await invoke(handleMailboxPing, makeServer(), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ from: 'alice' }),
+    })
+    assert.equal(res.status, 400)
+  })
+})
+
+describe('POST /api/mailbox/register', () => {
+  it('registers a valid id -> session mapping', async () => {
+    const res = await invoke(handleMailboxRegister, makeServer(), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ agentCommId: 'coder', sessionId: 'sid-1' }),
+    })
+    assert.equal(res.status, 200)
+    assert.equal(res.body.ok, true)
+  })
+
+  it('404s for an unknown session', async () => {
+    const res = await invoke(handleMailboxRegister, makeServer(), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ agentCommId: 'coder', sessionId: 'no-such-session' }),
+    })
+    assert.equal(res.status, 404)
+  })
+
+  it('400s when fields are missing', async () => {
+    const res = await invoke(handleMailboxRegister, makeServer(), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ agentCommId: 'coder' }),
+    })
+    assert.equal(res.status, 400)
+  })
+
+  it('rejects a missing bearer with 401', async () => {
+    const res = await invoke(handleMailboxRegister, makeServer(), {
+      body: JSON.stringify({ agentCommId: 'coder', sessionId: 'sid-1' }),
+    })
+    assert.equal(res.status, 401)
+  })
+})
+
+describe('SessionManager agent-comm registry', () => {
+  let mgr
+  let tmpDir
+
+  function makeMgr() {
+    tmpDir = mkdtempSync(join(tmpdir(), 'sm-mailbox-'))
+    mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 10,
+      defaultCwd: '/tmp',
+      stateFilePath: join(tmpDir, 'state.json'),
+    })
+    return mgr
+  }
+
+  afterEach(() => {
+    try {
+      mgr?._sessions?.clear()
+      mgr?.destroyAll?.()
+    } catch {
+      // teardown best-effort
+    }
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
+    mgr = null
+    tmpDir = null
+  })
+
+  it('registers and resolves an id to the live session', () => {
+    makeMgr()
+    const session = idleTuiSession()
+    mgr._sessions.set('sid-1', { session })
+
+    assert.equal(mgr.registerAgentCommId('sid-1', 'coder'), true)
+    assert.equal(mgr.resolveSessionByAgentCommId('coder'), session)
+    assert.equal(mgr.resolveSessionByAgentCommId('unknown'), null)
+  })
+
+  it('rejects registering an unknown session', () => {
+    makeMgr()
+    assert.equal(mgr.registerAgentCommId('nope', 'coder'), false)
+    assert.equal(mgr.resolveSessionByAgentCommId('coder'), null)
+  })
+
+  it('reassigning an id moves it to the new session and clears the old entry', () => {
+    makeMgr()
+    const s1 = idleTuiSession()
+    const s2 = idleTuiSession()
+    mgr._sessions.set('sid-1', { session: s1 })
+    mgr._sessions.set('sid-2', { session: s2 })
+
+    mgr.registerAgentCommId('sid-1', 'coder')
+    mgr.registerAgentCommId('sid-2', 'coder')
+
+    assert.equal(mgr.resolveSessionByAgentCommId('coder'), s2)
+    assert.equal(mgr._sessions.get('sid-1').agentCommId, null)
+    assert.equal(mgr._sessions.get('sid-2').agentCommId, 'coder')
+  })
+
+  it('giving a session a new id drops its previous id from the map', () => {
+    makeMgr()
+    const session = idleTuiSession()
+    mgr._sessions.set('sid-1', { session })
+
+    mgr.registerAgentCommId('sid-1', 'old')
+    mgr.registerAgentCommId('sid-1', 'new')
+
+    assert.equal(mgr.resolveSessionByAgentCommId('old'), null)
+    assert.equal(mgr.resolveSessionByAgentCommId('new'), session)
+  })
+
+  it('clears the reverse map when the session is removed', () => {
+    makeMgr()
+    const session = idleTuiSession()
+    mgr._sessions.set('sid-1', { session })
+    mgr.registerAgentCommId('sid-1', 'coder')
+
+    mgr._cleanupSessionMaps('sid-1')
+
+    assert.equal(mgr.resolveSessionByAgentCommId('coder'), null)
+    assert.equal(mgr._agentCommIds.has('coder'), false)
+  })
+
+  it('unregisterAgentCommId removes the mapping', () => {
+    makeMgr()
+    const session = idleTuiSession()
+    mgr._sessions.set('sid-1', { session })
+    mgr.registerAgentCommId('sid-1', 'coder')
+
+    assert.equal(mgr.unregisterAgentCommId('coder'), true)
+    assert.equal(mgr.resolveSessionByAgentCommId('coder'), null)
+    assert.equal(mgr.unregisterAgentCommId('coder'), false)
+  })
+})
