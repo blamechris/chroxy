@@ -62,6 +62,7 @@ export class Supervisor extends EventEmitter {
     this._restartCount = 0
     this._standbyServer = null
     this._standbyRetries = 0
+    this._standbyRetryTimer = null
     this._shuttingDown = false
     this._draining = false
     this._childReady = false
@@ -596,7 +597,8 @@ export class Supervisor extends EventEmitter {
     this._standbyServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         this._standbyRetries++
-        setTimeout(() => {
+        this._standbyRetryTimer = setTimeout(() => {
+          this._standbyRetryTimer = null
           if (this._standbyServer) {
             this._standbyServer.close()
             this._standbyServer = null
@@ -615,6 +617,10 @@ export class Supervisor extends EventEmitter {
   }
 
   _stopStandbyServer() {
+    if (this._standbyRetryTimer) {
+      clearTimeout(this._standbyRetryTimer)
+      this._standbyRetryTimer = null
+    }
     if (this._standbyServer) {
       this._standbyServer.close()
       this._standbyServer = null
