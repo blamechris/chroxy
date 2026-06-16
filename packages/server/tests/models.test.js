@@ -64,6 +64,14 @@ describe('resolveClaudeContextWindow (#5931 — version-aware opus heuristic)', 
     assert.equal(resolveClaudeContextWindow('claude-3-opus-20240229'), DEFAULT_CONTEXT_WINDOW)
   })
 
+  it('does not misread a DATED base-opus-4 id as a 1M minor version', () => {
+    // claude-opus-4-20250514 is opus 4.0 (dated) — a 200k model. The date must
+    // not be parsed as minor=20250514 (which would wrongly map it to 1M).
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-20250514'), DEFAULT_CONTEXT_WINDOW)
+    // But a VERSIONED + dated id keeps its real minor → opus 4.7 dated is 1M.
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-7-20251201'), 1_000_000)
+  })
+
   it('defaults non-opus families to 200k', () => {
     assert.equal(resolveClaudeContextWindow('claude-sonnet-4-6'), DEFAULT_CONTEXT_WINDOW)
     assert.equal(resolveClaudeContextWindow('claude-haiku-4-5'), DEFAULT_CONTEXT_WINDOW)

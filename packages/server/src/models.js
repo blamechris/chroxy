@@ -19,9 +19,12 @@ export const ONE_M_SUFFIX = '[1m]'
 // wrong cold-start guess only ever surfaces for the first turn.
 const OPUS_ONE_M_MIN_VERSION = Object.freeze([4, 6])
 // Matches an `opus-<major>-<minor>` / `opus-<major>.<minor>` version token, e.g.
-// `claude-opus-4-8` or `claude-opus-4.8`. A dated id like `claude-3-opus-2024…`
-// has no `opus-<n>-<n>` token, so it correctly falls through to the default.
-const OPUS_VERSION_RE = /opus-(\d+)[-.](\d+)/
+// `claude-opus-4-8`, `claude-opus-4.8`, or `claude-opus-4-7-20251201` (versioned
+// + dated). The minor is 1–2 digits NOT followed by another digit, so a DATED
+// base id like `claude-opus-4-20250514` (opus 4.0, dated — a 200k model) does not
+// have its date misread as a huge minor version. A `claude-3-opus-2024…` id has
+// no `opus-<n>-<n>` token at all and falls through to the default.
+const OPUS_VERSION_RE = /opus-(\d+)[-.](\d{1,2})(?!\d)/
 
 /**
  * Static context-window heuristic used at cold start before the SDK reports.
