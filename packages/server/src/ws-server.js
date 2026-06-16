@@ -158,8 +158,8 @@ export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
  * v1 (initial) — baseline message set: auth, auth_ok, message, assistant,
  *   result, raw_output, model_changed, permission_request, tool_use, etc.
  *   All subsequent additive message types (e.g. plan_started, plan_ready,
- *   models_updated, client_focus_changed) do NOT bump the version per the
- *   breaking-changes-only policy above.
+ *   models_updated, client_focus_changed, message_queued, message_dequeued)
+ *   do NOT bump the version per the breaking-changes-only policy above.
  *
  * v2 (#2849) — `server_status` gained a structured `phase` field
  *   ('tunnel_warming' | 'ready') that v1 dashboards don't know how to

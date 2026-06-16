@@ -770,6 +770,42 @@ export const ServerCancelActivityAckSchema = z.object({
     sessionId: z.string().optional(),
     requestId: z.string().max(128).optional(),
 }).passthrough();
+/**
+ * #5936 (epic #5935): outgoing-message queue mirror. The server-authoritative
+ * send queue holds a follow-up message the OWNER typed while the session was
+ * still mid-turn (busy) and flushes it FIFO on the turn-complete `result`
+ * event. These two transient events let clients render the queued message in a
+ * distinct "queued" state and reconcile it on flush/cancel — they are NOT
+ * replayed on reconnect (the live snapshot is authoritative).
+ *
+ * `message_queued` — a send-while-busy message was accepted into the queue.
+ * Carries the queued `text` (so clients can render the bubble), the sender's
+ * `clientMessageId` (when supplied, so the sender dedups its optimistic copy),
+ * and the post-enqueue `queueLength`.
+ */
+export const ServerMessageQueuedSchema = z.object({
+    type: z.literal('message_queued'),
+    sessionId: z.string(),
+    // Echoed when the sender supplied a well-formed clientMessageId so the
+    // originating client can match this queued entry to its optimistic copy.
+    clientMessageId: z.string().optional(),
+    text: z.string(),
+    queueLength: z.number().int().nonnegative(),
+}).passthrough();
+/**
+ * `message_dequeued` — a queued message left the queue. `reason` distinguishes
+ * the two exit paths: `'flush'` (auto-sent on turn-complete — the client should
+ * transition the bubble from queued → sent) vs `'interrupted'` (the queue was
+ * cancelled by an interrupt — the client should remove the queued bubble). The
+ * `queueLength` is the count remaining AFTER this item left.
+ */
+export const ServerMessageDequeuedSchema = z.object({
+    type: z.literal('message_dequeued'),
+    sessionId: z.string(),
+    clientMessageId: z.string().optional(),
+    queueLength: z.number().int().nonnegative(),
+    reason: z.enum(['flush', 'interrupted']),
+}).passthrough();
 // ───────────────────────────────────────────────────────────────────────────
 // Host/Repo Status Control Room (#5170 epic, #5171 protocol contract)
 // ───────────────────────────────────────────────────────────────────────────

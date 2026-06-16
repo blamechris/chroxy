@@ -506,7 +506,12 @@ async function handleInput(ws, client, msg, ctx) {
   // return and, if thenable, attach a .catch that logs and swallows — real
   // delivery failures still surface to the client via the provider's 'error'
   // event. Mirrors the start() guard in session-manager.js createSession.
-  const sendResult = entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice })
+  // #5936: forward the resolved clientMessageId so that if this send lands
+  // mid-turn and the provider queues it (BaseSession `_outgoingQueue`), the
+  // `message_queued` mirror carries the id the sender's optimistic copy uses —
+  // letting that client reconcile its queued bubble. Providers that send
+  // immediately ignore the extra option.
+  const sendResult = entry.session.sendMessage(textToSend, attachments, { isVoice: !!msg.isVoice, clientMessageId: messageId })
   if (sendResult && typeof sendResult.catch === 'function') {
     sendResult.catch((err) => {
       const message = err?.message || String(err)

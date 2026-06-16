@@ -870,37 +870,39 @@ describe('SdkSession', () => {
 
       session.sendMessage('follow-up message')
       assert.equal(errors.length, 0)
-      assert.equal(session._pendingInput.length, 1)
-      assert.equal(session._pendingInput[0].prompt, 'follow-up message')
+      assert.equal(session._outgoingQueue.length, 1)
+      assert.equal(session._outgoingQueue[0].prompt, 'follow-up message')
     })
 
     it('clears pending queue on destroy', () => {
       session._isBusy = true
       session.sendMessage('queued')
-      assert.equal(session._pendingInput.length, 1)
+      assert.equal(session._outgoingQueue.length, 1)
       session.destroy()
-      assert.equal(session._pendingInput.length, 0)
+      assert.equal(session._outgoingQueue.length, 0)
     })
 
-    it('caps the mid-turn queue at 3 and discards overflow with an error (#5711)', () => {
+    // #5936: the SDK's old mid-turn cap of 3 (#5711) became the shared
+    // OUTGOING_QUEUE_MAX (10) on BaseSession; overflow still surfaces a visible
+    // `error` rather than a silent drop.
+    it('caps the mid-turn queue at OUTGOING_QUEUE_MAX and discards overflow with an error (#5936)', () => {
       session._isBusy = true
       const errors = []
       session.on('error', (data) => errors.push(data))
 
-      // Fill the queue to the cap.
-      session.sendMessage('q1')
-      session.sendMessage('q2')
-      session.sendMessage('q3')
-      assert.equal(session._pendingInput.length, 3)
+      // Fill the queue to the cap (10).
+      for (let i = 0; i < 10; i++) session.sendMessage(`q${i}`)
+      assert.equal(session._outgoingQueue.length, 10)
       assert.equal(errors.length, 0)
 
-      // The 4th overflows: discarded with a visible error, queue stays at 3.
-      session.sendMessage('q4-overflow')
-      assert.equal(session._pendingInput.length, 3)
+      // The 11th overflows: discarded with a visible error, queue stays at 10.
+      session.sendMessage('q-overflow')
+      assert.equal(session._outgoingQueue.length, 10)
       assert.equal(errors.length, 1)
-      assert.match(errors[0].message, /queue full \(max 3\)/)
+      assert.match(errors[0].message, /queue full \(max 10\)/)
+      assert.equal(errors[0].code, 'queue_full')
       // The discarded message is NOT in the queue.
-      assert.ok(!session._pendingInput.some((m) => m.prompt === 'q4-overflow'))
+      assert.ok(!session._outgoingQueue.some((m) => m.prompt === 'q-overflow'))
     })
   })
 
@@ -988,7 +990,7 @@ describe('SdkSession', () => {
       s.sendMessage('q1')
       s.sendMessage('q2')
       s.sendMessage('q3')
-      assert.equal(s._pendingInput.length, 3, 'precondition: three messages queued')
+      assert.equal(s._outgoingQueue.length, 3, 'precondition: three messages queued')
 
       // Flag flips mid-turn (e.g. SidecarProcess loses stdin while query is
       // still streaming). Now any new sendMessage must reject AND drain the
@@ -1000,7 +1002,7 @@ describe('SdkSession', () => {
       await s.sendMessage('arriving while disabled')
 
       assert.equal(captured.length, 0, '_callQuery must not be invoked')
-      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained')
+      assert.equal(s._outgoingQueue.length, 0, 'queued follow-ups must be drained')
       assert.equal(errors.length, 1, 'a single error event covers the drained batch + new call')
       assert.equal(errors[0].code, 'stdin_disabled')
 
@@ -1009,7 +1011,7 @@ describe('SdkSession', () => {
 
     // #3562: short-circuit dequeue in finally when stdin forwarding is disabled.
     //
-    // PR #3560 (closes #3539) drains _pendingInput at the *entry* of sendMessage
+    // PR #3560 (closes #3539) drains _outgoingQueue at the *entry* of sendMessage
     // when the flag is set. This handles the case "next caller hits the gate".
     // But the post-turn dequeue path in sendMessage's finally block still has
     // its own "shift + process.nextTick(sendMessage)" branch. If a turn is
@@ -1039,7 +1041,7 @@ describe('SdkSession', () => {
       }
 
       // Pre-queue a follow-up so the dequeue site has work to do.
-      s._pendingInput = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
+      s._outgoingQueue = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
 
       const errors = []
       s.on('error', (e) => errors.push(e))
@@ -1053,7 +1055,7 @@ describe('SdkSession', () => {
       await new Promise((resolve) => setImmediate(resolve))
 
       assert.equal(callCount, 1, '_callQuery must only be invoked for the original turn — no recursive dequeue')
-      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained at the dequeue site')
+      assert.equal(s._outgoingQueue.length, 0, 'queued follow-ups must be drained at the dequeue site')
       assert.equal(errors.length, 0, 'dequeue-site short-circuit must not emit a per-message error (the warn is enough)')
 
       s.destroy()
@@ -1223,11 +1225,11 @@ describe('SdkSession', () => {
         // First refused call — both warns fire (refusal + drain of 0
         // queued follow-ups won't fire; pre-load the queue to force the
         // drain warn to be eligible).
-        s._pendingInput = [{ prompt: 'q1' }, { prompt: 'q2' }]
+        s._outgoingQueue = [{ prompt: 'q1' }, { prompt: 'q2' }]
         await s.sendMessage('attempt 1')
         // Second refused call inside the window — re-queue and verify the
         // drain warn is suppressed alongside the refusal warn.
-        s._pendingInput = [{ prompt: 'q3' }]
+        s._outgoingQueue = [{ prompt: 'q3' }]
         s._lastRefusedWarnTs = Date.now()
         await s.sendMessage('attempt 2')
       } finally {
@@ -1241,7 +1243,7 @@ describe('SdkSession', () => {
       )
       assert.equal(drainWarns.length, 1,
         'drain warn must share the rate-limit gate with the refusal warn')
-      assert.equal(s._pendingInput.length, 0,
+      assert.equal(s._outgoingQueue.length, 0,
         'queue must still be drained even when the warn is suppressed')
 
       s.destroy()

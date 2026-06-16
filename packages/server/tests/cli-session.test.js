@@ -109,14 +109,21 @@ describe('CliSession constructor', () => {
 })
 
 describe('CliSession.sendMessage', () => {
-  it('rejects when busy', () => {
+  // #5936 (epic #5935): a send-while-busy follow-up now QUEUES into the shared
+  // outgoing queue (flushed FIFO on the turn-complete `result`) instead of
+  // rejecting with "Already processing a message".
+  it('queues when busy (emits message_queued, no error)', () => {
     const session = createReadySession()
     session._isBusy = true
     const errors = []
+    const queued = []
     session.on('error', (e) => errors.push(e))
+    session.on('message_queued', (e) => queued.push(e))
     session.sendMessage('hello')
-    assert.equal(errors.length, 1)
-    assert.ok(errors[0].message.includes('Already processing'))
+    assert.equal(errors.length, 0)
+    assert.equal(queued.length, 1)
+    assert.equal(queued[0].text, 'hello')
+    assert.equal(session._outgoingQueue.length, 1)
   })
 
   it('queues message when process not ready', () => {
