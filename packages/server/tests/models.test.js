@@ -55,6 +55,13 @@ describe('resolveClaudeContextWindow (#5931 — version-aware opus heuristic)', 
     assert.equal(resolveClaudeContextWindow('claude-opus-4-9'), 1_000_000)
     assert.equal(resolveClaudeContextWindow('claude-opus-4-12'), 1_000_000)
     assert.equal(resolveClaudeContextWindow('claude-opus-5-0'), 1_000_000)
+    // Major-only future id (no minor) — opus 5+ is 1M.
+    assert.equal(resolveClaudeContextWindow('claude-opus-5'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-6'), 1_000_000)
+  })
+
+  it('treats a bare major-only opus-4 (no minor) as 4.0 → 200k, not 4.6', () => {
+    assert.equal(resolveClaudeContextWindow('claude-opus-4'), DEFAULT_CONTEXT_WINDOW)
   })
 
   it('does NOT mis-map opus releases older than 4.6 to 1M', () => {

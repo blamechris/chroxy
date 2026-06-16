@@ -18,13 +18,15 @@ export const ONE_M_SUFFIX = '[1m]'
 // SDK's authoritative modelUsage.contextWindow overrides this after turn 1, so a
 // wrong cold-start guess only ever surfaces for the first turn.
 const OPUS_ONE_M_MIN_VERSION = Object.freeze([4, 6])
-// Matches an `opus-<major>-<minor>` / `opus-<major>.<minor>` version token, e.g.
-// `claude-opus-4-8`, `claude-opus-4.8`, or `claude-opus-4-7-20251201` (versioned
-// + dated). The minor is 1–2 digits NOT followed by another digit, so a DATED
-// base id like `claude-opus-4-20250514` (opus 4.0, dated — a 200k model) does not
-// have its date misread as a huge minor version. A `claude-3-opus-2024…` id has
-// no `opus-<n>-<n>` token at all and falls through to the default.
-const OPUS_VERSION_RE = /opus-(\d+)[-.](\d{1,2})(?!\d)/
+// Matches an opus version token: `opus-<major>` with an OPTIONAL `-<minor>` /
+// `.<minor>`, e.g. `claude-opus-4-8`, `claude-opus-4.8`, `claude-opus-5` (major
+// only), or `claude-opus-4-7-20251201` (versioned + dated). Both major and minor
+// are 1–2 digits NOT followed by another digit, so:
+//   - a DATED base id like `claude-opus-4-20250514` (opus 4.0, dated — 200k) does
+//     NOT read the date as a minor (the optional group fails → major-only 4.0);
+//   - a `claude-3-opus-20240229` id does NOT read the 8-digit date as a major
+//     (the major is capped at 2 digits + lookahead → no match → default).
+const OPUS_VERSION_RE = /opus-(\d{1,2})(?!\d)(?:[-.](\d{1,2})(?!\d))?/
 
 /**
  * Static context-window heuristic used at cold start before the SDK reports.
@@ -45,9 +47,12 @@ export function resolveClaudeContextWindow(fullId) {
   const m = OPUS_VERSION_RE.exec(fullId)
   if (m) {
     const major = Number(m[1])
-    const minor = Number(m[2])
+    const minor = m[2] === undefined ? null : Number(m[2])
     const [minMajor, minMinor] = OPUS_ONE_M_MIN_VERSION
-    if (major > minMajor || (major === minMajor && minor >= minMinor)) return 1_000_000
+    // A future major (opus 5+) is 1M with or without a minor; opus 4 needs an
+    // explicit minor >= 6 (bare `opus-4` is 4.0 → 200k, not assumed 4.6).
+    if (major > minMajor) return 1_000_000
+    if (major === minMajor && minor !== null && minor >= minMinor) return 1_000_000
   }
   return DEFAULT_CONTEXT_WINDOW
 }
