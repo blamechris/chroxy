@@ -41,6 +41,14 @@ export const CHROXY_CONTEXT_HINT_TEXT =
 // turn token overhead predictable.
 export const SESSION_PREAMBLE_MAX_LENGTH = 4000
 
+// #5936 (epic #5935): explicit overflow cap for the shared outgoing-message
+// queue (`_outgoingQueue`). Replaces the SDK's hard-coded mid-turn cap of 3
+// (#5711) with one bounded, surfaced limit shared by SDK + CLI. A send-while-
+// busy message past this cap is discarded with a visible `error` event
+// (`code: 'queue_full'`) — never a silent drop. Generous enough for a realistic
+// burst of owner follow-ups while still bounding memory if a client wedges.
+export const OUTGOING_QUEUE_MAX = 10
+
 // #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
 // — every provider event (SDK iterator message, CLI stdout JSONL line)
 // resets the timer; the window only bounds *silent stretches*, not wall-
@@ -359,6 +367,19 @@ export class BaseSession extends EventEmitter {
     this._messageIdPrefix = randomBytes(3).toString('hex')
     this._currentMessageId = null
     this._destroying = false
+    // #5936 (epic #5935): server-authoritative outgoing-message queue. Holds a
+    // follow-up message the OWNER sent while the session was still mid-turn
+    // (busy) and flushes it FIFO on the turn-complete `result` event — the
+    // single canonical "no more response is coming" signal (where `_isBusy`
+    // clears via `_clearMessageState`). Replaces the SDK's ad-hoc `_pendingInput`
+    // (cap 3) and the CLI's mid-turn reject, giving both providers one
+    // consistent queue → flush-on-complete behaviour. Each entry is
+    // `{ prompt, attachments, sendOptions }`; `sendOptions.clientMessageId`
+    // (when supplied) lets clients reconcile their optimistic queued bubble.
+    // Cross-device arbitration is enforced ABOVE this layer (input-handlers'
+    // input_conflict gate) — by the time a send reaches the queue it is the
+    // owner's own follow-up, never a way around primary-client arbitration.
+    this._outgoingQueue = []
     this._activeAgents = new Map()
     this._resultTimeout = null
     // #3899: parallel hard-cap setTimeout handle. Armed alongside
@@ -573,6 +594,117 @@ export class BaseSession extends EventEmitter {
    */
   clearBackgroundShell(shellId) {
     return this._backgroundShellTracker.clearBackgroundShell(shellId)
+  }
+
+  /**
+   * #5936: current depth of the outgoing-message queue. Read-only snapshot for
+   * tests + any caller that wants to reflect queued state without reaching into
+   * `_outgoingQueue` directly.
+   *
+   * @returns {number}
+   */
+  get outgoingQueueLength() {
+    return this._outgoingQueue.length
+  }
+
+  /**
+   * #5936: accept a send-while-busy follow-up into the shared outgoing queue.
+   * Called by a provider's `sendMessage` when `_isBusy` (the model is mid-turn)
+   * INSTEAD of dropping the message (old SDK) or rejecting with an error (old
+   * CLI). The message is held and flushed FIFO on the next `result` via
+   * `dequeueNextOutgoing()`.
+   *
+   * Overflow is surfaced, never silent: past `OUTGOING_QUEUE_MAX` the message is
+   * discarded with an `error` event (`code: 'queue_full'`) so the client can
+   * tell the user, rather than the queue growing unbounded.
+   *
+   * Emits `message_queued` (transient; mirrored to clients via the normalizer)
+   * on success so both clients can render the queued bubble.
+   *
+   * @param {{ prompt: any, attachments?: any, sendOptions?: object }} item
+   * @returns {boolean} true if the message was queued, false on overflow.
+   */
+  enqueueOutgoingMessage({ prompt, attachments, sendOptions } = {}) {
+    if (this._outgoingQueue.length >= OUTGOING_QUEUE_MAX) {
+      this.emit('error', {
+        code: 'queue_full',
+        message: `Outgoing message queue full (max ${OUTGOING_QUEUE_MAX}) — message discarded`,
+        recoverable: true,
+      })
+      return false
+    }
+    const opts = sendOptions || {}
+    this._outgoingQueue.push({ prompt, attachments, sendOptions: opts })
+    this.emit('message_queued', {
+      clientMessageId: typeof opts.clientMessageId === 'string' ? opts.clientMessageId : undefined,
+      text: typeof prompt === 'string' ? prompt : '',
+      queueLength: this._outgoingQueue.length,
+    })
+    ;(this._log || log).info(`Queued follow-up message (${this._outgoingQueue.length} pending)`)
+    return true
+  }
+
+  /**
+   * #5936: flush the head of the outgoing queue. Called on the turn-complete
+   * `result` path (`_clearMessageState` for CLI, the post-turn `finally` for
+   * SDK). Shifts exactly ONE item and re-dispatches it via `sendMessage` on a
+   * `process.nextTick` — that send re-sets `_isBusy`, so the NEXT `result`
+   * drains the following item, preserving FIFO order one-turn-at-a-time without
+   * re-entrancy (synchronous `result` listeners finish first).
+   *
+   * Emits `message_dequeued` with `reason: 'flush'` so clients transition the
+   * bubble from queued → sent.
+   *
+   * @returns {object|null} the dequeued item, or null when nothing to flush.
+   */
+  dequeueNextOutgoing() {
+    if (this._destroying || this._outgoingQueue.length === 0) return null
+    const item = this._outgoingQueue.shift()
+    const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
+      ? item.sendOptions.clientMessageId
+      : undefined
+    this.emit('message_dequeued', {
+      clientMessageId,
+      queueLength: this._outgoingQueue.length,
+      reason: 'flush',
+    })
+    ;(this._log || log).info(`Dequeuing follow-up message (${this._outgoingQueue.length} remaining)`)
+    process.nextTick(() => {
+      if (this._destroying) return
+      this.sendMessage(item.prompt, item.attachments, item.sendOptions)
+    })
+    return item
+  }
+
+  /**
+   * #5936: drop every queued outgoing message. Called by `interrupt()` so a
+   * deliberate Stop cancels the owner's pending follow-ups rather than letting
+   * them auto-fire after the turn the user just halted — the canonical interrupt
+   * policy for the queue (cancel, not flush; see issue #5936). Emits one
+   * `message_dequeued` per cleared item with `reason: 'interrupted'` so clients
+   * remove each queued bubble. `emit` defaults true; destroy() passes false to
+   * tear the queue down silently (no listeners care once the session is gone).
+   *
+   * @param {{ emit?: boolean }} [opts]
+   * @returns {number} how many messages were cleared.
+   */
+  clearOutgoingQueue({ emit = true } = {}) {
+    if (this._outgoingQueue.length === 0) return 0
+    const cleared = this._outgoingQueue.splice(0)
+    if (emit) {
+      for (const item of cleared) {
+        const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
+          ? item.sendOptions.clientMessageId
+          : undefined
+        this.emit('message_dequeued', {
+          clientMessageId,
+          queueLength: this._outgoingQueue.length,
+          reason: 'interrupted',
+        })
+      }
+      ;(this._log || log).info(`Cleared ${cleared.length} queued follow-up message(s) (interrupted)`)
+    }
+    return cleared.length
   }
 
   /**

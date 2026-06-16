@@ -631,6 +631,43 @@ export declare const ServerCancelActivityAckSchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 /**
+ * #5936 (epic #5935): outgoing-message queue mirror. The server-authoritative
+ * send queue holds a follow-up message the OWNER typed while the session was
+ * still mid-turn (busy) and flushes it FIFO on the turn-complete `result`
+ * event. These two transient events let clients render the queued message in a
+ * distinct "queued" state and reconcile it on flush/cancel — they are NOT
+ * replayed on reconnect (the live snapshot is authoritative).
+ *
+ * `message_queued` — a send-while-busy message was accepted into the queue.
+ * Carries the queued `text` (so clients can render the bubble), the sender's
+ * `clientMessageId` (when supplied, so the sender dedups its optimistic copy),
+ * and the post-enqueue `queueLength`.
+ */
+export declare const ServerMessageQueuedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"message_queued">;
+    sessionId: z.ZodString;
+    clientMessageId: z.ZodOptional<z.ZodString>;
+    text: z.ZodString;
+    queueLength: z.ZodNumber;
+}, z.core.$loose>;
+/**
+ * `message_dequeued` — a queued message left the queue. `reason` distinguishes
+ * the two exit paths: `'flush'` (auto-sent on turn-complete — the client should
+ * transition the bubble from queued → sent) vs `'interrupted'` (the queue was
+ * cancelled by an interrupt — the client should remove the queued bubble). The
+ * `queueLength` is the count remaining AFTER this item left.
+ */
+export declare const ServerMessageDequeuedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"message_dequeued">;
+    sessionId: z.ZodString;
+    clientMessageId: z.ZodOptional<z.ZodString>;
+    queueLength: z.ZodNumber;
+    reason: z.ZodEnum<{
+        flush: "flush";
+        interrupted: "interrupted";
+    }>;
+}, z.core.$loose>;
+/**
  * Verdict for a repo — the survey's classification of "what is this repo's
  * current state". Drives the colour-coded tag in the Control Room table:
  *   - `'live'`        — actively worked (a chroxy session is/was recently running).
@@ -2426,6 +2463,8 @@ export type ActivityEntry = z.infer<typeof ActivityEntrySchema>;
 export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapshotSchema>;
 export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>;
 export type ServerCancelActivityAckMessage = z.infer<typeof ServerCancelActivityAckSchema>;
+export type ServerMessageQueuedMessage = z.infer<typeof ServerMessageQueuedSchema>;
+export type ServerMessageDequeuedMessage = z.infer<typeof ServerMessageDequeuedSchema>;
 export type ServerBudgetResumeAckMessage = z.infer<typeof ServerBudgetResumeAckSchema>;
 export type RepoVerdict = z.infer<typeof RepoVerdictSchema>;
 export type RepoTree = z.infer<typeof RepoTreeSchema>;

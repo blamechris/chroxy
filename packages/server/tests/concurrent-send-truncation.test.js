@@ -196,18 +196,27 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
       return session
     }
 
-    it('sendMessage emits "Already processing a message" without touching _currentMessageId or _currentCtx', async () => {
+    // #5936: a send-while-busy follow-up no longer errors — it ENQUEUES into the
+    // shared outgoing queue (flushed FIFO on the turn-complete `result`). The
+    // load-bearing invariant for this regression file is unchanged: the
+    // concurrent send must NOT touch the in-flight turn's `_currentMessageId` /
+    // `_currentCtx` (those are what truncation corrupted).
+    it('queues a concurrent send (message_queued) without touching _currentMessageId or _currentCtx', async () => {
       const session = createSession()
       const errors = []
+      const queued = []
       session.on('error', (e) => errors.push(e))
+      session.on('message_queued', (e) => queued.push(e))
 
       const beforeMessageId = session._currentMessageId
       const beforeCtx = session._currentCtx
 
-      await session.sendMessage('concurrent input that should be rejected')
+      await session.sendMessage('concurrent follow-up that should be queued')
 
-      assert.equal(errors.length, 1)
-      assert.equal(errors[0].message, 'Already processing a message')
+      assert.equal(errors.length, 0, 'a queued send must not emit an error')
+      assert.equal(queued.length, 1, 'a send-while-busy emits message_queued')
+      assert.equal(queued[0].text, 'concurrent follow-up that should be queued')
+      assert.equal(session._outgoingQueue.length, 1)
       // Critically: _currentMessageId and _currentCtx are unchanged. The
       // in-flight response continues uninterrupted.
       assert.equal(session._currentMessageId, beforeMessageId)
@@ -215,15 +224,15 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
       assert.equal(session._isBusy, true)
     })
 
-    it('rejected concurrent send does not emit stream_end or any side-effect on the in-flight response', async () => {
+    it('queued concurrent send does not emit stream_end or any side-effect on the in-flight response', async () => {
       const session = createSession()
       const events = []
       session.on('stream_start', (d) => events.push({ type: 'stream_start', ...d }))
       session.on('stream_end', (d) => events.push({ type: 'stream_end', ...d }))
       session.on('stream_delta', (d) => events.push({ type: 'stream_delta', ...d }))
-      // Attach an error listener to catch the rejection — without it Node
-      // would throw "Unhandled error" since EventEmitter requires a listener
-      // for every emitted error event.
+      // The concurrent send now enqueues (no error), but keep an error listener
+      // as a guard so an unexpected error event surfaces as a test failure
+      // rather than an unhandled 'error' crash.
       session.on('error', () => {})
 
       // Simulate an in-flight stream.
@@ -236,7 +245,7 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
         event: { type: 'content_block_delta', delta: { type: 'text_delta', text: 'in-flight content' } },
       })
 
-      // Concurrent send is rejected.
+      // Concurrent send is queued (not rejected) — still no effect on the stream.
       await session.sendMessage('concurrent send')
 
       // Only the synthetic in-flight events should appear — no stream_end.
@@ -284,7 +293,7 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
       return { session, sessionId }
     }
 
-    it('synthesized in-flight stream + concurrent rejected send results in full persisted content', async () => {
+    it('synthesized in-flight stream + concurrent queued send results in full persisted content', async () => {
       const { session, sessionId } = wireUp()
 
       // Stream starts and accumulates 5 KB of content.
@@ -300,12 +309,16 @@ describe('concurrent-send truncation (handoff Issue 3 / #3163)', () => {
         })
       }
 
-      // Concurrent send is rejected mid-stream — _isBusy=true.
+      // Concurrent send is queued mid-stream — _isBusy=true (#5936). Queueing
+      // must not touch the in-flight stream's accumulator any more than the old
+      // reject did — that is the truncation invariant under test.
       const errors = []
+      const queued = []
       session.on('error', (e) => errors.push(e))
-      await session.sendMessage('rejected')
-      assert.equal(errors.length, 1)
-      assert.equal(errors[0].message, 'Already processing a message')
+      session.on('message_queued', (e) => queued.push(e))
+      await session.sendMessage('queued follow-up')
+      assert.equal(errors.length, 0)
+      assert.equal(queued.length, 1)
 
       // Stream completes normally.
       session._handleEvent({

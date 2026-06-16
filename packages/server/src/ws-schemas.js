@@ -96,6 +96,8 @@ export {
   ServerAgentCompletedSchema,
   ServerClientFocusChangedSchema,
   ServerMcpServersSchema,
+  ServerMessageQueuedSchema,
+  ServerMessageDequeuedSchema,
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,

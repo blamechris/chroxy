@@ -629,7 +629,12 @@ export class CliSession extends BaseSession {
    */
   async sendMessage(prompt, attachments, options = {}) {
     if (this._isBusy) {
-      this.emit('error', { message: 'Already processing a message' })
+      // #5936 (epic #5935): a send-while-busy follow-up now QUEUES into the
+      // shared outgoing queue (BaseSession) instead of rejecting with "Already
+      // processing a message" — flushed FIFO on the turn-complete `result` (via
+      // _clearMessageState's drain below). Matches the SDK's behaviour. The
+      // overflow cap + the message_queued mirror live in enqueueOutgoingMessage.
+      this.enqueueOutgoingMessage({ prompt, attachments, sendOptions: options })
       return
     }
 
@@ -1316,15 +1321,30 @@ export class CliSession extends BaseSession {
     // This prevents re-entrancy where both a result listener and the drain
     // both call sendMessage() in the same tick, sending two messages when
     // only one is expected.
-    if (this._pendingQueue.length > 0 && this._processReady) {
-      process.nextTick(() => {
-        if (this._destroying) return
-        if (!this._processReady || this._pendingQueue.length === 0) return
-        const pending = this._pendingQueue.shift()
-        // #4828: session-scoped (post-result, post-init).
-        ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
-        this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
-      })
+    //
+    // #5936: two distinct queues drain here, in priority order:
+    //   1. `_outgoingQueue` (shared, BaseSession) — mid-turn send-while-busy
+    //      follow-ups. Flushed via dequeueNextOutgoing() (which emits
+    //      message_dequeued + re-dispatches on nextTick). This is the common
+    //      case after a normal turn.
+    //   2. `_pendingQueue` (CLI-only) — messages that arrived while the child
+    //      process was NOT ready (pre-init / respawn). Pre-#5936 behaviour,
+    //      unchanged. Only drained when the outgoing queue is empty so a single
+    //      turn flushes exactly one message and the next `result` flushes the
+    //      next (each re-dispatch re-sets _isBusy).
+    if (this._processReady) {
+      if (this._outgoingQueue.length > 0) {
+        this.dequeueNextOutgoing()
+      } else if (this._pendingQueue.length > 0) {
+        process.nextTick(() => {
+          if (this._destroying) return
+          if (!this._processReady || this._pendingQueue.length === 0) return
+          const pending = this._pendingQueue.shift()
+          // #4828: session-scoped (post-result, post-init).
+          ;(this._log || log).info(`Dequeuing next pending message after result (${this._pendingQueue.length} remaining)`)
+          this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
+        })
+      }
     }
   }
 
@@ -1652,6 +1672,13 @@ export class CliSession extends BaseSession {
 
   /** Interrupt the current message (send SIGINT to child process) */
   interrupt() {
+    // #5936: a deliberate Stop cancels the owner's queued follow-ups (cancel,
+    // not flush). Clear BEFORE the SIGINT so the synthetic interrupted-turn
+    // `result` → _clearMessageState drain sees an empty queue and nothing
+    // auto-fires after the halt. Runs even with no child so a queued send is
+    // never stranded.
+    this.clearOutgoingQueue()
+
     if (!this._child) return
 
     // #4602: mark the imminent child exit as user-initiated so
@@ -1690,6 +1717,9 @@ export class CliSession extends BaseSession {
   destroy() {
     this._destroying = true
     this._respawning = false
+    // #5936: tear down the shared outgoing queue silently (no message_dequeued
+    // for a session that's going away).
+    this.clearOutgoingQueue({ emit: false })
     this._clearIntentionalStop()
 
     // Clean up permission hook — destroy() now chains unregister() after any

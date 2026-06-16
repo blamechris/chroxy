@@ -51,15 +51,11 @@ const log = createLogger('sdk')
 
 // Default max accumulated size for tool_use input (~256KB)
 const DEFAULT_MAX_TOOL_INPUT_LENGTH = 262144
-// #5711 (Gap 3): cap the SDK's mid-turn follow-up queue. SdkSession is the only
-// provider that QUEUES sends during an in-flight turn (CliSession instead
-// rejects a mid-turn send with "Already processing a message"), and that queue
-// was unbounded — a user mashing send during a long turn accumulated an
-// unbounded backlog that then flooded the agent when the turn ended (a memory
-// footgun + a surprising burst of late messages). Reuse the cap value (3) and
-// the discard-error wording from CliSession's not-ready queue (cli-session.js)
-// so the overflow UX is consistent across providers.
-const MAX_PENDING_INPUT = 3
+// #5936 (epic #5935): the mid-turn follow-up queue moved to BaseSession's shared
+// `_outgoingQueue` (capped at OUTGOING_QUEUE_MAX), so both SDK and CLI now QUEUE
+// send-while-busy follow-ups and flush them FIFO on `result` — replacing the
+// SDK's old `_pendingInput` (cap 3, #5711) and the CLI's "Already processing a
+// message" reject with one consistent queue → flush-on-complete behaviour.
 
 // Marker stamped on a proc the first time _attachSidecarProcessListeners()
 // wires its default listeners (#3504 review).  Subsequent calls on the same
@@ -365,7 +361,6 @@ export class SdkSession extends BaseSession {
     this._log = null
     this._query = null
     this._thinkingLevel = null
-    this._pendingInput = []
 
     // #5269 (Control Room Phase 2a): map a Task subagent's tool_use_id (the id
     // chroxy keys activity/agent nodes by) → the SDK's separate `task_id`,
@@ -509,16 +504,19 @@ export class SdkSession extends BaseSession {
       // Drop any messages that piled up in the queue while the flag was
       // flipping. Without this, the post-turn dequeue would call
       // sendMessage(...) once per queued item and emit one error per message —
-      // noisy, and pointless because none of them can be sent.
-      if (this._pendingInput?.length) {
+      // noisy, and pointless because none of them can be sent. #5936: the queue
+      // is now the shared `_outgoingQueue`; clear it silently (no per-item
+      // message_dequeued — these are discarded, not flushed) and surface the
+      // single stdin_disabled error below.
+      if (this._outgoingQueue.length) {
         if (!warnSuppressed) {
           // #4828: session-scoped when init has fired.
           ;(this._log || log).warn(
-            `Discarding ${this._pendingInput.length} queued follow-up message(s) — ` +
+            `Discarding ${this._outgoingQueue.length} queued follow-up message(s) — ` +
             'stdin forwarding is disabled'
           )
         }
-        this._pendingInput.length = 0
+        this.clearOutgoingQueue({ emit: false })
       }
       this.emit('error', {
         code: 'stdin_disabled',
@@ -529,19 +527,11 @@ export class SdkSession extends BaseSession {
     }
 
     if (this._isBusy) {
-      // Queue the message — it will be sent after the current turn completes
-      if (!this._pendingInput) this._pendingInput = []
-      // #5711 (Gap 3): bound this SDK-specific mid-turn queue (max 3). Discard
-      // the overflow with a visible error rather than silently growing, reusing
-      // CliSession's discard-cap value + wording for a consistent overflow UX.
-      if (this._pendingInput.length >= MAX_PENDING_INPUT) {
-        this.emit('error', { message: `Pending message queue full (max ${MAX_PENDING_INPUT}) — message discarded` })
-        return
-      }
-      this._pendingInput.push({ prompt, attachments, sendOptions })
-      // #4828: session-scoped when init has fired (queue path requires an
-      // in-flight turn, so init is normally already in by this point).
-      ;(this._log || log).info(`Queued follow-up message (${this._pendingInput.length} pending)`)
+      // #5936 (epic #5935): a send-while-busy follow-up goes into the shared
+      // outgoing queue (BaseSession) — flushed FIFO on the next `result`. The
+      // overflow cap + the `message_queued` mirror event live in
+      // enqueueOutgoingMessage; nothing to do here but enqueue and return.
+      this.enqueueOutgoingMessage({ prompt, attachments, sendOptions })
       return
     }
 
@@ -994,8 +984,11 @@ export class SdkSession extends BaseSession {
       // mis-trigger a spurious `stopped` emit there. Idempotent — the
       // catch path already cleared it on the throw path.
       this._clearIntentionalStop()
-      // Dequeue any follow-up messages that arrived while busy
-      if (this._pendingInput?.length && !this._destroying) {
+      // Dequeue any follow-up messages that arrived while busy (#5936: the
+      // shared `_outgoingQueue`; flush one item via dequeueNextOutgoing, whose
+      // re-dispatched sendMessage re-sets _isBusy so the next `result` drains
+      // the following item — FIFO, one turn at a time).
+      if (this._outgoingQueue.length && !this._destroying) {
         // #3562: if the SidecarProcess latched stdin_disabled mid-turn (e.g.
         // the PassThrough closed while _callQuery was still streaming), the
         // entry-gate at the top of sendMessage has already been bypassed
@@ -1008,21 +1001,15 @@ export class SdkSession extends BaseSession {
         if (this._stdinForwardingDisabled) {
           // #4828: session-scoped (finally block runs strictly post-init).
           ;(this._log || log).warn(
-            `Discarding ${this._pendingInput.length} queued follow-up message(s) after turn finish — ` +
+            `Discarding ${this._outgoingQueue.length} queued follow-up message(s) after turn finish — ` +
             'stdin forwarding is disabled'
           )
-          this._pendingInput.length = 0
+          // Silent clear — these are discarded (stdin gone), not flushed, so no
+          // message_dequeued (which signals "sent") should fire for them.
+          this.clearOutgoingQueue({ emit: false })
           return
         }
-        const next = this._pendingInput.shift()
-        // #4828: session-scoped.
-        ;(this._log || log).info(`Dequeuing follow-up message (${this._pendingInput.length} remaining)`)
-        // Use setImmediate/nextTick to avoid stack depth issues
-        process.nextTick(() => {
-          if (!this._destroying) {
-            this.sendMessage(next.prompt, next.attachments, next.sendOptions)
-          }
-        })
+        this.dequeueNextOutgoing()
       }
     }
   }
@@ -1525,6 +1512,13 @@ export class SdkSession extends BaseSession {
    * Interrupt the current query.
    */
   async interrupt() {
+    // #5936: a deliberate Stop cancels the owner's queued follow-ups (cancel,
+    // not flush) — clear BEFORE the abort so the turn-end `result` flush in the
+    // `finally` sees an empty queue and nothing auto-fires after the halt.
+    // Runs even when there is no active `_query` (queued sends with the turn
+    // already settling) so an interrupt never strands a queued message.
+    this.clearOutgoingQueue()
+
     if (!this._query) return
 
     // #4881: mark the imminent query teardown as user-initiated so the
@@ -1737,7 +1731,9 @@ export class SdkSession extends BaseSession {
    */
   destroy() {
     this._destroying = true
-    this._pendingInput = []
+    // #5936: tear down the shared outgoing queue silently — no message_dequeued
+    // (which signals "sent") for a session that's going away.
+    this.clearOutgoingQueue({ emit: false })
     // #4881: clear so a teardown after interrupt() never leaks the flag past
     // this session instance. Mirrors CliSession.destroy() (#4602).
     this._clearIntentionalStop()

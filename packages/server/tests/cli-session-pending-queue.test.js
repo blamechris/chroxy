@@ -295,18 +295,24 @@ describe('CliSession._pendingQueue — drain via _clearMessageState', () => {
   })
 })
 
-describe('CliSession._pendingQueue — busy guard is unaffected', () => {
-  it('still rejects send when busy, regardless of queue', () => {
+describe('CliSession._pendingQueue — busy path queues into the shared outgoing queue', () => {
+  // #5936 (epic #5935): a send-while-busy follow-up no longer errors — it goes
+  // into the shared `_outgoingQueue`, NOT the pre-init `_pendingQueue`. The two
+  // queues stay independent: the not-ready (pre-init) queue is untouched here.
+  it('queues a busy send into _outgoingQueue, leaving _pendingQueue untouched', () => {
     const session = createReadySession()
     session._isBusy = true
     const errors = []
+    const queued = []
     session.on('error', (e) => errors.push(e))
+    session.on('message_queued', (e) => queued.push(e))
 
-    session.sendMessage('should-fail')
+    session.sendMessage('follow-up')
 
-    assert.equal(errors.length, 1)
-    assert.ok(errors[0].message.includes('Already processing'))
-    // Queue must not be touched
+    assert.equal(errors.length, 0)
+    assert.equal(queued.length, 1)
+    assert.equal(session._outgoingQueue.length, 1)
+    // The pre-init queue must not be touched.
     assert.equal(session._pendingQueue.length, 0)
   })
 })

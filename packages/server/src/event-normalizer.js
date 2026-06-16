@@ -326,6 +326,37 @@ Object.assign(EVENT_MAP, {
     }],
   }),
 
+  // #5936 (epic #5935): outgoing-message queue mirror. The session emits these
+  // when a send-while-busy follow-up enters (`message_queued`) or leaves
+  // (`message_dequeued`) the server-authoritative queue. We inject the canonical
+  // `ctx.sessionId` (the SessionManager key the dashboard routes on) — exactly
+  // like activity_delta / background_work_changed — regardless of any internal
+  // id the session held. Both transient: not replayed from history; the live
+  // queue snapshot is authoritative on reconnect.
+  message_queued: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'message_queued',
+        sessionId: ctx.sessionId,
+        ...(typeof data?.clientMessageId === 'string' ? { clientMessageId: data.clientMessageId } : {}),
+        text: typeof data?.text === 'string' ? data.text : '',
+        queueLength: typeof data?.queueLength === 'number' ? data.queueLength : 0,
+      },
+    }],
+  }),
+
+  message_dequeued: (data, ctx) => ({
+    messages: [{
+      msg: {
+        type: 'message_dequeued',
+        sessionId: ctx.sessionId,
+        ...(typeof data?.clientMessageId === 'string' ? { clientMessageId: data.clientMessageId } : {}),
+        queueLength: typeof data?.queueLength === 'number' ? data.queueLength : 0,
+        reason: data?.reason === 'interrupted' ? 'interrupted' : 'flush',
+      },
+    }],
+  }),
+
   // #3234: skill content-hash mismatch detected by SkillsTrustStore. Only the
   // 8-char hash prefixes go on the wire — the full SHA never leaves the
   // server, matching the sanitised log format from #3215. `mode` is the

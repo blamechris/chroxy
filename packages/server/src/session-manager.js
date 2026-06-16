@@ -2497,7 +2497,11 @@ export class SessionManager extends EventEmitter {
     // activity tree (ActivityRegistry on BaseSession). Transient — not
     // replayed from history; a reconnecting client gets the full tree from
     // the snapshot-on-subscribe in ws-history.sendSessionInfo.
-    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot']
+    // #5936: message_queued / message_dequeued mirror the server-authoritative
+    // outgoing-message queue (BaseSession `_outgoingQueue`). Transient — the
+    // live queue snapshot is authoritative, so they are not replayed on
+    // reconnect (a reconnecting client re-receives queued state from the store).
+    const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]
     for (const event of TRANSIENT_EVENTS) {
