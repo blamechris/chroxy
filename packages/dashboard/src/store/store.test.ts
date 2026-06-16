@@ -464,6 +464,29 @@ describe('useConnectionStore', () => {
       expect(ss.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-2']);
     });
 
+    it('sendCancelQueued with an explicit sessionId clears THAT session, not the active one', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's-active',
+        sessionStates: {
+          's-active': { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-a', text: 'a', queuedAt: 1, status: 'confirmed' }] },
+          's-other': { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-b', text: 'b', queuedAt: 1, status: 'confirmed' }] },
+        },
+      });
+
+      useConnectionStore.getState().sendCancelQueued('uin-b', 's-other');
+
+      const states = useConnectionStore.getState().sessionStates;
+      // The target session's entry is removed; the ACTIVE session is untouched.
+      expect(states['s-other']!.queuedMessages).toHaveLength(0);
+      expect(states['s-active']!.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-a']);
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload.sessionId).toBe('s-other');
+    });
+
     it('sendCancelQueued is a no-op offline (not queueable — races the flush)', async () => {
       const { useConnectionStore, createEmptySessionState } = await import('./connection');
       useConnectionStore.setState({

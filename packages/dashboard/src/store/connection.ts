@@ -2387,8 +2387,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!(socket && socket.readyState === WebSocket.OPEN)) return false;
     const payload: Record<string, unknown> = { type: 'cancel_queued', clientMessageId };
     if (sid) payload.sessionId = sid;
+    // Optimistically remove from the TARGET session's queue (updateSession, not
+    // updateActiveSession) so a future cross-session cancel — `sid` resolved
+    // from an explicit sessionId rather than the active one — clears the right
+    // queue, not whichever session happens to be active.
     if (sid && get().sessionStates[sid]) {
-      updateActiveSession((ss) => ({
+      updateSession(sid, (ss) => ({
         queuedMessages: removeQueuedMessage(ss.queuedMessages, clientMessageId),
       }));
     }
