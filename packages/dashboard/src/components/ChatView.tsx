@@ -18,7 +18,7 @@
  */
 import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
 import { bumpRenderCount } from '@chroxy/store-core'
-import { ThinkingDots } from './ThinkingDots'
+import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
 import { MessageRowShell } from './MeasuredRow'
 import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
@@ -159,6 +159,13 @@ export interface ChatViewProps {
   queuedIds?: ReadonlySet<string>
   /** #5939: cancel a single queued follow-up by its message id (cancel_queued). */
   onCancelQueued?: (id: string) => void
+  /**
+   * #5953 (epic #5951): label for the in-chat "Claude is working" indicator
+   * shown at the streaming tail. The parent derives it from the active session's
+   * in-flight tool ("Running Bash…") or passes nothing for the generic default
+   * ("Claude is working…"). A stable string so it doesn't churn per token.
+   */
+  workingLabel?: string
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -302,7 +309,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
@@ -674,7 +681,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
               style={{ flex: '0 0 auto', height: range.bottomSpacer }}
             />
           )}
-          {(isStreaming || isBusy) && <ThinkingDots />}
+          {(isStreaming || isBusy) && <WorkingIndicator label={workingLabel} />}
         </div>
       </ChatExpandContext.Provider>
 
