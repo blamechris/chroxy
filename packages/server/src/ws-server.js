@@ -2293,7 +2293,10 @@ export class WsServer {
   /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
-    this._clientSend(ws, client, message)
+    // #5721: propagate the delivery boolean so callers gating crypto state on a
+    // frame reaching the wire (the eager handshake's auth_ok) can observe a
+    // swallowed send failure. Other callers ignore the return, unchanged.
+    return this._clientSend(ws, client, message)
   }
 
   /**

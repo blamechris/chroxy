@@ -170,6 +170,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     serverMode, serverVersion, latestVersion, gitInfo,
     encryptionEnabled, localhostBypass, keyExchangeTimeoutMs,
     protocolVersion, minProtocolVersion, webTaskManager,
+    // #5721: `send` MUST be `WsServer._send` (which returns the delivery
+    // boolean from the client-sender), NOT a wrapper that drops the return —
+    // the eager-handshake gate below reads `authOkDelivered` to decide whether
+    // to mark E2E established. A ctx-wiring refactor that swallows the return
+    // would silently re-open the swallowed-send wedge this fix closes.
     send, broadcast, getConnectedClientList, permissions,
     resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs,
     // #4835: per-device active-session memory. Consulted below before
@@ -374,7 +379,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
       ? streamStallTimeoutMs
       : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
-  send(ws, {
+  const authOkDelivered = send(ws, {
     type: 'auth_ok',
     clientId: client.id,
     serverMode,
@@ -425,6 +430,20 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // from auth_ok.serverPublicKey + its own secret, so both sides start at
   // nonce 0 in lockstep. This is the un-gated eager path — no postAuthQueue.
   if (eagerEncryptionState) {
+    // #5721: gate the crypto activation on the auth_ok ACTUALLY reaching the
+    // wire. `send` (_clientSend) swallows a send throw internally, so without
+    // this check a failed/half-open auth_ok would still flip encryptionState —
+    // the server would then encrypt the whole post-auth burst with a key the
+    // client never received (it never got serverPublicKey), wedging the session
+    // until the 15–30s heartbeat sweep reaps it. Mirror the discrete-path
+    // rollback (#5702 8b / ws-auth.js key_exchange_ok): on non-delivery, do NOT
+    // mark E2E established, and close so the client reconnects and retries.
+    if (!authOkDelivered) {
+      log.error(`Failed to deliver eager auth_ok to ${client.id} — aborting handshake (client never received serverPublicKey)`)
+      client.encryptionState = null
+      try { ws.close(1011, 'Handshake failed') } catch { /* socket already gone */ }
+      return
+    }
     client.encryptionState = eagerEncryptionState
     log.info(`E2E encryption established eagerly with ${client.id}`)
   }
