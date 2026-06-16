@@ -51,6 +51,23 @@ describe('ChatView', () => {
     expect(screen.queryByTestId('thinking-dots')).not.toBeInTheDocument()
   })
 
+  // #5953 — the streaming tail shows the labelled WorkingIndicator.
+  it('shows the working indicator with the generic default label when streaming', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming />)
+    expect(screen.getByTestId('working-indicator')).toBeInTheDocument()
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Claude is working…')
+  })
+
+  it('surfaces the in-flight activity via workingLabel', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming workingLabel="Running Bash…" />)
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Running Bash…')
+  })
+
+  it('hides the working indicator when idle', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming={false} isBusy={false} workingLabel="Running Bash…" />)
+    expect(screen.queryByTestId('working-indicator')).not.toBeInTheDocument()
+  })
+
   it('shows scroll-to-bottom button when scrolled up', () => {
     const messages = makeMessages(3)
     render(<ChatView messages={messages} isStreaming={false} />)

@@ -13,6 +13,7 @@ import {
   expandPasteMarkers,
   resolveContextWindow,
   providerSupportsMultiQuestion,
+  formatToolName,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -33,7 +34,7 @@ import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
 import { formatTranscript } from './lib/transcript'
-import { ActivityIndicator } from './components/ActivityIndicator'
+import { ActivityIndicator, findInFlightToolUse } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
 import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
 import { SessionNotFoundChip } from './components/SessionNotFoundChip'
@@ -268,6 +269,17 @@ export function App() {
     () => new Set((queuedMessages || []).map(m => m.clientMessageId).filter((id): id is string => !!id)),
     [queuedMessages],
   )
+
+  // #5953 (epic #5951): label for the in-chat "Claude is working" indicator.
+  // Surfaces the current in-flight tool ("Running Bash…") using the same
+  // detection the ActivityIndicator uses; falls back to undefined so the
+  // indicator shows its generic default ("Claude is working…"). The walk is
+  // O(1) in practice (the unresolved tool is at the tail) and the label string
+  // is stable across response tokens (it only changes when the tool changes).
+  const workingLabel = useMemo(() => {
+    const inFlight = findInFlightToolUse(storeMessages)
+    return inFlight ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)}…` : undefined
+  }, [storeMessages])
 
   // #4735 / #4731: the multi-question AskUserQuestion form is gated per
   // session type. TUI / CLI sessions (`claude-tui` / `claude-cli`) keep
@@ -2076,6 +2088,7 @@ export function App() {
                         scrollToBottomSignal={scrollToBottomSignal}
                         queuedIds={queuedIds}
                         onCancelQueued={onCancelQueued}
+                        workingLabel={workingLabel}
                       />
                     }
                     second={
@@ -2120,6 +2133,7 @@ export function App() {
                         scrollToBottomSignal={scrollToBottomSignal}
                         queuedIds={queuedIds}
                         onCancelQueued={onCancelQueued}
+                        workingLabel={workingLabel}
                       />
                     </div>
                     <div

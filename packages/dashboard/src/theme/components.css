@@ -5151,6 +5151,33 @@ button.sidebar-token-view-session-row:hover {
   align-self: flex-start;
 }
 
+/* #5953 (epic #5951): in-chat "Claude is working" indicator at the streaming
+   tail — the animated dots plus a label surfacing the current activity, so a
+   live turn reads as actively working rather than a static/hung view. The
+   nested `.thinking-dots` drops its own padding so the row aligns tightly. */
+.working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 14px 8px;
+}
+
+.working-indicator .thinking-dots {
+  padding: 0;
+  /* `.thinking-dots` sets `align-self: flex-start` for its standalone use; in
+     the indicator row that top-aligns the dots against the label, so override
+     it back to the parent's center alignment. */
+  align-self: center;
+}
+
+.working-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1;
+}
+
 .thinking-dot {
   width: 8px;
   height: 8px;
