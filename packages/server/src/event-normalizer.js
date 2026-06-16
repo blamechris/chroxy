@@ -331,8 +331,9 @@ Object.assign(EVENT_MAP, {
   // (`message_dequeued`) the server-authoritative queue. We inject the canonical
   // `ctx.sessionId` (the SessionManager key the dashboard routes on) — exactly
   // like activity_delta / background_work_changed — regardless of any internal
-  // id the session held. Both transient: not replayed from history; the live
-  // queue snapshot is authoritative on reconnect.
+  // id the session held. Both transient deltas: not replayed from history. A
+  // server→client queue SNAPSHOT for reconnect rehydration is the store-core
+  // follow-up (#5937); this slice ships only the live deltas.
   message_queued: (data, ctx) => ({
     messages: [{
       msg: {

@@ -166,6 +166,9 @@ describe('outgoing-message queue (#5936)', () => {
       assert.equal(dequeued.length, 2)
       assert.ok(dequeued.every((e) => e.reason === 'interrupted'))
       assert.equal(dequeued[0].clientMessageId, 'uin-1')
+      // queueLength stays the documented "count remaining AFTER this item left":
+      // a descending sequence ending at 0, not 0 for every item (Copilot #5941).
+      assert.deepEqual(dequeued.map((e) => e.queueLength), [1, 0])
     })
 
     it('clearOutgoingQueue({ emit: false }) tears down silently (destroy path)', () => {

@@ -2498,9 +2498,13 @@ export class SessionManager extends EventEmitter {
     // replayed from history; a reconnecting client gets the full tree from
     // the snapshot-on-subscribe in ws-history.sendSessionInfo.
     // #5936: message_queued / message_dequeued mirror the server-authoritative
-    // outgoing-message queue (BaseSession `_outgoingQueue`). Transient — the
-    // live queue snapshot is authoritative, so they are not replayed on
-    // reconnect (a reconnecting client re-receives queued state from the store).
+    // outgoing-message queue (BaseSession `_outgoingQueue`). Transient (like
+    // activity_delta) — they are delta events, NOT replayed from history. This
+    // slice ships only the deltas; a server→client queue SNAPSHOT (so a
+    // reconnecting client can rehydrate any still-queued state) is the
+    // store-core follow-up (#5937). Until then a client that reconnects
+    // mid-queue won't see the pre-existing queued items — acceptable for the
+    // foundation slice, tracked in #5937.
     const builtinTransient = ['permission_request', 'permission_resolved', 'permission_expired', 'agent_spawned', 'agent_completed', 'agent_event', 'plan_started', 'plan_ready', 'mcp_servers', 'skill_changed', 'skill_trust_request', 'skill_trust_granted', 'inactivity_warning', 'background_work_changed', 'stopped', 'activity_delta', 'activity_snapshot', 'message_queued', 'message_dequeued']
     const customEvents = Array.isArray(session.constructor.customEvents) ? session.constructor.customEvents : []
     const TRANSIENT_EVENTS = [...new Set([...builtinTransient, ...customEvents])]

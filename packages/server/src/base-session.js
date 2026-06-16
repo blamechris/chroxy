@@ -698,16 +698,21 @@ export class BaseSession extends EventEmitter {
     if (this._outgoingQueue.length === 0) return 0
     const cleared = this._outgoingQueue.splice(0)
     if (emit) {
-      for (const item of cleared) {
+      // Report a DESCENDING queueLength as each item is removed (cleared.length
+      // - 1, - 2, … 0) so the field keeps its documented "count remaining AFTER
+      // this item left" meaning — matching dequeueNextOutgoing. The array is
+      // already spliced empty, so derive the count from the index rather than
+      // reading `_outgoingQueue.length` (which would report 0 for every item).
+      cleared.forEach((item, i) => {
         const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
           ? item.sendOptions.clientMessageId
           : undefined
         this.emit('message_dequeued', {
           clientMessageId,
-          queueLength: this._outgoingQueue.length,
+          queueLength: cleared.length - i - 1,
           reason: 'interrupted',
         })
-      }
+      })
       ;(this._log || log).info(`Cleared ${cleared.length} queued follow-up message(s) (interrupted)`)
     }
     return cleared.length
