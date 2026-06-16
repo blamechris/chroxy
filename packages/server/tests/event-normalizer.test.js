@@ -1101,6 +1101,16 @@ describe('EventNormalizer adaptive flush window (#5516)', () => {
     const counts = { 'sess-multi': 3, 'sess-solo': 1 }
     const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
     withSetTimeoutSpy((delays) => {
+      // Pin the clock the normalizer reads so the pull-in is deterministic.
+      // bufferDelta computes `wantDeadline = performance.now() + intervalMs` on
+      // each call and only reschedules when the new deadline is SOONER than the
+      // armed one. The solo call (now+8) must beat the multi deadline (now0+16),
+      // which holds only while < 8ms of wall-clock elapsed between the two
+      // synchronous calls. Under a >8ms GC/scheduling stall on a loaded CI runner
+      // that window closes and the reschedule is (correctly) skipped — a real
+      // flake (#5923). Freeze performance.now so the two reads are equal (0ms
+      // elapsed), exercising the pull-in path the assertions below describe.
+      mock.method(performance, 'now', () => 1000)
       // Multi-client session arms the 16ms timer first.
       n.bufferDelta('sess-multi', 'm', 'a')
       assert.equal(delays[0], 16)
