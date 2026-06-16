@@ -69,6 +69,8 @@ It does **not** derive a key from machine identifiers and "encrypt" with that. S
 
 **Caution — it disables keychain access entirely, including on read.** If the file is *already encrypted* and you set this flag, the read path can no longer reach the data key, so the store fails closed (`encrypted but its decryption key is unavailable`) and the credentials read as missing until you either unset the flag or re-enter them as plaintext. Only set it on a host whose `credentials.json` is still plaintext, or accept that you must re-enter the credentials.
 
+> **Sibling flag — the api-token keychain.** `CHROXY_CRED_DISABLE_KEYCHAIN` only covers the credential-store **data key**. The daemon's primary api-token is stored by a separate consumer (`keychain.js`, service `chroxy` / account `api-token`). `CHROXY_DISABLE_KEYCHAIN=1` is its equivalent off-switch: when set, `keychain.js` reports the keychain as unavailable, so the token falls back to the `0600` config file / `API_TOKEN` env exactly as on a host with no keychain. The server **test suite sets this by default** (`tests/_setup.mjs`) so tests never shell out to the real `security`/`secret-tool`.
+
 ## 6. Failure modes
 
 - **Lost / different-machine keychain.** If the file is encrypted but the `chroxy-cred-key` entry is missing (restored to a new machine, wiped keychain), the read **fails closed**: it returns no value and surfaces a clear status error (`encrypted but its decryption key is unavailable`), rather than silently treating the repo as having no credentials. The operator re-enters the credentials, which generates a fresh key.

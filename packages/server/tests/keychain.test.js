@@ -7,6 +7,18 @@ import { fileURLToPath } from 'url'
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const srcDir = join(__dirname, '../src')
 
+// `tests/_setup.mjs` sets CHROXY_DISABLE_KEYCHAIN=1 suite-wide so server tests
+// never shell out to the real OS keychain (modal-prompt spam on a broken login
+// keychain — see server_suite_real_keychain_prompts.md). The integration tests
+// below are the ONLY ones that exercise a real round-trip; gate them behind an
+// explicit opt-in so a deliberate `CHROXY_TEST_REAL_KEYCHAIN=1` run (e.g. a
+// known-good CI host) still gets real coverage, while the default run cleanly
+// skips them (isKeychainAvailable() → false). The plain export/null/source
+// assertions pass either way.
+if (process.env.CHROXY_TEST_REAL_KEYCHAIN === '1') {
+  delete process.env.CHROXY_DISABLE_KEYCHAIN
+}
+
 // Top-level await import to avoid timing issues with before() hooks
 const keychain = await import(join(srcDir, 'keychain.js'))
 
@@ -266,5 +278,38 @@ describe('Keychain failure paths (#1887)', () => {
       source.includes('config.apiToken'),
       'init-cmd.js should fall back to storing token in config'
     )
+  })
+})
+
+describe('CHROXY_DISABLE_KEYCHAIN off-switch', () => {
+  // The default test run has the flag set (tests/_setup.mjs); under
+  // CHROXY_TEST_REAL_KEYCHAIN=1 the top-of-file opt-in clears it. Assert the
+  // contract directly against the env so this holds in both modes.
+  const disabled = process.env.CHROXY_DISABLE_KEYCHAIN === '1'
+
+  it('reflects the disable flag in isKeychainAvailable()', () => {
+    if (disabled) {
+      assert.equal(keychain.isKeychainAvailable(), false, 'disabled → no keychain, regardless of binary presence')
+    } else {
+      // real-keychain opt-in: availability is environment-dependent (binary
+      // present or not) — just assert it stays a boolean and never throws.
+      assert.equal(typeof keychain.isKeychainAvailable(), 'boolean')
+    }
+  })
+
+  it('read/write/delete are inert no-ops when disabled (no real keychain access)', () => {
+    if (!disabled) return // only meaningful with the flag on
+    const svc = 'chroxy-test-disabled-noop'
+    assert.equal(keychain.getToken(svc), null)
+    assert.deepEqual(keychain.getTokenStatus(svc), { status: 'absent', value: null, error: null })
+    // These must NOT throw and must NOT shell out to `security`/`secret-tool`.
+    assert.doesNotThrow(() => keychain.setToken('should-be-ignored', svc))
+    assert.doesNotThrow(() => keychain.deleteToken(svc))
+    // A write that was a real no-op leaves the read still absent.
+    assert.equal(keychain.getToken(svc), null)
+    // migrateToken short-circuits on isKeychainAvailable() → no migration.
+    const res = keychain.migrateToken({ apiToken: 'x' }, svc)
+    assert.equal(res.migrated, false)
+    assert.equal(res.config.apiToken, 'x')
   })
 })

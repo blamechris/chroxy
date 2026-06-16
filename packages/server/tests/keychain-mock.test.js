@@ -19,6 +19,12 @@ if (typeof mock.module !== 'function') {
   })
 } else {
   // Mock child_process before importing keychain
+  // These tests drive keychain.js's real code path with a MOCKED child_process,
+  // so they never touch the OS keychain. Clear the suite-wide disable flag
+  // (`tests/_setup.mjs` sets CHROXY_DISABLE_KEYCHAIN=1) so isKeychainAvailable()
+  // / getToken() reach the mocked execFileSync instead of short-circuiting.
+  delete process.env.CHROXY_DISABLE_KEYCHAIN
+
   const cpMock = {
     execFileSync: mock.fn(() => '')
   }
