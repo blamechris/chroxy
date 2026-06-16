@@ -1,21 +1,25 @@
 /**
- * Permission-request handlers (audit P2-3 split).
+ * Permission handlers (audit P2-3 split).
  *
- * Parsers for the permission-prompt lifecycle: `permission_request`,
- * `permission_resolved`, `permission_expired` (auto-handled system notice),
- * `permission_timeout` (auto-deny system notice), and `permission_rules_updated`
- * (the PermissionRule[] snapshot). All routing + UX side effects stay at the
- * call site; these only normalise the wire payload.
+ * Permission-request lifecycle: `permission_request`, `permission_resolved`,
+ * `permission_expired` (auto-handled system notice), `permission_timeout`
+ * (auto-deny system notice), and `permission_rules_updated` (the
+ * PermissionRule[] snapshot).
  *
- * (The permission-MODE handlers — permission_mode_changed /
- * available_permission_modes / confirm_permission_mode — remain in ./index for
- * now because handleClaudeReady consumes handleAvailablePermissionModes.)
+ * Permission-mode controls: `permission_mode_changed`,
+ * `available_permission_modes` (`handleAvailablePermissionModes` +
+ * `PermissionMode`), and `confirm_permission_mode`. `handleAvailablePermissionModes`
+ * + `PermissionMode` are also consumed by `handleAuthOk` in ./index, which
+ * imports them back from here (no cycle — this file never imports ./index).
  *
- * Re-exported from ./index (the barrel) so the public surface is unchanged.
+ * All routing + UX side effects stay at the call site; these only normalise the
+ * wire payload. Re-exported from ./index (the barrel) so the public surface is
+ * unchanged.
  */
 
 import type { ChatMessage } from '../types'
 import { nextMessageId } from '../utils'
+import { parseStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // permission_request / permission_resolved / permission_expired /
@@ -193,4 +197,78 @@ export function handlePermissionRulesUpdated(
     ? (msg.rules as unknown as PermissionRule[])
     : []
   return { sessionId, rules }
+}
+
+// ---------------------------------------------------------------------------
+// permission_mode_changed
+// ---------------------------------------------------------------------------
+
+/** Extract the permission mode from a `permission_mode_changed` message. */
+export function handlePermissionModeChanged(msg: Record<string, unknown>): { mode: string | null } {
+  return { mode: parseStringField(msg, 'mode') }
+}
+
+// ---------------------------------------------------------------------------
+// available_permission_modes
+// ---------------------------------------------------------------------------
+
+export interface PermissionMode {
+  id: string
+  label: string
+  /**
+   * #4019: optional human-readable explainer for the mode (e.g. "Auto-approve
+   * every tool call without prompting"). The server's PERMISSION_MODES table
+   * exports a description for every mode; we keep the field optional here so
+   * older servers that pre-date the description plumbing still parse cleanly.
+   */
+  description?: string
+}
+
+/** Validate and extract permission modes from an `available_permission_modes` message. */
+export function handleAvailablePermissionModes(
+  msg: Record<string, unknown>,
+): PermissionMode[] | null {
+  if (!Array.isArray(msg.modes)) return null
+  return (msg.modes as unknown[])
+    .filter(
+      (m): m is { id: string; label: string; description?: unknown } =>
+        typeof m === 'object' &&
+        m !== null &&
+        typeof (m as { id: unknown }).id === 'string' &&
+        typeof (m as { label: unknown }).label === 'string',
+    )
+    .map((m) => {
+      const out: PermissionMode = { id: m.id, label: m.label }
+      // #4019: pass through description when present + string-typed. Non-
+      // strings (number, object, etc.) get dropped at the type boundary
+      // rather than poisoning the typed shape downstream consumers see.
+      if (typeof m.description === 'string') out.description = m.description
+      return out
+    })
+}
+
+// ---------------------------------------------------------------------------
+// confirm_permission_mode
+// ---------------------------------------------------------------------------
+
+export interface PendingPermissionConfirm {
+  mode: string
+  warning: string
+}
+
+/**
+ * Extract the mode + warning text from a `confirm_permission_mode` message.
+ *
+ * Returns the pending-confirmation payload when the server included a valid
+ * `mode` string, or null when the message is malformed (caller should leave
+ * existing pending state alone in that case — matches both clients' prior
+ * inline behavior).
+ */
+export function handleConfirmPermissionMode(
+  msg: Record<string, unknown>,
+): PendingPermissionConfirm | null {
+  const mode = typeof msg.mode === 'string' ? msg.mode : null
+  if (!mode) return null
+  const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?'
+  return { mode, warning }
 }
