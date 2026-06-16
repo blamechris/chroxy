@@ -649,6 +649,12 @@ export function createModelsRegistry(hooks = {}) {
   // (AC2) instead of reverting to the bare fallback view. Null until the first
   // SDK refresh (CLI-only / pre-init).
   let lastSdkModels = null
+  // #5932 (PR #5945 review): the last list applied via loadCache(), retained so
+  // an overlay reload in the CLI-only window (cache warmed, no SDK refresh yet)
+  // preserves cache-warmed entries the new fallback doesn't cover (date-suffixed
+  // ids past the family filter) — WITHOUT resurrecting overlay-only rows the
+  // operator removed (those only ever live in fallbackModels, never here).
+  let lastCacheModels = null
   // Snapshot of the last saved cache payload so saveCache() can skip
   // redundant writes. `null` forces the first save to always run.
   let lastSavedSnapshot = null
@@ -760,6 +766,19 @@ export function createModelsRegistry(hooks = {}) {
       fallbackModels = computeFallbackModels(map)
       if (lastSdkModels) {
         registry.updateModels(lastSdkModels)
+      } else if (lastCacheModels) {
+        // Cache-warmed (loadCache) but no SDK refresh yet — apply the new
+        // fallback (base + overlay overrides + overlay-only rows) while
+        // PRESERVING the cache entries it doesn't cover (date-suffixed ids past
+        // the family filter, e.g. `claude-sonnet-4-20250514`). Preserve from the
+        // CACHE list, not `activeModels`, so an overlay-only row the operator
+        // REMOVED still drops (it lives in fallbackModels, never lastCacheModels)
+        // — matched on fullId so an overlay override of a cached/fallback row
+        // still wins (it's in fallbackModels → the cache copy is skipped).
+        const byFullId = new Set(fallbackModels.map((m) => m.fullId))
+        const preserved = lastCacheModels.filter((m) => !byFullId.has(m.fullId))
+        const next = preserved.length > 0 ? Object.freeze([...fallbackModels, ...preserved]) : fallbackModels
+        applyModels(next, defaultModelId)
       } else {
         applyModels(fallbackModels, defaultModelId)
       }
@@ -971,9 +990,11 @@ export function createModelsRegistry(hooks = {}) {
     resetModels() {
       contextWindowOverrides.clear()
       pricingDriftWarned.clear()
-      // #5932: drop the retained SDK list too, so a reset truly returns to the
-      // bare fallback view (a later applyOverlay won't re-merge stale SDK data).
+      // #5932: drop the retained SDK + cache lists too, so a reset truly returns
+      // to the bare fallback view (a later applyOverlay won't re-merge stale
+      // SDK/cache data).
       lastSdkModels = null
+      lastCacheModels = null
       applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
@@ -1096,6 +1117,9 @@ export function createModelsRegistry(hooks = {}) {
         if (defaultDiscarded) nextDefault = null
 
         applyModels(models, nextDefault)
+        // #5932: remember the cache-applied list so an overlay reload in the
+        // CLI-only window (no SDK refresh yet) preserves these entries.
+        lastCacheModels = models
         // Treat the loaded state as the last-saved baseline so subsequent
         // saveCache() calls only hit disk when the registry actually drifts.
         lastSavedSnapshot = snapshotString()

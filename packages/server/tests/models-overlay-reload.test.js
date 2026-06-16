@@ -89,6 +89,34 @@ describe('registry.applyOverlay (#5932)', () => {
     assert.doesNotThrow(() => reg.applyOverlay(undefined))
     assert.equal(reg.getModels().some((m) => m.fullId === 'fable-9'), false)
   })
+
+  it('preserves cache-warmed (non-fallback) models on reload before any SDK refresh (#5945 review)', () => {
+    // A default-shaped Claude registry whose family filter recognises a
+    // date-suffixed sonnet id, then warm it from a disk cache (no updateModels
+    // → lastSdkModels stays null, the CLI-only window).
+    const reg = createModelsRegistry()
+    const dir = mkdtempSync(join(tmpdir(), 'overlay-cache-'))
+    const cachePath = join(dir, 'cache.json')
+    try {
+      writeFileSync(cachePath, JSON.stringify({
+        models: [
+          { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-20250514', contextWindow: 200000 },
+        ],
+        defaultModelId: 'sonnet',
+      }))
+      assert.equal(reg.loadCache(cachePath), true)
+      assert.ok(reg.getModels().some((m) => m.fullId === 'claude-sonnet-4-20250514'), 'cache-warmed model present')
+
+      // Operator edits the overlay (adds a custom model) — reload must NOT drop
+      // the cache-warmed date-suffixed entry.
+      reg.applyOverlay(overlayMap({ 'acme-9': { shortId: 'acme9', label: 'Acme' } }))
+      const ids = reg.getModels().map((m) => m.fullId)
+      assert.ok(ids.includes('claude-sonnet-4-20250514'), 'cache-warmed model survives overlay reload')
+      assert.ok(ids.includes('acme-9'), 'overlay-only model added')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
 })
 
 describe('reloadModelsOverlay (#5932)', () => {
