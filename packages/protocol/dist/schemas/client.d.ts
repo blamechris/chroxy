@@ -310,6 +310,7 @@ export declare const CreateSessionSchema: z.ZodObject<{
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
     skipPermissions: z.ZodOptional<z.ZodBoolean>;
+    agentCommId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const DestroySessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
@@ -808,6 +809,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
     skipPermissions: z.ZodOptional<z.ZodBoolean>;
+    agentCommId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
     sessionId: z.ZodString;

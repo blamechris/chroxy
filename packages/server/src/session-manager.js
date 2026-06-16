@@ -563,21 +563,31 @@ export class SessionManager extends EventEmitter {
    */
   registerAgentCommId(sessionId, agentCommId) {
     if (typeof sessionId !== 'string' || typeof agentCommId !== 'string') return false
-    if (!sessionId || !agentCommId) return false
+    if (!sessionId) return false
+    // Authoritative id contract (single source of truth for both the
+    // POST /api/mailbox/register route and createSession's auto-register),
+    // matching the route's cleanField bounds: trim, reject empty, cap length,
+    // reject control chars. The trim canonicalises the stored key so an
+    // untrimmed/whitespace-only id can't create a confusing/unresolvable
+    // mapping. Control chars are rejected for id hygiene and parity with the
+    // route — the id is only a routing key and never itself reaches the PTY
+    // wakeup string (a fixed template + unread count; see mailbox-route.js).
+    const id = agentCommId.trim()
+    if (!id || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)) return false
     const entry = this._sessions.get(sessionId)
     if (!entry) return false
     // Drop a prior holder of this id (id -> some other session).
-    const priorSessionId = this._agentCommIds.get(agentCommId)
+    const priorSessionId = this._agentCommIds.get(id)
     if (priorSessionId && priorSessionId !== sessionId) {
       const priorEntry = this._sessions.get(priorSessionId)
-      if (priorEntry && priorEntry.agentCommId === agentCommId) priorEntry.agentCommId = null
+      if (priorEntry && priorEntry.agentCommId === id) priorEntry.agentCommId = null
     }
     // Drop a prior id this session held (session -> some other id).
-    if (entry.agentCommId && entry.agentCommId !== agentCommId) {
+    if (entry.agentCommId && entry.agentCommId !== id) {
       this._agentCommIds.delete(entry.agentCommId)
     }
-    entry.agentCommId = agentCommId
-    this._agentCommIds.set(agentCommId, sessionId)
+    entry.agentCommId = id
+    this._agentCommIds.set(id, sessionId)
     return true
   }
 
@@ -674,7 +684,7 @@ export class SessionManager extends EventEmitter {
    *   full-destroy path on start failure.
    * @returns {string} sessionId
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, skipPersist = false, preserveId, isRestore = false } = {}) {
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, skipPersist = false, preserveId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -1051,6 +1061,12 @@ export class SessionManager extends EventEmitter {
     }
 
     this._sessions.set(sessionId, entry)
+    // Mailbox (#5914 follow-up): auto-register the session's AGENT_COMM_ID so the
+    // live-interrupt route resolves agent -> session WITHOUT a separate POST
+    // /api/mailbox/register. registerAgentCommId is the authoritative validator
+    // (drops control chars / over-length to a no-op) and must run AFTER the entry
+    // is in _sessions. Cleared on removal by _cleanupSessionMaps.
+    if (agentCommId) this.registerAgentCommId(sessionId, agentCommId)
     metrics.inc('sessions.created')
     this.touchActivity(sessionId)
     this._wireSessionEvents(sessionId, session)
@@ -1758,6 +1774,11 @@ export class SessionManager extends EventEmitter {
         // (pre-#5310) restore as null → treated as a non-worktree session.
         worktreePath: entry.worktreePath || null,
         worktreeRepoDir: entry.worktreeRepoDir || null,
+        // Mailbox (#5914 follow-up): persist the registered AGENT_COMM_ID so a
+        // session keeps its mailbox identity across a daemon restart (re-applied
+        // via createSession on restore below). Null when the session never
+        // registered one; older state files (no field) restore as null.
+        agentCommId: entry.agentCommId || null,
         lastActivityAt: this._sessionLastActivityAt.get(id) || entry.createdAt,
         history,
         // #4664: persist per-session toggle/string settings via the
@@ -1885,6 +1906,13 @@ export class SessionManager extends EventEmitter {
           // and collide with dashboard-cached messages (#3700).
           messageCounter: typeof saved.messageCounter === 'number' && Number.isFinite(saved.messageCounter) && saved.messageCounter >= 0
             ? saved.messageCounter
+            : undefined,
+          // Mailbox (#5914 follow-up): re-register the persisted AGENT_COMM_ID so
+          // a restored session is reachable by the live-interrupt route again.
+          // createSession validates it (drops bad values to a no-op); older
+          // state files (no field) restore with no mailbox identity.
+          agentCommId: typeof saved.agentCommId === 'string' && saved.agentCommId.length > 0
+            ? saved.agentCommId
             : undefined,
           skipPersist: true,
           // #5316 (WP-2.2) — mark this as a restore so an ASYNC provider

@@ -552,6 +552,29 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.sandbox, undefined)
   })
 
+  it('validates create_session with an agentCommId (mailbox identity)', async () => {
+    const { CreateSessionSchema } = await import('../src/schemas/client.ts')
+    const ok = CreateSessionSchema.safeParse({
+      type: 'create_session',
+      name: 'Coder',
+      agentCommId: 'coder',
+    })
+    assert.ok(ok.success, 'Should validate create_session with agentCommId')
+    assert.equal(ok.data.agentCommId, 'coder')
+
+    // Optional — omitted is valid and parses to undefined.
+    const omitted = CreateSessionSchema.safeParse({ type: 'create_session', name: 'X' })
+    assert.ok(omitted.success)
+    assert.equal(omitted.data.agentCommId, undefined)
+
+    // Bounded at 200 chars (matches the server-side id contract).
+    const tooLong = CreateSessionSchema.safeParse({
+      type: 'create_session',
+      agentCommId: 'a'.repeat(201),
+    })
+    assert.ok(!tooLong.success, 'agentCommId over 200 chars must be rejected')
+  })
+
   it('discriminatedUnion covers all expected message types', async () => {
     const { ClientMessageSchema } = await import('../src/schemas/client.ts')
 

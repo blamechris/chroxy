@@ -270,6 +270,34 @@ describe('session-handlers', () => {
       assert.match(sent.message, /disk full/)
     })
 
+    // Mailbox (#5914 follow-up): the WS handler hands an optional AGENT_COMM_ID
+    // off to SessionManager.createSession, which auto-registers it so the
+    // live-interrupt route resolves agent -> session without a separate
+    // POST /api/mailbox/register.
+    it('forwards a trimmed agentCommId from WS payload to SessionManager.createSession', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx._sessions.set('new-id', { session, name: 'Coder', cwd: '/tmp' })
+
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'Coder', agentCommId: '  coder  ' }, ctx)
+
+      const [createArgs] = ctx.sessions.sessionManager.createSession.lastCall
+      assert.equal(createArgs.agentCommId, 'coder', 'agentCommId must be trimmed and forwarded')
+    })
+
+    it('omits agentCommId when the payload field is missing or non-string', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      ctx.sessions.sessionManager.createSession = createSpy(() => 'new-id')
+      ctx._sessions.set('new-id', { session, name: 'X', cwd: '/tmp' })
+
+      sessionHandlers.create_session(makeWs(), makeClient(), { name: 'X', agentCommId: 42 }, ctx)
+
+      const [createArgs] = ctx.sessions.sessionManager.createSession.lastCall
+      assert.equal(createArgs.agentCommId, undefined, 'non-string agentCommId must drop to undefined')
+    })
+
     // #4208: WS-handler must preserve strict booleans for skipPermissions so
     // an explicit `false` from the dashboard can override a server-wide
     // `defaultSkipPermissions: true`. The SessionManager-level test exists
