@@ -230,6 +230,80 @@ describe('outgoing-message queue (#5936)', () => {
     })
   })
 
+  // #5943: cancel ONE queued follow-up by clientMessageId, leaving the rest —
+  // the per-item analogue of clearOutgoingQueue (which cancels the whole queue).
+  describe('cancel single queued message (#5943)', () => {
+    it('removes the matching entry, leaves the rest, and emits message_dequeued(cancelled)', () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')                                   // busy
+      s.sendMessage('q1', undefined, { clientMessageId: 'uin-1' })
+      s.sendMessage('q2', undefined, { clientMessageId: 'uin-2' })
+      s.sendMessage('q3', undefined, { clientMessageId: 'uin-3' })
+      assert.equal(s.outgoingQueueLength, 3)
+
+      const dequeued = []
+      s.on('message_dequeued', (e) => dequeued.push(e))
+      const ok = s.cancelQueuedMessage('uin-2')
+
+      assert.equal(ok, true)
+      assert.equal(s.outgoingQueueLength, 2, 'only the cancelled item left')
+      assert.deepEqual(dequeued, [{ clientMessageId: 'uin-2', queueLength: 2, reason: 'cancelled' }])
+    })
+
+    it('still flushes the surviving entries FIFO after a mid-queue cancel', async () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('q1', undefined, { clientMessageId: 'uin-1' })
+      s.sendMessage('q2', undefined, { clientMessageId: 'uin-2' })
+      s.sendMessage('q3', undefined, { clientMessageId: 'uin-3' })
+
+      s.cancelQueuedMessage('uin-2')
+      // Drain: each completeTurn flushes one head, going busy again.
+      s.completeTurn(); await tick()
+      s.completeTurn(); await tick()
+      assert.deepEqual(s.sent.map((m) => m.prompt), ['turn', 'q1', 'q3'], 'q2 dropped, q1/q3 sent in order')
+    })
+
+    it('is a no-op (returns false, no event) for an unknown or missing id', () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('q1', undefined, { clientMessageId: 'uin-1' })
+      const dequeued = []
+      s.on('message_dequeued', (e) => dequeued.push(e))
+
+      assert.equal(s.cancelQueuedMessage('uin-does-not-exist'), false)
+      assert.equal(s.cancelQueuedMessage(''), false)
+      assert.equal(s.cancelQueuedMessage(undefined), false)
+      assert.equal(s.outgoingQueueLength, 1, 'queue untouched')
+      assert.equal(dequeued.length, 0, 'no spurious dequeue')
+    })
+
+    it('cannot target an entry queued without a clientMessageId', () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('q1') // no clientMessageId
+      assert.equal(s.cancelQueuedMessage('uin-1'), false)
+      assert.equal(s.outgoingQueueLength, 1)
+    })
+
+    it('interrupt still clears the WHOLE queue after a single cancel', () => {
+      const s = new FakeSession()
+      s.sendMessage('turn')
+      s.sendMessage('q1', undefined, { clientMessageId: 'uin-1' })
+      s.sendMessage('q2', undefined, { clientMessageId: 'uin-2' })
+
+      assert.equal(s.cancelQueuedMessage('uin-1'), true)
+      assert.equal(s.outgoingQueueLength, 1)
+
+      const dequeued = []
+      s.on('message_dequeued', (e) => dequeued.push(e))
+      const cleared = s.clearOutgoingQueue()
+      assert.equal(cleared, 1)
+      assert.equal(s.outgoingQueueLength, 0)
+      assert.ok(dequeued.every((e) => e.reason === 'interrupted'))
+    })
+  })
+
   describe('normalizer → wire mapping injects sessionId', () => {
     const norm = new EventNormalizer()
 
@@ -270,6 +344,16 @@ describe('outgoing-message queue (#5936)', () => {
       )
       assert.equal(out.messages[0].msg.reason, 'interrupted')
       assert.equal(out.messages[0].msg.clientMessageId, 'uin-1')
+    })
+
+    it('passes through reason: cancelled (#5943)', () => {
+      const out = norm.normalize(
+        'message_dequeued',
+        { clientMessageId: 'uin-2', queueLength: 0, reason: 'cancelled' },
+        { sessionId: 'sess-3' },
+      )
+      assert.equal(out.messages[0].msg.reason, 'cancelled')
+      assert.equal(out.messages[0].msg.clientMessageId, 'uin-2')
     })
   })
 })

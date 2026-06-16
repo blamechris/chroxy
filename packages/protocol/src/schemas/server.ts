@@ -846,17 +846,19 @@ export const ServerMessageQueuedSchema = z.object({
 
 /**
  * `message_dequeued` — a queued message left the queue. `reason` distinguishes
- * the two exit paths: `'flush'` (auto-sent on turn-complete — the client should
- * transition the bubble from queued → sent) vs `'interrupted'` (the queue was
- * cancelled by an interrupt — the client should remove the queued bubble). The
- * `queueLength` is the count remaining AFTER this item left.
+ * the exit paths: `'flush'` (auto-sent on turn-complete — the client should
+ * transition the bubble from queued → sent), `'interrupted'` (the whole queue
+ * was cancelled by an interrupt — the client should remove the queued bubble),
+ * and `'cancelled'` (#5943 — the owner cancelled this ONE entry via
+ * `cancel_queued` — the client removes just this bubble, leaving the rest of the
+ * queue intact). The `queueLength` is the count remaining AFTER this item left.
  */
 export const ServerMessageDequeuedSchema = z.object({
   type: z.literal('message_dequeued'),
   sessionId: z.string(),
   clientMessageId: z.string().optional(),
   queueLength: z.number().int().nonnegative(),
-  reason: z.enum(['flush', 'interrupted']),
+  reason: z.enum(['flush', 'interrupted', 'cancelled']),
 }).passthrough()
 
 // ───────────────────────────────────────────────────────────────────────────

@@ -143,6 +143,23 @@ export const CancelActivitySchema = z.object({
   requestId: z.string().max(128).optional(),
 }).passthrough()
 
+// #5943 (epic #5935): cancel a SINGLE queued send-while-busy follow-up by its
+// `clientMessageId`, removing it from the server's per-session outgoing queue
+// (`base-session.js` `_outgoingQueue`) before it flushes. The server emits
+// `message_dequeued { reason: 'cancelled' }` so every client removes the queued
+// bubble. Authority mirrors `interrupt` — acting on your OWN bound/active
+// session, not a privilege escalation — so the server resolves the target from
+// `sessionId` or the caller's binding. Whole-queue cancellation stays on
+// `interrupt`; this is the per-item control action (the queue analogue of
+// `cancel_activity`).
+export const CancelQueuedSchema = z.object({
+  type: z.literal('cancel_queued'),
+  // Identifies the queued entry to drop. Same shape/cap as the `input`
+  // clientMessageId the entry was enqueued under.
+  clientMessageId: z.string().min(1).max(128),
+  sessionId: z.string().max(256).optional(),
+}).passthrough()
+
 export const SetModelSchema = z.object({
   type: z.literal('set_model'),
   model: z.string().max(256),
@@ -1109,6 +1126,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   InputSchema,
   InterruptSchema,
   CancelActivitySchema,
+  CancelQueuedSchema,
   SetModelSchema,
   SetPermissionModeSchema,
   SetThinkingLevelSchema,
@@ -1211,6 +1229,7 @@ export type PairDenyMessage = z.infer<typeof PairDenySchema>
 export type InputMessage = z.infer<typeof InputSchema>
 export type InterruptMessage = z.infer<typeof InterruptSchema>
 export type CancelActivityMessage = z.infer<typeof CancelActivitySchema>
+export type CancelQueuedMessage = z.infer<typeof CancelQueuedSchema>
 export type SetModelMessage = z.infer<typeof SetModelSchema>
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>

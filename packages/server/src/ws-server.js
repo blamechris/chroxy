@@ -247,7 +247,8 @@ function _isSecureRequest(req) {
  * Client -> Server:
  *   { type: 'auth',      token: '...', deviceInfo? }   — authenticate (deviceInfo: { deviceId, deviceName, deviceType, platform })
  *   { type: 'input',     data: '...' }               — send text to active session
- *   { type: 'interrupt' }                             — interrupt active session
+ *   { type: 'interrupt' }                             — interrupt active session (also cancels the WHOLE outgoing queue)
+ *   { type: 'cancel_queued', clientMessageId, sessionId? } — cancel ONE queued send-while-busy follow-up (#5943); server emits message_dequeued(reason: 'cancelled')
  *   { type: 'set_model', model: '...' }              — change model on active session
  *   { type: 'set_permission_mode', mode: '...', confirmed? } — change permission mode (confirmed: true required for 'auto')
  *   { type: 'permission_response', requestId, decision } — respond to permission prompt
@@ -425,7 +426,7 @@ function _isSecureRequest(req) {
  *   { type: 'activity_snapshot', sessionId, schemaVersion, entries } — Control Room full activity tree for a session, on subscribe/resync (#5161 schema; emitter #5160; `entries: [{ id, kind, label, status, startedAt, endedAt?, parentId?, outputRef? }, …]`)
  *   { type: 'activity_delta', sessionId, schemaVersion, op, entry } — Control Room incremental activity-entry change (#5161 schema; emitter #5160; `op` is one of `started` / `updated` / `ended`; `entry` is the full node)
  *   { type: 'message_queued', sessionId, clientMessageId?, text, queueLength } — a send-while-busy follow-up entered the server's outgoing-message queue (#5936/#5937, transient; mirrors `_outgoingQueue`)
- *   { type: 'message_dequeued', sessionId, clientMessageId?, queueLength, reason } — a queued follow-up left the queue (#5936/#5937, transient; `reason` is `flush` (auto-sent on turn-complete) or `interrupted` (cancelled by a Stop))
+ *   { type: 'message_dequeued', sessionId, clientMessageId?, queueLength, reason } — a queued follow-up left the queue (#5936/#5937/#5943, transient; `reason` is `flush` (auto-sent on turn-complete), `interrupted` (whole queue cancelled by a Stop), or `cancelled` (one item cancelled via `cancel_queued`))
  *   { type: 'host_status_snapshot', requestId?, generatedAt, root, summary, repos, error? } — Control Room Host/Repo Status survey reply (#5171 schema; emitter #5174); reply to a `host_status_request`. Always carries the full snapshot shape (so it is protocol-schema-valid); on failure `repos` is empty, `summary` is zeroed, and an additive `error: { code, message }` annotation is present for the consumer to branch on. `requestId` echoes the request when provided.
  *   { type: 'runner_status_snapshot', requestId?, generatedAt, root, summary, repos, error? } — Control Room self-hosted runner survey reply (#5253 schema + emitter); reply to a `runner_status_request`. Same degraded-snapshot-with-`error` posture as `host_status_snapshot`: always the full shape; on failure `repos` is empty, `summary` is zeroed, and an additive `error: { code, message }` is present. `requestId` echoes the request when provided.
  *   { type: 'integration_status_snapshot', requestId?, generatedAt, root, summary, repos, repoMemoryCli?, error? } — Control Room Integrations survey reply (#5499 schema + emitter, epic #5498); reply to an `integration_status_request`. Per-repo repo-memory status (config, cache stats, telemetry report); `repoMemoryCli` notes the once-per-snapshot binary probe. Same degraded-snapshot-with-`error` posture as the host/runner surveys. `requestId` echoes the request when provided.

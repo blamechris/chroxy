@@ -719,6 +719,39 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
+   * #5943: cancel ONE queued outgoing message by its `clientMessageId`, leaving
+   * the rest of the queue intact. Called by the `cancel_queued` handler so the
+   * owner can drop a single send-while-busy follow-up they no longer want,
+   * WITHOUT the whole-queue cancellation an `interrupt` performs. Emits
+   * `message_dequeued` with `reason: 'cancelled'` (the per-item analogue of
+   * `clearOutgoingQueue`'s `'interrupted'`) so every client removes just that
+   * queued bubble. `queueLength` carries the count remaining AFTER removal,
+   * matching the documented meaning on the other dequeue paths.
+   *
+   * A no-op (returns false, no event) when the id is missing, empty, or matches
+   * nothing — an entry queued without a `clientMessageId` cannot be targeted
+   * (only the owner's optimistic copy carries one), and a stale/duplicate cancel
+   * for an already-flushed item must not emit a spurious dequeue.
+   *
+   * @param {string} clientMessageId
+   * @returns {boolean} true if an entry was found and removed.
+   */
+  cancelQueuedMessage(clientMessageId) {
+    if (this._destroying || typeof clientMessageId !== 'string' || clientMessageId.length === 0) {
+      return false
+    }
+    const idx = this._outgoingQueue.findIndex(
+      (item) => item.sendOptions?.clientMessageId === clientMessageId,
+    )
+    if (idx === -1) return false
+    this._outgoingQueue.splice(idx, 1)
+    const remaining = this._outgoingQueue.length
+    this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'cancelled' })
+    ;(this._log || log).info(`Cancelled queued follow-up message ${clientMessageId} (${remaining} remaining)`)
+    return true
+  }
+
+  /**
    * #5160: wire the activity registry to this session's own lifecycle
    * events. The registry is a pure consumer — it only maps already-emitted
    * signals into `ActivityEntry` records, so listening here keeps it a thin

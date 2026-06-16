@@ -160,12 +160,13 @@ export function handleMessageQueued(
 
 /**
  * Parse a `message_dequeued` event (wire shape
- * `{ sessionId, clientMessageId?, queueLength, reason: 'flush' | 'interrupted' }`)
- * into a builder that REMOVES the dequeued entry. Both exit reasons remove the
- * entry from the queue model: `'flush'` (the message is now being sent — the
- * normal user_input / stream path takes over rendering it) and `'interrupted'`
- * (the queue was cancelled by a Stop). Removal is by `clientMessageId`, or FIFO
- * head when the server echoed no id.
+ * `{ sessionId, clientMessageId?, queueLength, reason: 'flush' | 'interrupted' | 'cancelled' }`)
+ * into a builder that REMOVES the dequeued entry. ALL exit reasons remove the
+ * entry from the queue model — the handler is reason-agnostic: `'flush'` (the
+ * message is now being sent — the normal user_input / stream path takes over
+ * rendering it), `'interrupted'` (the whole queue was cancelled by a Stop), and
+ * `'cancelled'` (#5943 — the owner cancelled this one entry via `cancel_queued`).
+ * Removal is by `clientMessageId`, or FIFO head when the server echoed no id.
  *
  * Always returns a builder (no malformed-payload null) — a `message_dequeued`
  * with no id is the legitimate FIFO-head case, and an unknown id is a safe

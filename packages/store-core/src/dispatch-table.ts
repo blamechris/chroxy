@@ -412,7 +412,9 @@ export interface DispatchMessageMap {
     sessionId: string
     clientMessageId?: string
     queueLength: number
-    reason: 'flush' | 'interrupted'
+    // #5943 adds 'cancelled' (per-item cancel via cancel_queued) alongside the
+    // slice-① 'flush'/'interrupted'. Mirrors ServerMessageDequeuedSchema.reason.
+    reason: 'flush' | 'interrupted' | 'cancelled'
   }
 }
 
