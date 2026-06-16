@@ -1589,8 +1589,10 @@ export * from './agent'
 // ---------------------------------------------------------------------------
 // #4307 background_work_changed (handleBackgroundWorkChanged /
 // PendingBackgroundShellsBuilder) moved to ./session-list.ts (audit P2-3
-// split) alongside buildSessionListPatches, its sole internal caller. Exported
-// via the ./session-list re-export above.
+// split) alongside buildSessionListPatches, which calls it to seed each
+// session's pendingBackgroundShells from the snapshot. It is also dispatched
+// independently for the background_work_changed wire message (dispatch-table).
+// Exported via the ./session-list re-export above.
 // ---------------------------------------------------------------------------
 
 // ---------------------------------------------------------------------------
