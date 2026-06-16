@@ -313,6 +313,11 @@ export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps 
   for (const ent of entries) {
     if (!ent || typeof ent.isDirectory !== 'function' || !ent.isDirectory()) continue
     const id = ent.name
+    // Defense-in-depth: chroxy session ids are 32 lowercase hex (matching the
+    // /^[a-f0-9]{32}$/ constraint in session-manager.js). A dir under the base
+    // whose name isn't that shape was never created by chroxy (e.g. a user-placed
+    // directory) — never a removal candidate, even if it somehow looked clean.
+    if (!/^[a-f0-9]{32}$/.test(id)) continue
     if (live.has(id)) continue // owned by a live session — never touch
     report.scanned++
     const wtPath = joinPath(worktreeBase, id)
