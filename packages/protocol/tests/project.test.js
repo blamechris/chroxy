@@ -8,6 +8,7 @@ import {
   deriveProjectFromCwd,
   classifyNonProjectCwd,
   worktreeParent,
+  chroxyWorktreeRepoPath,
   _worktreeMarkerIndex,
   _pathWithinPrefix,
 } from '../src/project.ts'
@@ -41,6 +42,34 @@ function chroxyWorktreeFixture(repoName = 'coolproj') {
   writeFileSync(join(wt, '.git'), `gitdir: ${join(repoRoot, '.git', 'worktrees', id)}\n`)
   return { home, root, id, wt, repoName }
 }
+
+describe('chroxyWorktreeRepoPath (shared .git parser, #5869)', () => {
+  it('recovers the owning repo PATH from a worktree .git file', () => {
+    const { home, wt, repoName } = chroxyWorktreeFixture()
+    assert.equal(chroxyWorktreeRepoPath(wt), join(home, 'projects', repoName))
+  })
+
+  it('returns null when the .git file is absent', () => {
+    const dir = realpathSync(mkdtempSync(join(tmpdir(), 'norepo-')))
+    assert.equal(chroxyWorktreeRepoPath(dir), null)
+  })
+
+  it('returns null when the gitdir pointer is the wrong shape (tamper guard)', () => {
+    const home = realpathSync(mkdtempSync(join(tmpdir(), 'bad-')))
+    const wt = join(home, '.chroxy', 'worktrees', 'cafebabecafebabecafebabecafebabe')
+    mkdirSync(wt, { recursive: true })
+    // Not `<repo>/.git/worktrees/<id>` — points straight at an arbitrary dir.
+    writeFileSync(join(wt, '.git'), `gitdir: ${join(home, 'evil')}\n`)
+    assert.equal(chroxyWorktreeRepoPath(wt), null)
+  })
+
+  it('the parent-project name is the basename of the recovered repo path', () => {
+    const { wt, repoName } = chroxyWorktreeFixture()
+    // chroxyWorktreeParentProject (used by deriveProjectFromCwd) derives the
+    // project name as basename(chroxyWorktreeRepoPath(...)).
+    assert.equal(basename(chroxyWorktreeRepoPath(wt)), repoName)
+  })
+})
 
 describe('deriveProjectFromCwd (server surface)', () => {
   it('walks up to the nearest .git and returns its basename', () => {
