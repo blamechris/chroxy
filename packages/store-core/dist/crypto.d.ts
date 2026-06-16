@@ -38,16 +38,39 @@ export interface SigningKeyPair {
  */
 export declare function createSigningKeyPair(): SigningKeyPair;
 /**
+ * #5604 — domain-separation label for the exchange-key signature. The identity
+ * key today signs ONLY the exchange key, so the bare 32 bytes are unambiguous;
+ * but if the key is ever reused to sign another payload (rotation statements,
+ * capability grants, …) a context-free signature invites cross-protocol
+ * confusion. Prefixing this versioned ASCII label binds a signature to "this is
+ * an exchange key" so it can never be replayed as another statement. `v1` marks
+ * the scheme so a future change can bump it.
+ *
+ * Rollout is a compat ramp (see `verifyExchangeKeySignature`): the verifier
+ * accepts BOTH the bare and domain-separated forms now, so the signer can flip
+ * to the domain-separated form in a later release without forcing already-pinned
+ * clients to re-pair.
+ */
+export declare const EXCHANGE_KEY_SIG_DOMAIN_V1 = "chroxy-exchange-key-v1:";
+/**
  * Sign an ephemeral exchange public key (base64) with the identity secret key.
  * Returns the detached signature as base64. The signed message is the RAW bytes
  * of the exchange public key (decoded from base64), so both sides sign/verify
  * over identical bytes regardless of base64 canonicalisation.
  *
+ * `opts.domainSeparated` (#5604) prepends `EXCHANGE_KEY_SIG_DOMAIN_V1` to the
+ * signed bytes. Defaults to `false` (bare form) so existing callers — and the
+ * live wire format — are unchanged until the compat ramp flips the signer; the
+ * accept-both verifier ships first.
+ *
  * @param exchangePublicKeyBase64 - the per-connection X25519 public key to bind
  * @param identitySecretKey - the 64-byte Ed25519 secret key
+ * @param opts.domainSeparated - sign the domain-separated payload (default false)
  * @returns base64-encoded 64-byte detached signature
  */
-export declare function signExchangeKey(exchangePublicKeyBase64: string, identitySecretKey: Uint8Array): string;
+export declare function signExchangeKey(exchangePublicKeyBase64: string, identitySecretKey: Uint8Array, opts?: {
+    domainSeparated?: boolean;
+}): string;
 /**
  * Verify that `signatureBase64` is a valid Ed25519 signature over
  * `exchangePublicKeyBase64`, produced by the holder of the secret key matching
@@ -55,6 +78,13 @@ export declare function signExchangeKey(exchangePublicKeyBase64: string, identit
  * signature, false on any mismatch / malformed input. NEVER throws — a bad or
  * absent signature is a verification FAILURE the caller must treat as a refusal,
  * not an exception to swallow.
+ *
+ * #5604 — accepts a signature over EITHER the bare exchange-key bytes (today's
+ * signer) OR the domain-separated payload (`EXCHANGE_KEY_SIG_DOMAIN_V1` ++ bytes,
+ * the form the signer flips to in a later release). Both require the identity
+ * secret to produce, so accepting both does not weaken pinning — it only lets
+ * the signer migrate without forcing already-pinned clients to re-pair. A future
+ * release can drop the bare branch once the signer no longer emits it.
  *
  * @param exchangePublicKeyBase64 - the per-connection X25519 public key offered
  * @param signatureBase64 - the detached signature offered by the server

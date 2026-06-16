@@ -16,6 +16,7 @@ import {
   createSigningKeyPair,
   signExchangeKey,
   verifyExchangeKeySignature,
+  EXCHANGE_KEY_SIG_DOMAIN_V1,
   DIRECTION_SERVER,
   DIRECTION_CLIENT,
 } from './crypto'
@@ -738,5 +739,61 @@ describe('server identity signing (#5536 — E2E key pinning)', () => {
     const identity = createSigningKeyPair()
     expect(decodeBase64(identity.publicKey).length).toBe(nacl.sign.publicKeyLength)
     expect(identity.secretKey.length).toBe(nacl.sign.secretKeyLength)
+  })
+})
+
+describe('exchange-key signature domain separation (#5604 compat ramp)', () => {
+  it('defaults to the bare form (unchanged wire format) when no opts are given', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const bare = signExchangeKey(exchange.publicKey, identity.secretKey)
+    const explicitBare = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: false })
+    // Deterministic Ed25519 detached signatures: the default and explicit-bare
+    // forms must be byte-identical, proving the default did not change.
+    expect(bare).toBe(explicitBare)
+  })
+
+  it('the domain-separated signature differs from the bare one over the same key', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const bare = signExchangeKey(exchange.publicKey, identity.secretKey)
+    const domain = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: true })
+    expect(domain).not.toBe(bare)
+  })
+
+  it('verify accepts the bare-form signature (today\'s signer)', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const bare = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: false })
+    expect(verifyExchangeKeySignature(exchange.publicKey, bare, identity.publicKey)).toBe(true)
+  })
+
+  it('verify accepts the domain-separated signature (future signer flip — no re-pair)', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const domain = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: true })
+    expect(verifyExchangeKeySignature(exchange.publicKey, domain, identity.publicKey)).toBe(true)
+  })
+
+  it('a domain-separated signature still fails against a DIFFERENT identity (no security loss)', () => {
+    const realIdentity = createSigningKeyPair()
+    const attackerIdentity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const domain = signExchangeKey(exchange.publicKey, attackerIdentity.secretKey, { domainSeparated: true })
+    expect(verifyExchangeKeySignature(exchange.publicKey, domain, realIdentity.publicKey)).toBe(false)
+  })
+
+  it('a domain-separated signature fails against a SUBSTITUTED exchange key', () => {
+    const identity = createSigningKeyPair()
+    const realExchange = createKeyPair()
+    const otherExchange = createKeyPair()
+    const domain = signExchangeKey(realExchange.publicKey, identity.secretKey, { domainSeparated: true })
+    expect(verifyExchangeKeySignature(otherExchange.publicKey, domain, identity.publicKey)).toBe(false)
+  })
+
+  it('exposes a stable, versioned domain label', () => {
+    // Pin the exact label — changing it would silently break verification across
+    // a version skew, so a change must be deliberate (and bump the version).
+    expect(EXCHANGE_KEY_SIG_DOMAIN_V1).toBe('chroxy-exchange-key-v1:')
   })
 })
