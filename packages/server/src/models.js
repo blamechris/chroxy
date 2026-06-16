@@ -12,9 +12,26 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000
 /** Suffix the Claude CLI uses to mark the explicit 1M-context variant */
 export const ONE_M_SUFFIX = '[1m]'
 
+// Opus gained a 1M context window at 4.6. `[major, minor]` of the first opus
+// release with a 1M window — opus at or above this (and any future opus major)
+// is treated as 1M; earlier opus and every other family default to 200k. The
+// SDK's authoritative modelUsage.contextWindow overrides this after turn 1, so a
+// wrong cold-start guess only ever surfaces for the first turn.
+const OPUS_ONE_M_MIN_VERSION = Object.freeze([4, 6])
+// Matches an opus version token: `opus-<major>` with an OPTIONAL `-<minor>` /
+// `.<minor>`, e.g. `claude-opus-4-8`, `claude-opus-4.8`, `claude-opus-5` (major
+// only), or `claude-opus-4-7-20251201` (versioned + dated). Both major and minor
+// are 1–2 digits NOT followed by another digit, so:
+//   - a DATED base id like `claude-opus-4-20250514` (opus 4.0, dated — 200k) does
+//     NOT read the date as a minor (the optional group fails → major-only 4.0);
+//   - a `claude-3-opus-20240229` id does NOT read the 8-digit date as a major
+//     (the major is capped at 2 digits + lookahead → no match → default).
+const OPUS_VERSION_RE = /opus-(\d{1,2})(?!\d)(?:[-.](\d{1,2})(?!\d))?/
+
 /**
  * Static context-window heuristic used at cold start before the SDK reports.
- * Opus 4.6+ has 1M; most other Claude models have 200k. Any id carrying the
+ * Opus 4.6+ has 1M (matched by family + version, so new minors/majors inherit it
+ * without a code change); most other Claude models have 200k. Any id carrying the
  * explicit `[1m]` CLI suffix is a 1M-context variant regardless of the base
  * model. The SDK sends authoritative values in
  * `SDKResultSuccess.modelUsage[*].contextWindow` after each turn — registries
@@ -27,13 +44,16 @@ export const ONE_M_SUFFIX = '[1m]'
 export function resolveClaudeContextWindow(fullId) {
   if (typeof fullId !== 'string') return DEFAULT_CONTEXT_WINDOW
   if (fullId.endsWith(ONE_M_SUFFIX)) return 1_000_000
-  if (fullId.includes('opus-4-6') || fullId.includes('opus-4.6')) return 1_000_000
-  if (fullId.includes('opus-4-7') || fullId.includes('opus-4.7')) return 1_000_000
-  // opus-4-8 is treated as 1M for consistency with the rest of the opus 4.x
-  // family the heuristic already maps to 1M — this is a family-consistency
-  // default, not a verified spec. The SDK's authoritative
-  // modelUsage.contextWindow overrides it after the first turn if wrong.
-  if (fullId.includes('opus-4-8') || fullId.includes('opus-4.8')) return 1_000_000
+  const m = OPUS_VERSION_RE.exec(fullId)
+  if (m) {
+    const major = Number(m[1])
+    const minor = m[2] === undefined ? null : Number(m[2])
+    const [minMajor, minMinor] = OPUS_ONE_M_MIN_VERSION
+    // A future major (opus 5+) is 1M with or without a minor; opus 4 needs an
+    // explicit minor >= 6 (bare `opus-4` is 4.0 → 200k, not assumed 4.6).
+    if (major > minMajor) return 1_000_000
+    if (major === minMajor && minor !== null && minor >= minMinor) return 1_000_000
+  }
   return DEFAULT_CONTEXT_WINDOW
 }
 

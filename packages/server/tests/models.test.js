@@ -1,6 +1,6 @@
 import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider, registerProviderRegistry } from '../src/models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider, registerProviderRegistry, resolveClaudeContextWindow, DEFAULT_CONTEXT_WINDOW } from '../src/models.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 // #5858: membership is now derived from `static claudeFamily` on the registered
 // provider classes (no hand-authored name literal). Importing providers.js
@@ -40,6 +40,60 @@ describe('FALLBACK_MODELS (default registry)', () => {
     for (const m of FALLBACK_MODELS) {
       assert.doesNotMatch(m.fullId, /-\d{8,}$/, `${m.id} fallback should not be a dated ID`)
     }
+  })
+})
+
+describe('resolveClaudeContextWindow (#5931 — version-aware opus heuristic)', () => {
+  it('maps the existing opus 4.6/4.7/4.8 minors to 1M (no behavior change)', () => {
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-6'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-7'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-8'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4.8'), 1_000_000)
+  })
+
+  it('generalizes to FUTURE opus minors and majors without a code change', () => {
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-9'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-12'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-5-0'), 1_000_000)
+    // Major-only future id (no minor) — opus 5+ is 1M.
+    assert.equal(resolveClaudeContextWindow('claude-opus-5'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-6'), 1_000_000)
+  })
+
+  it('treats a bare major-only opus-4 (no minor) as 4.0 → 200k, not 4.6', () => {
+    assert.equal(resolveClaudeContextWindow('claude-opus-4'), DEFAULT_CONTEXT_WINDOW)
+  })
+
+  it('does NOT mis-map opus releases older than 4.6 to 1M', () => {
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-5'), DEFAULT_CONTEXT_WINDOW)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-0'), DEFAULT_CONTEXT_WINDOW)
+    // Dated opus-3 id carries no opus-<n>-<n> version token → default.
+    assert.equal(resolveClaudeContextWindow('claude-3-opus-20240229'), DEFAULT_CONTEXT_WINDOW)
+  })
+
+  it('does not misread a DATED base-opus-4 id as a 1M minor version', () => {
+    // claude-opus-4-20250514 is opus 4.0 (dated) — a 200k model. The date must
+    // not be parsed as minor=20250514 (which would wrongly map it to 1M).
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-20250514'), DEFAULT_CONTEXT_WINDOW)
+    // But a VERSIONED + dated id keeps its real minor → opus 4.7 dated is 1M.
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-7-20251201'), 1_000_000)
+  })
+
+  it('defaults non-opus families to 200k', () => {
+    assert.equal(resolveClaudeContextWindow('claude-sonnet-4-6'), DEFAULT_CONTEXT_WINDOW)
+    assert.equal(resolveClaudeContextWindow('claude-haiku-4-5'), DEFAULT_CONTEXT_WINDOW)
+    assert.equal(resolveClaudeContextWindow('claude-fable-5'), DEFAULT_CONTEXT_WINDOW)
+  })
+
+  it('honors the explicit [1m] CLI suffix regardless of family', () => {
+    assert.equal(resolveClaudeContextWindow('claude-sonnet-4-6[1m]'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('some-model[1m]'), 1_000_000)
+  })
+
+  it('returns the default for non-string input', () => {
+    assert.equal(resolveClaudeContextWindow(null), DEFAULT_CONTEXT_WINDOW)
+    assert.equal(resolveClaudeContextWindow(undefined), DEFAULT_CONTEXT_WINDOW)
+    assert.equal(resolveClaudeContextWindow(42), DEFAULT_CONTEXT_WINDOW)
   })
 })
 
