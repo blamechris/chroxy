@@ -338,6 +338,13 @@ export function normalizePostCreateCommand(value) {
 }
 
 export class DockerByokSession extends ClaudeByokSession {
+  // #5891: declare Claude-family membership explicitly rather than inheriting it
+  // from ClaudeByokSession. Docker-BYOK runs Claude/Anthropic-key models in a
+  // container, so its model ids validate strictly as Claude-family — same as the
+  // base. Made explicit so a future non-Claude subclass can't silently inherit
+  // `true` (enforced by scripts/lint-claude-family-explicit.sh).
+  static claudeFamily = true
+
   static get displayLabel() {
     return 'Claude (BYOK — Docker container)'
   }
