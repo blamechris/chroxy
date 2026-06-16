@@ -1,6 +1,6 @@
-import { readFileSync, mkdirSync } from 'fs'
+import { readFileSync, mkdirSync, watch as fsWatch } from 'fs'
 import { homedir } from 'os'
-import { dirname, join } from 'path'
+import { basename, dirname, join } from 'path'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 
@@ -347,25 +347,44 @@ function getDefaultOverlayPath() {
  * @param {string} [path]
  * @returns {Map<string, {fullId:string, shortId?:string, label?:string, contextWindow?:number, pricing?:object}>}
  */
-function loadModelsOverlay(path = getDefaultOverlayPath()) {
+/**
+ * #5932 — load the overlay with an explicit MALFORMED-vs-EMPTY signal so a
+ * hot-reload can keep the last-good set when the file becomes malformed
+ * (rather than silently dropping every overlaid model). Returns
+ * `{ ok, overlay }`:
+ *   - absent file        → `{ ok: true,  overlay: <empty> }` (legit "no overrides";
+ *     a reload of an absent/deleted file CLEARS the overlay — an explicit
+ *     operator action, distinct from a parse failure)
+ *   - malformed JSON      → `{ ok: false, overlay: <empty> }`  (keep last-good on reload)
+ *   - non-object JSON root → `{ ok: false, overlay: <empty> }`
+ *   - valid object        → `{ ok: true,  overlay: <normalised> }`
+ *
+ * NEVER throws. The boot-time {@link loadModelsOverlay} wraps this and returns
+ * just the overlay (treating malformed as empty, exactly as before).
+ *
+ * @param {string} [path]
+ * @returns {{ ok: boolean, overlay: Map<string, object> }}
+ */
+function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
   const overlay = new Map()
   let raw
   try {
     raw = readFileSync(path, 'utf-8')
   } catch {
-    // Missing file is the common case — empty overlay, no log.
-    return overlay
+    // Missing file is the common case — empty overlay, no log. `ok` so a reload
+    // of a deleted file legitimately clears the overlay.
+    return { ok: true, overlay }
   }
   let parsed
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
     log.warn(`loadModelsOverlay: malformed JSON in ${path}: ${err?.message || err} — ignoring overlay`)
-    return overlay
+    return { ok: false, overlay }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     log.warn(`loadModelsOverlay: ${path} is not a JSON object keyed by model id — ignoring overlay`)
-    return overlay
+    return { ok: false, overlay }
   }
   for (const [key, value] of Object.entries(parsed)) {
     if (typeof key !== 'string' || key.length === 0) continue
@@ -380,13 +399,20 @@ function loadModelsOverlay(path = getDefaultOverlayPath()) {
     }
     overlay.set(fullId, entry)
   }
-  return overlay
+  return { ok: true, overlay }
 }
 
-// Module-level overlay, loaded once at boot. The default Claude registry and
-// the module-level getModelPricing() consult this. Per-provider registries
-// take their own overlay via the createModelsRegistry hook.
-const defaultOverlay = loadModelsOverlay()
+function loadModelsOverlay(path = getDefaultOverlayPath()) {
+  return loadModelsOverlayResult(path).overlay
+}
+
+// Module-level overlay, loaded at boot and HOT-RELOADABLE (#5932). The default
+// Claude registry and the module-level getModelPricing() consult this; both
+// read it dynamically (getModelPricing at call time; the registry via
+// applyOverlay), so reassigning it in reloadModelsOverlay() takes effect without
+// a restart. Per-provider registries take their own overlay via the
+// createModelsRegistry hook.
+let defaultOverlay = loadModelsOverlay()
 
 /**
  * Per-provider cache path resolver (#4413). Non-Claude providers
@@ -573,42 +599,56 @@ export function createModelsRegistry(hooks = {}) {
   // resolveModelPricing. SDK live values still win over both at
   // updateModels() time (the contextWindowOverrides / providerMeta lookups
   // are consulted ahead of the fallback row's contextWindow).
-  const overlayRows = []
-  const overriddenBase = []
-  const baseByFullId = new Map(baseFallbackModels.map((m) => [m.fullId, m]))
-  for (const entry of overlay.values()) {
-    const baseRow = baseByFullId.get(entry.fullId)
-    if (baseRow) {
-      // Override the base row's label/window from the overlay when supplied.
-      if (entry.label !== undefined || entry.contextWindow !== undefined || entry.shortId !== undefined) {
-        baseByFullId.set(entry.fullId, Object.freeze({
-          id: entry.shortId ?? baseRow.id,
-          label: entry.label ?? baseRow.label,
-          fullId: baseRow.fullId,
-          contextWindow: entry.contextWindow ?? baseRow.contextWindow,
-        }))
+  //
+  // #5932 — extracted so applyOverlay() can RE-fold a hot-reloaded overlay
+  // without rebuilding the whole registry (which would discard SDK-learned
+  // models + contextWindow overrides).
+  function computeFallbackModels(overlayMap) {
+    const overlayRows = []
+    const overriddenBase = []
+    const baseByFullId = new Map(baseFallbackModels.map((m) => [m.fullId, m]))
+    for (const entry of overlayMap.values()) {
+      const baseRow = baseByFullId.get(entry.fullId)
+      if (baseRow) {
+        // Override the base row's label/window from the overlay when supplied.
+        if (entry.label !== undefined || entry.contextWindow !== undefined || entry.shortId !== undefined) {
+          baseByFullId.set(entry.fullId, Object.freeze({
+            id: entry.shortId ?? baseRow.id,
+            label: entry.label ?? baseRow.label,
+            fullId: baseRow.fullId,
+            contextWindow: entry.contextWindow ?? baseRow.contextWindow,
+          }))
+        }
+        continue
       }
-      continue
+      const shortId = entry.shortId ?? deriveIdFn(entry.fullId)
+      overlayRows.push(Object.freeze({
+        id: shortId,
+        label: entry.label ?? humanizeModelId(shortId),
+        fullId: entry.fullId,
+        contextWindow: entry.contextWindow ?? resolveContextWindowFn(entry.fullId),
+      }))
     }
-    const shortId = entry.shortId ?? deriveIdFn(entry.fullId)
-    overlayRows.push(Object.freeze({
-      id: shortId,
-      label: entry.label ?? humanizeModelId(shortId),
-      fullId: entry.fullId,
-      contextWindow: entry.contextWindow ?? resolveContextWindowFn(entry.fullId),
-    }))
+    // Preserve base order, then append overlay-only rows.
+    for (const m of baseFallbackModels) overriddenBase.push(baseByFullId.get(m.fullId))
+    return overlayRows.length > 0 || overriddenBase.some((m, i) => m !== baseFallbackModels[i])
+      ? Object.freeze([...overriddenBase, ...overlayRows])
+      : baseFallbackModels
   }
-  // Preserve base order, then append overlay-only rows.
-  for (const m of baseFallbackModels) overriddenBase.push(baseByFullId.get(m.fullId))
-  const fallbackModels = overlayRows.length > 0 || overriddenBase.some((m, i) => m !== baseFallbackModels[i])
-    ? Object.freeze([...overriddenBase, ...overlayRows])
-    : baseFallbackModels
+
+  // #5932: `let` (was const) so applyOverlay() can swap in a re-folded set.
+  let fallbackModels = computeFallbackModels(overlay)
 
   let activeModels = fallbackModels
   let defaultModelId = null
   let allowedModelIds = new Set()
   let toFullIdMap = new Map()
   let toShortIdMap = new Map()
+  // #5932: the last SDK model list applied via updateModels(), retained so
+  // applyOverlay() can RE-merge a hot-reloaded overlay with the live SDK data
+  // (AC2) instead of reverting to the bare fallback view. Null until the first
+  // SDK refresh (CLI-only / pre-init).
+  let lastSdkModels = null
   // Snapshot of the last saved cache payload so saveCache() can skip
   // redundant writes. `null` forces the first save to always run.
   let lastSavedSnapshot = null
@@ -695,8 +735,34 @@ export function createModelsRegistry(hooks = {}) {
 
   rebuildLookups(fallbackModels)
 
-  return {
+  // #5932: captured in a const so applyOverlay() can re-run the full
+  // updateModels() pipeline against a re-folded fallback set. Methods reference
+  // `registry` only at call time (by which point it's assigned), so there is no
+  // temporal-dead-zone hazard.
+  const registry = {
     getModels() {
+      return activeModels
+    },
+
+    /**
+     * #5932 — apply a hot-reloaded overlay WITHOUT rebuilding the registry
+     * (which would discard SDK-learned models + contextWindow overrides). Re-fold
+     * the new overlay into the fallback set, then:
+     *   - if SDK data was applied (lastSdkModels) → re-run updateModels() so the
+     *     overlay (overlay-only rows + label/window overrides) re-merges with the
+     *     live SDK list exactly as it did originally (AC2);
+     *   - otherwise (CLI-only / pre-init) → the re-folded fallback IS the active
+     *     list; re-apply it and rebuild lookups, preserving the current default.
+     * Returns the new active model list.
+     */
+    applyOverlay(newOverlay) {
+      const map = newOverlay instanceof Map ? newOverlay : new Map()
+      fallbackModels = computeFallbackModels(map)
+      if (lastSdkModels) {
+        registry.updateModels(lastSdkModels)
+      } else {
+        applyModels(fallbackModels, defaultModelId)
+      }
       return activeModels
     },
 
@@ -869,6 +935,11 @@ export function createModelsRegistry(hooks = {}) {
         log.warn(`updateModels: no SDK entry matched the /^default\\b/i displayName regex — falling back to '${picked}' as the default model. The SDK's "Default (…)" marker may have changed shape.`)
       }
 
+      // #5932: remember the raw SDK list so a later overlay hot-reload can
+      // re-merge against it (AC2). Store the original input, not `converted`,
+      // so the re-merge re-derives ids/labels/windows from the new fallback
+      // exactly as the original call did.
+      lastSdkModels = sdkModels
       applyModels(converted, nextDefault)
       return converted
     },
@@ -900,6 +971,9 @@ export function createModelsRegistry(hooks = {}) {
     resetModels() {
       contextWindowOverrides.clear()
       pricingDriftWarned.clear()
+      // #5932: drop the retained SDK list too, so a reset truly returns to the
+      // bare fallback view (a later applyOverlay won't re-merge stale SDK data).
+      lastSdkModels = null
       applyModels(fallbackModels, null)
       lastSavedSnapshot = null
     },
@@ -1059,12 +1133,118 @@ export function createModelsRegistry(hooks = {}) {
       return saveCacheImpl(path)
     },
   }
+
+  return registry
 }
 
 // Default instance — preserves backward compatibility for all existing imports.
 // Seeded with the boot-loaded user overlay so an operator-supplied model id
 // appears in the picker / allowlist and survives the loadCache prune.
 const defaultRegistry = createModelsRegistry({ overlay: defaultOverlay })
+
+/**
+ * #5932 — hot-reload the user model overlay (`~/.chroxy/models.json`) into the
+ * DEFAULT (Claude) registry + the module-level pricing path, without a daemon
+ * restart. Re-reads the file, re-folds it into the registry (re-merging with
+ * any live SDK model list — AC2), and swaps the module-level `defaultOverlay`
+ * so `getModelPricing()` picks up new/changed pricing.
+ *
+ * Safety (AC3): a MALFORMED overlay is rejected — the registry + pricing keep
+ * the LAST GOOD set and the call returns `{ reloaded: false, reason }`. A
+ * deleted/absent file legitimately CLEARS the overlay (an explicit operator
+ * action). Never throws.
+ *
+ * @param {string} [path]
+ * @returns {{ reloaded: boolean, reason?: string, models?: object[], defaultModelId?: string|null }}
+ */
+export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
+  const result = loadModelsOverlayResult(path)
+  if (!result.ok) {
+    // Malformed — keep the last-good registry + pricing untouched.
+    return { reloaded: false, reason: 'malformed' }
+  }
+  defaultOverlay = result.overlay
+  defaultRegistry.applyOverlay(result.overlay)
+  return {
+    reloaded: true,
+    models: defaultRegistry.getModels(),
+    defaultModelId: defaultRegistry.getDefaultModelId(),
+  }
+}
+
+/**
+ * #5932 — watch the overlay file for edits and hot-reload on change. Watches the
+ * containing DIRECTORY (not the file inode) so an editor's atomic
+ * write-temp-then-rename still fires, filters to the overlay filename, and
+ * debounces the burst of events a single save emits. On a successful reload the
+ * `onReload({ models, defaultModelId })` callback fires (the caller broadcasts
+ * `available_models`). A malformed save is ignored (last-good kept, no callback).
+ *
+ * Returns a `{ close() }` handle; call it on daemon shutdown. Never throws — a
+ * watch that can't be established (e.g. unsupported FS) logs a warn and returns
+ * an inert handle (boot-only behavior, unchanged).
+ *
+ * `watchFactory` is injectable for tests (defaults to `fs.watch`); it must
+ * return a watcher with `.close()` and accept `(dir, listener)`.
+ *
+ * @param {{ path?: string, onReload?: (r: object) => void, debounceMs?: number, watchFactory?: Function }} [opts]
+ * @returns {{ close: () => void }}
+ */
+export function watchModelsOverlay({ path = getDefaultOverlayPath(), onReload, debounceMs = 200, watchFactory } = {}) {
+  const dir = dirname(path)
+  const file = basename(path)
+  let timer = null
+  let closed = false
+
+  const fire = () => {
+    timer = null
+    if (closed) return
+    const result = reloadModelsOverlay(path)
+    if (result.reloaded && typeof onReload === 'function') {
+      try { onReload(result) } catch (err) { log.warn(`watchModelsOverlay: onReload threw: ${err?.message || err}`) }
+    }
+  }
+  const trigger = () => {
+    if (closed) return
+    if (timer) clearTimeout(timer)
+    timer = setTimeout(fire, debounceMs)
+  }
+
+  let watcher
+  try {
+    const factory = typeof watchFactory === 'function' ? watchFactory : (d, listener) => fsWatch(d, listener)
+    watcher = factory(dir, (_eventType, changed) => {
+      // Directory watch fires for every entry; only react to our file. A null
+      // filename (some platforms) is treated as "maybe ours" → reload.
+      if (changed == null || basename(String(changed)) === file) trigger()
+    })
+    if (watcher && typeof watcher.on === 'function') {
+      watcher.on('error', (err) => log.warn(`watchModelsOverlay: watcher error: ${err?.message || err}`))
+    }
+  } catch (err) {
+    log.warn(`watchModelsOverlay: could not watch ${dir}: ${err?.message || err} — overlay edits need a restart`)
+    return { close() {} }
+  }
+
+  return {
+    close() {
+      closed = true
+      if (timer) { clearTimeout(timer); timer = null }
+      try { watcher?.close?.() } catch { /* already closed */ }
+    },
+  }
+}
+
+/**
+ * #5932 — test hook: restore the module-level default overlay + registry to a
+ * known state so a test that exercises reloadModelsOverlay() doesn't leak global
+ * mutations into sibling tests. Pass a Map to seed a specific overlay, or omit
+ * for an empty one.
+ */
+export function _resetModelsOverlayForTests(overlay = new Map()) {
+  defaultOverlay = overlay instanceof Map ? overlay : new Map()
+  defaultRegistry.applyOverlay(defaultOverlay)
+}
 
 /**
  * Per-provider registries. Providers that expose static
