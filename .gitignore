@@ -76,6 +76,10 @@ tmp/
 # Local docs (never commit)
 ROADMAP.local.md
 tests/screenshots/
+# Same, but nested under any package (the mid-slash pattern above is anchored to
+# the repo root, so it misses packages/*/tests/screenshots/ — Maestro / dashboard
+# screenshot artifacts that must never be committed).
+**/tests/screenshots/
 docs/audit-results/
 docs/audits/
 docs/qa-log.md
