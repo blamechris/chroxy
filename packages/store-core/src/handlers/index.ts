@@ -499,11 +499,12 @@ export * from './session-status'
 export * from './conversation'
 
 // ---------------------------------------------------------------------------
-// Permission-request handlers (permission_request, permission_resolved,
-// permission_expired, permission_timeout, permission_rules_updated + the
-// PermissionRule type) live in ./permission.ts (audit P2-3 split). Re-exported
-// here so the barrel's public surface is unchanged. (The permission-mode
-// handlers stay below — handleClaudeReady consumes handleAvailablePermissionModes.)
+// Permission handlers — request lifecycle (permission_request / _resolved /
+// _expired / _timeout / _rules_updated + the PermissionRule type) AND the
+// permission-mode controls (permission_mode_changed / available_permission_modes
+// / confirm_permission_mode) — live in ./permission.ts (audit P2-3 split).
+// Re-exported here so the barrel's public surface is unchanged. handleAuthOk
+// imports handleAvailablePermissionModes + PermissionMode back from there.
 // ---------------------------------------------------------------------------
 export * from './permission'
 
