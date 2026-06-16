@@ -82,12 +82,15 @@ function idleTuiSession() {
 }
 
 function makeServer(sessionForId = {}, { pushManager = makePushManager() } = {}) {
+  const recordedMailboxEvents = []
   return {
     _ingestSecret: SECRET,
     pushManager,
     sessionManager: {
       resolveSessionByAgentCommId: (id) => sessionForId[id] || null,
       registerAgentCommId: (sid) => sid !== 'no-such-session',
+      recordMailboxEvent: (ev) => recordedMailboxEvents.push(ev),
+      recordedMailboxEvents,
     },
   }
 }
@@ -130,6 +133,11 @@ describe('POST /api/mailbox — ping behavior', () => {
     assert.equal(push.calls[0].category, 'mailbox')
     assert.equal(push.calls[0].data.to, 'coder')
     assert.equal(push.calls[0].data.unread_count, 3)
+
+    // The delivery is recorded for the Control Room "Mailbox" tab.
+    const recorded = server.sessionManager.recordedMailboxEvents
+    assert.equal(recorded.length, 1)
+    assert.deepEqual(recorded[0], { to: 'coder', from: 'alice', unreadCount: 3, outcome: 'injected' })
   })
 
   it('does NOT inject when the recipient is mid-turn (busy) but still notifies', async () => {
@@ -411,5 +419,89 @@ describe('createSession auto-registers AGENT_COMM_ID', () => {
     mgr._sessions.set('sid-2', { session: idleTuiSession(), name: 'Plain', cwd: '/tmp', createdAt: 2 })
     const plain = mgr._serializeSessionEntry('sid-2', mgr._sessions.get('sid-2'))
     assert.equal(plain.agentCommId, null)
+  })
+})
+
+describe('SessionManager mailbox observability (Control Room snapshot)', () => {
+  let mgr
+  let tmpDir
+
+  function makeMgr() {
+    tmpDir = mkdtempSync(join(tmpdir(), 'sm-mailbox-obs-'))
+    mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 10,
+      defaultCwd: '/tmp',
+      stateFilePath: join(tmpDir, 'state.json'),
+    })
+    return mgr
+  }
+
+  afterEach(() => {
+    try {
+      mgr?._sessions?.clear()
+      mgr?.destroyAll?.()
+    } catch {
+      // best-effort teardown
+    }
+    if (tmpDir) rmSync(tmpDir, { recursive: true, force: true })
+    mgr = null
+    tmpDir = null
+  })
+
+  it('records mailbox events newest-first and ignores malformed ones', () => {
+    makeMgr()
+    mgr.recordMailboxEvent({ to: 'coder', from: 'alice', unreadCount: 3, outcome: 'injected' })
+    mgr.recordMailboxEvent({ to: 'coder', from: 'bob', unreadCount: 1, outcome: 'busy' })
+    // Malformed (missing `to` / `outcome`) — ignored, no throw.
+    mgr.recordMailboxEvent({ from: 'x' })
+    mgr.recordMailboxEvent(null)
+    // Negative/fractional unreadCount coerces to null.
+    mgr.recordMailboxEvent({ to: 'coder', outcome: 'no-session', unreadCount: -2 })
+
+    const events = mgr.getMailboxEvents()
+    assert.equal(events.length, 3)
+    assert.equal(events[0].outcome, 'no-session', 'newest first')
+    assert.equal(events[0].unreadCount, null)
+    assert.equal(events[0].from, 'unknown', 'missing from defaults to unknown')
+    assert.equal(events[2].outcome, 'injected', 'oldest last')
+    assert.ok(typeof events[0].at === 'number')
+  })
+
+  it('caps the ring buffer at MAILBOX_EVENT_LIMIT (oldest dropped)', () => {
+    makeMgr()
+    const limit = SessionManager.MAILBOX_EVENT_LIMIT
+    for (let i = 0; i < limit + 10; i++) {
+      mgr.recordMailboxEvent({ to: `m${i}`, outcome: 'injected' })
+    }
+    const events = mgr.getMailboxEvents()
+    assert.equal(events.length, limit)
+    // The 10 oldest were dropped; newest is the last recorded.
+    assert.equal(events[0].to, `m${limit + 9}`)
+    assert.equal(events[limit - 1].to, 'm10')
+  })
+
+  it('lists live agentCommId registrations with busy/tui flags, skipping dead sessions', () => {
+    makeMgr()
+    const tui = idleTuiSession()
+    const busyTui = { isRunning: true, writeTerminalInput() { return true } }
+    const nonTui = { isRunning: false }
+    mgr._sessions.set('sid-1', { session: tui, name: 'Coder' })
+    mgr._sessions.set('sid-2', { session: busyTui, name: 'Builder' })
+    mgr._sessions.set('sid-3', { session: nonTui, name: 'Sdk' })
+    mgr.registerAgentCommId('sid-1', 'coder')
+    mgr.registerAgentCommId('sid-2', 'builder')
+    mgr.registerAgentCommId('sid-3', 'sdk')
+    // An id whose session has gone is skipped.
+    mgr._agentCommIds.set('ghost', 'sid-gone')
+
+    const regs = mgr.listAgentCommRegistrations()
+    const byId = Object.fromEntries(regs.map((r) => [r.agentCommId, r]))
+    assert.equal(regs.length, 3, 'ghost id skipped')
+    assert.deepEqual(byId.coder, { agentCommId: 'coder', sessionId: 'sid-1', sessionName: 'Coder', isBusy: false, isTui: true })
+    assert.equal(byId.builder.isBusy, true)
+    assert.equal(byId.builder.isTui, true)
+    assert.equal(byId.sdk.isTui, false)
+    assert.equal(byId.sdk.isBusy, false)
   })
 })

@@ -9631,6 +9631,17 @@ button.sidebar-token-view-session-row:hover {
   overflow-x: auto;
 }
 
+/* Section sub-heading inside a panel that stacks more than one table (the
+   Mailbox tab: Registrations + Recent deliveries). Smaller than .cr-title and
+   tucked just above its table. */
+.cr-subtitle {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 8px 4px;
+  color: var(--text-primary);
+}
+
 .cr-table {
   width: 100%;
   border-collapse: collapse;

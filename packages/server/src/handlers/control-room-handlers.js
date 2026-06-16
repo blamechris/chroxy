@@ -695,10 +695,53 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
+ * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
+ * the live `agentCommId -> session` registrations plus a bounded ring buffer of
+ * recent live-interrupt deliveries (newest first). Reads in-memory SessionManager
+ * state only (no git/gh survey), so unlike the host/runner surveys it is
+ * synchronous and has no in-flight guard.
+ *
+ * Host-level survey: a pairing-bound (share-a-session) token is rejected, like
+ * `host_status_request`. On refusal it still replies with a schema-valid
+ * snapshot (empty arrays) carrying an additive `error` annotation so the tab can
+ * render the refusal rather than spin forever.
+ */
+function handleMailboxStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+  const base = {
+    type: 'mailbox_status_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    registrations: [],
+    recentEvents: [],
+  }
+
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, {
+      ...base,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'mailbox_status_request requires host-level authority (a session-bound token cannot survey the host)',
+      },
+    })
+    return
+  }
+
+  const sm = ctx?.sessions?.sessionManager
+  ctx.transport.send(ws, {
+    ...base,
+    registrations: typeof sm?.listAgentCommRegistrations === 'function' ? sm.listAgentCommRegistrations() : [],
+    recentEvents: typeof sm?.getMailboxEvents === 'function' ? sm.getMailboxEvents() : [],
+  })
+}
+
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
+  mailbox_status_request: handleMailboxStatusRequest,
   integration_action: handleIntegrationAction,
 }

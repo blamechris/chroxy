@@ -477,6 +477,7 @@ export class SessionManager extends EventEmitter {
     // Internal state
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt, agentCommId? }
     this._agentCommIds = new Map() // agentCommId -> sessionId (mailbox live-interrupt routing)
+    this._mailboxEvents = [] // bounded ring buffer of recent mailbox deliveries (Control Room observability)
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
@@ -615,6 +616,62 @@ export class SessionManager extends EventEmitter {
     if (!sessionId) return null
     const entry = this._sessions.get(sessionId)
     return entry ? entry.session : null
+  }
+
+  /** Max recent mailbox delivery events retained for the Control Room snapshot. */
+  static MAILBOX_EVENT_LIMIT = 50
+
+  /**
+   * Record one mailbox live-interrupt delivery attempt for the Control Room
+   * "Mailbox" tab. Bounded ring buffer (oldest dropped past the limit). Pure
+   * observability — never throws into the delivery path, so the caller
+   * (handleMailboxPing) can fire-and-forget. Invalid input is ignored.
+   * @param {{ to: string, from?: string, unreadCount?: number|null, outcome: string }} ev
+   */
+  recordMailboxEvent(ev) {
+    if (!ev || typeof ev.to !== 'string' || typeof ev.outcome !== 'string') return
+    const unreadCount =
+      typeof ev.unreadCount === 'number' && Number.isInteger(ev.unreadCount) && ev.unreadCount >= 0
+        ? ev.unreadCount
+        : null
+    this._mailboxEvents.push({
+      at: Date.now(),
+      to: ev.to,
+      from: typeof ev.from === 'string' && ev.from ? ev.from : 'unknown',
+      unreadCount,
+      outcome: ev.outcome,
+    })
+    const overflow = this._mailboxEvents.length - SessionManager.MAILBOX_EVENT_LIMIT
+    if (overflow > 0) this._mailboxEvents.splice(0, overflow)
+  }
+
+  /** Recent mailbox delivery events, newest first (a copy — safe to serialize). */
+  getMailboxEvents() {
+    return [...this._mailboxEvents].reverse()
+  }
+
+  /**
+   * Snapshot of the live agentCommId -> session registrations for the Control
+   * Room "Mailbox" tab: which mailbox ids are addressable, the session each
+   * resolves to, and whether that session is busy / claude-tui (the conditions
+   * the live-interrupt route injects under). Skips ids whose session has gone.
+   * @returns {Array<{agentCommId: string, sessionId: string, sessionName: string|null, isBusy: boolean, isTui: boolean}>}
+   */
+  listAgentCommRegistrations() {
+    const out = []
+    for (const [agentCommId, sessionId] of this._agentCommIds) {
+      const entry = this._sessions.get(sessionId)
+      if (!entry) continue
+      const session = entry.session
+      out.push({
+        agentCommId,
+        sessionId,
+        sessionName: typeof entry.name === 'string' ? entry.name : null,
+        isBusy: !!(session && session.isRunning),
+        isTui: !!(session && typeof session.writeTerminalInput === 'function'),
+      })
+    }
+    return out
   }
 
   /**

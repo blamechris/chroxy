@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -562,6 +562,74 @@ describe('integration_status_request handler (#5499)', () => {
     await handleSessionMessage(ws, client, { type: 'integration_status_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'integration_status_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+describe('mailbox_status_request handler (#5914 follow-up)', () => {
+  const stubMgr = {
+    listAgentCommRegistrations: () => [
+      { agentCommId: 'coder', sessionId: 'sid-1', sessionName: 'Coder', isBusy: false, isTui: true },
+    ],
+    getMailboxEvents: () => [
+      { at: 1718521200000, to: 'coder', from: 'alice', unreadCount: 3, outcome: 'injected' },
+      { at: 1718521100000, to: 'coder', from: 'unknown', unreadCount: null, outcome: 'busy' },
+    ],
+  }
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('mailbox_status_request'))
+    assert.equal(typeof controlRoomHandlers.mailbox_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant mailbox_status_snapshot and echoes requestId', () => {
+    const ctx = makeCtx({ sessionManager: stubMgr })
+    controlRoomHandlers.mailbox_status_request({}, { id: 'c' }, { type: 'mailbox_status_request', requestId: 'r1' }, ctx)
+
+    assert.equal(ctx._send.callCount, 1)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'mailbox_status_snapshot')
+    assert.equal(payload.requestId, 'r1')
+    const parsed = ServerMailboxStatusSnapshotSchema.safeParse(payload)
+    assert.ok(parsed.success, `snapshot should be schema-valid: ${JSON.stringify(parsed.error?.issues)}`)
+    assert.equal(payload.registrations[0].agentCommId, 'coder')
+    assert.equal(payload.recentEvents[0].outcome, 'injected')
+    assert.equal(payload.recentEvents[1].unreadCount, null)
+  })
+
+  it('sends requestId: null when omitted', () => {
+    const ctx = makeCtx({ sessionManager: stubMgr })
+    controlRoomHandlers.mailbox_status_request({}, { id: 'c' }, { type: 'mailbox_status_request' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.requestId, null)
+  })
+
+  it('rejects a session-bound (non-host) client with a FORBIDDEN error snapshot', () => {
+    const ctx = makeCtx({ sessionManager: stubMgr })
+    controlRoomHandlers.mailbox_status_request({}, { id: 'c', boundSessionId: 'sid-1' }, { type: 'mailbox_status_request' }, ctx)
+
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'mailbox_status_snapshot')
+    assert.equal(payload.error.code, 'FORBIDDEN')
+    assert.deepEqual(payload.registrations, [])
+    assert.deepEqual(payload.recentEvents, [])
+    // Still a schema-valid snapshot (the error is additive).
+    assert.ok(ServerMailboxStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('tolerates a SessionManager without the mailbox methods (empty arrays)', () => {
+    const ctx = makeCtx({ sessionManager: {} })
+    controlRoomHandlers.mailbox_status_request({}, { id: 'c' }, { type: 'mailbox_status_request' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.deepEqual(payload.registrations, [])
+    assert.deepEqual(payload.recentEvents, [])
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    const ctx = makeCtx({ sessionManager: stubMgr })
+    await handleSessionMessage({}, { id: 'c' }, { type: 'mailbox_status_request', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'mailbox_status_snapshot')
     assert.equal(payload.requestId, 'reg')
   })
 })

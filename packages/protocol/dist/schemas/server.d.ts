@@ -823,6 +823,57 @@ export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
         note: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+/** One live agentCommId → session registration row. */
+export declare const MailboxRegistrationSchema: z.ZodObject<{
+    agentCommId: z.ZodString;
+    sessionId: z.ZodString;
+    sessionName: z.ZodNullable<z.ZodString>;
+    isBusy: z.ZodBoolean;
+    isTui: z.ZodBoolean;
+}, z.core.$strip>;
+/** One recorded live-interrupt delivery attempt. */
+export declare const MailboxDeliveryEventSchema: z.ZodObject<{
+    at: z.ZodNumber;
+    to: z.ZodString;
+    from: z.ZodString;
+    unreadCount: z.ZodNullable<z.ZodNumber>;
+    outcome: z.ZodEnum<{
+        injected: "injected";
+        busy: "busy";
+        "not-tui": "not-tui";
+        "no-session": "no-session";
+        "pty-dead": "pty-dead";
+    }>;
+}, z.core.$strip>;
+export declare const ServerMailboxStatusSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"mailbox_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    registrations: z.ZodArray<z.ZodObject<{
+        agentCommId: z.ZodString;
+        sessionId: z.ZodString;
+        sessionName: z.ZodNullable<z.ZodString>;
+        isBusy: z.ZodBoolean;
+        isTui: z.ZodBoolean;
+    }, z.core.$strip>>;
+    recentEvents: z.ZodArray<z.ZodObject<{
+        at: z.ZodNumber;
+        to: z.ZodString;
+        from: z.ZodString;
+        unreadCount: z.ZodNullable<z.ZodNumber>;
+        outcome: z.ZodEnum<{
+            injected: "injected";
+            busy: "busy";
+            "not-tui": "not-tui";
+            "no-session": "no-session";
+            "pty-dead": "pty-dead";
+        }>;
+    }, z.core.$strip>>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
 export declare const ServerSessionPresetDisclosureSchema: z.ZodObject<{
     source: z.ZodEnum<{
         daemon: "daemon";
@@ -2381,6 +2432,9 @@ export type RepoTree = z.infer<typeof RepoTreeSchema>;
 export type RepoStatus = z.infer<typeof RepoStatusSchema>;
 export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>;
 export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>;
+export type ServerMailboxStatusSnapshotMessage = z.infer<typeof ServerMailboxStatusSnapshotSchema>;
+export type MailboxRegistration = z.infer<typeof MailboxRegistrationSchema>;
+export type MailboxDeliveryEvent = z.infer<typeof MailboxDeliveryEventSchema>;
 export type ServerSessionPresetDisclosure = z.infer<typeof ServerSessionPresetDisclosureSchema>;
 export type ServerSessionPresetFull = z.infer<typeof ServerSessionPresetFullSchema>;
 export type ServerSessionPresetSnapshotMessage = z.infer<typeof ServerSessionPresetSnapshotSchema>;
