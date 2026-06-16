@@ -469,6 +469,9 @@ export {
   handleMessageDequeued,
   enqueueOptimisticQueuedMessage,
   removeQueuedMessage,
+  // #5950 — orphan-badge safety net: reconcile local queue length to the
+  // server's authoritative count so a dropped message_dequeued self-heals.
+  reconcileQueueLength,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,

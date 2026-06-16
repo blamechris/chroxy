@@ -547,6 +547,25 @@ describe('shared dispatch table', () => {
       expect(env.sessions.s1.queuedMessages).toHaveLength(1)
       expect(env.sessions.s2.queuedMessages).toEqual([])
     })
+
+    it('self-heals a leftover orphan on the next dequeue via the authoritative queueLength (#5950)', () => {
+      // uin-0's message_dequeued was lost, leaving a stuck "Queued" badge. The
+      // server now flushes uin-1 with queueLength: 0 → both entries clear.
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            queuedMessages: [
+              { clientMessageId: 'uin-0', text: 'orphan', queuedAt: 9, status: 'confirmed' },
+              { clientMessageId: 'uin-1', text: 'a', queuedAt: 10, status: 'confirmed' },
+            ],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'uin-1', queueLength: 0, reason: 'flush' })
+      expect(env.sessions.s1.queuedMessages).toEqual([])
+    })
   })
 
   describe('plan_started', () => {

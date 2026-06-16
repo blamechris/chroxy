@@ -51,6 +51,70 @@ function optionalString(msg: Record<string, unknown>, key: string): string | und
   return typeof v === 'string' && v.length > 0 ? v : undefined
 }
 
+/** Read a finite numeric field, else undefined. */
+function optionalNumber(msg: Record<string, unknown>, key: string): number | undefined {
+  const v = msg[key]
+  return typeof v === 'number' && Number.isFinite(v) ? v : undefined
+}
+
+/**
+ * #5950 — defense-in-depth orphan-badge safety net. The server stamps every
+ * `message_queued` / `message_dequeued` with the AUTHORITATIVE post-event
+ * `queueLength`. If a `message_dequeued` is ever lost (a dropped frame, or a
+ * server edge that flushes without emitting), a stale entry would otherwise keep
+ * its "Queued" badge until a reconnect re-syncs. Reconciling against the
+ * server's count on every queue event self-heals that orphan on the next queue
+ * activity.
+ *
+ * STATUS-AWARE — this is load-bearing. Only `'confirmed'` entries correspond to
+ * messages the server is actually holding (and thus counted in `queueLength`).
+ * Optimistic `'pending'` entries (added synchronously on send, before their
+ * `message_queued` round-trips) are NOT yet server-acknowledged, so they
+ * legitimately make the local queue longer than `queueLength` and must NEVER be
+ * trimmed — they resolve via their own `message_queued` confirmation. A blind
+ * length trim would, on two fast queued sends, drop the just-confirmed entry
+ * while keeping an unconfirmed one (a normal-path data-loss bug, no dropped
+ * frame required). So we reconcile the CONFIRMED count only.
+ *
+ * Behaviour:
+ *   - confirmed-count <= target → no-op (returns `current`, referential — React
+ *     skips the re-render). Also covers "local SHORTER than server": we never
+ *     PAD, since a missing confirmed entry's text was never seen (left for the
+ *     planned reconnect snapshot #5937 to backfill).
+ *   - confirmed-count > target → drop the oldest (FIFO-head) CONFIRMED orphans
+ *     until the confirmed count equals `target`, preserving every pending entry
+ *     and overall order.
+ *   - non-finite/absent `queueLength` (older server) → returns `current`.
+ *
+ * FIFO-head trim is exact for the dominant case (a dropped flush retires the
+ * front of the queue, so the orphan IS the oldest confirmed entry). A dropped
+ * dequeue for a mid-queue `cancel_queued` of a confirmed entry is the only case
+ * where head-trim could drop a different still-valid confirmed entry; that
+ * compound failure is vanishingly unlikely, keeps the correct NUMBER of bubbles,
+ * and self-corrects on the reconnect snapshot.
+ */
+export function reconcileQueueLength(
+  current: QueuedSessionMessage[],
+  serverQueueLength: number | undefined,
+): QueuedSessionMessage[] {
+  if (typeof serverQueueLength !== 'number' || !Number.isFinite(serverQueueLength)) {
+    return current
+  }
+  const target = Math.max(0, Math.floor(serverQueueLength))
+  const confirmedCount = current.reduce((n, m) => (m.status === 'confirmed' ? n + 1 : n), 0)
+  if (confirmedCount <= target) return current
+  // Drop the oldest confirmed orphans (filter walks head→tail) until the
+  // confirmed count matches the server's; pending entries always survive.
+  let toDrop = confirmedCount - target
+  return current.filter((m) => {
+    if (toDrop > 0 && m.status === 'confirmed') {
+      toDrop--
+      return false
+    }
+    return true
+  })
+}
+
 /**
  * #5937 — optimistic local enqueue for the send-while-busy path (called by a
  * client's send action, NOT a wire handler). Appends a `'pending'` entry so the
@@ -125,10 +189,16 @@ export function handleMessageQueued(
   // QueuedSessionMessage doc). Do NOT tighten this to `!text`.
   if (typeof text !== 'string') return null
   const clientMessageId = optionalString(msg, 'clientMessageId')
+  const queueLength = optionalNumber(msg, 'queueLength')
 
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
     applyTo: (current) => {
+      // #5950 — reconcile the result against the server's authoritative
+      // queueLength so a leftover CONFIRMED orphan (from a dropped earlier
+      // dequeue) is trimmed. Status-aware: optimistic pending entries are never
+      // trimmed, so a 2nd fast send queued before the 1st confirms is safe. A
+      // no-op (referential) when the confirmed count is already in sync.
       if (clientMessageId) {
         const idx = current.findIndex((m) => m.clientMessageId === clientMessageId)
         // `existing` is read off the index AND truthy-guarded so it narrows to a
@@ -140,11 +210,11 @@ export function handleMessageQueued(
           // No-op (referential equality) when already confirmed with identical
           // text — a duplicate message_queued must not churn the array.
           if (existing.status === 'confirmed' && existing.text === text) {
-            return { queuedMessages: current }
+            return { queuedMessages: reconcileQueueLength(current, queueLength) }
           }
           const next = current.slice()
           next[idx] = { ...existing, text, status: 'confirmed' }
-          return { queuedMessages: next }
+          return { queuedMessages: reconcileQueueLength(next, queueLength) }
         }
       }
       const entry: QueuedSessionMessage = {
@@ -153,7 +223,7 @@ export function handleMessageQueued(
         queuedAt: Date.now(),
         status: 'confirmed',
       }
-      return { queuedMessages: [...current, entry] }
+      return { queuedMessages: reconcileQueueLength([...current, entry], queueLength) }
     },
   }
 }
@@ -177,8 +247,14 @@ export function handleMessageDequeued(
   activeSessionId: string | null,
 ): QueuedMessagesBuilder {
   const clientMessageId = optionalString(msg, 'clientMessageId')
+  const queueLength = optionalNumber(msg, 'queueLength')
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
-    applyTo: (current) => ({ queuedMessages: removeQueuedMessage(current, clientMessageId) }),
+    // #5950 — after removing the dequeued entry, reconcile against the server's
+    // authoritative queueLength so any leftover orphan (from a dropped earlier
+    // dequeue) is trimmed too. Referential no-op when already in sync.
+    applyTo: (current) => ({
+      queuedMessages: reconcileQueueLength(removeQueuedMessage(current, clientMessageId), queueLength),
+    }),
   }
 }
