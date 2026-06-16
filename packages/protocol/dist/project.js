@@ -148,12 +148,17 @@ function chroxyWorktreeTopDir(dir, env = defaultEnv()) {
     return id.length > 0 ? join(root, id) : null;
 }
 /**
- * Recover the parent project for a chroxy session worktree from its `.git` FILE:
- * `git worktree add` writes `gitdir: <repo>/.git/worktrees/<id>`, so the repo
- * root (the parent project) is three segments up. Returns null on any read/shape
- * surprise — a tampered `.git` file then can't misattribute the project.
+ * Recover the owning repo PATH of a chroxy session worktree from its `.git` FILE:
+ * `git worktree add` writes `gitdir: <repo>/.git/worktrees/<id>`, so the repo root
+ * is three segments up. Returns null on any read/shape surprise — a tampered
+ * `.git` file then can't point a caller (project attribution here, or the server's
+ * `git worktree remove` GC) at an arbitrary path.
+ *
+ * Single source of truth for the chroxy-worktree `.git` parser (#5850 / #5869):
+ * the server's worktree GC (`worktree-gc.js`) imports this instead of keeping its
+ * own copy; `chroxyWorktreeParentProject` derives the project name from it.
  */
-function chroxyWorktreeParentProject(worktreeDir) {
+export function chroxyWorktreeRepoPath(worktreeDir) {
     let raw;
     try {
         raw = readFileSync(join(worktreeDir, '.git'), 'utf8');
@@ -179,10 +184,21 @@ function chroxyWorktreeParentProject(worktreeDir) {
     // Strict shape: the linked gitdir must be <repo>/.git/worktrees/<id> — the
     // only shape `git worktree add` writes for the daemon's checkouts. Anything
     // else is a shape surprise → null, so a tampered .git file can't misattribute
-    // the project; classification still suppresses.
+    // the project (or target an arbitrary removal path).
     if (basename(gitDir) !== '.git')
         return null;
-    const name = basename(dirname(gitDir));
+    const repo = dirname(gitDir);
+    return repo.length > 0 ? repo : null;
+}
+/**
+ * Parent project NAME for a chroxy session worktree: the basename of its owning
+ * repo path (see chroxyWorktreeRepoPath). Returns null on any read/shape surprise.
+ */
+function chroxyWorktreeParentProject(worktreeDir) {
+    const repo = chroxyWorktreeRepoPath(worktreeDir);
+    if (repo === null)
+        return null;
+    const name = basename(repo);
     return name.length > 0 ? name : null;
 }
 /**

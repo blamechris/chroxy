@@ -33,6 +33,18 @@ export declare function _worktreeMarkerIndex(dir: string): number;
  */
 export declare function _pathWithinPrefix(prefix: string, dir: string): boolean;
 /**
+ * Recover the owning repo PATH of a chroxy session worktree from its `.git` FILE:
+ * `git worktree add` writes `gitdir: <repo>/.git/worktrees/<id>`, so the repo root
+ * is three segments up. Returns null on any read/shape surprise — a tampered
+ * `.git` file then can't point a caller (project attribution here, or the server's
+ * `git worktree remove` GC) at an arbitrary path.
+ *
+ * Single source of truth for the chroxy-worktree `.git` parser (#5850 / #5869):
+ * the server's worktree GC (`worktree-gc.js`) imports this instead of keeping its
+ * own copy; `chroxyWorktreeParentProject` derives the project name from it.
+ */
+export declare function chroxyWorktreeRepoPath(worktreeDir: string): string | null;
+/**
  * #5439 GAP B: a cwd inside a worktree checkout belongs to the PARENT project —
  * the segment before /.claude/worktrees/ — not the agent-* checkout. #5464
  * extends this to chroxy session worktrees (~/.chroxy/worktrees/<id>): their

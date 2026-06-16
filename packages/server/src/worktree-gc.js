@@ -26,7 +26,8 @@
 
 import { execFileSync } from 'node:child_process'
 import { existsSync, readFileSync, readdirSync, statSync } from 'node:fs'
-import { isAbsolute, join as joinPath, resolve as resolvePath, dirname, sep } from 'node:path'
+import { isAbsolute, join as joinPath, resolve as resolvePath } from 'node:path'
+import { chroxyWorktreeRepoPath } from '@chroxy/protocol/project'
 import { GIT } from './git.js'
 
 // #5706: absolute-age fallback for the PID-liveness check. A dead agent's pid
@@ -250,27 +251,6 @@ function isClean(git, worktreePath) {
   }
 }
 
-/**
- * Recover the owning repo path of a chroxy session worktree from its `.git`
- * FILE: `git worktree add` writes `gitdir: <repo>/.git/worktrees/<id>`, so the
- * repo root is three segments up. Returns null on any read/shape surprise.
- */
-function chroxyWorktreeRepoPath(worktreePath, readFile = readFileSync) {
-  let raw
-  try { raw = readFile(joinPath(worktreePath, '.git'), 'utf8') } catch { return null }
-  const match = /^gitdir:\s*(.+?)\s*$/m.exec(raw)
-  if (!match) return null
-  let linkedGitDir
-  try { linkedGitDir = resolvePath(worktreePath, match[1]) } catch { return null }
-  const worktreesDir = dirname(linkedGitDir) // <repo>/.git/worktrees
-  const gitDir = dirname(worktreesDir)       // <repo>/.git
-  // Strict shape: the gitdir must be `<repo>/.git/worktrees/<id>` (the only
-  // form `git worktree add` writes), so a tampered .git file can't point the
-  // removal at an arbitrary path.
-  if (!worktreesDir.endsWith(`${sep}worktrees`) || !gitDir.endsWith(`${sep}.git`)) return null
-  const repo = dirname(gitDir)
-  return repo.length > 0 ? repo : null
-}
 
 /**
  * #5859 (audit P1-7): boot-time sweep of ORPHANED chroxy session worktrees.
@@ -295,7 +275,7 @@ function chroxyWorktreeRepoPath(worktreePath, readFile = readFileSync) {
  * @param {object} args
  * @param {string} args.worktreeBase - e.g. ~/.chroxy/worktrees
  * @param {Set<string>} args.liveSessionIds - currently-live session ids (off-limits)
- * @param {object} [args.deps] - { git, readdir, exists, readFile }
+ * @param {object} [args.deps] - { git, readdir, exists }
  * @returns {{ removed: string[], skippedDirty: object[], skippedError: object[], scanned: number }}
  */
 export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps = {} } = {}) {
@@ -303,7 +283,6 @@ export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps 
     git = (cwd, args) => execFileSync(GIT, ['-C', cwd, ...args], { encoding: 'utf8' }),
     readdir = (p) => readdirSync(p, { withFileTypes: true }),
     exists = existsSync,
-    readFile = readFileSync,
   } = deps
   const report = { removed: [], skippedDirty: [], skippedError: [], scanned: 0 }
   if (!worktreeBase || !exists(worktreeBase)) return report
@@ -326,7 +305,7 @@ export function sweepOrphanChroxyWorktrees({ worktreeBase, liveSessionIds, deps 
       report.skippedDirty.push({ path: wtPath, reason: clean === null ? 'status-unknown' : 'dirty' })
       continue
     }
-    const repo = chroxyWorktreeRepoPath(wtPath, readFile)
+    const repo = chroxyWorktreeRepoPath(wtPath)
     if (!repo) { report.skippedError.push({ path: wtPath, error: 'repo-unrecoverable' }); continue }
     try {
       git(repo, ['worktree', 'remove', wtPath]) // NO --force; clean-checked above
