@@ -31,7 +31,7 @@ interface FakeSession {
   activeAgents?: AgentInfo[]
   pendingBackgroundShells?: PendingBackgroundShell[]
   devPreviews?: DevPreview[]
-  // slice 5 (#5937)
+  // outgoing-message queue (#5937)
   queuedMessages?: QueuedSessionMessage[]
   [k: string]: unknown
 }

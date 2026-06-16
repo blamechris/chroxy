@@ -39,7 +39,13 @@ export interface QueuedMessagesBuilder {
   applyTo: (current: QueuedSessionMessage[]) => { queuedMessages: QueuedSessionMessage[] }
 }
 
-/** Read a well-formed, non-empty string field, else undefined. */
+/**
+ * Read a well-formed, non-empty string field, else undefined. Deliberately
+ * NOT `_shared`'s `parseStringField` (which trims + returns null): a
+ * `clientMessageId` must not be trimmed, and `undefined` (not `null`) matches
+ * the optional `QueuedSessionMessage.clientMessageId?` type so the field is
+ * simply absent when unset rather than explicitly null.
+ */
 function optionalString(msg: Record<string, unknown>, key: string): string | undefined {
   const v = msg[key]
   return typeof v === 'string' && v.length > 0 ? v : undefined
@@ -114,6 +120,9 @@ export function handleMessageQueued(
   activeSessionId: string | null,
 ): QueuedMessagesBuilder | null {
   const text = msg.text
+  // Only the TYPE is guarded — an empty-string text is a valid queued entry
+  // (attachment-only sends carry `text: ''` from the server; see the
+  // QueuedSessionMessage doc). Do NOT tighten this to `!text`.
   if (typeof text !== 'string') return null
   const clientMessageId = optionalString(msg, 'clientMessageId')
 

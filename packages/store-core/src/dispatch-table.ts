@@ -95,7 +95,7 @@ import {
   // --- slice 4 (epic #5556) — web-task upsert (#5653 follow-on) ---
   handleWebTaskUpsert,
   applyWebTaskUpsert,
-  // --- slice 5 (epic #5935) — outgoing-message queue mirror (#5937) ---
+  // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   handleMessageQueued,
   handleMessageDequeued,
   resolveSessionId,
@@ -146,7 +146,7 @@ export interface DispatchSessionBase {
   activeAgents?: AgentInfo[]
   pendingBackgroundShells?: PendingBackgroundShell[]
   devPreviews?: DevPreview[]
-  // --- slice 5 (epic #5935) ---
+  // --- outgoing-message queue mirror (#5937) ---
   // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
   // Both clients' real `SessionState` carry this array (BaseSessionState).
   queuedMessages?: QueuedSessionMessage[]
@@ -392,7 +392,7 @@ export interface DispatchMessageMap {
   // the dispatch handler filter-and-appends against the flat `webTasks` list.
   web_task_created: { type: 'web_task_created'; task?: unknown }
   web_task_updated: { type: 'web_task_updated'; task?: unknown }
-  // --- slice 5 (epic #5935) — outgoing-message queue mirror (#5937) ---
+  // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   message_queued: {
     type: 'message_queued'
     sessionId: string
@@ -934,7 +934,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- slice 4 (epic #5556) — web-task upsert ---
     web_task_created: dispatchWebTaskUpsert,
     web_task_updated: dispatchWebTaskUpsert,
-    // --- slice 5 (epic #5935) — outgoing-message queue mirror (#5937) ---
+    // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
     message_queued: dispatchQueuedMessages<S>(handleMessageQueued),
     message_dequeued: dispatchQueuedMessages<S>(handleMessageDequeued),
   }
@@ -980,7 +980,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- slice 4 (epic #5556) — web-task upsert ---
   'web_task_created',
   'web_task_updated',
-  // --- slice 5 (epic #5935) — outgoing-message queue mirror (#5937) ---
+  // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   'message_queued',
   'message_dequeued',
 ]
