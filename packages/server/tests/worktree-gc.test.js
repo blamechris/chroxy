@@ -568,13 +568,13 @@ describe('sweepOrphanChroxyWorktrees (real git repo)', () => {
 
   it('removes a clean orphan, keeps a live session, skips dirty + ignored-only', () => {
     const orphan = addChroxyWorktree('0000000000000000000000000000aaaa')
-    const live = addChroxyWorktree('0000000000000000000000000000live')
-    const dirty = addChroxyWorktree('0000000000000000000000000000dirt', { dirty: true })
-    const ignored = addChroxyWorktree('0000000000000000000000000000ign0', { ignoredOnly: true })
+    const live = addChroxyWorktree('0000000000000000000000000000bbbb')
+    const dirty = addChroxyWorktree('0000000000000000000000000000cccc', { dirty: true })
+    const ignored = addChroxyWorktree('0000000000000000000000000000dddd', { ignoredOnly: true })
 
     const report = sweepOrphanChroxyWorktrees({
       worktreeBase: base,
-      liveSessionIds: new Set(['0000000000000000000000000000live']),
+      liveSessionIds: new Set(['0000000000000000000000000000bbbb']),
     })
 
     assert.equal(report.removed.map((p) => basename(p)).includes('0000000000000000000000000000aaaa'), true, 'clean orphan removed')
@@ -590,8 +590,21 @@ describe('sweepOrphanChroxyWorktrees (real git repo)', () => {
     assert.deepEqual(report, { removed: [], skippedDirty: [], skippedError: [], scanned: 0 })
   })
 
+  it('never sweeps a dir whose name is not a 32-hex session id (user-placed dir)', () => {
+    // A clean worktree that WOULD be a removal candidate but for its non-hex name.
+    const userDir = addChroxyWorktree('not-a-chroxy-session-id')
+    addChroxyWorktree('0000000000000000000000000000aaaa')
+
+    const report = sweepOrphanChroxyWorktrees({ worktreeBase: base, liveSessionIds: new Set() })
+
+    assert.equal(existsSync(userDir), true, 'non-hex-named dir never touched')
+    assert.equal(report.removed.map((p) => basename(p)).includes('not-a-chroxy-session-id'), false, 'non-hex dir not removed')
+    assert.equal(report.scanned, 1, 'only the hex-named orphan was scanned (non-hex dir filtered before scan)')
+    assert.equal(report.removed.map((p) => basename(p)).includes('0000000000000000000000000000aaaa'), true, 'hex orphan still removed')
+  })
+
   it('skips a dir whose .git cannot be resolved to a repo (no removal)', () => {
-    const bogus = join(base, '0000000000000000000000000000bog0')
+    const bogus = join(base, '0000000000000000000000000000beef')
     mkdirSync(bogus, { recursive: true })
     writeFileSync(join(bogus, '.git'), 'gitdir: /nowhere/bogus\n') // status will fail → status-unknown
     const report = sweepOrphanChroxyWorktrees({ worktreeBase: base, liveSessionIds: new Set() })
