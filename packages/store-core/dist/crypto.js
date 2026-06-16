@@ -47,23 +47,59 @@ export function createSigningKeyPair() {
     return { publicKey: encodeBase64(kp.publicKey), secretKey: kp.secretKey };
 }
 /**
+ * #5604 — domain-separation label for the exchange-key signature. The identity
+ * key today signs ONLY the exchange key, so the bare 32 bytes are unambiguous;
+ * but if the key is ever reused to sign another payload (rotation statements,
+ * capability grants, …) a context-free signature invites cross-protocol
+ * confusion. Prefixing this versioned ASCII label binds a signature to "this is
+ * an exchange key" so it can never be replayed as another statement. `v1` marks
+ * the scheme so a future change can bump it.
+ *
+ * Rollout is a compat ramp (see `verifyExchangeKeySignature`): the verifier
+ * accepts BOTH the bare and domain-separated forms now, so the signer can flip
+ * to the domain-separated form in a later release without forcing already-pinned
+ * clients to re-pair.
+ */
+export const EXCHANGE_KEY_SIG_DOMAIN_V1 = 'chroxy-exchange-key-v1:';
+/**
+ * Build the byte string the identity key signs/verifies for an exchange key.
+ * Bare form = the raw 32 exchange-key bytes (today's wire format).
+ * Domain-separated form = `EXCHANGE_KEY_SIG_DOMAIN_V1` (ASCII) ++ the 32 bytes.
+ */
+function exchangeKeySigMessage(exchangeKeyBytes, domainSeparated) {
+    if (!domainSeparated)
+        return exchangeKeyBytes;
+    const prefix = new TextEncoder().encode(EXCHANGE_KEY_SIG_DOMAIN_V1);
+    const msg = new Uint8Array(prefix.length + exchangeKeyBytes.length);
+    msg.set(prefix, 0);
+    msg.set(exchangeKeyBytes, prefix.length);
+    return msg;
+}
+/**
  * Sign an ephemeral exchange public key (base64) with the identity secret key.
  * Returns the detached signature as base64. The signed message is the RAW bytes
  * of the exchange public key (decoded from base64), so both sides sign/verify
  * over identical bytes regardless of base64 canonicalisation.
  *
+ * `opts.domainSeparated` (#5604) prepends `EXCHANGE_KEY_SIG_DOMAIN_V1` to the
+ * signed bytes. Defaults to `false` (bare form) so existing callers — and the
+ * live wire format — are unchanged until the compat ramp flips the signer; the
+ * accept-both verifier ships first.
+ *
  * @param exchangePublicKeyBase64 - the per-connection X25519 public key to bind
  * @param identitySecretKey - the 64-byte Ed25519 secret key
+ * @param opts.domainSeparated - sign the domain-separated payload (default false)
  * @returns base64-encoded 64-byte detached signature
  */
-export function signExchangeKey(exchangePublicKeyBase64, identitySecretKey) {
+export function signExchangeKey(exchangePublicKeyBase64, identitySecretKey, opts = {}) {
     if (typeof exchangePublicKeyBase64 !== 'string' || exchangePublicKeyBase64.trim().length === 0) {
         throw new Error('signExchangeKey: exchange public key must be a non-empty base64 string');
     }
     if (!(identitySecretKey instanceof Uint8Array) || identitySecretKey.length !== nacl.sign.secretKeyLength) {
         throw new Error(`signExchangeKey: identity secret key must be a ${nacl.sign.secretKeyLength}-byte Uint8Array`);
     }
-    const message = new Uint8Array(decodeBase64(exchangePublicKeyBase64));
+    const exchangeKeyBytes = new Uint8Array(decodeBase64(exchangePublicKeyBase64));
+    const message = exchangeKeySigMessage(exchangeKeyBytes, opts.domainSeparated === true);
     const sig = nacl.sign.detached(message, identitySecretKey);
     return encodeBase64(sig);
 }
@@ -74,6 +110,13 @@ export function signExchangeKey(exchangePublicKeyBase64, identitySecretKey) {
  * signature, false on any mismatch / malformed input. NEVER throws — a bad or
  * absent signature is a verification FAILURE the caller must treat as a refusal,
  * not an exception to swallow.
+ *
+ * #5604 — accepts a signature over EITHER the bare exchange-key bytes (today's
+ * signer) OR the domain-separated payload (`EXCHANGE_KEY_SIG_DOMAIN_V1` ++ bytes,
+ * the form the signer flips to in a later release). Both require the identity
+ * secret to produce, so accepting both does not weaken pinning — it only lets
+ * the signer migrate without forcing already-pinned clients to re-pair. A future
+ * release can drop the bare branch once the signer no longer emits it.
  *
  * @param exchangePublicKeyBase64 - the per-connection X25519 public key offered
  * @param signatureBase64 - the detached signature offered by the server
@@ -87,20 +130,27 @@ export function verifyExchangeKeySignature(exchangePublicKeyBase64, signatureBas
             return false;
         if (typeof identityPublicKeyBase64 !== 'string' || identityPublicKeyBase64.length === 0)
             return false;
-        const message = new Uint8Array(decodeBase64(exchangePublicKeyBase64));
+        const exchangeKeyBytes = new Uint8Array(decodeBase64(exchangePublicKeyBase64));
         const sig = new Uint8Array(decodeBase64(signatureBase64));
         const identityPub = new Uint8Array(decodeBase64(identityPublicKeyBase64));
         // This function only ever verifies an X25519 EXCHANGE public key, so reject
         // anything that isn't 32 bytes up front — a wrong-length key is malformed
         // input, not a genuine signature mismatch. deriveSharedKey enforces the same
         // length downstream, but checking here keeps the signature API honest.
-        if (message.length !== nacl.box.publicKeyLength)
+        if (exchangeKeyBytes.length !== nacl.box.publicKeyLength)
             return false;
         if (sig.length !== nacl.sign.signatureLength)
             return false;
         if (identityPub.length !== nacl.sign.publicKeyLength)
             return false;
-        return nacl.sign.detached.verify(message, sig, identityPub);
+        // Bare form first (the live wire format — the common path); fall back to the
+        // domain-separated form so a future signer flip verifies without a re-pair.
+        // TODO(#5959 phase 3): once the signer has emitted ONLY the domain-separated
+        // form for a full release, DROP the bare branch below — leaving it forever
+        // would defeat the domain separation (a context-free signature stays
+        // accepted). This accept-both window is deliberately temporary.
+        return (nacl.sign.detached.verify(exchangeKeyBytes, sig, identityPub) ||
+            nacl.sign.detached.verify(exchangeKeySigMessage(exchangeKeyBytes, true), sig, identityPub));
     }
     catch {
         return false;
