@@ -120,8 +120,10 @@ function handleCreateSession(ws, client, msg, ctx) {
   // forwards via providerOpts and non-TUI providers ignore the unknown key.
   const skipPermissions = typeof msg.skipPermissions === 'boolean' ? msg.skipPermissions : undefined
   // Mailbox: optional AGENT_COMM_ID to auto-register for this session (#5914
-  // follow-up). createSession validates + sanitises it (control chars rejected,
-  // trimmed, capped); a bad value is dropped to undefined there, never an error.
+  // follow-up). Trim here; SessionManager.registerAgentCommId (reached via
+  // createSession) is the authoritative validator — it re-trims and no-ops on a
+  // control-char / over-200-char id, so a bad value silently skips registration
+  // rather than failing the create.
   const agentCommId = (typeof msg.agentCommId === 'string' && msg.agentCommId.trim()) ? msg.agentCommId.trim() : undefined
   // Note: isolation is accepted in the schema but always derived server-side
   // from the actual session state (provider capabilities, worktree, sandbox).

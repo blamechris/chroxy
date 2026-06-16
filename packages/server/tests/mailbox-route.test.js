@@ -341,10 +341,12 @@ describe('SessionManager agent-comm registry', () => {
     assert.equal(mgr.unregisterAgentCommId('coder'), false)
   })
 
-  it('rejects an id with control characters (it is injected into a PTY)', () => {
+  it('rejects an id with control characters (hygiene / route parity)', () => {
     makeMgr()
     mgr._sessions.set('sid-1', { session: idleTuiSession() })
-    // A carriage return would let a crafted id inject an extra PTY line.
+    // The id is only a routing key (never itself injected into the PTY — the
+    // wakeup is a fixed template), but control chars are rejected for parity
+    // with the route's cleanField contract and to keep ids well-formed.
     assert.equal(mgr.registerAgentCommId('sid-1', 'coder\r\nrm -rf'), false)
     assert.equal(mgr.registerAgentCommId('sid-1', 'tab\tid'), false)
     assert.equal(mgr.resolveSessionByAgentCommId('coder\r\nrm -rf'), null)
@@ -355,6 +357,16 @@ describe('SessionManager agent-comm registry', () => {
     mgr._sessions.set('sid-1', { session: idleTuiSession() })
     assert.equal(mgr.registerAgentCommId('sid-1', 'a'.repeat(201)), false)
     assert.equal(mgr.registerAgentCommId('sid-1', 'a'.repeat(200)), true)
+  })
+
+  it('trims the id and rejects whitespace-only (canonical stored key)', () => {
+    makeMgr()
+    mgr._sessions.set('sid-1', { session: idleTuiSession() })
+    // Whitespace-only → rejected (no confusing empty-ish mapping).
+    assert.equal(mgr.registerAgentCommId('sid-1', '   '), false)
+    // Leading/trailing space is trimmed; the canonical 'coder' resolves.
+    assert.equal(mgr.registerAgentCommId('sid-1', '  coder  '), true)
+    assert.equal(mgr.resolveSessionByAgentCommId('coder'), mgr._sessions.get('sid-1').session)
   })
 })
 

@@ -563,26 +563,31 @@ export class SessionManager extends EventEmitter {
    */
   registerAgentCommId(sessionId, agentCommId) {
     if (typeof sessionId !== 'string' || typeof agentCommId !== 'string') return false
-    if (!sessionId || !agentCommId) return false
+    if (!sessionId) return false
     // Authoritative id contract (single source of truth for both the
-    // POST /api/mailbox/register route and createSession's auto-register):
-    // reject control chars (the wakeup is injected into a PTY — see
-    // mailbox-route.js) and cap length, matching the route's cleanField bounds.
-    if (agentCommId.length > 200 || /[\u0000-\u001f\u007f]/.test(agentCommId)) return false
+    // POST /api/mailbox/register route and createSession's auto-register),
+    // matching the route's cleanField bounds: trim, reject empty, cap length,
+    // reject control chars. The trim canonicalises the stored key so an
+    // untrimmed/whitespace-only id can't create a confusing/unresolvable
+    // mapping. Control chars are rejected for id hygiene and parity with the
+    // route — the id is only a routing key and never itself reaches the PTY
+    // wakeup string (a fixed template + unread count; see mailbox-route.js).
+    const id = agentCommId.trim()
+    if (!id || id.length > 200 || /[\u0000-\u001f\u007f]/.test(id)) return false
     const entry = this._sessions.get(sessionId)
     if (!entry) return false
     // Drop a prior holder of this id (id -> some other session).
-    const priorSessionId = this._agentCommIds.get(agentCommId)
+    const priorSessionId = this._agentCommIds.get(id)
     if (priorSessionId && priorSessionId !== sessionId) {
       const priorEntry = this._sessions.get(priorSessionId)
-      if (priorEntry && priorEntry.agentCommId === agentCommId) priorEntry.agentCommId = null
+      if (priorEntry && priorEntry.agentCommId === id) priorEntry.agentCommId = null
     }
     // Drop a prior id this session held (session -> some other id).
-    if (entry.agentCommId && entry.agentCommId !== agentCommId) {
+    if (entry.agentCommId && entry.agentCommId !== id) {
       this._agentCommIds.delete(entry.agentCommId)
     }
-    entry.agentCommId = agentCommId
-    this._agentCommIds.set(agentCommId, sessionId)
+    entry.agentCommId = id
+    this._agentCommIds.set(id, sessionId)
     return true
   }
 
