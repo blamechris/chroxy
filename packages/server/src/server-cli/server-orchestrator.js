@@ -33,6 +33,7 @@ export class ServerOrchestrator {
     pairingManager,
     pushManager = null,
     billingCanaryMonitor = null,
+    modelsOverlayWatcher = null,
     getWorktreeReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo = defaultRemoveConnectionInfo,
@@ -51,6 +52,10 @@ export class ServerOrchestrator {
     this._pairingManager = pairingManager
     this._pushManager = pushManager
     this._billingCanaryMonitor = billingCanaryMonitor
+    // #5932: the models.json overlay fs-watcher handle (or null when watching
+    // couldn't be established). Closed on shutdown so the watch doesn't outlive
+    // the daemon.
+    this._modelsOverlayWatcher = modelsOverlayWatcher || null
     this._getWorktreeReapTimer = typeof getWorktreeReapTimer === 'function' ? getWorktreeReapTimer : () => null
     this._emergencyCleanupSync = emergencyCleanupSync
     this._removeConnectionInfo = removeConnectionInfo
@@ -94,6 +99,11 @@ export class ServerOrchestrator {
     // wouldn't block exit, but clearing it avoids a sweep racing shutdown.
     const worktreeReapTimer = this._getWorktreeReapTimer()
     if (worktreeReapTimer) clearInterval(worktreeReapTimer)
+    // #5932: stop watching ~/.chroxy/models.json so the fs-watch doesn't outlive
+    // the daemon. Best-effort — close() never throws but guard anyway.
+    if (this._modelsOverlayWatcher) {
+      try { this._modelsOverlayWatcher.close?.() } catch {}
+    }
     // #5821: stop the billing-canary recompute timer. It's unref'd so it
     // wouldn't block exit, but clearing it avoids a recompute racing shutdown.
     if (this._billingCanaryMonitor) {

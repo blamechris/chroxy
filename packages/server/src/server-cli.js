@@ -39,7 +39,7 @@ import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from '
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { loadModelsCache, getModels } from './models.js'
+import { loadModelsCache, getModels, watchModelsOverlay } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
@@ -902,6 +902,18 @@ export async function startCliServer(config) {
   maybeWarnNonLoopbackBind({ bindHost, log })
   wsServer.start(bindHost)
 
+  // #5932: hot-reload the ~/.chroxy/models.json overlay on edit — surfacing a
+  // new model id (or a label/contextWindow/pricing override) is "a config entry,
+  // not a code change", so it must not require a daemon restart. On a successful
+  // reload, re-broadcast `available_models` for the default (Claude) registry so
+  // connected pickers refresh live. A malformed save is ignored (last-good kept).
+  const modelsOverlayWatcher = watchModelsOverlay({
+    onReload: ({ models, defaultModelId }) => {
+      log.info(`Models overlay reloaded: ${models.map((m) => m.id).join(', ')}`)
+      wsServer.broadcast({ type: 'available_models', models, defaultModel: defaultModelId, provider: 'claude-sdk' })
+    },
+  })
+
   // #5821 (live wiring): the billing canary. Recomputes the daemon's billing
   // early-warnings (silent metered default; the dormant claude-tui
   // reclassification tripwire) and broadcasts a `billing_canary` message when
@@ -1135,6 +1147,7 @@ export async function startCliServer(config) {
     pairingManager,
     pushManager,
     billingCanaryMonitor,
+    modelsOverlayWatcher,
     getWorktreeReapTimer: () => worktreeReapTimer,
     emergencyCleanupSync,
     removeConnectionInfo,
