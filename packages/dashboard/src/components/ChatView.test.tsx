@@ -210,10 +210,14 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
-  // #5954 — the streaming RAF keeps re-pinning to the growing bottom, and its
-  // own (programmatic) scroll events must not be misread as a user scroll-up
-  // (which would kill the auto-follow). Mirrors the suppression contract that
-  // `scrollToBottomNow` owns (next-frame flag clear).
+  // #5954 — behavior guard: the streaming RAF keeps re-pinning to the growing
+  // bottom, and an at-bottom self-induced scroll does not surface the
+  // scroll-to-bottom button. NOTE: this is a happy-path guard, not a regression
+  // test for the deferred-flag-clear fix specifically — the exact
+  // synchronous-vs-next-frame `programmaticScrollRef` timing depends on the
+  // browser's async scroll-event dispatch ordering, which jsdom doesn't model,
+  // so it would also pass on the pre-fix code. The suppression fix is verified
+  // by reasoning + on-device confirmation (#5954 stays open for the live check).
   it('keeps following the bottom while streaming as content grows (#5954)', async () => {
     vi.useFakeTimers()
     render(<ChatView messages={makeMessages(3)} isStreaming />)
