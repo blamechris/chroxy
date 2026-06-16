@@ -260,6 +260,41 @@ describe('createClientSender', () => {
     })
   })
 
+  // #5721 — the delivery boolean callers gate crypto state on (the eager
+  // handshake's auth_ok). The catch swallows the throw, so the return value is
+  // the only observable signal that a frame did NOT reach the wire.
+  describe('delivery return value (#5721)', () => {
+    it('returns true when ws.send succeeds', () => {
+      const ws = { send: () => {}, bufferedAmount: 0 }
+      assert.equal(send(ws, { _seq: 0 }, { type: 'test' }), true)
+    })
+
+    it('returns false when ws.send throws (swallowed internally)', () => {
+      log.error = () => {}
+      const ws = { send: () => { throw new Error('half-open') } }
+      assert.equal(send(ws, { _seq: 0 }, { type: 'test' }), false)
+    })
+
+    it('returns false when the client was already evicted', () => {
+      const ws = { send: () => {}, bufferedAmount: 0 }
+      assert.equal(send(ws, { _seq: 0, _evicted: true }, { type: 'test' }), false)
+    })
+
+    it('returns true when the message is queued (encryptionPending)', () => {
+      const ws = { send: () => {}, bufferedAmount: 0 }
+      const client = { _seq: 0, encryptionPending: true, postAuthQueue: [] }
+      assert.equal(send(ws, client, { type: 'test' }), true)
+      assert.equal(client.postAuthQueue.length, 1)
+    })
+
+    it('returns true when the message is buffered (_flushing)', () => {
+      const ws = { send: () => {}, bufferedAmount: 0 }
+      const client = { _seq: 0, _flushing: true }
+      assert.equal(send(ws, client, { type: 'test' }), true)
+      assert.equal(client._flushOverflow.length, 1)
+    })
+  })
+
   describe('backpressure eviction dedupe (#4834)', () => {
     /**
      * Build a fake ws whose bufferedAmount is set per-call (simulating a

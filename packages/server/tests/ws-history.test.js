@@ -732,7 +732,11 @@ function makeEncryptingCtx(overrides = {}) {
     send: (ws, msg) => {
       const client = ctx.clients.get(ws)
       sends.push(msg)
-      clientSend(ws, client, msg)
+      // #5721: mirror the real WsServer._send contract — return the delivery
+      // boolean from the underlying client-sender so the eager handshake's
+      // auth_ok-delivery gate sees a faithful true/false (a normal fake ws
+      // returns true; an injected throwing ws.send returns false).
+      return clientSend(ws, client, msg)
     },
     ...overrides,
   })
@@ -792,6 +796,37 @@ describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
     // And the client can actually decrypt that first burst frame with the shared key.
     const decrypted = decrypt(firstBurst, clientKey, 0, DIRECTION_SERVER)
     assert.equal(typeof decrypted.type, 'string')
+  })
+
+  it('#5721 — rolls back + closes when the eager auth_ok send fails (never marks E2E established)', () => {
+    // Half-open socket: ws.send throws, which _clientSend swallows + reports as a
+    // non-delivery (returns false). Without the #5721 gate the server would still
+    // flip encryptionState and encrypt the whole burst with a key the client
+    // never received (it never got serverPublicKey) — a silent wedge.
+    const closeCalls = []
+    const ws = {
+      readyState: 1,
+      send: () => { throw new Error('half-open socket') },
+      close: (code, reason) => closeCalls.push({ code, reason }),
+      _rawSent: [],
+    }
+    const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
+    const clientKp = createKeyPair()
+    const client = registerClient(ctx, ws, {
+      socketIp: '203.0.113.9', // not localhost → encryption required → eager path
+      eagerKeyExchange: { publicKey: clientKp.publicKey, salt: generateConnectionSalt() },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    // Crypto NOT established — mirrors the discrete-path rollback (#5702 8b).
+    assert.equal(client.encryptionState, null, 'encryptionState must NOT be set when auth_ok did not reach the wire')
+    // Handshake aborted: socket closed (1011) so the client reconnects + retries.
+    assert.equal(closeCalls.length, 1, 'socket closed on non-delivery')
+    assert.equal(closeCalls[0].code, 1011)
+    // The post-auth burst was skipped — we returned right after the failed auth_ok.
+    const attemptedTypes = ctx._plainSends.map(m => m.type)
+    assert.deepEqual(attemptedTypes, ['auth_ok'], 'only auth_ok attempted; burst skipped after rollback')
   })
 
   it('#5536 — signs the eager serverPublicKey with the configured identity', async () => {

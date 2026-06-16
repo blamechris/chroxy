@@ -29,7 +29,14 @@ const WARN_THROTTLE_MS = 30_000
  * @param {number} [opts.warnThreshold] - Bytes above which to log warning
  * @param {number} [opts.evictThreshold] - Bytes above which to close client
  * @param {number} [opts.warnThrottleMs] - Min ms between warnings per client
- * @returns {(ws: WebSocket, client: object|undefined, message: object) => void}
+ * @returns {(ws: WebSocket, client: object|undefined, message: object) => boolean}
+ *   Returns `true` when the message was handed to `ws.send` without throwing
+ *   (or accepted into the post-auth / flush-overflow queue for later delivery),
+ *   `false` when it could not be delivered — the client was already evicted, or
+ *   `ws.send` threw (a torn-down / half-open socket). #5721: callers that gate
+ *   crypto state on a frame actually reaching the wire (the eager handshake's
+ *   `auth_ok` carrying `serverPublicKey`) MUST check this — the catch below
+ *   swallows the throw, so there is no exception to observe otherwise.
  */
 export function createClientSender(log, opts = {}) {
   const warnThreshold = opts.warnThreshold ?? WARN_THRESHOLD
@@ -42,18 +49,18 @@ export function createClientSender(log, opts = {}) {
     // chain (e.g. replayHistory / flushPostAuthQueue) would otherwise keep
     // serializing + encrypting messages that will never leave the buffer.
     if (client?._evicted) {
-      return
+      return false
     }
     // Queue messages while key exchange is pending
     if (client?.encryptionPending && client.postAuthQueue) {
       client.postAuthQueue.push(message)
-      return
+      return true
     }
     // Buffer messages while post-auth queue is still flushing
     if (client?._flushing) {
       client._flushOverflow = client._flushOverflow || []
       client._flushOverflow.push(message)
-      return
+      return true
     }
     // Assign per-client monotonic sequence number
     if (client) {
@@ -96,8 +103,13 @@ export function createClientSender(log, opts = {}) {
           log.warn(`Backpressure: client ${client.id} bufferedAmount ${buffered} exceeds warning threshold (${warnThreshold} bytes) type=${message?.type || 'unknown'}`)
         }
       }
+      // #5721: the frame was handed to ws.send without throwing. A post-send
+      // backpressure eviction above (ws.close) affects FUTURE sends, not this
+      // one — this message already left for the socket buffer, so report success.
+      return true
     } catch (err) {
       log.error(`Send error: ${err.message}`)
+      return false
     }
   }
 }
