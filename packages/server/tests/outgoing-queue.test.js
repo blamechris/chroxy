@@ -246,7 +246,7 @@ describe('outgoing-message queue (#5936)', () => {
       const ok = s.cancelQueuedMessage('uin-2')
 
       assert.equal(ok, true)
-      assert.equal(s.outgoingQueueLength, 2, 'only the cancelled item left')
+      assert.equal(s.outgoingQueueLength, 2, 'cancelled item removed; the other two remain')
       assert.deepEqual(dequeued, [{ clientMessageId: 'uin-2', queueLength: 2, reason: 'cancelled' }])
     })
 

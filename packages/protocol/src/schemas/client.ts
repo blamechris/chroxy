@@ -154,8 +154,10 @@ export const CancelActivitySchema = z.object({
 // `cancel_activity`).
 export const CancelQueuedSchema = z.object({
   type: z.literal('cancel_queued'),
-  // Identifies the queued entry to drop. Same shape/cap as the `input`
-  // clientMessageId the entry was enqueued under.
+  // Identifies the queued entry to drop: the client-generated message id the
+  // entry was enqueued under (the server's resolved `messageId`, echoed as
+  // `clientMessageId` on `message_queued` / `message_dequeued`). Same 128-char
+  // cap the server applies to that id.
   clientMessageId: z.string().min(1).max(128),
   sessionId: z.string().max(256).optional(),
 }).passthrough()
