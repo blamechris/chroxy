@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -661,6 +661,13 @@ export interface ConnectionState {
    */
   hostStatusLoading: boolean;
 
+  // Mailbox (#5914 follow-up) — Control Room "Mailbox" tab snapshot (live
+  // agentCommId→session registrations + recent live-interrupt deliveries). Null
+  // until the first survey lands.
+  mailboxStatus: ServerMailboxStatusSnapshotMessage | null;
+  /** True between a `mailbox_status_request` and its `mailbox_status_snapshot`. */
+  mailboxStatusLoading: boolean;
+
   /**
    * #5553 — per-repo session presets, keyed by cwd. `undefined` = not yet
    * fetched; `null` = fetched, no preset for that repo; a value = the resolved
@@ -1256,6 +1263,12 @@ export interface ConnectionState {
   // button surfaces a "not connected" state). Sets `hostStatusLoading` while in
   // flight so the button can show a spinner.
   requestHostStatus: () => boolean;
+
+  // Mailbox (#5914 follow-up) — sends a `mailbox_status_request`; the reply is a
+  // single `mailbox_status_snapshot` handled into `mailboxStatus`. Returns
+  // whether the message went on the wire (false = socket closed). Sets
+  // `mailboxStatusLoading` while in flight.
+  requestMailboxStatus: () => boolean;
 
   // #5553 — per-repo session preset surface (host-authority). Each returns
   // whether the message went on the wire. Replies arrive as

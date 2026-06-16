@@ -476,6 +476,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
   hostStatusLoading: false,
+  // Mailbox (#5914 follow-up): Control Room "Mailbox" tab snapshot, fed by the
+  // mailbox_status_snapshot handler. Null until the first survey lands.
+  mailboxStatus: null,
+  mailboxStatusLoading: false,
   // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
   sessionPresetSnapshots: {},
   // #5553: server-provided composer seeds keyed by sessionId (drained by App).
@@ -867,6 +871,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ hostStatusLoading: true });
       wsSend(socket, { type: 'host_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // Mailbox (#5914 follow-up): request a mailbox snapshot. Mirrors
+  // requestHostStatus — sends `mailbox_status_request`, flips
+  // `mailboxStatusLoading`, returns false (without setting loading) when the
+  // socket is closed.
+  requestMailboxStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ mailboxStatusLoading: true });
+      wsSend(socket, { type: 'mailbox_status_request' });
       return true;
     }
     return false;

@@ -867,6 +867,17 @@ export const HostStatusRequestSchema = z.object({
     type: z.literal('host_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// Mailbox (#5914 follow-up): the Control Room "Mailbox" tab asks the server for
+// a point-in-time mailbox snapshot — the live agentCommId → session
+// registrations plus a bounded ring buffer of recent live-interrupt deliveries.
+// Host-level survey (a session-bound token is rejected, like
+// `host_status_request`). Pull-on-Refresh; the reply is a single
+// `mailbox_status_snapshot` (see server.ts). The optional `requestId` lets the
+// dashboard correlate a Refresh click to its snapshot.
+export const MailboxStatusRequestSchema = z.object({
+    type: z.literal('mailbox_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5253: Control Room — request a self-hosted runner status survey. The server
 // scans the runner-install root, probes each runner's service, optionally
 // enriches via `gh`, and replies with a single `runner_status_snapshot` (see
@@ -1052,6 +1063,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     RunnerStatusRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
+    MailboxStatusRequestSchema,
     IntegrationActionSchema,
     SummarizeSessionSchema,
     PairApproveSchema,

@@ -145,7 +145,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2500,6 +2500,20 @@ function handleHostStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
 }
 
 /**
+ * Mailbox (#5914 follow-up) — Control Room "Mailbox" tab `mailbox_status_snapshot`:
+ * REPLACE the stored snapshot with the carried one and clear the in-flight
+ * loading flag. Same defensive pattern as the host/runner snapshots — the wire
+ * shape is Zod-validated so a malformed payload is dropped rather than crashing
+ * the panel, and `mailboxStatusLoading` is cleared only on a successful parse so
+ * a buggy server doesn't make Refresh silently lie.
+ */
+function handleMailboxStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerMailboxStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ mailboxStatus: parsed.data, mailboxStatusLoading: false });
+}
+
+/**
  * #5553 — per-repo session-preset snapshot. The reply to session_preset_get /
  * _set / _approve / _revoke. Store the resolved preset keyed by cwd so the
  * create-session modal can disclose "repo preset applies" and the per-repo
@@ -2755,6 +2769,8 @@ const HANDLERS: Record<string, Handler> = {
   pair_resolved: handlePairResolved,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
+  // Mailbox (#5914 follow-up): Control Room "Mailbox" tab survey snapshot.
+  mailbox_status_snapshot: handleMailboxStatusSnapshot,
   session_preset_snapshot: handleSessionPresetSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,

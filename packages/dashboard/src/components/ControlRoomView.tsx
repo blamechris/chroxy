@@ -42,6 +42,7 @@ import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRe
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
+import { MailboxPanel } from './MailboxPanel'
 import { SettingsContent } from './SettingsPanel'
 import { useConnectionStore } from '../store/connection'
 import type { ConnectionState } from '../store/types'
@@ -136,6 +137,19 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'skillsInventory',
     loadingKey: 'skillsInventoryLoading',
     requestKey: 'requestSkillsInventory',
+  },
+  // Mailbox (#5914 follow-up): the agent-to-agent mailbox observability tab —
+  // live agentCommId→session registrations + recent live-interrupt deliveries.
+  // Same survey:true fetch-on-activation flow as the other tabs; the in-memory
+  // snapshot is cheap so the #5546 staleness guard just keeps it fresh.
+  {
+    key: 'mailbox',
+    label: 'Mailbox',
+    survey: true,
+    requestType: 'mailbox_status_request',
+    snapshotKey: 'mailboxStatus',
+    loadingKey: 'mailboxStatusLoading',
+    requestKey: 'requestMailboxStatus',
   },
   // #5544: the Settings tab converges the scattered preference surfaces
   // (notification categories, appearance, session defaults, BYOK, Tauri desktop
@@ -354,6 +368,8 @@ export function ControlRoomView({
         <IntegrationsSection />
       ) : tab === 'skills' ? (
         <SkillsInventorySection />
+      ) : tab === 'mailbox' ? (
+        <MailboxPanel />
       ) : (
         // #5544: scrollable wrapper so the (often long) settings body scrolls
         // inside the tab panel rather than the whole Control Room view. The

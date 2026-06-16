@@ -938,6 +938,52 @@ export const ServerHostStatusSnapshotSchema = z.object({
     repos: z.array(RepoStatusSchema),
 });
 // ---------------------------------------------------------------------------
+// Mailbox (#5914 follow-up) — Control Room "Mailbox" tab snapshot.
+//
+// Reply to a `mailbox_status_request` (see client.ts). Two projections of the
+// daemon's in-memory mailbox state: the live `registrations` (which sessions
+// are addressable by which agentCommId, and whether each is idle/claude-tui —
+// the conditions the live-interrupt route injects under) and a bounded
+// `recentEvents` ring buffer of the last deliveries the route attempted (newest
+// first). `generatedAt` is the ISO-8601 snapshot time so the tab can render
+// "generated Nm ago". Empty arrays are valid (no registrations / no traffic yet).
+/** One live agentCommId → session registration row. */
+export const MailboxRegistrationSchema = z.object({
+    /** The mailbox identity an external sender targets (the route's `to`). */
+    agentCommId: z.string(),
+    /** The chroxy session it currently resolves to. */
+    sessionId: z.string(),
+    /** Display name for that session, or null when unnamed. */
+    sessionName: z.string().nullable(),
+    /** True while the session is mid-turn — the route notifies but does NOT inject. */
+    isBusy: z.boolean(),
+    /** True when the session can receive a PTY wakeup (claude-tui). */
+    isTui: z.boolean(),
+});
+/** One recorded live-interrupt delivery attempt. */
+export const MailboxDeliveryEventSchema = z.object({
+    /** Epoch-ms timestamp the ping was handled. */
+    at: z.number(),
+    /** Recipient mailbox id (the ping's `to`). */
+    to: z.string(),
+    /** Sender label (the ping's `from`, or 'unknown'). */
+    from: z.string(),
+    /** Unread count the sender reported, or null when it was absent/invalid. */
+    unreadCount: z.number().int().nonnegative().nullable(),
+    /** What the route did — mirrors handleMailboxPing's `reason`. */
+    outcome: z.enum(['injected', 'busy', 'not-tui', 'no-session', 'pty-dead']),
+});
+export const ServerMailboxStatusSnapshotSchema = z.object({
+    type: z.literal('mailbox_status_snapshot'),
+    /** Echoes the request's `requestId` when provided (null otherwise). */
+    requestId: z.string().nullable().optional(),
+    generatedAt: z.string().datetime(),
+    registrations: z.array(MailboxRegistrationSchema),
+    recentEvents: z.array(MailboxDeliveryEventSchema),
+    /** Present only on a refusal (e.g. a session-bound token surveying the host). */
+    error: z.object({ code: z.string(), message: z.string() }).optional(),
+});
+// ---------------------------------------------------------------------------
 // #5553: per-repo session preset surfaces.
 //
 // Two distinct projections of the resolved preset cross the wire:

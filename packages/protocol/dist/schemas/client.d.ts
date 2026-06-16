@@ -640,6 +640,10 @@ export declare const HostStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"host_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const MailboxStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"mailbox_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const RunnerStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"runner_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1072,6 +1076,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"skills_inventory_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"mailbox_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"integration_action">;
     action: z.ZodEnum<{
         repo_memory_reindex: "repo_memory_reindex";
@@ -1108,6 +1115,7 @@ export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>;
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>;
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
+export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;

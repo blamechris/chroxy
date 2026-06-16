@@ -552,6 +552,50 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.sandbox, undefined)
   })
 
+  it('validates mailbox_status_request and its snapshot reply', async () => {
+    const { MailboxStatusRequestSchema } = await import('../src/schemas/client.ts')
+    const { ServerMailboxStatusSnapshotSchema } = await import('../src/schemas/server.ts')
+
+    assert.ok(MailboxStatusRequestSchema.safeParse({ type: 'mailbox_status_request' }).success)
+    assert.ok(MailboxStatusRequestSchema.safeParse({ type: 'mailbox_status_request', requestId: 'r1' }).success)
+
+    const snap = ServerMailboxStatusSnapshotSchema.safeParse({
+      type: 'mailbox_status_snapshot',
+      requestId: null,
+      generatedAt: '2026-06-16T07:00:00.000Z',
+      registrations: [
+        { agentCommId: 'coder', sessionId: 'sid-1', sessionName: 'Coder', isBusy: false, isTui: true },
+      ],
+      recentEvents: [
+        { at: 1718521200000, to: 'coder', from: 'alice', unreadCount: 3, outcome: 'injected' },
+        { at: 1718521100000, to: 'coder', from: 'unknown', unreadCount: null, outcome: 'busy' },
+      ],
+    })
+    assert.ok(snap.success, 'full mailbox snapshot must validate')
+    assert.equal(snap.data.registrations[0].agentCommId, 'coder')
+    assert.equal(snap.data.recentEvents[1].unreadCount, null)
+
+    // Empty arrays are the valid "no registrations / no traffic" state.
+    assert.ok(
+      ServerMailboxStatusSnapshotSchema.safeParse({
+        type: 'mailbox_status_snapshot',
+        generatedAt: '2026-06-16T07:00:00.000Z',
+        registrations: [],
+        recentEvents: [],
+      }).success,
+    )
+
+    // An unknown outcome is rejected (the enum is the source of truth).
+    assert.ok(
+      !ServerMailboxStatusSnapshotSchema.safeParse({
+        type: 'mailbox_status_snapshot',
+        generatedAt: '2026-06-16T07:00:00.000Z',
+        registrations: [],
+        recentEvents: [{ at: 1, to: 'x', from: 'y', unreadCount: 0, outcome: 'bogus' }],
+      }).success,
+    )
+  })
+
   it('validates create_session with an agentCommId (mailbox identity)', async () => {
     const { CreateSessionSchema } = await import('../src/schemas/client.ts')
     const ok = CreateSessionSchema.safeParse({

@@ -213,6 +213,9 @@ export function handleMailboxPing(server, req, res) {
     }
 
     const reason = injectWakeup(server, to, unreadCount)
+    // Record the delivery for the Control Room "Mailbox" tab (observability;
+    // recordMailboxEvent never throws into the delivery path).
+    server.sessionManager?.recordMailboxEvent?.({ to, from, unreadCount, outcome: reason })
     sendJson(res, 200, { ok: true, notified, injected: reason === 'injected', reason })
   })
 }

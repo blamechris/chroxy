@@ -990,6 +990,18 @@ export const HostStatusRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// Mailbox (#5914 follow-up): the Control Room "Mailbox" tab asks the server for
+// a point-in-time mailbox snapshot — the live agentCommId → session
+// registrations plus a bounded ring buffer of recent live-interrupt deliveries.
+// Host-level survey (a session-bound token is rejected, like
+// `host_status_request`). Pull-on-Refresh; the reply is a single
+// `mailbox_status_snapshot` (see server.ts). The optional `requestId` lets the
+// dashboard correlate a Refresh click to its snapshot.
+export const MailboxStatusRequestSchema = z.object({
+  type: z.literal('mailbox_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5253: Control Room — request a self-hosted runner status survey. The server
 // scans the runner-install root, probes each runner's service, optionally
 // enriches via `gh`, and replies with a single `runner_status_snapshot` (see
@@ -1182,6 +1194,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RunnerStatusRequestSchema,
   IntegrationStatusRequestSchema,
   SkillsInventoryRequestSchema,
+  MailboxStatusRequestSchema,
   IntegrationActionSchema,
   SummarizeSessionSchema,
   PairApproveSchema,
@@ -1207,6 +1220,7 @@ export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
+export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>
