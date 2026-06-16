@@ -287,6 +287,55 @@ const RANCHER_CLUSTER_ID_RE = /^c-[a-z0-9-]+$/
 const RANCHER_PROJECT_ID_RE = /^p-[a-z0-9-]+$/
 
 /**
+ * #5878 (audit P2-6 part 2): warn on unrecognised keys in a config sub-block so
+ * a typo (`billing.creditTeir`, `worktreeGc.autoRepa`, `k8s.imagePulPolicy`)
+ * surfaces a non-fatal warning instead of being silently dropped. Factored from
+ * the existing `notifications.discord` unknown-key loop (#5453).
+ *
+ * Iterates own enumerable keys; a key absent from `knownSet` pushes an
+ * "Invalid value … unknown key" warning (the NON-fatal wording — the CLI layer
+ * escalates only "Invalid type" prefixes, so a cosmetic typo can never fail
+ * startup). The "supported:" hint lists `supportedKeys` (defaults to `knownSet`)
+ * so a block whose known set includes allowed-but-not-advertised keys (e.g.
+ * discord's secret keys, which get their own pointed warning) doesn't surface
+ * them as suggestions.
+ *
+ * @param {object} obj - the sub-block (already known to be a plain object)
+ * @param {Set<string>} knownSet - recognised keys (no warning)
+ * @param {string} prefix - dotted path for the message (e.g. 'environments.k8s')
+ * @param {string[]} warnings - accumulator
+ * @param {Set<string>|string[]} [supportedKeys] - keys to list in the hint
+ */
+function warnUnknownKeys(obj, knownSet, prefix, warnings, supportedKeys = knownSet) {
+  const hint = [...supportedKeys].join(', ')
+  for (const key of Object.keys(obj)) {
+    if (knownSet.has(key)) continue
+    warnings.push(`Invalid value for '${prefix}.${key}': unknown key (supported: ${hint})`)
+  }
+}
+
+// #5878: recognised keys per advanced/enterprise config sub-block. Each set is
+// the UNION of what the validator checks AND what the wiring layer
+// (createEnvironmentBackend / server-cli / the reaper) forwards to the consumer
+// — a key the consumer reads but the validator omits would otherwise false-warn.
+// Verified against the consumers: K8sBackend wiring (config.js ~1385-1394) +
+// the `workspace` sub-block (#4556); billing-budget.js + billing-canary-monitor;
+// worktree-reaper.js; rancher.js + resolveRancherToken.
+const K8S_SUPPORTED_KEYS = new Set([
+  'namespace', 'inCluster', 'kubeconfigPath', 'sidecarImage', 'imagePullPolicy',
+  'connectMode', 'namespaceQuota', 'namespaceLimitRange', 'workspace',
+])
+const BILLING_SUPPORTED_KEYS = new Set([
+  'creditTier', 'monthlyCreditBudgetUsd', 'budgetWarningPercent', 'egressCheck', 'datacenterPrefixes',
+])
+const WORKTREE_GC_SUPPORTED_KEYS = new Set([
+  'autoReap', 'reapIntervalMs', 'maxLockAgeMs',
+])
+const RANCHER_SUPPORTED_KEYS = new Set([
+  'rancherUrl', 'clusterId', 'token', 'tokenEnv', 'tokenFile', 'caData', 'skipTLSVerify', 'defaultProjectId',
+])
+
+/**
  * #5144: validate the `environments.k8s` connection sub-block at config-load
  * time. The `workspace` sub-block has its own validation (#4556); this covers
  * the remaining fields the wiring layer forwards to `K8sBackend`. Every field
@@ -328,6 +377,9 @@ function validateK8sBlock(k8s, warnings) {
       )
     }
   }
+  // #5878: typo-catch. `workspace` IS recognised (validated separately at the
+  // call site, #4556), so it's in the known set — only genuine unknowns warn.
+  warnUnknownKeys(k8s, K8S_SUPPORTED_KEYS, 'environments.k8s', warnings)
 }
 
 /**
@@ -356,6 +408,10 @@ function validateRancherBlock(rancher, warnings) {
     )
     return
   }
+
+  // #5878: typo-catch — runs BEFORE the "configured" gate below so an unknown
+  // key warns even in a half-filled-in block.
+  warnUnknownKeys(rancher, RANCHER_SUPPORTED_KEYS, 'environments.rancher', warnings)
 
   const { rancherUrl, clusterId, token, tokenEnv, tokenFile, caData, skipTLSVerify, defaultProjectId } = rancher
 
@@ -523,6 +579,8 @@ function validateBillingBlock(billing, warnings) {
       warnings.push(`Invalid value for 'billing.datacenterPrefixes': expected an array of non-empty strings, got ${JSON.stringify(v)}`)
     }
   }
+  // #5878: typo-catch for the billing knobs.
+  warnUnknownKeys(billing, BILLING_SUPPORTED_KEYS, 'billing', warnings)
 }
 
 function validateDiscordNotificationsBlock(discord, warnings) {
@@ -616,12 +674,18 @@ function validateDiscordNotificationsBlock(discord, warnings) {
 
   // #5453: warn on any unrecognised key. A typo'd knob is silently ignored
   // (operator gets default behavior with no hint), and a test-seam key spread
-  // into the sink constructor fails it closed — both silent foot-guns. Skip the
-  // secret keys, which already got their specific "it's a secret" warning above.
-  for (const key of Object.keys(discord)) {
-    if (DISCORD_SUPPORTED_KEYS.has(key) || DISCORD_SECRET_KEYS.includes(key)) continue
-    warnings.push(`Invalid value for 'notifications.discord.${key}': unknown key (supported: ${[...DISCORD_SUPPORTED_KEYS].join(', ')})`)
-  }
+  // into the sink constructor fails it closed — both silent foot-guns. The
+  // secret keys are KNOWN (no unknown-key warning — they already got their
+  // specific "it's a secret" warning above) but are NOT advertised in the
+  // "supported:" hint, so warnUnknownKeys takes the union as the known set and
+  // DISCORD_SUPPORTED_KEYS as the hint. #5878: factored onto the shared helper.
+  warnUnknownKeys(
+    discord,
+    new Set([...DISCORD_SUPPORTED_KEYS, ...DISCORD_SECRET_KEYS]),
+    'notifications.discord',
+    warnings,
+    DISCORD_SUPPORTED_KEYS,
+  )
 }
 
 /**
@@ -949,6 +1013,8 @@ export function validateConfig(config, verbose = false) {
           warnings.push(`Invalid value for 'worktreeGc.maxLockAgeMs': expected a non-negative number (0 disables), got ${typeof v === 'number' ? v : typeof v}`)
         }
       }
+      // #5878: typo-catch for the worktree-GC knobs.
+      warnUnknownKeys(config.worktreeGc, WORKTREE_GC_SUPPORTED_KEYS, 'worktreeGc', warnings)
     }
   }
 
