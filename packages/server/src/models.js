@@ -370,10 +370,16 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
   let raw
   try {
     raw = readFileSync(path, 'utf-8')
-  } catch {
-    // Missing file is the common case — empty overlay, no log. `ok` so a reload
-    // of a deleted file legitimately clears the overlay.
-    return { ok: true, overlay }
+  } catch (err) {
+    // A genuinely-absent file (ENOENT) is the common case AND a legitimate
+    // operator action — empty overlay, `ok: true` so a reload of a deleted file
+    // clears the overlay (no log; absence is normal). Any OTHER read error
+    // (EACCES, EBUSY, EISDIR, transient IO) is NOT an intentional clear — return
+    // `ok: false` + warn so a hot-reload keeps the LAST-GOOD set instead of
+    // silently wiping the operator's overlay on a transient fault (Copilot #5945).
+    if (err?.code === 'ENOENT') return { ok: true, overlay }
+    log.warn(`loadModelsOverlay: cannot read ${path}: ${err?.code || ''} ${err?.message || err} — keeping last-good overlay`.replace(/\s+/g, ' ').trim())
+    return { ok: false, overlay }
   }
   let parsed
   try {

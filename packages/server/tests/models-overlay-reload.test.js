@@ -158,6 +158,16 @@ describe('reloadModelsOverlay (#5932)', () => {
     assert.equal(res.reason, 'malformed')
   })
 
+  it('keeps last-good on a non-ENOENT read error (e.g. EISDIR) — does NOT clear (Copilot #5945)', () => {
+    // Seed a good overlay.
+    writeFileSync(path, JSON.stringify({ 'acme-overlay-test-9': { shortId: 'acme9' } }))
+    assert.equal(reloadModelsOverlay(path).reloaded, true)
+    // Reload pointing at the DIRECTORY → readFileSync throws EISDIR (not ENOENT).
+    const res = reloadModelsOverlay(dir)
+    assert.equal(res.reloaded, false, 'a transient/non-ENOENT read error must not clear the overlay')
+    assert.ok(getModels().some((m) => m.fullId === 'acme-overlay-test-9'), 'last-good overlay kept on read error')
+  })
+
   it('clears the overlay when the file is absent/deleted (explicit operator action)', () => {
     writeFileSync(path, JSON.stringify({ 'acme-overlay-test-9': { shortId: 'acme9' } }))
     assert.equal(reloadModelsOverlay(path).reloaded, true)
