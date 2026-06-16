@@ -13,6 +13,27 @@ const DEFAULT_SERVICE = 'chroxy'
 const ACCOUNT = 'api-token'
 
 /**
+ * Global off-switch for OS keychain access.
+ *
+ * When `CHROXY_DISABLE_KEYCHAIN=1`, every entry point below behaves as if no
+ * keychain exists: `isKeychainAvailable()` is false, reads return
+ * null/`absent`, and writes/deletes no-op. Callers then transparently fall back
+ * to their file/env paths.
+ *
+ * Read LAZILY (per call, not at import) so tests can toggle it per-process:
+ * `tests/_setup.mjs` sets it for the whole suite to stop server tests from
+ * shelling out to the real `security`/`secret-tool` — which on a developer's
+ * box pollutes (or, with a broken login keychain, pops modal prompts for) the
+ * real keychain. This mirrors `CHROXY_CRED_DISABLE_KEYCHAIN` for the credential
+ * data-key store; here it covers the api-token keychain. Tests that genuinely
+ * drive the keychain code path clear the flag (real integration: keychain.test.js
+ * under `CHROXY_TEST_REAL_KEYCHAIN=1`; mocked child_process: keychain-mock.test.js).
+ */
+function keychainDisabled() {
+  return process.env.CHROXY_DISABLE_KEYCHAIN === '1'
+}
+
+/**
  * macOS `security` exit code for errSecItemNotFound — the item genuinely is not
  * in the keychain (a clean "absent"). Any OTHER non-zero exit (locked keychain,
  * interaction-not-allowed, keychain not found, auth denied, …) is a READ FAILURE
@@ -24,6 +45,7 @@ const MAC_ERR_SEC_ITEM_NOT_FOUND = 44
  * Check if OS keychain is available on this system.
  */
 export function isKeychainAvailable() {
+  if (keychainDisabled()) return false
   if (isMac) {
     try {
       execFileSync('security', ['help'], { stdio: 'pipe' })
@@ -49,6 +71,7 @@ export function isKeychainAvailable() {
  * @returns {string|null} Token or null if not found
  */
 export function getToken(service = DEFAULT_SERVICE) {
+  if (keychainDisabled()) return null
   if (isMac) {
     return _macGetToken(service)
   }
@@ -92,6 +115,7 @@ export function getToken(service = DEFAULT_SERVICE) {
  * @returns {KeychainReadResult}
  */
 export function getTokenStatus(service = DEFAULT_SERVICE) {
+  if (keychainDisabled()) return { status: 'absent', value: null, error: null }
   if (isMac) {
     return _macGetTokenStatus(service)
   }
@@ -107,6 +131,7 @@ export function getTokenStatus(service = DEFAULT_SERVICE) {
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  */
 export function setToken(token, service = DEFAULT_SERVICE) {
+  if (keychainDisabled()) return
   if (isMac) {
     _macSetToken(service, token)
   } else if (isLinux) {
@@ -119,6 +144,7 @@ export function setToken(token, service = DEFAULT_SERVICE) {
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  */
 export function deleteToken(service = DEFAULT_SERVICE) {
+  if (keychainDisabled()) return
   if (isMac) {
     _macDeleteToken(service)
   } else if (isLinux) {

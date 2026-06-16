@@ -228,6 +228,22 @@ if (fs.promises) {
 // `_setCredentialKeychainForTests(...)`, which takes precedence over this flag.
 process.env.CHROXY_CRED_DISABLE_KEYCHAIN = '1'
 
+// --- Default the api-token keychain (keychain.js) to "no keychain" ------------
+// Sibling of the credential-store flag above, for the OTHER keychain consumer:
+// `keychain.js` stores the daemon api-token under service 'chroxy' / account
+// 'api-token' by shelling out to the real `security`/`secret-tool`. That path is
+// NOT covered by CHROXY_CRED_DISABLE_KEYCHAIN. Without this flag, any test that
+// exercises keychain.js (or boots server-cli, which migrates the token on
+// startup) shells out to the REAL OS keychain — polluting it, and on a developer
+// box with a broken login keychain popping a modal "a keychain cannot be found
+// to store 'api-token'" prompt for EVERY access (the user had to Cancel a dozen+
+// on 2026-06-16). keychain.js reads this flag lazily, so the two tests that
+// genuinely drive its code path opt back in: keychain.test.js (real round-trip,
+// only under CHROXY_TEST_REAL_KEYCHAIN=1) and keychain-mock.test.js (mocked
+// child_process — never touches the real keychain). See
+// `server_suite_real_keychain_prompts.md`.
+process.env.CHROXY_DISABLE_KEYCHAIN = '1'
+
 // --- Scrub Discord webhook env -------------------------------------------------
 // #5413: PushManager always registers a DiscordWebhookSink that activates the
 // moment a webhook URL resolves. A developer with the webhook exported in
