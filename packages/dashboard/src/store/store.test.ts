@@ -385,6 +385,156 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(false);
   });
 
+  // #5939 (epic #5935 ④): send-while-busy queues (optimistic badge) instead of
+  // faking a new turn; per-item cancel sends cancel_queued + optimistically
+  // clears the local entry.
+  describe('#5939 queued send-while-busy', () => {
+    it('queues a send while the turn is in progress: optimistic bubble + pending queue entry, no new-turn fake', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: 'm-live', messages: [], queuedMessages: [] } },
+      });
+
+      useConnectionStore.getState().sendInput('follow-up');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // The live turn keeps its own streaming id — we did NOT reset it to 'pending'.
+      expect(ss.streamingMessageId).toBe('m-live');
+      // No optimistic thinking indicator for a queued follow-up.
+      expect(ss.messages.some(m => m.type === 'thinking')).toBe(false);
+      // The user bubble is shown, and its id is recorded in the queue model as pending.
+      const bubble = ss.messages.find(m => m.type === 'user_input');
+      expect(bubble?.content).toBe('follow-up');
+      expect(ss.queuedMessages).toHaveLength(1);
+      expect(ss.queuedMessages[0]!.status).toBe('pending');
+      expect(ss.queuedMessages[0]!.clientMessageId).toBe(bubble!.id);
+      // The input still goes over the wire (the server queues it authoritatively).
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload.type).toBe('input');
+      expect(payload.clientMessageId).toBe(bubble!.id);
+    });
+
+    it('preserves the in-progress turn thinking indicator when queueing a follow-up', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      // streamingMessageId 'pending' = sent, awaiting stream_start; the thinking
+      // bubble for that live turn is present and must survive a queued follow-up.
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            streamingMessageId: 'pending',
+            messages: [
+              { id: 'uin-0', type: 'user_input', content: 'first', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            queuedMessages: [],
+          },
+        },
+      });
+
+      useConnectionStore.getState().sendInput('second');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // The live turn's thinking indicator is NOT stripped...
+      expect(ss.messages.some(m => m.id === 'thinking')).toBe(true);
+      // ...and the queued bubble lands at the tail (queued behind the live turn).
+      expect(ss.messages[ss.messages.length - 1]!.content).toBe('second');
+      expect(ss.queuedMessages).toHaveLength(1);
+    });
+
+    it('does NOT queue when idle: normal optimistic turn (thinking + pending stream)', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: null, messages: [], queuedMessages: [] } },
+      });
+
+      useConnectionStore.getState().sendInput('first');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.streamingMessageId).toBe('pending');
+      expect(ss.messages.some(m => m.type === 'thinking')).toBe(true);
+      expect(ss.queuedMessages).toHaveLength(0);
+    });
+
+    it('sendCancelQueued sends cancel_queued and optimistically removes the local entry', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            queuedMessages: [
+              { clientMessageId: 'uin-1', text: 'a', queuedAt: 1, status: 'confirmed' },
+              { clientMessageId: 'uin-2', text: 'b', queuedAt: 2, status: 'confirmed' },
+            ],
+          },
+        },
+      });
+
+      const result = useConnectionStore.getState().sendCancelQueued('uin-1');
+
+      expect(result).toBe('sent');
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload).toEqual({ type: 'cancel_queued', clientMessageId: 'uin-1', sessionId: 's1' });
+      // Optimistic local removal — only uin-2 remains.
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-2']);
+    });
+
+    it('sendCancelQueued with an explicit sessionId clears THAT session, not the active one', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's-active',
+        sessionStates: {
+          's-active': { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-a', text: 'a', queuedAt: 1, status: 'confirmed' }] },
+          's-other': { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-b', text: 'b', queuedAt: 1, status: 'confirmed' }] },
+        },
+      });
+
+      useConnectionStore.getState().sendCancelQueued('uin-b', 's-other');
+
+      const states = useConnectionStore.getState().sessionStates;
+      // The target session's entry is removed; the ACTIVE session is untouched.
+      expect(states['s-other']!.queuedMessages).toHaveLength(0);
+      expect(states['s-active']!.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-a']);
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload.sessionId).toBe('s-other');
+    });
+
+    it('sendCancelQueued is a no-op offline (not queueable — races the flush)', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      useConnectionStore.setState({
+        socket: null,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-1', text: 'a', queuedAt: 1, status: 'confirmed' }] } },
+      });
+
+      const result = useConnectionStore.getState().sendCancelQueued('uin-1');
+
+      expect(result).toBe(false);
+      // Local entry untouched — no optimistic removal without a real send.
+      expect(useConnectionStore.getState().sessionStates.s1!.queuedMessages).toHaveLength(1);
+    });
+  });
+
   it('#5710: destroySession sends force:true only when forced', async () => {
     const { useConnectionStore } = await import('./connection');
     const send = vi.fn();

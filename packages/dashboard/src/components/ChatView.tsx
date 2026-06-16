@@ -148,6 +148,17 @@ export interface ChatViewProps {
    * the bottom); only changes trigger a scroll.
    */
   scrollToBottomSignal?: number
+  /**
+   * #5939 (epic #5935 ④): ids of `user_input` messages currently held in the
+   * server's outgoing queue (send-while-busy). A row whose id is in this set
+   * renders a "Queued" badge + a cancel affordance instead of a plain sent
+   * bubble; the badge clears when the id leaves the set (flush / cancel /
+   * interrupt). A `Set` of scalars keeps the per-row prop a stable boolean so
+   * the row memo still skips unaffected rows.
+   */
+  queuedIds?: ReadonlySet<string>
+  /** #5939: cancel a single queued follow-up by its message id (cancel_queued). */
+  onCancelQueued?: (id: string) => void
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -230,12 +241,18 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   content,
   timestamp,
   isStreaming,
+  queued,
+  onCancelQueued,
 }: {
   id: string
   type: ChatViewMessage['type']
   content: string
   timestamp: number
   isStreaming?: boolean
+  /** #5939: this user_input is held in the server's outgoing queue. */
+  queued?: boolean
+  /** #5939: cancel this queued follow-up (stable callback from ChatView). */
+  onCancelQueued?: (id: string) => void
 }) {
   // Dev-only render tally — proves (in the memoization test + ad-hoc
   // profiling) non-tail rows don't re-render on a delta flush. Never read on
@@ -259,8 +276,25 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   return (
     <>
       {type !== 'user_input' && icon}
-      <div className={`msg ${TYPE_CLASS[type] || 'assistant'}${isStreaming ? ' streaming' : ''}`}>
+      <div className={`msg ${TYPE_CLASS[type] || 'assistant'}${isStreaming ? ' streaming' : ''}${queued ? ' queued' : ''}`}>
         {body}
+        {queued && (
+          <span className="msg-queued" data-testid={`msg-queued-${id}`}>
+            <span className="msg-queued-label">Queued</span>
+            {onCancelQueued && (
+              <button
+                type="button"
+                className="msg-queued-cancel"
+                aria-label="Cancel queued message"
+                title="Cancel queued message"
+                data-testid={`msg-queued-cancel-${id}`}
+                onClick={() => onCancelQueued(id)}
+              >
+                ✕
+              </button>
+            )}
+          </span>
+        )}
         {timestamp > 0 && <span className="msg-timestamp">{formatTime(timestamp)}</span>}
       </div>
       {type === 'user_input' && icon}
@@ -268,7 +302,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
@@ -626,6 +660,8 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
                   content={msg.content}
                   timestamp={msg.timestamp}
                   isStreaming={msg.isStreaming}
+                  queued={queuedIds?.has(msg.id) ?? false}
+                  onCancelQueued={onCancelQueued}
                 />
               </MessageRowShell>
             )
