@@ -55,6 +55,41 @@ Thanks for your interest in contributing! This document covers how to get starte
 5. Commit with a clear message
 6. Push and open a PR
 
+## Branch protection & CI policy
+
+`main` is protected. Every PR is expected to clear these gates before merging:
+
+- **Required status checks must be green.** These checks block the merge:
+  `Server Tests`, `Server Lint`, `Protocol Tests`, `Store Core Tests`,
+  `Store Core Type Check`, `Dashboard Tests`, `Dashboard Type Check`, `App Tests`,
+  `App Type Check`, `App Expo Doctor`, and `Desktop Rust Tests`. (Other CI jobs
+  run too — e.g. conditional Windows platform tests and scripts/hooks jobs — but
+  the list above is the set wired as required. The `Desktop (macOS)` /
+  `Desktop (Windows)` release builds run only on tag pushes and gate the release
+  pipeline, not PRs.)
+- **All review conversations must be resolved.** A PR with an open review thread
+  cannot merge — resolve it (or have it resolved) first.
+- **A Copilot review** is requested automatically on the default branch (via a
+  repository ruleset) and is expected before merge.
+- **No force-pushes or branch deletions** to `main`.
+
+Deliberate policy choices (a solo-maintained project):
+
+- **No required approving review.** The maintainer self-merges once the checks and
+  conversation-resolution gates above pass; the required checks plus the Copilot
+  review are the quality bar, not a second human reviewer. This keeps merge latency
+  low and lets unattended/batch maintenance flows merge their own green, reviewed
+  PRs.
+- **Admins are not force-subjected to the protection rules**, which keeps an
+  emergency-fix path open. This is why the bar above is framed as the expected
+  policy rather than a rule enforced against every actor — in practice every merge
+  still goes through these gates.
+
+Repository Actions are hardened too: third-party actions are pinned to full commit
+SHAs, the default workflow token is read-only (jobs elevate their own permissions
+per-workflow as needed), and workflows on pull requests from first-time
+contributors require maintainer approval before they run.
+
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server
