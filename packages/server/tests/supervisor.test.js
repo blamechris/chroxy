@@ -758,6 +758,49 @@ describe('Supervisor', () => {
       assert.equal(supervisor._standbyRetries, 0,
         'Retry counter should reset on successful listen')
     })
+
+    it('tracks the EADDRINUSE retry timer and clears it on stop (no leaked timer)', async () => {
+      const { supervisor } = setup()
+
+      // Occupy a port so the standby server's listen() fails with EADDRINUSE,
+      // exercising the retry-scheduling branch of the error handler.
+      const port = await findFreePort()
+      const blocker = createNetServer()
+      await new Promise((resolve, reject) => {
+        blocker.on('error', reject)
+        blocker.listen(port, resolve)
+      })
+
+      try {
+        supervisor._port = port
+
+        // Capture the standby server handle before its listen() errors.
+        supervisor._startStandbyServer()
+        const standby = supervisor._standbyServer
+        assert.ok(standby !== null, 'standby server object created')
+
+        // Wait for the EADDRINUSE error handler to run.
+        await new Promise((resolve) => standby.once('error', () => setImmediate(resolve)))
+
+        assert.equal(supervisor._standbyRetries, 1, 'retry counter incremented on EADDRINUSE')
+        assert.ok(supervisor._standbyRetryTimer !== null,
+          'pending retry must be tracked on the instance so it can be cancelled')
+
+        // Stopping must cancel the pending retry timer (and null it) so it cannot
+        // fire across a stop/shutdown boundary.
+        supervisor._stopStandbyServer()
+        assert.equal(supervisor._standbyRetryTimer, null, 'retry timer cleared on stop')
+        assert.equal(supervisor._standbyServer, null, 'standby server cleared on stop')
+
+        // Prove the cancelled retry does not resurrect the standby after its delay
+        // (STANDBY_EADDRINUSE_RETRY_DELAY_MS is 500ms; wait past it).
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        assert.equal(supervisor._standbyServer, null,
+          'cancelled retry must not restart the standby')
+      } finally {
+        await new Promise((resolve) => blocker.close(resolve))
+      }
+    })
   })
 
   describe('deploy crash detection', () => {
