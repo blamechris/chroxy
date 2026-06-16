@@ -591,22 +591,30 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
     requestAnimationFrame(() => { scrollToBottomNow() })
   }, [scrollToBottomSignal, scrollToBottomNow])
 
-  // During streaming, continuously scroll to bottom via RAF
+  // During streaming, continuously re-pin to the bottom via RAF so the growing
+  // tail stays in view. #5954: reuse `scrollToBottomNow()` rather than an inline
+  // `scrollTop = scrollHeight` with a SYNCHRONOUS `programmaticScrollRef` clear.
+  // The synchronous clear violated the suppression contract (the flag was
+  // already false by the time the write's async `scroll` event reached
+  // `handleScroll`), so a streaming scroll event landing in a transient
+  // not-quite-at-bottom window (windowing churn / content growth between the
+  // write and the event) was misread as a user scroll-up — which flipped
+  // `userScrolledUp` and KILLED the auto-follow effect, dropping the live tail
+  // below the fold ("doesn't consistently stay at the bottom"). `scrollToBottomNow`
+  // holds the flag until the next frame, so `handleScroll`'s
+  // `programmaticScrollRef.current && atBottom` guard reliably ignores the
+  // self-induced events while a genuine user scroll-up (atBottom false) is still
+  // honored.
   useEffect(() => {
     if (!isStreaming || userScrolledUp) return
     let rafId: number
     const tick = () => {
-      const el = containerRef.current
-      if (el) {
-        programmaticScrollRef.current = true
-        el.scrollTop = el.scrollHeight
-        programmaticScrollRef.current = false
-      }
+      scrollToBottomNow()
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafId)
-  }, [isStreaming, userScrolledUp])
+  }, [isStreaming, userScrolledUp, scrollToBottomNow])
 
   // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the
   // top/bottom spacers reserve the height of the skipped rows so the scrollbar

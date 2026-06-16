@@ -210,6 +210,34 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
+  // #5954 — the streaming RAF keeps re-pinning to the growing bottom, and its
+  // own (programmatic) scroll events must not be misread as a user scroll-up
+  // (which would kill the auto-follow). Mirrors the suppression contract that
+  // `scrollToBottomNow` owns (next-frame flag clear).
+  it('keeps following the bottom while streaming as content grows (#5954)', async () => {
+    vi.useFakeTimers()
+    render(<ChatView messages={makeMessages(3)} isStreaming />)
+    const container = screen.getByTestId('chat-messages')
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+
+    // Streaming RAF pins to the current bottom.
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+
+    // Content grows (a stream_delta) — the RAF re-pins to the NEW bottom.
+    Object.defineProperty(container, 'scrollHeight', { value: 1500, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1500)
+
+    // The self-induced scroll event (flag still held) must NOT surface the
+    // scroll-to-bottom button — i.e. it isn't misread as a user scroll-up.
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
   it('snaps to bottom when scrollToBottomSignal bumps, even if scrolled up (#5780)', async () => {
     vi.useFakeTimers()
     const messages = makeMessages(3)
