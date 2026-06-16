@@ -29,7 +29,7 @@
  *   --dry-run          Print offenders without failing the exit code.
  */
 
-import { readFileSync, readdirSync, statSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -80,6 +80,43 @@ function findMatchingBrace(src, openIdx) {
   return -1
 }
 
+// Blank out `//` line and `/* */` block comments, preserving every character
+// position and newline so downstream index/line math stays valid. Run the
+// subclass scan on the stripped text so a `class X extends ClaudeByokSession {`
+// written inside a comment is never matched as a real subclass (PR #5925
+// review). String literals are left intact — like the repo's other lints, we
+// don't strip strings (a class declaration inside a string is not a real case).
+function stripComments(src) {
+  let out = ''
+  let i = 0
+  const n = src.length
+  let inStr = null
+  while (i < n) {
+    const ch = src[i]
+    if (inStr) {
+      out += ch
+      if (ch === '\\' && i + 1 < n) { out += src[i + 1]; i += 2; continue }
+      if (ch === inStr) inStr = null
+      i++
+      continue
+    }
+    if (ch === '"' || ch === "'" || ch === '`') { inStr = ch; out += ch; i++; continue }
+    if (ch === '/' && src[i + 1] === '/') {
+      while (i < n && src[i] !== '\n') { out += ' '; i++ }
+      continue
+    }
+    if (ch === '/' && src[i + 1] === '*') {
+      out += '  '; i += 2
+      while (i < n && !(src[i] === '*' && src[i + 1] === '/')) { out += src[i] === '\n' ? '\n' : ' '; i++ }
+      if (i < n) { out += '  '; i += 2 }
+      continue
+    }
+    out += ch
+    i++
+  }
+  return out
+}
+
 function listJsFiles(dir) {
   const out = []
   for (const ent of readdirSync(dir, { withFileTypes: true })) {
@@ -114,8 +151,12 @@ function main() {
   const offenders = []
   let subclassCount = 0
   for (const file of files) {
-    const src = readFileSync(file, 'utf8')
-    if (!src.includes('ClaudeByokSession')) continue
+    const raw = readFileSync(file, 'utf8')
+    if (!raw.includes('ClaudeByokSession')) continue
+    // Scan comment-stripped text (indices preserved) so a subclass declaration
+    // inside a comment isn't matched. `static claudeFamily = …` is real code and
+    // survives stripping intact.
+    const src = stripComments(raw)
     SUBCLASS_RE.lastIndex = 0
     let m
     while ((m = SUBCLASS_RE.exec(src)) !== null) {

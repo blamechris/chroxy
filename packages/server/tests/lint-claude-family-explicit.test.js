@@ -27,7 +27,9 @@ const LINT_SCRIPT = resolve(__dirname, '..', 'scripts', 'lint-claude-family-expl
 const REAL_SRC = resolve(__dirname, '..', 'src')
 
 function runLint(srcDir, extra = []) {
-  return spawnSync('node', [LINT_SCRIPT, '--src-dir', srcDir, ...extra], { encoding: 'utf8' })
+  // process.execPath (not a bare 'node' on PATH) — robust + consistent with the
+  // other lint tests in this repo.
+  return spawnSync(process.execPath, [LINT_SCRIPT, '--src-dir', srcDir, ...extra], { encoding: 'utf8' })
 }
 
 function withFixtureDir(files, fn) {
@@ -93,6 +95,24 @@ describe('lint-claude-family-explicit', () => {
       assert.equal(r.status, 0, r.stderr)
       // No `extends ClaudeByokSession` subclass present → 0 counted.
       assert.match(r.stdout, /0 ClaudeByokSession subclass/)
+    })
+  })
+
+  test('does not match a subclass declaration written inside a comment', () => {
+    const commented = `
+// Example from the docs: class DocExample extends ClaudeByokSession { ... }
+/* class BlockExample extends ClaudeByokSession {
+     static get x() { return 1 }
+   } */
+export class RealOne extends ClaudeByokSession {
+  static claudeFamily = false
+}
+`
+    withFixtureDir({ 'c.js': commented }, (dir) => {
+      const r = runLint(dir)
+      assert.equal(r.status, 0, r.stderr)
+      // Only RealOne is a real subclass; the commented ones are ignored.
+      assert.match(r.stdout, /1 ClaudeByokSession subclass/)
     })
   })
 
