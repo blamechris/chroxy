@@ -88,6 +88,10 @@ export const ALL_CATEGORIES = Object.freeze([
   // trip; opt-in datacenter egress). Listed so they are mutable in prefs and
   // visible in snapshots; sanitizeCategoryMap would otherwise strip them as unknown.
   'billing_warning',
+  // Mailbox live-interrupt: "new mail" pings fed by POST /api/mailbox
+  // (mailbox-route.js). Listed so the category is mutable in prefs and visible
+  // in snapshots (sanitizeCategoryMap strips unknown keys otherwise).
+  'mailbox',
 ])
 
 /**

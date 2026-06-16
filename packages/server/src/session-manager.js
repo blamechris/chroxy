@@ -475,7 +475,8 @@ export class SessionManager extends EventEmitter {
     })
 
     // Internal state
-    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt }
+    this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt, agentCommId? }
+    this._agentCommIds = new Map() // agentCommId -> sessionId (mailbox live-interrupt routing)
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
@@ -540,11 +541,70 @@ export class SessionManager extends EventEmitter {
    * @param {string} sessionId
    */
   _cleanupSessionMaps(sessionId) {
+    const entry = this._sessions.get(sessionId)
+    if (entry && entry.agentCommId) {
+      this._agentCommIds.delete(entry.agentCommId)
+    }
     this._sessions.delete(sessionId)
     this._sessionLastActivityAt.delete(sessionId)
     this._timeoutManager.removeSession(sessionId)
     this._history.cleanupSession(sessionId)
     this._costBudget.removeSession(sessionId)
+  }
+
+  /**
+   * Register a mailbox identity (AGENT_COMM_ID) for a live session so the
+   * mailbox live-interrupt route (POST /api/mailbox) can resolve agent -> session.
+   * One id maps to one session: re-registering an id, or registering a new id
+   * for a session, replaces the prior mapping. Returns true when the session
+   * exists and was registered.
+   * @param {string} sessionId
+   * @param {string} agentCommId
+   */
+  registerAgentCommId(sessionId, agentCommId) {
+    if (typeof sessionId !== 'string' || typeof agentCommId !== 'string') return false
+    if (!sessionId || !agentCommId) return false
+    const entry = this._sessions.get(sessionId)
+    if (!entry) return false
+    // Drop a prior holder of this id (id -> some other session).
+    const priorSessionId = this._agentCommIds.get(agentCommId)
+    if (priorSessionId && priorSessionId !== sessionId) {
+      const priorEntry = this._sessions.get(priorSessionId)
+      if (priorEntry && priorEntry.agentCommId === agentCommId) priorEntry.agentCommId = null
+    }
+    // Drop a prior id this session held (session -> some other id).
+    if (entry.agentCommId && entry.agentCommId !== agentCommId) {
+      this._agentCommIds.delete(entry.agentCommId)
+    }
+    entry.agentCommId = agentCommId
+    this._agentCommIds.set(agentCommId, sessionId)
+    return true
+  }
+
+  /**
+   * Remove a mailbox identity mapping. Returns true when something was removed.
+   * @param {string} agentCommId
+   */
+  unregisterAgentCommId(agentCommId) {
+    if (typeof agentCommId !== 'string' || !agentCommId) return false
+    const sessionId = this._agentCommIds.get(agentCommId)
+    if (!sessionId) return false
+    this._agentCommIds.delete(agentCommId)
+    const entry = this._sessions.get(sessionId)
+    if (entry && entry.agentCommId === agentCommId) entry.agentCommId = null
+    return true
+  }
+
+  /**
+   * Resolve the live session object registered for a mailbox id, or null.
+   * @param {string} agentCommId
+   */
+  resolveSessionByAgentCommId(agentCommId) {
+    if (typeof agentCommId !== 'string' || !agentCommId) return null
+    const sessionId = this._agentCommIds.get(agentCommId)
+    if (!sessionId) return null
+    const entry = this._sessions.get(sessionId)
+    return entry ? entry.session : null
   }
 
   /**

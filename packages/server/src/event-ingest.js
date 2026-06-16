@@ -215,7 +215,7 @@ function sendUnauthorized(res) {
  * object so the fs probe doesn't run per event. Returns null on failure —
  * the caller MUST reject (fail closed).
  */
-function resolveIngestSecret(server) {
+export function resolveIngestSecret(server) {
   if (typeof server._ingestSecret === 'string' && server._ingestSecret.length > 0) {
     return server._ingestSecret
   }

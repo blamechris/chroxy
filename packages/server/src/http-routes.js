@@ -9,6 +9,7 @@ import { buildDiagnosticsSnapshot } from './diagnostics.js'
 import { getRateLimitKey } from './rate-limiter.js'
 import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
 import { handleEventIngest } from './event-ingest.js'
+import { handleMailboxPing, handleMailboxRegister } from './mailbox-route.js'
 import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { isValidSlug, mimeForPath } from './pages-store.js'
@@ -436,6 +437,20 @@ export function createHttpHandler(server) {
     // callbacks and guards them per the #5313 pattern.
     if (req.method === 'POST' && snapPath === '/api/events') {
       handleEventIngest(server, req, res)
+      return
+    }
+
+    // Mailbox live-interrupt (agent-comm-system delivery). Same daemon-level
+    // ingest-secret auth as /api/events (never the primary token). The ping
+    // route notifies + wakes a live idle claude-tui recipient; the register
+    // route populates the agent-id -> session map. See mailbox-route.js.
+    if (req.method === 'POST' && snapPath === '/api/mailbox') {
+      handleMailboxPing(server, req, res)
+      return
+    }
+
+    if (req.method === 'POST' && snapPath === '/api/mailbox/register') {
+      handleMailboxRegister(server, req, res)
       return
     }
 

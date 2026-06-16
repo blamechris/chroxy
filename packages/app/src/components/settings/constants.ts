@@ -28,6 +28,8 @@ export const NOTIFICATION_CATEGORY_LABELS: Record<string, { label: string; hint?
   session_online: { label: 'External session online', hint: 'An external session reported in via /api/events.' },
   session_offline: { label: 'External session offline', hint: 'An external session ended or went away.' },
   session_activity: { label: 'External session activity', hint: 'Subagent and tool activity from external sessions.' },
+  // Mailbox live-interrupt: "new mail" pings fed by POST /api/mailbox.
+  mailbox: { label: 'Mailbox', hint: 'New agent-to-agent mailbox messages waiting for a session.' },
 };
 
 /** Render order for known categories. Unknown keys append in snapshot order. */
@@ -44,6 +46,7 @@ export const NOTIFICATION_CATEGORY_ORDER = [
   'session_online',
   'session_offline',
   'session_activity',
+  'mailbox',
   'live_activity',
 ];
 

@@ -87,6 +87,9 @@ const RATE_LIMITS = {
   // trip). The monitor only emits on a CHANGED warning set, so this is already
   // dedup'd at the source — immediate is fine, no extra throttle needed.
   billing_warning: 0,
+  // Mailbox live-interrupt: a "new mail" ping for an agent (POST /api/mailbox,
+  // mailbox-route.js). Rare and meaningful → immediate.
+  mailbox: 0,
 }
 
 // Re-exported for existing importers/tests — the implementation moved to
