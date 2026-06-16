@@ -2285,13 +2285,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // instead of (content, timestamp) equality (issue #2902).
     const clientMessageId = nextMessageId('user');
 
-    // #5939: a send while the turn is in progress (streamingMessageId truthy)
-    // is QUEUED by the server, not concurrently force-sent. Reflect that
-    // optimistically — render the bubble with a "Queued" badge instead of
-    // faking a fresh turn. The server is authoritative (its message_queued /
-    // message_dequeued events reconcile the local model either way), so a
-    // mis-guess here only briefly misrenders before self-correcting.
-    const busy = get().getActiveSessionState().streamingMessageId !== null;
+    // #5939 / #5952: a send while the turn is in progress is QUEUED by the
+    // server, not concurrently force-sent. Reflect that optimistically — render
+    // the bubble with a "Queued" badge instead of faking a fresh turn.
+    //
+    // #5952: the busy signal must match EXACTLY what the InputBar shows as busy
+    // (`isStreaming || isBusy` → `streamingMessageId !== null || isIdle === false`)
+    // so there is no window where the input UI says "busy" (Stop visible, "Type
+    // to send follow-up…") yet a send optimistically fakes a fresh turn. `isIdle`
+    // is the server-authoritative working flag (#4639); `streamingMessageId`
+    // additionally covers the optimistic pre-status window. Either ⇒ queue. The
+    // server is authoritative regardless (it queues any mid-turn input and
+    // reconciles via message_queued/message_dequeued), so this only keeps the
+    // optimistic render honest.
+    const active = get().getActiveSessionState();
+    const busy = active.streamingMessageId !== null || active.isIdle === false;
 
     // Show user message immediately (optimistic update + thinking indicator, or
     // a queued badge when busy). Wire attachments use a different shape than
