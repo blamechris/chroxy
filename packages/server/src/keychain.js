@@ -68,15 +68,19 @@ export function isKeychainAvailable() {
 /**
  * Get token from OS keychain.
  * @param {string} [service] - Keychain service name (default: 'chroxy')
+ * @param {string} [account] - Keychain account (default: 'api-token'). Other
+ *   credentials reuse the same OS keychain under a different account — e.g. the
+ *   Discord webhook URL at service `chroxy-discord-webhook` / account
+ *   `webhook-url` (#5493).
  * @returns {string|null} Token or null if not found
  */
-export function getToken(service = DEFAULT_SERVICE) {
+export function getToken(service = DEFAULT_SERVICE, account = ACCOUNT) {
   if (keychainDisabled()) return null
   if (isMac) {
-    return _macGetToken(service)
+    return _macGetToken(service, account)
   }
   if (isLinux) {
-    return _linuxGetToken(service)
+    return _linuxGetToken(service, account)
   }
   return null
 }
@@ -187,12 +191,12 @@ export function migrateToken(config, service = DEFAULT_SERVICE) {
 
 // -- macOS implementation (security command) --
 
-function _macGetToken(service) {
+function _macGetToken(service, account = ACCOUNT) {
   try {
     const output = execFileSync('security', [
       'find-generic-password',
       '-s', service,
-      '-a', ACCOUNT,
+      '-a', account,
       '-w',
     ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
     return output.trim() || null
@@ -248,12 +252,12 @@ function _macDeleteToken(service) {
 
 // -- Linux implementation (secret-tool / libsecret) --
 
-function _linuxGetToken(service) {
+function _linuxGetToken(service, account = ACCOUNT) {
   try {
     const output = execFileSync('secret-tool', [
       'lookup',
       'service', service,
-      'account', ACCOUNT,
+      'account', account,
     ], { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] })
     return output.trim() || null
   } catch {

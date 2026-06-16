@@ -179,6 +179,48 @@ describe('discord-credentials — webhook URL sourcing', () => {
     assert.equal(r.source, 'none')
   })
 
+  // #5493: a Tauri-app-spawned server has no service-wrapper to export the env
+  // var, and credentials.json is the encrypted BYOK envelope — so the webhook
+  // must be readable straight from the OS keychain as a third source.
+  it('falls back to the keychain when env and file are both absent (#5493)', () => {
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    const r = resolveDiscordWebhookUrl({
+      keychainGet: (service, account) =>
+        service === 'chroxy-discord-webhook' && account === 'webhook-url' ? WEBHOOK : null,
+    })
+    assert.equal(r.source, 'keychain')
+    assert.equal(r.url, WEBHOOK)
+  })
+
+  it('env var wins over the keychain (#5493)', () => {
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.CHROXY_DISCORD_WEBHOOK_URL = WEBHOOK
+    const r = resolveDiscordWebhookUrl({ keychainGet: () => 'https://discord.com/api/webhooks/9/keychain-token-zzzzzzzzzzzzzzzzzzzz' })
+    assert.equal(r.source, 'env')
+    assert.equal(r.url, WEBHOOK)
+  })
+
+  it('the credentials file wins over the keychain (#5493)', () => {
+    const home = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    process.env.HOME = home
+    const dir = join(home, '.chroxy')
+    mkdirSync(dir, { recursive: true })
+    const file = join(dir, 'credentials.json')
+    writeFileSync(file, JSON.stringify({ discordWebhookUrl: WEBHOOK }), { mode: 0o600 })
+    chmodSync(file, 0o600)
+    const r = resolveDiscordWebhookUrl({ keychainGet: () => 'https://discord.com/api/webhooks/9/keychain-token-zzzzzzzzzzzzzzzzzzzz' })
+    assert.equal(r.source, 'file')
+    assert.equal(r.url, WEBHOOK)
+  })
+
+  it('keychain miss leaves source none with a reason noting the keychain was checked (#5493)', () => {
+    process.env.HOME = mkdtempSync(join(tmpdir(), 'discord-home-'))
+    const r = resolveDiscordWebhookUrl({ keychainGet: () => null })
+    assert.equal(r.url, null)
+    assert.equal(r.source, 'none')
+    assert.match(r.reason, /keychain/)
+  })
+
   // #5523 review: a non-ENOENT stat failure (EACCES/EPERM) must surface the
   // real error, NOT be misreported as "does not exist". readStore() returns such
   // failures as { fileExists:false, error:'unable to stat …' }, so the resolver

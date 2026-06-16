@@ -15,6 +15,10 @@
  *   2. ~/.chroxy/credentials.json — { discordWebhookUrl: "https://discord.com/api/webhooks/..." }
  *      File MUST be mode 0600. We refuse to read it otherwise (security
  *      boundary: secrets must not be world-readable).
+ *   3. OS keychain — service `chroxy-discord-webhook`, account `webhook-url`
+ *      (#5493). The launchd cutover stores it here; a Tauri-app-spawned server
+ *      has no wrapper to export the env var, so the server reads the keychain
+ *      directly (mirrors how the API token self-resolves).
  *
  * The URL is deliberately NOT a config.json key — config.json is not
  * permission-restricted and gets echoed in verbose/diagnostic output.
@@ -29,6 +33,15 @@ import { join } from 'path'
 import { homedir } from 'os'
 import { cachedResolveCredentialFile } from './auth-probes.js'
 import { readStoredField } from './credential-store.js'
+import { getToken } from './keychain.js'
+
+// #5493: the launchd cutover (#5439) stores the webhook in the OS keychain under
+// this service/account and relies on ~/.chroxy/service-wrapper.sh to export it as
+// the env var. A Tauri-app-spawned server has no wrapper, so env+file both miss —
+// read the keychain directly as a third source (mirrors the API token, which the
+// server self-resolves from the keychain too).
+const DISCORD_WEBHOOK_KEYCHAIN_SERVICE = 'chroxy-discord-webhook'
+const DISCORD_WEBHOOK_KEYCHAIN_ACCOUNT = 'webhook-url'
 
 // Lazy-resolved per call so tests that mutate process.env.HOME between
 // cases pick up the new home (same rationale as byok-credentials.js).
@@ -68,15 +81,23 @@ export function extractWebhookIdToken(url) {
 /**
  * Resolve the Discord webhook URL for the notification sink.
  *
- * @returns {{ url: string, source: 'env' | 'file' } | { url: null, source: 'none', reason: string }}
+ * @param {object} [opts]
+ * @param {(service: string, account: string) => string|null} [opts.keychainGet]
+ *   OS-keychain reader (source 3); injectable for tests. Defaults to
+ *   keychain.getToken, which itself returns null when no keychain is available.
+ * @returns {{ url: string, source: 'env' | 'file' | 'keychain' } | { url: null, source: 'none', reason: string }}
  */
-export function resolveDiscordWebhookUrl() {
+export function resolveDiscordWebhookUrl({ keychainGet = getToken } = {}) {
   const envUrl = process.env.CHROXY_DISCORD_WEBHOOK_URL
   if (typeof envUrl === 'string' && envUrl.length > 0) {
     return { url: envUrl, source: 'env' }
   }
 
   const CREDENTIALS_FILE = credentialsFilePath()
+  // The file source's failure reason is captured rather than returned eagerly so
+  // a missing/empty/unreadable file falls through to the keychain (#5493) before
+  // we report `source: 'none'` with the most informative reason.
+  let fileReason = null
 
   // #5490: route the file read through credential-store's cipher-aware reader.
   // The webhook URL lives in the SAME credentials.json the BYOK/API-key
@@ -93,43 +114,47 @@ export function resolveDiscordWebhookUrl() {
     read = readStoredField('discordWebhookUrl')
   } catch (err) {
     // Defensive: readStoredField is non-throwing by contract, but if it ever
-    // does, degrade to source:'none' rather than crash the sink's probe.
-    return {
-      url: null,
-      source: 'none',
-      reason: `unable to read ${CREDENTIALS_FILE}: ${err.message}`,
+    // does, record the reason and fall through to the keychain.
+    read = null
+    fileReason = `unable to read ${CREDENTIALS_FILE}: ${err.message}`
+  }
+
+  if (read) {
+    // A read error covers bad mode, malformed JSON, an encrypted envelope whose
+    // keychain data key is unavailable, a corrupt/undecryptable envelope, AND a
+    // non-ENOENT stat failure (EACCES/EPERM). readStore() reports those stat
+    // failures with `fileExists:false` but a populated `error`, so this MUST be
+    // checked before the `!fileExists` "does not exist" branch below — otherwise a
+    // permission error would be misreported as a missing file, hiding the real
+    // cause from an operator debugging a 0600/ownership problem. The reason is
+    // value-free (built by credential-store from the path/cause).
+    if (read.error) {
+      fileReason = read.error
+    } else if (!read.fileExists) {
+      fileReason = `CHROXY_DISCORD_WEBHOOK_URL not set and ${CREDENTIALS_FILE} does not exist`
+    } else if (read.value === null) {
+      fileReason = `${CREDENTIALS_FILE} missing or empty "discordWebhookUrl" field`
+    } else {
+      return { url: read.value, source: 'file' }
     }
   }
 
-  // A read error covers bad mode, malformed JSON, an encrypted envelope whose
-  // keychain data key is unavailable, a corrupt/undecryptable envelope, AND a
-  // non-ENOENT stat failure (EACCES/EPERM). readStore() reports those stat
-  // failures with `fileExists:false` but a populated `error`, so this MUST be
-  // checked before the `!fileExists` "does not exist" branch below — otherwise a
-  // permission error would be misreported as a missing file, hiding the real
-  // cause from an operator debugging a 0600/ownership problem. The reason is
-  // value-free (built by credential-store from the path/cause).
-  if (read.error) {
-    return { url: null, source: 'none', reason: read.error }
+  // Source 3 (#5493): the OS keychain. getToken short-circuits to null when the
+  // keychain is unavailable/disabled, so this is a no-op on platforms/tests
+  // without one. Returned raw (like env/file) — the sink applies the same
+  // isValidDiscordWebhookUrl + maskWebhookUrl rules to every source.
+  const keychainUrl = keychainGet(DISCORD_WEBHOOK_KEYCHAIN_SERVICE, DISCORD_WEBHOOK_KEYCHAIN_ACCOUNT)
+  if (typeof keychainUrl === 'string' && keychainUrl.length > 0) {
+    return { url: keychainUrl, source: 'keychain' }
   }
 
-  if (!read.fileExists) {
-    return {
-      url: null,
-      source: 'none',
-      reason: `CHROXY_DISCORD_WEBHOOK_URL not set and ${CREDENTIALS_FILE} does not exist`,
-    }
+  return {
+    url: null,
+    source: 'none',
+    reason: fileReason
+      ? `${fileReason}; no webhook in the keychain either`
+      : `CHROXY_DISCORD_WEBHOOK_URL not set and no webhook in ${CREDENTIALS_FILE} or the keychain`,
   }
-
-  if (read.value === null) {
-    return {
-      url: null,
-      source: 'none',
-      reason: `${CREDENTIALS_FILE} missing or empty "discordWebhookUrl" field`,
-    }
-  }
-
-  return { url: read.value, source: 'file' }
 }
 
 /**
