@@ -55,6 +55,39 @@ Thanks for your interest in contributing! This document covers how to get starte
 5. Commit with a clear message
 6. Push and open a PR
 
+## Branch protection & CI policy
+
+`main` is protected. Every PR must satisfy these gates before it can merge — they
+apply to maintainer and external PRs alike:
+
+- **All required status checks green.** The full CI matrix is required:
+  `Server Tests`, `Server Lint`, `Protocol Tests`, `Store Core Tests`,
+  `Store Core Type Check`, `Dashboard Tests`, `Dashboard Type Check`, `App Tests`,
+  `App Type Check`, `App Expo Doctor`, and `Desktop Rust Tests`. (The
+  `Desktop (macOS)` / `Desktop (Windows)` release builds run only on tag pushes
+  and gate the release pipeline, not PRs.)
+- **All review conversations resolved** (`required_conversation_resolution`). A PR
+  with an open review thread cannot merge — resolve it (or have it resolved) first.
+- **A Copilot review** is requested automatically on the default branch and must be
+  present.
+- **No force-pushes or branch deletions** to `main`.
+
+Deliberate policy choices (a solo-maintained project):
+
+- **No required approving review** (`required_approving_review_count: 0`). The
+  maintainer self-merges once the checks and conversation-resolution gates above
+  pass; the CI matrix + Copilot review are the quality bar, not a second human.
+  This keeps merge latency low and is what lets unattended/batch maintenance flows
+  merge their own green, reviewed PRs.
+- **Admins are not force-subjected to the rules** (`enforce_admins: false`) to keep
+  an emergency-fix path open; in practice every merge still goes through the gates
+  above.
+
+Repository Actions hardening: third-party actions are **SHA-pinned**
+(`sha_pinning_required`), the default `GITHUB_TOKEN` is **read-only** (jobs elevate
+per-workflow via `permissions:`), and **fork PRs from first-time contributors
+require maintainer approval** before workflows run.
+
 ## Code Style
 
 - **TypeScript** for the app, **JavaScript (ES modules)** for the server
