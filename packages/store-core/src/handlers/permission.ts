@@ -9,8 +9,9 @@
  * Permission-mode controls: `permission_mode_changed`,
  * `available_permission_modes` (`handleAvailablePermissionModes` +
  * `PermissionMode`), and `confirm_permission_mode`. `handleAvailablePermissionModes`
- * + `PermissionMode` are also consumed by `handleAuthOk` in ./index, which
- * imports them back from here (no cycle — this file never imports ./index).
+ * + `PermissionMode` are also consumed by `handleAuthOk` in ./auth, which
+ * imports them back from here (no cycle — this file never imports ./auth or
+ * ./index).
  *
  * All routing + UX side effects stay at the call site; these only normalise the
  * wire payload. Re-exported from ./index (the barrel) so the public surface is
