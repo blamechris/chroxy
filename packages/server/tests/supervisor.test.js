@@ -763,13 +763,14 @@ describe('Supervisor', () => {
       const { supervisor } = setup()
 
       // Occupy a port so the standby server's listen() fails with EADDRINUSE,
-      // exercising the retry-scheduling branch of the error handler.
-      const port = await findFreePort()
+      // exercising the retry-scheduling branch of the error handler. Bind the
+      // blocker to port 0 and read the assigned port (no findFreePort TOCTOU gap).
       const blocker = createNetServer()
       await new Promise((resolve, reject) => {
         blocker.on('error', reject)
-        blocker.listen(port, resolve)
+        blocker.listen(0, resolve)
       })
+      const port = blocker.address().port
 
       try {
         supervisor._port = port
