@@ -131,8 +131,12 @@ export function handleMessageQueued(
     applyTo: (current) => {
       if (clientMessageId) {
         const idx = current.findIndex((m) => m.clientMessageId === clientMessageId)
-        if (idx !== -1) {
-          const existing = current[idx]
+        // `existing` is read off the index AND truthy-guarded so it narrows to a
+        // defined QueuedSessionMessage under `noUncheckedIndexedAccess` (the
+        // dashboard's stricter tsconfig) — `current[idx]` is `T | undefined`
+        // there even after the `findIndex` check.
+        const existing = idx === -1 ? undefined : current[idx]
+        if (existing) {
           // No-op (referential equality) when already confirmed with identical
           // text — a duplicate message_queued must not churn the array.
           if (existing.status === 'confirmed' && existing.text === text) {

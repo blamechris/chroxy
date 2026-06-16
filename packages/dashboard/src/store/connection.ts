@@ -321,6 +321,9 @@ const EMPTY_TRANSCRIPT_BACKGROUND_TASKS: never[] = [];
 // type system; never[] here because the array is provably empty and
 // TypeScript widens `never[]` to any element type at the call site.
 const EMPTY_INTERVENTIONS: never[] = [];
+// #5937: stable empty outgoing-message queue for the flat-state fallback —
+// same stable-reference rationale as the EMPTY_* constants above.
+const EMPTY_QUEUED_MESSAGES: never[] = [];
 
 // #5555.5 — the close/error-path reconnect delay is no longer a fixed
 // constant. Both handlers now climb the shared CONNECT_RETRY_DELAYS ladder
@@ -1331,6 +1334,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // fallback — intervention events are routed by sessionId, which only
       // populates after a session_list snapshot lands.
       interventions: EMPTY_INTERVENTIONS,
+      // #5937: no queued message in the flat-state fallback — queue events are
+      // routed by sessionId, which only populates after a session_list snapshot.
+      queuedMessages: EMPTY_QUEUED_MESSAGES,
     };
   },
 
