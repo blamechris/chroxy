@@ -393,19 +393,26 @@ export interface DispatchMessageMap {
   web_task_created: { type: 'web_task_created'; task?: unknown }
   web_task_updated: { type: 'web_task_updated'; task?: unknown }
   // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
+  // Field optionality mirrors the protocol wire contract exactly
+  // (ServerMessageQueuedSchema / ServerMessageDequeuedSchema in
+  // packages/protocol/src/schemas/server.ts): the server ALWAYS emits
+  // sessionId/text/queueLength/reason, so they are required here to catch
+  // producer/normalizer drift at compile time; only clientMessageId is
+  // genuinely optional (echoed only when the sender supplied one). The pure
+  // handlers still re-validate defensively at runtime.
   message_queued: {
     type: 'message_queued'
     sessionId: string
     clientMessageId?: string
-    text?: string
-    queueLength?: number
+    text: string
+    queueLength: number
   }
   message_dequeued: {
     type: 'message_dequeued'
     sessionId: string
     clientMessageId?: string
-    queueLength?: number
-    reason?: string
+    queueLength: number
+    reason: 'flush' | 'interrupted'
   }
 }
 
