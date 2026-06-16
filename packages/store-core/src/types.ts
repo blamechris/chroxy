@@ -738,6 +738,37 @@ export interface QueuedMessage {
   maxAge: number;
 }
 
+/**
+ * #5937 (epic #5935) — one entry in a session's server-authoritative
+ * outgoing-message queue: a follow-up the OWNER sent while the session was
+ * still mid-turn, which the server is holding and will auto-send FIFO when the
+ * turn completes (mirrored from slice ①'s `message_queued` / `message_dequeued`
+ * events, see packages/server/base-session.js `_outgoingQueue`).
+ *
+ * DISTINCT from {@link QueuedMessage} (the connection-level OFFLINE-send buffer
+ * drained on reconnect): this is per-session, server-authoritative, and bounded
+ * by the server's queue cap — not a client-side disconnect buffer.
+ *
+ * - `clientMessageId`: stable id correlating this entry to the sender's
+ *   optimistic copy (the resolved user-input id). Undefined when the server did
+ *   not echo one (e.g. a queued send with no client id) — such entries can only
+ *   be reconciled/removed FIFO, not by id.
+ * - `text`: the queued message text, for rendering the queued bubble. May be
+ *   empty for attachment-only sends (the server's `message_queued` carries an
+ *   empty `text` for a non-string prompt — see #5937 follow-up note).
+ * - `queuedAt`: client wall-clock (ms) when this entry entered the local model.
+ * - `status`: `'pending'` = added optimistically on send-while-busy, awaiting
+ *   the server's `message_queued` confirmation; `'confirmed'` = the server has
+ *   acknowledged it is holding the message. Lets a renderer distinguish an
+ *   in-flight optimistic entry from a server-confirmed one.
+ */
+export interface QueuedSessionMessage {
+  clientMessageId?: string;
+  text: string;
+  queuedAt: number;
+  status: 'pending' | 'confirmed';
+}
+
 export interface Checkpoint {
   id: string;
   name: string;
@@ -952,4 +983,21 @@ export interface BaseSessionState {
    * audit log.
    */
   interventions: SessionIntervention[];
+  /**
+   * #5937 (epic #5935) — the session's outgoing-message queue: follow-ups the
+   * owner sent mid-turn that the server is holding and will auto-send FIFO on
+   * turn-complete. See {@link QueuedSessionMessage}. Driven by slice ①'s
+   * `message_queued` / `message_dequeued` events (and an optimistic local
+   * enqueue on send-while-busy, reconciled by `clientMessageId`). Empty array
+   * when nothing is queued — never `null`, so renderers' `.length`/`.map` are
+   * guard-free.
+   *
+   * Per-session by construction (keyed by sessionId in the store, NOT component
+   * state — ChatView is not session-keyed), so a queue in one session never
+   * bleeds into another. NOT replayed on reconnect in this slice: the server
+   * ships only the live deltas, so a fresh `session_list` snapshot leaves this
+   * untouched and a client reconnecting mid-queue won't see pre-existing items
+   * until a server→client queue snapshot lands (tracked in #5937 / #5935).
+   */
+  queuedMessages: QueuedSessionMessage[];
 }

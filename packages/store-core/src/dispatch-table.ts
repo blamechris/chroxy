@@ -53,6 +53,7 @@ import type {
   AgentInfo,
   DevPreview,
   PendingBackgroundShell,
+  QueuedSessionMessage,
   WebTask,
 } from './types'
 import {
@@ -94,6 +95,9 @@ import {
   // --- slice 4 (epic #5556) — web-task upsert (#5653 follow-on) ---
   handleWebTaskUpsert,
   applyWebTaskUpsert,
+  // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
+  handleMessageQueued,
+  handleMessageDequeued,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
@@ -142,6 +146,10 @@ export interface DispatchSessionBase {
   activeAgents?: AgentInfo[]
   pendingBackgroundShells?: PendingBackgroundShell[]
   devPreviews?: DevPreview[]
+  // --- outgoing-message queue mirror (#5937) ---
+  // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
+  // Both clients' real `SessionState` carry this array (BaseSessionState).
+  queuedMessages?: QueuedSessionMessage[]
 }
 
 /**
@@ -384,6 +392,28 @@ export interface DispatchMessageMap {
   // the dispatch handler filter-and-appends against the flat `webTasks` list.
   web_task_created: { type: 'web_task_created'; task?: unknown }
   web_task_updated: { type: 'web_task_updated'; task?: unknown }
+  // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
+  // Field optionality mirrors the protocol wire contract exactly
+  // (ServerMessageQueuedSchema / ServerMessageDequeuedSchema in
+  // packages/protocol/src/schemas/server.ts): the server ALWAYS emits
+  // sessionId/text/queueLength/reason, so they are required here to catch
+  // producer/normalizer drift at compile time; only clientMessageId is
+  // genuinely optional (echoed only when the sender supplied one). The pure
+  // handlers still re-validate defensively at runtime.
+  message_queued: {
+    type: 'message_queued'
+    sessionId: string
+    clientMessageId?: string
+    text: string
+    queueLength: number
+  }
+  message_dequeued: {
+    type: 'message_dequeued'
+    sessionId: string
+    clientMessageId?: string
+    queueLength: number
+    reason: 'flush' | 'interrupted'
+  }
 }
 
 /** Union of message types this table currently handles. */
@@ -621,6 +651,36 @@ function dispatchBackgroundWorkChanged<S extends DispatchSessionBase>(
         ? ({} as Partial<S>)
         : ({ pendingBackgroundShells: next } as Partial<S>)
     })
+  }
+}
+
+/**
+ * `message_queued` / `message_dequeued` (#5937) — reconcile / remove the
+ * dequeued entry in the session's `queuedMessages`. Same builder-on-a-list shape
+ * as `background_work_changed`: apply against the current array, and skip the
+ * write (referential equality) when the builder returned the same array (a
+ * duplicate `message_queued` or an unknown-id `message_dequeued`).
+ */
+function dispatchQueuedMessages<S extends DispatchSessionBase>(
+  handle: (
+    msg: Record<string, unknown>,
+    activeSessionId: string | null,
+  ) => { sessionId: string | null; applyTo: (current: QueuedSessionMessage[]) => { queuedMessages: QueuedSessionMessage[] } } | null,
+): (msg: Record<string, unknown>, adapter: ClientStoreAdapter<S>) => void {
+  return (msg, adapter) => {
+    const builder = handle(msg, adapter.getActiveSessionId())
+    if (builder && builder.sessionId && adapter.hasSession(builder.sessionId)) {
+      adapter.updateSession(builder.sessionId, (ss) => {
+        const next = builder.applyTo(ss.queuedMessages ?? []).queuedMessages
+        // Compare against the ORIGINAL field (mirrors dispatchBackgroundWorkChanged):
+        // when the builder returned the same array AND the field already held it,
+        // skip the write so React's referential check elides a re-render. When the
+        // field was undefined, `next` is a fresh array (!== undefined) → write.
+        return next === ss.queuedMessages
+          ? ({} as Partial<S>)
+          : ({ queuedMessages: next } as Partial<S>)
+      })
+    }
   }
 }
 
@@ -881,6 +941,9 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- slice 4 (epic #5556) — web-task upsert ---
     web_task_created: dispatchWebTaskUpsert,
     web_task_updated: dispatchWebTaskUpsert,
+    // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
+    message_queued: dispatchQueuedMessages<S>(handleMessageQueued),
+    message_dequeued: dispatchQueuedMessages<S>(handleMessageDequeued),
   }
 }
 
@@ -924,6 +987,9 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- slice 4 (epic #5556) — web-task upsert ---
   'web_task_created',
   'web_task_updated',
+  // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
+  'message_queued',
+  'message_dequeued',
 ]
 
 /**

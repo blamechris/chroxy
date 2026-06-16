@@ -68,6 +68,14 @@ export * from './plan'
 export * from './intervention'
 
 // ---------------------------------------------------------------------------
+// Outgoing-message queue handlers (message_queued / message_dequeued #5937 —
+// the per-session mid-turn send-queue mirror, with optimistic-enqueue + remove
+// helpers) live in ./outgoing-queue.ts. Re-exported here so the barrel's public
+// surface is unchanged.
+// ---------------------------------------------------------------------------
+export * from './outgoing-queue'
+
+// ---------------------------------------------------------------------------
 // Dev-preview handlers (dev_preview, dev_preview_stopped) live in
 // ./dev-preview.ts (audit P2-3 split). Re-exported here so the barrel's public
 // surface is unchanged.

@@ -96,6 +96,8 @@ export type {
   ConnectionPhase,
   ConnectionContext,
   QueuedMessage,
+  // #5937: per-session outgoing-message queue entry (mid-turn send queue)
+  QueuedSessionMessage,
   Checkpoint,
   BaseSessionState,
   InactivityWarning,
@@ -376,6 +378,8 @@ export type {
   DevPreviewBuilder,
   // #4653 — builder for the chroxy-side intervention append/dedup/ring-cap path
   SessionInterventionBuilder,
+  // #5937 — builder for the outgoing-message queue reconcile/dequeue path
+  QueuedMessagesBuilder,
   AgentInfoBuilder,
   PendingBackgroundShellsBuilder,
   // #4767 — centralised session_list dispatch (GC + cumulativeUsage + pendingShells seeding)
@@ -460,6 +464,11 @@ export {
   // #4653 — chroxy-side multi-question deny notification
   handleMultiQuestionIntervention,
   applyInterventionBuilder,
+  // #5937 — outgoing-message queue (mid-turn send queue) handlers + helpers
+  handleMessageQueued,
+  handleMessageDequeued,
+  enqueueOptimisticQueuedMessage,
+  removeQueuedMessage,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,

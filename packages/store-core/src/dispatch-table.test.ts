@@ -11,6 +11,7 @@ import type {
   AgentInfo,
   DevPreview,
   PendingBackgroundShell,
+  QueuedSessionMessage,
 } from './types'
 import type { PermissionRule } from './handlers'
 
@@ -30,6 +31,8 @@ interface FakeSession {
   activeAgents?: AgentInfo[]
   pendingBackgroundShells?: PendingBackgroundShell[]
   devPreviews?: DevPreview[]
+  // outgoing-message queue (#5937)
+  queuedMessages?: QueuedSessionMessage[]
   [k: string]: unknown
 }
 
@@ -459,6 +462,90 @@ describe('shared dispatch table', () => {
       expect(env.sessions.s1.pendingBackgroundShells).toEqual([
         { shellId: 'sh-1', command: 'npm test', startedAt: 1000 },
       ])
+    })
+  })
+
+  describe('message_queued / message_dequeued (#5937)', () => {
+    it('reconciles a server message_queued by appending a confirmed entry', () => {
+      const env = makeAdapter({
+        sessions: { s1: { sessionId: 's1', messages: [], queuedMessages: [] } },
+      })
+      dispatch(env, {
+        type: 'message_queued',
+        sessionId: 's1',
+        clientMessageId: 'uin-1',
+        text: 'follow-up',
+        queueLength: 1,
+      })
+      expect(env.sessions.s1.queuedMessages).toMatchObject([
+        { clientMessageId: 'uin-1', text: 'follow-up', status: 'confirmed' },
+      ])
+    })
+
+    it('flips an optimistic pending entry to confirmed (dedup by clientMessageId)', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            queuedMessages: [
+              { clientMessageId: 'uin-1', text: 'follow-up', queuedAt: 10, status: 'pending' },
+            ],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-1', text: 'follow-up', queueLength: 1 })
+      expect(env.sessions.s1.queuedMessages).toEqual([
+        { clientMessageId: 'uin-1', text: 'follow-up', queuedAt: 10, status: 'confirmed' },
+      ])
+    })
+
+    it('removes the dequeued entry by clientMessageId on flush', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            queuedMessages: [
+              { clientMessageId: 'uin-1', text: 'a', queuedAt: 10, status: 'confirmed' },
+              { clientMessageId: 'uin-2', text: 'b', queuedAt: 11, status: 'confirmed' },
+            ],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'uin-1', queueLength: 1, reason: 'flush' })
+      expect(env.sessions.s1.queuedMessages).toEqual([
+        { clientMessageId: 'uin-2', text: 'b', queuedAt: 11, status: 'confirmed' },
+      ])
+    })
+
+    it('removes the FIFO head when message_dequeued echoes no clientMessageId', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            queuedMessages: [
+              { text: 'a', queuedAt: 10, status: 'confirmed' },
+              { text: 'b', queuedAt: 11, status: 'confirmed' },
+            ],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_dequeued', sessionId: 's1', queueLength: 1, reason: 'flush' })
+      expect(env.sessions.s1.queuedMessages).toEqual([{ text: 'b', queuedAt: 11, status: 'confirmed' }])
+    })
+
+    it('does not bleed across sessions — only the targeted session is mutated', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: { sessionId: 's1', messages: [], queuedMessages: [] },
+          s2: { sessionId: 's2', messages: [], queuedMessages: [] },
+        },
+      })
+      dispatch(env, { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-1', text: 'hi', queueLength: 1 })
+      expect(env.sessions.s1.queuedMessages).toHaveLength(1)
+      expect(env.sessions.s2.queuedMessages).toEqual([])
     })
   })
 

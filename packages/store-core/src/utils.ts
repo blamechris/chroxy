@@ -107,6 +107,9 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     // #4653: empty ring for chroxy-side interventions. Never null so the
     // dashboard's `.length`/`map` call sites don't need a guard.
     interventions: [],
+    // #5937: empty outgoing-message queue. Never null so renderers' .length/.map
+    // are guard-free; populated by message_queued / optimistic enqueue.
+    queuedMessages: [],
   };
 }
 

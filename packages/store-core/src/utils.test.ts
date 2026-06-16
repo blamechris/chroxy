@@ -48,6 +48,9 @@ describe('createEmptyBaseSessionState', () => {
       // #4653: chroxy-side intervention ring — empty array on init,
       // populated by multi_question_intervention events.
       interventions: [],
+      // #5937: outgoing-message queue — empty array on init, populated by
+      // message_queued / optimistic enqueue.
+      queuedMessages: [],
     })
   })
 

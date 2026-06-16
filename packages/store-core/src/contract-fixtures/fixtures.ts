@@ -764,6 +764,43 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     message: { type: 'web_task_created', task: { status: 'running' } },
     expect: { noop: true },
   },
+
+  // 13. message_queued / message_dequeued — outgoing-message queue mirror (#5937)
+  {
+    name: 'message_queued flips the optimistic pending entry to confirmed (dedup by clientMessageId)',
+    type: 'message_queued',
+    init: {
+      sessions: {
+        s1: { queuedMessages: [{ clientMessageId: 'uin-1', text: 'draft', queuedAt: 10, status: 'pending' }] },
+      },
+    },
+    message: { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-1', text: 'rewritten', queueLength: 1 },
+    expect: {
+      sessions: {
+        s1: { queuedMessages: [{ clientMessageId: 'uin-1', text: 'rewritten', queuedAt: 10, status: 'confirmed' }] },
+      },
+    },
+  },
+  {
+    name: 'message_dequeued removes the flushed entry by clientMessageId',
+    type: 'message_dequeued',
+    init: {
+      sessions: {
+        s1: {
+          queuedMessages: [
+            { clientMessageId: 'uin-1', text: 'a', queuedAt: 10, status: 'confirmed' },
+            { clientMessageId: 'uin-2', text: 'b', queuedAt: 11, status: 'confirmed' },
+          ],
+        },
+      },
+    },
+    message: { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'uin-1', queueLength: 1, reason: 'flush' },
+    expect: {
+      sessions: {
+        s1: { queuedMessages: [{ clientMessageId: 'uin-2', text: 'b', queuedAt: 11, status: 'confirmed' }] },
+      },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
