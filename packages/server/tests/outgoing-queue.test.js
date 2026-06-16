@@ -89,12 +89,14 @@ describe('outgoing-message queue (#5936)', () => {
       const dequeued = []
       s.on('message_dequeued', (e) => dequeued.push(e))
 
-      // Turn for 'a' completes → flush head 'b'.
+      // Turn for 'a' completes → flush head 'b'. The message_dequeued(flush)
+      // event + the re-dispatch both land on the next tick (so the event only
+      // fires when the send actually happens).
       s.completeTurn()
+      await tick()
       assert.equal(dequeued.length, 1)
       assert.equal(dequeued[0].reason, 'flush')
       assert.equal(dequeued[0].queueLength, 1, 'queueLength is the count remaining after dequeue')
-      await tick()
       assert.deepEqual(s.sent.map((m) => m.prompt), ['a', 'b'])
 
       // Turn for 'b' completes → flush 'c'.

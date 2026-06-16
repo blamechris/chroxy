@@ -663,14 +663,20 @@ export class BaseSession extends EventEmitter {
     const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
       ? item.sendOptions.clientMessageId
       : undefined
-    this.emit('message_dequeued', {
-      clientMessageId,
-      queueLength: this._outgoingQueue.length,
-      reason: 'flush',
-    })
-    ;(this._log || log).info(`Dequeuing follow-up message (${this._outgoingQueue.length} remaining)`)
+    // queueLength is captured now (post-shift) but the event + re-dispatch are
+    // deferred to the next tick together, so message_dequeued(flush) — which a
+    // client reads as "this queued message is being sent" — only fires when we
+    // are ACTUALLY about to send (a destroy() landing in this window suppresses
+    // both). Deferring also guarantees the event lands AFTER the turn's
+    // synchronous `result` broadcast on every turn-end path (the natural-result
+    // path emits `result` then drains; the abnormal paths drain via
+    // _emitInterruptedTurnResult then emit `result`), so a client never sees the
+    // dequeue ahead of the result that triggered it.
+    const remaining = this._outgoingQueue.length
     process.nextTick(() => {
       if (this._destroying) return
+      this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'flush' })
+      ;(this._log || log).info(`Dequeuing follow-up message (${remaining} remaining)`)
       this.sendMessage(item.prompt, item.attachments, item.sendOptions)
     })
     return item
