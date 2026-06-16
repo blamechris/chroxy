@@ -60,6 +60,40 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(result.data.type, 'cancel_activity')
   })
 
+  // #5943 (epic #5935): cancel_queued client→server message.
+  it('validates cancel_queued with a clientMessageId (sessionId optional)', async () => {
+    const { CancelQueuedSchema } = await import('../src/schemas/client.ts')
+    const minimal = CancelQueuedSchema.safeParse({ type: 'cancel_queued', clientMessageId: 'uin-2' })
+    assert.ok(minimal.success, 'Should validate with just clientMessageId')
+    const withSession = CancelQueuedSchema.safeParse({ type: 'cancel_queued', clientMessageId: 'uin-2', sessionId: 'sess-1' })
+    assert.ok(withSession.success, 'Should validate with sessionId too')
+  })
+
+  it('rejects cancel_queued missing or with an empty/over-long clientMessageId', async () => {
+    const { CancelQueuedSchema } = await import('../src/schemas/client.ts')
+    assert.ok(!CancelQueuedSchema.safeParse({ type: 'cancel_queued' }).success, 'missing clientMessageId rejected')
+    assert.ok(!CancelQueuedSchema.safeParse({ type: 'cancel_queued', clientMessageId: '' }).success, 'empty clientMessageId rejected')
+    assert.ok(!CancelQueuedSchema.safeParse({ type: 'cancel_queued', clientMessageId: 'x'.repeat(129) }).success, 'over-long clientMessageId rejected')
+  })
+
+  it('resolves cancel_queued through the ClientMessageSchema union by discriminator', async () => {
+    const { ClientMessageSchema } = await import('../src/schemas/client.ts')
+    const result = ClientMessageSchema.safeParse({ type: 'cancel_queued', clientMessageId: 'uin-2' })
+    assert.ok(result.success, 'union should route cancel_queued to CancelQueuedSchema')
+    assert.equal(result.data.type, 'cancel_queued')
+  })
+
+  // #5943: message_dequeued gains the 'cancelled' reason alongside flush/interrupted.
+  it('validates message_dequeued reason enum incl. cancelled (#5943)', async () => {
+    const { ServerMessageDequeuedSchema } = await import('../src/schemas/server.ts')
+    for (const reason of ['flush', 'interrupted', 'cancelled']) {
+      const r = ServerMessageDequeuedSchema.safeParse({ type: 'message_dequeued', sessionId: 's1', queueLength: 0, reason })
+      assert.ok(r.success, `reason '${reason}' should validate`)
+    }
+    const bad = ServerMessageDequeuedSchema.safeParse({ type: 'message_dequeued', sessionId: 's1', queueLength: 0, reason: 'bogus' })
+    assert.ok(!bad.success, 'unknown reason rejected')
+  })
+
   it('validates server auth_ok message', async () => {
     const { ServerAuthOkSchema } = await import('../src/schemas/server.ts')
     const result = ServerAuthOkSchema.safeParse({

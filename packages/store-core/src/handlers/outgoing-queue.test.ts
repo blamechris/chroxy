@@ -128,6 +128,12 @@ describe('handleMessageDequeued', () => {
     expect(builder.applyTo(current)).toEqual({ queuedMessages: [] })
   })
 
+  it('removes only the cancelled entry (#5943), leaving the rest of the queue', () => {
+    const current = [confirmed('uin-1', 'a'), confirmed('uin-2', 'b'), confirmed('uin-3', 'c')]
+    const builder = handleMessageDequeued({ sessionId: 's1', clientMessageId: 'uin-2', reason: 'cancelled' }, null)
+    expect(builder.applyTo(current)).toEqual({ queuedMessages: [confirmed('uin-1', 'a'), confirmed('uin-3', 'c')] })
+  })
+
   it('is a no-op (referential) for an unknown id', () => {
     const current = [confirmed('uin-1', 'a')]
     const builder = handleMessageDequeued({ sessionId: 's1', clientMessageId: 'uin-9', reason: 'flush' }, null)

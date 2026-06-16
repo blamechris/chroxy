@@ -92,6 +92,11 @@ export declare const CancelActivitySchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+export declare const CancelQueuedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"cancel_queued">;
+    clientMessageId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const SetModelSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_model">;
     model: z.ZodString;
@@ -701,6 +706,10 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"cancel_queued">;
+    clientMessageId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_model">;
     model: z.ZodString;
 }, z.core.$loose>, z.ZodObject<{
@@ -1106,6 +1115,7 @@ export type PairDenyMessage = z.infer<typeof PairDenySchema>;
 export type InputMessage = z.infer<typeof InputSchema>;
 export type InterruptMessage = z.infer<typeof InterruptSchema>;
 export type CancelActivityMessage = z.infer<typeof CancelActivitySchema>;
+export type CancelQueuedMessage = z.infer<typeof CancelQueuedSchema>;
 export type SetModelMessage = z.infer<typeof SetModelSchema>;
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>;
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>;

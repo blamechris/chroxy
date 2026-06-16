@@ -129,6 +129,24 @@ export const CancelActivitySchema = z.object({
     // to its outcome without inferring it from the terminal activity_delta.
     requestId: z.string().max(128).optional(),
 }).passthrough();
+// #5943 (epic #5935): cancel a SINGLE queued send-while-busy follow-up by its
+// `clientMessageId`, removing it from the server's per-session outgoing queue
+// (`base-session.js` `_outgoingQueue`) before it flushes. The server emits
+// `message_dequeued { reason: 'cancelled' }` so every client removes the queued
+// bubble. Authority mirrors `interrupt` — acting on your OWN bound/active
+// session, not a privilege escalation — so the server resolves the target from
+// `sessionId` or the caller's binding. Whole-queue cancellation stays on
+// `interrupt`; this is the per-item control action (the queue analogue of
+// `cancel_activity`).
+export const CancelQueuedSchema = z.object({
+    type: z.literal('cancel_queued'),
+    // Identifies the queued entry to drop: the client-generated message id the
+    // entry was enqueued under (the server's resolved `messageId`, echoed as
+    // `clientMessageId` on `message_queued` / `message_dequeued`). Same 128-char
+    // cap the server applies to that id.
+    clientMessageId: z.string().min(1).max(128),
+    sessionId: z.string().max(256).optional(),
+}).passthrough();
 export const SetModelSchema = z.object({
     type: z.literal('set_model'),
     model: z.string().max(256),
@@ -978,6 +996,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     InputSchema,
     InterruptSchema,
     CancelActivitySchema,
+    CancelQueuedSchema,
     SetModelSchema,
     SetPermissionModeSchema,
     SetThinkingLevelSchema,

@@ -353,7 +353,10 @@ Object.assign(EVENT_MAP, {
         sessionId: ctx.sessionId,
         ...(typeof data?.clientMessageId === 'string' ? { clientMessageId: data.clientMessageId } : {}),
         queueLength: typeof data?.queueLength === 'number' ? data.queueLength : 0,
-        reason: data?.reason === 'interrupted' ? 'interrupted' : 'flush',
+        // #5943: pass the per-item cancel reason through alongside the two
+        // slice-① reasons; anything unrecognised collapses to 'flush' (the
+        // benign default — the client transitions the bubble to sent).
+        reason: data?.reason === 'interrupted' || data?.reason === 'cancelled' ? data.reason : 'flush',
       },
     }],
   }),

@@ -572,6 +572,51 @@ function handleInterrupt(ws, client, msg, ctx) {
 }
 
 /**
+ * #5943 (epic #5935): cancel ONE queued send-while-busy follow-up by its
+ * `clientMessageId`. Authority mirrors `interrupt` — acting on your OWN bound
+ * session, not a privilege escalation — so resolveSession's binding check is the
+ * only gate (a pairing-bound client may cancel a queued message in its own
+ * session but not another's). Whole-queue cancellation stays on `interrupt`.
+ *
+ * The session removes the matching `_outgoingQueue` entry and emits
+ * `message_dequeued { reason: 'cancelled' }`, which mirrors to every client via
+ * the EventNormalizer — so there is no extra reply on success here. A
+ * stale/duplicate cancel (id already flushed) is a silent no-op, like an
+ * `interrupt` to an idle session. Binding/stale-id failures surface the same
+ * session_error envelopes as handleInterrupt.
+ */
+function handleCancelQueued(ws, client, msg, ctx) {
+  const entry = resolveSession(ctx, msg, client)
+  if (entry) {
+    const cancelled = entry.session.cancelQueuedMessage(msg.clientMessageId)
+    log.info(`cancel_queued ${msg.clientMessageId} from ${client.id} → ${cancelled ? 'removed' : 'no-op (not queued)'}`)
+    return
+  }
+  // Disambiguate a binding mismatch from a truly-missing session, exactly as
+  // handleInterrupt does (Copilot review #4979).
+  if (msg.sessionId && client.boundSessionId && client.boundSessionId !== msg.sessionId) {
+    log.info(`cancel_queued rejected: session-token mismatch sessionId=${msg.sessionId} boundSessionId=${client.boundSessionId} client=${client.id}`)
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
+    return
+  }
+  if (msg.sessionId) {
+    log.info(`cancel_queued dropped: session not found sessionId=${msg.sessionId} client=${client.id}`)
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      code: 'SESSION_NOT_FOUND',
+      message: `Session not found: ${msg.sessionId}`,
+      attemptedSessionId: msg.sessionId,
+    })
+  }
+}
+
+/**
  * #5271 (Control Room Phase 2a): cancel a single in-flight activity node
  * (currently a Task subagent) in a session. Authority mirrors `interrupt` —
  * acting on your own session, NOT a privilege escalation — so resolveSession's
@@ -987,6 +1032,7 @@ function handleTerminalInput(ws, client, msg, ctx) {
 export const inputHandlers = {
   input: handleInput,
   interrupt: handleInterrupt,
+  cancel_queued: handleCancelQueued,
   terminal_input: handleTerminalInput,
   cancel_activity: handleCancelActivity,
   resume_budget: handleResumeBudget,

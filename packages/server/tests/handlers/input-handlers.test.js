@@ -1994,4 +1994,66 @@ describe('input-handlers', () => {
       assert.equal(ctx.transport.getPrimary('s1'), 'me')
     })
   })
+
+  // #5943: per-item cancel of a queued send-while-busy follow-up.
+  describe('cancel_queued', () => {
+    function sessionWithCancel(removed = true) {
+      const session = createMockSession()
+      session.cancelQueuedMessage = createSpy(() => removed)
+      return session
+    }
+
+    it('calls session.cancelQueuedMessage with the clientMessageId on the bound session', () => {
+      const sessions = new Map()
+      const session = sessionWithCancel(true)
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.cancel_queued(makeWs(), client, { clientMessageId: 'uin-2' }, ctx)
+
+      assert.equal(session.cancelQueuedMessage.callCount, 1)
+      assert.equal(session.cancelQueuedMessage.lastCall[0], 'uin-2')
+      assert.equal(ctx._sent.length, 0, 'success sends no extra reply (dequeue mirrors via the normalizer)')
+    })
+
+    it('is a silent no-op (no error) when the id is not queued', () => {
+      const sessions = new Map()
+      const session = sessionWithCancel(false) // nothing matched
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      inputHandlers.cancel_queued(makeWs(), client, { clientMessageId: 'uin-gone' }, ctx)
+
+      assert.equal(session.cancelQueuedMessage.callCount, 1)
+      assert.equal(ctx._sent.length, 0, 'a stale cancel must not surface an error')
+    })
+
+    it('sends SESSION_TOKEN_MISMATCH when bound to a different session', () => {
+      const sessions = new Map()
+      sessions.set('bound-id', { session: sessionWithCancel(), name: 'BoundSession', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ boundSessionId: 'bound-id' })
+
+      inputHandlers.cancel_queued(makeWs(), client, { clientMessageId: 'uin-1', sessionId: 'other-id' }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_TOKEN_MISMATCH')
+      assert.equal(ctx._sent[0].attemptedSessionId, undefined)
+    })
+
+    it('sends SESSION_NOT_FOUND for an unknown sessionId', () => {
+      const ctx = makeCtx(new Map())
+      const client = makeClient({})
+
+      inputHandlers.cancel_queued(makeWs(), client, { clientMessageId: 'uin-1', sessionId: 'ghost' }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.equal(ctx._sent[0].code, 'SESSION_NOT_FOUND')
+      assert.equal(ctx._sent[0].attemptedSessionId, 'ghost')
+    })
+  })
 })

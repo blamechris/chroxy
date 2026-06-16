@@ -652,10 +652,12 @@ export declare const ServerMessageQueuedSchema: z.ZodObject<{
 }, z.core.$loose>;
 /**
  * `message_dequeued` — a queued message left the queue. `reason` distinguishes
- * the two exit paths: `'flush'` (auto-sent on turn-complete — the client should
- * transition the bubble from queued → sent) vs `'interrupted'` (the queue was
- * cancelled by an interrupt — the client should remove the queued bubble). The
- * `queueLength` is the count remaining AFTER this item left.
+ * the exit paths: `'flush'` (auto-sent on turn-complete — the client should
+ * transition the bubble from queued → sent), `'interrupted'` (the whole queue
+ * was cancelled by an interrupt — the client should remove the queued bubble),
+ * and `'cancelled'` (#5943 — the owner cancelled this ONE entry via
+ * `cancel_queued` — the client removes just this bubble, leaving the rest of the
+ * queue intact). The `queueLength` is the count remaining AFTER this item left.
  */
 export declare const ServerMessageDequeuedSchema: z.ZodObject<{
     type: z.ZodLiteral<"message_dequeued">;
@@ -665,6 +667,7 @@ export declare const ServerMessageDequeuedSchema: z.ZodObject<{
     reason: z.ZodEnum<{
         flush: "flush";
         interrupted: "interrupted";
+        cancelled: "cancelled";
     }>;
 }, z.core.$loose>;
 /**
