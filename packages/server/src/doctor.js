@@ -8,6 +8,7 @@ import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { parseTunnelArg } from './tunnel/index.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from './claude-tui/tested-cli-version.js'
 import { detectSilentMeteredDefault } from './doctor-billing.js'
 import {
@@ -26,7 +27,13 @@ import { checkDependencies } from './utils/check-dependencies.js'
 const __filename = fileURLToPath(import.meta.url)
 const SERVER_PKG_DIR = dirname(dirname(__filename))
 
-const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
+// Honor CHROXY_CONFIG_DIR (the repo-wide convention — connection-info.js,
+// models.js, etc.) so the config read resolves to the same dir as every other
+// reader. Without this, doctor read the REAL ~/.chroxy in tests despite
+// tests/_setup.mjs redirecting CHROXY_CONFIG_DIR to a tmp dir — which would let
+// the named-tunnel routability probe (#5328) fire a live network request from
+// a maintainer's real config during the suite.
+const CONFIG_FILE = join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'config.json')
 
 /**
  * Parse the leading `major.minor.patch` semver out of an arbitrary version
@@ -179,6 +186,83 @@ export function checkClaudeTuiCliVersion(deps = {}) {
 }
 
 /**
+ * #5328 (WP-5.6) — default end-to-end routability probe for a named tunnel:
+ * a HEAD request to the tunnel hostname with a hard timeout. ANY HTTP response
+ * (even 4xx/5xx/426-upgrade, and whether it comes from the chroxy origin or a
+ * Cloudflare edge error page) means the hostname resolves and the edge answered
+ * — i.e. the route is live enough to reach. Only a network/DNS error or a
+ * timeout (caught here, returned as `{ ok: false }`) means the path is broken.
+ * Uses the Node 22 global `fetch` + `AbortController`; no new dependency.
+ */
+async function defaultHttpsProbe(url, timeoutMs) {
+  const controller = new AbortController()
+  const timer = setTimeout(() => controller.abort(), timeoutMs)
+  try {
+    const res = await fetch(url, { method: 'HEAD', signal: controller.signal, redirect: 'manual' })
+    return { ok: true, status: res.status }
+  } catch (err) {
+    const error = err?.name === 'AbortError' ? `timed out after ${timeoutMs}ms` : (err?.message || String(err))
+    return { ok: false, error }
+  } finally {
+    clearTimeout(timer)
+  }
+}
+
+/**
+ * #5328 (WP-5.6) — probe whether a configured NAMED tunnel's hostname is
+ * actually routable end-to-end, so `chroxy doctor` distinguishes "cloudflared
+ * is installed" (the binary check) from "the edge → origin path resolves".
+ *
+ * Skipped (returns null) unless a named tunnel with a hostname is configured —
+ * a quick tunnel's URL is random and runtime-only, so doctor can't know it
+ * ahead of time. A reachable hostname is a `pass`; an unreachable one is a
+ * `warn` (a diagnostic, not a hard failure: the daemon still runs on localhost).
+ *
+ * @param {object} [deps]
+ * @param {string|null} [deps.hostname] - the configured named-tunnel hostname
+ * @param {string|null} [deps.mode] - the configured tunnel mode ('named'|'quick'|'none')
+ * @param {(url: string, timeoutMs: number) => Promise<{ ok: boolean, status?: number, error?: string }>} [deps.probe]
+ * @param {number} [deps.timeoutMs]
+ * @returns {Promise<{ name: string, status: 'pass'|'warn', message: string } | null>}
+ */
+export async function checkTunnelRoutability(deps = {}) {
+  const { hostname = null, mode = null, timeoutMs = 5000, probe = defaultHttpsProbe } = deps
+  if (mode !== 'named' || typeof hostname !== 'string') return null
+  const NAME = 'Tunnel routability'
+  // Trim and reject anything that isn't a bare host — a stray scheme, path,
+  // userinfo (`@`), or whitespace in the configured `tunnelHostname` would make
+  // `https://${hostname}/` probe a DIFFERENT host than intended (or build an
+  // invalid URL). Surface it as a warn rather than silently probing the wrong
+  // place. A bare `host` or `host:port` is fine.
+  const host = hostname.trim()
+  if (host.length === 0) return null
+  if (/[\s/@]/.test(host) || host.includes('://')) {
+    return {
+      name: NAME,
+      status: 'warn',
+      message: `Configured tunnelHostname '${hostname}' is not a bare host — expected e.g. 'tunnel.example.com', not a URL. Run 'chroxy tunnel setup' to (re)configure.`,
+    }
+  }
+  let result
+  try {
+    result = await probe(`https://${host}/`, timeoutMs)
+  } catch (err) {
+    // A probe should resolve { ok: false }, never throw — but never let a
+    // diagnostic crash the whole doctor run.
+    result = { ok: false, error: err?.message || String(err) }
+  }
+  if (result && result.ok) {
+    const code = typeof result.status === 'number' ? ` (HTTP ${result.status})` : ''
+    return { name: NAME, status: 'pass', message: `${host} is reachable${code}` }
+  }
+  return {
+    name: NAME,
+    status: 'warn',
+    message: `${host} did not respond${result?.error ? ` (${result.error})` : ''} — the DNS route may be missing or the named tunnel is down. Run 'chroxy tunnel setup' to (re)configure.`,
+  }
+}
+
+/**
  * Run all preflight dependency checks and return results.
  *
  * Provider-aware: only runs the binary/credential checks for the
@@ -196,7 +280,7 @@ export function checkClaudeTuiCliVersion(deps = {}) {
  *   tests can point the check at a temp directory without mutating process.cwd().
  * @returns {{ checks: Array<{ name: string, status: 'pass'|'warn'|'fail', message: string, provider?: string }>, passed: boolean, providers: string[] }}
  */
-export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now() } = {}) {
+export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgDir = SERVER_PKG_DIR, now = Date.now(), tunnelProbe } = {}) {
   const checks = []
   const isMac = platform() === 'darwin'
   const isLinux = platform() === 'linux'
@@ -229,10 +313,26 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 3. Load config (once) — used for both the Config check and provider resolution.
   let configProvider = null
   let configCheck = null
+  // #5328 (WP-5.6): named-tunnel coordinates for the routability probe (step 5.6).
+  let tunnelMode = null
+  let tunnelHostname = null
   if (existsSync(CONFIG_FILE)) {
     try {
       const config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
       if (typeof config.provider === 'string') configProvider = config.provider
+      // Normalize the tunnel mode through parseTunnelArg so aliases resolve —
+      // e.g. `cloudflare:named` (a documented --tunnel form persisted verbatim)
+      // maps to mode 'named' and isn't silently skipped by the routability
+      // probe. parseTunnelArg throws on an unknown value; validateConfig already
+      // surfaces that, so treat it as "no probe" here rather than crashing doctor.
+      if (typeof config.tunnel === 'string') {
+        try {
+          tunnelMode = parseTunnelArg(config.tunnel)?.mode ?? null
+        } catch {
+          tunnelMode = null
+        }
+      }
+      if (typeof config.tunnelHostname === 'string') tunnelHostname = config.tunnelHostname
       // #5419: register config-driven Anthropic-compatible endpoints before
       // provider resolution so a config.provider pointing at one preflights
       // its credential spec instead of failing as "Unknown provider".
@@ -269,6 +369,18 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 5. Config check — appended after provider checks so per-provider
   // sections group together in the output report.
   checks.push(configCheck)
+
+  // 5.6 Tunnel routability (#5328 WP-5.6). For a configured NAMED tunnel, probe
+  // the hostname end-to-end so a broken DNS route / down tunnel is visible here
+  // rather than only as a failed remote connection later. Skipped for quick /
+  // no tunnel (no stable hostname to probe). `tunnelProbe` is injectable so the
+  // check is testable without a real network round-trip.
+  const tunnelCheck = await checkTunnelRoutability({
+    hostname: tunnelHostname,
+    mode: tunnelMode,
+    ...(tunnelProbe ? { probe: tunnelProbe } : {}),
+  })
+  if (tunnelCheck) checks.push(tunnelCheck)
 
   // 5.5 Billing canary (#5821, audit rec #4). Standalone-feasible half of the
   // canary: the silent-metered-default check needs only the resolved default
