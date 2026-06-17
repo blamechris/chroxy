@@ -8,6 +8,7 @@ import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { parseTunnelArg } from './tunnel/index.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from './claude-tui/tested-cli-version.js'
 import { detectSilentMeteredDefault } from './doctor-billing.js'
 import {
@@ -26,7 +27,13 @@ import { checkDependencies } from './utils/check-dependencies.js'
 const __filename = fileURLToPath(import.meta.url)
 const SERVER_PKG_DIR = dirname(dirname(__filename))
 
-const CONFIG_FILE = join(homedir(), '.chroxy', 'config.json')
+// Honor CHROXY_CONFIG_DIR (the repo-wide convention — connection-info.js,
+// models.js, etc.) so the config read resolves to the same dir as every other
+// reader. Without this, doctor read the REAL ~/.chroxy in tests despite
+// tests/_setup.mjs redirecting CHROXY_CONFIG_DIR to a tmp dir — which would let
+// the named-tunnel routability probe (#5328) fire a live network request from
+// a maintainer's real config during the suite.
+const CONFIG_FILE = join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'config.json')
 
 /**
  * Parse the leading `major.minor.patch` semver out of an arbitrary version
@@ -299,7 +306,18 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
     try {
       const config = JSON.parse(readFileSync(CONFIG_FILE, 'utf-8'))
       if (typeof config.provider === 'string') configProvider = config.provider
-      if (typeof config.tunnel === 'string') tunnelMode = config.tunnel
+      // Normalize the tunnel mode through parseTunnelArg so aliases resolve —
+      // e.g. `cloudflare:named` (a documented --tunnel form persisted verbatim)
+      // maps to mode 'named' and isn't silently skipped by the routability
+      // probe. parseTunnelArg throws on an unknown value; validateConfig already
+      // surfaces that, so treat it as "no probe" here rather than crashing doctor.
+      if (typeof config.tunnel === 'string') {
+        try {
+          tunnelMode = parseTunnelArg(config.tunnel)?.mode ?? null
+        } catch {
+          tunnelMode = null
+        }
+      }
       if (typeof config.tunnelHostname === 'string') tunnelHostname = config.tunnelHostname
       // #5419: register config-driven Anthropic-compatible endpoints before
       // provider resolution so a config.provider pointing at one preflights

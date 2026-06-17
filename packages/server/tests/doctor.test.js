@@ -742,9 +742,33 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
       providers: ['claude-sdk'],
       tunnelProbe: async () => { probed = true; return { ok: true } },
     })
-    // The real home config under test has no named tunnel, so the probe must
-    // not fire and no routability check is added.
+    // CHROXY_CONFIG_DIR is redirected to a tmp dir by _setup.mjs and has no
+    // named tunnel, so the probe must not fire and no routability check is added.
     assert.equal(probed, false)
     assert.equal(checks.find(c => c.name === 'Tunnel routability'), undefined)
+  })
+
+  it('runDoctorChecks fires the probe for a configured named tunnel, incl. the cloudflare:named alias', async () => {
+    const { writeFileSync, rmSync } = await import('node:fs')
+    // _setup.mjs points CHROXY_CONFIG_DIR at a writable tmp dir and doctor's
+    // CONFIG_FILE now honors it (the hermeticity fix), so this lands in the
+    // sandbox, not the real ~/.chroxy.
+    const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify({ tunnel: 'cloudflare:named', tunnelHostname: 'chroxy.example.com' }))
+    try {
+      let probedUrl = null
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-sdk'],
+        tunnelProbe: async (url) => { probedUrl = url; return { ok: true, status: 200 } },
+      })
+      // The `cloudflare:named` alias must normalize to mode 'named' (not be
+      // skipped), and the probe must receive the configured hostname URL.
+      assert.equal(probedUrl, 'https://chroxy.example.com/')
+      const routability = checks.find(c => c.name === 'Tunnel routability')
+      assert.ok(routability)
+      assert.equal(routability.status, 'pass')
+    } finally {
+      rmSync(cfgPath, { force: true })
+    }
   })
 })
