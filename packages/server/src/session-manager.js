@@ -824,16 +824,17 @@ export class SessionManager extends EventEmitter {
     // appeared in the UI. Runs BEFORE worktree creation so a failed preflight
     // doesn't leave an orphan worktree behind. (#2962)
     const resolvedProviderType = provider || this._providerType
+    const PreflightProviderClass = getProvider(resolvedProviderType)
     // #5985 (epic #5982): fail-closed gate for the embedded user-shell terminal.
-    // Enforced here (before getProvider / any spawn) so it covers EVERY create
-    // path — WS create_session, restoreState, and internal callers — not just
-    // the WS handler (swarm-audit C3: a handler-only gate is bypassed on restore).
-    // The provider itself ships later (#5983); until then this is a deny that
-    // fails closed during build-out.
-    if (resolvedProviderType === 'user-shell' && !this._userShellEnabled) {
+    // Enforced here (before any spawn) so it covers EVERY create path — WS
+    // create_session, restoreState, and internal callers — not just the WS
+    // handler (swarm-audit C3: a handler-only gate is bypassed on restore). Keyed
+    // on the resolved provider CLASS (`isUserShell`), not the provider-name
+    // string, so any user-shell provider is caught regardless of its registry id
+    // — consistent with the serialize-skip and terminal_* gates.
+    if (PreflightProviderClass?.isUserShell === true && !this._userShellEnabled) {
       throw new UserShellDisabledError()
     }
-    const PreflightProviderClass = getProvider(resolvedProviderType)
     if (!this._skipPreflight) {
       runProviderPreflight(PreflightProviderClass)
     }
@@ -1804,6 +1805,11 @@ export class SessionManager extends EventEmitter {
     if (this._destroying) return null
     const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
+      // #5983 (epic #5982): never persist a user-shell session. Restoring one
+      // would re-spawn a $SHELL on boot — bypassing the userShell.enabled gate
+      // if it was since turned off (swarm-audit C3 / Skeptic finding 4) — and a
+      // shell has no resumable conversation state worth keeping anyway.
+      if (entry.session?.constructor?.isUserShell === true) continue
       state.sessions.push(this._serializeSessionEntry(id, entry))
     }
 

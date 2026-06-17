@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, UserShellDisabledError } from '../src/session-manager.js'
+import { UserShellSession } from '../src/user-shell-session.js'
 
 /**
  * #5985 (epic #5982) — the fail-closed gate for the embedded user-shell
@@ -93,25 +94,19 @@ describe('SessionManager user-shell gate (#5985)', () => {
     }
   })
 
-  it('userShellEnabled:true OPENS the gate (flow proceeds past it to getProvider)', () => {
+  it('userShellEnabled:true OPENS the gate (user-shell session is created)', () => {
+    // #5983 registered the provider, so the gate-opens path now ends in a real
+    // UserShellSession (re-asserts the #5989 follow-up). Stub the $SHELL spawn —
+    // this test covers the gate, not node-pty.
+    const origStart = UserShellSession.prototype.start
+    UserShellSession.prototype.start = async function () {}
     const mgr = makeMgr({ userShellEnabled: true })
     try {
-      // No `user-shell` provider is registered yet (#5983 ships it), so flow
-      // falls through the gate to getProvider, which throws "Unknown provider".
-      // The point: it is NOT the gate error — proving the gate opened.
-      // TODO(#5983/#5989): once the `user-shell` provider is registered this
-      // "Unknown provider" assertion flips meaning — re-assert the gate-opens
-      // path against a successful create (or a stubbed provider) at that point.
-      assert.throws(
-        () => mgr.createSession({ cwd: '/tmp', provider: 'user-shell' }),
-        (err) => {
-          assert.ok(!(err instanceof UserShellDisabledError), 'gate must NOT block when enabled')
-          assert.notEqual(err.code, 'USER_SHELL_DISABLED')
-          assert.match(err.message, /Unknown provider/)
-          return true
-        },
-      )
+      const id = mgr.createSession({ cwd: '/tmp', provider: 'user-shell' })
+      assert.ok(typeof id === 'string' && id.length > 0, 'gate opened → session created')
+      assert.equal(mgr.getSession(id).session.constructor.isUserShell, true)
     } finally {
+      UserShellSession.prototype.start = origStart
       cleanup(mgr)
     }
   })
