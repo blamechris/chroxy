@@ -199,6 +199,26 @@ export class BaseSession extends EventEmitter {
     return []
   }
 
+  /**
+   * #5984 (epic #5982): is this session class the claude-tui PTY mirror — the
+   * ONLY session type that is a legitimate target for server-initiated
+   * PTY-write paths (the mailbox live-interrupt wakeup) and the Control Room's
+   * `isTui` flag? Defaults to false; ClaudeTuiSession overrides to true.
+   *
+   * This replaces the previous `typeof session.writeTerminalInput === 'function'`
+   * duck-typing at those sites. The user-shell session (#5983) will ALSO expose
+   * `writeTerminalInput` (to receive `terminal_input`), so duck-typing would
+   * mis-detect it as claude-tui and let the weaker ingest-secret holder inject
+   * an executed line into a root shell (swarm-audit finding C2). A positive
+   * class discriminator fails safe: anything not explicitly claude-tui — incl.
+   * a future user-shell — is excluded by construction.
+   *
+   * @returns {boolean}
+   */
+  static get isClaudeTui() {
+    return false
+  }
+
   constructor({
     cwd,
     model,

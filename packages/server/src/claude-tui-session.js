@@ -90,6 +90,14 @@ export class ClaudeTuiSession extends BaseSession {
   // This is the DEFAULT_PROVIDER, so its membership is load-bearing (#5855).
   static claudeFamily = true
 
+  // #5984 (epic #5982): this IS the claude-tui PTY mirror — the only legitimate
+  // target for server-initiated PTY writes (mailbox wakeup) and the Control
+  // Room isTui flag. See BaseSession.isClaudeTui for why this is a positive
+  // discriminator rather than `typeof writeTerminalInput` duck-typing.
+  static get isClaudeTui() {
+    return true
+  }
+
   static get displayLabel() {
     return 'Claude Code (TUI · subscription)'
   }

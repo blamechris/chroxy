@@ -696,7 +696,10 @@ export class SessionManager extends EventEmitter {
         sessionId,
         sessionName: typeof entry.name === 'string' ? entry.name : null,
         isBusy: !!(session && session.isRunning),
-        isTui: !!(session && typeof session.writeTerminalInput === 'function'),
+        // #5984 (epic #5982): positive claude-tui discriminator, not
+        // `typeof writeTerminalInput` duck-typing (a user-shell session will
+        // also expose it). Matches the mailbox wakeup gate's eligibility.
+        isTui: !!(session && session.constructor?.isClaudeTui),
       })
     }
     return out

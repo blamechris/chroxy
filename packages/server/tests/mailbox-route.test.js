@@ -74,6 +74,10 @@ function idleTuiSession() {
   return {
     isRunning: false,
     writes: [],
+    // #5984: injectWakeup gates on the positive claude-tui discriminator
+    // (session.constructor.isClaudeTui), not duck-typed writeTerminalInput.
+    // A claude-tui-shaped fake must carry the marker to be a wakeup target.
+    constructor: { isClaudeTui: true },
     writeTerminalInput(text) {
       this.writes.push(text)
       return true
@@ -141,7 +145,7 @@ describe('POST /api/mailbox — ping behavior', () => {
   })
 
   it('does NOT inject when the recipient is mid-turn (busy) but still notifies', async () => {
-    const session = { isRunning: true, writes: [], writeTerminalInput(t) { this.writes.push(t); return true } }
+    const session = { isRunning: true, writes: [], constructor: { isClaudeTui: true }, writeTerminalInput(t) { this.writes.push(t); return true } }
     const push = makePushManager()
     const server = makeServer({ coder: session }, { pushManager: push })
     const res = await invoke(handleMailboxPing, server, {
@@ -165,6 +169,27 @@ describe('POST /api/mailbox — ping behavior', () => {
     assert.equal(res.body.injected, false)
   })
 
+  // #5984 (epic #5982) — swarm-audit finding C2: a non-claude-tui session that
+  // ALSO exposes writeTerminalInput (the future user-shell, #5983) must NOT be a
+  // mailbox-injection target. The gate is the positive `isClaudeTui` class
+  // discriminator, so duck-typing writeTerminalInput can never inject an
+  // executed line into a root shell via the weaker ingest secret.
+  it('reports not-tui for a writeTerminalInput-bearing NON-claude-tui session (user-shell)', async () => {
+    const shellWrites = []
+    const session = {
+      isRunning: false,
+      constructor: { isClaudeTui: false },
+      writeTerminalInput(t) { shellWrites.push(t); return true },
+    }
+    const res = await invoke(handleMailboxPing, makeServer({ coder: session }), {
+      headers: bearer(SECRET),
+      body: JSON.stringify({ to: 'coder', unread_count: 2 }),
+    })
+    assert.equal(res.body.reason, 'not-tui')
+    assert.equal(res.body.injected, false)
+    assert.equal(shellWrites.length, 0, 'must NEVER write into a non-claude-tui PTY')
+  })
+
   it('reports no-session for an unregistered recipient', async () => {
     const res = await invoke(handleMailboxPing, makeServer(), {
       headers: bearer(SECRET),
@@ -174,7 +199,7 @@ describe('POST /api/mailbox — ping behavior', () => {
   })
 
   it('reports pty-dead when the PTY write fails', async () => {
-    const session = { isRunning: false, writeTerminalInput: () => false }
+    const session = { isRunning: false, constructor: { isClaudeTui: true }, writeTerminalInput: () => false }
     const res = await invoke(handleMailboxPing, makeServer({ coder: session }), {
       headers: bearer(SECRET),
       body: JSON.stringify({ to: 'coder' }),
@@ -484,7 +509,8 @@ describe('SessionManager mailbox observability (Control Room snapshot)', () => {
   it('lists live agentCommId registrations with busy/tui flags, skipping dead sessions', () => {
     makeMgr()
     const tui = idleTuiSession()
-    const busyTui = { isRunning: true, writeTerminalInput() { return true } }
+    const busyTui = { isRunning: true, constructor: { isClaudeTui: true }, writeTerminalInput() { return true } }
+    // #5984: a non-claude-tui session is isTui:false even if it had a PTY write.
     const nonTui = { isRunning: false }
     mgr._sessions.set('sid-1', { session: tui, name: 'Coder' })
     mgr._sessions.set('sid-2', { session: busyTui, name: 'Builder' })

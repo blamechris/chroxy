@@ -229,6 +229,12 @@ export function handleMailboxPing(server, req, res) {
 function injectWakeup(server, to, unreadCount) {
   const session = server.sessionManager?.resolveSessionByAgentCommId?.(to) ?? null
   if (!session) return 'no-session'
+  // #5984 (epic #5982): gate on the positive claude-tui discriminator, NOT
+  // `typeof session.writeTerminalInput` — a user-shell session (#5983) will
+  // also expose writeTerminalInput, and duck-typing here would let the weaker
+  // ingest-secret holder inject an executed line into a root shell (swarm-audit
+  // finding C2). Only the claude-tui PTY mirror is a legitimate wakeup target.
+  if (!session.constructor?.isClaudeTui) return 'not-tui'
   if (typeof session.writeTerminalInput !== 'function') return 'not-tui'
   // `isRunning` is true mid-turn or with background shells — inject only at a
   // quiet prompt so we never corrupt an in-flight turn's input.
