@@ -56,6 +56,14 @@ const __dirname = dirname(__filename)
 
 const log = createLogger('claude-tui-session')
 
+// #5792: how long a DENIED-shape AskUserQuestion pending entry may linger past
+// turn-end before the reaper drops it. Derived from (not a re-declared copy of)
+// the stall-watchdog window so the two can't drift: long enough for any
+// in-flight teardown / reinject to clear the entry on its own (making the reaper
+// a no-op), short enough that a leaked entry can't shadow the most-recent
+// fallback for long. Same recovery-window class as the answer stall.
+const DENIED_QUESTION_REAPER_MS = ASK_USER_QUESTION_WATCHDOG_MS
+
 /**
  * ClaudeTuiSession — drives the interactive `claude` TUI under a PTY so the
  * round-trip bills as a subscription instead of programmatic (`claude -p` and
@@ -434,6 +442,21 @@ export class ClaudeTuiSession extends BaseSession {
     // answering / stalling one no longer disarms the others. Cleared per-id on
     // PostToolUse and cleared wholesale on the turn-ending paths + destroy().
     this._askUserQuestionWatchdogs = new Map()
+    // #5792: denied-shape AskUserQuestion reapers, keyed by toolUseId. A
+    // multi-question (questions.length > 1) or multi-select (any question
+    // multiSelect:true) AskUserQuestion is DENIED at the permission hook, so
+    // claude blocks → Stops with no PostToolUse. The Stop success path
+    // (_clearTurnEndState) clears the sibling lock + stall watchdogs but
+    // deliberately NOT _pendingUserAnswers (a legit sibling answer may still be
+    // in flight — see _pendingUserAnswers_clearAll's doc). For a denied shape
+    // there is NO legit answer coming, so that pending entry leaks: a later
+    // no-toolUseId respondToQuestion would misroute to it via the most-recent
+    // back-compat fallback. This reaper, armed ONLY for denied shapes at
+    // pending-creation, drops the still-leaked entry after a short window. It is
+    // deliberately keyed/cleared per toolUseId and does NOT touch the global
+    // askuserquestion-active lock (already cleared at the denied turn's Stop; a
+    // later turn may own a fresh lock by the time the reaper fires).
+    this._deniedQuestionReapers = new Map()
     // #5798: observability-only marker for the multi-select reinject "stop and
     // wait" steer. When CHROXY_TUI_MULTISELECT_REINJECT is on and a multi-select
     // AskUserQuestion is denied, the deny reason steers the model to STOP its
@@ -550,12 +573,16 @@ export class ClaudeTuiSession extends BaseSession {
   _pendingUserAnswers_clearAll() {
     this._pendingUserAnswers.clear()
     this._lastPendingAnswerToolUseId = null
+    // #5792: pending entries are gone → their reapers have nothing to guard.
+    this._clearAllDeniedQuestionReapers()
   }
 
   /** Internal: drop a specific pending answer entry (PostToolUse cleanup). */
   _clearPendingAnswerByToolUseId(toolUseId) {
     if (!toolUseId) return
     this._pendingUserAnswers.delete(toolUseId)
+    // #5792: the entry is gone → cancel its denied-shape reaper (no-op if none).
+    this._clearDeniedQuestionReaper(toolUseId)
     if (this._lastPendingAnswerToolUseId === toolUseId) {
       // Advance the "most recent" pointer to whichever entry was set most
       // recently after the one we just removed (insertion-order via Map
@@ -607,6 +634,66 @@ export class ClaudeTuiSession extends BaseSession {
   _clearAllAskUserQuestionWatchdogs() {
     for (const t of this._askUserQuestionWatchdogs.values()) clearTimeout(t)
     this._askUserQuestionWatchdogs.clear()
+  }
+
+  /**
+   * #5792: arm (or re-arm) the denied-shape reaper for one toolUseId. Called
+   * from `_emitToolHookEvent` ONLY when the AskUserQuestion payload is a denied
+   * shape (multi-question or multi-select) — a legitimate single single-select
+   * arms its own stall watchdog in `respondToQuestion` instead and is left
+   * alone. On fire, `_reapDeniedQuestion` drops the pending entry if it still
+   * leaks. Unlike the stall watchdog (which assumes a live, busy turn), this
+   * reaper must OUTLIVE the turn: the denied turn Stops immediately, so the
+   * reaper is intentionally NOT cleared by `_clearTurnEndState` — only when the
+   * pending entry it guards is cleared (see `_clearPendingAnswerByToolUseId` /
+   * `_pendingUserAnswers_clearAll`).
+   */
+  _armDeniedQuestionReaper(toolUseId, ms = DENIED_QUESTION_REAPER_MS) {
+    if (!toolUseId) return
+    const existing = this._deniedQuestionReapers.get(toolUseId)
+    if (existing) clearTimeout(existing)
+    const t = setTimeout(() => {
+      this._deniedQuestionReapers.delete(toolUseId)
+      this._reapDeniedQuestion(toolUseId)
+    }, ms)
+    this._deniedQuestionReapers.set(toolUseId, t)
+  }
+
+  /** #5792: cancel + drop ONE toolUseId's denied-shape reaper. Idempotent. */
+  _clearDeniedQuestionReaper(toolUseId) {
+    const t = this._deniedQuestionReapers.get(toolUseId)
+    if (t) {
+      clearTimeout(t)
+      this._deniedQuestionReapers.delete(toolUseId)
+    }
+  }
+
+  /** #5792: cancel + drop ALL denied-shape reapers (turn-level wipe + destroy()). Idempotent. */
+  _clearAllDeniedQuestionReapers() {
+    for (const t of this._deniedQuestionReapers.values()) clearTimeout(t)
+    this._deniedQuestionReapers.clear()
+  }
+
+  /**
+   * #5792: drop a denied-shape AskUserQuestion's pending entry if it STILL
+   * leaks after the reaper window (deny → Stop → idle with no answer). A no-op
+   * when the entry is already gone (PostToolUse arrived, the user answered, or a
+   * turn-ending teardown cleared it). Clears only this toolUseId's state — the
+   * pending entry and its own (keyed) stall watchdog. It deliberately does NOT
+   * touch the global `askuserquestion-active` lock: that lock is already cleared
+   * at the denied turn's Stop (`_clearTurnEndState`), and clearing it here could
+   * drop a LATER turn's legitimate lock if a fresh AskUserQuestion is in flight
+   * when the reaper fires.
+   */
+  _reapDeniedQuestion(toolUseId) {
+    if (this._destroying) return
+    if (!this._pendingUserAnswers.has(toolUseId)) return
+    ;(this._log || log).warn(`AskUserQuestion denied-shape reaper (#5792): tool=${toolUseId} pending entry never cleared after deny→Stop→idle — dropping leaked entry so a later no-toolUseId answer can't misroute to it`)
+    // _clearPendingAnswerByToolUseId re-enters _clearDeniedQuestionReaper; that's
+    // an idempotent no-op here (this reaper already self-deleted from the Map
+    // before its callback ran).
+    this._clearPendingAnswerByToolUseId(toolUseId)
+    this._clearAskUserQuestionWatchdog(toolUseId)
   }
 
   /**
@@ -2579,6 +2666,17 @@ export class ClaudeTuiSession extends BaseSession {
         // across any subsequent re-arm until the answer's PostToolUse clears the
         // pending entry.
         this._suspendBackstopsForPendingQuestion()
+        // #5792: a DENIED shape (multi-question OR any multi-select question) is
+        // rejected at the permission hook, so claude Stops with no PostToolUse
+        // and no answer ever arrives — the pending entry above would leak past
+        // turn-end (the Stop success path keeps pending). Arm a reaper to drop
+        // it. A legitimate single single-select is NOT a denied shape: it gets a
+        // PostToolUse (or its own respondToQuestion stall watchdog) and is left
+        // untouched.
+        const isDeniedShape = questionCount > 1 || questions.some((q) => q && q.multiSelect === true)
+        if (isDeniedShape) {
+          this._armDeniedQuestionReaper(toolUseId)
+        }
       }
       return
     }
