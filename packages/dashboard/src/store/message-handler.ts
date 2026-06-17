@@ -709,6 +709,33 @@ const _rttSmoother = new RttSmoother();
 const HEARTBEAT_INTERVAL_MS = 15_000;
 const PONG_TIMEOUT_MS = 5_000;
 
+// #5721 (item 2) — client-side handshake timeout. The heartbeat above does NOT
+// start until `auth_ok` is processed (see startHeartbeat's caller), so the
+// handshake window (socket OPEN + `auth`/`pair` sent, awaiting
+// `auth_ok`/`key_exchange_ok`) has zero liveness coverage: a server that opens
+// the socket but never completes the handshake leaves the client wedged in
+// `connecting`/`reconnecting` until the transport drops on its own. A dedicated
+// ~10s timer — comfortably below the ~20s worst-case heartbeat detection once
+// connected — surfaces "Handshake failed — reconnecting" and hands off to the
+// normal reconnect ladder instead of a silent stall. Exported so connection.ts
+// arms/clears it around the socket lifecycle and tests can read the budget.
+export const HANDSHAKE_TIMEOUT_MS = 10_000;
+let _handshakeTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+// Arm the handshake timer with the caller's fire behaviour. The fire callback
+// is injected (not built here) because the reconnect machinery it needs lives
+// in connection.ts's per-socket closure — the same inversion createReconnectScheduler
+// uses. Clears any prior timer first (single-instance, mirroring startHeartbeat)
+// so a reconnect that re-enters onopen can never leak a second pending timer.
+export function armHandshakeTimer(onTimeout: () => void): void {
+  clearHandshakeTimer();
+  _handshakeTimeoutId = setTimeout(onTimeout, HANDSHAKE_TIMEOUT_MS);
+}
+
+export function clearHandshakeTimer(): void {
+  if (_handshakeTimeoutId) { clearTimeout(_handshakeTimeoutId); _handshakeTimeoutId = null; }
+}
+
 // #5515 (epic #5514): latency instrumentation. `_deltaServerTs` records the
 // server-stamped serverTs (and local recv time) of the OLDEST un-rendered
 // delta per messageId; on flush we measure serverTs→render (token-to-render)
@@ -2871,6 +2898,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // reset the close/error-path backoff ladder here (not on socket-open). A
       // socket that opens but never authenticates keeps climbing the ladder.
       resetReconnectAttempt();
+      // #5721 (item 2) — auth_ok is the authoritative handshake-completion frame
+      // (the issue calls it out by name); a discrete key_exchange round-trip, when
+      // it happens, only ever FOLLOWS a successful auth_ok. Clear the handshake
+      // timer here so the (healthy) encryption sub-handshake isn't counted against
+      // the budget. Eager-encryption and no-encryption connects never send
+      // key_exchange, so this is the single authoritative clear.
+      clearHandshakeTimer();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
       // #4766: full wire-shape decode lives in the shared parser
@@ -3106,6 +3140,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
         _pendingKeyPair = null;
         _pendingSalt = null;
+        // #5721 (item 2) — defensive: auth_ok already cleared the handshake timer
+        // (it always precedes this discrete round-trip), but clear again here so a
+        // future reordering that makes the encryption sub-handshake the real
+        // completion point can't leave a timer to fire spuriously. Idempotent.
+        clearHandshakeTimer();
         console.log('[crypto] E2E encryption established');
         // Now send the post-auth messages that were deferred. #5555: skip the
         // 3 list requests when the server advertised the auth_bootstrap

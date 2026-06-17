@@ -102,6 +102,8 @@ import {
   clearTerminalWriteBatching,
   appendPendingTerminalWrite,
   stopHeartbeat,
+  armHandshakeTimer,
+  clearHandshakeTimer,
   clearDeltaBuffers,
   clearMessageQueue,
   enqueueMessage,
@@ -1575,6 +1577,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Reset encryption state for each new connection (forward secrecy)
     setEncryptionState(null);
     setPendingKeyPair(null);
+    // #5721 (item 2) — clear any handshake timer left armed by a prior socket
+    // BEFORE this attempt opens, so a reconnect that re-enters onopen can never
+    // leak a second pending timer (the key leak-prevention site).
+    clearHandshakeTimer();
     const socket = new WebSocket(url);
 
     // #3624: shared reconnect scheduler used by both onclose and onerror.
@@ -1701,6 +1707,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
             ...(Object.keys(historyCursors).length > 0 ? { historyCursors } : {}),
           }));
         }
+        // #5721 (item 2) — a handshake frame went out; arm the handshake timer.
+        // If auth_ok / key_exchange_ok never completes the handshake within
+        // HANDSHAKE_TIMEOUT_MS, fire: drop this half-open socket and hand off to
+        // the SAME reconnect ladder a transport error uses (scheduleReconnect),
+        // surfacing "Handshake failed — reconnecting" instead of a silent stall
+        // until the transport gives up. The success clears live in the auth_ok /
+        // key_exchange_ok handlers; teardown clears live in onclose/onerror/
+        // disconnect and at the top of the next connect.
+        armHandshakeTimer(() => {
+          // Superseded by a newer attempt — ignore (mirrors the onclose/onerror
+          // stale guard). The current attempt's timer is the only live one.
+          if (myAttemptId !== connectionAttemptId) return;
+          // Null ALL handlers before closing: onclose/onerror so this manual
+          // close doesn't double-dispatch (scheduleReconnect owns recovery), AND
+          // onmessage so a frame already queued/in-flight on this wedged socket
+          // (a late auth_ok / key_exchange_ok) can't be delivered and mutate
+          // store state after we've declared the handshake failed.
+          socket.onclose = null;
+          socket.onerror = null;
+          socket.onmessage = null;
+          try { socket.close(); } catch { /* already closing */ }
+          scheduleReconnect('Handshake timed out', 'Handshake failed — reconnecting');
+        });
       }
     };
 
@@ -1754,6 +1783,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
+
+      // #5721 (item 2) — this attempt's socket closed; no handshake left to time.
+      // Clear AFTER the stale guard so a late stale-socket close can't cancel the
+      // CURRENT attempt's timer. (Idempotent if the handshake already completed.)
+      clearHandshakeTimer();
 
       // #3068: any in-flight evaluator request is now a guaranteed no-op —
       // reject them so awaiters get a fast error instead of waiting 60s for
@@ -1885,6 +1919,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
+      // #5721 (item 2) — the socket errored mid-handshake or after; cancel the
+      // handshake timer so it can't also fire (scheduleReconnect's per-socket
+      // dedupe would no-op the second one, but clearing keeps it tidy).
+      clearHandshakeTimer();
+
       // #3605: an unexpected error means any in-flight skill_trust_grant
       // request will never be acked. Clear both the Map-based correlation
       // (#3587) and the per-session arrays (#3588) so the SkillsPanel
@@ -1917,6 +1956,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Clear saved connection so ConnectScreen doesn't auto-reconnect
     setLastConnectedUrl(null);
     stopHeartbeat();
+    // #5721 (item 2) — user-initiated disconnect: cancel any armed handshake
+    // timer so it can't fire (and schedule a reconnect) after an explicit close.
+    clearHandshakeTimer();
     // #3068: same as the onclose handler — fail any pending evaluator
     // requests fast instead of waiting on the 60s timeout. We do this both
     // here (user-initiated) and in onclose (transport drop) because we null
