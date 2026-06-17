@@ -1502,6 +1502,11 @@ export class WsServer {
         // the `ws` for readyState + backpressure without a per-send Map lookup.
         _ws: ws,
         authenticated: false,
+        // #5985b: a fresh client is never the primary token class until
+        // handleAuthMessage proves it. Initialized false (not left undefined) so
+        // the strict `=== true` user-shell gates fail closed even if a future
+        // code path reads the field before auth completes.
+        isPrimaryToken: false,
         mode: 'chat', // default to chat view
         activeSessionId: null,
         subscribedSessionIds: new Set(),

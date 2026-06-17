@@ -219,6 +219,24 @@ export class BaseSession extends EventEmitter {
     return false
   }
 
+  /**
+   * #5985b (epic #5982): is this session class the general-purpose user shell
+   * (spawns the operator's `$SHELL` — arbitrary code execution on the dev
+   * machine)? Defaults to false; UserShellSession (#5983) overrides to true.
+   *
+   * The WS create + terminal_* (input / resize / subscribe) gates use this to
+   * require the PRIMARY token class for a shell — a much stricter bar than the
+   * session-scoped viewer/primary-claim checks that suffice for the claude-tui
+   * mirror (swarm-audit findings C1/C4). Read off the instance via
+   * `session.constructor?.isUserShell`. False by construction for every existing
+   * session type, so these gates are inert until the provider lands (#5983).
+   *
+   * @returns {boolean}
+   */
+  static get isUserShell() {
+    return false
+  }
+
   constructor({
     cwd,
     model,

@@ -245,6 +245,52 @@ describe('handleAuthMessage', () => {
       assert.equal(onAuthSuccess.callCount, 1)
     })
 
+    // #5985b (epic #5982) — the WS primary-token primitive. A token is primary
+    // iff it is NOT a PairingManager-issued session token (mirrors the HTTP
+    // _validatePrimaryBearerAuth). Gates the user-shell create + terminal_*.
+    it('marks a non-pairing token as primary (isPrimaryToken === true)', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        pairingManager: { isSessionTokenValid: () => false, getSessionIdForToken: () => null },
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'primary-token' })
+      assert.equal(client.isPrimaryToken, true)
+    })
+
+    it('marks a pairing-issued session token as NOT primary', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        // Unbound linking-mode pairing token: valid + isSessionTokenValid true,
+        // but getSessionIdForToken null (no boundSessionId). Must NOT be primary.
+        pairingManager: { isSessionTokenValid: () => true, getSessionIdForToken: () => null },
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'pairing-token' })
+      assert.equal(client.isPrimaryToken, false)
+      assert.equal(client.boundSessionId, undefined, 'unbound pairing token has no boundSessionId')
+    })
+
+    it('treats every client as primary in no-auth mode', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: false,
+        isTokenValid: () => false,
+        pairingManager: { isSessionTokenValid: () => true, getSessionIdForToken: () => null },
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'any' })
+      assert.equal(client.isPrimaryToken, true)
+    })
+
+    it('marks the primary as primary when there is no pairing manager at all', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        pairingManager: null,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'primary-token' })
+      assert.equal(client.isPrimaryToken, true)
+    })
+
     it('clears auth failures on successful auth', () => {
       const authFailures = new Map([['127.0.0.1', { count: 3, blockedUntil: 0 }]])
       const { ctx, ws } = makeAuthCtx({
@@ -734,6 +780,8 @@ describe('handleAuthMessage', () => {
     it('sets boundSessionId when pairingManager returns a session binding', () => {
       const pairingManager = {
         getSessionIdForToken: (token) => token === 'paired-tok' ? 'session-123' : null,
+        // paired-tok is a pairing-issued (session-bound) token.
+        isSessionTokenValid: (token) => token === 'paired-tok',
       }
       const { ctx, ws, client } = makeAuthCtx({
         authRequired: true,
@@ -743,11 +791,14 @@ describe('handleAuthMessage', () => {
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'paired-tok' })
       assert.equal(client.authenticated, true)
       assert.equal(client.boundSessionId, 'session-123')
+      assert.equal(client.isPrimaryToken, false, 'a pairing-bound token is not primary')
     })
 
     it('does not set boundSessionId when token has no session binding', () => {
       const pairingManager = {
         getSessionIdForToken: () => null,
+        // api-tok is the primary token, not a pairing-issued session token.
+        isSessionTokenValid: () => false,
       }
       const { ctx, ws, client } = makeAuthCtx({
         authRequired: true,
@@ -757,6 +808,7 @@ describe('handleAuthMessage', () => {
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'api-tok' })
       assert.equal(client.authenticated, true)
       assert.equal(client.boundSessionId, undefined)
+      assert.equal(client.isPrimaryToken, true, 'the primary token is primary')
     })
 
     it('does not set boundSessionId when no pairingManager is provided', () => {

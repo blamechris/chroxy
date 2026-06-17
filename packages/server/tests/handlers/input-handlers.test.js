@@ -2056,4 +2056,40 @@ describe('input-handlers', () => {
       assert.equal(ctx._sent[0].attemptedSessionId, 'ghost')
     })
   })
+
+  // #5985b (epic #5982): keystrokes into a user-shell PTY require the PRIMARY
+  // token class — a paired device must never type into a root shell. Inert for
+  // non-user-shell sessions (the existing claude-tui mirror path is unchanged).
+  describe('terminal_input user-shell primary gate (#5985b)', () => {
+    const shellSession = () => {
+      const writes = []
+      return {
+        session: {
+          constructor: { isUserShell: true },
+          writeTerminalInput: createSpy((t) => { writes.push(t); return true }),
+        },
+        writes,
+      }
+    }
+
+    it('blocks a non-primary client from typing into a user-shell PTY', () => {
+      const sessions = new Map()
+      const entry = shellSession()
+      sessions.set('sh-1', entry)
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ id: 'c1', isPrimaryToken: false, activeSessionId: 'sh-1' })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 'sh-1', data: 'rm -rf ~\r' }, ctx)
+      assert.equal(entry.session.writeTerminalInput.callCount, 0, 'must NEVER write to a root shell from a non-primary client')
+    })
+
+    it('allows a primary client to type into a user-shell PTY', () => {
+      const sessions = new Map()
+      const entry = shellSession()
+      sessions.set('sh-1', entry)
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ id: 'c1', isPrimaryToken: true, activeSessionId: 'sh-1', subscribedSessionIds: new Set(['sh-1']) })
+      inputHandlers.terminal_input(makeWs(), client, { sessionId: 'sh-1', data: 'ls\r' }, ctx)
+      assert.equal(entry.session.writeTerminalInput.callCount, 1)
+    })
+  })
 })
