@@ -698,8 +698,9 @@ export class SessionManager extends EventEmitter {
         isBusy: !!(session && session.isRunning),
         // #5984 (epic #5982): positive claude-tui discriminator, not
         // `typeof writeTerminalInput` duck-typing (a user-shell session will
-        // also expose it). Matches the mailbox wakeup gate's eligibility.
-        isTui: !!(session && session.constructor?.isClaudeTui),
+        // also expose it). Strict `=== true` (matches the mailbox gate) so a
+        // buggy override returning a truthy non-boolean isn't treated as tui.
+        isTui: session?.constructor?.isClaudeTui === true,
       })
     }
     return out

@@ -22,10 +22,12 @@ describe('isClaudeTui discriminator (#5984)', () => {
     assert.equal(ClaudeTuiSession.isClaudeTui, true)
   })
 
-  it('is readable off an instance via .constructor (the access path the gates use)', () => {
-    // The gates read `session.constructor?.isClaudeTui`. A subclass that does
-    // NOT override the getter inherits the base false — proving a hypothetical
-    // PTY-bearing subclass is excluded unless it explicitly opts in.
+  it('a BaseSession subclass inherits the false default unless it opts in', () => {
+    // The gates read `session.constructor?.isClaudeTui` (that live access path is
+    // exercised end-to-end by the mailbox-route regression test). Here we assert
+    // the inheritance contract directly: a subclass that does NOT override the
+    // getter inherits the base false — so a hypothetical PTY-bearing subclass
+    // (e.g. the future user-shell) is excluded unless it explicitly opts in.
     class FakeShellSession extends BaseSession {}
     assert.equal(FakeShellSession.isClaudeTui, false)
   })

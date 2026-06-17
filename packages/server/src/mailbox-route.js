@@ -234,7 +234,13 @@ function injectWakeup(server, to, unreadCount) {
   // also expose writeTerminalInput, and duck-typing here would let the weaker
   // ingest-secret holder inject an executed line into a root shell (swarm-audit
   // finding C2). Only the claude-tui PTY mirror is a legitimate wakeup target.
-  if (!session.constructor?.isClaudeTui) return 'not-tui'
+  // Strict `!== true` (not truthiness): this gate is security-load-bearing, so a
+  // buggy override returning a truthy non-boolean must NOT be treated as tui.
+  if (session.constructor?.isClaudeTui !== true) return 'not-tui'
+  // Defense-in-depth: isClaudeTui===true implies writeTerminalInput exists today
+  // (only ClaudeTuiSession sets the marker AND defines the method), so this is
+  // unreachable in practice — but it guards against a future class that sets the
+  // marker without the method rather than throwing on the write below.
   if (typeof session.writeTerminalInput !== 'function') return 'not-tui'
   // `isRunning` is true mid-turn or with background shells — inject only at a
   // quiet prompt so we never corrupt an in-flight turn's input.
