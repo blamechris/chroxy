@@ -339,7 +339,11 @@ export class SessionManager extends EventEmitter {
     // partially enable the flag. Forwarded to providerOpts.skipPermissions
     // for every createSession() call that omits the field.
     this._defaultSkipPermissions = !!defaultSkipPermissions
-    this._userShellEnabled = !!userShellEnabled
+    // #5985: strict `=== true` (not `!!`) so the fail-closed / no-coercion
+    // contract holds at the SessionManager layer too — a direct caller passing
+    // a truthy non-boolean (`'true'`, `1`) must NOT open the shell gate. Matches
+    // isUserShellEnabled()'s strictness; production passes that helper's boolean.
+    this._userShellEnabled = userShellEnabled === true
     this._sweepOrphanWorktrees = !!sweepOrphanWorktrees
     this._providerType = providerType
 

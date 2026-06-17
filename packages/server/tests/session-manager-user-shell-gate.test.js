@@ -99,6 +99,9 @@ describe('SessionManager user-shell gate (#5985)', () => {
       // No `user-shell` provider is registered yet (#5983 ships it), so flow
       // falls through the gate to getProvider, which throws "Unknown provider".
       // The point: it is NOT the gate error — proving the gate opened.
+      // TODO(#5983/#5989): once the `user-shell` provider is registered this
+      // "Unknown provider" assertion flips meaning — re-assert the gate-opens
+      // path against a successful create (or a stubbed provider) at that point.
       assert.throws(
         () => mgr.createSession({ cwd: '/tmp', provider: 'user-shell' }),
         (err) => {
@@ -110,6 +113,23 @@ describe('SessionManager user-shell gate (#5985)', () => {
       )
     } finally {
       cleanup(mgr)
+    }
+  })
+
+  it('fail-closed: a truthy non-boolean userShellEnabled does NOT open the gate', () => {
+    // The gate is strict `=== true` (no `!!` coercion), so a direct caller
+    // passing a truthy non-boolean must still be rejected.
+    for (const truthy of ['true', 1, {}]) {
+      const mgr = makeMgr({ userShellEnabled: truthy })
+      try {
+        assert.throws(
+          () => mgr.createSession({ cwd: '/tmp', provider: 'user-shell' }),
+          (err) => err.code === 'USER_SHELL_DISABLED',
+          `userShellEnabled=${JSON.stringify(truthy)} must NOT open the gate`,
+        )
+      } finally {
+        cleanup(mgr)
+      }
     }
   })
 

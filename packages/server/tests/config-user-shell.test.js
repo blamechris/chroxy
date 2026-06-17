@@ -31,13 +31,32 @@ describe('config.userShell (#5985)', () => {
     )
   })
 
-  it('warns when userShell is an array (wrong shape)', () => {
-    const result = validateConfig({ userShell: [] })
+  it('rejects userShell with the wrong top-level shape (array/scalar)', () => {
+    // Top-level shape is enforced by the shared schema type-gate, exactly like
+    // every other 'object' block (billing, notifications, environments): a
+    // non-object value is a fatal "Invalid type" config error. For a security
+    // gate that's the fail-safe choice — a malformed block stops boot rather
+    // than silently leaving the gate in an ambiguous state.
+    for (const bad of [[], 'yes', 3]) {
+      const result = validateConfig({ userShell: bad })
+      assert.equal(result.valid, false, `userShell=${JSON.stringify(bad)} must be invalid`)
+      assert.ok(
+        result.warnings.some((w) => w.includes('userShell') && w.includes('object')),
+        `expected a shape warning for userShell=${JSON.stringify(bad)}, got: ${JSON.stringify(result.warnings)}`,
+      )
+    }
+  })
+
+  it('a bad userShell.enabled SUB-key is warn-only and leaves the gate closed', () => {
+    // Sub-key validation (validateUserShellBlock) is warn-only — NOT a fatal
+    // "Invalid type" — and isUserShellEnabled stays false (fail-closed).
+    const result = validateConfig({ userShell: { enabled: 'x' } })
     assert.equal(result.valid, false)
     assert.ok(
-      result.warnings.some((w) => w.includes('userShell') && w.includes('object')),
-      `expected a shape warning for userShell, got: ${JSON.stringify(result.warnings)}`,
+      !result.warnings.some((w) => w.includes('Invalid type') && w.includes('userShell')),
+      `a bad enabled value must be warn-only, got: ${JSON.stringify(result.warnings)}`,
     )
+    assert.equal(isUserShellEnabled({ userShell: { enabled: 'x' } }), false)
   })
 
   it('warns on an unknown sub-key', () => {

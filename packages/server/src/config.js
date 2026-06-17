@@ -600,8 +600,14 @@ const USER_SHELL_SUPPORTED_KEYS = new Set(['enabled'])
 
 // #5985 (epic #5982): validate the `userShell` block. Only `enabled` (boolean)
 // today; the security primitives (primary-token gate, audit, isolation) land in
-// the #5985b slice. Warn-only "Invalid value" wording (never "Invalid type") so
-// a mis-typed knob doesn't abort startup via loadAndMergeConfig's fatal-prefix.
+// the #5985b slice. SUB-key checks here are warn-only "Invalid value" (never
+// "Invalid type") so a mis-typed knob doesn't abort startup via
+// loadAndMergeConfig's fatal-prefix — and isUserShellEnabled stays fail-closed
+// for a bad `enabled` value. NOTE: the TOP-LEVEL shape (userShell must be an
+// object) is enforced separately by the shared schema type-gate in
+// validateConfig, which IS fatal for a non-object — same as billing /
+// notifications / environments. That's the fail-safe choice for a security gate:
+// a malformed block stops boot rather than silently disabling.
 function validateUserShellBlock(userShell, warnings) {
   if (typeof userShell !== 'object' || userShell === null || Array.isArray(userShell)) {
     warnings.push(`Invalid value for 'userShell': expected object, got ${Array.isArray(userShell) ? 'array' : typeof userShell}`)
