@@ -10,15 +10,18 @@ export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'cons
 /** Scrollable tab bar with arrow buttons when overflowing */
 export function ViewSwitcher({
   viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
-  showTerminalTab = true, showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
+  showChatTab = true, showTerminalTab = true, showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
 }: {
   viewMode: string
   setViewMode: (m: ViewMode) => void
   splitMode: SplitDirection | null
   setSplitMode: (m: SplitDirection | null) => void
   persistSplitMode: (m: SplitDirection | null) => void
-  // #5835 (PR2): the "Output" tab is the live claude-tui PTY mirror — shown only
-  // for claude-tui sessions (the only provider with a real PTY to mirror).
+  // #5986: the Chat tab is hidden for terminal-only providers (user-shell) —
+  // a raw $SHELL has no parsed chat surface, only the Output terminal.
+  showChatTab?: boolean
+  // #5835 (PR2): the "Output" tab is the live claude-tui PTY mirror — shown for
+  // providers with a real PTY (claude-tui, and user-shell since #5986).
   showTerminalTab?: boolean
   showConsoleTab: boolean
   unreadSystemCount: number
@@ -101,7 +104,9 @@ export function ViewSwitcher({
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
       >
-        <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
+        {showChatTab && (
+          <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
+        )}
         {showTerminalTab && (
           <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
         )}

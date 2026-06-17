@@ -15,6 +15,7 @@
  */
 
 import { realpathSync, existsSync } from 'fs'
+import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 
@@ -77,7 +78,7 @@ export class UserShellSession extends BaseSession {
 
   constructor(opts = {}) {
     // Picker forwards every BaseSession opt; `provider` is fixed to user-shell.
-    super(buildBaseSessionOpts(opts, { provider: 'user-shell' }))
+    super(buildBaseSessionOpts(opts, { provider: USER_SHELL_PROVIDER }))
     this._term = null
     this._ptyExited = false
     this._destroying = false

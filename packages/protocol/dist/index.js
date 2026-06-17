@@ -47,6 +47,16 @@ export const MIN_PROTOCOL_VERSION = 1;
  */
 export const DEFAULT_PROVIDER = 'claude-tui';
 /**
+ * #5986 (epic #5982): the embedded user-shell provider id. A user-shell session
+ * is a raw `$SHELL` PTY with NO Claude semantics — terminal-only, no chat, no
+ * tools/permissions/streaming. Single-sourced here so the server registry
+ * (`providers.js`), the WS create gate, and the clients (which render it
+ * terminal-only and gate the "New shell" button on the `userShell` capability)
+ * all agree on exactly one string. Server-gated behind `config.userShell.enabled`
+ * + a WS primary-token check — see `docs/security/bearer-token-authority.md`.
+ */
+export const USER_SHELL_PROVIDER = 'user-shell';
+/**
  * #5835 / #5839: the fixed grid size of the claude-tui PTY. The server spawns
  * the TUI at this size and the dashboard renders the live mirror at exactly this
  * size (letterboxed), so the mirror stays 1:1 faithful. Single-sourced here so

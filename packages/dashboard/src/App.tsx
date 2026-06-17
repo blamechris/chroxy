@@ -71,7 +71,7 @@ import { useControlRoomState } from './hooks/useControlRoomState'
 import { useMessageRenderer } from './hooks/useMessageRenderer'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
-import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
 import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
@@ -148,6 +148,19 @@ export function App() {
   const activeSessionProvider = useConnectionStore(s =>
     s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider ?? null,
   )
+  // #5986 (epic #5982): the embedded user-shell terminal. The server advertises
+  // `userShell` in auth_ok.capabilities only when config.userShell.enabled is on
+  // AND the connecting client holds the primary token class, so gating the "New
+  // shell" affordance on it means paired devices / disabled hosts never see a
+  // dead button.
+  const userShellSupported = useConnectionStore(s => s.serverCapabilities?.userShell === true)
+  // Providers backed by a real PTY get the live Output terminal. claude-tui
+  // mirrors its TUI PTY alongside the parsed Chat view; user-shell is
+  // terminal-ONLY — a raw $SHELL with no Claude chat/tools/permissions
+  // semantics, so its session renders the terminal and hides the Chat tab.
+  const isTui = activeSessionProvider === DEFAULT_PROVIDER
+  const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER
+  const isPtyProvider = isTui || isUserShell
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
   // #5665 — machine-wide monthly programmatic-credit meter (sidebar token view).
@@ -473,24 +486,31 @@ export function App() {
   // non-tui session (e.g. after switching), fall back to chat — the tab is
   // hidden there, so the user shouldn't be stranded on it.
   useEffect(() => {
-    // Only force away from the Output tab once we KNOW the active session is
-    // non-tui. During the initial-load / reconnect window the provider is still
-    // null/unknown — force-switching then would kick the operator out of a
+    // #5986 — user-shell is terminal-only (no Chat view). Force the operator
+    // onto the Output terminal whenever a user-shell session is active so they
+    // never land on the (hidden) Chat tab after a session switch.
+    if (isUserShell && viewMode !== 'terminal') {
+      setViewMode('terminal')
+      return
+    }
+    // Only force away from the Output tab once we KNOW the active session has no
+    // PTY mirror. During the initial-load / reconnect window the provider is
+    // still null/unknown — force-switching then would kick the operator out of a
     // persisted Output view for a claude-tui session (Copilot #5838).
-    if (viewMode === 'terminal' && activeSessionProvider != null && activeSessionProvider !== DEFAULT_PROVIDER) {
+    if (viewMode === 'terminal' && activeSessionProvider != null && !isPtyProvider) {
       setViewMode('chat')
       return
     }
     // Gate the opt-in on a live socket and depend on connectionPhase, so a
     // reconnect (which clears the server-side terminalSessionIds set) re-runs
     // this effect and re-subscribes — otherwise the mirror silently stops
-    // updating until the user toggles tabs (Copilot #5838).
-    const isTui = activeSessionProvider === DEFAULT_PROVIDER
-    if (viewMode === 'terminal' && isTui && activeSessionId && connectionPhase === 'connected') {
+    // updating until the user toggles tabs (Copilot #5838). Both claude-tui and
+    // user-shell expose a live PTY mirror, so subscribe for either (#5986).
+    if (viewMode === 'terminal' && isPtyProvider && activeSessionId && connectionPhase === 'connected') {
       subscribeTerminalMirror(activeSessionId)
       return () => unsubscribeTerminalMirror(activeSessionId)
     }
-  }, [viewMode, activeSessionId, activeSessionProvider, connectionPhase, subscribeTerminalMirror, unsubscribeTerminalMirror, setViewMode])
+  }, [viewMode, activeSessionId, activeSessionProvider, isUserShell, isPtyProvider, connectionPhase, subscribeTerminalMirror, unsubscribeTerminalMirror, setViewMode])
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
@@ -1477,6 +1497,16 @@ export function App() {
     openCreateSession()
   }, [openCreateSession])
 
+  // #5986 (epic #5982) — create an embedded user-shell directly. Unlike a chat
+  // session this skips the provider-picker modal: user-shell is HIDDEN from the
+  // chat provider list and server-gated on the primary token + the userShell
+  // capability, so there are no per-session options to pick. The session lands
+  // terminal-only (see the isUserShell branch — forces the Output view, hides
+  // Chat). cwd falls back to the host default when no repo is selected.
+  const handleNewShell = useCallback(() => {
+    createSession({ name: 'Shell', cwd: defaultCwd ?? undefined, provider: USER_SHELL_PROVIDER })
+  }, [createSession, defaultCwd])
+
   // #5202 — open the create-session picker pre-filled for an Investigate
   // action: cwd = the repo path, and the reason note seeded into the new
   // session's composer once it's created. The user still picks
@@ -1830,6 +1860,7 @@ export function App() {
         onMarkAllNotificationsRead={markAllSessionNotificationsRead}
         onDismissNotification={dismissSessionNotification}
         onNewSession={handleNewSession}
+        onNewShell={userShellSupported ? handleNewShell : undefined}
         onToggleSkillsPanel={() => {
           setSkillsPanelOpen(prev => {
             const next = !prev
@@ -2049,7 +2080,8 @@ export function App() {
               splitMode={splitMode}
               setSplitMode={setSplitMode}
               persistSplitMode={persistSplitMode}
-              showTerminalTab={activeSessionProvider === DEFAULT_PROVIDER}
+              showChatTab={!isUserShell}
+              showTerminalTab={isPtyProvider}
               showConsoleTab={showConsoleTab}
               unreadSystemCount={unreadSystemCount}
               checkpointsOpen={checkpointsOpen}
