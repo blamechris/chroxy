@@ -117,6 +117,7 @@ import {
   stopHeartbeat,
   armHandshakeTimer,
   clearHandshakeTimer,
+  resetReconnectAttempt,
   clearDeltaBuffers,
   clearMessageQueue,
   enqueueMessage,
@@ -162,6 +163,9 @@ import {
   // #5621 — the shared retry-ladder defaults (was duplicated verbatim here).
   CONNECT_MAX_RETRIES,
   CONNECT_RETRY_DELAYS,
+  // #5725 (#5698) — cap the reconnect ladder so it goes terminal (server_down)
+  // instead of spinning forever.
+  RECONNECT_MAX_RUNG,
   // #5537 — shared LAN→tunnel fast-fallback decision for the reconnect ladder.
   selectReconnectEndpoint,
   type ProbeResult,
@@ -1143,6 +1147,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       reconnect: () => get().connect(resolveCurrentEndpointUrl(url, token), token),
       isStale: () => myAttemptId !== connectionAttemptId,
       retryDelays: CONNECT_RETRY_DELAYS,
+      // #5725 (#5698) — stop the reconnect ladder after RECONNECT_MAX_RUNG rungs
+      // and go terminal (server_down) instead of looping forever. A user-initiated
+      // retryConnection() (or an app resume / network-change recovery) resets the
+      // counter, so this is not permanent. Mirrors the dashboard (#5724).
+      maxRung: RECONNECT_MAX_RUNG,
+      onGaveUp: () => {
+        // Superseded by a newer attempt — don't clobber it.
+        if (myAttemptId !== connectionAttemptId) return;
+        console.log('[ws] reconnect ladder exhausted — server appears down');
+        useConnectionLifecycleStore.getState().setConnectionPhase('server_down');
+        useConnectionLifecycleStore.getState().setConnectionError('Server appears to be down', 0);
+      },
     });
     const scheduleReconnect = (): void => { reconnectScheduler.schedule(); };
 
@@ -1313,6 +1329,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // "Observing"/driver badge doesn't survive the reconnect gap.
       clearSessionRolesAcrossSessions(set, get);
 
+      // #5725 (#5698) — terminal: the reconnect ladder already gave up
+      // (server_down). The PAIRED event of this same transport drop (RN fires
+      // error → close, or close → error) must NOT clobber server_down back to
+      // reconnecting/disconnected — transitionPhase only WARNS on the illegal
+      // transition, it still applies it, which would revert the terminal banner
+      // to the infinite spinner this state exists to kill. Keep it sticky.
+      if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
+        return;
+      }
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         const closeMsg = getWsCloseMessage(event.code);
@@ -1359,6 +1384,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         ? `Connection error: ${detail}`
         : 'Connection error — server may be unreachable';
 
+      // #5725 (#5698) — terminal server_down is sticky against the paired event
+      // of this drop (mirrors the onclose guard above): once the ladder gave up,
+      // a close→error (or error after a give-up) must not clobber it back.
+      if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
+        return;
+      }
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         // #3624 — if onclose already armed the retry for this same transport
@@ -1474,6 +1505,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // means "close the session for now" — the saved server should
     // persist so ConnectScreen shows "Reconnect". Only forgetSession()
     // (called from "Forget Server" in the alert and Settings) clears it.
+  },
+
+  // #5725 (#5698) — user-initiated retry from the terminal `server_down` state
+  // (the Reconnect button, app resume, and network-change recovery all route
+  // here). Reset the backoff ladder FIRST so the fresh attempt starts at rung 0;
+  // otherwise it would immediately re-exhaust the still-maxed counter and give
+  // up again on the first failure. Then reconnect to the saved connection
+  // (connectAuto re-resolves the freshest LAN/tunnel endpoint). Mirrors the
+  // dashboard's retryConnection (#5724).
+  retryConnection: () => {
+    resetReconnectAttempt();
+    const lifecycle = useConnectionLifecycleStore.getState();
+    // #5725 — leave the terminal server_down phase explicitly BEFORE dialing.
+    // connect() sets 'reconnecting' when re-dialing the same URL (isReconnect),
+    // and `server_down -> reconnecting` is an illegal FSM transition (warns +
+    // still applies + carries the stale "Server appears to be down" error
+    // forward). `server_down -> connecting` is the legal exit; clearing the error
+    // here keeps the banner from leaking into the fresh attempt.
+    if (lifecycle.connectionPhase === 'server_down') {
+      lifecycle.setConnectionPhase('connecting');
+      lifecycle.setConnectionError(null, 0);
+    }
+    const saved = lifecycle.savedConnection;
+    if (saved?.url && saved?.token) {
+      void get().connectAuto(saved, { silent: true });
+    }
   },
 
   forgetSession: () => {
@@ -2270,6 +2327,18 @@ export const _appStateSub = AppState.addEventListener('change', (nextState) => {
 
     const { connectionPhase, wsUrl, apiToken, userDisconnected, savedConnection } = useConnectionLifecycleStore.getState();
 
+    // #5725 (#5698) — the reconnect ladder gave up (terminal `server_down`)
+    // while the app was backgrounded; the server is very likely fine now, so a
+    // resume is the natural moment to retry (mirrors the dashboard tab-wake
+    // recovery, but mobile auto-clears where the laptop stays manual). Reset the
+    // ladder + reconnect via retryConnection; skip the zombie-socket logic below.
+    if (connectionPhase === 'server_down' && !userDisconnected && savedConnection?.url && savedConnection?.token) {
+      console.log('[ws] App resumed while server_down — retrying');
+      _lastResumeReconnectAt = now;
+      useConnectionStore.getState().retryConnection();
+      return;
+    }
+
     // #5633 Case 0 (zombie socket): we believe we're connected, the socket
     // even still claims OPEN, but we were away at least one heartbeat cycle —
     // long enough for iOS to have suspended JS and the connection to have
@@ -2367,6 +2436,18 @@ export const _networkSub = Network.addNetworkStateListener((state) => {
   if (userDisconnected || !savedConnection?.url || !savedConnection?.token) return;
   // Don't interrupt an in-flight connect/reconnect attempt.
   if (connectionPhase === 'connecting' || connectionPhase === 'reconnecting') return;
+
+  // #5725 (#5698) — the reconnect ladder gave up (terminal `server_down`) before
+  // the network dropped/changed; now that connectivity is back, retry with a
+  // fresh ladder (mirrors the app-resume recovery). Unlike the LAN-candidate
+  // fast-path below, this fires for ANY saved record — a server_down phone that
+  // roamed networks must not sit on a stale terminal banner.
+  if (connectionPhase === 'server_down') {
+    console.log('[ws] Network changed while server_down — retrying');
+    _lastNetworkReconnectAt = now;
+    void useConnectionStore.getState().retryConnection();
+    return;
+  }
 
   // Only bother re-selecting when a faster local path could exist for this
   // record — i.e. it carries a verified LAN candidate. Without one, the tunnel

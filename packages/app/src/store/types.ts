@@ -403,6 +403,9 @@ export interface ConnectionActions {
     options?: { silent?: boolean; preferTunnel?: boolean; force?: boolean },
   ) => Promise<void>;
   disconnect: () => void;
+  // #5725 (#5698) — user-initiated retry from the terminal `server_down` state:
+  // resets the reconnect ladder, then reconnects to the saved connection.
+  retryConnection: () => void;
   loadSavedConnection: () => Promise<void>;
   clearSavedConnection: () => Promise<void>;
 }
