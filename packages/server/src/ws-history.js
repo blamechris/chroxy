@@ -177,6 +177,10 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // would silently re-open the swallowed-send wedge this fix closes.
     send, broadcast, getConnectedClientList, permissions,
     resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs,
+    // #5986 (epic #5982): whether the embedded user-shell terminal is enabled,
+    // surfaced as the `userShell` capability so the dashboard gates its "New
+    // shell" affordance. Optional — absent → false (fail-closed) for old servers.
+    userShellEnabled,
     // #4835: per-device active-session memory. Consulted below before
     // falling back to defaultSessionId / firstSessionId so a reconnect
     // restores whatever session the client was actually viewing instead
@@ -334,6 +338,12 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // (older server) fall back to requesting the three lists as before. The
     // request handlers stay live either way for post-connect refreshes.
     authBootstrap: true,
+    // #5986 (epic #5982) — the embedded user-shell terminal is enabled on this
+    // server (userShell.enabled). The dashboard gates its "New shell" affordance
+    // on this; the provider is hidden from listProviders(), so this flag is the
+    // only signal that creating a `user-shell` session will succeed. Absent /
+    // false on servers without it → the affordance stays hidden (fail-closed).
+    userShell: userShellEnabled === true,
   }
 
   // #3760, #3905: surface the effective inactivity timeouts so clients

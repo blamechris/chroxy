@@ -225,6 +225,29 @@ describe('sendPostAuthInfo — eager-derivation storm fallback (#5622)', () => {
   })
 })
 
+// #5986 (epic #5982): the userShell capability gates the dashboard's "New shell"
+// affordance. The provider is hidden from listProviders(), so this flag is the
+// only signal that creating a user-shell session will succeed — fail-closed.
+describe('sendPostAuthInfo — userShell capability (#5986)', () => {
+  it('advertises userShell:true when the server enabled it', () => {
+    const ctx = makeCtx({ userShellEnabled: true })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(ctx._sends[0].capabilities.userShell, true)
+  })
+
+  it('advertises userShell:false when disabled or absent (fail-closed)', () => {
+    for (const v of [false, undefined]) {
+      const ctx = makeCtx(v === undefined ? {} : { userShellEnabled: v })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws)
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.userShell, false)
+    }
+  })
+})
+
 // #3760: surface the effective inactivity timeout in auth_ok so clients can
 // render their ActivityIndicator timeout warning against the real configured
 // value instead of a hardcoded reference.
