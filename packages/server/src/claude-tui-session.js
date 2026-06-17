@@ -57,11 +57,12 @@ const __dirname = dirname(__filename)
 const log = createLogger('claude-tui-session')
 
 // #5792: how long a DENIED-shape AskUserQuestion pending entry may linger past
-// turn-end before the reaper drops it. Mirrors the 30s stall-watchdog window
-// (ASK_USER_QUESTION_WATCHDOG_MS) — long enough for any in-flight teardown /
-// reinject to clear the entry on its own (making the reaper a no-op), short
-// enough that a leaked entry can't shadow the most-recent fallback for long.
-const DENIED_QUESTION_REAPER_MS = 30 * 1000
+// turn-end before the reaper drops it. Derived from (not a re-declared copy of)
+// the stall-watchdog window so the two can't drift: long enough for any
+// in-flight teardown / reinject to clear the entry on its own (making the reaper
+// a no-op), short enough that a leaked entry can't shadow the most-recent
+// fallback for long. Same recovery-window class as the answer stall.
+const DENIED_QUESTION_REAPER_MS = ASK_USER_QUESTION_WATCHDOG_MS
 
 /**
  * ClaudeTuiSession — drives the interactive `claude` TUI under a PTY so the
