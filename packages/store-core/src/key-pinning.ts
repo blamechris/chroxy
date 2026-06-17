@@ -21,7 +21,13 @@
  *     ├─ yes → server sent a signature?
  *     │         ├─ yes → verify(sig over exchangeKey, pinnedKey)
  *     │         │         ├─ ok    → CONNECT (identity confirmed)
- *     │         │         └─ fail  → REFUSE  (MITM / wrong daemon / rotated key)
+ *     │         │         └─ fail  → identity-rotation handoff? (#5616)
+ *     │         │                    ├─ valid cert (old pin signed new identity)
+ *     │         │                    │   AND new identity signed THIS exchange key
+ *     │         │                    │   → ROTATE-PIN (chain the pin forward; no
+ *     │         │                    │      forced re-pair for a legit rotation)
+ *     │         │                    └─ else → REFUSE (MITM / wrong daemon /
+ *     │         │                       rotated key with no valid continuity cert)
  *     │         └─ no  → REFUSE (pinned but unsigned — downgrade attempt: a MITM
  *     │                  cannot produce a valid sig, so it would strip the field
  *     │                  to force us back to TOFU; refusing closes that door)
@@ -43,7 +49,7 @@
  * (the server already refuses to downgrade encryption to plaintext).
  */
 
-import { verifyExchangeKeySignature } from './crypto'
+import { verifyExchangeKeySignature, verifyIdentityRotation } from './crypto'
 
 /** What the caller should do with a handshake, given the pin state. */
 export type KeyPinDecision =
@@ -51,6 +57,14 @@ export type KeyPinDecision =
   | { action: 'connect'; reason: 'verified' | 'unpinned-no-identity' }
   /** Proceed AND store `identityKey` as the newly-pinned identity (TOFU first-use). */
   | { action: 'pin-and-connect'; reason: 'pin-on-first-use'; identityKey: string }
+  /**
+   * #5616 — the offered exchange key failed direct verification against the pin,
+   * but the server presented a valid rotation cert (old pinned identity signed
+   * the new identity) AND the new identity proved liveness by signing this
+   * handshake's exchange key. Chain the pin forward: proceed AND RE-PIN to
+   * `identityKey` (the new identity) instead of refusing + forcing a re-pair.
+   */
+  | { action: 'rotate-pin'; reason: 'identity-rotated'; identityKey: string }
   /** Abort the connection; the offered key failed verification against the pin. */
   | {
       action: 'refuse'
@@ -66,6 +80,16 @@ export interface KeyPinInput {
   exchangePublicKey: string
   /** The server's signature over `exchangePublicKey`, or null if it sent none. */
   serverKeySig: string | null
+  /**
+   * #5616 — the NEW identity public key the server rotated to, or null/absent if
+   * no rotation is being offered. Present alongside `rotationCert`.
+   */
+  newIdentityKey?: string | null
+  /**
+   * #5616 — a rotation cert: the OLD (currently-pinned) identity's signature over
+   * `newIdentityKey`. Null/absent when no rotation is offered.
+   */
+  rotationCert?: string | null
 }
 
 /**
@@ -189,11 +213,52 @@ export function decideKeyPin(input: KeyPinInput): KeyPinDecision {
   if (ok) {
     return { action: 'connect', reason: 'verified' }
   }
+  // #5616 — direct verification failed. Before refusing, try an identity-rotation
+  // handoff: a legitimately-rotated daemon (reinstall / migration / #5229) signs
+  // the new identity with the OLD one, so a pinned client can chain forward.
+  const rotated = tryRotationHandoff({ pinnedIdentityKey, exchangePublicKey, serverKeySig, input })
+  if (rotated) return rotated
   return {
     action: 'refuse',
     reason: 'signature-mismatch',
     message: KEY_PIN_MISMATCH_MESSAGE,
   }
+}
+
+/**
+ * #5616 — try to accept an identity-rotation handoff after a direct pin check
+ * failed. Returns a `rotate-pin` decision ONLY when BOTH hold:
+ *
+ *   1. The OLD (pinned) identity signed the NEW identity — a valid rotation cert.
+ *      Proves the rotation was authorised by the identity the client already
+ *      trusts (a MITM lacks the old secret, so cannot forge this).
+ *   2. The NEW identity signed THIS handshake's exchange key — liveness. Proves
+ *      the server actually holds the new secret right now; without this an
+ *      attacker who captured an old (legitimate) rotation cert but not the new
+ *      secret could replay the cert to pin THEIR key. Re-using the live
+ *      `serverKeySig` verification against the new identity closes that.
+ *
+ * Any missing input (no cert, no new identity, no live sig) → null (no rotation),
+ * and the caller refuses as before. Pure; never throws (the crypto verifiers
+ * swallow malformed input → false).
+ */
+function tryRotationHandoff(args: {
+  pinnedIdentityKey: string
+  exchangePublicKey: string
+  serverKeySig: string
+  input: KeyPinInput
+}): Extract<KeyPinDecision, { action: 'rotate-pin' }> | null {
+  const { pinnedIdentityKey, exchangePublicKey, serverKeySig, input } = args
+  const newIdentityKey = input.newIdentityKey
+  const rotationCert = input.rotationCert
+  if (!newIdentityKey || !rotationCert) return null
+  // (1) the pinned identity must have blessed the new identity.
+  if (!verifyIdentityRotation(newIdentityKey, rotationCert, pinnedIdentityKey)) return null
+  // (2) the new identity must have signed this live exchange key (liveness — no
+  // cert replay). The same exchange-key signature, now checked against the NEW
+  // identity it claims to come from.
+  if (!verifyExchangeKeySignature(exchangePublicKey, serverKeySig, newIdentityKey)) return null
+  return { action: 'rotate-pin', reason: 'identity-rotated', identityKey: newIdentityKey }
 }
 
 /**
@@ -220,9 +285,16 @@ export function decideKeyPinWithPairingIdentity(input: KeyPinInput & {
 }): KeyPinDecision {
   const { pinnedIdentityKey, pairingIdentityKey, exchangePublicKey, serverKeySig } = input
 
-  // Already pinned → the strict path.
+  // Already pinned → the strict path. Forward the #5616 rotation inputs so a
+  // pinned client can chain its pin forward through decideKeyPin.
   if (pinnedIdentityKey) {
-    return decideKeyPin({ pinnedIdentityKey, exchangePublicKey, serverKeySig })
+    return decideKeyPin({
+      pinnedIdentityKey,
+      exchangePublicKey,
+      serverKeySig,
+      newIdentityKey: input.newIdentityKey,
+      rotationCert: input.rotationCert,
+    })
   }
 
   // Not yet pinned, but we have a pairing-time identity to adopt. Verify the

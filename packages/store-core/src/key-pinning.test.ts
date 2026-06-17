@@ -2,7 +2,7 @@
  * Tests for the shared E2E key-pinning decision (#5536).
  */
 import { describe, it, expect } from 'vitest'
-import { createKeyPair, createSigningKeyPair, signExchangeKey } from './crypto'
+import { createKeyPair, createSigningKeyPair, signExchangeKey, signIdentityRotation } from './crypto'
 import {
   decideKeyPin,
   decideKeyPinWithPairingIdentity,
@@ -237,5 +237,126 @@ describe('decodeEncryptionGate — plaintext-auth_ok downgrade cell (#5614)', ()
       encryptionMode: null,
     })
     expect(g).toEqual({ action: 'connect', reason: 'verified' })
+  })
+})
+
+describe('decideKeyPin — identity-rotation handoff (#5616)', () => {
+  /**
+   * A legitimately-rotated daemon: the OLD (pinned) identity signs the NEW
+   * identity (rotation cert), and the NEW identity signs this handshake's
+   * exchange key (liveness). `oldIdentity` is what the client has pinned.
+   */
+  function makeRotation() {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const serverKeySig = signExchangeKey(exchange.publicKey, newIdentity.secretKey)
+    const rotationCert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    return { oldIdentity, newIdentity, exchange, serverKeySig, rotationCert }
+  }
+
+  it('ROTATE-PINs to the new identity when the cert + liveness both verify', () => {
+    const { oldIdentity, newIdentity, exchange, serverKeySig, rotationCert } = makeRotation()
+    const d = decideKeyPin({
+      pinnedIdentityKey: oldIdentity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig,
+      newIdentityKey: newIdentity.publicKey,
+      rotationCert,
+    })
+    expect(d).toEqual({ action: 'rotate-pin', reason: 'identity-rotated', identityKey: newIdentity.publicKey })
+  })
+
+  it('REFUSEs when the rotation cert is signed by a non-pinned identity (forged rotation)', () => {
+    const { newIdentity, exchange, serverKeySig } = makeRotation()
+    const pinned = createSigningKeyPair()
+    const attacker = createSigningKeyPair()
+    // Attacker blesses the new identity with THEIR key, not the pinned one.
+    const forgedCert = signIdentityRotation(newIdentity.publicKey, attacker.secretKey)
+    const d = decideKeyPin({
+      pinnedIdentityKey: pinned.publicKey,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig,
+      newIdentityKey: newIdentity.publicKey,
+      rotationCert: forgedCert,
+    })
+    expect(d.action).toBe('refuse')
+    expect((d as { reason: string }).reason).toBe('signature-mismatch')
+  })
+
+  it('REFUSEs a replayed cert when the new identity did NOT sign the live exchange key', () => {
+    // Attacker captured a genuine old→new rotation cert but lacks the new secret,
+    // so they sign the exchange key with their OWN key. Liveness check fails.
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const attacker = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const rotationCert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    const attackerSig = signExchangeKey(exchange.publicKey, attacker.secretKey)
+    const d = decideKeyPin({
+      pinnedIdentityKey: oldIdentity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig: attackerSig,
+      newIdentityKey: newIdentity.publicKey,
+      rotationCert,
+    })
+    expect(d.action).toBe('refuse')
+    expect((d as { reason: string }).reason).toBe('signature-mismatch')
+  })
+
+  it('REFUSEs when a cert is present but no new identity key is offered', () => {
+    const { oldIdentity, newIdentity, exchange, serverKeySig, rotationCert } = makeRotation()
+    void newIdentity
+    const d = decideKeyPin({
+      pinnedIdentityKey: oldIdentity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig,
+      newIdentityKey: null,
+      rotationCert,
+    })
+    expect(d.action).toBe('refuse')
+  })
+
+  it('still CONNECTs (no rotation) when the offered key verifies against the pin directly', () => {
+    // Rotation fields present but irrelevant: the direct pin check wins first, so
+    // a stale/irrelevant rotation cert never overrides a normal verified connect.
+    const { oldIdentity, newIdentity, rotationCert } = makeRotation()
+    const exchange = createKeyPair()
+    const directSig = signExchangeKey(exchange.publicKey, oldIdentity.secretKey)
+    const d = decideKeyPin({
+      pinnedIdentityKey: oldIdentity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig: directSig,
+      newIdentityKey: newIdentity.publicKey,
+      rotationCert,
+    })
+    expect(d).toEqual({ action: 'connect', reason: 'verified' })
+  })
+
+  it('REFUSEs (no rotation attempted) when the handshake is unsigned even with a cert', () => {
+    const { oldIdentity, newIdentity, rotationCert } = makeRotation()
+    const exchange = createKeyPair()
+    const d = decideKeyPin({
+      pinnedIdentityKey: oldIdentity.publicKey,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig: null,
+      newIdentityKey: newIdentity.publicKey,
+      rotationCert,
+    })
+    // No live signature → no liveness proof possible; fail closed as a downgrade.
+    expect(d).toEqual({ action: 'refuse', reason: 'pinned-but-unsigned', message: KEY_PIN_MISMATCH_MESSAGE })
+  })
+
+  it('forwards the rotation handoff through decideKeyPinWithPairingIdentity', () => {
+    const { oldIdentity, newIdentity, exchange, serverKeySig, rotationCert } = makeRotation()
+    const d = decideKeyPinWithPairingIdentity({
+      pinnedIdentityKey: oldIdentity.publicKey,
+      pairingIdentityKey: null,
+      exchangePublicKey: exchange.publicKey,
+      serverKeySig,
+      newIdentityKey: newIdentity.publicKey,
+      rotationCert,
+    })
+    expect(d).toEqual({ action: 'rotate-pin', reason: 'identity-rotated', identityKey: newIdentity.publicKey })
   })
 })

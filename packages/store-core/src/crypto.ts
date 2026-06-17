@@ -207,6 +207,107 @@ export function verifyExchangeKeySignature(
 }
 
 /**
+ * #5616 — domain-separation label for an identity-key ROTATION statement: the
+ * OLD identity secret signs the NEW identity PUBLIC key so a pinned client can
+ * chain its pin forward (reinstall / machine migration / #5229 master-key
+ * rotation) instead of refusing + forcing a manual re-pair.
+ *
+ * This is a SECOND statement the identity key signs (the first being the
+ * exchange key, #5604), so domain separation is mandatory: without it a rotation
+ * cert (old signs new-identity-bytes) and an exchange-key signature (identity
+ * signs exchange-key-bytes) could be confused if their byte lengths ever
+ * coincided. Both labels are versioned ASCII; this scheme is domain-separated
+ * from the START (unlike the exchange-key ramp), since there is no legacy bare
+ * rotation-cert wire format to stay compatible with — it's a new message.
+ */
+export const IDENTITY_ROTATION_DOMAIN_V1 = 'chroxy-identity-rotation-v1:'
+
+/**
+ * Build the byte string the OLD identity key signs to bless a NEW identity:
+ * `IDENTITY_ROTATION_DOMAIN_V1` (ASCII) ++ the raw 32 bytes of the new identity
+ * Ed25519 public key.
+ */
+function identityRotationSigMessage(newIdentityPublicKeyBytes: Uint8Array): Uint8Array {
+  const prefix = new TextEncoder().encode(IDENTITY_ROTATION_DOMAIN_V1)
+  const msg = new Uint8Array(prefix.length + newIdentityPublicKeyBytes.length)
+  msg.set(prefix, 0)
+  msg.set(newIdentityPublicKeyBytes, prefix.length)
+  return msg
+}
+
+/**
+ * Sign an identity-rotation cert: the OLD identity secret signs the NEW identity
+ * public key (domain-separated). A pinned client presented this cert at handshake
+ * can verify the new identity was authorised by the identity it already trusts,
+ * and chain its pin forward without a manual re-pair (#5616).
+ *
+ * The cert alone is NOT sufficient to accept a rotation — the verifier must ALSO
+ * confirm the new identity signed the live exchange key (proving the server holds
+ * the new secret, not just a replayed cert). See `verifyIdentityRotation` +
+ * `decideKeyPin`'s rotation branch.
+ *
+ * @param newIdentityPublicKeyBase64 - the NEW identity Ed25519 public key (base64)
+ * @param oldIdentitySecretKey - the 64-byte OLD identity Ed25519 secret key
+ * @returns base64-encoded 64-byte detached rotation cert
+ */
+export function signIdentityRotation(
+  newIdentityPublicKeyBase64: string,
+  oldIdentitySecretKey: Uint8Array,
+): string {
+  if (typeof newIdentityPublicKeyBase64 !== 'string' || newIdentityPublicKeyBase64.trim().length === 0) {
+    throw new Error('signIdentityRotation: new identity public key must be a non-empty base64 string')
+  }
+  if (!(oldIdentitySecretKey instanceof Uint8Array) || oldIdentitySecretKey.length !== nacl.sign.secretKeyLength) {
+    throw new Error(`signIdentityRotation: old identity secret key must be a ${nacl.sign.secretKeyLength}-byte Uint8Array`)
+  }
+  const newIdentityBytes = new Uint8Array(decodeBase64(newIdentityPublicKeyBase64))
+  if (newIdentityBytes.length !== nacl.sign.publicKeyLength) {
+    throw new Error(`signIdentityRotation: new identity public key must decode to ${nacl.sign.publicKeyLength} bytes`)
+  }
+  const sig = nacl.sign.detached(identityRotationSigMessage(newIdentityBytes), oldIdentitySecretKey)
+  return encodeBase64(sig)
+}
+
+/**
+ * Verify an identity-rotation cert: that `certBase64` is a valid signature over
+ * the NEW identity public key, produced by the holder of the OLD (pinned)
+ * identity secret. Returns true on a valid cert, false on any mismatch /
+ * malformed input. NEVER throws — an invalid cert is a verification FAILURE the
+ * caller must treat as "no valid rotation", not an exception to swallow.
+ *
+ * Only the domain-separated form is accepted (this statement type never had a
+ * bare wire form), so a context-free signature — or an exchange-key signature
+ * replayed as a rotation cert — cannot pass.
+ *
+ * @param newIdentityPublicKeyBase64 - the NEW identity Ed25519 public key offered
+ * @param certBase64 - the rotation cert offered by the server
+ * @param oldIdentityPublicKeyBase64 - the PINNED (old) identity public key to verify against
+ */
+export function verifyIdentityRotation(
+  newIdentityPublicKeyBase64: string,
+  certBase64: string,
+  oldIdentityPublicKeyBase64: string,
+): boolean {
+  try {
+    if (typeof newIdentityPublicKeyBase64 !== 'string' || newIdentityPublicKeyBase64.length === 0) return false
+    if (typeof certBase64 !== 'string' || certBase64.length === 0) return false
+    if (typeof oldIdentityPublicKeyBase64 !== 'string' || oldIdentityPublicKeyBase64.length === 0) return false
+    const newIdentityBytes = new Uint8Array(decodeBase64(newIdentityPublicKeyBase64))
+    const cert = new Uint8Array(decodeBase64(certBase64))
+    const oldIdentityPub = new Uint8Array(decodeBase64(oldIdentityPublicKeyBase64))
+    // Both the new identity key and the verifying old identity key are Ed25519
+    // public keys; the cert is a detached Ed25519 signature. Reject wrong lengths
+    // as malformed input up front rather than as a genuine mismatch.
+    if (newIdentityBytes.length !== nacl.sign.publicKeyLength) return false
+    if (cert.length !== nacl.sign.signatureLength) return false
+    if (oldIdentityPub.length !== nacl.sign.publicKeyLength) return false
+    return nacl.sign.detached.verify(identityRotationSigMessage(newIdentityBytes), cert, oldIdentityPub)
+  } catch {
+    return false
+  }
+}
+
+/**
  * Derive a shared symmetric key from the other side's public key and our secret key.
  */
 export function deriveSharedKey(theirPubBase64: string, mySecretKey: Uint8Array): Uint8Array {
