@@ -31,8 +31,9 @@ const DESTROY_GRACE_MS = 3000
 
 /**
  * Resolve the shell to spawn: `$SHELL` if it exists, then common fallbacks.
- * Never returns a non-existent path so spawn fails cleanly only on a truly
- * shell-less host.
+ * Returns the first path that exists; if none do (a truly unusual host), falls
+ * back to `/bin/sh` as a last resort — start() then surfaces a clean spawn error
+ * if that path is also missing.
  */
 function resolveShell() {
   const shell = process.env.SHELL
@@ -173,8 +174,12 @@ export class UserShellSession extends BaseSession {
     // shell ended rather than a frozen prompt. Kept out of history (it's a
     // terminal_output, transient by wiring).
     this._flushTerminalMirror()
-    const marker = `\r\n[chroxy] shell exited${code != null ? ` (code ${code})` : ''}\r\n`
-    this.emit('terminal_output', { data: marker })
+    // Only surface the marker when a viewer is actually subscribed — consistent
+    // with the coalescer's mirror-active gate (an unwatched shell does no work).
+    if (this._terminalMirrorActive) {
+      const marker = `\r\n[chroxy] shell exited${code != null ? ` (code ${code})` : ''}\r\n`
+      this.emit('terminal_output', { data: marker })
+    }
     this._clearKillTimer()
   }
 
@@ -290,6 +295,11 @@ export class UserShellSession extends BaseSession {
    * shell (never a recycled pid).
    */
   destroy() {
+    // Idempotent: a second destroy() (or a destroy racing the exit path) is a
+    // no-op — the first call already armed teardown (SIGTERM + the escalation
+    // timer), and re-running would do nothing useful and risks cancelling a
+    // still-pending SIGKILL escalation.
+    if (this._destroying) return
     this._destroying = true
 
     if (this._mirrorTimer) {

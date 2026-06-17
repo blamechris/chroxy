@@ -68,7 +68,11 @@ const PROVIDERS = {
 export { DEFAULT_PROVIDER }
 
 // Names hidden from listProviders() (backward-compat aliases, etc.)
-const HIDDEN = new Set()
+// #5994: user-shell is NOT a chat provider — it's a terminal-only session
+// created via a dedicated shell affordance (#5986/#5987), never the chat
+// provider picker. Hiding it keeps it out of listProviders() so it can't be
+// selected as a (fake-ready) chat backend. getProvider/create still resolve it.
+const HIDDEN = new Set(['user-shell'])
 
 /** Required methods every provider class prototype must expose. */
 const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
