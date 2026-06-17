@@ -270,6 +270,88 @@ describe('session-handlers', () => {
       assert.match(sent.message, /disk full/)
     })
 
+    // #5985b (epic #5982): a user-shell session requires the PRIMARY token class.
+    it('rejects provider:user-shell from a non-primary client with PRIMARY_TOKEN_REQUIRED', () => {
+      const ctx = makeCtx()
+      const created = createSpy(() => 'sh-1')
+      ctx.sessions.sessionManager.createSession = created
+      sessionHandlers.create_session(makeWs(), makeClient({ isPrimaryToken: false }), { provider: 'user-shell' }, ctx)
+
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'PRIMARY_TOKEN_REQUIRED')
+      assert.equal(created.callCount, 0, 'must reject BEFORE createSession')
+    })
+
+    it('lets a primary client past the user-shell token gate (createSession called)', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      const created = createSpy(() => 'sh-1')
+      ctx.sessions.sessionManager.createSession = created
+      ctx._sessions.set('sh-1', { session, name: 'Shell', cwd: '/tmp' })
+      sessionHandlers.create_session(makeWs(), makeClient({ isPrimaryToken: true }), { provider: 'user-shell' }, ctx)
+      assert.equal(created.callCount, 1, 'gate passed → createSession invoked')
+    })
+
+    it('does not gate a normal provider on isPrimaryToken', () => {
+      const ctx = makeCtx()
+      const session = createMockSession()
+      const created = createSpy(() => 'c-1')
+      ctx.sessions.sessionManager.createSession = created
+      ctx._sessions.set('c-1', { session, name: 'C', cwd: '/tmp' })
+      sessionHandlers.create_session(makeWs(), makeClient({ isPrimaryToken: false }), { provider: 'claude-tui' }, ctx)
+      assert.equal(created.callCount, 1, 'a non-shell provider is unaffected by the token gate')
+    })
+  })
+
+  // #5985b (epic #5982): terminal_subscribe / terminal_resize on a user-shell
+  // PTY require the PRIMARY token class (subscribe = raw output exfil; resize =
+  // driving the shell's grid). Inert for non-user-shell sessions.
+  describe('terminal_* user-shell primary gate (#5985b)', () => {
+    const shellEntry = (extra = {}) => ({ session: { constructor: { isUserShell: true }, ...extra } })
+
+    it('blocks a non-primary client from subscribing to a user-shell PTY', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sh-1', shellEntry())
+      const client = makeClient({ isPrimaryToken: false })
+      sessionHandlers.terminal_subscribe(makeWs(), client, { sessionId: 'sh-1' }, ctx)
+      assert.ok(!client.terminalSessionIds || !client.terminalSessionIds.has('sh-1'), 'must not subscribe')
+    })
+
+    it('allows a primary client to subscribe to a user-shell PTY', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('sh-1', shellEntry())
+      const client = makeClient({ isPrimaryToken: true, activeSessionId: 'sh-1' })
+      sessionHandlers.terminal_subscribe(makeWs(), client, { sessionId: 'sh-1' }, ctx)
+      assert.ok(client.terminalSessionIds.has('sh-1'))
+    })
+
+    it('does not gate terminal_subscribe for a non-user-shell session', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('s-1', { session: createMockSession() })
+      const client = makeClient({ isPrimaryToken: false })
+      sessionHandlers.terminal_subscribe(makeWs(), client, { sessionId: 's-1' }, ctx)
+      assert.ok(client.terminalSessionIds.has('s-1'), 'non-shell sessions are unaffected')
+    })
+
+    it('blocks a non-primary client from resizing a user-shell PTY', () => {
+      const ctx = makeCtx()
+      const resizeTerminal = createSpy()
+      ctx._sessions.set('sh-1', shellEntry({ resizeTerminal }))
+      const client = makeClient({ isPrimaryToken: false, activeSessionId: 'sh-1' })
+      sessionHandlers.terminal_resize(makeWs(), client, { sessionId: 'sh-1', cols: 100, rows: 40 }, ctx)
+      assert.equal(resizeTerminal.callCount, 0)
+    })
+
+    it('allows a primary client to resize a user-shell PTY', () => {
+      const ctx = makeCtx()
+      const resizeTerminal = createSpy()
+      ctx._sessions.set('sh-1', shellEntry({ resizeTerminal }))
+      const client = makeClient({ isPrimaryToken: true, activeSessionId: 'sh-1' })
+      sessionHandlers.terminal_resize(makeWs(), client, { sessionId: 'sh-1', cols: 100, rows: 40 }, ctx)
+      assert.equal(resizeTerminal.callCount, 1)
+    })
+
     // Mailbox (#5914 follow-up): the WS handler hands an optional AGENT_COMM_ID
     // off to SessionManager.createSession, which auto-registers it so the
     // live-interrupt route resolves agent -> session without a separate

@@ -175,6 +175,20 @@ export function handleAuthMessage(ctx, ws, msg) {
       }
     }
 
+    // #5985b (epic #5982) — the WS analog of the HTTP-only
+    // `_validatePrimaryBearerAuth`. The WS layer previously could not tell the
+    // primary token from an unbound linking-mode pairing token (both have no
+    // `boundSessionId`), so a high-privilege capability gated only on
+    // "unbound" would admit a paired phone (swarm-audit finding C1). A token is
+    // the PRIMARY class iff it is NOT a PairingManager-issued session token
+    // (`isSessionTokenValid` is true for every pairing token — bound and
+    // unbound — and false for the static/rotated primary). In no-auth mode every
+    // local client is trusted as primary, matching `_validatePrimaryBearerAuth`'s
+    // `!authRequired` short-circuit. The `pair`-message path never sets this, so
+    // paired clients default to undefined (non-primary) — gates use strict
+    // `=== true`. Consumed by the user-shell create + terminal_* gates.
+    client.isPrimaryToken = !authRequired || !pairingManager?.isSessionTokenValid(msg.token)
+
     client.clientCapabilities = new Set(authData.capabilities ?? [])
 
     // #5555 (eager key exchange) — stash the client's ephemeral public key +

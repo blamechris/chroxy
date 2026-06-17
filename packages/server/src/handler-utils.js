@@ -214,6 +214,17 @@ export function isSessionViewer(client, sid) {
     Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
 }
 
+// #5985b (epic #5982): is this session entry a general-purpose user shell? The
+// session-scoped viewer/primary-claim gates that suffice for the claude-tui
+// mirror are NOT enough for a root shell — terminal_subscribe (output exfil),
+// terminal_resize, and terminal_input must additionally require the PRIMARY
+// token class (swarm-audit findings C1/C4). Reads the positive `isUserShell`
+// class discriminator (false on every existing session type), so the gates that
+// call this are inert until the UserShellSession provider lands (#5983).
+export function isUserShellSession(entry) {
+  return entry?.session?.constructor?.isUserShell === true
+}
+
 // #5835 / audit P1-2: the single predicate for who RECEIVES a session's live
 // terminal mirror — opted into the terminal (`terminalSessionIds`) AND a viewer
 // of the session (`isSessionViewer`). The delivery filter

@@ -6,7 +6,7 @@
  *          notification_prefs_set (#4541)
  */
 import { randomUUID } from 'node:crypto'
-import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer } from '../handler-utils.js'
+import { validateAttachments, resolveFileRefAttachments, resolveSession, sendError, sendSessionError, buildSessionTokenMismatchPayload, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { evaluateDraft as defaultEvaluateDraft, shouldSkipEvaluator } from '../prompt-evaluator.js'
 import { PushManager } from '../push.js'
 import { createLogger, sessionLogger } from '../logger.js'
@@ -1008,6 +1008,12 @@ function handleTerminalInput(ws, client, msg, ctx) {
     return
   }
   if (typeof entry.session.writeTerminalInput !== 'function') return
+  // #5985b (epic #5982): keystrokes into a user-shell PTY require the PRIMARY
+  // token class (audit C1/C4) — a paired device must NEVER type into a root
+  // shell. Silent return (parity with the viewer guard below); the create +
+  // terminal_subscribe gates already prevent a non-primary client from becoming
+  // a shell viewer, so this is defense-in-depth on the keystroke path.
+  if (isUserShellSession(entry) && client.isPrimaryToken !== true) return
   // Must be VIEWING the session to drive its PTY (#5842 review) — parity with
   // terminal_resize/terminal_size (#5840): keystrokes are strictly more powerful
   // than a resize, so they require at least the same viewer precondition. A client

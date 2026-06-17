@@ -4,7 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
@@ -139,6 +139,22 @@ function handleCreateSession(ws, client, msg, ctx) {
       sendSessionError(ws, ctx, cwdError)
       return
     }
+  }
+
+  // #5985b (epic #5982): a user-shell session spawns the operator's $SHELL
+  // (arbitrary host code execution). Require the PRIMARY token class — strictly
+  // NOT any pairing-issued token (an unbound linking-mode pairing token is
+  // host-authority for ordinary ops but must NOT reach a root shell; swarm-audit
+  // finding C1). The `userShell.enabled` flag is separately enforced as the
+  // authoritative gate in SessionManager.createSession (covers every spawn
+  // path); this is the token-class half, surfaced early with a clean code.
+  if (provider === 'user-shell' && client.isPrimaryToken !== true) {
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      code: 'PRIMARY_TOKEN_REQUIRED',
+      message: 'A user-shell session requires the primary token. Pairing-issued tokens (paired devices) cannot create a shell.',
+    })
+    return
   }
 
   // Resolve environment container details if environmentId is specified
@@ -362,6 +378,11 @@ function handleTerminalSubscribe(ws, client, msg, ctx) {
   // can't grow terminalSessionIds unboundedly with junk ids.
   const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
   if (!entry) return
+  // #5985b (epic #5982): subscribing to a user-shell PTY streams raw shell
+  // output (live exfil of whatever the operator types/sees), so it requires the
+  // PRIMARY token class — not merely the session-scoped viewer check (audit C4).
+  // Silent reject, consistent with the other observer rejections here.
+  if (isUserShellSession(entry) && client.isPrimaryToken !== true) return
   if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
   const alreadySubscribed = client.terminalSessionIds.has(sid)
   client.terminalSessionIds.add(sid)
@@ -393,6 +414,9 @@ function handleTerminalResize(ws, client, msg, ctx) {
   if (client.boundSessionId && client.boundSessionId !== sid) return
   const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
   if (!entry) return
+  // #5985b (epic #5982): resizing a user-shell PTY requires the PRIMARY token
+  // class (audit C4) — a paired device must not drive a root shell's grid.
+  if (isUserShellSession(entry) && client.isPrimaryToken !== true) return
   // Must be viewing the session to mutate its shared PTY (#5840 review): a
   // non-viewer who merely knows the id must not be able to resize the grid or
   // spam terminal_size at real viewers, even when the session is unclaimed.
