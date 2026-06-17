@@ -92,6 +92,53 @@ export declare function signExchangeKey(exchangePublicKeyBase64: string, identit
  */
 export declare function verifyExchangeKeySignature(exchangePublicKeyBase64: string, signatureBase64: string, identityPublicKeyBase64: string): boolean;
 /**
+ * #5616 — domain-separation label for an identity-key ROTATION statement: the
+ * OLD identity secret signs the NEW identity PUBLIC key so a pinned client can
+ * chain its pin forward (reinstall / machine migration / #5229 master-key
+ * rotation) instead of refusing + forcing a manual re-pair.
+ *
+ * This is a SECOND statement the identity key signs (the first being the
+ * exchange key, #5604), so domain separation is mandatory: without it a rotation
+ * cert (old signs new-identity-bytes) and an exchange-key signature (identity
+ * signs exchange-key-bytes) could be confused if their byte lengths ever
+ * coincided. Both labels are versioned ASCII; this scheme is domain-separated
+ * from the START (unlike the exchange-key ramp), since there is no legacy bare
+ * rotation-cert wire format to stay compatible with — it's a new message.
+ */
+export declare const IDENTITY_ROTATION_DOMAIN_V1 = "chroxy-identity-rotation-v1:";
+/**
+ * Sign an identity-rotation cert: the OLD identity secret signs the NEW identity
+ * public key (domain-separated). A pinned client presented this cert at handshake
+ * can verify the new identity was authorised by the identity it already trusts,
+ * and chain its pin forward without a manual re-pair (#5616).
+ *
+ * The cert alone is NOT sufficient to accept a rotation — the verifier must ALSO
+ * confirm the new identity signed the live exchange key (proving the server holds
+ * the new secret, not just a replayed cert). See `verifyIdentityRotation` +
+ * `decideKeyPin`'s rotation branch.
+ *
+ * @param newIdentityPublicKeyBase64 - the NEW identity Ed25519 public key (base64)
+ * @param oldIdentitySecretKey - the 64-byte OLD identity Ed25519 secret key
+ * @returns base64-encoded 64-byte detached rotation cert
+ */
+export declare function signIdentityRotation(newIdentityPublicKeyBase64: string, oldIdentitySecretKey: Uint8Array): string;
+/**
+ * Verify an identity-rotation cert: that `certBase64` is a valid signature over
+ * the NEW identity public key, produced by the holder of the OLD (pinned)
+ * identity secret. Returns true on a valid cert, false on any mismatch /
+ * malformed input. NEVER throws — an invalid cert is a verification FAILURE the
+ * caller must treat as "no valid rotation", not an exception to swallow.
+ *
+ * Only the domain-separated form is accepted (this statement type never had a
+ * bare wire form), so a context-free signature — or an exchange-key signature
+ * replayed as a rotation cert — cannot pass.
+ *
+ * @param newIdentityPublicKeyBase64 - the NEW identity Ed25519 public key offered
+ * @param certBase64 - the rotation cert offered by the server
+ * @param oldIdentityPublicKeyBase64 - the PINNED (old) identity public key to verify against
+ */
+export declare function verifyIdentityRotation(newIdentityPublicKeyBase64: string, certBase64: string, oldIdentityPublicKeyBase64: string): boolean;
+/**
  * Derive a shared symmetric key from the other side's public key and our secret key.
  */
 export declare function deriveSharedKey(theirPubBase64: string, mySecretKey: Uint8Array): Uint8Array;

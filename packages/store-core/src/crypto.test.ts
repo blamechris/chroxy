@@ -17,6 +17,9 @@ import {
   signExchangeKey,
   verifyExchangeKeySignature,
   EXCHANGE_KEY_SIG_DOMAIN_V1,
+  signIdentityRotation,
+  verifyIdentityRotation,
+  IDENTITY_ROTATION_DOMAIN_V1,
   DIRECTION_SERVER,
   DIRECTION_CLIENT,
 } from './crypto'
@@ -807,5 +810,85 @@ describe('exchange-key signature domain separation (#5604 compat ramp)', () => {
     // Pin the exact label — changing it would silently break verification across
     // a version skew, so a change must be deliberate (and bump the version).
     expect(EXCHANGE_KEY_SIG_DOMAIN_V1).toBe('chroxy-exchange-key-v1:')
+  })
+})
+
+describe('identity-key rotation cert (#5616)', () => {
+  it('signs with the old identity and verifies the new identity against the old public key', () => {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const cert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    expect(verifyIdentityRotation(newIdentity.publicKey, cert, oldIdentity.publicKey)).toBe(true)
+  })
+
+  it('rejects a cert from a DIFFERENT old identity (forged rotation)', () => {
+    const realOld = createSigningKeyPair()
+    const attackerOld = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    // The attacker signs the new identity with THEIR key, but the client pinned
+    // the real old identity — so the cert fails against the pinned key.
+    const forged = signIdentityRotation(newIdentity.publicKey, attackerOld.secretKey)
+    expect(verifyIdentityRotation(newIdentity.publicKey, forged, realOld.publicKey)).toBe(false)
+  })
+
+  it('rejects a valid cert verified against a SUBSTITUTED new identity', () => {
+    const oldIdentity = createSigningKeyPair()
+    const realNew = createSigningKeyPair()
+    const otherNew = createSigningKeyPair()
+    const cert = signIdentityRotation(realNew.publicKey, oldIdentity.secretKey)
+    // The cert is genuine but blesses realNew; verifying it for a different new
+    // identity must fail (an attacker can't redirect the cert to their key).
+    expect(verifyIdentityRotation(otherNew.publicKey, cert, oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('an exchange-key signature is NOT accepted as a rotation cert (domain separation)', () => {
+    // Cross-protocol confusion guard: a signature the old identity produced over
+    // an exchange key must not verify as a rotation cert over those same bytes.
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    // Sign the new-identity bytes AS AN EXCHANGE KEY (bare + domain-separated),
+    // then try to pass each off as a rotation cert.
+    const asExchangeBare = signExchangeKey(newIdentity.publicKey, oldIdentity.secretKey)
+    const asExchangeDomain = signExchangeKey(newIdentity.publicKey, oldIdentity.secretKey, { domainSeparated: true })
+    expect(verifyIdentityRotation(newIdentity.publicKey, asExchangeBare, oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, asExchangeDomain, oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('a tampered cert byte fails verification', () => {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const cert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    const bytes = decodeBase64(cert)
+    bytes[0] ^= 0xff
+    expect(verifyIdentityRotation(newIdentity.publicKey, encodeBase64(bytes), oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('returns false (never throws) for malformed / empty / missing inputs', () => {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const cert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    expect(verifyIdentityRotation(newIdentity.publicKey, '', oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, cert, '')).toBe(false)
+    expect(verifyIdentityRotation('', cert, oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, 'not-base64-@@@', oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, cert, 'tooShort')).toBe(false)
+    // @ts-expect-error — deliberately pass a non-string to assert no throw
+    expect(verifyIdentityRotation(undefined, cert, oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('signIdentityRotation throws on a wrong-length old secret key', () => {
+    const newIdentity = createSigningKeyPair()
+    expect(() => signIdentityRotation(newIdentity.publicKey, new Uint8Array(32))).toThrow()
+  })
+
+  it('signIdentityRotation throws on a new identity key that is not 32 bytes', () => {
+    const oldIdentity = createSigningKeyPair()
+    const notAnIdentity = encodeBase64(nacl.randomBytes(16))
+    expect(() => signIdentityRotation(notAnIdentity, oldIdentity.secretKey)).toThrow()
+  })
+
+  it('exposes a stable, versioned domain label distinct from the exchange-key label', () => {
+    expect(IDENTITY_ROTATION_DOMAIN_V1).toBe('chroxy-identity-rotation-v1:')
+    expect(IDENTITY_ROTATION_DOMAIN_V1).not.toBe(EXCHANGE_KEY_SIG_DOMAIN_V1)
   })
 })
