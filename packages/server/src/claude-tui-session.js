@@ -688,6 +688,9 @@ export class ClaudeTuiSession extends BaseSession {
     if (this._destroying) return
     if (!this._pendingUserAnswers.has(toolUseId)) return
     ;(this._log || log).warn(`AskUserQuestion denied-shape reaper (#5792): tool=${toolUseId} pending entry never cleared after deny→Stop→idle — dropping leaked entry so a later no-toolUseId answer can't misroute to it`)
+    // _clearPendingAnswerByToolUseId re-enters _clearDeniedQuestionReaper; that's
+    // an idempotent no-op here (this reaper already self-deleted from the Map
+    // before its callback ran).
     this._clearPendingAnswerByToolUseId(toolUseId)
     this._clearAskUserQuestionWatchdog(toolUseId)
   }

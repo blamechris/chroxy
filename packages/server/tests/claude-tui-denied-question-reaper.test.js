@@ -170,4 +170,55 @@ describe('ClaudeTuiSession — denied-shape AskUserQuestion reaper (#5792)', () 
     assert.doesNotThrow(() => session._reapDeniedQuestion('toolu_absent'))
     assert.ok(session._pendingUserAnswers.has('toolu_keep'), 'unrelated pending entry untouched')
   })
+
+  // S1 (review #5975): reaping the denied entry must not disturb a CO-RESIDENT
+  // legit single-select sibling — the actual #4668-class hazard the per-toolUseId
+  // keying guards against (the absent-id test above only covers a missing id).
+  it('reaping a denied multi leaves a co-resident legit single-select sibling intact', () => {
+    mock.timers.enable({ apis: ['setTimeout'] })
+    // Denied multi (id A) → arms a reaper (30s).
+    session._emitToolHookEvent('PreToolUse', multiQuestionPayload('toolu_A'), 'msg-test')
+    // Legit single single-select (id B) → no reaper; seed its own stall watchdog
+    // as respondToQuestion would, with a longer window so A's 30s reaper fires
+    // first without B's watchdog also firing.
+    session._emitToolHookEvent('PreToolUse', singleSelectPayload('toolu_B'), 'msg-test')
+    session._armAskUserQuestionWatchdog('toolu_B', 120_000)
+    assert.ok(session._deniedQuestionReapers.has('toolu_A'), 'reaper armed for the denied multi')
+    assert.equal(session._deniedQuestionReapers.has('toolu_B'), false, 'no reaper for the legit single-select')
+    assert.ok(session._askUserQuestionWatchdogs.has('toolu_B'), 'sibling stall watchdog armed')
+
+    mock.timers.tick(60_000) // past A's 30s reaper, before B's 120s watchdog
+
+    assert.equal(session._pendingUserAnswers.has('toolu_A'), false, 'denied sibling reaped')
+    assert.ok(session._pendingUserAnswers.has('toolu_B'), 'legit single-select entry survives')
+    assert.ok(session._askUserQuestionWatchdogs.has('toolu_B'), 'legit single-select watchdog survives')
+    assert.equal(session._lastPendingAnswerToolUseId, 'toolu_B', 'most-recent pointer points at the survivor')
+  })
+
+  // S2 (review #5975): the multiSelect reinject path clears the pending entry
+  // synchronously (before its async send) on every outcome, so it cancels the
+  // reaper — pinning the no-race property documented on DENIED_QUESTION_REAPER_MS.
+  it('the multiSelect reinject path cancels the reaper (flag-on, no race)', () => {
+    mock.timers.enable({ apis: ['setTimeout'] })
+    const prev = process.env.CHROXY_TUI_MULTISELECT_REINJECT
+    process.env.CHROXY_TUI_MULTISELECT_REINJECT = '1'
+    try {
+      session._emitToolHookEvent('PreToolUse', multiSelectPayload('toolu_ms'), 'msg-test')
+      assert.ok(session._deniedQuestionReapers.has('toolu_ms'), 'reaper armed for the denied multi-select')
+
+      // The session has no PTY in this unit test, so the flag-on reinject path
+      // tears down via the 'unavailable' refusal — which clears the pending entry
+      // synchronously, cancelling the reaper before any async send could race it.
+      session.respondToQuestion('', { 'Pick any': ['A'] }, 'toolu_ms', {})
+
+      assert.equal(session._pendingUserAnswers.has('toolu_ms'), false, 'reinject teardown cleared the entry')
+      assert.equal(session._deniedQuestionReapers.has('toolu_ms'), false, 'reaper cancelled with the entry')
+
+      mock.timers.tick(60_000) // nothing armed — must be a no-op
+      assert.equal(session._pendingUserAnswers.size, 0)
+    } finally {
+      if (prev === undefined) delete process.env.CHROXY_TUI_MULTISELECT_REINJECT
+      else process.env.CHROXY_TUI_MULTISELECT_REINJECT = prev
+    }
+  })
 })
