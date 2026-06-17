@@ -21,7 +21,13 @@
  *     ├─ yes → server sent a signature?
  *     │         ├─ yes → verify(sig over exchangeKey, pinnedKey)
  *     │         │         ├─ ok    → CONNECT (identity confirmed)
- *     │         │         └─ fail  → REFUSE  (MITM / wrong daemon / rotated key)
+ *     │         │         └─ fail  → identity-rotation handoff? (#5616)
+ *     │         │                    ├─ valid cert (old pin signed new identity)
+ *     │         │                    │   AND new identity signed THIS exchange key
+ *     │         │                    │   → ROTATE-PIN (chain the pin forward; no
+ *     │         │                    │      forced re-pair for a legit rotation)
+ *     │         │                    └─ else → REFUSE (MITM / wrong daemon /
+ *     │         │                       rotated key with no valid continuity cert)
  *     │         └─ no  → REFUSE (pinned but unsigned — downgrade attempt: a MITM
  *     │                  cannot produce a valid sig, so it would strip the field
  *     │                  to force us back to TOFU; refusing closes that door)
