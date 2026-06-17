@@ -1516,7 +1516,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // dashboard's retryConnection (#5724).
   retryConnection: () => {
     resetReconnectAttempt();
-    const saved = useConnectionLifecycleStore.getState().savedConnection;
+    const lifecycle = useConnectionLifecycleStore.getState();
+    // #5725 — leave the terminal server_down phase explicitly BEFORE dialing.
+    // connect() sets 'reconnecting' when re-dialing the same URL (isReconnect),
+    // and `server_down -> reconnecting` is an illegal FSM transition (warns +
+    // still applies + carries the stale "Server appears to be down" error
+    // forward). `server_down -> connecting` is the legal exit; clearing the error
+    // here keeps the banner from leaking into the fresh attempt.
+    if (lifecycle.connectionPhase === 'server_down') {
+      lifecycle.setConnectionPhase('connecting');
+      lifecycle.setConnectionError(null, 0);
+    }
+    const saved = lifecycle.savedConnection;
     if (saved?.url && saved?.token) {
       void get().connectAuto(saved, { silent: true });
     }

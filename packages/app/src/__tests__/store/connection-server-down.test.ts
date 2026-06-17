@@ -16,7 +16,7 @@ jest.mock('expo-secure-store', () => ({
 import * as SecureStore from 'expo-secure-store';
 import { useConnectionStore, __resetDeviceIdCacheForTests } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
-import { resetReconnectAttempt, reconnectAttempt } from '../../store/message-handler';
+import { resetReconnectAttempt, reconnectAttempt, nextReconnectAttempt } from '../../store/message-handler';
 import { clearAllCallbacks } from '../../store/imperative-callbacks';
 
 function flushPromises(): Promise<void> {
@@ -145,8 +145,14 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
       connectionError: 'Server appears to be down',
       savedConnection: { url: 'wss://tunnel.example.com', token: 'tok' },
     });
-    // Climb the ladder so we can prove retryConnection rewinds it.
+    // ACTUALLY climb the ladder first so the reset assertion is load-bearing —
+    // otherwise reconnectAttempt is already 0 and the test would pass even if
+    // retryConnection stopped resetting it.
     resetReconnectAttempt();
+    nextReconnectAttempt();
+    nextReconnectAttempt();
+    nextReconnectAttempt();
+    expect(reconnectAttempt).toBeGreaterThan(0);
     const before = ws.instances.length;
 
     useConnectionStore.getState().retryConnection();
@@ -154,7 +160,7 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     jest.advanceTimersByTime(0);
     await flushPromises();
 
-    // The ladder was reset to the bottom rung…
+    // The ladder was rewound to the bottom rung…
     expect(reconnectAttempt).toBe(0);
     // …and a fresh dial was attempted (connectAuto → connect → WebSocket).
     expect(ws.instances.length).toBeGreaterThan(before);
