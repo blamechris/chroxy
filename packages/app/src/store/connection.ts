@@ -1329,6 +1329,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // "Observing"/driver badge doesn't survive the reconnect gap.
       clearSessionRolesAcrossSessions(set, get);
 
+      // #5725 (#5698) — terminal: the reconnect ladder already gave up
+      // (server_down). The PAIRED event of this same transport drop (RN fires
+      // error → close, or close → error) must NOT clobber server_down back to
+      // reconnecting/disconnected — transitionPhase only WARNS on the illegal
+      // transition, it still applies it, which would revert the terminal banner
+      // to the infinite spinner this state exists to kill. Keep it sticky.
+      if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
+        return;
+      }
       // Auto-reconnect if the connection dropped unexpectedly (not user-initiated)
       if (wasConnected && disconnectedAttemptId !== myAttemptId) {
         const closeMsg = getWsCloseMessage(event.code);
@@ -1375,6 +1384,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         ? `Connection error: ${detail}`
         : 'Connection error — server may be unreachable';
 
+      // #5725 (#5698) — terminal server_down is sticky against the paired event
+      // of this drop (mirrors the onclose guard above): once the ladder gave up,
+      // a close→error (or error after a give-up) must not clobber it back.
+      if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
+        return;
+      }
       // Auto-reconnect on unexpected WS error
       if (disconnectedAttemptId !== myAttemptId) {
         // #3624 — if onclose already armed the retry for this same transport

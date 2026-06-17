@@ -162,6 +162,40 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     ws.restore();
   });
 
+  it('keeps server_down sticky against the paired onerror/onclose of the same drop', async () => {
+    // Regression: RN fires error → close (or close → error) for ONE transport
+    // drop. The give-up sets server_down on the first event; the paired second
+    // event must NOT clobber it back to reconnecting/disconnected (transitionPhase
+    // only warns on the illegal transition — it still applies it).
+    const ws = installMockWebSocket();
+    await openConnectedSocket(ws);
+    const socket = ws.instances[ws.instances.length - 1];
+    // Simulate the ladder having given up (terminal phase set by onGaveUp).
+    useConnectionLifecycleStore.setState({
+      connectionPhase: 'server_down',
+      connectionError: 'Server appears to be down',
+    });
+
+    // error → close
+    socket.onerror?.({});
+    socket.onclose?.({ code: 1006 });
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+
+    // and the reverse close → error ordering on the same terminal state
+    socket.onclose?.({ code: 1006 });
+    socket.onerror?.({});
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+
+    // No spurious reconnect socket was built either.
+    jest.advanceTimersByTime(60_000);
+    await flushPromises();
+    expect(ws.instances.length).toBe(1);
+
+    ws.restore();
+  });
+
   it('retryConnection no-ops without a saved connection', async () => {
     const ws = installMockWebSocket();
     useConnectionLifecycleStore.setState({ connectionPhase: 'server_down', savedConnection: null });
