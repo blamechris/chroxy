@@ -1804,6 +1804,11 @@ export class SessionManager extends EventEmitter {
     if (this._destroying) return null
     const state = { version: 1, timestamp: Date.now(), sessions: [] }
     for (const [id, entry] of this._sessions) {
+      // #5983 (epic #5982): never persist a user-shell session. Restoring one
+      // would re-spawn a $SHELL on boot — bypassing the userShell.enabled gate
+      // if it was since turned off (swarm-audit C3 / Skeptic finding 4) — and a
+      // shell has no resumable conversation state worth keeping anyway.
+      if (entry.session?.constructor?.isUserShell === true) continue
       state.sessions.push(this._serializeSessionEntry(id, entry))
     }
 

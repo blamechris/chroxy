@@ -22,6 +22,7 @@ import { DeepSeekSession } from './deepseek-session.js'
 import { OllamaSession } from './ollama-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
+import { UserShellSession } from './user-shell-session.js'
 import { registerProviderRegistry } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
@@ -51,6 +52,11 @@ const PROVIDERS = {
   'ollama': OllamaSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
+  // #5983 (epic #5982) — general-purpose user shell ($SHELL via node-pty).
+  // Gated OFF by default (userShell.enabled, #5985a) and primary-token-only
+  // on create + every terminal_* op (#5985b); excluded from mailbox injection
+  // (#5984). PTY-only — no chat/turn semantics.
+  'user-shell': UserShellSession,
 }
 
 // The default provider lives in @chroxy/protocol so the server, dashboard,
