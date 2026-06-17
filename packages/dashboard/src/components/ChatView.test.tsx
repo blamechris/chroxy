@@ -210,6 +210,38 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
+  // #5954 — behavior guard: the streaming RAF keeps re-pinning to the growing
+  // bottom, and an at-bottom self-induced scroll does not surface the
+  // scroll-to-bottom button. NOTE: this is a happy-path guard, not a regression
+  // test for the deferred-flag-clear fix specifically — the exact
+  // synchronous-vs-next-frame `programmaticScrollRef` timing depends on the
+  // browser's async scroll-event dispatch ordering, which jsdom doesn't model,
+  // so it would also pass on the pre-fix code. The suppression fix is verified
+  // by reasoning + on-device confirmation (#5954 stays open for the live check).
+  it('keeps following the bottom while streaming as content grows (#5954)', async () => {
+    vi.useFakeTimers()
+    render(<ChatView messages={makeMessages(3)} isStreaming />)
+    const container = screen.getByTestId('chat-messages')
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+
+    // Streaming RAF pins to the current bottom.
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+
+    // Content grows (a stream_delta) — the RAF re-pins to the NEW bottom.
+    Object.defineProperty(container, 'scrollHeight', { value: 1500, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1500)
+
+    // The self-induced scroll event (flag still held) must NOT surface the
+    // scroll-to-bottom button — i.e. it isn't misread as a user scroll-up.
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
   it('snaps to bottom when scrollToBottomSignal bumps, even if scrolled up (#5780)', async () => {
     vi.useFakeTimers()
     const messages = makeMessages(3)
