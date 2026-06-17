@@ -859,6 +859,12 @@ export class WsServer {
       // the dashboard chip can hide instead of rendering against a
       // disabled timer).
       get streamStallTimeoutMs() { return self.config?.streamStallTimeoutMs ?? null },
+      // #5986 (epic #5982): whether the embedded user-shell terminal is enabled
+      // (userShell.enabled). Surfaced in auth_ok's capability map so the
+      // dashboard can show/hide the "New shell" affordance fail-closed (the
+      // user-shell provider is hidden from listProviders, so the picker can't
+      // advertise it). Late-bound getter so a test mutating self.config is seen.
+      get userShellEnabled() { return self.config?.userShell?.enabled === true },
       // #4835: per-device active-session memory consulted during reconnect.
       // sendPostAuthInfo treats this as optional, but production wiring
       // always supplies the default disk-backed store from the WsServer
