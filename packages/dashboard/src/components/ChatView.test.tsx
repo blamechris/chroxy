@@ -242,6 +242,89 @@ describe('ChatView', () => {
     vi.useRealTimers()
   })
 
+  // #5954 (occlusion) — when the input area grows (multi-line textarea,
+  // attachments, the activity / check-in chips appearing) the `.chat-messages`
+  // viewport shrinks, which fires the container's ResizeObserver. While the user
+  // is following the tail, the observer must re-pin to the bottom so the newest
+  // lines stay ABOVE the input bar instead of sliding below the now-shorter
+  // fold. jsdom has no ResizeObserver, so install a controllable one (the same
+  // pattern as the virtualization test) and fire the container's callback by
+  // hand after shrinking `clientHeight`.
+  // NOTE: this positive case is tautological in isolation — `userScrolledUp`
+  // defaults to false, so it would pass even if the `userScrolledUpRef` gate were
+  // broken. The scrolled-up negative test directly below is the load-bearing one
+  // (it proves the ref gate actually suppresses the re-pin); keep both.
+  it('re-pins to the bottom when the input area grows while following (#5954)', async () => {
+    type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
+    const observers: Entry[] = []
+    class MockRO {
+      cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe(el: Element) { observers.push({ el: el as HTMLElement, cb: this.cb }) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver
+    ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
+      MockRO as unknown as typeof ResizeObserver
+    try {
+      render(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+      // Following the tail: at bottom, user has not scrolled up.
+      Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+      Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+      Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+
+      // The input area grows → the viewport shrinks and the browser leaves the
+      // tail below the new fold (scrollTop now short of the new bottom).
+      container.scrollTop = 600
+      Object.defineProperty(container, 'clientHeight', { value: 250, configurable: true })
+
+      // Fire the container's ResizeObserver (the real reflow path). The observer
+      // re-pins to the bottom because the user is still following.
+      const containerRO = observers.find(o => o.el === container)
+      expect(containerRO).toBeTruthy()
+      await act(async () => { containerRO!.cb([], containerRO as unknown as ResizeObserver) })
+      expect(container.scrollTop).toBe(1000)
+    } finally {
+      ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = origRO
+    }
+  })
+
+  it('does NOT re-pin on resize when the user has scrolled up (#5954 / #4652)', async () => {
+    type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
+    const observers: Entry[] = []
+    class MockRO {
+      cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe(el: Element) { observers.push({ el: el as HTMLElement, cb: this.cb }) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver
+    ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
+      MockRO as unknown as typeof ResizeObserver
+    try {
+      render(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+      Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+      Object.defineProperty(container, 'scrollTop', { value: 100, writable: true, configurable: true })
+      Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+      // User deliberately scrolled up to read history.
+      await act(async () => { fireEvent.scroll(container) })
+      expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+      // The input area grows; the observer must leave the reading position alone.
+      Object.defineProperty(container, 'clientHeight', { value: 250, configurable: true })
+      const containerRO = observers.find(o => o.el === container)
+      expect(containerRO).toBeTruthy()
+      await act(async () => { containerRO!.cb([], containerRO as unknown as ResizeObserver) })
+      expect(container.scrollTop).toBe(100)
+    } finally {
+      ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = origRO
+    }
+  })
+
   it('snaps to bottom when scrollToBottomSignal bumps, even if scrolled up (#5780)', async () => {
     vi.useFakeTimers()
     const messages = makeMessages(3)

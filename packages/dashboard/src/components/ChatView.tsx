@@ -313,6 +313,10 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
+  // #5954 — a ref mirror of `userScrolledUp` so the ResizeObserver callback can
+  // read the live follow-state without re-subscribing the observer every time
+  // the user crosses the bottom threshold. Kept in sync by the effect below.
+  const userScrolledUpRef = useRef(false)
 
   // #5561 — scroll-anchor compensation state. WKWebView (the Tauri desktop's
   // engine, and the dashboard's PRIMARY consumer) does NOT implement default
@@ -466,15 +470,41 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
     syncGeometry()
   }, [syncGeometry, scrollToBottomNow])
 
+  // #5954 — mirror `userScrolledUp` into a ref so the ResizeObserver callback
+  // (which we don't want to re-subscribe on every threshold crossing) reads the
+  // current follow-state.
+  useEffect(() => {
+    userScrolledUpRef.current = userScrolledUp
+  }, [userScrolledUp])
+
   // #5561 — keep the windowed range correct when the container resizes (panel
   // split drag, window resize, sidebar toggle) without a scroll event firing.
+  //
+  // #5954 — also re-pin to the tail on a container resize. The motivating case
+  // is a SHRINK because the input area grew (a multi-line textarea, attachments,
+  // or the activity / check-in chips appearing all push `.chat-messages`
+  // shorter), which slides a previously bottom-pinned tail below the now-shorter
+  // fold so it renders *behind* the input bar. ResizeObserver also fires on
+  // width changes (split-pane drag, sidebar toggle) and on grow — re-pinning
+  // there while following is harmless-to-helpful (it keeps the tail in view on
+  // any geometry change), so we don't try to distinguish the trigger. What this
+  // observer does NOT see is streamed content growth: that changes `scrollHeight`,
+  // not the container's own box size, so it never fires here — the streaming RAF
+  // owns that path (no double-pin). Gated on following (`!userScrolledUpRef`) so
+  // a user reading history is never yanked down (#4652 / AC3). `scrollToBottomNow`
+  // keeps the programmatic-scroll suppression contract (#5957) intact, and only
+  // ever runs when the #5561 anchor compensation is dormant (it bails unless
+  // `userScrolledUp`), so the two never fight.
   useEffect(() => {
     const el = containerRef.current
     if (!el || typeof ResizeObserver === 'undefined') return
-    const ro = new ResizeObserver(() => syncGeometry())
+    const ro = new ResizeObserver(() => {
+      syncGeometry()
+      if (!userScrolledUpRef.current) scrollToBottomNow()
+    })
     ro.observe(el)
     return () => ro.disconnect()
-  }, [syncGeometry])
+  }, [syncGeometry, scrollToBottomNow])
 
   // #5561 — engine-independent scroll-position compensation.
   //
