@@ -20,6 +20,7 @@ import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleK
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
+import { isUserShellEnabled } from './config.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -864,7 +865,7 @@ export class WsServer {
       // dashboard can show/hide the "New shell" affordance fail-closed (the
       // user-shell provider is hidden from listProviders, so the picker can't
       // advertise it). Late-bound getter so a test mutating self.config is seen.
-      get userShellEnabled() { return self.config?.userShell?.enabled === true },
+      get userShellEnabled() { return isUserShellEnabled(self.config) },
       // #4835: per-device active-session memory consulted during reconnect.
       // sendPostAuthInfo treats this as optional, but production wiring
       // always supplies the default disk-backed store from the WsServer
