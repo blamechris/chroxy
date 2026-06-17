@@ -268,6 +268,10 @@ interface MessageHandlerContext extends EncryptionContext {
   heartbeatInterval: ReturnType<typeof setInterval> | null;
   pongTimeout: ReturnType<typeof setTimeout> | null;
   lastPingSentAt: number;
+  // #5962 (#5721 parity) — client-side handshake timeout. The heartbeat does NOT
+  // start until auth_ok, so the handshake window has no liveness coverage; this
+  // timer drops a wedged half-open socket and hands off to the reconnect ladder.
+  handshakeTimeout: ReturnType<typeof setTimeout> | null;
   // #5556: EWMA-smoothed RTT (replaces the inlined `ewmaRtt` accumulator).
   rttSmoother: RttSmoother;
 
@@ -311,6 +315,7 @@ function createDefaultContext(): MessageHandlerContext {
     heartbeatInterval: null,
     pongTimeout: null,
     lastPingSentAt: 0,
+    handshakeTimeout: null,
     rttSmoother,
     // #5556: the flusher owns the accumulator + coalescing timer + adaptive
     // window, sizing it off this context's own RttSmoother. `applyDeltas` is
@@ -341,6 +346,7 @@ export function resetAllHandlerState(): void {
   if (_ctx.terminalWriteTimer) clearTimeout(_ctx.terminalWriteTimer);
   if (_ctx.heartbeatInterval) clearInterval(_ctx.heartbeatInterval);
   if (_ctx.pongTimeout) clearTimeout(_ctx.pongTimeout);
+  if (_ctx.handshakeTimeout) clearTimeout(_ctx.handshakeTimeout);
   _ctx.deltaFlusher.dispose();
   _ctx = createDefaultContext();
   _pendingPermissionModeRequests.clear();
@@ -762,6 +768,32 @@ export function startHeartbeat(socket: WebSocket): void {
       try { socket.close(); } catch {}
     }, PONG_TIMEOUT_MS);
   }, HEARTBEAT_INTERVAL_MS);
+}
+
+// #5962 (#5721 parity) — client-side handshake timeout. Mirrors the dashboard
+// (packages/dashboard/src/store/message-handler.ts). The heartbeat above does
+// NOT start until auth_ok is processed, so the handshake window (socket OPEN +
+// auth/pair sent, awaiting auth_ok/key_exchange_ok) has zero liveness coverage:
+// a server that opens the socket but never completes the handshake leaves the
+// client wedged until the transport drops on its own. A ~10s timer — comfortably
+// below the ~20s worst-case heartbeat detection once connected — hands off to the
+// normal reconnect ladder ("Handshake failed — reconnecting") instead of a
+// silent stall. Exported so connection.ts arms/clears it around the socket
+// lifecycle and tests can read the budget.
+export const HANDSHAKE_TIMEOUT_MS = 10_000;
+
+// Arm the handshake timer with the caller's fire behaviour. The fire callback is
+// injected (not built here) because the reconnect machinery it needs lives in
+// connection.ts's per-socket closure. Clears any prior timer first
+// (single-instance, mirroring startHeartbeat) so a reconnect that re-enters
+// onopen can never leak a second pending timer.
+export function armHandshakeTimer(onTimeout: () => void): void {
+  clearHandshakeTimer();
+  _ctx.handshakeTimeout = setTimeout(onTimeout, HANDSHAKE_TIMEOUT_MS);
+}
+
+export function clearHandshakeTimer(): void {
+  if (_ctx.handshakeTimeout) { clearTimeout(_ctx.handshakeTimeout); _ctx.handshakeTimeout = null; }
 }
 
 function _onPong(serverTs?: number): void {
@@ -1574,6 +1606,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       return;
 
     case 'auth_ok': {
+      // #5962 (#5721 parity) — auth_ok is the authoritative handshake-complete
+      // signal; clear the handshake timer so a completed handshake can't fire it.
+      // Eager-encryption and no-encryption connects never send key_exchange, so
+      // this is the single authoritative clear (key_exchange_ok clears defensively).
+      clearHandshakeTimer();
       // Reset replay flags — fresh auth means clean slate (#4512: clear the
       // per-session replaying set so a reconnect doesn't leave stale ids
       // gating future activity bumps).
@@ -1790,6 +1827,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     case 'key_exchange_ok': {
+      // #5962 (#5721 parity) — defensive: auth_ok already cleared the handshake
+      // timer (it precedes the discrete key-exchange round-trip), but clear again
+      // so a future reordering that makes the encryption sub-handshake the real
+      // completion point can't leave a timer to fire spuriously. Idempotent.
+      clearHandshakeTimer();
       if (_ctx.pendingKeyPair) {
         const { publicKey: serverPublicKey, serverKeySig } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
