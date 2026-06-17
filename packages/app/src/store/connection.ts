@@ -1196,6 +1196,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // failed — reconnecting" instead of a silent stall. The success clears
           // live in the auth_ok / key_exchange_ok handlers; teardown clears live in
           // onclose/onerror/disconnect and at the top of the next connect.
+          //
+          // The timer is a SINGLE global (message-handler `_ctx`), so guard the
+          // ARM (not just the fire callback) against a stale/superseded attempt: a
+          // late onopen on an old socket must not clear+re-arm the CURRENT
+          // attempt's timer and strip its liveness coverage. (onopen also `await`s
+          // getDeviceId, widening the window for a late delivery.)
+          if (myAttemptId !== connectionAttemptId || disconnectedAttemptId === myAttemptId) return;
           armHandshakeTimer(() => {
             // Superseded by a newer attempt — ignore (mirrors the onclose/onerror
             // stale guard). The current attempt's timer is the only live one.
