@@ -223,6 +223,8 @@ export function SessionScreen() {
   const sendInput = useConnectionStore((s) => s.sendInput);
   const sendInterrupt = useConnectionStore((s) => s.sendInterrupt);
   const disconnect = useConnectionStore((s) => s.disconnect);
+  // #5725 (#5698) — manual retry from the terminal `server_down` banner.
+  const retryConnection = useConnectionStore((s) => s.retryConnection);
   const clearTerminalBuffer = useConnectionStore((s) => s.clearTerminalBuffer);
   const addUserMessage = useConnectionStore((s) => s.addUserMessage);
   const updateInputSettings = useConnectionStore((s) => s.updateInputSettings);
@@ -1197,29 +1199,42 @@ export function SessionScreen() {
       )}
 
       {/* Reconnecting / restarting banner */}
-      {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
+      {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting' || connectionPhase === 'server_down') && (
         <View testID="reconnect-banner" style={styles.reconnectingBanner}>
           <View style={styles.reconnectingRow}>
-            <RNActivityIndicator
-              testID="reconnect-spinner"
-              size="small"
-              color={COLORS.accentBlue}
-              style={styles.reconnectingSpinner}
-            />
+            {/* #5725 (#5698) — server_down is terminal: no indefinite spinner. */}
+            {connectionPhase !== 'server_down' && (
+              <RNActivityIndicator
+                testID="reconnect-spinner"
+                size="small"
+                color={COLORS.accentBlue}
+                style={styles.reconnectingSpinner}
+              />
+            )}
             <Text style={[styles.reconnectingText, { flex: 1 }]}>
-              {connectionPhase === 'server_restarting'
-                ? shutdownReason === 'shutdown'
-                  ? 'Server shut down'
-                  : restartCountdown != null && restartCountdown > 0
-                    ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
-                    : 'Server restarting...'
-                : connectionRetryCount > 0
-                  ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
-                  : 'Reconnecting...'}
+              {connectionPhase === 'server_down'
+                ? 'Server appears to be down'
+                : connectionPhase === 'server_restarting'
+                  ? shutdownReason === 'shutdown'
+                    ? 'Server shut down'
+                    : restartCountdown != null && restartCountdown > 0
+                      ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
+                      : 'Server restarting...'
+                  : connectionRetryCount > 0
+                    ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
+                    : 'Reconnecting...'}
             </Text>
-            <TouchableOpacity onPress={disconnect} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
-              <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
-            </TouchableOpacity>
+            {/* #5725 (#5698) — server_down offers a manual Reconnect (resets the
+                ladder + re-dials); the live states keep the Disconnect affordance. */}
+            {connectionPhase === 'server_down' ? (
+              <TouchableOpacity testID="server-down-reconnect" onPress={retryConnection} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Reconnect">
+                <Text style={styles.reconnectDisconnectText}>Reconnect</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={disconnect} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
+                <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
+              </TouchableOpacity>
+            )}
           </View>
           {connectionPhase === 'server_restarting' && shutdownReason === 'restart' && (
             <Text style={styles.reconnectingDetail}>Graceful restart</Text>
