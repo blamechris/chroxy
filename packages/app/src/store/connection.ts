@@ -115,6 +115,8 @@ import {
   clearTerminalWriteBatching,
   appendPendingTerminalWrite,
   stopHeartbeat,
+  armHandshakeTimer,
+  clearHandshakeTimer,
   clearDeltaBuffers,
   clearMessageQueue,
   enqueueMessage,
@@ -1101,6 +1103,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Reset encryption state for each new connection (forward secrecy)
     setEncryptionState(null);
     setPendingKeyPair(null);
+    // #5962 (#5721 parity) — clear any leftover handshake timer from a prior
+    // attempt before opening a new socket, so a stale timer can't fire against
+    // this fresh attempt.
+    clearHandshakeTimer();
     const socket = new WebSocket(url);
 
     // #3624 (ported from dashboard) — per-socket reconnect scheduler for both
@@ -1183,6 +1189,45 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               ...(Object.keys(historyCursors).length > 0 ? { historyCursors } : {}),
             }));
           }
+          // #5962 (#5721 parity) — a handshake frame (auth/pair) went out; arm the
+          // handshake timer. If auth_ok / key_exchange_ok never completes within
+          // HANDSHAKE_TIMEOUT_MS, drop this half-open socket and hand off to the
+          // SAME reconnect ladder a transport drop uses, surfacing "Handshake
+          // failed — reconnecting" instead of a silent stall. The success clears
+          // live in the auth_ok / key_exchange_ok handlers; teardown clears live in
+          // onclose/onerror/disconnect and at the top of the next connect.
+          //
+          // The timer is a SINGLE global (message-handler `_ctx`), so guard the
+          // ARM (not just the fire callback) against a stale/superseded attempt: a
+          // late onopen on an old socket must not clear+re-arm the CURRENT
+          // attempt's timer and strip its liveness coverage. (onopen also `await`s
+          // getDeviceId, widening the window for a late delivery.)
+          if (myAttemptId !== connectionAttemptId || disconnectedAttemptId === myAttemptId) return;
+          armHandshakeTimer(() => {
+            // Superseded by a newer attempt — ignore (mirrors the onclose/onerror
+            // stale guard). The current attempt's timer is the only live one.
+            if (myAttemptId !== connectionAttemptId) return;
+            // User disconnected this attempt — don't auto-reconnect.
+            if (disconnectedAttemptId === myAttemptId) return;
+            // Null ALL handlers before closing: onclose/onerror so this manual
+            // close doesn't double-dispatch (scheduleReconnect owns recovery), AND
+            // onmessage so a late auth_ok / key_exchange_ok already in flight on
+            // this wedged socket can't mutate store state after we've declared the
+            // handshake failed.
+            socket.onclose = null;
+            socket.onerror = null;
+            socket.onmessage = null;
+            try { socket.close(); } catch { /* already closing */ }
+            set({ socket: null });
+            // Mirror the onerror first-write-wins guard so a paired drop can't
+            // double-write the phase/error; then hand off to the ladder.
+            if (!reconnectScheduler.scheduled) {
+              console.log('[ws] Handshake timed out, reconnecting...');
+              useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
+              useConnectionLifecycleStore.getState().setConnectionError('Handshake failed — reconnecting', 0);
+            }
+            scheduleReconnect();
+          });
         }
       });
     };
@@ -1237,6 +1282,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
+
+      // #5962 (#5721 parity) — this attempt's socket closed; no handshake left to
+      // time. Clear AFTER the stale guard so a late stale-socket close can't
+      // cancel the CURRENT attempt's timer. Idempotent if already cleared.
+      clearHandshakeTimer();
 
       const wasConnected = useConnectionLifecycleStore.getState().connectionPhase === 'connected';
       set({ socket: null });
@@ -1295,6 +1345,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // Stale socket from a previous connection attempt — ignore
       if (myAttemptId !== connectionAttemptId) return;
 
+      // #5962 (#5721 parity) — clear the handshake timer after the stale guard
+      // (this attempt errored; the reconnect ladder takes over).
+      clearHandshakeTimer();
+
       set({ socket: null });
 
       // UX landmine #8: extract whatever detail we can from the error
@@ -1331,6 +1385,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Clear saved connection so ConnectScreen doesn't auto-reconnect
     setLastConnectedUrl(null);
     stopHeartbeat();
+    // #5962 (#5721 parity) — user-initiated disconnect nulls socket.onclose
+    // below, so the onclose handshake-timer clear never runs; clear it here.
+    clearHandshakeTimer();
     const { socket } = get();
     if (socket) {
       socket.onclose = null;
