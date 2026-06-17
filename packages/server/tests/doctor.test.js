@@ -723,6 +723,35 @@ describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
     assert.match(check.message, /did not respond \(boom\)/)
   })
 
+  it('trims surrounding whitespace from the hostname before probing', async () => {
+    let seenUrl = null
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: '  chroxy.example.com  ',
+      probe: async (url) => { seenUrl = url; return { ok: true, status: 200 } },
+    })
+    assert.equal(seenUrl, 'https://chroxy.example.com/')
+    assert.equal(check.status, 'pass')
+  })
+
+  it('warns (without probing) when the hostname is not a bare host', async () => {
+    for (const bad of ['https://chroxy.example.com', 'evil.com/@chroxy.example.com', 'a b.example.com', 'chroxy.example.com/path']) {
+      let probed = false
+      const check = await checkTunnelRoutability({
+        mode: 'named',
+        hostname: bad,
+        probe: async () => { probed = true; return { ok: true } },
+      })
+      assert.equal(probed, false, `should not probe a malformed host: ${bad}`)
+      assert.equal(check.status, 'warn')
+      assert.match(check.message, /is not a bare host/)
+    }
+  })
+
+  it('returns null for a whitespace-only hostname', async () => {
+    assert.equal(await checkTunnelRoutability({ mode: 'named', hostname: '   ' }), null)
+  })
+
   it('passes the hostname URL and a numeric timeout to the probe', async () => {
     let seenUrl = null
     let seenTimeout = null

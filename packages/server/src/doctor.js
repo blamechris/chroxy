@@ -188,11 +188,11 @@ export function checkClaudeTuiCliVersion(deps = {}) {
 /**
  * #5328 (WP-5.6) — default end-to-end routability probe for a named tunnel:
  * a HEAD request to the tunnel hostname with a hard timeout. ANY HTTP response
- * (even 4xx/5xx/426-upgrade) proves the request reached the chroxy origin
- * through the Cloudflare edge — i.e. the hostname resolves and the route is
- * live. Only a network/DNS error or a timeout (caught here, returned as
- * `{ ok: false }`) means the path is broken. Uses the Node 22 global `fetch` +
- * `AbortController`; no new dependency.
+ * (even 4xx/5xx/426-upgrade, and whether it comes from the chroxy origin or a
+ * Cloudflare edge error page) means the hostname resolves and the edge answered
+ * — i.e. the route is live enough to reach. Only a network/DNS error or a
+ * timeout (caught here, returned as `{ ok: false }`) means the path is broken.
+ * Uses the Node 22 global `fetch` + `AbortController`; no new dependency.
  */
 async function defaultHttpsProbe(url, timeoutMs) {
   const controller = new AbortController()
@@ -227,11 +227,25 @@ async function defaultHttpsProbe(url, timeoutMs) {
  */
 export async function checkTunnelRoutability(deps = {}) {
   const { hostname = null, mode = null, timeoutMs = 5000, probe = defaultHttpsProbe } = deps
-  if (mode !== 'named' || typeof hostname !== 'string' || hostname.length === 0) return null
+  if (mode !== 'named' || typeof hostname !== 'string') return null
   const NAME = 'Tunnel routability'
+  // Trim and reject anything that isn't a bare host — a stray scheme, path,
+  // userinfo (`@`), or whitespace in the configured `tunnelHostname` would make
+  // `https://${hostname}/` probe a DIFFERENT host than intended (or build an
+  // invalid URL). Surface it as a warn rather than silently probing the wrong
+  // place. A bare `host` or `host:port` is fine.
+  const host = hostname.trim()
+  if (host.length === 0) return null
+  if (/[\s/@]/.test(host) || host.includes('://')) {
+    return {
+      name: NAME,
+      status: 'warn',
+      message: `Configured tunnelHostname '${hostname}' is not a bare host — expected e.g. 'tunnel.example.com', not a URL. Run 'chroxy tunnel setup' to (re)configure.`,
+    }
+  }
   let result
   try {
-    result = await probe(`https://${hostname}/`, timeoutMs)
+    result = await probe(`https://${host}/`, timeoutMs)
   } catch (err) {
     // A probe should resolve { ok: false }, never throw — but never let a
     // diagnostic crash the whole doctor run.
@@ -239,12 +253,12 @@ export async function checkTunnelRoutability(deps = {}) {
   }
   if (result && result.ok) {
     const code = typeof result.status === 'number' ? ` (HTTP ${result.status})` : ''
-    return { name: NAME, status: 'pass', message: `${hostname} is reachable${code}` }
+    return { name: NAME, status: 'pass', message: `${host} is reachable${code}` }
   }
   return {
     name: NAME,
     status: 'warn',
-    message: `${hostname} did not respond${result?.error ? ` (${result.error})` : ''} — the DNS route may be missing or the named tunnel is down. Run 'chroxy tunnel setup' to (re)configure.`,
+    message: `${host} did not respond${result?.error ? ` (${result.error})` : ''} — the DNS route may be missing or the named tunnel is down. Run 'chroxy tunnel setup' to (re)configure.`,
   }
 }
 
