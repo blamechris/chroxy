@@ -1719,10 +1719,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           // Superseded by a newer attempt — ignore (mirrors the onclose/onerror
           // stale guard). The current attempt's timer is the only live one.
           if (myAttemptId !== connectionAttemptId) return;
-          // Null the handlers before closing so this manual close doesn't also
-          // dispatch through onclose; scheduleReconnect owns the recovery.
+          // Null ALL handlers before closing: onclose/onerror so this manual
+          // close doesn't double-dispatch (scheduleReconnect owns recovery), AND
+          // onmessage so a frame already queued/in-flight on this wedged socket
+          // (a late auth_ok / key_exchange_ok) can't be delivered and mutate
+          // store state after we've declared the handshake failed.
           socket.onclose = null;
           socket.onerror = null;
+          socket.onmessage = null;
           try { socket.close(); } catch { /* already closing */ }
           scheduleReconnect('Handshake timed out', 'Handshake failed — reconnecting');
         });

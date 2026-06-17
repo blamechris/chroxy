@@ -141,17 +141,17 @@ describe('#5721 client-side handshake timeout (dashboard)', () => {
 
   it('does not schedule a second reconnect when the socket already errored', async () => {
     const ws = await openConnected()
-    // A transport error arms the reconnect scheduler first…
+    // A transport error schedules a reconnect AND clears the handshake timer
+    // (onerror's teardown clear), so the timeout window is now a no-op…
     ws.onerror?.()
     await vi.advanceTimersByTimeAsync(0)
     const afterError = MockWebSocket.instances.length
 
-    // …then the handshake timer fires. scheduleReconnect's per-socket dedupe
-    // (reconnectScheduler.scheduled) must make this a no-op — exactly one
-    // reconnect socket should appear, not two.
+    // …advancing past the handshake budget adds nothing (the timer was cleared;
+    // and even if it weren't, scheduleReconnect's per-socket `scheduled` dedupe
+    // would suppress a second reconnect). Exactly one reconnect socket appears.
     await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS)
     await vi.advanceTimersByTimeAsync(10_000) // let the single scheduled rung fire
-    // One new socket from the single scheduled reconnect (not two).
     expect(MockWebSocket.instances.length).toBe(afterError + 1)
   })
 })
