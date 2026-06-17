@@ -480,14 +480,17 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
   // #5561 — keep the windowed range correct when the container resizes (panel
   // split drag, window resize, sidebar toggle) without a scroll event firing.
   //
-  // #5954 — also re-pin to the tail when the container SHRINKS because the input
-  // area grew (a multi-line textarea, attachments, or the activity / check-in
-  // chips appearing all push `.chat-messages` shorter). Content growth during
-  // streaming changes `scrollHeight`, not the container's `clientHeight`, so it
-  // never fires this observer — the streaming RAF owns that path. This observer
-  // fires only on viewport-height changes, which is exactly when a previously
-  // bottom-pinned tail would otherwise slide below the now-shorter fold and
-  // render *behind* the input bar. Gated on following (`!userScrolledUpRef`) so
+  // #5954 — also re-pin to the tail on a container resize. The motivating case
+  // is a SHRINK because the input area grew (a multi-line textarea, attachments,
+  // or the activity / check-in chips appearing all push `.chat-messages`
+  // shorter), which slides a previously bottom-pinned tail below the now-shorter
+  // fold so it renders *behind* the input bar. ResizeObserver also fires on
+  // width changes (split-pane drag, sidebar toggle) and on grow — re-pinning
+  // there while following is harmless-to-helpful (it keeps the tail in view on
+  // any geometry change), so we don't try to distinguish the trigger. What this
+  // observer does NOT see is streamed content growth: that changes `scrollHeight`,
+  // not the container's own box size, so it never fires here — the streaming RAF
+  // owns that path (no double-pin). Gated on following (`!userScrolledUpRef`) so
   // a user reading history is never yanked down (#4652 / AC3). `scrollToBottomNow`
   // keeps the programmatic-scroll suppression contract (#5957) intact, and only
   // ever runs when the #5561 anchor compensation is dormant (it bails unless

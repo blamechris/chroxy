@@ -250,6 +250,10 @@ describe('ChatView', () => {
   // fold. jsdom has no ResizeObserver, so install a controllable one (the same
   // pattern as the virtualization test) and fire the container's callback by
   // hand after shrinking `clientHeight`.
+  // NOTE: this positive case is tautological in isolation — `userScrolledUp`
+  // defaults to false, so it would pass even if the `userScrolledUpRef` gate were
+  // broken. The scrolled-up negative test directly below is the load-bearing one
+  // (it proves the ref gate actually suppresses the re-pin); keep both.
   it('re-pins to the bottom when the input area grows while following (#5954)', async () => {
     type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
     const observers: Entry[] = []
