@@ -45,7 +45,7 @@ import { loadModelsCache, getModels, watchModelsOverlay } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -634,6 +634,10 @@ export async function startCliServer(config) {
     // alias are honoured (with a deprecation warning for the latter —
     // see the [security] log lines above).
     defaultSkipPermissions: skipPerms.enabled,
+    // #5985 (epic #5982): gate the embedded user-shell terminal. Off unless the
+    // operator set userShell.enabled:true in the config file. Enforced in
+    // SessionManager.createSession so it covers every spawn path.
+    userShellEnabled: isUserShellEnabled(config),
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],

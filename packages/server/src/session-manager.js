@@ -85,6 +85,22 @@ export class SessionDirectoryError extends SessionError {
 }
 
 /**
+ * #5985 (epic #5982): thrown when a `user-shell` session is requested but the
+ * server has not opted in (`userShell.enabled !== true`). Secure-by-default —
+ * a user shell is arbitrary code execution on the dev machine, so it is off
+ * until an explicit local config edit enables it.
+ */
+export class UserShellDisabledError extends SessionError {
+  constructor() {
+    super(
+      'User-shell sessions are disabled on this server. To enable, set userShell.enabled:true in the server config file (requires local filesystem access). Default is disabled for security.',
+      'USER_SHELL_DISABLED'
+    )
+    this.name = 'UserShellDisabledError'
+  }
+}
+
+/**
  * Thrown when worktree creation fails (e.g. non-git directory).
  */
 export class WorktreeError extends SessionError {
@@ -206,6 +222,13 @@ export class SessionManager extends EventEmitter {
     // TUI session boots already in unmediated mode without requiring the
     // dashboard checkbox round-trip.
     defaultSkipPermissions = false,
+    // #5985 (epic #5982): gate for the embedded user-shell terminal. When false
+    // (default — secure-by-default), createSession rejects a `user-shell`
+    // provider with UserShellDisabledError. Wired from `isUserShellEnabled(config)`
+    // in server-cli. Enforced HERE (not in the WS handler) so it covers every
+    // spawn path — WS create, restoreState, and any internal caller — per the
+    // #5985 swarm-audit C3 finding.
+    userShellEnabled = false,
     // Shadowed in production (server-cli.js always passes providerType
     // explicitly), but kept on the single source of truth so the fallback
     // can't silently diverge from the server's default (#5819).
@@ -316,6 +339,7 @@ export class SessionManager extends EventEmitter {
     // partially enable the flag. Forwarded to providerOpts.skipPermissions
     // for every createSession() call that omits the field.
     this._defaultSkipPermissions = !!defaultSkipPermissions
+    this._userShellEnabled = !!userShellEnabled
     this._sweepOrphanWorktrees = !!sweepOrphanWorktrees
     this._providerType = providerType
 
@@ -792,6 +816,15 @@ export class SessionManager extends EventEmitter {
     // appeared in the UI. Runs BEFORE worktree creation so a failed preflight
     // doesn't leave an orphan worktree behind. (#2962)
     const resolvedProviderType = provider || this._providerType
+    // #5985 (epic #5982): fail-closed gate for the embedded user-shell terminal.
+    // Enforced here (before getProvider / any spawn) so it covers EVERY create
+    // path — WS create_session, restoreState, and internal callers — not just
+    // the WS handler (swarm-audit C3: a handler-only gate is bypassed on restore).
+    // The provider itself ships later (#5983); until then this is a deny that
+    // fails closed during build-out.
+    if (resolvedProviderType === 'user-shell' && !this._userShellEnabled) {
+      throw new UserShellDisabledError()
+    }
     const PreflightProviderClass = getProvider(resolvedProviderType)
     if (!this._skipPreflight) {
       runProviderPreflight(PreflightProviderClass)

@@ -158,6 +158,17 @@ const CONFIG_SCHEMA = {
   // config file on the dev machine (physical-access proxy for real
   // user confirmation). Added in the 2026-04-11 audit Adversary A5 fix.
   allowAutoPermissionMode: 'boolean',
+  // #5985 (epic #5982): gate for the embedded user-shell terminal — a
+  // `user-shell` session spawns the operator's `$SHELL` (arbitrary code
+  // execution on the dev machine, reachable through the tunnel). Nested object
+  // `{ enabled: boolean }`. Defaults to undefined/false so fresh installs are
+  // secure-by-default: creating a `user-shell` session is rejected with
+  // USER_SHELL_DISABLED unless `userShell.enabled === true`. Enabling is a
+  // deliberate edit on the dev machine (physical-access proxy for confirmation),
+  // matching `allowAutoPermissionMode`. The gate is enforced in
+  // SessionManager.createSession so it covers every spawn path (WS create,
+  // restore, internal callers) — see the swarm-audit C3 finding.
+  userShell: 'object',
   // Allowlist of Docker image patterns that create_environment may use.
   // Each entry is either an exact image name or a prefix pattern like
   // `mcr.microsoft.com/devcontainers/*`. When set, client-supplied
@@ -583,6 +594,32 @@ function validateBillingBlock(billing, warnings) {
   }
   // #5878: typo-catch for the billing knobs.
   warnUnknownKeys(billing, BILLING_SUPPORTED_KEYS, 'billing', warnings)
+}
+
+const USER_SHELL_SUPPORTED_KEYS = new Set(['enabled'])
+
+// #5985 (epic #5982): validate the `userShell` block. Only `enabled` (boolean)
+// today; the security primitives (primary-token gate, audit, isolation) land in
+// the #5985b slice. Warn-only "Invalid value" wording (never "Invalid type") so
+// a mis-typed knob doesn't abort startup via loadAndMergeConfig's fatal-prefix.
+function validateUserShellBlock(userShell, warnings) {
+  if (typeof userShell !== 'object' || userShell === null || Array.isArray(userShell)) {
+    warnings.push(`Invalid value for 'userShell': expected object, got ${Array.isArray(userShell) ? 'array' : typeof userShell}`)
+    return
+  }
+  if (Object.prototype.hasOwnProperty.call(userShell, 'enabled')) {
+    if (typeof userShell.enabled !== 'boolean') {
+      warnings.push(`Invalid value for 'userShell.enabled': expected a boolean, got ${JSON.stringify(userShell.enabled)}`)
+    }
+  }
+  warnUnknownKeys(userShell, USER_SHELL_SUPPORTED_KEYS, 'userShell', warnings)
+}
+
+// #5985: single source of truth for "may a user-shell session be created?".
+// Fail-closed — anything other than an explicit `userShell.enabled === true` is
+// disabled. Used by SessionManager.createSession (the authoritative gate).
+export function isUserShellEnabled(config) {
+  return config?.userShell?.enabled === true
 }
 
 function validateDiscordNotificationsBlock(discord, warnings) {
@@ -1029,6 +1066,11 @@ export function validateConfig(config, verbose = false) {
   // Per-field typos are warn-only "Invalid value"; see validateBillingBlock.
   if (config.billing !== undefined) {
     validateBillingBlock(config.billing, warnings)
+  }
+
+  // #5985 (epic #5982): validate the user-shell gate block.
+  if (config.userShell !== undefined) {
+    validateUserShellBlock(config.userShell, warnings)
   }
 
   if (config.notifications !== undefined) {
