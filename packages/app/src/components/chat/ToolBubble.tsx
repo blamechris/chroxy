@@ -79,13 +79,21 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     : '';
   const rawContent = message.content?.trim() || '';
   const isPlaceholderContent = !rawContent || rawContent === message.tool;
-  const content = partialPreview && isPlaceholderContent
-    ? partialPreview
-    : (rawContent || partialPreview);
+  // #6018 — the NON-streaming path also leaks: when `tool_start` carries `input`,
+  // store-core serializes it into `message.content` (`content: msg.input ?
+  // JSON.stringify(msg.input) : tool`), so `rawContent` is the raw `{"questions":
+  // [...` JSON. For suppressed tools, never let that become the bubble body —
+  // collapse to the tool-name placeholder so the expanded body shows only the
+  // tool name (the structured QuestionPrompt card is the canonical render path).
+  const content = suppressRawInput
+    ? (message.tool || '')
+    : partialPreview && isPlaceholderContent
+      ? partialPreview
+      : (rawContent || partialPreview);
 
-  // Hide empty tool messages (for suppressed tools, content = rawContent = tool
-  // name placeholder, which is always non-empty after handleToolStart — so the
-  // bubble renders as a quiet placeholder with just the tool name + pulse marker).
+  // Hide empty tool messages. For suppressed tools `content` is the tool-name
+  // placeholder (non-empty, since the tool was matched by name) so the bubble
+  // still renders as a quiet placeholder with just the tool name + pulse marker.
   if (!content) return null;
 
   const displayTool = formatToolName(message.tool);

@@ -154,6 +154,42 @@ describe('#6018 AskUserQuestion raw tool_input must not leak on mobile', () => {
     expect(allText).not.toMatch(/\{"questions"/);
   });
 
+  it('does NOT render the raw tool_input JSON when input arrives whole on tool_start (non-streaming path)', () => {
+    // Providers that send the full input on tool_start (not as tool_input_delta
+    // chunks) land it in message.content: store-core does
+    // `content: msg.input ? JSON.stringify(msg.input) : tool`. The expanded body
+    // renders `content`, so without gating it leaks the raw JSON.
+    const start = handleToolStart(
+      {
+        sessionId: SESSION,
+        tool: 'AskUserQuestion',
+        toolUseId: 'tu-ask-whole',
+        messageId: 'm-ask-whole',
+        input: { questions: [{ question: 'Pick a deploy target', header: 'Deploy', options: [{ label: 'staging' }, { label: 'production' }] }] },
+      },
+      SESSION,
+      false,
+      [],
+    );
+    const ask = start.chatMessage!;
+    // Sanity: the raw JSON is in content (this is what must NOT render).
+    expect(ask.content).toContain('"questions"');
+
+    const root = renderToolBubble(ask);
+    // Collapsed: no leak.
+    let allText = getAllTextContent(root);
+    expect(allText).not.toMatch(/"questions"/);
+    expect(allText).not.toMatch(/Pick a deploy target/);
+    // Expanded: still no leak (content gated to the tool-name placeholder).
+    tapToExpand(root);
+    allText = getAllTextContent(root);
+    expect(allText).not.toMatch(/"questions"/);
+    expect(allText).not.toMatch(/Pick a deploy target/);
+    expect(allText).not.toMatch(/\{"questions"/);
+    // The bubble still renders as a placeholder (tool name visible).
+    expect(allText).toMatch(/AskUserQuestion/);
+  });
+
   it('still renders the ToolBubble as a visible placeholder (tool name in header)', () => {
     const messages = buildAskUserQuestionMessages();
     const ask = messages.find((m) => m.toolUseId === 'tu-ask')!;
