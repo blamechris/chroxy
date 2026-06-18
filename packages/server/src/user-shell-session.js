@@ -197,6 +197,10 @@ export class UserShellSession extends BaseSession {
       this.emit('terminal_output', { data: marker })
     }
     this._clearKillTimer()
+    // #5982 — signal a NATURAL exit so SessionManager can auto-remove the dead
+    // session (no lingering zombie shells). Emitted only here, so an explicit
+    // destroy() — which detaches listeners first — never triggers auto-remove.
+    this.emit('shell_exited', { code })
   }
 
   /**

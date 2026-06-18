@@ -33,6 +33,9 @@ import {
 
 const log = createLogger('session-manager')
 const DEFAULT_STATE_FILE = join(homedir(), '.chroxy', 'session-state.json')
+// #5982 — grace before auto-removing an exited user-shell session, so a live
+// viewer sees the "[shell exited]" marker before the session vanishes.
+const AUTO_REMOVE_ON_EXIT_DELAY_MS = 1500
 
 /**
  * Zero-initialized cumulative usage record (#4072). Lives on the session
@@ -2437,6 +2440,33 @@ export class SessionManager extends EventEmitter {
     session.on('terminal_resize', (data) => {
       this.emit('session_event', { sessionId, event: 'terminal_resize', data })
     })
+
+    // #5982 — auto-remove a user-shell session when its PTY exits on its own
+    // (the user typed `exit`, or the shell died). A short grace lets a live
+    // viewer read the "[shell exited]" marker, then the session is destroyed so
+    // no dead zombie shells linger in the list. UserShellSession emits
+    // `shell_exited` ONLY from its natural-exit path; an explicit destroySession
+    // detaches this listener first (removeAllListeners), so a deliberate
+    // teardown never schedules a redundant auto-remove. The timer is unref'd so
+    // it can't keep the process alive, and re-checks the session still exists
+    // (and isn't already tearing down) before destroying.
+    if (session.constructor?.isUserShell === true) {
+      session.on('shell_exited', () => {
+        const timer = setTimeout(() => {
+          const entry = this._sessions.get(sessionId)
+          if (entry && !entry._destroying) {
+            log.info(`Auto-removing exited user-shell session ${sessionId}`)
+            // Calls destroySession directly, intentionally bypassing the
+            // handler-layer "cannot destroy the last session" guard: that guard
+            // stops a USER from emptying their list, not a dead shell from being
+            // reaped — a zombie shell shouldn't be force-kept just because it's
+            // the last session.
+            this.destroySession(sessionId)
+          }
+        }, AUTO_REMOVE_ON_EXIT_DELAY_MS)
+        if (typeof timer.unref === 'function') timer.unref()
+      })
+    }
 
     for (const event of PROXIED_EVENTS) {
       session.on(event, (data) => {
