@@ -1156,6 +1156,9 @@ export class WsServer {
           }
           let forced = 0
           for (const [ws, client] of this.clients) {
+            // Skip connections still mid-handshake (not yet authenticated): they
+            // hold no authority to strip and will fail their pending auth step
+            // against the now-current token on their own.
             if (!client.authenticated || ws.readyState !== 1) continue
             client.authenticated = false
             client.isPrimaryToken = false
@@ -1173,11 +1176,13 @@ export class WsServer {
         let encrypted = 0, unencrypted = 0
         for (const [ws, client] of this.clients) {
           if (!client.authenticated || ws.readyState !== 1) continue
+          // Carry `reason: 'scheduled'` so the wire is self-describing and
+          // matches the documented contract + TokenManager's event payload.
           if (client.encryptionState) {
-            this._send(ws, { type: 'token_rotated', token: newToken, expiresAt })
+            this._send(ws, { type: 'token_rotated', token: newToken, expiresAt, reason: 'scheduled' })
             encrypted++
           } else {
-            this._send(ws, { type: 'token_rotated', expiresAt })
+            this._send(ws, { type: 'token_rotated', expiresAt, reason: 'scheduled' })
             unencrypted++
           }
         }

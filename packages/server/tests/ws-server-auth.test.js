@@ -1327,6 +1327,48 @@ describe('WsServer with TokenManager', () => {
     tokenManager.destroy()
   })
 
+  it('after revoke, the de-authed socket cannot regain authority by replaying the old token (#6006)', async () => {
+    // End-to-end proof of the bypass closure: once revoke de-auths the socket,
+    // the dispatch gate (_handleMessage) routes every message back through auth,
+    // so a privileged op (e.g. create_session for a user-shell) is unreachable
+    // until re-auth — and re-auth with the OLD token fails (no grace), so the
+    // attacker cannot regain authority on the still-open socket. (Re-auth with
+    // the CURRENT token is covered by the new-token test below.)
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'initial-token', graceMs: 5000 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'initial-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+    // No sessionManager override: the revoke handler tolerates a null
+    // sessionManager via optional chaining (sever count 0). This test is about
+    // the re-auth gate, not the sever path (covered by the test above).
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'initial-token' })
+    await waitForMessage(messages, 'auth_ok')
+
+    tokenManager.revoke()
+    await waitForMessage(messages, 'token_rotated')
+    messages.length = 0 // discard the initial auth_ok + the revoke notice
+
+    // Re-auth with the OLD (revoked) token must FAIL — no grace replay.
+    send(ws, { type: 'auth', token: 'initial-token' })
+    const fail = await waitForMessage(messages, 'auth_fail')
+    assert.ok(fail, 'old token is rejected immediately after revoke')
+    // The socket is still unauthenticated, so it cannot issue privileged ops.
+    assert.equal([...server.clients.values()].some(c => c.authenticated), false)
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
   it('scheduled rotation does NOT sever shells or force re-auth (#6006)', async () => {
     const { TokenManager } = await import('../src/token-manager.js')
     const tokenManager = new TokenManager({ token: 'initial-token', graceMs: 5000 })
