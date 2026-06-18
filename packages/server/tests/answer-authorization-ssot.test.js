@@ -135,6 +135,21 @@ describe('#6059 handlers actually enforce the SSoT predicate (end-to-end)', () =
       assert.equal(ctx.permissions.questionSessionMap.has('tool-1'), false, 'mapping should be consumed on a routed answer')
     })
 
+    it('a SUBSCRIBED-only viewer (active elsewhere) routes the answer (#6072)', () => {
+      // Active on a DIFFERENT session but subscribed to s1 → still a viewer via
+      // the subscribedSessionIds branch of isSessionViewer. Guards against a
+      // regression that authorizes only the active session and drops the
+      // subscription branch (Copilot review on #6068).
+      const respondToQuestion = mock.fn()
+      const ctx = makeCtx(respondToQuestion)
+      const client = { id: 'c3', activeSessionId: 's2', subscribedSessionIds: new Set(['s1']) }
+
+      inputHandlers.user_question_response(ws, client, { toolUseId: 'tool-1', answer: 'yes' }, ctx)
+
+      assert.equal(respondToQuestion.mock.calls.length, 1, 'a subscribed viewer must be allowed to answer')
+      assert.equal(ctx.permissions.questionSessionMap.has('tool-1'), false, 'mapping consumed for a subscribed viewer')
+    })
+
     it('a non-recipient unbound client is dropped (mapping intact, no dispatch)', () => {
       const respondToQuestion = mock.fn()
       const ctx = makeCtx(respondToQuestion)
@@ -180,6 +195,20 @@ describe('#6059 handlers actually enforce the SSoT predicate (end-to-end)', () =
 
       assert.equal(respondToPermission.mock.calls.length, 1, 'viewer decision should reach the session')
       assert.equal(permissionSessionMap.has('req-1'), false, 'mapping should be consumed on a routed decision')
+    })
+
+    it('a SUBSCRIBED-only viewer (active elsewhere) routes the decision (#6072)', () => {
+      // Active on a DIFFERENT session but subscribed to s1 → a viewer via the
+      // subscribedSessionIds branch; guards against dropping that branch in
+      // handlePermissionResponse (Copilot review on #6068).
+      const respondToPermission = mock.fn(() => true)
+      const { ctx, permissionSessionMap } = makeCtx(respondToPermission)
+      const client = { id: 'c3', activeSessionId: 's2', subscribedSessionIds: new Set(['s1']) }
+
+      settingsHandlers.permission_response(ws, client, { requestId: 'req-1', decision: 'allow' }, ctx)
+
+      assert.equal(respondToPermission.mock.calls.length, 1, 'a subscribed viewer must be allowed to respond')
+      assert.equal(permissionSessionMap.has('req-1'), false, 'mapping consumed for a subscribed viewer')
     })
 
     it('a non-recipient unbound client is dropped (mapping intact, no dispatch)', () => {
