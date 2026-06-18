@@ -6,6 +6,7 @@ import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
 import { redactValue, sanitizeToolInput } from './redaction.js'
+import { buildPermissionRequestMessage } from '@chroxy/protocol'
 
 const log = createLogger('ws')
 
@@ -231,8 +232,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       // with `LOG_LEVEL=debug` when triangulating SESSION_TOKEN_MISMATCH.
       log.debug(`[session-binding-create] permission ${requestId} created via HTTP (sessionId=${ownerSessionId ?? 'none'}, sourceIp=${clientIp})`)
 
-      broadcastFn({
-        type: 'permission_request',
+      broadcastFn(buildPermissionRequestMessage({
         requestId,
         tool,
         description,
@@ -241,11 +241,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         // #5667: carry the owning session so clients route the prompt to the
         // session that actually asked, instead of falling back to whatever tab
         // is focused. Matches the resend-on-reconnect (line ~485) and SDK
-        // (line ~406) paths, which already include sessionId. The `sessionId`
-        // property is omitted entirely (absent, not null) when the request maps
-        // to no chroxy session — clients then fall back to the active session.
-        ...(ownerSessionId ? { sessionId: ownerSessionId } : {}),
-      })
+        // (line ~406) paths, which already include sessionId. The builder omits
+        // `sessionId` entirely (absent, not null) when undefined — the request
+        // maps to no chroxy session and clients fall back to the active one.
+        sessionId: ownerSessionId || undefined,
+      }))
 
       if (pushManager) {
         // #5702 (8d): settle the fire-and-forget send so a failed phone
@@ -505,8 +505,14 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               } else {
                 permissionSessionMap.set(requestId, sessionId)
               }
-              const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = permData
-              sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs, sessionId })
+              sendFn(ws, buildPermissionRequestMessage({
+                requestId: permData.requestId ?? requestId,
+                tool: permData.tool,
+                description: permData.description,
+                input: permData.input,
+                remainingMs,
+                sessionId,
+              }))
             }
           }
         }
@@ -530,8 +536,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         } else {
           log.debug(`[session-binding-resend] legacy permission ${requestId} resent (client=unknown)`)
         }
-        const { createdAt: _ca, remainingMs: _origMs, ...clientPayload } = pending.data
-        sendFn(ws, { type: 'permission_request', ...clientPayload, remainingMs })
+        sendFn(ws, buildPermissionRequestMessage({
+          requestId: pending.data.requestId ?? requestId,
+          tool: pending.data.tool,
+          description: pending.data.description,
+          input: pending.data.input,
+          remainingMs,
+        }))
       }
     }
   }
