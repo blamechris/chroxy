@@ -40,7 +40,23 @@ import { spawn } from 'node:child_process'
 // AND shrinkage, while still catching a truncation that drops more than a couple
 // hundred tests. Override per-invocation with CHROXY_MIN_TEST_COUNT for targeted
 // runs of a subset (e.g. a single large file in local repro).
-const EXPECTED_MIN_TESTS = Number(process.env.CHROXY_MIN_TEST_COUNT ?? 9700)
+const DEFAULT_MIN_TESTS = 9700
+// Validate the override: an invalid value (typo, empty, non-numeric) must NOT
+// silently disable the floor. `Number('abc')` is NaN and `total < NaN` is always
+// false, which would quietly turn the guard off — so fall back to the default and
+// warn loudly instead.
+let EXPECTED_MIN_TESTS = DEFAULT_MIN_TESTS
+if (process.env.CHROXY_MIN_TEST_COUNT !== undefined) {
+  const parsed = Number(process.env.CHROXY_MIN_TEST_COUNT)
+  if (Number.isInteger(parsed) && parsed > 0) {
+    EXPECTED_MIN_TESTS = parsed
+  } else {
+    console.error(
+      `[assert-test-count] ignoring invalid CHROXY_MIN_TEST_COUNT='${process.env.CHROXY_MIN_TEST_COUNT}' ` +
+      `(must be a positive integer); using default floor ${DEFAULT_MIN_TESTS}.`,
+    )
+  }
+}
 
 // How far above the floor the live count must climb before we suggest bumping
 // the floor. Purely advisory — never fails the run.
@@ -59,8 +75,10 @@ if (!cmd) {
 let captured = ''
 const child = spawn(cmd, args, {
   stdio: ['inherit', 'pipe', 'inherit'],
-  // `c8`/`node` resolve from PATH; shell:false keeps argv quoting intact.
-  shell: false,
+  // `c8`/`node` resolve from PATH. On Windows, npm installs `c8` as a `c8.cmd`
+  // shim and CreateProcess can't execute a .cmd without a shell, so spawn via
+  // the shell there; on POSIX keep shell:false so argv quoting stays intact.
+  shell: process.platform === 'win32',
 })
 
 child.stdout.on('data', (chunk) => {
