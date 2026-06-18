@@ -12,6 +12,11 @@
  * ("create/destroy audited, with the token class"). Per-keystroke command-input
  * auditing is deliberately out of scope (volume + privacy); the create/destroy
  * pair with the token class is the traceability anchor.
+ *
+ * Entries are emitted via the logger's always-on `audit()` path (#6001), so the
+ * trail survives a quiet `LOG_LEVEL` (warn/error) — a security record for a
+ * host-RCE capability must not vanish just because the operator turned down
+ * ordinary logging. Lines are tagged `[AUDIT] [shell-audit]`.
  */
 import { createLogger } from './logger.js'
 
@@ -44,7 +49,7 @@ export function formatShellAuditLine(event, fields = {}) {
  * widening of the authz is captured in the trail).
  */
 export function auditShellCreate({ sessionId, clientId, tokenClass, cwd, shell, deviceName } = {}) {
-  log.info(formatShellAuditLine('user_shell_create', { sessionId, clientId, tokenClass, cwd, shell, deviceName }))
+  log.audit(formatShellAuditLine('user_shell_create', { sessionId, clientId, tokenClass, cwd, shell, deviceName }))
 }
 
 /**
@@ -54,5 +59,5 @@ export function auditShellCreate({ sessionId, clientId, tokenClass, cwd, shell, 
  * asynchronously). `reason` is the shell's own exit reason or 'destroyed'.
  */
 export function auditShellDestroy({ sessionId, exitCode, reason } = {}) {
-  log.info(formatShellAuditLine('user_shell_destroy', { sessionId, exitCode, reason }))
+  log.audit(formatShellAuditLine('user_shell_destroy', { sessionId, exitCode, reason }))
 }

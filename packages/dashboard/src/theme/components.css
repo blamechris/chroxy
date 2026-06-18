@@ -8371,6 +8371,8 @@ button.sidebar-token-view-session-row:hover {
 .log-filter-warn.active { color: #f0ad4e; border-color: #f0ad4e; }
 .log-filter-error.active { color: #e74c3c; border-color: #e74c3c; }
 .log-filter-debug.active { color: #7f8c8d; border-color: #7f8c8d; }
+/* #6001 — the always-on security-audit level (shell-audit), distinct from warn's orange */
+.log-filter-audit.active { color: #17a2b8; border-color: #17a2b8; }
 
 .log-actions {
   display: flex;
@@ -8439,6 +8441,7 @@ button.sidebar-token-view-session-row:hover {
 .log-level-tag-warn { color: #f0ad4e; }
 .log-level-tag-error { color: #e74c3c; }
 .log-level-tag-debug { color: #7f8c8d; }
+.log-level-tag-audit { color: #17a2b8; font-weight: 600; }
 
 .log-component {
   color: var(--accent, #6c63ff);

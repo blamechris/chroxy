@@ -305,11 +305,14 @@ export function getLogLevel() {
  * Create a component logger. Backward-compatible with existing API.
  * @param {string} component - Component name for log prefix
  * @param {object} [context] - Optional context (e.g. { sessionId })
- * @returns {{ debug: Function, info: Function, warn: Function, error: Function, log: Function, withSession: Function }}
+ * @returns {{ debug: Function, info: Function, warn: Function, error: Function, audit: Function, log: Function, withSession: Function }}
  */
 export function createLogger(component, context = {}) {
-  const write = (level, msg) => {
-    if (LOG_LEVELS[level] < _logLevel) return
+  const write = (level, msg, { always = false } = {}) => {
+    // `always` bypasses the configured level gate (#6001) so an audit trail is
+    // never dropped by LOG_LEVEL. Everything else (redaction, console routing,
+    // listener broadcast, file write) is identical to a normal line.
+    if (!always && LOG_LEVELS[level] < _logLevel) return
 
     const safeMsg = redactSensitive(msg)
     const timestamp = new Date().toISOString()
@@ -355,6 +358,13 @@ export function createLogger(component, context = {}) {
     info(msg) { write('info', msg) },
     warn(msg) { write('warn', msg) },
     error(msg) { write('error', msg) },
+    /**
+     * Always-on audit line (#6001) — bypasses the configured LOG_LEVEL so a
+     * security audit trail (e.g. shell-audit) is never suppressed by a quiet
+     * production log level. Tagged `[AUDIT]`; still redacted, broadcast to log
+     * listeners, and written to the daemon log file like any other line.
+     */
+    audit(msg) { write('audit', msg, { always: true }) },
     // Backward compat alias
     log(msg) { write('info', msg) },
     /** Create a child logger tagged with a session ID. */

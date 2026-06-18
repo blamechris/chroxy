@@ -1,6 +1,10 @@
-import { describe, it } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { formatShellAuditLine } from '../src/shell-audit.js'
+import { mkdtempSync, rmSync, readFileSync } from 'fs'
+import { join } from 'path'
+import { tmpdir } from 'os'
+import { formatShellAuditLine, auditShellCreate } from '../src/shell-audit.js'
+import { initFileLogging, closeFileLogging } from '../src/logger.js'
 
 /**
  * #5985 (epic #5982) — shell-audit line formatting. The create/destroy audit
@@ -52,5 +56,29 @@ describe('shell-audit — formatShellAuditLine (#5985)', () => {
     const line = formatShellAuditLine('user_shell_create', { cwd: '/tmp/with space', deviceName: 'My Phone' })
     assert.match(line, /cwd="\/tmp\/with space"/)
     assert.match(line, /deviceName="My Phone"/)
+  })
+})
+
+// #6001 — the trail must survive a quiet LOG_LEVEL. Drive the real
+// auditShellCreate through file logging at the strictest non-silent level
+// (error) and assert the line is still written — locks the log.audit() wiring
+// against a regression back to a level-gated log.info().
+describe('shell-audit — always-on under quiet LOG_LEVEL (#6001)', () => {
+  let logDir
+  afterEach(() => {
+    closeFileLogging()
+    if (logDir) rmSync(logDir, { recursive: true, force: true })
+  })
+
+  it('writes a create entry even at LOG_LEVEL=error', () => {
+    logDir = mkdtempSync(join(tmpdir(), 'chroxy-shell-audit-'))
+    initFileLogging({ logDir, level: 'error' })
+    auditShellCreate({ sessionId: 'sess-9', clientId: 'client-9', tokenClass: 'primary', shell: '/bin/zsh' })
+    closeFileLogging()
+
+    const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
+    assert.match(content, /event=user_shell_create/)
+    assert.match(content, /sessionId="sess-9"/)
+    assert.match(content, /\[AUDIT\]/)
   })
 })

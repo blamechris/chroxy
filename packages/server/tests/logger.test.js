@@ -164,6 +164,23 @@ describe('log levels', () => {
     assert.ok(content.includes('warn-msg'))
     assert.ok(content.includes('error-msg'))
   })
+
+  // #6001 — audit() bypasses the level gate so a security trail survives a
+  // quiet LOG_LEVEL. At the strictest non-silent level (error), an audit line
+  // is still written and tagged [AUDIT], while a plain info line is suppressed.
+  it('at level error, audit() is still written (always-on) but info is not', () => {
+    initFileLogging({ logDir, level: 'error' })
+    const log = createLogger('shell-audit')
+    log.info('info-suppressed')
+    log.audit('audit-kept')
+    closeFileLogging()
+
+    const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
+    assert.ok(!content.includes('info-suppressed'), 'info is suppressed at error level')
+    assert.ok(content.includes('audit-kept'), 'audit survives the level gate')
+    assert.ok(content.includes('[AUDIT]'), 'audit line is tagged [AUDIT]')
+    assert.ok(content.includes('[shell-audit]'), 'component tag preserved')
+  })
 })
 
 describe('log rotation', () => {
