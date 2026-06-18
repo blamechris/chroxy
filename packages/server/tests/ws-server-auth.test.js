@@ -1401,6 +1401,54 @@ describe('WsServer with TokenManager', () => {
     tokenManager.destroy()
   })
 
+  it('scheduled rotation refreshes authToken for encrypted clients only; revoke does not (#6012)', async () => {
+    // #6012 — on a scheduled push the encrypted client receives the new token, so
+    // its recorded authToken is refreshed → it can open a NEW shell (#6004 gate)
+    // without reconnecting. Unencrypted clients get no token (authToken stays
+    // stale → must reconnect). Revoke must NEVER refresh authToken (it de-auths
+    // and pushes no token), so a compromised connection can't gain currency.
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'tok-0', graceMs: 5000 })
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-0',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    await startServerAndGetPort(server)
+    server.sessionManager = { destroyAllUserShellSessions: () => 0 }
+    // Skip real encryption/serialization — we only assert server-side authToken.
+    server._send = () => {}
+
+    const encWs = { readyState: 1, close: () => {}, terminate: () => {} }
+    const plainWs = { readyState: 1, close: () => {}, terminate: () => {} }
+    server.clients.set(encWs, { id: 'e', authenticated: true, isPrimaryToken: true, encryptionState: { sharedKey: 'k' }, authToken: 'tok-0' })
+    server.clients.set(plainWs, { id: 'p', authenticated: true, isPrimaryToken: true, encryptionState: null, authToken: 'tok-0' })
+
+    // Scheduled rotation
+    const tok1 = tokenManager.rotate()
+    assert.equal(server.clients.get(encWs).authToken, tok1, 'encrypted client authToken refreshed to current')
+    assert.equal(server.clients.get(plainWs).authToken, 'tok-0', 'unencrypted client NOT refreshed — must reconnect')
+
+    // Linkage to the #6004 create gate (real TokenManager): the refreshed
+    // encrypted client's token now satisfies isCurrentToken → it can open a NEW
+    // shell without reconnecting; the stale unencrypted client still fails it.
+    assert.equal(tokenManager.isCurrentToken(server.clients.get(encWs).authToken), true,
+      'refreshed encrypted client passes the #6004 current-token gate')
+    assert.equal(tokenManager.isCurrentToken(server.clients.get(plainWs).authToken), false,
+      'stale unencrypted client still fails the #6004 gate (must reconnect)')
+
+    // Revoke must NOT refresh authToken (and de-auths instead)
+    const tok2 = tokenManager.revoke()
+    assert.equal(server.clients.get(encWs).authToken, tok1, 'revoke leaves authToken stale (no currency granted)')
+    assert.notEqual(server.clients.get(encWs).authToken, tok2)
+    assert.equal(server.clients.get(encWs).authenticated, false, 'revoke de-auths the connection')
+
+    tokenManager.destroy()
+  })
+
   it('updates apiToken on rotation so new connections use the new token', async () => {
     const { TokenManager } = await import('../src/token-manager.js')
     const tokenManager = new TokenManager({ token: 'first-token', graceMs: 100 })
