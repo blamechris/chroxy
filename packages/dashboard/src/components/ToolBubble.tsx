@@ -28,6 +28,7 @@ import {
   getInputSummary,
   getPartialSummary,
   tryParseCompleteJson,
+  shouldSuppressRawToolInput,
 } from '@chroxy/store-core'
 import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
@@ -108,7 +109,12 @@ export interface ToolBubbleProps {
 // (b) the tool_input shape carries no user-meaningful text on its own.
 // "This shape looks ugly when rendered raw" is NOT sufficient — that's
 // what #4655's generic key:value fallback in `tool-summary.ts` is for.
-const SUPPRESS_RAW_INPUT_TOOLS = new Set(['AskUserQuestion'])
+//
+// #5770 — the suppress set now lives in @chroxy/store-core
+// (`SUPPRESS_RAW_INPUT_TOOLS` / `shouldSuppressRawToolInput`) as the single
+// source of truth so this path and the `ToolGroup` (2+ contiguous tools)
+// detail-panel path can't drift — the group path previously had no
+// suppression check and leaked the raw AskUserQuestion JSON on claude-tui.
 
 export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, serverName, isTail = false, resultImages, childAgentEvents }: ToolBubbleProps) {
   // #4313 — tail bubbles mount expanded so the singleton trailing-tool
@@ -138,7 +144,7 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   // render path owns the display. Gate computed once so both the
   // collapsed summary and the expanded partial-preview branches stay
   // in sync.
-  const suppressRawInput = SUPPRESS_RAW_INPUT_TOOLS.has(toolName)
+  const suppressRawInput = shouldSuppressRawToolInput(toolName)
   // #4081: prefer the structured `input` summary when present (server
   // gave us the full final input, e.g. via legacy non-streaming
   // providers or after `tool_result` lands). Otherwise fall back to the

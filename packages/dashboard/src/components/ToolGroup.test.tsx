@@ -312,11 +312,15 @@ describe('ToolGroup', () => {
       expect(screen.getByTestId('tool-group-entry-detail-2')).toHaveTextContent('root')
     })
 
-    it('renders the structured AskUserQuestion input verbatim so the user can see the question + options', () => {
-      // The bug surfaced via #4278: AskUserQuestion in a TUI session ends
-      // up in the tool group with no way to see what was asked. Until the
-      // server-side fix lands (#4278), at least the dashboard must let the
-      // user expand the entry to read the structured question.
+    it('suppresses the raw AskUserQuestion input — the QuestionPrompt card owns the display (#4667 / #5770)', () => {
+      // History: #4278 originally rendered AskUserQuestion's raw input in the
+      // group as a stopgap so the user could at least read the question. That
+      // is now obsolete — #4667 designated the structured QuestionPrompt card
+      // (driven by the parallel `user_question` event) as the ONLY render
+      // path, and #5770 found the group's detail panel was leaking the raw
+      // `{"questions":[...` JSON beside the card on the claude-tui provider
+      // (an AskUserQuestion sharing a turn with another tool takes the group
+      // path, not the singleton ToolBubble). Both surfaces must suppress.
       const messages = [
         tool('1', 'AskUserQuestion', {
           toolInput: {
@@ -332,9 +336,13 @@ describe('ToolGroup', () => {
       render(<ToolGroup messages={messages} isActive={true} />)
       fireEvent.click(screen.getByTestId('tool-group-entry-row-1'))
       const detail = screen.getByTestId('tool-group-entry-detail-1')
-      expect(detail).toHaveTextContent('Which release strategy?')
-      expect(detail).toHaveTextContent('Patch')
-      expect(detail).toHaveTextContent('Minor')
+      // The raw question text + options must NOT leak anywhere in the group.
+      expect(detail).not.toHaveTextContent('Which release strategy?')
+      expect(detail).not.toHaveTextContent('Patch')
+      expect(detail).not.toHaveTextContent('Minor')
+      // The entry collapses to a quiet placeholder: tool name only, "(no input)".
+      expect(screen.getByTestId('tool-group-entry-1')).toHaveTextContent('AskUserQuestion')
+      expect(detail).toHaveTextContent('(no input)')
     })
 
     it('Thinking entries are not expandable (no marker, no detail panel even on click)', () => {
