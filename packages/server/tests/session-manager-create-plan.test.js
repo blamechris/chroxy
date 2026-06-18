@@ -110,16 +110,19 @@ describe('SessionManager._resolveCreateSessionPlan (#6036)', () => {
     assert.equal(plan.resolvedProvider, 'test-plan-model-limited-6036')
   })
 
-  it('applies _defaultModel via nullish-coalesce for both undefined and null model', () => {
-    // `model ?? this._defaultModel` — preserved verbatim from the inline
-    // front-half. Both omitted (undefined) and explicit null fall back to the
-    // server default; an empty string is kept as-is (only null/undefined coalesce).
-    // NOTE: this pins CURRENT behavior, not a #3403 ruling — whether an explicit
-    // `model: null` should instead SURVIVE as a "use provider default" marker is
-    // tracked in #6064; this refactor only preserves what main did.
+  it('falls back to _defaultModel ONLY for an omitted (undefined) model; null survives (#6064/#3403)', () => {
+    // #6064 ruling: `model === undefined ? this._defaultModel : model`.
+    //  - omitted (undefined) → server-config default (the normal create path).
+    //  - explicit `null` → SURVIVES as the #3403 "use the provider's own default"
+    //    marker. null reaches createSession only via restoreState (the wire
+    //    create_session.model is z.string().optional() — clients send a string or
+    //    omit it, never null), so re-pinning a persisted provider-default to
+    //    _defaultModel would re-introduce the staleness #3403 avoids.
+    //  - empty string → kept as-is (unchanged).
     assert.equal(mgr._resolveCreateSessionPlan({}).resolvedModel, 'default-model')
-    assert.equal(mgr._resolveCreateSessionPlan({ model: null }).resolvedModel, 'default-model')
+    assert.equal(mgr._resolveCreateSessionPlan({ model: null }).resolvedModel, null)
     assert.equal(mgr._resolveCreateSessionPlan({ model: '' }).resolvedModel, '')
+    assert.equal(mgr._resolveCreateSessionPlan({ model: 'allowed-model', provider: 'test-plan-model-limited-6036' }).resolvedModel, 'allowed-model')
   })
 
   it('increments the session-name counter on each call', () => {
