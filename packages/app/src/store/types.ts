@@ -237,6 +237,11 @@ export interface SessionNotification {
  */
 export interface ConnectionSocketData {
   socket: WebSocket | null;
+  // #5699 — reactive mirror of the outgoing message queue's length (the queue
+  // itself lives in message-handler's module context, which is non-reactive).
+  // Surfaced so the reconnect banner can show "N queued" and the manual-
+  // disconnect path can warn before discarding unsent messages.
+  queuedMessageCount: number;
 }
 
 /**

@@ -414,6 +414,21 @@ describe('message queue', () => {
     expect(store.sendInput('overflow')).toBe(false);
   });
 
+  it('mirrors the queue length into reactive queuedMessageCount (#5699)', () => {
+    const store = useConnectionStore.getState();
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(0);
+    store.sendInput('one');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(1);
+    store.sendInput('two');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(2);
+    // Refused responses don't bump the count.
+    store.sendPermissionResponse('req-z', 'allow');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(2);
+    // disconnect() clears the queue → count resets to 0.
+    store.disconnect();
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(0);
+  });
+
   it('returns false when queue is full (max 10)', () => {
     const store = useConnectionStore.getState();
     for (let i = 0; i < 10; i++) {

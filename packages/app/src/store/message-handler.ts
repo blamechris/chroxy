@@ -1009,6 +1009,15 @@ function payloadSessionId(payload: unknown): string | null {
   return null;
 }
 
+/**
+ * #5699 — mirror the (non-reactive, module-level) queue length into the store
+ * so the reconnect banner + manual-disconnect warning can react to it. No-op
+ * when the store isn't wired yet (early enqueue / unit fixtures).
+ */
+function syncQueueCount(): void {
+  if (_store) _store.setState({ queuedMessageCount: _ctx.messageQueue.length });
+}
+
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
   if (QUEUE_EXCLUDED.has(type)) return false;
   const maxAge = QUEUE_TTLS[type];
@@ -1029,6 +1038,7 @@ export function enqueueMessage(type: string, payload: unknown): 'queued' | false
   }
   _ctx.messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
   console.log(`[queue] Queued ${type} (${_ctx.messageQueue.length}/${QUEUE_MAX_SIZE})`);
+  syncQueueCount();
   return 'queued';
 }
 
@@ -1042,6 +1052,7 @@ export function drainMessageQueue(socket: WebSocket): void {
     else expired.push(m);
   }
   _ctx.messageQueue.length = 0;
+  syncQueueCount(); // queue emptied on drain — clear the reactive count (#5699)
 
   // #5633: a queued message can expire before a longer backoff completes —
   // notably an `interrupt` with its 5s TTL. That drop was invisible: the user
@@ -1082,6 +1093,7 @@ export function drainMessageQueue(socket: WebSocket): void {
 
 export function clearMessageQueue(): void {
   _ctx.messageQueue.length = 0;
+  syncQueueCount(); // #5699
 }
 
 /** @internal Exposed for testing only */

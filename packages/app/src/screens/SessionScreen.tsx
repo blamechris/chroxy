@@ -224,6 +224,9 @@ export function SessionScreen() {
   const sendInput = useConnectionStore((s) => s.sendInput);
   const sendInterrupt = useConnectionStore((s) => s.sendInterrupt);
   const disconnect = useConnectionStore((s) => s.disconnect);
+  // #5699 — reactive count of queued (unsent) messages, surfaced in the
+  // reconnect banner and used to warn before a manual disconnect discards them.
+  const queuedMessageCount = useConnectionStore((s) => s.queuedMessageCount);
   // #5725 (#5698) — manual retry from the terminal `server_down` banner.
   const retryConnection = useConnectionStore((s) => s.retryConnection);
   const clearTerminalBuffer = useConnectionStore((s) => s.clearTerminalBuffer);
@@ -923,6 +926,25 @@ export function SessionScreen() {
     inputRef.current?.focus();
   }, []);
 
+  // #5699 — manual disconnect during a reconnect discards the outgoing queue
+  // (disconnect() calls clearMessageQueue). Warn first when there are unsent
+  // messages so the user doesn't silently lose typed input by giving up.
+  const handleStopReconnecting = useCallback(() => {
+    if (queuedMessageCount > 0) {
+      const n = queuedMessageCount;
+      Alert.alert(
+        'Discard unsent messages?',
+        `You have ${n} unsent message${n === 1 ? '' : 's'} waiting to send. Disconnecting will discard ${n === 1 ? 'it' : 'them'}.`,
+        [
+          { text: 'Keep waiting', style: 'cancel' },
+          { text: 'Disconnect', style: 'destructive', onPress: disconnect },
+        ],
+      );
+      return;
+    }
+    disconnect();
+  }, [queuedMessageCount, disconnect]);
+
   const handleInvokeAgent = useCallback((agentName: string) => {
     inputRef.current?.setValue(`@${agentName} `);
     inputRef.current?.focus();
@@ -1316,7 +1338,7 @@ export function SessionScreen() {
                 <Text style={styles.reconnectDisconnectText}>Reconnect</Text>
               </TouchableOpacity>
             ) : (
-              <TouchableOpacity onPress={disconnect} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
+              <TouchableOpacity onPress={handleStopReconnecting} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
                 <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
               </TouchableOpacity>
             )}
@@ -1329,6 +1351,13 @@ export function SessionScreen() {
           )}
           {connectionPhase === 'reconnecting' && connectionError && (
             <Text style={styles.reconnectingDetail}>{connectionError}</Text>
+          )}
+          {/* #5699 — surface unsent queued messages so the user knows they're
+              held (and at risk if they disconnect), rather than silently lost. */}
+          {queuedMessageCount > 0 && (
+            <Text testID="reconnect-queued-count" style={styles.reconnectingDetail}>
+              {queuedMessageCount} unsent message{queuedMessageCount === 1 ? '' : 's'} queued
+            </Text>
           )}
         </View>
       )}
