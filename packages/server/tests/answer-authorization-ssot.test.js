@@ -223,3 +223,178 @@ describe('#6059 handlers actually enforce the SSoT predicate (end-to-end)', () =
     })
   })
 })
+
+/**
+ * #6073 — bound-client and empty-string sessionId edges.
+ *
+ * The #6059 cases above only drive UNBOUND clients (no boundSessionId). Two
+ * production branches in the real handlers are left uncovered at the handler
+ * layer:
+ *
+ * 1. Bound client. Both handlers gate on client.boundSessionId BEFORE the
+ *    isSessionViewer check:
+ *      handleUserQuestionResponse: if (client.boundSessionId && client.boundSessionId !== questionSessionId) return
+ *      handlePermissionResponse:   delegates to resolver.resolve(…, client.boundSessionId, …)
+ *                                  which returns { kind: 'binding_mismatch' } on mismatch.
+ *    A client bound to the WRONG session must be dropped (mapping intact, no
+ *    dispatch); a client bound to the CORRECT session must bypass the unbound
+ *    viewer guard and reach dispatch.
+ *
+ * 2. Empty-string sessionId (permission_response only). resolveOriginSessionId
+ *    uses ?? (not ||), so an explicitly-mapped empty-string id yields
+ *    originSessionId=''. The handler guard is:
+ *      if (!client.boundSessionId && originSessionId) { ... isSessionViewer check ... }
+ *    Because '' is falsy, the guard condition is false → guard SKIPPED → falls
+ *    through to the resolver. This is intentional and documented — the test pins
+ *    it so the skip stays explicit.
+ */
+describe('#6073 bound-client + empty-string sessionId edges (handler layer)', () => {
+  const ws = {}
+
+  describe('user_question_response — bound client', () => {
+    function makeCtx(respondToQuestion) {
+      return {
+        permissions: { questionSessionMap: new Map([['tool-bound', 's1']]) },
+        sessions: {
+          sessionManager: {
+            getSession: (id) => (id === 's1' ? { session: { respondToQuestion } } : null),
+          },
+        },
+      }
+    }
+
+    it('bound-to-wrong-session: dropped before the viewer guard (mapping intact, no dispatch)', () => {
+      // client.boundSessionId='s2' but the question is mapped to 's1'.
+      // Handler line: if (client.boundSessionId && client.boundSessionId !== questionSessionId) return
+      // The mapping must survive so the legitimately-bound or subscribed client can answer.
+      const respondToQuestion = mock.fn()
+      const ctx = makeCtx(respondToQuestion)
+      const client = { id: 'c-wrong', activeSessionId: 's2', subscribedSessionIds: new Set(), boundSessionId: 's2' }
+
+      inputHandlers.user_question_response(ws, client, { toolUseId: 'tool-bound', answer: 'yes' }, ctx)
+
+      assert.equal(respondToQuestion.mock.calls.length, 0, 'a bound client for the wrong session must not reach dispatch')
+      assert.equal(ctx.permissions.questionSessionMap.get('tool-bound'), 's1', 'mapping must be left intact after a binding mismatch')
+    })
+
+    it('bound-to-correct-session: bypasses the unbound viewer guard and routes the answer', () => {
+      // client.boundSessionId='s1' matches questionSessionId='s1' → the binding
+      // mismatch check passes. The unbound viewer guard (isSessionViewer) is then
+      // SKIPPED (it is inside `if (!client.boundSessionId)`) and dispatch fires.
+      const respondToQuestion = mock.fn()
+      const ctx = makeCtx(respondToQuestion)
+      // Deliberately NOT active on s1 or subscribed to s1 — confirms the viewer
+      // guard is bypassed, not just redundantly passing, for a bound client.
+      const client = { id: 'c-correct', activeSessionId: null, subscribedSessionIds: new Set(), boundSessionId: 's1' }
+
+      inputHandlers.user_question_response(ws, client, { toolUseId: 'tool-bound', answer: 'yes' }, ctx)
+
+      assert.equal(respondToQuestion.mock.calls.length, 1, 'a bound client for the correct session must reach dispatch')
+      assert.equal(ctx.permissions.questionSessionMap.has('tool-bound'), false, 'mapping consumed when a bound client answers correctly')
+    })
+  })
+
+  describe('permission_response — bound client', () => {
+    function makeCtx(respondToPermission) {
+      const permissionSessionMap = new Map([['req-bound', 's1']])
+      return {
+        ctx: {
+          transport: { send: mock.fn(), broadcast: mock.fn() },
+          permissions: {
+            permissionSessionMap,
+            pendingPermissions: new Map(),
+            permissions: { resolvePermission: mock.fn() },
+            permissionAudit: null,
+            unregisterPermissionRoute: (rid) => permissionSessionMap.delete(rid),
+          },
+          sessions: {
+            sessionManager: {
+              getSession: (id) => (id === 's1' ? { session: { respondToPermission } } : null),
+            },
+          },
+        },
+        permissionSessionMap,
+      }
+    }
+
+    it('bound-to-wrong-session: resolver returns binding_mismatch (mapping intact, no dispatch, error sent)', () => {
+      // client.boundSessionId='s2' but the request is mapped to 's1'.
+      // The handler's unbound guard is SKIPPED (client IS bound). The resolver is
+      // called with callerBoundSessionId='s2'; it sees mappedSessionId='s1' ≠ 's2'
+      // and returns { kind: 'binding_mismatch' }. The handler sends a WS error and
+      // leaves the mapping intact.
+      const respondToPermission = mock.fn(() => true)
+      const { ctx, permissionSessionMap } = makeCtx(respondToPermission)
+      const client = { id: 'c-wrong', activeSessionId: 's2', subscribedSessionIds: new Set(), boundSessionId: 's2' }
+
+      settingsHandlers.permission_response(ws, client, { requestId: 'req-bound', decision: 'allow' }, ctx)
+
+      assert.equal(respondToPermission.mock.calls.length, 0, 'binding-mismatch must not reach dispatch')
+      assert.equal(permissionSessionMap.get('req-bound'), 's1', 'mapping must survive a binding mismatch')
+      assert.equal(ctx.transport.send.mock.calls.length, 1, 'a WS error must be sent on binding mismatch')
+      assert.equal(ctx.transport.send.mock.calls[0].arguments[1].type, 'error', 'the sent message must be an error type')
+    })
+
+    it('bound-to-correct-session: bypasses the unbound viewer guard and routes the decision', () => {
+      // client.boundSessionId='s1' matches the mapping. The unbound guard is SKIPPED
+      // (condition is !client.boundSessionId → false). Resolver sees a matching
+      // callerBoundSessionId and dispatches via respondToPermission.
+      const respondToPermission = mock.fn(() => true)
+      const { ctx, permissionSessionMap } = makeCtx(respondToPermission)
+      // Deliberately NOT active on s1 or subscribed — confirms the viewer guard
+      // is bypassed, not just coincidentally passing.
+      const client = { id: 'c-correct', activeSessionId: null, subscribedSessionIds: new Set(), boundSessionId: 's1' }
+
+      settingsHandlers.permission_response(ws, client, { requestId: 'req-bound', decision: 'allow' }, ctx)
+
+      assert.equal(respondToPermission.mock.calls.length, 1, 'a bound client for the correct session must reach dispatch')
+      assert.equal(permissionSessionMap.has('req-bound'), false, 'mapping consumed when a bound client responds correctly')
+    })
+  })
+
+  describe('permission_response — empty-string mapped sessionId', () => {
+    it('unbound guard is SKIPPED when originSessionId is empty-string (falsy); falls through to the resolver', () => {
+      // permissionSessionMap maps 'req-empty' → '' (an explicitly-registered empty-
+      // string session id, as honoured by resolveOriginSessionId with ?? not ||).
+      // originSessionId = resolveOriginSessionId('', client.activeSessionId) = ''
+      // Guard: `if (!client.boundSessionId && originSessionId)` → `true && ''` → false
+      // → guard SKIPPED. Falls through to the resolver.
+      //
+      // The resolver also computes originSessionId='' (falsy), so the SDK path
+      // `if (originSessionId && sm)` is not entered. The legacy path fires because
+      // the requestId is in pendingPermissions, consuming the route and calling
+      // resolveLegacyPermission — proving the guard was not the exit point.
+      const resolveLegacyPermission = mock.fn()
+      const permissionSessionMap = new Map([['req-empty', '']])
+      const pendingPermissions = new Map([['req-empty', { data: null }]])
+
+      const ctx = {
+        transport: { send: mock.fn(), broadcast: mock.fn() },
+        permissions: {
+          permissionSessionMap,
+          pendingPermissions,
+          permissions: { resolvePermission: resolveLegacyPermission },
+          permissionAudit: null,
+          unregisterPermissionRoute: (rid) => permissionSessionMap.delete(rid),
+        },
+        sessions: {
+          sessionManager: {
+            getSession: () => null,
+          },
+        },
+      }
+      // Unbound client — the guard would block dispatch for a real non-empty
+      // originSessionId if this client were not a viewer. With originSessionId=''
+      // the guard is skipped entirely regardless of viewer status.
+      const client = { id: 'c-empty', activeSessionId: 's-other', subscribedSessionIds: new Set(), boundSessionId: undefined }
+
+      settingsHandlers.permission_response(ws, client, { requestId: 'req-empty', decision: 'deny' }, ctx)
+
+      // The guard did NOT return early → the resolver was reached → legacy path fired.
+      assert.equal(resolveLegacyPermission.mock.calls.length, 1, 'resolveLegacyPermission must be called, proving the guard was skipped')
+      assert.equal(resolveLegacyPermission.mock.calls[0].arguments[0], 'req-empty', 'correct requestId forwarded')
+      assert.equal(resolveLegacyPermission.mock.calls[0].arguments[1], 'deny', 'correct decision forwarded')
+      assert.equal(permissionSessionMap.has('req-empty'), false, 'route consumed after legacy dispatch')
+    })
+  })
+})

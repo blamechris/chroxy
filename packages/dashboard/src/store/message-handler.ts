@@ -2297,7 +2297,7 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
     // (`markAllSessionNotificationsRead`).
     const readStamp = Date.now();
     set((s) => ({
-      sessionNotifications: s.sessionNotifications.map((n) =>
+      sessionNotifications: (s.sessionNotifications ?? []).map((n) =>
         n.requestId === resolvedRequestId && n.readAt === undefined
           ? { ...n, readAt: readStamp }
           : n
