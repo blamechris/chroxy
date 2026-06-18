@@ -477,6 +477,67 @@ export const ServerPermissionRequestSchema = z.object({
   sessionId: z.string().optional(),
 })
 
+/**
+ * Single validated builder for the `permission_request` wire message (#6031).
+ *
+ * `permission_request` is the most security-relevant message on the wire — a
+ * dropped/misnamed binding field (e.g. `sessionId`) routes a prompt to the
+ * wrong session or strands it on the legacy resolver. It used to be hand-built
+ * as a raw object literal at 4+ emit sites (ws-permissions.js HTTP-fallback +
+ * two resend paths, event-normalizer.js), each free to drift its field set.
+ *
+ * This factory is the one place those sites construct the message, and it
+ * `safeParse`-validates against `ServerPermissionRequestSchema` so field drift
+ * (a missing required field, a wrong type) is caught instead of silently
+ * shipping a malformed prompt.
+ *
+ * Field hygiene:
+ *  - `type` is always set here — callers never pass it.
+ *  - Optional fields (`description`, `remainingMs`, `sessionId`) are omitted
+ *    entirely (absent, not `null`/`undefined`) when not provided, matching the
+ *    existing wire shape (clients fall back to the active session when
+ *    `sessionId` is absent).
+ *  - `input` is passed through as-is. Callers are responsible for redaction
+ *    (#6038: `description: redactValue(...)`, `input: sanitizeToolInput(...)`)
+ *    BEFORE handing values to this builder — it is a shape guard, not a
+ *    redaction layer, and must not re-process already-redacted values.
+ *
+ * Validation failures throw a descriptive `Error` (with the Zod issues) rather
+ * than returning a partial object, so a drift bug surfaces loudly at the emit
+ * site in dev/test/CI instead of corrupting the client prompt.
+ */
+export function buildPermissionRequestMessage(fields: {
+  requestId: string
+  tool: string
+  description?: string
+  input?: unknown
+  remainingMs?: number
+  sessionId?: string
+}): ServerPermissionRequestMessage {
+  const msg: Record<string, unknown> = {
+    type: 'permission_request',
+    requestId: fields.requestId,
+    tool: fields.tool,
+    input: fields.input,
+  }
+  // Omit optional fields when absent so the wire shape stays identical to the
+  // hand-built literals (clients fall back to the active session when
+  // `sessionId` is absent, not null).
+  if (fields.description !== undefined) msg.description = fields.description
+  if (fields.remainingMs !== undefined) msg.remainingMs = fields.remainingMs
+  if (fields.sessionId !== undefined) msg.sessionId = fields.sessionId
+
+  const result = ServerPermissionRequestSchema.safeParse(msg)
+  if (!result.success) {
+    throw new Error(
+      `buildPermissionRequestMessage: invalid permission_request (${result.error.issues
+        .map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`)
+        .join('; ')})`,
+    )
+  }
+  return result.data
+}
+
 export const ServerUserQuestionSchema = z.object({
   type: z.literal('user_question'),
   toolUseId: z.string(),

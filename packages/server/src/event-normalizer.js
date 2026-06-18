@@ -1,6 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { toShortModelId } from './models.js'
 import { createLogger } from './logger.js'
+import { buildPermissionRequestMessage } from '@chroxy/protocol'
 
 const log = createLogger('event-normalizer')
 
@@ -507,14 +508,13 @@ Object.assign(EVENT_MAP, {
 
   permission_request: (data, ctx) => ({
     messages: [{
-      msg: {
-        type: 'permission_request',
+      msg: buildPermissionRequestMessage({
         requestId: data.requestId,
         tool: data.tool,
         description: data.description,
         input: data.input,
         remainingMs: data.remainingMs,
-      },
+      }),
     }],
     registrations: [{ map: 'permission', key: data.requestId, value: ctx.sessionId }],
     sideEffects: [{
