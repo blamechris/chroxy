@@ -83,6 +83,15 @@ export class UserShellSession extends BaseSession {
     this._ptyExited = false
     this._destroying = false
     this._shellAlive = false
+    // #5985 audit — the resolved shell path and the last exit code/reason (set
+    // when the PTY exits), surfaced to the shell-audit trail. resolveShell() is
+    // synchronous, so resolve it HERE (not in async start()) — the create-audit
+    // in the WS handler reads this right after createSession returns, before the
+    // fire-and-forget start() microtask has run, so a start()-set value would
+    // always be null on the audit line (agent review).
+    this._shellPath = resolveShell()
+    this._exitCode = null
+    this._exitReason = null
     this._ptyCols = DEFAULT_COLS
     this._ptyRows = DEFAULT_ROWS
     this._mirrorBuffer = ''
@@ -114,7 +123,9 @@ export class UserShellSession extends BaseSession {
       throw new Error(`node-pty unavailable: ${err.message}`)
     }
 
-    const shell = resolveShell()
+    // Resolved in the constructor (see _shellPath) so the create-audit can read
+    // it synchronously; reuse it here for the actual spawn.
+    const shell = this._shellPath
     let cwdReal
     try {
       cwdReal = realpathSync(this.cwd)
@@ -170,6 +181,10 @@ export class UserShellSession extends BaseSession {
     this._ptyExited = true
     this._shellAlive = false
     const code = info && typeof info.exitCode === 'number' ? info.exitCode : null
+    // #5985 audit — preserve the natural exit code/reason so the destroy audit
+    // entry can report how the shell ended (vs. a SIGTERM-killed null).
+    this._exitCode = code
+    this._exitReason = reason
     log.info(`user-shell exited (reason=${reason}${code != null ? ` code=${code}` : ''})`)
     // Flush any buffered bytes, then a terminal marker so a live viewer sees the
     // shell ended rather than a frozen prompt. Kept out of history (it's a

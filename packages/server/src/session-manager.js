@@ -24,6 +24,7 @@ import { resolveSessionPreset, foldPreamble } from './session-preset.js'
 import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
+import { auditShellDestroy } from './shell-audit.js'
 import {
   forwardPerSessionSettingsToProviderOpts,
   serializePerSessionSettings,
@@ -1707,6 +1708,17 @@ export class SessionManager extends EventEmitter {
       this._removeWorktree(entry.worktreePath, entry.worktreeRepoDir, sessionId)
     }
     log.info(`Destroyed session ${sessionId} "${entry.name}" (${this._sessions.size}/${this.maxSessions})`)
+    // #5985 audit — close the user-shell trail opened at create. Exit code is
+    // the shell's natural code if it ended before this teardown, else null (the
+    // destroy() above SIGTERMs a live shell asynchronously). Read off the
+    // session, set in UserShellSession._onShellExit.
+    if (entry.session?.constructor?.isUserShell === true) {
+      auditShellDestroy({
+        sessionId,
+        exitCode: entry.session._exitCode ?? null,
+        reason: entry.session._exitReason ?? 'destroyed',
+      })
+    }
     this.emit('session_destroyed', { sessionId })
     // Flush synchronously so the deletion survives an abrupt shutdown. The
     // entry is already out of `_sessions` by now, so pass its name explicitly.
@@ -1757,6 +1769,15 @@ export class SessionManager extends EventEmitter {
       // belongs only in destroySessionLocked() (the explicit per-session
       // destroy). Orphan worktrees from sessions that DON'T come back are
       // swept at boot — see worktree-gc (P1-7 follow-up).
+      // #5985 audit — user-shells are non-persisted, so a live shell at
+      // shutdown is torn down here (not via destroySession); close its trail.
+      if (entry.session?.constructor?.isUserShell === true) {
+        auditShellDestroy({
+          sessionId,
+          exitCode: entry.session._exitCode ?? null,
+          reason: entry.session._exitReason ?? 'shutdown',
+        })
+      }
       this.emit('session_destroyed', { sessionId })
     }
     this._sessions.clear()
