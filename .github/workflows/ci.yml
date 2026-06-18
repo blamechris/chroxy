@@ -27,12 +27,18 @@ permissions:
 # `ubuntu-24.04` (GitHub-hosted) so untrusted contributor code never executes on
 # the self-hosted machine, while external contributors still get full CI.
 # The macOS desktop job uses the separate self-hosted macOS runner; the Windows
-# job stays GitHub-hosted (no self-hosted Windows box).
+# job stays GitHub-hosted (no self-hosted Windows box). Three heavy/env-sensitive
+# test jobs (Server Tests, App Tests, Store Core Tests) also stay GitHub-hosted —
+# see the per-job notes; revisit once the Linux runner env/RAM is hardened.
 
 jobs:
   server-tests:
     name: Server Tests
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
+    # Stays GitHub-hosted: the suite has env-sensitive tests that fail on the
+    # ARM64 self-hosted container (e.g. the permission-hook pipeline), and its
+    # c8 coverage run is memory-heavy. Revisit if the runner env is hardened
+    # (see the self-hosted migration follow-up).
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
       run:
@@ -367,7 +373,10 @@ jobs:
 
   store-core-tests:
     name: Store Core Tests
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
+    # Stays GitHub-hosted: under the self-hosted pool's npm-ci memory pressure
+    # (7.7GB Docker VM) this job's install OOM'd (exit 137). Revisit once the
+    # runner has more RAM (see the self-hosted migration follow-up).
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
       run:
@@ -441,7 +450,10 @@ jobs:
 
   app-tests:
     name: App Tests
-    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
+    # Stays GitHub-hosted: 7 jest-expo suites "failed to run" on the ARM64
+    # self-hosted container (native/transform env differences). Revisit if the
+    # runner env is hardened (see the self-hosted migration follow-up).
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
       run:
