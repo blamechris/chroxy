@@ -48,6 +48,16 @@ beforeEach(() => {
     activeServerId: null,
     connectionPhase: 'disconnected',
     ...realActions,
+    // #6063: stub the network-touching `connect` so the switchServer /
+    // connectToServer / connectLocal / pairServer tests — which only assert the
+    // synchronous registry/scope state those actions set BEFORE delegating to
+    // connect() — never open a real WebSocket. The real connect()'s async path
+    // logs via console.* AFTER the test body resolves, racing the vitest worker
+    // teardown ("Closing rpc while onUserConsoleLog was pending" →
+    // EnvironmentTeardownError → green suite, non-zero exit, red CI job). The
+    // retryConnection tests override `connect`/`connectToServer` with their own
+    // spies after this, so they are unaffected.
+    connect: vi.fn(),
   })
 })
 
