@@ -915,15 +915,14 @@ function handleUserQuestionResponse(ws, client, msg, ctx) {
   // to match the client's active or subscribed sessions before routing the
   // answer. Without this, an unbound dashboard tab could submit an answer
   // for any session by replaying a known toolUseId — paired with the log
-  // leak in #4787 this enables cross-session answer hijacking. Mirrors the
-  // default filter used by _broadcastToSession (ws-broadcaster.js:106) so
-  // the set of clients permitted to ANSWER a question is the same set that
-  // could legitimately have RECEIVED it. Leaves the mapping intact so the
-  // legitimate subscribed client can still respond.
+  // leak in #4787 this enables cross-session answer hijacking. Routes through
+  // isSessionViewer (#6030) — the SAME predicate _broadcastToSession uses to
+  // pick recipients (ws-broadcaster.js _matchesSession) — so the set of clients
+  // permitted to ANSWER a question is provably the same set that could
+  // legitimately have RECEIVED it, and the two can never drift. Leaves the
+  // mapping intact so the legitimate subscribed client can still respond.
   if (!client.boundSessionId) {
-    const subscribed = questionSessionId === client.activeSessionId
-      || (client.subscribedSessionIds && client.subscribedSessionIds.has(questionSessionId))
-    if (!subscribed) return
+    if (!isSessionViewer(client, questionSessionId)) return
   }
 
   if (msg.toolUseId) ctx.permissions.questionSessionMap.delete(msg.toolUseId)

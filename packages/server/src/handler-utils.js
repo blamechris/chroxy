@@ -209,6 +209,15 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
 // this so a client that merely knows a session id — but isn't watching it — can't
 // drive or leak its terminal (#5840 review; extended to terminal_input in #5842).
 // Shared here so the session-handlers and input-handlers copies can't drift.
+//
+// #6030: this is ALSO the single source of truth for the answer-authorization
+// invariant "who may ANSWER a permission/question == who could have RECEIVED it".
+// The broadcaster's recipient predicate (_matchesSession), the unbound
+// AskUserQuestion answer guard (input-handlers.js, #4788), and the unbound
+// permission-response guard (settings-handlers.js, #4798) all route through this
+// SAME function — so if the receiver set is ever widened (a new viewer class, the
+// LAN shared-session epic), the answer guards follow automatically and cannot
+// drift back into the cross-session answer-hijack vector #4788/#4798 closed.
 export function isSessionViewer(client, sid) {
   return client.activeSessionId === sid ||
     Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
