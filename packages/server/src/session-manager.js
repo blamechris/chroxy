@@ -1730,6 +1730,40 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Sever every live user-shell session — the #6006 token-revoke primitive.
+   *
+   * Iterates a SNAPSHOT of the session map (destroySession() mutates it) and
+   * destroys each session whose provider CLASS is a user-shell, leaving every
+   * other session untouched. Called by WsServer's `token_rotated` handler when
+   * an operator REVOKES the token (the panic button), never on a scheduled
+   * rotation — a periodic re-key must not kill long-running shells.
+   *
+   * The destroy trail is closed by destroySession()'s #5985 audit; `reason` is
+   * stamped onto each still-live shell first so the trail records WHY it died
+   * (e.g. 'revoked') without clobbering a shell that already exited naturally.
+   *
+   * @param {string} [reason='revoked'] - audit reason recorded on each shell
+   * @returns {number} count of shells severed
+   */
+  destroyAllUserShellSessions(reason = 'revoked') {
+    let severed = 0
+    // Snapshot: destroySession() deletes from _sessions mid-iteration.
+    for (const [sessionId, entry] of [...this._sessions]) {
+      if (entry.session?.constructor?.isUserShell !== true) continue
+      // Record the reason only for a still-live shell — preserve a natural
+      // exit reason already set by UserShellSession._onShellExit.
+      if (entry.session._exitReason == null) {
+        entry.session._exitReason = reason
+      }
+      if (this.destroySession(sessionId)) severed++
+    }
+    if (severed > 0) {
+      log.warn(`Severed ${severed} user-shell session(s): ${reason}`)
+    }
+    return severed
+  }
+
+  /**
    * Destroy all sessions (shutdown cleanup).
    *
    * Sets `_destroying` so any persist call after this point — whether from a

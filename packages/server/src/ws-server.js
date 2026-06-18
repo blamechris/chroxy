@@ -386,7 +386,7 @@ function _isSecureRequest(req) {
  *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
- *   { type: 'token_rotated', expiresAt }                — API token was rotated, client must re-authenticate
+ *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band).
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
@@ -1130,9 +1130,43 @@ export class WsServer {
     // Wire TokenManager rotation events — broadcast new token to all clients
     this._tokenRotatedHandler = null
     if (this._tokenManager) {
-      this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
+      this._tokenRotatedHandler = ({ newToken, expiresAt, reason }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
+
+        if (reason === 'revoke') {
+          // #6006 panic button. The old token is compromised and we cannot tell
+          // an attacker's connection from a legitimate one — every connection
+          // authenticated with the same now-suspect token. So:
+          //   (a) sever every privileged user-shell session, and
+          //   (b) force EVERY connection to re-authenticate: clear
+          //       `authenticated` + `isPrimaryToken` so the dispatch gate
+          //       (_handleMessage) rejects all privileged ops — including a
+          //       re-create of the shell — until the connection re-auths with
+          //       the current token, obtained out-of-band (re-pair / re-scan).
+          // We deliberately do NOT push the new token to any client, even
+          // encrypted ones: handing it down a possibly-compromised connection
+          // would defeat the revoke. The token-less `token_rotated` already
+          // drives clients onto their "must re-authenticate" path.
+          let severed = 0
+          try {
+            severed = this.sessionManager?.destroyAllUserShellSessions('revoked') ?? 0
+          } catch (err) {
+            log.error(`Failed to sever user-shell sessions on revoke: ${err.message}`)
+          }
+          let forced = 0
+          for (const [ws, client] of this.clients) {
+            if (!client.authenticated || ws.readyState !== 1) continue
+            client.authenticated = false
+            client.isPrimaryToken = false
+            this._send(ws, { type: 'token_rotated', expiresAt, reason: 'revoke' })
+            forced++
+          }
+          log.warn(`Token REVOKED — severed ${severed} user-shell session(s), forced re-auth on ${forced} connection(s)`)
+          return
+        }
+
+        // Scheduled/periodic rotation — graceful re-key, live sessions survive.
         // Send the new token to encrypted clients (they need it for reconnection).
         // Unencrypted clients (e.g. localhost dashboard) get the event without the
         // raw token to avoid leaking credentials over plaintext connections.

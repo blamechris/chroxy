@@ -127,6 +127,48 @@ describe('TokenManager', () => {
     assert.equal(emitted.newToken, newToken)
   })
 
+  // #6006 — revoke is the panic button: it must NOT keep the old token valid
+  // (no grace) and must mark the event so WsServer severs sessions + forces
+  // re-auth. A scheduled rotation keeps today's graceful grace-window behavior.
+  it('rotate carries reason "scheduled" by default', () => {
+    manager = new TokenManager({ token: 'abc-123' })
+    let emitted = null
+    manager.on('token_rotated', (data) => { emitted = data })
+    manager.rotate()
+    assert.equal(emitted.reason, 'scheduled')
+  })
+
+  it('revoke generates a new token and carries reason "revoke"', () => {
+    manager = new TokenManager({ token: 'abc-123' })
+    let emitted = null
+    manager.on('token_rotated', (data) => { emitted = data })
+    const newToken = manager.revoke()
+    assert.notEqual(newToken, 'abc-123')
+    assert.equal(manager.currentToken, newToken)
+    assert.equal(manager.validate(newToken), true)
+    assert.equal(emitted.reason, 'revoke')
+    assert.equal(emitted.oldToken, 'abc-123')
+    assert.equal(emitted.newToken, newToken)
+  })
+
+  it('revoke invalidates the old token immediately (no grace)', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 60_000 })
+    const newToken = manager.revoke()
+    // Unlike rotate(), the old token must be rejected at once.
+    assert.equal(manager.validate('abc-123'), false)
+    assert.equal(manager.validate(newToken), true)
+  })
+
+  it('revoke tears down an in-flight grace window from a prior rotation', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 60_000 })
+    const second = manager.rotate() // 'abc-123' now in grace
+    assert.equal(manager.validate('abc-123'), true)
+    const third = manager.revoke() // panic — kill everything but current
+    assert.equal(manager.validate('abc-123'), false)
+    assert.equal(manager.validate(second), false)
+    assert.equal(manager.validate(third), true)
+  })
+
   it('rotate calls onPersist callback', async () => {
     let persisted = null
     manager = new TokenManager({
