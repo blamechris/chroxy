@@ -38,6 +38,10 @@ import { describe, it, expect } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
+import {
+  extractAppHandlerTypes,
+  extractDashboardHandlerTypes,
+} from '@chroxy/protocol/handler-coverage'
 import { SWITCH_FIXTURES } from './fixtures'
 import { DISPATCH_TABLE_TYPES } from '../dispatch-table'
 
@@ -119,29 +123,18 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
 
 // ---------------------------------------------------------------------------
 // Static extraction — derive the both-clients-SWITCH universe from the two
-// clients' real handler sources. Mirrors the protocol handler-coverage guard.
+// clients' real handler sources. The extractors are the SHARED helper from
+// @chroxy/protocol/handler-coverage (#6021), the single source of truth this
+// lint and the protocol handler-coverage guard both consume so they can never
+// diverge on the parse (the previous local copy here was stricter and could
+// miss HANDLERS-map keys in some formatting cases).
 // ---------------------------------------------------------------------------
-
-/** App handler uses only `case '<type>':` clauses. */
-function extractAppSwitchTypes(src: string): Set<string> {
-  return new Set([...src.matchAll(/case\s+'([a-z_]+)'/g)].map((m) => m[1]))
-}
-
-/** Dashboard handler uses `case '<type>':` clauses AND a `HANDLERS` map. */
-function extractDashSwitchTypes(src: string): Set<string> {
-  const types = new Set<string>([...src.matchAll(/case\s+'([a-z_]+)'/g)].map((m) => m[1]))
-  const handlersBlock = src.match(/const HANDLERS:\s*Record<string,\s*Handler>\s*=\s*\{([\s\S]*?)\n\}/)
-  if (handlersBlock) {
-    for (const m of handlersBlock[1].matchAll(/^\s*([a-z_]+):/gm)) types.add(m[1])
-  }
-  return types
-}
 
 function bothClientsSwitchTypes(): string[] {
   const appSrc = readFileSync(appHandlerPath, 'utf-8')
   const dashSrc = readFileSync(dashHandlerPath, 'utf-8')
-  const appTypes = extractAppSwitchTypes(appSrc)
-  const dashTypes = extractDashSwitchTypes(dashSrc)
+  const appTypes = extractAppHandlerTypes(appSrc)
+  const dashTypes = extractDashboardHandlerTypes(dashSrc)
   const dispatchTableTypes = new Set<string>(DISPATCH_TABLE_TYPES)
   return [...appTypes]
     .filter((t) => dashTypes.has(t) && !dispatchTableTypes.has(t))
