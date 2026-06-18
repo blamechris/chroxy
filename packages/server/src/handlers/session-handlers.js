@@ -5,6 +5,7 @@
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -185,6 +186,20 @@ function handleCreateSession(ws, client, msg, ctx) {
     ctx.transport.setActiveSession(client, sessionId)
     ctx.transport.subscribeClient(client, sessionId)
     const entry = ctx.sessions.sessionManager.getSession(sessionId)
+    // #5985 audit — a user-shell spawn is host code execution; record who
+    // opened it (token class + client id/device), where, and which shell, so
+    // shell usage is traceable. Only the create path here knows the token
+    // class; the matching destroy entry is emitted by SessionManager.
+    if (provider === USER_SHELL_PROVIDER) {
+      auditShellCreate({
+        sessionId,
+        clientId: client.id,
+        tokenClass: client.isPrimaryToken === true ? 'primary' : 'other',
+        cwd: entry?.cwd,
+        shell: entry?.session?._shellPath,
+        deviceName: client.deviceInfo?.deviceName,
+      })
+    }
     // #5553: disclose the resolved per-repo session preset on the create
     // confirmation so the client can (a) show the "repo preset applied" badge
     // and (b) stage the seed EDITABLE into the new session's composer (never

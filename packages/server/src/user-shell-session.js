@@ -83,6 +83,11 @@ export class UserShellSession extends BaseSession {
     this._ptyExited = false
     this._destroying = false
     this._shellAlive = false
+    // #5985 audit — the resolved shell path (set at spawn) and the last exit
+    // code/reason (set when the PTY exits), surfaced to the shell-audit trail.
+    this._shellPath = null
+    this._exitCode = null
+    this._exitReason = null
     this._ptyCols = DEFAULT_COLS
     this._ptyRows = DEFAULT_ROWS
     this._mirrorBuffer = ''
@@ -115,6 +120,7 @@ export class UserShellSession extends BaseSession {
     }
 
     const shell = resolveShell()
+    this._shellPath = shell
     let cwdReal
     try {
       cwdReal = realpathSync(this.cwd)
@@ -170,6 +176,10 @@ export class UserShellSession extends BaseSession {
     this._ptyExited = true
     this._shellAlive = false
     const code = info && typeof info.exitCode === 'number' ? info.exitCode : null
+    // #5985 audit — preserve the natural exit code/reason so the destroy audit
+    // entry can report how the shell ended (vs. a SIGTERM-killed null).
+    this._exitCode = code
+    this._exitReason = reason
     log.info(`user-shell exited (reason=${reason}${code != null ? ` code=${code}` : ''})`)
     // Flush any buffered bytes, then a terminal marker so a live viewer sees the
     // shell ended rather than a frozen prompt. Kept out of history (it's a
