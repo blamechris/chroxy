@@ -191,9 +191,12 @@ export function handleSessionStopped(
 // log_entry
 // ---------------------------------------------------------------------------
 
-export type LogLevel = 'debug' | 'info' | 'warn' | 'error'
+// 'audit' (#6001) is the server's always-on security-trail level (shell-audit) —
+// emitted regardless of LOG_LEVEL and surfaced as a first-class, filterable
+// level on the dashboard rather than being coerced down to 'info'.
+export type LogLevel = 'debug' | 'info' | 'warn' | 'error' | 'audit'
 
-const VALID_LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error'])
+const VALID_LOG_LEVELS = new Set<LogLevel>(['debug', 'info', 'warn', 'error', 'audit'])
 
 export interface LogEntry {
   id: string

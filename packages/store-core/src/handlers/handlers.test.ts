@@ -1969,6 +1969,12 @@ describe('handleLogEntry', () => {
     expect(handleLogEntry({ level: 'error' }).entry.level).toBe('error')
   })
 
+  it('preserves the always-on audit level (#6001), not coercing it to info', () => {
+    // The server's shell-audit trail is emitted at level 'audit'; the dashboard
+    // must keep it first-class (filterable / distinctly badged), not flatten it.
+    expect(handleLogEntry({ level: 'audit' }).entry.level).toBe('audit')
+  })
+
   it('defaults missing message to empty string', () => {
     const result = handleLogEntry({ component: 'ws' })
     expect(result.entry.message).toBe('')
