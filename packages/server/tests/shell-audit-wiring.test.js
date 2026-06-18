@@ -203,6 +203,38 @@ if (typeof mock.module !== 'function') {
       assert.equal(createCalls.length, 0)
     })
   })
+
+  // #5985 revoke-kills-live-shells — destroyAllUserShellSessions severs every
+  // live user-shell on token rotation, leaves other sessions, audits with the
+  // revoke reason.
+  describe('destroyAllUserShellSessions (#5985 revoke-kills-live-shells)', () => {
+    beforeEach(() => { destroyCalls.length = 0 })
+
+    it('destroys every user-shell, leaves non-shell sessions, audits reason=token-rotated', () => {
+      const mgr = makeMgr()
+      const shellA = mgr.createSession({ name: 'shA', cwd: '/tmp', provider: 'test-audit-usershell' })
+      const shellB = mgr.createSession({ name: 'shB', cwd: '/tmp', provider: 'test-audit-usershell' })
+      const chat = mgr.createSession({ name: 'chat', cwd: '/tmp', provider: 'test-audit-normal' })
+
+      const count = mgr.destroyAllUserShellSessions('token-rotated')
+
+      assert.equal(count, 2, 'both user-shells destroyed')
+      assert.equal(mgr.getSession(shellA), null)
+      assert.equal(mgr.getSession(shellB), null)
+      assert.ok(mgr.getSession(chat), 'non-shell session survives')
+      assert.equal(destroyCalls.length, 2)
+      assert.ok(destroyCalls.every((c) => c.reason === 'token-rotated'))
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+
+    it('is a no-op (returns 0) when there are no user-shell sessions', () => {
+      const mgr = makeMgr()
+      mgr.createSession({ name: 'chat', cwd: '/tmp', provider: 'test-audit-normal' })
+      assert.equal(mgr.destroyAllUserShellSessions('token-rotated'), 0)
+      assert.equal(destroyCalls.length, 0)
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+  })
 }
 
 function makeWs() { return {} }

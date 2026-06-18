@@ -1727,6 +1727,43 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
+   * Destroy every live user-shell session (#5985 "revoke-kills-live-shells").
+   *
+   * Called on token rotation so a leaked-then-rotated primary token can't keep
+   * an already-open remote root shell alive (auth is only checked once at
+   * connect, so the shell would otherwise survive the rotation — see
+   * docs/security/bearer-token-authority.md §12). Every user-shell is
+   * primary-created (the create gate rejects all other token classes), so
+   * "all user-shell sessions" is exactly the set of privileged shells to sever.
+   *
+   * Collects ids first, then destroys, so mutating `_sessions` during teardown
+   * can't disturb the iteration. The audit reason flows through the session's
+   * `_exitReason` (preserving a natural exit reason if the shell already ended).
+   *
+   * @param {string} reason - audit reason for the teardown (e.g. 'token-rotated')
+   * @returns {number} how many user-shell sessions were destroyed
+   */
+  destroyAllUserShellSessions(reason = 'revoked') {
+    const ids = []
+    for (const [sessionId, entry] of this._sessions) {
+      if (entry.session?.constructor?.isUserShell === true) ids.push(sessionId)
+    }
+    for (const sessionId of ids) {
+      const entry = this._sessions.get(sessionId)
+      if (entry?.session) {
+        // Surface the revoke reason on the audit line; keep a real exit reason
+        // if the shell happened to end on its own just before the sweep.
+        entry.session._exitReason = entry.session._exitReason ?? reason
+      }
+      this.destroySession(sessionId)
+    }
+    if (ids.length > 0) {
+      log.info(`Destroyed ${ids.length} user-shell session(s) (reason=${reason})`)
+    }
+    return ids.length
+  }
+
+  /**
    * Destroy all sessions (shutdown cleanup).
    *
    * Sets `_destroying` so any persist call after this point — whether from a

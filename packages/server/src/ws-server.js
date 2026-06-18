@@ -1133,6 +1133,20 @@ export class WsServer {
       this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
+        // #5985 revoke-kills-live-shells: rotation is a credential-revoke
+        // boundary, so sever every already-open user-shell (raw $SHELL PTY)
+        // immediately — otherwise a leaked-then-rotated primary token would keep
+        // its remote root shell alive (auth is checked once at connect). Every
+        // user-shell is primary-created, so this targets exactly the privileged
+        // shells. The destroyed shells are audited (reason=token-rotated). Note:
+        // an old token still inside its grace window could reconnect and create
+        // a NEW shell — closing that is tracked separately (a shell create
+        // should require a current, non-grace token).
+        try {
+          this.sessionManager?.destroyAllUserShellSessions?.('token-rotated')
+        } catch (err) {
+          log.error(`revoke-kills-live-shells sweep failed on token rotation: ${err?.message}`)
+        }
         // Send the new token to encrypted clients (they need it for reconnection).
         // Unencrypted clients (e.g. localhost dashboard) get the event without the
         // raw token to avoid leaking credentials over plaintext connections.
