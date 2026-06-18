@@ -95,15 +95,30 @@ describe('terminal_output receive', () => {
   });
   afterEach(() => _testMessageHandler.clearContext());
 
-  it('appends the data string to the raw terminal buffer (same path as raw)', () => {
-    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'sess-1', data: 'hello shell\r\n' });
+  it('appends the data string for the ACTIVE session (same path as raw)', () => {
+    // activeSessionId is 'default' (see top-level beforeEach).
+    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'default', data: 'hello shell\r\n' });
     expect(useConnectionStore.getState().terminalRawBuffer).toContain('hello shell');
+  });
+
+  it('ignores a frame for a non-active session (no cross-session bleed)', () => {
+    // A stale frame for a just-left session must not paint the active terminal
+    // (mobile uses one global terminalRawBuffer). Active is 'default'.
+    const before = useConnectionStore.getState().terminalRawBuffer;
+    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'other-session', data: 'stale bytes' });
+    expect(useConnectionStore.getState().terminalRawBuffer).toBe(before);
+  });
+
+  it('ignores a frame with a missing sessionId', () => {
+    const before = useConnectionStore.getState().terminalRawBuffer;
+    _testMessageHandler.handle({ type: 'terminal_output', data: 'orphan' });
+    expect(useConnectionStore.getState().terminalRawBuffer).toBe(before);
   });
 
   it('ignores a non-string data payload without throwing or appending', () => {
     const before = useConnectionStore.getState().terminalRawBuffer;
-    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'sess-1', data: 12345 });
-    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'sess-1' });
+    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'default', data: 12345 });
+    _testMessageHandler.handle({ type: 'terminal_output', sessionId: 'default' });
     expect(useConnectionStore.getState().terminalRawBuffer).toBe(before);
   });
 });

@@ -1587,7 +1587,7 @@ export function SessionScreen() {
             />
           </ErrorBoundary>
         ) : (
-          // TODO(#5837): interactive keystroke input (xterm stdin + terminal_input) — PR2.
+          // TODO(#6003): interactive keystroke input (xterm stdin + terminal_input) — PR2.
           // PR1 is a read-only mirror: terminal_output renders here via the
           // write-callback path, but no keystrokes are forwarded yet.
           <ErrorBoundary fallbackTitle="Terminal error">
