@@ -1191,6 +1191,14 @@ export class WsServer {
           // matches the documented contract + TokenManager's event payload.
           if (client.encryptionState) {
             this._send(ws, { type: 'token_rotated', token: newToken, expiresAt, reason: 'scheduled' })
+            // #6012: this connection just received the new token, so refresh the
+            // token recorded at auth — an honest, still-connected encrypted
+            // primary can then open a NEW user-shell (#6004 gate) without a
+            // reconnect. Only on a SCHEDULED push: revoke never pushes the token
+            // and de-auths instead, so a compromised connection can't gain
+            // currency this way. Unencrypted clients get no token, so theirs
+            // stays stale (they must reconnect) — handled by the else branch.
+            client.authToken = newToken
             encrypted++
           } else {
             this._send(ws, { type: 'token_rotated', expiresAt, reason: 'scheduled' })
