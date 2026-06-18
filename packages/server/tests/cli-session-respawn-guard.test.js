@@ -33,13 +33,17 @@ class RespawnTestHarness extends EventEmitter {
     // #5349: rolling-window cap, checked BEFORE _respawnCount.
     if (!this._respawnRateLimiter.record()) {
       const { maxPerWindow, windowMs } = this._respawnRateLimiter
-      this.emit('error', { message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      // #5698: coded terminal error + the session-dropping signal.
+      this.emit('error', { code: 'cli_respawn_exhausted', message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      this.emit('respawn_exhausted', { reason: 'cli_respawn_rate_capped' })
       return
     }
 
     this._respawnCount++
     if (this._respawnCount > 5) {
-      this.emit('error', { message: 'Claude process failed to stay alive after 5 attempts' })
+      // #5698: coded terminal error + the session-dropping signal.
+      this.emit('error', { code: 'cli_respawn_exhausted', message: 'Claude process failed to stay alive after 5 attempts' })
+      this.emit('respawn_exhausted', { reason: 'cli_respawn_exhausted', attempts: this._respawnCount - 1 })
       return
     }
 
