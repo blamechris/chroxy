@@ -252,7 +252,7 @@ describe('permission_resolved flips answered + clears options (in-place)', () =>
     const ss = (store.getState() as unknown as { sessionStates: Record<string, SessionState> })
       .sessionStates['s1']
     expect(ss!.messages).toHaveLength(1)
-    const bubble = ss!.messages[0] as Record<string, unknown>
+    const bubble = ss!.messages[0] as unknown as Record<string, unknown>
     // Shape invariant: same id/type/content/tool (not duplicated or wiped)
     expect(bubble.id).toBe('prompt-req-1')
     expect(bubble.type).toBe('prompt')
