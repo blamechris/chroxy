@@ -1972,7 +1972,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         const code = data.charCodeAt(end - 1);
         if (code >= 0xd800 && code <= 0xdbff) end -= 1;
       }
-      sendIfOpen({ type: 'terminal_input', sessionId, data: data.slice(i, end) });
+      // sendIfOpen returns false when the socket isn't OPEN; bail rather than
+      // slicing the rest of a large paste into frames that can't be sent.
+      if (!sendIfOpen({ type: 'terminal_input', sessionId, data: data.slice(i, end) })) return;
       i = end;
     }
   },

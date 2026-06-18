@@ -216,6 +216,32 @@ describe('TerminalView interactive input (#6003)', () => {
     expect(onInput).toHaveBeenCalledWith('ls -la\r');
   });
 
+  it('IGNORES an input message when read-only (defense vs unexpected WebView messages)', () => {
+    const onInput = jest.fn();
+    act(() => {
+      create(<TerminalView onInput={onInput} />); // not interactive
+    });
+    markReady();
+    act(() => {
+      getWebView().emitMessage(JSON.stringify({ type: 'input', data: 'rm -rf /\r' }));
+    });
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  it('focus() is a no-op when read-only (does not summon the keyboard)', () => {
+    const handleRef = React.createRef<TerminalHandle>();
+    act(() => {
+      create(<TerminalView ref={handleRef} />); // not interactive
+    });
+    markReady();
+    const wv = getWebView();
+    wv.postMessage.mockClear();
+    act(() => {
+      handleRef.current!.focus();
+    });
+    expect(wv.postMessage).not.toHaveBeenCalled();
+  });
+
   it('focus() posts a focus bridge message', () => {
     const handleRef = React.createRef<TerminalHandle>();
     act(() => {
@@ -259,18 +285,23 @@ describe('TerminalView interactive input (#6003)', () => {
     expect(findPosted('set-interactive')).toEqual({ type: 'set-interactive', enabled: true });
   });
 
-  it('marks the WebView text-interaction-enabled only when interactive', () => {
+  it('gates textInteractionEnabled + keyboardDisplayRequiresUserAction on interactive', () => {
     let roRenderer!: ReactTestRenderer;
     act(() => {
       roRenderer = create(<TerminalView />);
     });
-    expect(roRenderer.root.findByProps({ testID: 'webview' }).props.textInteractionEnabled).toBe(false);
+    const roWebView = roRenderer.root.findByProps({ testID: 'webview' });
+    expect(roWebView.props.textInteractionEnabled).toBe(false);
+    // Read-only keeps the pre-PR behavior (prop left undefined, not forced false).
+    expect(roWebView.props.keyboardDisplayRequiresUserAction).toBeUndefined();
 
     let intRenderer!: ReactTestRenderer;
     act(() => {
       intRenderer = create(<TerminalView interactive />);
     });
-    expect(intRenderer.root.findByProps({ testID: 'webview' }).props.textInteractionEnabled).toBe(true);
+    const intWebView = intRenderer.root.findByProps({ testID: 'webview' });
+    expect(intWebView.props.textInteractionEnabled).toBe(true);
+    expect(intWebView.props.keyboardDisplayRequiresUserAction).toBe(false);
   });
 });
 

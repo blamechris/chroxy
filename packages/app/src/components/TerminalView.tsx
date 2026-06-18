@@ -128,7 +128,8 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
       pendingWritesRef.current = [];
     },
     focus() {
-      if (readyRef.current) postFocus();
+      // Only an interactive terminal should summon the soft keyboard.
+      if (readyRef.current && interactiveRef.current) postFocus();
     },
   }), [postWrite, postClear, postFocus]);
 
@@ -166,8 +167,10 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
       } else if (msg.type === 'resize') {
         onResize?.(msg.cols, msg.rows);
       } else if (msg.type === 'input') {
-        // #6003 — a keystroke/paste from an interactive terminal.
-        if (typeof msg.data === 'string') onInputRef.current?.(msg.data);
+        // #6003 — a keystroke/paste from an interactive terminal. Guard on
+        // interactivity too (not just the WebView's disableStdin) so an
+        // unexpected/malicious 'input' message can't drive a read-only terminal.
+        if (interactiveRef.current && typeof msg.data === 'string') onInputRef.current?.(msg.data);
       }
     } catch {
       // Ignore malformed messages
@@ -220,10 +223,11 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         // an interactive user-shell terminal; a read-only chat/mirror terminal
         // stays selection-free as before.
         textInteractionEnabled={!!interactive}
-        // #6003 — let a tap inside the WebView summon the keyboard without an
-        // extra user gesture (the tap itself is the gesture). iOS-only prop;
-        // harmless elsewhere.
-        keyboardDisplayRequiresUserAction={false}
+        // #6003 — for an interactive terminal, let a tap inside the WebView
+        // summon the keyboard without an extra user gesture (the tap itself is
+        // the gesture). Left undefined for a read-only terminal so its behavior
+        // is unchanged from before this PR. iOS-only prop.
+        keyboardDisplayRequiresUserAction={interactive ? false : undefined}
       />
     </View>
   );
