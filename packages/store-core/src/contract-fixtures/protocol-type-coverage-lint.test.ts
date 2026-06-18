@@ -89,7 +89,11 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 function serverSchemaTypes(): string[] {
   const src = readFileSync(serverSchemaPath, 'utf-8')
   const types = new Set(
-    [...src.matchAll(/type:\s*z\.literal\('([a-z_]+)'\)/g)].map((m) => m[1]),
+    // Permissive on quote style, identifier chars (digits/caps), and whitespace
+    // so a reformat / double-quote / digit-bearing type can't silently slip the
+    // drift guard (#6033 review). The `type:` anchor still excludes non-message
+    // literals (e.g. serverMode: z.literal('cli'), reason: z.literal(...)).
+    [...src.matchAll(/type:\s*z\.literal\(\s*['"]([A-Za-z0-9_]+)['"]\s*\)/g)].map((m) => m[1]),
   )
   return [...types].sort()
 }
