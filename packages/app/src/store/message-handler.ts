@@ -2659,6 +2659,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    // #5835 / #5987 — live PTY mirror channel. Unlike legacy 'raw' (claude-tui's
+    // headless output), terminal_output is the opt-in mirror stream for a
+    // user-shell ($SHELL) session subscribed via terminal_subscribe. Render it
+    // through the exact same write-callback → xterm path as 'raw' so user-shell
+    // output appears in TerminalView with no TerminalView changes. Read-only in
+    // PR1; interactive stdin (terminal_input) is deferred — see #5837.
+    case 'terminal_output': {
+      const data = msg.data;
+      if (typeof data === 'string') {
+        get().appendTerminalData(data);
+        useTerminalStore.getState().appendTerminalData(data);
+      }
+      break;
+    }
+
     case 'claude_ready': {
       const patch = sharedClaudeReady();
       const targetId = resolveSessionId(msg, get().activeSessionId);

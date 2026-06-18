@@ -655,6 +655,13 @@ export interface UIViewActions {
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   resize: (cols: number, rows: number) => void;
+  // #5835 / #5987 — live PTY mirror channel (read-only on mobile in PR1).
+  // Opt in/out of a session's terminal_output stream and report the viewer's
+  // grid size. Used by user-shell sessions; claude-tui keeps its legacy 'raw'
+  // + `resize` path. Interactive stdin (terminal_input) is deferred — see #5837.
+  subscribeTerminalMirror: (sessionId: string) => void;
+  unsubscribeTerminalMirror: (sessionId: string) => void;
+  sendTerminalResize: (sessionId: string, cols: number, rows: number) => void;
 }
 
 /**
