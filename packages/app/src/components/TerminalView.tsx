@@ -53,21 +53,34 @@ export function shouldAllowTerminalNavigation(request: ShouldStartLoadRequest): 
 export interface TerminalHandle {
   write: (data: string) => void;
   clear: () => void;
+  /** #6003 — focus the terminal (summons the soft keyboard when interactive). */
+  focus: () => void;
 }
 
 export interface TerminalViewProps {
   onResize?: (cols: number, rows: number) => void;
   onReady?: () => void;
+  // #6003 — when true, xterm stdin is enabled (interactive user-shell PTY) and
+  // keystrokes/paste stream back via onInput. Defaults to read-only (chat /
+  // claude-tui mirror) so existing behavior is unchanged.
+  interactive?: boolean;
+  onInput?: (data: string) => void;
 }
 
 // -- Component --
 
-export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function TerminalView({ onResize, onReady }, ref) {
+export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function TerminalView({ onResize, onReady, interactive, onInput }, ref) {
   const webViewRef = useRef<WebView>(null);
   const readyRef = useRef(false);
   const pendingWritesRef = useRef<string[]>([]);
   const [recovering, setRecovering] = useState(false);
   const recoverTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // #6003 — keep onInput + interactive in refs so the (stable) message handler
+  // and the ready path read the latest without re-subscribing.
+  const onInputRef = useRef(onInput);
+  const interactiveRef = useRef(interactive);
+  useEffect(() => { onInputRef.current = onInput; }, [onInput]);
+  useEffect(() => { interactiveRef.current = interactive; }, [interactive]);
 
   const html = useMemo(() => buildXtermHtml(), []);
 
@@ -92,6 +105,14 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
     webViewRef.current?.postMessage(JSON.stringify({ type: 'clear' }));
   }, []);
 
+  // #6003 — toggle xterm stdin / focus the terminal via the bridge.
+  const postSetInteractive = useCallback((enabled: boolean) => {
+    webViewRef.current?.postMessage(JSON.stringify({ type: 'set-interactive', enabled }));
+  }, []);
+  const postFocus = useCallback(() => {
+    webViewRef.current?.postMessage(JSON.stringify({ type: 'focus' }));
+  }, []);
+
   useImperativeHandle(ref, () => ({
     write(data: string) {
       if (readyRef.current) {
@@ -106,7 +127,18 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
       }
       pendingWritesRef.current = [];
     },
-  }), [postWrite, postClear]);
+    focus() {
+      // Only an interactive terminal should summon the soft keyboard.
+      if (readyRef.current && interactiveRef.current) postFocus();
+    },
+  }), [postWrite, postClear, postFocus]);
+
+  // #6003 — push interactivity changes once the page is ready. The ready handler
+  // (below) applies the initial state via interactiveRef, so this only fires for
+  // post-ready toggles (e.g. switching to/from a user-shell session).
+  useEffect(() => {
+    if (readyRef.current) postSetInteractive(!!interactive);
+  }, [interactive, postSetInteractive]);
 
   const handleMessage = useCallback((event: WebViewMessageEvent) => {
     try {
@@ -124,6 +156,9 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         if (pending.length > 0) {
           postWrite(pending.join(''));
         }
+        // #6003 — apply the current interactivity state to the freshly-loaded
+        // page (initial mount and after a crash-recovery reload).
+        if (interactiveRef.current) postSetInteractive(true);
         onReady?.();
         // Forward initial dimensions so the PTY is sized correctly on mount/reload
         if (typeof msg.cols === 'number' && typeof msg.rows === 'number') {
@@ -131,11 +166,16 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         }
       } else if (msg.type === 'resize') {
         onResize?.(msg.cols, msg.rows);
+      } else if (msg.type === 'input') {
+        // #6003 — a keystroke/paste from an interactive terminal. Guard on
+        // interactivity too (not just the WebView's disableStdin) so an
+        // unexpected/malicious 'input' message can't drive a read-only terminal.
+        if (interactiveRef.current && typeof msg.data === 'string') onInputRef.current?.(msg.data);
       }
     } catch {
       // Ignore malformed messages
     }
-  }, [postWrite, onReady, onResize]);
+  }, [postWrite, postSetInteractive, onReady, onResize]);
 
   // Crash recovery: reload WebView when the OS kills the content process
   const handleWebViewCrash = useCallback(() => {
@@ -179,8 +219,15 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
         showsHorizontalScrollIndicator={false}
         allowsInlineMediaPlayback={true}
         mediaPlaybackRequiresUserAction={false}
-        // Prevent text selection in WebView (display-only terminal)
-        textInteractionEnabled={false}
+        // #6003 — allow text interaction (tap-to-focus → soft keyboard) only for
+        // an interactive user-shell terminal; a read-only chat/mirror terminal
+        // stays selection-free as before.
+        textInteractionEnabled={!!interactive}
+        // #6003 — for an interactive terminal, let a tap inside the WebView
+        // summon the keyboard without an extra user gesture (the tap itself is
+        // the gesture). Left undefined for a read-only terminal so its behavior
+        // is unchanged from before this PR. iOS-only prop.
+        keyboardDisplayRequiresUserAction={interactive ? false : undefined}
       />
     </View>
   );

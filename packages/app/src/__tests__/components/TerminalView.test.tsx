@@ -177,6 +177,134 @@ describe('TerminalView postMessage bridge (#5519)', () => {
   });
 });
 
+describe('TerminalView interactive input (#6003)', () => {
+  // Find a captured RN->WebView bridge message of a given type.
+  function findPosted(type: string): Record<string, unknown> | undefined {
+    return getWebView()
+      .postMessage.mock.calls.map((c) => JSON.parse(c[0] as string))
+      .find((m) => m.type === type);
+  }
+
+  it('enables stdin on ready when interactive (posts set-interactive:true)', () => {
+    act(() => {
+      create(<TerminalView interactive />);
+    });
+    markReady();
+    expect(findPosted('set-interactive')).toEqual({ type: 'set-interactive', enabled: true });
+  });
+
+  it('does NOT enable stdin on ready when read-only (default)', () => {
+    act(() => {
+      create(<TerminalView />);
+    });
+    markReady();
+    const setTrue = getWebView()
+      .postMessage.mock.calls.map((c) => JSON.parse(c[0] as string))
+      .find((m) => m.type === 'set-interactive' && m.enabled === true);
+    expect(setTrue).toBeUndefined();
+  });
+
+  it('forwards xterm input (onData → {type:\'input\'}) to onInput', () => {
+    const onInput = jest.fn();
+    act(() => {
+      create(<TerminalView interactive onInput={onInput} />);
+    });
+    markReady();
+    act(() => {
+      getWebView().emitMessage(JSON.stringify({ type: 'input', data: 'ls -la\r' }));
+    });
+    expect(onInput).toHaveBeenCalledWith('ls -la\r');
+  });
+
+  it('IGNORES an input message when read-only (defense vs unexpected WebView messages)', () => {
+    const onInput = jest.fn();
+    act(() => {
+      create(<TerminalView onInput={onInput} />); // not interactive
+    });
+    markReady();
+    act(() => {
+      getWebView().emitMessage(JSON.stringify({ type: 'input', data: 'rm -rf /\r' }));
+    });
+    expect(onInput).not.toHaveBeenCalled();
+  });
+
+  it('focus() is a no-op when read-only (does not summon the keyboard)', () => {
+    const handleRef = React.createRef<TerminalHandle>();
+    act(() => {
+      create(<TerminalView ref={handleRef} />); // not interactive
+    });
+    markReady();
+    const wv = getWebView();
+    wv.postMessage.mockClear();
+    act(() => {
+      handleRef.current!.focus();
+    });
+    expect(wv.postMessage).not.toHaveBeenCalled();
+  });
+
+  it('focus() posts a focus bridge message', () => {
+    const handleRef = React.createRef<TerminalHandle>();
+    act(() => {
+      create(<TerminalView ref={handleRef} interactive />);
+    });
+    markReady();
+    const wv = getWebView();
+    wv.postMessage.mockClear();
+    act(() => {
+      handleRef.current!.focus();
+    });
+    expect(JSON.parse(wv.postMessage.mock.calls[0][0] as string)).toEqual({ type: 'focus' });
+  });
+
+  it('pushes interactivity changes after ready (read-only → interactive toggle)', () => {
+    const handleRef = React.createRef<TerminalHandle>();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<TerminalView ref={handleRef} interactive={false} />);
+    });
+    markReady();
+    const wv = getWebView();
+    wv.postMessage.mockClear();
+    act(() => {
+      renderer.update(<TerminalView ref={handleRef} interactive />);
+    });
+    expect(findPosted('set-interactive')).toEqual({ type: 'set-interactive', enabled: true });
+  });
+
+  it('re-applies interactive state on a crash-recovery reload (second ready)', () => {
+    act(() => {
+      create(<TerminalView interactive />);
+    });
+    markReady();
+    const wv = getWebView();
+    wv.postMessage.mockClear();
+    // Simulate the WebView content process being killed and the page reloading:
+    // it re-emits `ready`, and the handler must re-enable stdin (the reloaded
+    // page reset to disableStdin: true).
+    markReady();
+    expect(findPosted('set-interactive')).toEqual({ type: 'set-interactive', enabled: true });
+  });
+
+  it('gates textInteractionEnabled + keyboardDisplayRequiresUserAction on interactive', () => {
+    let roRenderer!: ReactTestRenderer;
+    act(() => {
+      roRenderer = create(<TerminalView />);
+    });
+    const roWebView = roRenderer.root.findByProps({ testID: 'webview' });
+    expect(roWebView.props.textInteractionEnabled).toBe(false);
+    // Read-only keeps the pre-PR behavior (prop left undefined, not forced false).
+    expect(roWebView.props.keyboardDisplayRequiresUserAction).toBeUndefined();
+
+    let intRenderer!: ReactTestRenderer;
+    act(() => {
+      intRenderer = create(<TerminalView interactive />);
+    });
+    const intWebView = intRenderer.root.findByProps({ testID: 'webview' });
+    expect(intWebView.props.textInteractionEnabled).toBe(true);
+    expect(intWebView.props.keyboardDisplayRequiresUserAction).toBe(false);
+  });
+});
+
 describe('TerminalView navigation allow-list (#5645)', () => {
   // The xterm document loads from an inline `source={{ html }}` with no baseUrl,
   // so RN WebView reports the document URL as `about:blank` on iOS
