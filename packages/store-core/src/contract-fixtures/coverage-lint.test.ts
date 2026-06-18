@@ -86,9 +86,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'pair_fail',
   'permission_expired',
   'permission_mode_changed',
-  // permission_resolved: the dashboard call site maps over session messages in a
-  // way the simple contract fixture doesn't yet satisfy — tracked separately.
-  'permission_resolved',
+  // permission_resolved now has a both-clients SWITCH_FIXTURES entry (#6058).
   'permission_timeout',
   'plan_ready',
   'pong',

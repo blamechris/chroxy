@@ -1057,6 +1057,43 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // permission_resolved (another client answered) flips the matching 'prompt'
+    // bubble to answered IN PLACE — both clients keep exactly ONE bubble and do
+    // NOT add/remove/retype it. Each client scans its session states for the
+    // requestId and rewrites that one bubble ({...m, answered, answeredAt,
+    // options: undefined}); the answered/answeredAt/options fields are STRIPPED by
+    // each runner's `normalize`, so the asserted slice is the unchanged prompt
+    // bubble (same id/type/content/tool). The contract this pins is the
+    // both-clients shape invariant: one in-place flip, never a duplicate prompt or
+    // a wiped transcript. (#6058; deferred from #6032.) The dashboard's extra
+    // sessionNotifications-drain + flat-messages-fallback and the app's banner
+    // filter are per-client side effects outside the messages slice.
+    name: 'permission_resolved flips the prompt to answered in place (one bubble, shape unchanged)',
+    type: 'permission_resolved',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: { type: 'permission_resolved', requestId: 'req-1', decision: 'allow' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'prompt-req-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x', tool: 'Bash' }] },
+      },
+    },
+  },
+  {
     // error is a GLOBAL surface (app → native Alert, dashboard → toast) — neither
     // client routes it into a session transcript. Seed a response bubble on the
     // active session and assert the error leaves the transcript completely
