@@ -46,6 +46,10 @@ export interface AppHeaderProps {
   onDismissNotification: ComponentProps<typeof NotificationsWidget>['onDismiss']
   // Overflow menu
   onNewSession: () => void
+  // #5986 — create an embedded user-shell. Undefined when the server doesn't
+  // advertise the `userShell` capability (flag off, or this client isn't the
+  // primary token), which filters the "New Shell" row out of the menu entirely.
+  onNewShell?: () => void
   onToggleSkillsPanel: () => void
   showCopyTranscript: boolean
   transcriptCopied: boolean
@@ -191,6 +195,16 @@ export function AppHeader(props: AppHeaderProps) {
               icon: '+',
               title: `New session (${formatShortcutKeys('Cmd+N')})`,
               onClick: props.onNewSession,
+            },
+            // #5986 — embedded user-shell. `onNewShell` is undefined unless the
+            // server advertises the userShell capability, so the menu filters
+            // this row out (falsy onClick) on hosts where it isn't available.
+            {
+              id: 'new-shell',
+              label: 'New Shell',
+              icon: '\u{1F5A5}',
+              title: 'Open an embedded terminal shell',
+              onClick: props.onNewShell,
             },
             {
               id: 'skills',

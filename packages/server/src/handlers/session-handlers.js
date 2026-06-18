@@ -4,6 +4,7 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
+import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { createLogger, loggerForSession } from '../logger.js'
@@ -148,7 +149,7 @@ function handleCreateSession(ws, client, msg, ctx) {
   // finding C1). The `userShell.enabled` flag is separately enforced as the
   // authoritative gate in SessionManager.createSession (covers every spawn
   // path); this is the token-class half, surfaced early with a clean code.
-  if (provider === 'user-shell' && client.isPrimaryToken !== true) {
+  if (provider === USER_SHELL_PROVIDER && client.isPrimaryToken !== true) {
     ctx.transport.send(ws, {
       type: 'session_error',
       code: 'PRIMARY_TOKEN_REQUIRED',

@@ -25,7 +25,7 @@ import { CodexSession } from './codex-session.js'
 import { UserShellSession } from './user-shell-session.js'
 import { registerProviderRegistry } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
-import { DEFAULT_PROVIDER } from '@chroxy/protocol'
+import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import {
   hasClaudeOAuthCreds,
   hasCodexOAuthCreds,
@@ -55,8 +55,9 @@ const PROVIDERS = {
   // #5983 (epic #5982) — general-purpose user shell ($SHELL via node-pty).
   // Gated OFF by default (userShell.enabled, #5985a) and primary-token-only
   // on create + every terminal_* op (#5985b); excluded from mailbox injection
-  // (#5984). PTY-only — no chat/turn semantics.
-  'user-shell': UserShellSession,
+  // (#5984). PTY-only — no chat/turn semantics. Provider id single-sourced
+  // from @chroxy/protocol (#5986) so server + clients can't drift.
+  [USER_SHELL_PROVIDER]: UserShellSession,
 }
 
 // The default provider lives in @chroxy/protocol so the server, dashboard,
@@ -65,14 +66,14 @@ const PROVIDERS = {
 // (server-cli.js, doctor.js, session-manager.js) keep importing it from the
 // provider registry. Flipped to claude-tui ahead of the 2026-06-15 cutover
 // (#5819) — see the protocol constant's doc for the billing rationale.
-export { DEFAULT_PROVIDER }
+export { DEFAULT_PROVIDER, USER_SHELL_PROVIDER }
 
 // Names hidden from listProviders() (backward-compat aliases, etc.)
 // #5994: user-shell is NOT a chat provider — it's a terminal-only session
 // created via a dedicated shell affordance (#5986/#5987), never the chat
 // provider picker. Hiding it keeps it out of listProviders() so it can't be
 // selected as a (fake-ready) chat backend. getProvider/create still resolve it.
-const HIDDEN = new Set(['user-shell'])
+const HIDDEN = new Set([USER_SHELL_PROVIDER])
 
 /** Required methods every provider class prototype must expose. */
 const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
