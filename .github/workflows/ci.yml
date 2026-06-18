@@ -5,12 +5,15 @@ on:
     branches: [main]
   pull_request:
 
-# Cancel superseded in-progress runs on the same PR/branch so a burst of pushes
-# (fix commits, rebases) doesn't run the full matrix N times. Never cancels main
-# (post-merge) runs — those each validate a distinct merged commit.
+# Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
+# commits, rebases) doesn't run the full matrix N times. Keying on the PR's
+# source branch groups a PR's runs together; on push to main `head_ref` is empty
+# so we fall back to the unique `run_id` — every main run gets its own group and
+# is therefore never cancelled OR queued behind another main run (each validates
+# a distinct merged commit and must complete).
 concurrency:
-  group: ci-${{ github.ref }}
-  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+  group: ci-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
