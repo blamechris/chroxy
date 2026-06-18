@@ -159,6 +159,26 @@ function handleCreateSession(ws, client, msg, ctx) {
     return
   }
 
+  // #6004 (epic #5982): require the CURRENT token, not a grace/previous one.
+  // After a rotation the old primary token stays valid through the grace window,
+  // and a connection authed with it keeps isPrimaryToken===true — so without
+  // this check it could re-create the very shell the rotation severed. Gate on
+  // the connection's auth token still being the current token. Skipped when no
+  // TokenManager exists (--no-auth: local trust, the create proceeds). The
+  // method guard tolerates test ctx mocks that stub services.tokenManager.
+  if (provider === USER_SHELL_PROVIDER) {
+    const tokenManager = ctx.services?.tokenManager
+    if (tokenManager && typeof tokenManager.isCurrentToken === 'function' &&
+        !tokenManager.isCurrentToken(client.authToken)) {
+      ctx.transport.send(ws, {
+        type: 'session_error',
+        code: 'CURRENT_TOKEN_REQUIRED',
+        message: 'A user-shell session requires the current token. The token was rotated — reconnect with the new token to open a shell.',
+      })
+      return
+    }
+  }
+
   // Resolve environment container details if environmentId is specified
   let envOpts = {}
   if (environmentId) {

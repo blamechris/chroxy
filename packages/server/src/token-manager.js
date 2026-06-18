@@ -91,6 +91,17 @@ export class TokenManager extends EventEmitter {
   }
 
   /**
+   * #6004 — whether a token is the CURRENT token specifically (NOT the previous
+   * token honored during the grace window). Used to gate user-shell creation so
+   * a connection authed with a just-rotated (now grace-period) token can't
+   * re-create the shell that rotation severed. Constant-time.
+   */
+  isCurrentToken(token) {
+    if (!token) return false
+    return safeTokenCompare(token, this._currentToken)
+  }
+
+  /**
    * Start the rotation schedule. Call after server startup.
    * No-op if tokenExpiry is not configured.
    */

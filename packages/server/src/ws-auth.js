@@ -141,6 +141,13 @@ export function handleAuthMessage(ctx, ws, msg) {
   if (!authRequired || isTokenValid(msg.token)) {
     client.authenticated = true
     client.authTime = Date.now()
+    // #6004 — remember the exact token this connection authed with so the
+    // user-shell create gate can require it still be the CURRENT token (not a
+    // grace/previous token after a rotation). In-memory only, for the
+    // connection lifetime — the client already holds the E2E shared key, so
+    // this is comparable exposure. Undefined in --no-auth (no token), where the
+    // shell gate's current-token check is skipped (no TokenManager).
+    client.authToken = msg.token
     authFailures.delete(rateLimitKey)
 
     const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
