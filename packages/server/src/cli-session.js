@@ -1471,6 +1471,12 @@ export class CliSession extends BaseSession {
           respawn()
         }
       }, 10000)
+      // #6043: fire-and-forget respawn safety net — never gate process exit on
+      // it. Respawn runs either off the child's 'close' or this fallback; if the
+      // loop is otherwise dead the process is exiting and there is nothing to
+      // respawn into, so holding the loop open for 10s only leaks (notably in
+      // tests with a mock child that never emits 'close').
+      if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
 
       oldChild.kill('SIGTERM')
     } else {
@@ -1735,6 +1741,10 @@ export class CliSession extends BaseSession {
         this._emitInterruptedTurnResult()
       }
     }, 5000)
+    // #6043: fire-and-forget busy-state safety net — never gate process exit on
+    // it. It only force-clears local state if the child ignored SIGINT; if the
+    // loop is otherwise idle the process is exiting and the state is moot.
+    if (typeof this._interruptTimer.unref === 'function') this._interruptTimer.unref()
   }
 
   /** Clean up resources */
@@ -1788,6 +1798,12 @@ export class CliSession extends BaseSession {
       const forceKillTimer = setTimeout(() => {
         try { forceKill(child) } catch {}
       }, 3000)
+      // #6043: fire-and-forget safety net — never gate process exit on it. If
+      // the loop is otherwise idle the process is shutting down anyway and the
+      // child is reaped on exit; the timer only matters while the loop is alive
+      // for other reasons. Without unref it pins the loop for the full 3s in
+      // tests whose mock child never emits 'close'.
+      if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
 
       child.on('close', () => clearTimeout(forceKillTimer))
       this._child = null

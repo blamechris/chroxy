@@ -657,6 +657,10 @@ export class Supervisor extends EventEmitter {
         try { this._child.kill('SIGTERM') } catch {}
       }
     }, DRAIN_TIMEOUT)
+    // #6043: fire-and-forget drain safety net — never gate process exit on it.
+    // The supervisor stays alive via its own listening handles during a drain;
+    // this timer is only the fallback SIGTERM if the child ignores drain.
+    if (typeof drainTimer.unref === 'function') drainTimer.unref()
 
     if (this._child) {
       this._child.once('exit', () => clearTimeout(drainTimer))
@@ -788,6 +792,12 @@ export class Supervisor extends EventEmitter {
         this._log.info('Force-killing child after 5s timeout')
         try { forceKill(childRef) } catch {}
       }, 5000)
+      // #6043: fire-and-forget shutdown safety net — never gate process exit on
+      // it. During shutdown the supervisor is held alive by the awaited
+      // tunnel.stop() and remaining handles; the goal of this path is exit, so
+      // if the loop is otherwise idle the process should exit, not be pinned for
+      // 5s. The child is in this process group and is reaped on full exit.
+      if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
 
       childRef.once('exit', () => clearTimeout(forceKillTimer))
 
