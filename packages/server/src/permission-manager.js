@@ -188,12 +188,18 @@ export class PermissionManager extends EventEmitter {
       })
 
       const toolInput = input || {}
-      const description = toolInput.description
+      const rawDescription = toolInput.description
         || toolInput.command
         || toolInput.file_path
         || toolInput.pattern
         || toolInput.query
-        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput).slice(0, 200) : toolName)
+        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput) : toolName)
+      // #6038/#6048/#6049: build the broadcast description by REDACTING the full
+      // string first, THEN truncating — truncating first (the old order) could
+      // leave a secret straddling the cap as a sub-floor partial prefix that the
+      // pattern scan misses. String() coerces a non-string field so a malformed
+      // tool input can't crash the emit path (.replace on a non-string throws).
+      const description = redactValue(String(rawDescription)).slice(0, 200)
 
       this._logInfo(`Permission request ${requestId}: ${toolName}`)
 
@@ -204,7 +210,7 @@ export class PermissionManager extends EventEmitter {
       const permPayload = {
         requestId,
         tool: toolName,
-        description: redactValue(description),
+        description,
         input: sanitizeToolInput(toolInput),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
@@ -598,7 +604,7 @@ export class PermissionManager extends EventEmitter {
       const permPayload = {
         requestId,
         tool: 'mcp_spawn',
-        description: redactValue(description),
+        description: redactValue(String(description)).slice(0, 200),
         input: sanitizeToolInput(input),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),

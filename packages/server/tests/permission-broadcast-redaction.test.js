@@ -68,4 +68,34 @@ describe('#6038 SDK permission broadcast redaction', () => {
     pm.destroy()
     void requestId
   })
+
+  it('redacts a secret in the stringified fallback even when it straddles the truncation cap (#6048)', () => {
+    const pm = new PermissionManager({ log: silentLog })
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    // No description/command/etc. field → description falls back to
+    // JSON.stringify(toolInput). Pad so the secret value sits across the
+    // 200-char cap; redaction must run on the FULL string before truncation.
+    pm.handlePermission('Tool', { padding: 'p'.repeat(180), blob: FAKE_ANT_KEY }, null, 'approve')
+
+    const ev = events[0]
+    assert.ok(ev, 'permission_request should be emitted')
+    assert.ok(!ev.description.includes('sk-ant'), 'no partial secret prefix may survive in the description')
+
+    pm.destroy()
+  })
+
+  it('does not crash when a description-source field is non-string (#6049)', () => {
+    const pm = new PermissionManager({ log: silentLog })
+    const events = []
+    pm.on('permission_request', (d) => events.push(d))
+
+    assert.doesNotThrow(() => {
+      pm.handlePermission('Tool', { command: { nested: 'obj' } }, null, 'approve')
+    })
+    assert.ok(events[0], 'permission_request should still be emitted')
+
+    pm.destroy()
+  })
 })
