@@ -308,6 +308,10 @@ describe('CloudflareTunnelAdapter', () => {
       const failedEvent = await failedPromise
       assert.ok(failedEvent.message.includes('3 attempts'))
       assert.equal(spawnCount, 4)
+      // #6027: recovery is an unbounded long-tail loop — after the first round
+      // emits tunnel_failed it keeps retrying in the background. Stop it so the
+      // backoff sleep doesn't outlive the test (hangs the suite w/o force-exit).
+      await tunnel.stop()
     })
   })
 
