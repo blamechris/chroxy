@@ -22,6 +22,13 @@ import renderer, { act } from 'react-test-renderer';
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
 import { MessageBubble } from '../chat/MessageBubble';
 import type { ChatMessage } from '../../store/types';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
+
+// #5699 — the freeform Send + Enter (onSubmitEditing) paths gate on a live
+// connection. These tests exercise the connected submit, so set that.
+beforeEach(() => {
+  useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+});
 
 function makePromptWithOther(): ChatMessage {
   return {

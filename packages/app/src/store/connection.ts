@@ -1705,17 +1705,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
   sendPermissionResponse: (requestId: string, decision: string) => {
     const { socket } = get();
+    // #5699 — refuse to answer a permission prompt while disconnected, rather
+    // than queuing it. The server EXPIRES the pending request the moment the
+    // socket drops, so a queued response just drains into the void on reconnect
+    // (the request no longer exists) — the user taps Allow and nothing lands.
+    // Return false so the prompt stays actionable and the caller can surface
+    // clear "not connected" feedback; the answer buttons also gate on
+    // connectionPhase in MessageBubble. Mirrors the dashboard #5699 fix.
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     // allowSession: send immediate 'allow' unblock + register a session rule for auto-approval
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
     const payload = { type: 'permission_response', requestId, decision: wireDecision };
-    let result: 'sent' | 'queued' | false;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
-      wsSend(socket, payload);
-      result = 'sent';
-    } else {
-      result = enqueueMessage('permission_response', payload);
-    }
+    if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
+    wsSend(socket, payload);
+    const result: 'sent' | 'queued' | false = 'sent';
     // Auto-switch to the session that owns this prompt (if different from active).
     // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
     // fall back to scanning sessionStates messages.
@@ -1791,11 +1794,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       payload.answers = answer;
     }
     if (toolUseId) payload.toolUseId = toolUseId;
-    if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, payload);
-      return 'sent';
-    }
-    return enqueueMessage('user_question_response', payload);
+    // #5699 — like permission responses, an AskUserQuestion answer is tied to a
+    // live pending request the server expires on disconnect; queuing it would
+    // drain into the void on reconnect. Refuse while disconnected so the form
+    // stays actionable and the caller gives clear feedback (the form also gates
+    // on connectionPhase in the UI).
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    wsSend(socket, payload);
+    return 'sent';
   },
 
   markPromptAnswered: (messageId: string, answer: string) => {

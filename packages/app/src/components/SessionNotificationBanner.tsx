@@ -7,6 +7,7 @@ import {
   Platform,
 } from 'react-native';
 import { useConnectionStore } from '../store/connection';
+import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import type { SessionNotification } from '../store/connection';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
@@ -26,6 +27,10 @@ function NotificationRow({ notification }: { notification: SessionNotification }
   const dismiss = useConnectionStore((s) => s.dismissSessionNotification);
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
   const sendPlanResponse = useConnectionStore((s) => s.sendPlanResponse);
+  // #5699/#6078 — gate the banner's permission Approve/Deny on a live
+  // connection, like the in-bubble buttons. The server expires the pending
+  // request on disconnect, so answering from a cached banner can't land.
+  const connected = useConnectionLifecycleStore((s) => s.connectionPhase === 'connected');
 
   const dotColor =
     notification.eventType === 'error' ? COLORS.accentRed :
@@ -36,15 +41,16 @@ function NotificationRow({ notification }: { notification: SessionNotification }
   const isPlan = notification.eventType === 'plan';
 
   const handleApprove = () => {
-    if (notification.requestId) {
-      sendPermissionResponse(notification.requestId, 'allow');
+    // #6078 — only dismiss the banner row when the answer actually went over
+    // the wire ('sent'). A disconnected tap now returns false, so the row stays
+    // visible and actionable for retry after reconnect instead of vanishing.
+    if (notification.requestId && sendPermissionResponse(notification.requestId, 'allow') === 'sent') {
       dismiss(notification.id);
     }
   };
 
   const handleDeny = () => {
-    if (notification.requestId) {
-      sendPermissionResponse(notification.requestId, 'deny');
+    if (notification.requestId && sendPermissionResponse(notification.requestId, 'deny') === 'sent') {
       dismiss(notification.id);
     }
   };
@@ -64,18 +70,22 @@ function NotificationRow({ notification }: { notification: SessionNotification }
       return (
         <View style={styles.actionButtons}>
           <TouchableOpacity
-            style={styles.approveButton}
+            style={[styles.approveButton, !connected && styles.actionButtonDisabled]}
             onPress={handleApprove}
+            disabled={!connected}
             accessibilityRole="button"
             accessibilityLabel="Approve permission"
+            accessibilityState={{ disabled: !connected }}
           >
             <Text style={styles.approveText}>Approve</Text>
           </TouchableOpacity>
           <TouchableOpacity
-            style={styles.denyButton}
+            style={[styles.denyButton, !connected && styles.actionButtonDisabled]}
             onPress={handleDeny}
+            disabled={!connected}
             accessibilityRole="button"
             accessibilityLabel="Deny permission"
+            accessibilityState={{ disabled: !connected }}
           >
             <Text style={styles.denyText}>Deny</Text>
           </TouchableOpacity>
@@ -207,6 +217,10 @@ const styles = StyleSheet.create({
   actionButtons: {
     flexDirection: 'row',
     gap: 6,
+  },
+  // #6078 — dim Approve/Deny while disconnected (the answer can't land).
+  actionButtonDisabled: {
+    opacity: 0.4,
   },
   approveButton: {
     backgroundColor: COLORS.accentGreen,

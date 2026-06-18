@@ -944,11 +944,23 @@ export function clearDeltaBuffers(): void {
 const QUEUE_TTLS: Record<string, number> = {
   input: 60_000,
   interrupt: 5_000,
-  permission_response: 300_000,
-  user_question_response: 60_000,
 };
 const QUEUE_MAX_SIZE = 10;
-const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
+// #5699: permission_response / user_question_response are NOT queueable — the
+// server expires the pending request the moment the socket drops, so a queued
+// answer would drain into the void on reconnect while the UI could appear to
+// have answered. They are refused at the call sites (sendPermissionResponse /
+// sendUserQuestionResponse return false when disconnected); excluding them here
+// is the defense-in-depth backstop so no future enqueue path can re-introduce
+// the silent-loss bug.
+const QUEUE_EXCLUDED = new Set([
+  'set_model',
+  'set_permission_mode',
+  'mode',
+  'resize',
+  'permission_response',
+  'user_question_response',
+]);
 
 /**
  * #5633: surface a queue failure to the user as a system message in the

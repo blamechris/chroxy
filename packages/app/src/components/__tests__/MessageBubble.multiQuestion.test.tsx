@@ -18,6 +18,13 @@ import React from 'react';
 import renderer, { act } from 'react-test-renderer';
 import { MessageBubble } from '../chat/MessageBubble';
 import type { ChatMessage } from '../../store/connection';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
+
+// #5699 — the multi-question Submit gates on a live connection. These tests
+// exercise the connected submit path, so set that precondition.
+beforeEach(() => {
+  useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+});
 
 function multiQuestionPrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {

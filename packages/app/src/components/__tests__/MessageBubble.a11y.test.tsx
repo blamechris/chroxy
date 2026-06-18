@@ -21,6 +21,14 @@ import renderer, { act } from 'react-test-renderer';
 import { OTHER_OPTION_VALUE } from '@chroxy/store-core';
 import { MessageBubble } from '../chat/MessageBubble';
 import type { ChatMessage } from '../../store/types';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
+
+// #5699 — answer controls now gate on a live connection. These tests exercise
+// the normal (connected) behaviour, so establish that precondition; the
+// disconnected gate has its own dedicated test below.
+beforeEach(() => {
+  useConnectionLifecycleStore.setState({ connectionPhase: 'connected' });
+});
 
 function makePrompt(overrides: Partial<ChatMessage> = {}): ChatMessage {
   return {
@@ -115,5 +123,25 @@ describe('MessageBubble accessibility (#5634)', () => {
     });
     const sendAfter = tree.root.findByProps({ testID: 'approval-freetext-send' });
     expect(sendAfter.props.accessibilityState).toEqual({ disabled: false });
+  });
+
+  it('disables answer buttons and shows a reconnect hint while disconnected (#5699)', () => {
+    useConnectionLifecycleStore.setState({ connectionPhase: 'disconnected' });
+    const onSelectOption = jest.fn();
+    const tree = render(makePrompt(), onSelectOption);
+
+    // The option buttons are present but disabled (the answer can't reach the
+    // server's expired pending request) — not a tappable no-op.
+    const approve = tree.root.findByProps({ testID: 'approval-button-approve' });
+    expect(approve.props.accessibilityState).toEqual({ disabled: true, selected: false });
+    expect(approve.props.disabled).toBe(true);
+
+    // A clear "reconnect to respond" hint replaces the silent dead tap.
+    // (>=1: react-test-renderer matches both the element node and its host.)
+    expect(tree.root.findAllByProps({ testID: 'prompt-disconnected-hint' }).length).toBeGreaterThanOrEqual(1);
+
+    // Even a forced press routes nowhere — the store would refuse it anyway, but
+    // the disabled control means the handler isn't invoked.
+    expect(onSelectOption).not.toHaveBeenCalled();
   });
 });
