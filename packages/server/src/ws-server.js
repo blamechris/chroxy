@@ -657,6 +657,17 @@ export class WsServer {
     // so a long-running server doesn't leak entries for destroyed sessions.
     this._evaluatorIterations = new Map() // sessionId -> iteration count
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
+    // #5704: refcount of permission-INDUCED session subscriptions, per client.
+    // clientId -> Map<sessionId, refcount>. _registerPermissionRoute increments
+    // it only when it auto-subscribes a client that wasn't already subscribed
+    // (so a permission can never "steal ownership" of an explicit subscription);
+    // _unregisterPermissionRoute (wired to every resolve/expire/cleanup site)
+    // decrements it and tears the auto-subscription back down when the count
+    // hits zero AND the client is neither active on nor explicitly subscribed to
+    // the session. An explicit switch_session/subscribe_sessions ADOPTS the
+    // subscription by zeroing this refcount (see _adoptPermissionSubscription),
+    // so permission teardown never unsubscribes a client that asked to watch.
+    this._permissionSubs = new Map() // clientId -> Map<sessionId, refcount>
     this._hookSecrets = new Set() // per-session hook secrets registered by active CliSessions
     this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
@@ -700,6 +711,9 @@ export class WsServer {
       // subscribedSessionIds on connected viewers so the settings-handler
       // subscription guard accepts the legitimate response.
       registerPermissionRoute: (requestId, sessionId) => self._registerPermissionRoute(requestId, sessionId),
+      // #5704: tear down the permission-induced subscription refcount in lockstep
+      // with the map entry on every resolve / expire / cleanup / drain / destroy.
+      unregisterPermissionRoute: (requestId) => self._unregisterPermissionRoute(requestId),
       getSessionManager: () => self.sessionManager,
       // Pass pairingManager so the HTTP /permission-response fallback can
       // enforce session binding — see 2026-04-11 audit blocker 5.
@@ -740,8 +754,21 @@ export class WsServer {
         // through these (NOT bare `client.subscribedSessionIds.add()` /
         // `client.activeSessionId = x`) so the sessionId→clients reverse index
         // can never drift from the per-client Sets.
-        subscribeClient: (client, sid) => self._clientManager.subscribe(client, sid),
-        unsubscribeClient: (client, sid) => self._clientManager.unsubscribe(client, sid),
+        subscribeClient: (client, sid) => {
+          // #5704: an EXPLICIT subscribe (switch_session / subscribe_sessions /
+          // session-create auto-sub all route through here) adopts the
+          // subscription — zero any permission-induced refcount so permission
+          // teardown can never tear down a subscription the client asked for.
+          self._adoptPermissionSubscription(client.id, sid)
+          self._clientManager.subscribe(client, sid)
+        },
+        unsubscribeClient: (client, sid) => {
+          // #5704: an explicit unsubscribe also drops any permission refcount —
+          // the client chose to stop watching; a later permission teardown must
+          // not be a no-op-that-leaks the bookkeeping entry.
+          self._adoptPermissionSubscription(client.id, sid)
+          self._clientManager.unsubscribe(client, sid)
+        },
         setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
         // #5563: explicit primary-ownership surface. `updatePrimary` is the
         // first-input adoption path (claims if unclaimed, no-op if already
@@ -771,6 +798,11 @@ export class WsServer {
         get permissionAudit() { return self._permissionAudit },
         pendingPermissions: this._pendingPermissions,
         permissionSessionMap: this._permissionSessionMap,
+        // #5704: the resolver in settings-handlers (WS permission_response) must
+        // route its map delete through this so the permission-induced
+        // subscription refcount is decremented in lockstep — same hook the HTTP
+        // resolver uses via createPermissionHandler.
+        unregisterPermissionRoute: (requestId) => self._unregisterPermissionRoute(requestId),
         questionSessionMap: this._questionSessionMap,
       },
       services: {
@@ -1004,8 +1036,12 @@ export class WsServer {
         } catch (err) {
           log.warn(`Failed to drain pending permissions for destroyed session ${sessionId}: ${err.message}`)
         }
-        for (const [key, sid] of this._permissionSessionMap) {
-          if (sid === sessionId) this._permissionSessionMap.delete(key)
+        // #5704: route the orphan sweep through _unregisterPermissionRoute so a
+        // destroyed session's permission-induced subscriptions are torn down,
+        // not just the map entry. Collect keys first to avoid mutating the map
+        // mid-iteration (_unregisterPermissionRoute deletes the entry).
+        for (const key of [...this._permissionSessionMap.keys()]) {
+          if (this._permissionSessionMap.get(key) === sessionId) this._unregisterPermissionRoute(key)
         }
         for (const [key, sid] of this._questionSessionMap) {
           if (sid === sessionId) this._questionSessionMap.delete(key)
@@ -2115,14 +2151,129 @@ export class WsServer {
    * hijack-prevention property.
    */
   _registerPermissionRoute(requestId, sessionId) {
+    // #5704: a route may be re-registered for the same requestId (e.g. the
+    // resend-on-reconnect path re-runs the dispatch). Don't double-count the
+    // refcount — only the FIRST registration of a requestId seeds the per-client
+    // permission-induced subscriptions. Subsequent re-registrations just re-seed
+    // subscribedSessionIds (idempotent) without re-incrementing.
+    const isNewRoute = !this._permissionSessionMap.has(requestId)
     this._permissionSessionMap.set(requestId, sessionId)
     if (!sessionId) return
     for (const [, client] of this.clients) {
       if (!client.authenticated) continue
       if (client.boundSessionId && client.boundSessionId !== sessionId) continue
       if (!client.subscribedSessionIds) continue
+      // #5704: decide whether THIS route's auto-subscribe is permission-induced
+      // (refcounted + torn-down) or rides on an existing EXPLICIT subscription
+      // (left untouched). A subscription is EXPLICIT iff the client is subscribed
+      // with NO permission refcount — an explicit switch_session/subscribe_sessions
+      // ADOPTS by zeroing the refcount. The ACTIVE session is deliberately NOT
+      // treated as ownership here: a client active on A at dispatch is exactly the
+      // #4798 "view A → switch to B → respond" case — it WILL switch away, and we
+      // must hold a refcount so the subscription is torn down after resolve. The
+      // teardown's own active-session guard still protects a client that stays
+      // active on the session. So:
+      //   - subscribed && refcount === 0   -> explicit ownership: don't count.
+      //   - refcount > 0                   -> already permission-owned: count up
+      //                                       (a second concurrent permission).
+      //   - otherwise                      -> permission-induced subscribe: count.
+      const existingRefcount = this._permissionSubs.get(client.id)?.get(sessionId) || 0
+      const explicitlyOwned = client.subscribedSessionIds.has(sessionId) && existingRefcount === 0
       // #5563: route through the index-maintaining helper.
       this._clientManager.subscribe(client, sessionId)
+      if (isNewRoute && !explicitlyOwned) {
+        this._incPermissionSub(client.id, sessionId)
+      }
+    }
+  }
+
+  /**
+   * #5704: tear down a permission route registered by `_registerPermissionRoute`.
+   * Called at EVERY resolve / expire / cleanup site (the WS + HTTP resolver, the
+   * HTTP-hook cleanup()/destroy(), the session-destroy sweep) so a permission-
+   * induced subscription never outlives its permission. Idempotent: deleting an
+   * already-gone requestId is a no-op (returns without touching refcounts).
+   *
+   * Decrements every connected client's permission-induced refcount for the
+   * route's session and, when a client's count reaches zero, removes the
+   * auto-subscription UNLESS the client is the active session or still
+   * explicitly subscribed (adoption — see _adoptPermissionSubscription). The
+   * #4798 cross-tab flow stays intact because teardown only fires AFTER the
+   * permission is resolved/expired; while it is live the refcount is > 0.
+   * @param {string} requestId
+   */
+  _unregisterPermissionRoute(requestId) {
+    if (!this._permissionSessionMap.has(requestId)) return
+    const sessionId = this._permissionSessionMap.get(requestId)
+    this._permissionSessionMap.delete(requestId)
+    if (!sessionId) return
+    // Decrement for every client that currently holds a permission-induced
+    // refcount on this session. We iterate the per-client refcount maps (not
+    // this.clients) so a client that already disconnected — its entry purged by
+    // _handleClientDeparture — is simply absent and never double-decremented.
+    for (const [, client] of this.clients) {
+      this._decPermissionSub(client, sessionId)
+    }
+  }
+
+  /**
+   * #5704: increment the permission-induced subscription refcount for
+   * (clientId, sessionId). Lazily creates the per-client Map.
+   * @private
+   */
+  _incPermissionSub(clientId, sessionId) {
+    let perSession = this._permissionSubs.get(clientId)
+    if (!perSession) {
+      perSession = new Map()
+      this._permissionSubs.set(clientId, perSession)
+    }
+    perSession.set(sessionId, (perSession.get(sessionId) || 0) + 1)
+  }
+
+  /**
+   * #5704: decrement the permission-induced subscription refcount for `client`
+   * on `sessionId`. When it hits zero, drop the bookkeeping entry and unsubscribe
+   * the client from the session — but ONLY if the client neither has it as its
+   * active session NOR is explicitly subscribed (adoption zeroes the refcount, so
+   * a still-counted entry here means no explicit subscribe happened). Never
+   * drives the count negative: a client with no counted entry is a no-op.
+   * @private
+   */
+  _decPermissionSub(client, sessionId) {
+    const perSession = this._permissionSubs.get(client.id)
+    if (!perSession) return
+    const count = perSession.get(sessionId)
+    if (!count) return
+    if (count > 1) {
+      perSession.set(sessionId, count - 1)
+      return
+    }
+    // Last permission-induced reference for this (client, session) is gone.
+    perSession.delete(sessionId)
+    if (perSession.size === 0) this._permissionSubs.delete(client.id)
+    // Don't tear down a subscription the client still actively views. An
+    // EXPLICIT subscribe would have adopted/zeroed the refcount, so reaching
+    // here (count was > 0) already means no explicit subscribe happened — only
+    // the transient active-session case still needs guarding before unsubscribe.
+    if (client.activeSessionId === sessionId) return
+    this._clientManager.unsubscribe(client, sessionId)
+  }
+
+  /**
+   * #5704: an explicit subscribe (switch_session / subscribe_sessions /
+   * session-create auto-subscribe) ADOPTS the subscription for (client,
+   * sessionId): it zeroes any permission-induced refcount so a later permission
+   * teardown can never unsubscribe a client that asked to watch the session.
+   * Wired into transport.subscribeClient so every explicit subscribe path runs
+   * it; the permission auto-subscribe goes straight through _clientManager and
+   * therefore does NOT trigger adoption of its own refcount.
+   * @private
+   */
+  _adoptPermissionSubscription(clientId, sessionId) {
+    const perSession = this._permissionSubs.get(clientId)
+    if (!perSession) return
+    if (perSession.delete(sessionId) && perSession.size === 0) {
+      this._permissionSubs.delete(clientId)
     }
   }
 
@@ -2219,6 +2370,12 @@ export class WsServer {
       }
       departingClient._ownedPushTokens.clear()
     }
+
+    // #5704: drop this client's permission-induced subscription bookkeeping so
+    // a disconnected client never leaks a per-client Map entry (and can never be
+    // double-decremented by a later _unregisterPermissionRoute — the entry is
+    // gone). The reverse-index membership is purged separately by removeClient.
+    this._permissionSubs.delete(departingClient.id)
 
     // Broadcast client_left to remaining authenticated clients
     this._broadcastClientLeft(departingClient)

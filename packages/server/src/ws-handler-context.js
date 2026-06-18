@@ -46,6 +46,7 @@
  * @property {object} permissionAudit - The PermissionAuditLog.
  * @property {Map} pendingPermissions - requestId → pending permission.
  * @property {Map} permissionSessionMap - requestId → sessionId routing.
+ * @property {(requestId: string) => void} unregisterPermissionRoute - #5704 teardown hook.
  * @property {Map} questionSessionMap - toolUseId → sessionId routing.
  *
  * @typedef {Object} WsHandlerServices
@@ -119,6 +120,7 @@ export const CTX_NAMESPACES = {
     'permissionAudit',
     'pendingPermissions',
     'permissionSessionMap',
+    'unregisterPermissionRoute',
     'questionSessionMap',
   ],
   services: [

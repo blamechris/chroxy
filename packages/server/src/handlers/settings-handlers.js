@@ -406,6 +406,9 @@ function handlePermissionResponse(ws, client, msg, ctx) {
     getSessionManager: () => ctx.sessions.sessionManager,
     resolveLegacyPermission: (rid, dec) => ctx.permissions.permissions.resolvePermission(rid, dec),
     getPermissionAudit: () => ctx.permissions.permissionAudit,
+    // #5704: route the map delete through the WsServer teardown so resolving a
+    // permission over WS also drops its permission-induced subscription refcount.
+    onRouteTeardown: ctx.permissions.unregisterPermissionRoute,
   })
   const result = resolver.resolve(requestId, decision, client.boundSessionId, {
     clientId: client.id,
