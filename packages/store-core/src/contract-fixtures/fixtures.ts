@@ -914,6 +914,50 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
+    // budget_warning is a both-clients switch case (#5619): both clients append
+    // the SAME system note to the target session's messages when it exists.
+    // `msg.message` is echoed verbatim into the bubble content.
+    name: 'budget_warning appends the warning system bubble to the target session',
+    type: 'budget_warning',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'budget_warning', sessionId: 's1', message: 'Approaching cost budget limit' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Approaching cost budget limit' }] },
+      },
+    },
+  },
+  {
+    // budget_exceeded is a DOCUMENTED divergence (#5619): both append a
+    // "session paused" system note, but the dashboard auto-resumes and tacks
+    // ". Budget will auto-resume." onto the same bubble (the app does not — it
+    // shows a manual "Resume" Alert action instead). The `divergent` block pins
+    // each client's own content so the difference is locked, not hidden.
+    name: 'budget_exceeded appends a paused system bubble (dashboard notes auto-resume)',
+    type: 'budget_exceeded',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'budget_exceeded', sessionId: 's1', message: 'Cost budget exceeded' },
+    divergent: {
+      reason:
+        'dashboard auto-resumes and appends ". Budget will auto-resume." to the bubble; ' +
+        'the app surfaces a manual Resume Alert and leaves the bubble at "— session paused"',
+      app: {
+        sessions: {
+          s1: { messages: [{ type: 'system', content: 'Cost budget exceeded — session paused' }] },
+        },
+      },
+      dashboard: {
+        sessions: {
+          s1: {
+            messages: [
+              { type: 'system', content: 'Cost budget exceeded — session paused. Budget will auto-resume.' },
+            ],
+          },
+        },
+      },
+    },
+  },
+  {
     name: 'history_replay_start (full) keeps existing messages visible (no blank-flash wipe)',
     type: 'history_replay_start',
     init: {
