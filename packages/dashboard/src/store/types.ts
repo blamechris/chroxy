@@ -1111,6 +1111,8 @@ export interface ConnectionState {
   claimPrimary: (sessionId: string, options?: { force?: boolean }) => void;
   createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean }) => void;
   destroySession: (sessionId: string, force?: boolean) => void;
+  /** #6006 — operator panic button: request an immediate token revoke (primary-token only). */
+  revokeToken: () => void;
   renameSession: (sessionId: string, name: string) => void;
   forgetSession: () => void;
   _resetSessionMemory: () => void;

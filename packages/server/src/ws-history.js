@@ -181,6 +181,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // surfaced as the `userShell` capability so the dashboard gates its "New
     // shell" affordance. Optional — absent → false (fail-closed) for old servers.
     userShellEnabled,
+    // #6006: whether the server has a rotating TokenManager (i.e. auth is on),
+    // so the operator panic button (`revoke_token`) can fire. Surfaced as the
+    // `tokenRevoke` capability, gated to primary-token clients below. Optional —
+    // absent → false (fail-closed) for --no-auth servers and old callers.
+    tokenRevocable,
     // #4835: per-device active-session memory. Consulted below before
     // falling back to defaultSessionId / firstSessionId so a reconnect
     // restores whatever session the client was actually viewing instead
@@ -349,6 +354,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // hosts with it disabled, or for paired clients → the affordance stays hidden
     // (fail-closed). The server gates remain the authority regardless.
     userShell: userShellEnabled === true && client?.isPrimaryToken === true,
+    // #6006 — the operator panic button (revoke_token) is available to THIS
+    // client: the server has a rotating TokenManager (auth on) AND this
+    // connection holds the primary token. Mirrors the server-side gate in
+    // token-handlers.js (isPrimaryToken === true) so a paired (non-primary)
+    // device never sees a "Revoke token" affordance it would only get a
+    // NOT_AUTHORIZED rejection from. Fail-closed: absent/false otherwise.
+    tokenRevoke: tokenRevocable === true && client?.isPrimaryToken === true,
   }
 
   // #3760, #3905: surface the effective inactivity timeouts so clients

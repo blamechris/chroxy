@@ -3246,6 +3246,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #6006 — operator panic button. Ask the server to immediately revoke the
+  // current API token: it severs live user-shells and forces every connection
+  // (including this one) to re-authenticate with the new token. Primary-token
+  // only; the server rejects non-primary clients with NOT_AUTHORIZED, but the
+  // UI also gates the affordance on the `tokenRevoke` capability so a paired
+  // device never sees the button.
+  revokeToken: () => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'revoke_token' });
+    } else {
+      // Destructive op: don't fail silently. A closing/closed socket is
+      // plausible exactly when an operator panics, so surface it instead of
+      // leaving them thinking the token was revoked.
+      console.warn('[chroxy] revokeToken: socket not open — revoke request not sent');
+    }
+  },
+
   destroySession: (sessionId: string, force?: boolean) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {

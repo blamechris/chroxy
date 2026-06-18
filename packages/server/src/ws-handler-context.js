@@ -52,6 +52,7 @@
  * @property {object|null} pushManager - Push-notification manager.
  * @property {object|null} pairingManager - Pairing/approval manager.
  * @property {object|null} checkpointManager - Checkpoint manager.
+ * @property {object|null} tokenManager - Token lifecycle manager (revoke/rotate); null in --no-auth mode (#6006).
  * @property {object|null} devPreview - Dev-preview manager.
  * @property {object|null} webTaskManager - Background web-task manager.
  * @property {object|null} environmentManager - Container/environment manager.
