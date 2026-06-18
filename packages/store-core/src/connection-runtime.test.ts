@@ -204,6 +204,9 @@ describe('createHeartbeatController — handshake timer', () => {
 
     vi.advanceTimersByTime(1)
     expect(onTimeout).toHaveBeenCalledTimes(1)
+    // After firing, the timer is no longer armed and holds no stale handle
+    // (#6065 review).
+    expect(controller.isHandshakeArmed).toBe(false)
 
     // No second fire ever.
     vi.advanceTimersByTime(HANDSHAKE_TIMEOUT_MS * 2)

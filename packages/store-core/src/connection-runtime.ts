@@ -263,7 +263,13 @@ export function createHeartbeatController<S extends HeartbeatSocket = HeartbeatS
 
   function armHandshakeTimer(onTimeout: () => void): void {
     clearHandshakeTimer()
-    handshakeTimeout = scheduler.setTimeout(onTimeout, HANDSHAKE_TIMEOUT_MS)
+    // Null the handle when the timer FIRES (not just on clear) so isHandshakeArmed
+    // reflects reality post-fire and no obsolete handle lingers (#6065 review).
+    // External behavior is unchanged: onTimeout still runs once at the same time.
+    handshakeTimeout = scheduler.setTimeout(() => {
+      handshakeTimeout = null
+      onTimeout()
+    }, HANDSHAKE_TIMEOUT_MS)
   }
 
   function clearHandshakeTimer(): void {
