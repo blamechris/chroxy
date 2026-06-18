@@ -83,9 +83,13 @@ export class UserShellSession extends BaseSession {
     this._ptyExited = false
     this._destroying = false
     this._shellAlive = false
-    // #5985 audit — the resolved shell path (set at spawn) and the last exit
-    // code/reason (set when the PTY exits), surfaced to the shell-audit trail.
-    this._shellPath = null
+    // #5985 audit — the resolved shell path and the last exit code/reason (set
+    // when the PTY exits), surfaced to the shell-audit trail. resolveShell() is
+    // synchronous, so resolve it HERE (not in async start()) — the create-audit
+    // in the WS handler reads this right after createSession returns, before the
+    // fire-and-forget start() microtask has run, so a start()-set value would
+    // always be null on the audit line (agent review).
+    this._shellPath = resolveShell()
     this._exitCode = null
     this._exitReason = null
     this._ptyCols = DEFAULT_COLS
@@ -119,8 +123,9 @@ export class UserShellSession extends BaseSession {
       throw new Error(`node-pty unavailable: ${err.message}`)
     }
 
-    const shell = resolveShell()
-    this._shellPath = shell
+    // Resolved in the constructor (see _shellPath) so the create-audit can read
+    // it synchronously; reuse it here for the actual spawn.
+    const shell = this._shellPath
     let cwdReal
     try {
       cwdReal = realpathSync(this.cwd)

@@ -121,6 +121,8 @@ User-shell sessions are additionally gated by the `userShell.enabled` config fla
 
 **Audit trail (#5985).** Every user-shell lifecycle event is recorded to the `shell-audit` log component (`packages/server/src/shell-audit.js`) as a single greppable `[shell-audit]` line: a `user_shell_create` entry (sessionId, authorizing `clientId` + `tokenClass`, cwd, resolved shell, device) emitted by the WS create handler — the only layer that knows the token class — and a matching `user_shell_destroy` entry (sessionId, the shell's natural exit code/reason when it ended before teardown, else `null`/`destroyed`) emitted by `SessionManager` for both per-session destroy and shutdown. Per-keystroke command-input auditing is deliberately out of scope (volume + privacy); the create/destroy pair with the token class is the traceability anchor. Filter the server log on the `shell-audit` component to reconstruct who opened which shell, from where, and how it ended.
 
+> **Operational note:** the trail is emitted at `info` level, so it requires `LOG_LEVEL<=info` (the default) — running the daemon at `LOG_LEVEL=warn`/`error` suppresses it. A level-independent always-on audit sink (in-memory ring + optional file, like `PermissionAuditLog`) is tracked as a follow-up; until then, keep `info` logging on when `userShell.enabled` is set.
+
 ## 5. Per-Session Hook Secrets
 
 Each `CliSession` mints a 32-byte hex secret in its constructor ([`cli-session.js`](../../packages/server/src/cli-session.js) ~line 193) and exports it to the spawned `claude` CLI subprocess as `CHROXY_HOOK_SECRET`. The CLI uses it on outbound `POST /permission` callbacks.

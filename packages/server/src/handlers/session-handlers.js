@@ -194,6 +194,9 @@ function handleCreateSession(ws, client, msg, ctx) {
       auditShellCreate({
         sessionId,
         clientId: client.id,
+        // Always 'primary' today — the gate above rejects every non-primary
+        // class before we reach here. The ternary is future-proofing for if the
+        // authz ever widens; the 'other' branch is currently unreachable.
         tokenClass: client.isPrimaryToken === true ? 'primary' : 'other',
         cwd: entry?.cwd,
         shell: entry?.session?._shellPath,
