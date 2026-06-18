@@ -114,11 +114,16 @@ export function ViewSwitcher({
             panel slot (its header "Control Room" button) and opens as its own
             session-independent top-level tab in the SessionBar strip — not a
             per-session view tab here. */}
-        <button
-          className={`view-tab${splitMode ? ' active' : ''}`}
-          onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
-          type="button" title={`Split view (${formatShortcutKeys('Cmd+\\')})`}
-        >Split</button>
+        {/* #5997 — Split is a chat|terminal pane pair, so it needs a chat
+            surface. Hidden for terminal-only providers (user-shell) where the
+            Chat tab is also hidden — otherwise the chat half renders empty. */}
+        {showChatTab && (
+          <button
+            className={`view-tab${splitMode ? ' active' : ''}`}
+            onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
+            type="button" title={`Split view (${formatShortcutKeys('Cmd+\\')})`}
+          >Split</button>
+        )}
         <button className={`view-tab${viewMode === 'files' ? ' active' : ''}`} onClick={() => setViewMode('files')} type="button">Files</button>
         <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
           System{unreadSystemCount > 0 && <span className="system-badge">{unreadSystemCount}</span>}
