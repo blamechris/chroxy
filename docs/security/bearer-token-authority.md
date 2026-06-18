@@ -121,7 +121,7 @@ User-shell sessions are additionally gated by the `userShell.enabled` config fla
 
 **Audit trail (#5985).** Every user-shell lifecycle event is recorded to the `shell-audit` log component (`packages/server/src/shell-audit.js`) as a single greppable `[shell-audit]` line: a `user_shell_create` entry (sessionId, authorizing `clientId` + `tokenClass`, cwd, resolved shell, device) emitted by the WS create handler — the only layer that knows the token class — and a matching `user_shell_destroy` entry (sessionId, the shell's natural exit code/reason when it ended before teardown, else a `null` code with `reason=destroyed` for a per-session destroy or `reason=shutdown` at process shutdown) emitted by `SessionManager` for both teardown paths. Per-keystroke command-input auditing is deliberately out of scope (volume + privacy); the create/destroy pair with the token class is the traceability anchor. Filter the server log on the `shell-audit` component to reconstruct who opened which shell, from where, and how it ended.
 
-> **Operational note:** the trail is emitted at `info` level, so it requires `LOG_LEVEL<=info` (the default) — running the daemon at `LOG_LEVEL=warn`/`error` suppresses it. A level-independent always-on audit sink (in-memory ring + optional file, like `PermissionAuditLog`) is tracked as a follow-up; until then, keep `info` logging on when `userShell.enabled` is set.
+> **Always-on (#6001):** the trail is emitted via the logger's level-independent `audit()` path (tagged `[AUDIT] [shell-audit]`), so it is recorded regardless of `LOG_LEVEL` — a quiet `LOG_LEVEL=warn`/`error` daemon still captures every shell create/destroy. The lines are redacted and written to the daemon log file like any other.
 
 ## 5. Per-Session Hook Secrets
 
