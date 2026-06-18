@@ -191,6 +191,28 @@ describe('TokenManager', () => {
     assert.equal(manager.validate(third), true)
   })
 
+  // #6004 — isCurrentToken accepts ONLY the current token, never the grace
+  // (previous) token. Gates user-shell create so a just-rotated token can't
+  // re-create a severed shell within its grace window.
+  it('isCurrentToken accepts the current token but rejects grace + bogus tokens', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 5000 })
+    const newToken = manager.rotate() // 'abc-123' is now the grace/previous token
+    assert.equal(manager.isCurrentToken(newToken), true, 'current token accepted')
+    // validate() still honors the grace token, but isCurrentToken must NOT.
+    assert.equal(manager.validate('abc-123'), true, 'grace token is still valid for auth')
+    assert.equal(manager.isCurrentToken('abc-123'), false, 'grace token is NOT the current token')
+    assert.equal(manager.isCurrentToken('bogus'), false)
+    assert.equal(manager.isCurrentToken(''), false)
+    assert.equal(manager.isCurrentToken(null), false)
+  })
+
+  it('revoke makes the old token fail isCurrentToken immediately', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 5000 })
+    const newToken = manager.revoke()
+    assert.equal(manager.isCurrentToken('abc-123'), false)
+    assert.equal(manager.isCurrentToken(newToken), true)
+  })
+
   it('destroy clears timers and listeners', () => {
     manager = new TokenManager({ token: 'abc-123', tokenExpiry: '1h' })
     manager.start()

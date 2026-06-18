@@ -302,6 +302,59 @@ describe('session-handlers', () => {
       sessionHandlers.create_session(makeWs(), makeClient({ isPrimaryToken: false }), { provider: 'claude-tui' }, ctx)
       assert.equal(created.callCount, 1, 'a non-shell provider is unaffected by the token gate')
     })
+
+    // #6004 (epic #5982): a user-shell requires the CURRENT token, not a
+    // grace/previous one. A connection authed with a just-rotated token keeps
+    // isPrimaryToken===true but must NOT be able to re-create the severed shell.
+    it('rejects a primary client whose auth token is no longer current with CURRENT_TOKEN_REQUIRED', () => {
+      const ctx = makeCtx({
+        services: { tokenManager: { isCurrentToken: (t) => t === 'current-tok' } },
+      })
+      const created = createSpy(() => 'sh-1')
+      ctx.sessions.sessionManager.createSession = created
+      sessionHandlers.create_session(
+        makeWs(),
+        makeClient({ isPrimaryToken: true, authToken: 'old-grace-tok' }),
+        { provider: 'user-shell' },
+        ctx,
+      )
+      const [, sent] = ctx.transport.send.lastCall
+      assert.equal(sent.type, 'session_error')
+      assert.equal(sent.code, 'CURRENT_TOKEN_REQUIRED')
+      assert.equal(created.callCount, 0, 'must reject a grace-token holder BEFORE createSession')
+    })
+
+    it('lets a primary client holding the CURRENT token create a user-shell (#6004)', () => {
+      const ctx = makeCtx({
+        services: { tokenManager: { isCurrentToken: (t) => t === 'current-tok' } },
+      })
+      const session = createMockSession()
+      const created = createSpy(() => 'sh-1')
+      ctx.sessions.sessionManager.createSession = created
+      ctx._sessions.set('sh-1', { session, name: 'Shell', cwd: '/tmp' })
+      sessionHandlers.create_session(
+        makeWs(),
+        makeClient({ isPrimaryToken: true, authToken: 'current-tok' }),
+        { provider: 'user-shell' },
+        ctx,
+      )
+      assert.equal(created.callCount, 1, 'current-token holder passes the gate')
+    })
+
+    it('skips the current-token check when no TokenManager is configured (--no-auth)', () => {
+      const ctx = makeCtx() // no services.tokenManager
+      const session = createMockSession()
+      const created = createSpy(() => 'sh-1')
+      ctx.sessions.sessionManager.createSession = created
+      ctx._sessions.set('sh-1', { session, name: 'Shell', cwd: '/tmp' })
+      sessionHandlers.create_session(
+        makeWs(),
+        makeClient({ isPrimaryToken: true }),
+        { provider: 'user-shell' },
+        ctx,
+      )
+      assert.equal(created.callCount, 1, 'no TokenManager → current-token check skipped (local trust)')
+    })
   })
 
   // #5985b (epic #5982): terminal_subscribe / terminal_resize on a user-shell
