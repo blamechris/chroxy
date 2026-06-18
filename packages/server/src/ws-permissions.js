@@ -5,7 +5,7 @@ import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
-import { SENSITIVE_KEY_NAMES, redactValue } from './redaction.js'
+import { redactValue, sanitizeToolInput } from './redaction.js'
 
 const log = createLogger('ws')
 
@@ -13,80 +13,10 @@ const log = createLogger('ws')
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
 
 // -- Broadcast safety --
-const MAX_INPUT_CHARS = 10_240 // ~10K chars max for broadcast (JS string length, not bytes)
-
-// Cap recursion so a pathologically deep or cyclic tool_input can't blow the
-// stack. Real tool inputs are shallow; anything past this is summarized away.
-const MAX_SANITIZE_DEPTH = 8
-
-/**
- * Recursively redact a single tool_input value of any shape (#6029). Applies the
- * KEY-NAME pass to object keys and the VALUE-SHAPE pass (`redactValue`) to every
- * string at any depth, so a secret nested inside an object or array — e.g.
- * `{ env: { TOKEN: 'sk-ant-…' } }`, `{ args: ['--token', 'sk-ant-…'] }`, or
- * `{ headers: { Authorization: 'Bearer …' } }` — can't slip past the top-level
- * scan. `seen` guards against cycles; `depth` caps pathological nesting.
- *
- * @param {*} value
- * @param {number} depth
- * @param {WeakSet} seen
- * @returns {*}
- */
-function redactDeep(value, depth, seen) {
-  if (typeof value === 'string') {
-    const redacted = redactValue(value)
-    return redacted.length > MAX_INPUT_CHARS
-      ? redacted.slice(0, MAX_INPUT_CHARS) + '... [truncated]'
-      : redacted
-  }
-  if (!value || typeof value !== 'object') return value
-  if (depth >= MAX_SANITIZE_DEPTH) return '[REDACTED:depth]'
-  if (seen.has(value)) return '[REDACTED:cycle]'
-  seen.add(value)
-  let out
-  if (Array.isArray(value)) {
-    out = value.map((item) => redactDeep(item, depth + 1, seen))
-  } else {
-    out = {}
-    for (const [key, child] of Object.entries(value)) {
-      out[key] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
-        ? '[REDACTED]'
-        : redactDeep(child, depth + 1, seen)
-    }
-  }
-  seen.delete(value)
-  return out
-}
-
-/**
- * Sanitize tool input for broadcast: redact sensitive fields and truncate large
- * values. Two passes (#6029): a KEY-NAME pass redacts values under sensitive
- * keys wholesale, and a VALUE-SHAPE pass runs every string value (at ANY depth)
- * through `redactValue` so a secret embedded under a benign key — e.g.
- * `{ command: 'export TOKEN=sk-ant-…' }`, `{ url: 'https://discord.com/api/webhooks/…' }`,
- * or nested in `{ env: { TOKEN: 'sk-ant-…' } }` / `{ args: ['--token', 'sk-ant-…'] }`
- * — is redacted before it reaches any client. Both passes recurse through nested
- * objects and arrays. Value patterns are shared with the logger via redaction.js
- * (single source of truth).
- */
-function sanitizeToolInput(input) {
-  if (!input || typeof input !== 'object') return input
-
-  const seen = new WeakSet()
-  const result = {}
-  for (const [key, value] of Object.entries(input)) {
-    result[key] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
-      ? '[REDACTED]'
-      : redactDeep(value, 1, seen)
-  }
-
-  // Final size check on the whole object
-  const serialized = JSON.stringify(result)
-  if (serialized.length > MAX_INPUT_CHARS) {
-    return { _truncated: true, summary: serialized.slice(0, MAX_INPUT_CHARS) + '... [truncated]' }
-  }
-  return result
-}
+// `sanitizeToolInput` (key-name + recursive value-shape redaction) lives in
+// redaction.js (#6038) so the SDK/TUI provider path (permission-manager.js)
+// shares the exact same sanitizer as this hook path. Imported above and
+// re-exported below for back-compat with existing importers/tests.
 
 /**
  * Build the human-readable `description` broadcast alongside a permission

@@ -1,6 +1,10 @@
 import { EventEmitter } from 'events'
 import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
+// #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
+// the same redaction as the hook path. Shared sanitizer + value redactor live in
+// redaction.js (a leaf module — no import cycle / HTTP-handler weight).
+import { sanitizeToolInput, redactValue } from './redaction.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -193,11 +197,15 @@ export class PermissionManager extends EventEmitter {
 
       this._logInfo(`Permission request ${requestId}: ${toolName}`)
 
+      // #6038: redact before broadcast. The raw input/description are kept for
+      // execution via the _pendingPermissions entry above; this payload is
+      // broadcast/display only, so a secret in a value (or the stringified
+      // fallback description) must not reach subscribed clients.
       const permPayload = {
         requestId,
         tool: toolName,
-        description,
-        input: toolInput,
+        description: redactValue(description),
+        input: sanitizeToolInput(toolInput),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
       }
@@ -584,11 +592,14 @@ export class PermissionManager extends EventEmitter {
 
       this._logInfo(`MCP trust request ${requestId}: ${server.name}`)
 
+      // #6038: redact before broadcast (description embeds server.command/argv0;
+      // input carries args/envKeys). Raw values for execution live on the
+      // _pendingPermissions entry above.
       const permPayload = {
         requestId,
         tool: 'mcp_spawn',
-        description,
-        input,
+        description: redactValue(description),
+        input: sanitizeToolInput(input),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
       }
