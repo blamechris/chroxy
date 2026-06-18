@@ -288,6 +288,102 @@ describe('createPermissionHandler', () => {
       assert.equal(permissionSessionMap.get('sdk-req-map'), 'sess-map')
     })
 
+    it('skips a malformed legacy permission but still resends the valid ones (#6054)', () => {
+      const opts = makeHandlerOpts()
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      // Malformed: `tool` is non-string → buildPermissionRequestMessage throws.
+      opts.pendingPermissions.set('req-bad', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'req-bad',
+          tool: 12345,
+          description: '/tmp/bad',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      opts.pendingPermissions.set('req-good', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'req-good',
+          tool: 'Write',
+          description: '/tmp/good',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      // Capture warn-level logs so we can assert the skip is logged WITH the
+      // offending requestId (#6054 acceptance + Copilot review on #6067) — a
+      // regression that removed the log or dropped the requestId would slip past
+      // a send-only assertion.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'ws') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      const ws = {}
+      try {
+        assert.doesNotThrow(() => resendPendingPermissions(ws))
+      } finally {
+        removeLogListener(logSpy)
+      }
+      // Only the valid one is sent; the malformed one is logged-and-skipped.
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(msg.type, 'permission_request')
+      assert.equal(msg.requestId, 'req-good')
+      const skipWarn = warnLines.find((m) => m.includes('req-bad'))
+      assert.ok(skipWarn, `expected a warn log naming the skipped requestId, got: ${JSON.stringify(warnLines)}`)
+      assert.match(skipWarn, /Skipping malformed/, 'warn explains the skip')
+    })
+
+    it('skips a malformed SDK-mode permission but still resends the valid ones (#6054)', () => {
+      const session = {
+        _pendingPermissions: new Map([['sdk-bad', {}], ['sdk-good', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-bad', {
+            requestId: 'sdk-bad',
+            tool: 999, // non-string → builder throws
+            description: '/tmp/bad',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+          ['sdk-good', {
+            requestId: 'sdk-good',
+            tool: 'Write',
+            description: '/tmp/good',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-mixed', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'ws') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        assert.doesNotThrow(() => resendPendingPermissions({}))
+      } finally {
+        removeLogListener(logSpy)
+      }
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(msg.requestId, 'sdk-good')
+      const skipWarn = warnLines.find((m) => m.includes('sdk-bad'))
+      assert.ok(skipWarn, `expected a warn log naming the skipped requestId, got: ${JSON.stringify(warnLines)}`)
+      assert.match(skipWarn, /Skipping malformed/, 'warn explains the skip')
+    })
+
     it('skips expired SDK-mode permissions', () => {
       const session = {
         _pendingPermissions: new Map([['sdk-req-exp', {}]]),
