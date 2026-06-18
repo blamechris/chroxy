@@ -2456,6 +2456,11 @@ export class SessionManager extends EventEmitter {
           const entry = this._sessions.get(sessionId)
           if (entry && !entry._destroying) {
             log.info(`Auto-removing exited user-shell session ${sessionId}`)
+            // Calls destroySession directly, intentionally bypassing the
+            // handler-layer "cannot destroy the last session" guard: that guard
+            // stops a USER from emptying their list, not a dead shell from being
+            // reaped — a zombie shell shouldn't be force-kept just because it's
+            // the last session.
             this.destroySession(sessionId)
           }
         }, AUTO_REMOVE_ON_EXIT_DELAY_MS)

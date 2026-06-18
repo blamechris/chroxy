@@ -215,7 +215,9 @@ if (typeof mock.module !== 'function') {
       const mgr = makeMgr()
       const sessionId = mgr.createSession({ name: 'sh', cwd: '/tmp', provider: 'test-audit-usershell' })
       const entry = mgr.getSession(sessionId)
-      entry.session._exitReason = 'exit' // mimic a natural exit (set by _onShellExit)
+      // Mimic a natural exit — _onShellExit sets BOTH _exitCode and _exitReason.
+      entry.session._exitCode = 0
+      entry.session._exitReason = 'exit'
 
       entry.session.emit('shell_exited', { code: 0 })
       assert.ok(mgr.getSession(sessionId), 'still present during the grace window')
@@ -224,6 +226,7 @@ if (typeof mock.module !== 'function') {
       assert.equal(mgr.getSession(sessionId), null, 'removed after the grace')
       assert.equal(destroyCalls.length, 1)
       assert.equal(destroyCalls[0].reason, 'exit', 'audits the natural exit reason')
+      assert.equal(destroyCalls[0].exitCode, 0, 'audits the natural exit code')
       rmSync(mgr._tmpDir, { recursive: true, force: true })
     })
 
