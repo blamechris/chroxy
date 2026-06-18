@@ -12,7 +12,7 @@
  * - `SENSITIVE_PATTERNS` / `API_KEY_PATTERNS` — the value-shape regexes.
  * - `redactValue(str)` — apply both pattern sets to a string (the logger's
  *   existing redaction behavior, hoisted verbatim).
- * - `SENSITIVE_KEYS` — the key-NAME set used by the broadcast sanitizer.
+ * - `SENSITIVE_KEY_NAMES` — the key-NAME set used by the broadcast sanitizer.
  */
 
 // Sensitive patterns to redact from strings.

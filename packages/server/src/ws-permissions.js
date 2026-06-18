@@ -13,7 +13,7 @@ const log = createLogger('ws')
 const PERMISSION_TTL_MS = 300_000 // 5 minutes
 
 // -- Broadcast safety --
-const MAX_INPUT_BYTES = 10_240 // 10KB max for broadcast
+const MAX_INPUT_CHARS = 10_240 // ~10K chars max for broadcast (JS string length, not bytes)
 
 // Cap recursion so a pathologically deep or cyclic tool_input can't blow the
 // stack. Real tool inputs are shallow; anything past this is summarized away.
@@ -35,8 +35,8 @@ const MAX_SANITIZE_DEPTH = 8
 function redactDeep(value, depth, seen) {
   if (typeof value === 'string') {
     const redacted = redactValue(value)
-    return redacted.length > MAX_INPUT_BYTES
-      ? redacted.slice(0, MAX_INPUT_BYTES) + '... [truncated]'
+    return redacted.length > MAX_INPUT_CHARS
+      ? redacted.slice(0, MAX_INPUT_CHARS) + '... [truncated]'
       : redacted
   }
   if (!value || typeof value !== 'object') return value
@@ -82,8 +82,8 @@ function sanitizeToolInput(input) {
 
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
-  if (serialized.length > MAX_INPUT_BYTES) {
-    return { _truncated: true, summary: serialized.slice(0, MAX_INPUT_BYTES) + '... [truncated]' }
+  if (serialized.length > MAX_INPUT_CHARS) {
+    return { _truncated: true, summary: serialized.slice(0, MAX_INPUT_CHARS) + '... [truncated]' }
   }
   return result
 }
