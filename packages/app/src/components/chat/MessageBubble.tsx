@@ -577,7 +577,13 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
             autoFocus
             onSubmitEditing={() => {
               const trimmed = otherText.trim();
-              if (!trimmed || submittedRef.current) return;
+              // #5699/#6079 — gate the Enter-key path on a live connection too
+              // (the Send button is already disabled). Critically, bail BEFORE
+              // latching submittedRef: a disconnected submit can't land, and
+              // setting the one-shot guard here would block the legitimate retry
+              // after reconnect (the guard only resets when message.answered
+              // changes, which never happens for a refused answer).
+              if (!trimmed || !connected || submittedRef.current) return;
               submittedRef.current = true;
               // #4755 — when the user reached this input by clicking the
               // synthesized "Other" option (otherActive true), emit the
