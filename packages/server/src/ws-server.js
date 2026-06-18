@@ -871,10 +871,12 @@ export class WsServer {
       // advertise it). Late-bound getter so a test mutating self.config is seen.
       get userShellEnabled() { return isUserShellEnabled(self.config) },
       // #6006: whether the operator panic button (revoke_token) can fire — true
-      // iff a rotating TokenManager exists (i.e. auth is on). Surfaced as the
-      // `tokenRevoke` capability, further gated to primary-token clients in
-      // ws-history so a paired device never sees a "Revoke token" affordance.
-      get tokenRevocable() { return self._tokenManager != null },
+      // iff a usable rotating TokenManager exists (i.e. auth is on). Mirrors the
+      // token-handlers availability check (`typeof revoke === 'function'`) so the
+      // capability never advertises a button that would only get REVOKE_UNAVAILABLE.
+      // Surfaced as the `tokenRevoke` capability, further gated to primary-token
+      // clients in ws-history so a paired device never sees the affordance.
+      get tokenRevocable() { return self._tokenManager != null && typeof self._tokenManager.revoke === 'function' },
       // #4835: per-device active-session memory consulted during reconnect.
       // sendPostAuthInfo treats this as optional, but production wiring
       // always supplies the default disk-backed store from the WsServer

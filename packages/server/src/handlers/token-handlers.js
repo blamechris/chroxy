@@ -32,6 +32,7 @@ function handleRevokeToken(ws, client, msg, ctx) {
       code: 'NOT_AUTHORIZED',
       message: 'Token revoke requires the primary token',
       correlationId,
+      requestId: msg.requestId,
     })
     return
   }
@@ -43,6 +44,7 @@ function handleRevokeToken(ws, client, msg, ctx) {
       code: 'REVOKE_UNAVAILABLE',
       message: 'Token revoke is unavailable (no token manager configured)',
       correlationId,
+      requestId: msg.requestId,
     })
     return
   }
