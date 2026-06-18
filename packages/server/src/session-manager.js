@@ -753,11 +753,19 @@ export class SessionManager extends EventEmitter {
     }
 
     const baseCwd = cwd || this._defaultCwd
-    // Nullish-coalesce so an explicit `null` (the soft-fallback marker for a
-    // stale Claude model — see #3403) survives restore intact instead of
-    // re-applying `_defaultModel`. Only `undefined` (omitted/missing) falls
-    // back to the server-config default.
-    let resolvedModel = model ?? this._defaultModel
+    // #6064/#3403: only an OMITTED model (`undefined`) falls back to the
+    // server-config default. An explicit `null` is the #3403 "use the provider's
+    // own default" marker and must SURVIVE. `null` is NOT a valid value on the WS
+    // wire (`create_session.model` is `z.string().optional()`, so a remote client
+    // sends a string or omits the field — never null); in practice it arrives via
+    // restoreState (the production path: a session that soft-fell-back to the
+    // provider default persists `model: null`) or an explicit internal/test
+    // caller passing it deliberately. Coalescing that `null` to `_defaultModel`
+    // would re-pin it to a server-config id that may itself be stale — exactly
+    // the staleness #3403 avoids — so the marker must be reproduced faithfully.
+    // (The prior `??` coalesced null too, contradicting this and the comment that
+    // claimed null survived; #6064.)
+    let resolvedModel = model === undefined ? this._defaultModel : model
     const resolvedPermissionMode = permissionMode || this._defaultPermissionMode
 
     // Validate cwd exists
