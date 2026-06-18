@@ -39,9 +39,11 @@ permissions:
 # The macOS desktop job uses the separate self-hosted macOS runner and routes on
 # the same boolean inline in its `if:` (it has no shared `runs-on` array, so it
 # is not a `runner-target` consumer). The Windows job stays GitHub-hosted (no
-# self-hosted Windows box). Three heavy/env-sensitive test jobs (Server Tests,
-# App Tests, Store Core Tests) also stay GitHub-hosted — see the per-job notes;
-# revisit once the Linux runner env/RAM is hardened.
+# self-hosted Windows box). After the Linux runner was bumped to 24GB (#6046),
+# Store Core Tests and App Tests moved to the self-hosted pool (their blocker was
+# npm-ci/transform OOM, not arch). Server Tests stays GitHub-hosted — RAM was
+# ruled out; 9 tests fail on the ARM64 container from genuine env differences
+# (keychain, Docker-in-Docker, fs perms) — tracked in #6075.
 
 jobs:
   runner-target:
@@ -72,10 +74,12 @@ jobs:
           fi
   server-tests:
     name: Server Tests
-    # Stays GitHub-hosted: the suite has env-sensitive tests that fail on the
-    # ARM64 self-hosted container (e.g. the permission-hook pipeline), and its
-    # c8 coverage run is memory-heavy. Revisit if the runner env is hardened
-    # (see the self-hosted migration follow-up).
+    # Stays GitHub-hosted (#6046): RAM was ruled out — with the self-hosted
+    # runner at 24GB, 9 tests still fail on the ARM64 Linux container from
+    # genuine env differences (keychain rekey, create_environment /
+    # Docker-in-Docker, disk-cache paths, permission-hook pipeline,
+    # ws-file-ops + directory-listing fs perms). Making the server suite
+    # container-portable is tracked in #6075.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -415,10 +419,11 @@ jobs:
 
   store-core-tests:
     name: Store Core Tests
-    # Stays GitHub-hosted: under the self-hosted pool's npm-ci memory pressure
-    # (7.7GB Docker VM) this job's install OOM'd (exit 137). Revisit once the
-    # runner has more RAM (see the self-hosted migration follow-up).
-    runs-on: ubuntu-24.04
+    # Self-hosted (#6046): the prior install OOM (exit 137) was the 7.7GB Docker
+    # VM, not arch — with the runner bumped to 24GB the full suite (1676 tests)
+    # passes on ARM64. Fork PRs still route to ubuntu-24.04 via runner-target.
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -494,10 +499,11 @@ jobs:
 
   app-tests:
     name: App Tests
-    # Stays GitHub-hosted: 7 jest-expo suites "failed to run" on the ARM64
-    # self-hosted container (native/transform env differences). Revisit if the
-    # runner env is hardened (see the self-hosted migration follow-up).
-    runs-on: ubuntu-24.04
+    # Self-hosted (#6046): the jest-expo "failed to run" suites were transform
+    # OOM under the 7.7GB VM, not arch — with the runner at 24GB all 147 suites
+    # (1973 tests) pass on ARM64. Fork PRs still route to ubuntu-24.04.
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
