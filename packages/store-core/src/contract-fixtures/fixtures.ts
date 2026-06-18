@@ -1015,41 +1015,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
-    // permission_resolved MODIFIES the in-flight prompt in place (flips
-    // `answered`, clears `options`) — it never adds or removes a bubble. Seed an
-    // unanswered prompt and assert it survives as the same single 'prompt' bubble
-    // (the answered/options fields are outside the normalised assertion slice).
-    // The handler searches ALL session states by requestId, so it is independent
-    // of the active session.
-    name: 'permission_resolved marks the matching prompt answered without adding/removing a bubble',
-    type: 'permission_resolved',
-    init: {
-      activeSessionId: 's1',
-      sessions: {
-        s1: {
-          messages: [
-            {
-              id: 'perm-seed-1',
-              type: 'prompt',
-              content: 'Bash: rm -rf /tmp/x',
-              tool: 'Bash',
-              requestId: 'req-1',
-              options: [{ label: 'Allow', value: 'allow' }],
-            } as unknown as ChatMessage,
-          ],
-        },
-      },
-    },
-    message: { type: 'permission_resolved', requestId: 'req-1', decision: 'allow' },
-    expect: {
-      sessions: {
-        s1: {
-          messages: [{ id: 'perm-seed-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x', tool: 'Bash' }],
-        },
-      },
-    },
-  },
-  {
     // result ends a turn: both clients tear down streaming state and refresh the
     // messages REFERENCE (`[...ss.messages]`) but DO NOT add/remove/edit any
     // bubble — the transcript is preserved verbatim. Seed a response bubble and

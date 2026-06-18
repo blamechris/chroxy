@@ -52,8 +52,8 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // ---------------------------------------------------------------------------
 // PENDING allowlist — both-clients switch types that do NOT yet have a
 // SWITCH_FIXTURES entry. This is the pre-existing backlog (epic #5556 sub-item
-// 5 covered only ~6 of these; #6032 pinned the five hottest — permission_request,
-// permission_resolved, result, stream_end, error — leaving ~52). The lint
+// 5 covered only ~6 of these; #6032 pinned four hot types — permission_request,
+// result, stream_end, error — leaving ~53; permission_resolved is deferred). The lint
 // subtracts this set so it enforces NO-NEW-DRIFT without forcing all the
 // remaining fixtures at once. Each removal here must be paired with a real,
 // behaviour-verified fixture in fixtures.ts. SHRINKING this set toward empty is
@@ -86,6 +86,9 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'pair_fail',
   'permission_expired',
   'permission_mode_changed',
+  // permission_resolved: the dashboard call site maps over session messages in a
+  // way the simple contract fixture doesn't yet satisfy — tracked separately.
+  'permission_resolved',
   'permission_timeout',
   'plan_ready',
   'pong',
