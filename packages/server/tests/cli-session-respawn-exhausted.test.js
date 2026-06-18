@@ -18,10 +18,10 @@ import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
  */
 
 describe('CliSession respawn exhaustion — terminal signal (#5698)', () => {
-  it('declares respawn_exhausted in customEvents so it bridges to clients', () => {
+  it('declares respawn_exhausted in customEvents so SessionManager forwards it', () => {
     assert.ok(
       CliSession.customEvents.includes('respawn_exhausted'),
-      'respawn_exhausted must be a forwarded custom event',
+      'respawn_exhausted must be a declared custom event so _wireSessionEvents forwards it',
     )
   })
 

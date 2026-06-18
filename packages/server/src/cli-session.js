@@ -210,8 +210,11 @@ export class CliSession extends BaseSession {
    * listens for it and drops the session from its list (no input-rejecting
    * zombie tab), mirroring ClaudeTuiSession's contract. Listing it here makes
    * `_wireSessionEvents` bridge it onto the transient `session_event` channel
-   * as well (subprocess providers — BYOK, Gemini, Codex, DeepSeek, Docker —
-   * inherit this getter and so inherit the terminal signal).
+   * as well. DockerSession is the only subclass of CliSession, so it inherits
+   * this getter and the terminal signal; the other subprocess providers
+   * (BYOK/DeepSeek extend BaseSession, Gemini/Codex extend
+   * JsonlSubprocessSession) have no auto-respawn loop, so there is nothing to
+   * exhaust there.
    */
   static get customEvents() {
     return ['respawn_exhausted']
