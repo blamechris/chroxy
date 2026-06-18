@@ -281,7 +281,7 @@ describe('CloudflareTunnelAdapter', () => {
       await tunnel.stop()
     })
 
-    it('stops after maxRecoveryAttempts failures', async () => {
+    it('stops after maxRecoveryAttempts failures', async (t) => {
       let spawnCount = 0
       const mockSpawn = () => {
         spawnCount++
@@ -297,6 +297,11 @@ describe('CloudflareTunnelAdapter', () => {
       }
 
       const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+      // #6027: recovery is an unbounded long-tail loop — after the first round
+      // emits tunnel_failed it keeps retrying in the background. stop() aborts
+      // it; register via t.after so it runs even if an assertion below throws
+      // (otherwise the leaked backoff would hang the suite w/o force-exit).
+      t.after(() => tunnel.stop())
       tunnel.recoveryBackoffs = [10, 20, 30]
 
       await tunnel.start()
@@ -415,13 +420,18 @@ describe('CloudflareTunnelAdapter', () => {
       await tunnel.stop()
     })
 
-    it('rejects when tunnelName is missing', async () => {
+    it('rejects when tunnelName is missing', async (t) => {
       const tunnel = new TestCloudflareAdapter({
         port: 3000,
         mockSpawn: () => createNamedMockProcess(),
         mode: 'named',
         config: { tunnelHostname: 'chroxy.example.com' },
       })
+      // #6027: a failed named-tunnel start leaves the retry/recovery loop
+      // scheduling backoff sleeps in the background. stop() aborts it; via
+      // t.after so it runs even if the assertion below throws (otherwise the
+      // leaked timer keeps the suite alive without --test-force-exit).
+      t.after(() => tunnel.stop())
 
       await assert.rejects(
         async () => await tunnel.start(),
@@ -429,13 +439,15 @@ describe('CloudflareTunnelAdapter', () => {
       )
     })
 
-    it('rejects when tunnelHostname is missing', async () => {
+    it('rejects when tunnelHostname is missing', async (t) => {
       const tunnel = new TestCloudflareAdapter({
         port: 3000,
         mockSpawn: () => createNamedMockProcess(),
         mode: 'named',
         config: { tunnelName: 'chroxy' },
       })
+      // #6027: stop the background retry/recovery loop (see tunnelName test).
+      t.after(() => tunnel.stop())
 
       await assert.rejects(
         async () => await tunnel.start(),

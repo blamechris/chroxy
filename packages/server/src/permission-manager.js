@@ -505,6 +505,13 @@ export class PermissionManager extends EventEmitter {
     this._pendingPermissions.clear()
     this._lastPermissionData.clear()
 
+    // #6027: belt-and-braces — the loop above only clears timers for entries
+    // still in _pendingPermissions. A permission timer whose requestId has
+    // already left that map would otherwise survive destroy() and keep the
+    // suite alive without --test-force-exit. Drop any stragglers.
+    for (const timer of this._permissionTimers.values()) clearTimeout(timer)
+    this._permissionTimers.clear()
+
     // Auto-deny pending user answer
     this._clearQuestionTimer()
     if (this._pendingUserAnswer) {

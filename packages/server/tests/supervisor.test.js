@@ -172,6 +172,9 @@ describe('Supervisor', () => {
     for (const s of supervisors) {
       s._shuttingDown = true
       if (s._heartbeatInterval) clearInterval(s._heartbeatInterval)
+      // #6027: a child that went ready (deploy window) but never exited leaves
+      // _deployResetTimer pending; the exit handler that would clear it never ran.
+      if (s._deployResetTimer) { clearTimeout(s._deployResetTimer); s._deployResetTimer = null }
       s._stopStandbyServer()
     }
     supervisors = []

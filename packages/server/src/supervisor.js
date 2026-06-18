@@ -73,6 +73,10 @@ export class Supervisor extends EventEmitter {
     this._restartScheduledAt = null
     this._restartDelayMs = null
     this._restartTimer = null
+    // #6027: deploy-window reset timer. Instance-scoped (was a startChild-local
+    // closure var) so shutdown()/teardown can clear it — otherwise a child that
+    // goes ready but never exits leaves a ~DEPLOY_CRASH_WINDOW timer pending.
+    this._deployResetTimer = null
     this._log = createLogger('supervisor')
 
     // Deploy rollback tracking
@@ -426,7 +430,6 @@ export class Supervisor extends EventEmitter {
       })
     }
 
-    let deployResetTimer = null
     this._child.on('message', (msg) => {
       if (msg.type === 'ready') {
         this._log.info('Server child is ready')
@@ -442,7 +445,8 @@ export class Supervisor extends EventEmitter {
         if (this._lastDeployTimestamp > 0 && this._deployFailureCount > 0) {
           const remaining = DEPLOY_CRASH_WINDOW - (Date.now() - this._lastDeployTimestamp)
           if (remaining > 0) {
-            deployResetTimer = setTimeout(() => {
+            this._deployResetTimer = setTimeout(() => {
+              this._deployResetTimer = null
               this._deployFailureCount = 0
               this._log.info('Deploy crash window passed, resetting failure count')
             }, remaining)
@@ -466,7 +470,7 @@ export class Supervisor extends EventEmitter {
       void (async () => {
         stdoutRl?.close()
         stderrRl?.close()
-        if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
+        if (this._deployResetTimer) { clearTimeout(this._deployResetTimer); this._deployResetTimer = null }
         const childUptimeMs = this._metrics.childStartedAt ? Date.now() - this._metrics.childStartedAt : 0
         this._child = null
         this._childReady = false
@@ -768,6 +772,7 @@ export class Supervisor extends EventEmitter {
     this._shuttingDown = true
     if (this._heartbeatInterval) clearInterval(this._heartbeatInterval)
     if (this._restartTimer) clearTimeout(this._restartTimer)
+    if (this._deployResetTimer) { clearTimeout(this._deployResetTimer); this._deployResetTimer = null }
     this._log.info(`${signal} received, shutting down...`)
 
     // Remove PID file
