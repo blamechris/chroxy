@@ -1773,6 +1773,48 @@ describe('handleKeyExchange', () => {
         false,
       )
     })
+
+    it('#5959 — serverKeySig is domain-separated (not bare): verifies with domain-separated payload, not with bare bytes', async () => {
+      // Proves the signer flip landed: the emitted signature covers
+      // `chroxy-exchange-key-v1:` ++ key, not the bare key bytes alone.
+      const { signExchangeKey, EXCHANGE_KEY_SIG_DOMAIN_V1 } = await import('@chroxy/store-core/crypto')
+      const identity = createSigningKeyPair()
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws })
+      ctx.serverIdentity = identity
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      assert.ok(keOk.serverKeySig, 'serverKeySig present')
+
+      // The accept-both verifier still accepts the domain-separated form.
+      assert.equal(
+        verifyExchangeKeySignature(keOk.publicKey, keOk.serverKeySig, identity.publicKey),
+        true,
+        'verifyExchangeKeySignature accepts domain-separated sig',
+      )
+
+      // The emitted sig must NOT equal the bare-form sig produced by the old signer.
+      const bareSig = signExchangeKey(keOk.publicKey, identity.secretKey, { domainSeparated: false })
+      assert.notEqual(
+        keOk.serverKeySig,
+        bareSig,
+        'emitted sig differs from bare-form sig — signer is domain-separated',
+      )
+
+      // The emitted sig MUST equal the domain-separated sig (proves the flip).
+      const domainSig = signExchangeKey(keOk.publicKey, identity.secretKey, { domainSeparated: true })
+      assert.equal(
+        keOk.serverKeySig,
+        domainSig,
+        'emitted sig matches the domain-separated sig — ' + EXCHANGE_KEY_SIG_DOMAIN_V1 + ' prefix active',
+      )
+    })
   })
 
   describe('non-key_exchange message while encryption pending', () => {

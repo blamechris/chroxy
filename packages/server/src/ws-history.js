@@ -291,7 +291,7 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
         // when pinning is unavailable — old clients ignore it, exchange stays TOFU.
         if (serverIdentity?.secretKey) {
           try {
-            eagerServerKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey)
+            eagerServerKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey, { domainSeparated: true })
           } catch (sigErr) {
             log.warn(`Failed to sign eager exchange key for ${client.id}: ${sigErr.message}`)
             eagerServerKeySig = null

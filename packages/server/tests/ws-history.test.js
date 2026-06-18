@@ -928,6 +928,59 @@ describe('sendPostAuthInfo — eager key exchange (#5555)', () => {
     )
   })
 
+  it('#5959 — eager serverKeySig is domain-separated (not bare): verifies as domain-separated, not as bare bytes', async () => {
+    // Proves the signer flip landed on the eager path: the signature covers
+    // `chroxy-exchange-key-v1:` ++ key, not the bare key bytes alone.
+    const {
+      createSigningKeyPair,
+      verifyExchangeKeySignature,
+      signExchangeKey,
+      EXCHANGE_KEY_SIG_DOMAIN_V1,
+    } = await import('@chroxy/store-core/crypto')
+    const identity = createSigningKeyPair()
+    const ws = makeFakeWs()
+    const ctx = makeEncryptingCtx({
+      encryptionEnabled: true,
+      keyExchangeTimeoutMs: 60000,
+      serverIdentity: identity,
+    })
+    const clientKp = createKeyPair()
+    const salt = generateConnectionSalt()
+    registerClient(ctx, ws, {
+      socketIp: '203.0.113.11',
+      eagerKeyExchange: { publicKey: clientKp.publicKey, salt },
+    })
+
+    sendPostAuthInfo(ctx, ws)
+
+    const authOk = ctx._plainSends.find(m => m.type === 'auth_ok')
+    assert.ok(authOk.serverPublicKey, 'eager serverPublicKey present')
+    assert.ok(authOk.serverKeySig, 'auth_ok carries serverKeySig')
+
+    // The accept-both verifier still accepts the domain-separated form.
+    assert.equal(
+      verifyExchangeKeySignature(authOk.serverPublicKey, authOk.serverKeySig, identity.publicKey),
+      true,
+      'verifyExchangeKeySignature accepts domain-separated sig',
+    )
+
+    // The emitted sig must NOT equal the bare-form sig produced by the old signer.
+    const bareSig = signExchangeKey(authOk.serverPublicKey, identity.secretKey, { domainSeparated: false })
+    assert.notEqual(
+      authOk.serverKeySig,
+      bareSig,
+      'emitted sig differs from bare-form sig — signer is domain-separated',
+    )
+
+    // The emitted sig MUST equal the domain-separated sig (proves the flip).
+    const domainSig = signExchangeKey(authOk.serverPublicKey, identity.secretKey, { domainSeparated: true })
+    assert.equal(
+      authOk.serverKeySig,
+      domainSig,
+      'emitted sig matches the domain-separated sig — ' + EXCHANGE_KEY_SIG_DOMAIN_V1 + ' prefix active',
+    )
+  })
+
   it('#5536 — omits serverKeySig on the eager path when no identity is configured', () => {
     const ws = makeFakeWs()
     const ctx = makeEncryptingCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 60000 })
