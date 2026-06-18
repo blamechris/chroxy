@@ -22,11 +22,16 @@ const log = createLogger('token-handlers')
  * `token_rotated{reason:'revoke'}` broadcast like every other connection.
  */
 function handleRevokeToken(ws, client, msg, ctx) {
+  const correlationId = ctx.correlationId
   if (client.isPrimaryToken !== true) {
+    // A non-primary client attempting revoke is a potential privilege-escalation
+    // signal — log it (with the client id) so it surfaces in triage.
+    log.warn(`Denied revoke_token from non-primary client ${client.id} (NOT_AUTHORIZED)`)
     ctx.transport.send(ws, {
       type: 'error',
       code: 'NOT_AUTHORIZED',
       message: 'Token revoke requires the primary token',
+      correlationId,
     })
     return
   }
@@ -37,6 +42,7 @@ function handleRevokeToken(ws, client, msg, ctx) {
       type: 'error',
       code: 'REVOKE_UNAVAILABLE',
       message: 'Token revoke is unavailable (no token manager configured)',
+      correlationId,
     })
     return
   }

@@ -3256,6 +3256,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       wsSend(socket, { type: 'revoke_token' });
+    } else {
+      // Destructive op: don't fail silently. A closing/closed socket is
+      // plausible exactly when an operator panics, so surface it instead of
+      // leaving them thinking the token was revoked.
+      console.warn('[chroxy] revokeToken: socket not open — revoke request not sent');
     }
   },
 
