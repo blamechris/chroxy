@@ -5,6 +5,7 @@ import { buildSessionTokenMismatchPayload } from './handler-utils.js'
 import { settlePush } from './push.js'
 import { createPermissionResolver } from './permission-resolver.js'
 import { sendOversizeResponse } from './http-oversize.js'
+import { SENSITIVE_KEY_NAMES, redactValue } from './redaction.js'
 
 const log = createLogger('ws')
 
@@ -13,20 +14,29 @@ const PERMISSION_TTL_MS = 300_000 // 5 minutes
 
 // -- Broadcast safety --
 const MAX_INPUT_BYTES = 10_240 // 10KB max for broadcast
-const SENSITIVE_KEYS = new Set(['token', 'password', 'apikey', 'secret', 'authorization', 'credential', 'private_key', 'api_key'])
 
 /**
- * Sanitize tool input for broadcast: redact sensitive fields and truncate large values.
+ * Sanitize tool input for broadcast: redact sensitive fields and truncate large
+ * values. Two passes (#6029): a KEY-NAME pass redacts values under sensitive
+ * keys wholesale, and a VALUE-SHAPE pass runs every remaining string value
+ * through `redactValue` so a secret embedded under a benign key — e.g.
+ * `{ command: 'export TOKEN=sk-ant-…' }` or `{ url: 'https://discord.com/api/webhooks/…' }`
+ * — is redacted before it reaches any client. Value patterns are shared with the
+ * logger via redaction.js (single source of truth).
  */
 function sanitizeToolInput(input) {
   if (!input || typeof input !== 'object') return input
 
   const result = {}
   for (const [key, value] of Object.entries(input)) {
-    if (SENSITIVE_KEYS.has(key.toLowerCase())) {
+    if (SENSITIVE_KEY_NAMES.has(key.toLowerCase())) {
       result[key] = '[REDACTED]'
-    } else if (typeof value === 'string' && value.length > MAX_INPUT_BYTES) {
-      result[key] = value.slice(0, MAX_INPUT_BYTES) + '... [truncated]'
+    } else if (typeof value === 'string') {
+      // Value-shape pass first so a redacted secret never survives truncation.
+      const redacted = redactValue(value)
+      result[key] = redacted.length > MAX_INPUT_BYTES
+        ? redacted.slice(0, MAX_INPUT_BYTES) + '... [truncated]'
+        : redacted
     } else {
       result[key] = value
     }

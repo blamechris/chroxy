@@ -18,6 +18,7 @@
 import { appendFileSync, statSync, renameSync, mkdirSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
 
 const DEFAULT_LOG_DIR = join(homedir(), '.chroxy', 'logs')
 const MAX_LOG_SIZE = 5 * 1024 * 1024  // 5MB
@@ -26,72 +27,21 @@ const ROTATION_CHECK_INTERVAL = 100  // check every N writes
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
 
-// Sensitive patterns to redact from log messages
-const SENSITIVE_PATTERNS = [
-  // Bearer tokens in headers
-  /Bearer\s+[A-Za-z0-9_\-./+=]{8,}/gi,
-  // API tokens (base64url, UUID, hex) after common key names
-  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{8,}["']?/gi,
-]
-
-// Provider API key patterns (#2961). These run separately so we can emit a
-// bare "[REDACTED]" regardless of any surrounding key/value syntax — the raw
-// key often appears mid-sentence in stderr (e.g., "invalid api key sk-...").
-// Length floors are tuned to avoid false positives on short identifiers like
-// product SKUs or the literal word "AIzawa".
-const API_KEY_PATTERNS = [
-  // Anthropic: sk-ant-api03-... (checked before generic sk- so the longer
-  // prefix wins). Real keys are well over 40 trailing chars.
-  /\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{40,}/g,
-  // OpenAI project-scoped keys: sk-proj-... (typically 40+ chars after prefix)
-  /\bsk-proj-[A-Za-z0-9_-]{40,}/g,
-  // OpenAI legacy secret keys: sk- followed by 40+ chars. Must not match
-  // sk-ant- / sk-proj- (already handled above) — negative lookahead keeps
-  // them from being partially redacted.
-  /\bsk-(?!ant-|proj-)[A-Za-z0-9]{40,}/g,
-  // Google API keys: AIza + exactly 35 chars of [A-Za-z0-9_-].
-  // Trailing \b prevents matching into longer alphanumerics (e.g., AIzawa…).
-  /\bAIza[A-Za-z0-9_-]{35}\b/g,
-  // #5358: JWTs (incl. claude/OAuth bearer JWTs printed without a "Bearer"/key
-  // marker). header.payload.signature, each base64url; the header always starts
-  // `eyJ` (base64 of `{"`), which makes this specific enough to avoid matching
-  // ordinary dotted tokens. Length floors keep it off short `a.b.c` strings.
-  /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}/g,
-  // #5413: Discord webhook URLs. The token segment after the numeric webhook
-  // id grants post/edit/delete on the channel, so the URL is a credential.
-  // Covers discordapp.com (legacy), ptb/canary builds, and optional /vN/ API
-  // version segments; anything after the token (e.g. /messages/<id>) is left
-  // intact. Real webhook tokens are 60+ chars; the 20 floor keeps doc
-  // placeholders like .../webhooks/123/abc readable while catching any
-  // plausible real token.
-  /\bhttps:\/\/(?:ptb\.|canary\.)?discord(?:app)?\.com\/api\/(?:v\d+\/)?webhooks\/\d+\/[A-Za-z0-9_-]{20,}/g,
-]
+// #6029: the value-SHAPE patterns (SENSITIVE_PATTERNS / API_KEY_PATTERNS) and
+// the contiguous redaction logic now live in redaction.js as the single source
+// of truth, shared with the tool-broadcast sanitizer (ws-permissions.js). The
+// constants are imported here for redactSensitivePreservingEscapes (the
+// escape-aware PTY-dump pass that still needs the raw pattern list).
 
 /**
- * Redact sensitive data from a log message.
+ * Redact sensitive data from a log message. Delegates to the shared
+ * `redactValue` (redaction.js) so the logger and the tool-broadcast path apply
+ * identical patterns and replacement rules.
  * @param {string} msg
  * @returns {string}
  */
 export function redactSensitive(msg) {
-  let result = msg
-  for (const pattern of SENSITIVE_PATTERNS) {
-    result = result.replace(pattern, (match) => {
-      // Keep the key name, redact the value
-      const colonIdx = match.indexOf(':')
-      const eqIdx = match.indexOf('=')
-      const sepIdx = colonIdx >= 0 ? (eqIdx >= 0 ? Math.min(colonIdx, eqIdx) : colonIdx) : eqIdx
-      if (sepIdx >= 0) {
-        return match.slice(0, sepIdx + 1) + ' [REDACTED]'
-      }
-      // For Bearer tokens
-      if (match.startsWith('Bearer')) return 'Bearer [REDACTED]'
-      return '[REDACTED]'
-    })
-  }
-  for (const pattern of API_KEY_PATTERNS) {
-    result = result.replace(pattern, '[REDACTED]')
-  }
-  return result
+  return redactValue(msg)
 }
 
 // #5358: escape/control sequences a TUI can interleave INTO a token while
