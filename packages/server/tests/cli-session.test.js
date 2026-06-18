@@ -48,6 +48,10 @@ after(() => {
 const _createdSessions = []
 afterEach(() => {
   for (const s of _createdSessions) {
+    // Null the mock child first: destroy() otherwise arms a 3s forceKillTimer
+    // cleared only by a real child's 'close' event, which the mock never emits
+    // — a (self-clearing, non-hanging) timer we'd rather not add in a teardown.
+    s._child = null
     try { const r = s.destroy(); if (r && typeof r.catch === 'function') r.catch(() => {}) } catch {}
   }
   _createdSessions.length = 0
