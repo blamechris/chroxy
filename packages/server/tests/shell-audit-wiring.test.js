@@ -1,4 +1,4 @@
-import { describe, it, before, after, beforeEach, mock } from 'node:test'
+import { describe, it, before, after, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'fs'
 import { join } from 'path'
@@ -201,6 +201,55 @@ if (typeof mock.module !== 'function') {
         ctx,
       )
       assert.equal(createCalls.length, 0)
+    })
+  })
+
+  // #5982 — auto-remove an exited user-shell session after the grace delay, and
+  // never double-destroy if it's torn down during the grace.
+  describe('user-shell auto-remove on exit (#5982)', () => {
+    beforeEach(() => { destroyCalls.length = 0 })
+    afterEach(() => { mock.timers.reset() })
+
+    it('auto-removes a user-shell after a natural PTY exit (after the grace)', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      const mgr = makeMgr()
+      const sessionId = mgr.createSession({ name: 'sh', cwd: '/tmp', provider: 'test-audit-usershell' })
+      const entry = mgr.getSession(sessionId)
+      entry.session._exitReason = 'exit' // mimic a natural exit (set by _onShellExit)
+
+      entry.session.emit('shell_exited', { code: 0 })
+      assert.ok(mgr.getSession(sessionId), 'still present during the grace window')
+
+      mock.timers.tick(1500)
+      assert.equal(mgr.getSession(sessionId), null, 'removed after the grace')
+      assert.equal(destroyCalls.length, 1)
+      assert.equal(destroyCalls[0].reason, 'exit', 'audits the natural exit reason')
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+
+    it('does not double-destroy if the session is torn down during the grace', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      const mgr = makeMgr()
+      const sessionId = mgr.createSession({ name: 'sh', cwd: '/tmp', provider: 'test-audit-usershell' })
+      mgr.getSession(sessionId).session.emit('shell_exited', { code: 0 })
+
+      mgr.destroySession(sessionId) // explicit teardown during the grace
+      const after = destroyCalls.length
+
+      mock.timers.tick(1500) // pending timer fires — must be a no-op (session gone)
+      assert.equal(destroyCalls.length, after, 'the grace timer did not destroy again')
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+
+    it('does not auto-remove a non-shell session', () => {
+      mock.timers.enable({ apis: ['setTimeout'] })
+      const mgr = makeMgr()
+      const sessionId = mgr.createSession({ name: 'chat', cwd: '/tmp', provider: 'test-audit-normal' })
+      // A normal session has no shell_exited wiring; emitting it is inert.
+      mgr.getSession(sessionId).session.emit('shell_exited', { code: 0 })
+      mock.timers.tick(1500)
+      assert.ok(mgr.getSession(sessionId), 'non-shell session is not auto-removed')
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
     })
   })
 }
