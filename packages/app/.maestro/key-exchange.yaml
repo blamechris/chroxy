@@ -1,0 +1,165 @@
+appId: com.blamechris.chroxy
+name: E2E key exchange eager handshake (#6019)
+---
+
+# #6019 — Device-layer coverage for the key_exchange / eager-handshake
+# path (deferred from #5619 / #5605 / #5556). The encrypted-handshake
+# path is covered at the store-core level via FakeHandshakeServer /
+# FakeHandshakeClient contract-switch suites, but had no Maestro
+# coverage against a real device.
+#
+# This flow exercises the full encrypted connect sequence on a real RN
+# runtime:
+#   auth (with eagerPublicKey + eagerSalt) →
+#   auth_ok (with serverPublicKey) →
+#   shared-key derivation →
+#   encrypted post-auth burst →
+#   encrypted assistant message →
+#   SessionScreen lands
+#
+# The flow uses token `test-token-maestro-encrypted` to opt-in to the
+# mock-server's encrypted path (standard `test-token-maestro` keeps
+# encryption:'disabled' so existing flows are unaffected).
+#
+# Handshake modes supported by the mock:
+#   Eager path (expected): the app sends `eagerPublicKey` + `eagerSalt`
+#     in its `auth` message → mock derives the shared key from its own
+#     static keypair + the client's public key → includes
+#     `serverPublicKey` in auth_ok → client derives shared key in the
+#     auth_ok handler → encryption active immediately → post-auth burst
+#     arrives encrypted.
+#   Discrete fallback: if the app does NOT send eagerPublicKey (older
+#     build or eager disabled) → mock replies auth_ok with
+#     encryption:'required' but no serverPublicKey → client sends a
+#     standalone `key_exchange` message → mock replies key_exchange_ok
+#     with serverPublicKey → shared key derived → burst sent encrypted.
+#
+# ASSUMPTIONS requiring on-device verification:
+#   1. The app generates an eager keypair in socket.onopen before
+#      sending `auth`, so eagerPublicKey is present on the auth message.
+#      If the mock log shows "Waiting for discrete key_exchange from
+#      client" instead of "Eager key exchange — shared key derived",
+#      the discrete fallback path fired (still valid, but note it).
+#   2. The mock's static server keypair has no Ed25519 identity
+#      signature (serverKeySig: null). The app skips signature
+#      verification on an UNPINNED connection (first connect after
+#      clearState:true — no SecureStore pin). If a test failure shows
+#      "identity refused" that means a stale pin was not cleared by
+#      clearState:true — check the app's SecureStore eviction logic.
+#   3. The mock does not implement server-initiated re-key or key
+#      rotation; this flow only covers the initial handshake.
+#
+# Deliberately RED run (for on-device verification): patch the app so
+# that `wsSend` in connection.ts bypasses encryption (remove the
+# `encryptionState` branch) and confirm the mock's decryption logs
+# "Decryption failed — MAC mismatch" or the flow times out on Chat.
+#
+# Tested devices: portrait iPhone (iOS 17+).
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+# Use launchApp + openLink directly (not setup/ensure-session-screen.yaml)
+# because this flow must connect with a different token
+# (test-token-maestro-encrypted) than the standard fixture. We replicate
+# the same launch + connect sequence that ensure-session-screen.yaml uses,
+# but with the encrypted token in the API-token field.
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip the onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands — extended timeout
+# because Metro may need to bundle on first launch.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we auto-connected to a stale saved server, bail out to ConnectScreen.
+- runFlow:
+    when:
+      visible:
+        id: "reconnect-banner"
+    commands:
+      - tapOn:
+          text: "Disconnect and go back"
+      - extendedWaitUntil:
+          visible: "Connect to Chroxy"
+          timeout: 8000
+
+# Connect using the encrypted token. This opts the mock into the
+# encryption:'required' path (the standard token keeps encryption:'disabled').
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro-encrypted"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+# SessionScreen should land — the encrypted post-auth burst completes
+# just like the unencrypted path; the session_list / session_switched
+# flow is the same, just wrapped in encrypted envelopes. A timeout here
+# means the handshake failed (check the mock-server log for "Encrypted
+# session started" vs "Waiting for discrete key_exchange from client"
+# vs "Decryption failed").
+- extendedWaitUntil:
+    visible: "Chat"
+    timeout: 20000
+
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+- takeScreenshot: key-exchange-session-screen-landed
+
+# Send a plain message to confirm the encrypted session is fully
+# functional — input goes through wsSend (encrypted), the mock decrypts
+# it, and replies with the default assistant response (also encrypted).
+# If encryption is broken the mock logs "Decryption failed" and either
+# closes the socket or the response never arrives.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "ping-encrypted"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for the echo-response bubble from the mock server. The mock
+# default branch emits: `I received your message: "ping-encrypted".
+# This is a mock response for E2E testing.` — assert the phrase is
+# present in the chat to pin that the encrypted round-trip worked.
+- extendedWaitUntil:
+    visible:
+      text: ".*ping-encrypted.*"
+    timeout: 15000
+
+- takeScreenshot: key-exchange-encrypted-roundtrip-confirmed

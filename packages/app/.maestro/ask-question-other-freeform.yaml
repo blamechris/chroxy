@@ -1,5 +1,5 @@
 appId: com.blamechris.chroxy
-name: ChatView AskUserQuestion Other → freeform send-path (#4877, #4755)
+name: ChatView AskUserQuestion Other freeform send-path (#4877, #4755)
 ---
 
 # #4877 — Maestro coverage for the third (deferred) acceptance criterion of
@@ -45,65 +45,12 @@ name: ChatView AskUserQuestion Other → freeform send-path (#4877, #4755)
 #     `styles.promptFreetextAnswered` renders the user's actual answer
 #     (matches dashboard `formatQuestionAnswerSummary` UX behaviour).
 #
-# Self-contained (no `runFlow: setup/...`) for the same reason the sibling
-# ask-user-question{,-deny,-multi}.yaml flows are: setup/ targets Expo Go
-# (host.exp.Exponent) while this needs the chroxy dev client
-# (com.blamechris.chroxy).
-#
 # Tested devices: portrait iPhone 15 Pro (iOS 17+).
 # Requires: dev client installed + mock server on port 9876
 #   cd packages/app && npx expo run:ios
 #   bash packages/app/.maestro/scripts/start-mock-server.sh
 
-- launchApp:
-    clearState: true
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-# Skip onboarding carousel post-clearState.
-- tapOn:
-    text: "Skip"
-    optional: true
-
-# Wait until either ConnectScreen OR Chat lands.
-- extendedWaitUntil:
-    visible:
-      text: "Connect to Chroxy|Chat"
-    timeout: 30000
-
-# If we landed on ConnectScreen, fill the manual-entry form.
-- runFlow:
-    when:
-      visible: "Connect to Chroxy"
-    commands:
-      - tapOn:
-          id: "connect-manual-toggle"
-
-      - tapOn:
-          id: "connect-server-url"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-
-      - tapOn:
-          id: "connect-api-token"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-
-      - hideKeyboard
-
-      - tapOn:
-          id: "connect-submit"
-
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+- runFlow: setup/ensure-session-screen.yaml
 
 # Ensure Chat tab.
 - tapOn: "Chat"

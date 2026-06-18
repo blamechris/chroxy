@@ -2,7 +2,7 @@ appId: com.blamechris.chroxy
 name: Reconnect after tunnel drop (#4701)
 ---
 
-# #4701 — End-to-end coverage for the ConnectionPhase
+# #4701 / #5468 — End-to-end coverage for the ConnectionPhase
 # `connected → reconnecting → connected` transition after the WebSocket
 # drops. Unit tests in `__tests__/store/connection.*.test.ts` pin the
 # state-machine transitions, but no E2E ever exercised the visual
@@ -13,90 +13,45 @@ name: Reconnect after tunnel drop (#4701)
 # phase returns to `connected`.
 #
 # This flow pins:
-#   (a) The `reconnect-banner` testID (added in this PR to
-#       SessionScreen.tsx) becomes visible when phase enters
-#       `reconnecting`,
-#   (b) The `reconnect-spinner` testID (RNActivityIndicator inside the
-#       banner) is wired,
-#   (c) The auto-reconnect succeeds — the banner clears and the chat
-#       input is usable again (we re-tap the input and assert the
-#       send button is reachable).
+#   (a) Recovery: the app ends up reconnected and usable (the input
+#       placeholder flips back to "Message Claude..." and the input bar
+#       is focused-able). Banner/spinner visibility is too short to
+#       hard-assert on Maestro's iOS hierarchy poll interval (~1-in-3
+#       catch rate observed on iPhone 16 Pro) — that mount is
+#       unit-test territory.
+#   (b) #5468 drop marker: mock-server emits
+#       "mock reconnect #<N>" (as a system-type message) on the SECOND
+#       auth within this server process. The flow hard-asserts that
+#       text after recovery, proving a real WS drop + reconnect happened
+#       — a broken simulate-disconnect path (mock never calls
+#       ws.terminate()) means the app never reconnects, the mock never
+#       sees a second auth, and the marker is never emitted.
 #
 # Trigger: 'simulate-disconnect' user input → mock-server schedules a
 # `ws.terminate()` after a 1s delay (abrupt TCP teardown, mirrors a
-# Cloudflare tunnel drop — the client observes a 1006 close locally
-# without a Close frame on the wire). The 1s buffer lets the app ack
-# the input before the close lands and mirrors the production case
-# where the server is mid-stream when the tunnel drops. After the
-# AUTO_RECONNECT_DELAY (currently 1500ms in connection.ts), the app
-# auto-reconnects to the same URL — and because the mock-server is
-# still up on port 9876, the reconnect succeeds.
+# Cloudflare tunnel drop — the client observes a 1006 close code
+# locally without a Close frame on the wire). After AUTO_RECONNECT_DELAY
+# (currently ~1500ms in connection.ts), the app auto-reconnects to the
+# same URL — and because the mock-server is still up on port 9876,
+# the reconnect succeeds and the marker is emitted.
+#
+# Deliberately RED run (for on-device verification): comment out the
+# `ws.terminate()` line in mock-server.mjs and confirm the
+# `extendedWaitUntil` for "mock reconnect #" times out — proving the
+# marker is only reachable via a real drop.
 #
 # Reconnect timing is inherently flakey on a simulator (Metro pause,
 # bridge GC, network throttle), so the assertion uses generous
 # `extendedWaitUntil` timeouts. The fixture seeding pattern is
-# documented in CLAUDE.md → "Fixture Seeding for Structured
-# Renderers".
+# documented in CLAUDE.md → "Fixture Seeding for Structured Renderers".
 #
 # Tested devices: portrait iPhone (iOS 17+). Mirrors chat-todolist /
 # stream-stall-chip flows.
 # Requires: dev client installed + mock server on port 9876
 #   cd packages/app && npx expo run:ios
 #   bash packages/app/.maestro/scripts/start-mock-server.sh
-#
-# Self-contained (no `runFlow: setup/...`) because the existing setup/
-# flows target Expo Go (appId host.exp.Exponent), whereas this needs
-# the chroxy dev client (com.blamechris.chroxy).
 
-- launchApp:
-    clearState: true
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-# Skip onboarding carousel post-clearState.
-- tapOn:
-    text: "Skip"
-    optional: true
-
-# Wait until either ConnectScreen OR Chat lands.
-- extendedWaitUntil:
-    visible:
-      text: "Connect to Chroxy|Chat"
-    timeout: 30000
-
-# If we landed on ConnectScreen, fill the manual-entry form.
-- runFlow:
-    when:
-      visible: "Connect to Chroxy"
-    commands:
-      - tapOn:
-          id: "connect-manual-toggle"
-
-      - tapOn:
-          id: "connect-server-url"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-
-      - tapOn:
-          id: "connect-api-token"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-
-      - hideKeyboard
-
-      - tapOn:
-          id: "connect-submit"
-
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+- runFlow: setup/ensure-session-screen.yaml
 
 # Ensure Chat tab is selected.
 - tapOn: "Chat"
@@ -112,24 +67,6 @@ name: Reconnect after tunnel drop (#4701)
     id: "chat-send-button"
 
 - hideKeyboard
-
-# NOTE (2026-06-10, dev-client migration): the banner/spinner pins from
-# (a)/(b) in the header are NOT hard-asserted here anymore. The mock
-# server stays up, so the app reconnects in ~1-2s and the banner's
-# visibility window is shorter than Maestro's iOS view-hierarchy poll
-# interval more often than not (observed ~1-in-3 catch rate on
-# iPhone 16 Pro — the wait timed out while the app had already
-# recovered). The `reconnect-banner` / `reconnect-spinner` mount on
-# phase=reconnecting is unit-test territory; what this flow can pin
-# deterministically end-to-end is (c): the app ends up recovered and
-# usable after the drop, asserted below.
-#
-# Caveat (be honest about the coverage): the flow cannot pin the drop
-# itself either — the placeholder is "Message Claude..." both before
-# the drop and after recovery, so if the mock's simulate-disconnect
-# stopped terminating the socket the asserts below would still pass.
-# A deterministic drop marker (mock emits a per-connection signal the
-# flow can hard-assert) is tracked in #5468.
 
 # Wait for the reconnect to succeed. The mock-server stays up on port
 # 9876 so the auto-reconnect lands → phase flips back to `connected`
@@ -151,6 +88,18 @@ name: Reconnect after tunnel drop (#4701)
     visible:
       text: "Message Claude..."
     timeout: 30000
+
+# #5468 — Hard-assert the reconnect marker emitted by mock-server on
+# the second auth (i.e. the post-reconnect auth). The marker is a
+# system-type message with content "mock reconnect #<N>". Waiting for
+# it proves the full drop + reconnect cycle completed end-to-end:
+# ws.terminate() fired → client got 1006 close → re-dialled → second
+# auth received → marker emitted → store dispatched the message →
+# ChatView rendered the bubble.
+- extendedWaitUntil:
+    visible:
+      text: ".*mock reconnect #.*"
+    timeout: 15000
 
 # Positive confirmation: the input bar is still wired and we can
 # focus it (proves the SessionScreen is in a usable state, not stuck
