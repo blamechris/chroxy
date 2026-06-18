@@ -21,9 +21,10 @@ permissions:
 # SELF_HOSTED_OR_HOSTED runner routing
 # ------------------------------------
 # Jobs marked `runs-on: ${{ ... SELF_HOSTED_OR_HOSTED ... }}` route to the
-# self-hosted Linux runner pool (4 Docker replicas on the maintainer's Mac —
-# labels self-hosted,Linux,ARM64; see ~/actions-runner-linux) for SAME-REPO
-# pushes and PRs, keeping them off the GitHub-hosted bill. FORK PRs fall back to
+# self-hosted Linux runner pool (Docker-based, labels self-hosted,Linux,ARM64)
+# for SAME-REPO pushes and PRs, keeping them off the GitHub-hosted bill. If no
+# self-hosted Linux runner is online, those jobs queue until one appears. FORK
+# PRs fall back to
 # `ubuntu-24.04` (GitHub-hosted) so untrusted contributor code never executes on
 # the self-hosted machine, while external contributors still get full CI.
 # The macOS desktop job uses the separate self-hosted macOS runner; the Windows
