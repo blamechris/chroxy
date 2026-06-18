@@ -15,31 +15,69 @@ const PERMISSION_TTL_MS = 300_000 // 5 minutes
 // -- Broadcast safety --
 const MAX_INPUT_BYTES = 10_240 // 10KB max for broadcast
 
+// Cap recursion so a pathologically deep or cyclic tool_input can't blow the
+// stack. Real tool inputs are shallow; anything past this is summarized away.
+const MAX_SANITIZE_DEPTH = 8
+
+/**
+ * Recursively redact a single tool_input value of any shape (#6029). Applies the
+ * KEY-NAME pass to object keys and the VALUE-SHAPE pass (`redactValue`) to every
+ * string at any depth, so a secret nested inside an object or array — e.g.
+ * `{ env: { TOKEN: 'sk-ant-…' } }`, `{ args: ['--token', 'sk-ant-…'] }`, or
+ * `{ headers: { Authorization: 'Bearer …' } }` — can't slip past the top-level
+ * scan. `seen` guards against cycles; `depth` caps pathological nesting.
+ *
+ * @param {*} value
+ * @param {number} depth
+ * @param {WeakSet} seen
+ * @returns {*}
+ */
+function redactDeep(value, depth, seen) {
+  if (typeof value === 'string') {
+    const redacted = redactValue(value)
+    return redacted.length > MAX_INPUT_BYTES
+      ? redacted.slice(0, MAX_INPUT_BYTES) + '... [truncated]'
+      : redacted
+  }
+  if (!value || typeof value !== 'object') return value
+  if (depth >= MAX_SANITIZE_DEPTH) return '[REDACTED:depth]'
+  if (seen.has(value)) return '[REDACTED:cycle]'
+  seen.add(value)
+  let out
+  if (Array.isArray(value)) {
+    out = value.map((item) => redactDeep(item, depth + 1, seen))
+  } else {
+    out = {}
+    for (const [key, child] of Object.entries(value)) {
+      out[key] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
+        ? '[REDACTED]'
+        : redactDeep(child, depth + 1, seen)
+    }
+  }
+  seen.delete(value)
+  return out
+}
+
 /**
  * Sanitize tool input for broadcast: redact sensitive fields and truncate large
  * values. Two passes (#6029): a KEY-NAME pass redacts values under sensitive
- * keys wholesale, and a VALUE-SHAPE pass runs every remaining string value
+ * keys wholesale, and a VALUE-SHAPE pass runs every string value (at ANY depth)
  * through `redactValue` so a secret embedded under a benign key — e.g.
- * `{ command: 'export TOKEN=sk-ant-…' }` or `{ url: 'https://discord.com/api/webhooks/…' }`
- * — is redacted before it reaches any client. Value patterns are shared with the
- * logger via redaction.js (single source of truth).
+ * `{ command: 'export TOKEN=sk-ant-…' }`, `{ url: 'https://discord.com/api/webhooks/…' }`,
+ * or nested in `{ env: { TOKEN: 'sk-ant-…' } }` / `{ args: ['--token', 'sk-ant-…'] }`
+ * — is redacted before it reaches any client. Both passes recurse through nested
+ * objects and arrays. Value patterns are shared with the logger via redaction.js
+ * (single source of truth).
  */
 function sanitizeToolInput(input) {
   if (!input || typeof input !== 'object') return input
 
+  const seen = new WeakSet()
   const result = {}
   for (const [key, value] of Object.entries(input)) {
-    if (SENSITIVE_KEY_NAMES.has(key.toLowerCase())) {
-      result[key] = '[REDACTED]'
-    } else if (typeof value === 'string') {
-      // Value-shape pass first so a redacted secret never survives truncation.
-      const redacted = redactValue(value)
-      result[key] = redacted.length > MAX_INPUT_BYTES
-        ? redacted.slice(0, MAX_INPUT_BYTES) + '... [truncated]'
-        : redacted
-    } else {
-      result[key] = value
-    }
+    result[key] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
+      ? '[REDACTED]'
+      : redactDeep(value, 1, seen)
   }
 
   // Final size check on the whole object
@@ -48,6 +86,26 @@ function sanitizeToolInput(input) {
     return { _truncated: true, summary: serialized.slice(0, MAX_INPUT_BYTES) + '... [truncated]' }
   }
   return result
+}
+
+/**
+ * Build the human-readable `description` broadcast alongside a permission
+ * request. #6029: the description is derived from RAW toolInput and broadcast
+ * next to the sanitized `input`, so a secret in command/url/etc. would leak here
+ * even though `input` is clean. The final string is run through `redactValue` so
+ * the broadcast description can never carry a secret-shaped value.
+ *
+ * @param {object} toolInput
+ * @returns {string}
+ */
+function buildPermissionDescription(toolInput) {
+  const raw = toolInput.description
+    || toolInput.command
+    || toolInput.file_path
+    || toolInput.pattern
+    || toolInput.query
+    || JSON.stringify(toolInput).slice(0, 200)
+  return redactValue(raw)
 }
 
 /**
@@ -202,12 +260,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const tool = hookData.tool_name || 'Unknown tool'
       const toolInput = hookData.tool_input || {}
       const sanitizedInput = sanitizeToolInput(toolInput)
-      const description = toolInput.description
-        || toolInput.command
-        || toolInput.file_path
-        || toolInput.pattern
-        || toolInput.query
-        || JSON.stringify(toolInput).slice(0, 200)
+      const description = buildPermissionDescription(toolInput)
 
       // #2831: find the CliSession this hook permission belongs to (via
       // the per-session hook secret from the Authorization header) so we
@@ -640,4 +693,4 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
 }
 
 // Exported for testing
-export { sanitizeToolInput }
+export { sanitizeToolInput, buildPermissionDescription }

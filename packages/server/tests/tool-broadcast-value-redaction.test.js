@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { sanitizeToolInput } from '../src/ws-permissions.js'
+import { sanitizeToolInput, buildPermissionDescription } from '../src/ws-permissions.js'
 import { redactValue } from '../src/redaction.js'
 
 /**
@@ -94,6 +94,73 @@ describe('#6029 tool-broadcast value redaction', () => {
     const out = sanitizeToolInput({ blob: 'y'.repeat(11_000) + ' ' + FAKE_ANT_KEY })
     const serialized = JSON.stringify(out)
     assert.ok(!serialized.includes(FAKE_ANT_KEY), 'secret must not survive into the truncated summary')
+  })
+
+  // #6029 bypass 2: nested objects/arrays must be traversed, not just top-level.
+  it('redacts a secret nested in an object value', () => {
+    const out = sanitizeToolInput({ env: { TOKEN: FAKE_ANT_KEY } })
+    const serialized = JSON.stringify(out)
+    assert.ok(!serialized.includes(FAKE_ANT_KEY), 'nested object secret must not leak')
+    assert.ok(serialized.includes('[REDACTED]'), 'should mark the redaction')
+  })
+
+  it('redacts a secret nested in an array value', () => {
+    const out = sanitizeToolInput({ args: ['--token', FAKE_ANT_KEY] })
+    const serialized = JSON.stringify(out)
+    assert.ok(!serialized.includes(FAKE_ANT_KEY), 'array secret must not leak')
+    assert.ok(serialized.includes('[REDACTED]'), 'should mark the redaction')
+  })
+
+  it('redacts a Bearer header nested in an object value', () => {
+    const out = sanitizeToolInput({ headers: { Authorization: 'Bearer abc.def.ghijklmnop' } })
+    const serialized = JSON.stringify(out)
+    assert.ok(!serialized.includes('abc.def.ghijklmnop'), 'nested bearer token must not leak')
+    assert.ok(serialized.includes('[REDACTED]'), 'should mark the redaction')
+  })
+
+  it('redacts a sensitive KEY NAME nested deep in an object', () => {
+    const out = sanitizeToolInput({ config: { auth: { password: 'hunter2' } } })
+    assert.equal(out.config.auth.password, '[REDACTED]', 'nested sensitive key redacted wholesale')
+  })
+
+  it('leaves benign nested structures unchanged', () => {
+    const input = { env: { NODE_ENV: 'production' }, args: ['build', '--watch'] }
+    const out = sanitizeToolInput(input)
+    assert.deepEqual(out, input)
+  })
+
+  it('guards against pathological depth / cycles without throwing', () => {
+    const cyclic = { a: 1 }
+    cyclic.self = cyclic
+    assert.doesNotThrow(() => sanitizeToolInput(cyclic))
+    const out = sanitizeToolInput(cyclic)
+    // The back-reference is caught and replaced rather than recursing forever.
+    const serialized = JSON.stringify(out)
+    assert.ok(serialized.includes('[REDACTED:cycle]'), 'cycle marker present')
+  })
+})
+
+describe('#6029 broadcast description redaction', () => {
+  it('redacts a secret in a command-derived description', () => {
+    const desc = buildPermissionDescription({ command: `export TOKEN=${FAKE_ANT_KEY}` })
+    assert.ok(!desc.includes(FAKE_ANT_KEY), 'API key must not leak in broadcast description')
+    assert.ok(desc.includes('[REDACTED]'), 'should mark the redaction')
+  })
+
+  it('redacts a Discord webhook in a url-derived description', () => {
+    const desc = buildPermissionDescription({ url: FAKE_DISCORD })
+    assert.ok(!desc.includes('b'.repeat(40)), 'webhook token must not leak in description')
+    assert.ok(desc.includes('[REDACTED]'), 'should mark the redaction')
+  })
+
+  it('redacts a secret in the JSON.stringify fallback description', () => {
+    // No description/command/file_path/pattern/query — falls back to JSON dump.
+    const desc = buildPermissionDescription({ payload: `key ${FAKE_ANT_KEY}` })
+    assert.ok(!desc.includes(FAKE_ANT_KEY), 'fallback JSON dump must not leak the secret')
+  })
+
+  it('passes a benign description through unchanged', () => {
+    assert.equal(buildPermissionDescription({ command: 'ls -la' }), 'ls -la')
   })
 })
 
