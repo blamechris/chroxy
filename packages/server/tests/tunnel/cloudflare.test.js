@@ -427,6 +427,10 @@ describe('CloudflareTunnelAdapter', () => {
         async () => await tunnel.start(),
         /tunnelName/
       )
+      // #6027: a failed named-tunnel start leaves the retry/recovery loop
+      // scheduling backoff sleeps in the background. Stop it so the timer
+      // doesn't outlive the test (keeps the suite alive without force-exit).
+      await tunnel.stop()
     })
 
     it('rejects when tunnelHostname is missing', async () => {
@@ -441,6 +445,8 @@ describe('CloudflareTunnelAdapter', () => {
         async () => await tunnel.start(),
         /tunnelHostname/
       )
+      // #6027: stop the background retry/recovery loop (see tunnelName test).
+      await tunnel.stop()
     })
 
     it('hasStableUrl returns true for named mode', () => {

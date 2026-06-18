@@ -1,15 +1,23 @@
-import { describe, it, after, mock } from 'node:test'
+import { describe, it, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { createMockSessionManager } from './test-helpers.js'
 
 describe('WsServer error handlers (#2195)', { timeout: 10000 }, () => {
   let wsServer
 
-  after(async () => {
-    mock.restoreAll()
+  // #6027: each test creates and reassigns `wsServer`, so an `after` that
+  // closes only the last one leaks the earlier listening socket + its
+  // keepalive/auth-cleanup intervals — keeping the suite alive without
+  // --test-force-exit. Close after every test instead.
+  afterEach(() => {
     if (wsServer) {
       try { wsServer.close() } catch {}
+      wsServer = null
     }
+  })
+
+  after(() => {
+    mock.restoreAll()
   })
 
   it('attaches an error handler to the WebSocketServer instance', async () => {

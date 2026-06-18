@@ -40,6 +40,19 @@ after(() => {
   if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
 })
 
+// #6027: sendMessage arms _resultTimeout/_hardTimeout/_streamStallTimeout, but
+// most tests clear only _resultTimeout (or none), leaking _hardTimeout/
+// _streamStallTimeout and keeping the suite alive without --test-force-exit.
+// Track every constructed session and destroy() it after each test — destroy()
+// clears all of them and is idempotent (tests already call it twice safely).
+const _createdSessions = []
+afterEach(() => {
+  for (const s of _createdSessions) {
+    try { const r = s.destroy(); if (r && typeof r.catch === 'function') r.catch(() => {}) } catch {}
+  }
+  _createdSessions.length = 0
+})
+
 function createSession(opts = {}) {
   const stateFilePath = opts.stateFilePath || tmpStateFile()
   // CliSession ignores unknown keys via destructuring today, so passing
@@ -50,6 +63,7 @@ function createSession(opts = {}) {
   // instance so individual tests can assert on it.
   const session = new CliSession({ cwd: '/tmp', stateFilePath, ...opts })
   session._testStateFilePath = stateFilePath
+  _createdSessions.push(session)
   return session
 }
 
