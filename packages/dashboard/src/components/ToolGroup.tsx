@@ -140,7 +140,7 @@ function ToolGroupEntry({
   // (#4081), so the expanded view now mirrors the same fallback.
   // `isStreamingInput` flags the panel as still arriving so styling can
   // hint at the in-flight state (data-streaming="true").
-  const partialInputDetail = structuredInputDetail || suppressRawInput
+  const partialInputDetail = (structuredInputDetail || suppressRawInput)
     ? ''
     : formatPartialForDetail(message.toolInputPartial)
   const inputDetail = structuredInputDetail || partialInputDetail
