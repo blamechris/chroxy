@@ -204,6 +204,79 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
 });
 
 // ---------------------------------------------------------------------------
+// Targeted in-place-flip assertion for permission_resolved (#6074)
+//
+// The SWITCH_FIXTURES shape contract above strips non-whitelist fields via
+// normalize(), so it cannot observe the in-place mutation of answered /
+// answeredAt / options. This separate test drives the same real handleMessage
+// path and asserts the fields that are invisible to normalize().
+// ---------------------------------------------------------------------------
+
+describe('permission_resolved flips answered + clears options (in-place)', () => {
+  beforeEach(() => {
+    jest.useFakeTimers();
+    clearDeltaBuffers();
+  });
+
+  afterEach(() => {
+    clearDeltaBuffers();
+    jest.runAllTimers();
+    jest.useRealTimers();
+    setConnectionContext(null);
+  });
+
+  it('permission_resolved flips answered + clears options (in-place) (#6074)', () => {
+    const before = Date.now();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [],
+      availableProviders: [],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+              answered: undefined,
+              answeredAt: undefined,
+            },
+          ],
+        },
+      } as unknown as ConnectionState['sessionStates'],
+      messages: [],
+      addMessage: jest.fn(),
+      appendTerminalData: jest.fn(),
+    } as unknown as ConnectionState);
+    setStore(store);
+    setConnectionContext(mockCtx as never);
+
+    handleMessage({ type: 'permission_resolved', requestId: 'req-1', decision: 'allow' });
+    const after = Date.now();
+
+    const ss = (store.getState() as unknown as { sessionStates: Record<string, SessionState> })
+      .sessionStates['s1'];
+    expect(ss.messages).toHaveLength(1);
+    const bubble = ss.messages[0] as Record<string, unknown>;
+    // Shape invariant: same id/type/content/tool (not duplicated or wiped)
+    expect(bubble.id).toBe('prompt-req-1');
+    expect(bubble.type).toBe('prompt');
+    expect(bubble.content).toBe('Bash: rm -rf /tmp/x');
+    expect(bubble.tool).toBe('Bash');
+    // In-place flip: answered set to the decision string, options cleared
+    expect(bubble.answered).toBe('allow');
+    expect(typeof bubble.answeredAt).toBe('number');
+    expect(bubble.answeredAt as number).toBeGreaterThanOrEqual(before);
+    expect(bubble.answeredAt as number).toBeLessThanOrEqual(after);
+    expect(bubble.options).toBeUndefined();
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Encrypted-handshake replay INTO the app's real store (#5556.6)
 //
 // The shared fake-WS handshake driver (REAL store-core crypto) runs the full
