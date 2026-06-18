@@ -18,6 +18,10 @@
     "./project": {
       "import": "./dist/project.js",
       "types": "./dist/project.d.ts"
+    },
+    "./handler-coverage": {
+      "import": "./dist/handler-coverage-extract.js",
+      "types": "./dist/handler-coverage-extract.d.ts"
     }
   },
   "scripts": {

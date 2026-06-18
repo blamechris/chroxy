@@ -2,6 +2,10 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import {
+  extractAppHandlerTypes,
+  extractDashboardHandlerTypes,
+} from '@chroxy/protocol/handler-coverage'
 
 /**
  * Handler coverage contract test
@@ -199,32 +203,10 @@ function extractServerMessageTypes(wsServerSrc) {
   return result
 }
 
-function extractAppHandlerTypes(appSrc) {
-  // App uses only case statements
-  const cases = [...appSrc.matchAll(/case\s+'([a-z_]+)'/g)].map(m => m[1])
-  return new Set(cases)
-}
-
-function extractDashboardHandlerTypes(dashSrc) {
-  const types = new Set()
-
-  // 1. HANDLERS map keys (e.g. `pong: handlePong,`)
-  const handlersBlock = dashSrc.match(
-    /const HANDLERS:\s*Record<string,\s*Handler>\s*=\s*\{([\s\S]*?)\}/,
-  )
-  if (handlersBlock) {
-    for (const m of handlersBlock[1].matchAll(/^\s*(\w+):/gm)) {
-      types.add(m[1])
-    }
-  }
-
-  // 2. case statements
-  for (const m of dashSrc.matchAll(/case\s+'([a-z_]+)'/g)) {
-    types.add(m[1])
-  }
-
-  return types
-}
+// extractAppHandlerTypes / extractDashboardHandlerTypes are imported from the
+// shared @chroxy/protocol/handler-coverage module (#6021) so this guard and the
+// store-core coverage lint can never diverge on how they parse the two clients'
+// handler sources.
 
 // ---------------------------------------------------------------------------
 // Tests
