@@ -119,6 +119,9 @@ function seedStore(fx: ContractFixture) {
       terminalWrites.push(d)
     },
     addMessage: () => {},
+    // The dashboard `error` handler routes structured errors here; stub so the
+    // `error` fixture exercises the switch without a real toast store.
+    addServerError: () => {},
     _terminalWrites: terminalWrites,
   } as unknown as ConnectionState)
 }
