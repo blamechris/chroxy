@@ -114,10 +114,12 @@ describe('SessionManager._resolveCreateSessionPlan (#6036)', () => {
     // #6064 ruling: `model === undefined ? this._defaultModel : model`.
     //  - omitted (undefined) → server-config default (the normal create path).
     //  - explicit `null` → SURVIVES as the #3403 "use the provider's own default"
-    //    marker. null reaches createSession only via restoreState (the wire
-    //    create_session.model is z.string().optional() — clients send a string or
-    //    omit it, never null), so re-pinning a persisted provider-default to
-    //    _defaultModel would re-introduce the staleness #3403 avoids.
+    //    marker. `null` is not valid on the WS wire (create_session.model is
+    //    z.string().optional() — a remote client sends a string or omits it,
+    //    never null); it arrives mainly via restoreState (a persisted soft-
+    //    fallback) or an explicit internal/test caller like this one. Re-pinning a
+    //    persisted provider-default to _defaultModel would re-introduce the
+    //    staleness #3403 avoids.
     //  - empty string → kept as-is (unchanged).
     assert.equal(mgr._resolveCreateSessionPlan({}).resolvedModel, 'default-model')
     assert.equal(mgr._resolveCreateSessionPlan({ model: null }).resolvedModel, null)
