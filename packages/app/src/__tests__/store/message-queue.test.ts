@@ -146,7 +146,13 @@ describe('offline message queue (#5635)', () => {
   describe('flush on reconnect', () => {
     it('sends all valid queued messages in FIFO order and empties the queue', () => {
       _testQueueInternals.enqueue('input', { type: 'input', data: 'first' });
-      _testQueueInternals.enqueue('permission_response', { type: 'permission_response', allow: true });
+      // #5699 — permission_response / user_question_response are no longer
+      // queueable (the server expires them on disconnect); enqueue refuses them.
+      expect(
+        _testQueueInternals.enqueue('permission_response', { type: 'permission_response', allow: true }),
+      ).toBe(false);
+      // `interrupt` IS still queueable — use it to exercise mixed-type FIFO.
+      _testQueueInternals.enqueue('interrupt', { type: 'interrupt' });
       _testQueueInternals.enqueue('input', { type: 'input', data: 'second' });
 
       // Within all TTLs.
@@ -157,7 +163,7 @@ describe('offline message queue (#5635)', () => {
 
       expect(sent).toEqual([
         { type: 'input', data: 'first' },
-        { type: 'permission_response', allow: true },
+        { type: 'interrupt' },
         { type: 'input', data: 'second' },
       ]);
       expect(_testQueueInternals.getQueue()).toHaveLength(0);

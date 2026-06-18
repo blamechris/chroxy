@@ -17,6 +17,7 @@ import { OTHER_OPTION_VALUE, bumpRenderCount, isRetryableAskUserQuestionError, i
 import type { OtherFreeformAnswer } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage, SessionInfo } from '../../store/connection';
 import { useConnectionStore } from '../../store/connection';
+import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { FormattedResponse } from '../MarkdownRenderer';
@@ -165,6 +166,14 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
   const isError = message.type === 'error';
+
+  // #5699 — answer buttons must be gated on a live connection, not just the
+  // text input. The server expires a pending permission/question request when
+  // the socket drops, so answering a cached prompt while disconnected can't
+  // land (sendPermissionResponse/sendUserQuestionResponse now refuse it). Gate
+  // the buttons here so the user sees a disabled, explained control instead of
+  // tapping into a silent no-op. Global selector (not session-keyed) — safe.
+  const connected = useConnectionLifecycleStore((s) => s.connectionPhase === 'connected');
   const isSystem = message.type === 'system';
 
   // #5674 — resolve the owning-session label for permission prompts so a user
@@ -258,6 +267,11 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
     !showMultiQuestionForm && !showMultiQuestionSummary &&
     (message.answered != null || !otherActive);
   const showFreetextInput = isPrompt && otherActive && !message.answered && !isExpired;
+  // #5699 — when an unanswered, non-expired prompt is showing but we're offline,
+  // explain why the (disabled) answer controls can't be used.
+  const showDisconnectedAnswerHint =
+    isPrompt && !connected && message.answered == null && !isExpired &&
+    (hasOptions || useMultiForm || otherActive);
 
   // Answered permission prompts (with requestId) collapse to a compact pill.
   // user_question prompts (no requestId) are NOT collapsed.
@@ -438,9 +452,15 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
           ))}
         </View>
       )}
+      {showDisconnectedAnswerHint && (
+        <Text testID="prompt-disconnected-hint" style={styles.promptDisconnectedHint}>
+          Disconnected — reconnect to respond
+        </Text>
+      )}
       {showMultiQuestionForm && (
         <MultiQuestionForm
           questions={message.questions!}
+          disabled={!connected}
           onSubmit={(answersMap) => {
             if (submittedRef.current) return;
             submittedRef.current = true;
@@ -480,7 +500,10 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
         <View style={styles.promptOptions}>
           {message.options!.map((opt, i) => {
             const isAnswered = message.answered != null;
-            const isDisabled = isAnswered || isExpired;
+            // #5699 — also disable while disconnected: the answer can't reach
+            // the (now-expired) pending request, so the control must not look
+            // tappable.
+            const isDisabled = isAnswered || isExpired || !connected;
             const isChosen = message.answered === opt.value;
             return (
               <TouchableOpacity
@@ -572,12 +595,13 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
             returnKeyType="send"
           />
           <TouchableOpacity
-            style={[styles.promptFreetextSend, !otherText.trim() && styles.promptOptionDisabled]}
-            disabled={!otherText.trim()}
+            style={[styles.promptFreetextSend, (!otherText.trim() || !connected) && styles.promptOptionDisabled]}
+            // #5699 — also block the freeform Send while disconnected.
+            disabled={!otherText.trim() || !connected}
             accessibilityRole="button"
             // #5634 — name the freeform response in the tool context.
             accessibilityLabel={message.tool ? `Send response, ${message.tool}` : 'Send response'}
-            accessibilityState={{ disabled: !otherText.trim() }}
+            accessibilityState={{ disabled: !otherText.trim() || !connected }}
             // #4755 — see input testID comment above.
             testID="approval-freetext-send"
             onPress={() => {
@@ -749,6 +773,13 @@ const styles = StyleSheet.create({
     flexWrap: 'wrap',
     gap: 8,
     marginTop: 10,
+  },
+  // #5699 — muted caption shown above the disabled answer controls when offline.
+  promptDisconnectedHint: {
+    color: COLORS.textSecondary,
+    fontSize: 12,
+    fontStyle: 'italic',
+    marginTop: 8,
   },
   promptOptionButton: {
     backgroundColor: COLORS.accentOrangeMedium,

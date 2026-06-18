@@ -54,9 +54,15 @@ export type MultiQuestionAnswersMap = SharedMultiQuestionAnswersMap;
 export interface MultiQuestionFormProps {
   questions: ChatMessageQuestion[];
   onSubmit: (answersMap: MultiQuestionAnswersMap) => void;
+  /**
+   * #5699 — when false (disconnected), the Submit button is disabled. The answer
+   * can't reach the server's already-expired pending request, so the control
+   * must not look actionable.
+   */
+  disabled?: boolean;
 }
 
-export function MultiQuestionForm({ questions, onSubmit }: MultiQuestionFormProps) {
+export function MultiQuestionForm({ questions, onSubmit, disabled = false }: MultiQuestionFormProps) {
   // Local selection state is indexed by question POSITION so that while
   // the form is open, two questions with identical text track their
   // choices independently (single-select holds the chosen value string,
@@ -91,7 +97,7 @@ export function MultiQuestionForm({ questions, onSubmit }: MultiQuestionFormProp
   const canSubmit = computeCanSubmit(questions, { singleSelectByIdx, multiSelectByIdx });
 
   const handleSubmit = () => {
-    if (submittedRef.current || !canSubmit) return;
+    if (submittedRef.current || !canSubmit || disabled) return;
     submittedRef.current = true;
     onSubmit(buildAnswersMap(questions, { singleSelectByIdx, multiSelectByIdx }));
   };
@@ -151,9 +157,9 @@ export function MultiQuestionForm({ questions, onSubmit }: MultiQuestionFormProp
         testID="question-multi-submit"
         accessibilityRole="button"
         accessibilityLabel="Submit answers"
-        accessibilityState={{ disabled: !canSubmit }}
-        disabled={!canSubmit}
-        style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}
+        accessibilityState={{ disabled: !canSubmit || disabled }}
+        disabled={!canSubmit || disabled}
+        style={[styles.submitButton, (!canSubmit || disabled) && styles.submitButtonDisabled]}
         onPress={handleSubmit}
       >
         <Text style={styles.submitButtonText}>Submit</Text>

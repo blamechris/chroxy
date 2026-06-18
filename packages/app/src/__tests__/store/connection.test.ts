@@ -388,14 +388,30 @@ describe('message queue', () => {
     expect(result).toBe('queued');
   });
 
-  it('queues permission_response when socket is not connected', () => {
+  it('REFUSES permission_response when socket is not connected (#5699 — never queued)', () => {
+    // The server expires the pending request on disconnect, so a queued
+    // response would drain into the void on reconnect while the prompt could
+    // look answered. Refuse with `false` instead of queuing.
     const result = useConnectionStore.getState().sendPermissionResponse('req-1', 'allow');
-    expect(result).toBe('queued');
+    expect(result).toBe(false);
   });
 
-  it('queues user_question_response when socket is not connected', () => {
+  it('REFUSES user_question_response when socket is not connected (#5699 — never queued)', () => {
     const result = useConnectionStore.getState().sendUserQuestionResponse('yes');
-    expect(result).toBe('queued');
+    expect(result).toBe(false);
+  });
+
+  it('a refused permission/question response consumes no queue capacity (#5699)', () => {
+    const store = useConnectionStore.getState();
+    // Refused responses must not occupy a queue slot — fill exactly to 10 with
+    // inputs after attempting to "answer" while disconnected.
+    expect(store.sendPermissionResponse('req-x', 'allow')).toBe(false);
+    expect(store.sendUserQuestionResponse('nope')).toBe(false);
+    for (let i = 0; i < 10; i++) {
+      expect(store.sendInput(`msg-${i}`)).toBe('queued');
+    }
+    // 11th input overflows — proving the two refused responses took no slots.
+    expect(store.sendInput('overflow')).toBe(false);
   });
 
   it('returns false when queue is full (max 10)', () => {
@@ -614,12 +630,15 @@ describe('sendUserQuestionResponse wire payload (#4761)', () => {
     expect(payload.answer).not.toContain('["App"');
   });
 
-  it('queues the multi-question payload when socket is not connected', () => {
+  it('REFUSES the multi-question payload when socket is not connected (#5699 — never queued)', () => {
+    // A multi-question answer is still a user_question_response: the server
+    // expires the pending request on disconnect, so it must be refused (false),
+    // not queued, to avoid a silent drain-into-the-void on reconnect.
     useConnectionStore.setState({ socket: null });
     const result = useConnectionStore
       .getState()
       .sendUserQuestionResponse({ 'Q?': ['A', 'B'] }, 'toolu_q');
-    expect(result).toBe('queued');
+    expect(result).toBe(false);
   });
 });
 
