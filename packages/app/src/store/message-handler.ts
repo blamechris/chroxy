@@ -1010,12 +1010,18 @@ function payloadSessionId(payload: unknown): string | null {
 }
 
 /**
- * #5699 — mirror the (non-reactive, module-level) queue length into the store
- * so the reconnect banner + manual-disconnect warning can react to it. No-op
- * when the store isn't wired yet (early enqueue / unit fixtures).
+ * #5699 — mirror the count of queued *user input* into the store so the
+ * reconnect banner + manual-disconnect warning can react to it. Counts only
+ * `input` entries, not `interrupt`: an interrupt is an ephemeral control signal
+ * (5s TTL, see QUEUE_TTLS) the user never typed as a "message", so including it
+ * would make the banner say "1 unsent message queued" — and the discard-warning
+ * copy lie — when nothing the user authored is actually pending. No-op when the
+ * store isn't wired yet (early enqueue / unit fixtures).
  */
 function syncQueueCount(): void {
-  if (_store) _store.setState({ queuedMessageCount: _ctx.messageQueue.length });
+  if (!_store) return;
+  const count = _ctx.messageQueue.reduce((n, m) => (m.type === 'input' ? n + 1 : n), 0);
+  _store.setState({ queuedMessageCount: count });
 }
 
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
