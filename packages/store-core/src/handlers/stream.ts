@@ -863,9 +863,10 @@ export type StreamDeltaTarget =
  *
  * @param incomingId The currently-resolved delta id (post original capture).
  * @param state Membership + resolver snapshots from {@link StreamDeltaContext}.
- * @param now Clock value for the post-permission split's `-post-<now>` id
- *   (injected so the result is deterministic in tests; production passes
- *   `Date.now()`).
+ * @param nowFn Clock thunk for the post-permission split's `-post-<now>` id,
+ *   read LAZILY (only on the split path) so a plain delta never pays a
+ *   `Date.now()` call. Injected for deterministic tests; production passes
+ *   `Date.now`.
  */
 export function resolveStreamDeltaTarget(
   incomingId: string,
@@ -883,11 +884,14 @@ export function resolveStreamDeltaTarget(
       targetForSuffix: string | null
     }
   },
-  now: number,
+  nowFn: () => number,
 ): StreamDeltaTarget {
   // Permission boundary split: first delta after a split creates a new message.
   if (state.postPermissionSplits.has(incomingId)) {
-    const newId = `${incomingId}-post-${now}`
+    // Read the clock lazily — only this (rare) split path needs it, so a plain
+    // delta on the hot path pays no Date.now() call (matches the pre-refactor
+    // inline behavior where the timestamp was only read inside this branch).
+    const newId = `${incomingId}-post-${nowFn()}`
     return { kind: 'permission-split', deltaId: incomingId, newId }
   }
   if (state.deltaIdRemaps.has(incomingId)) {
@@ -1016,7 +1020,7 @@ export function sharedStreamDelta(
         }
       },
     },
-    Date.now(),
+    Date.now,
   )
   if (target.kind === 'permission-split') {
     // Permission boundary split: first delta after a split creates a new message.

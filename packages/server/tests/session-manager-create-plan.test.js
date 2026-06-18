@@ -114,6 +114,9 @@ describe('SessionManager._resolveCreateSessionPlan (#6036)', () => {
     // `model ?? this._defaultModel` — preserved verbatim from the inline
     // front-half. Both omitted (undefined) and explicit null fall back to the
     // server default; an empty string is kept as-is (only null/undefined coalesce).
+    // NOTE: this pins CURRENT behavior, not a #3403 ruling — whether an explicit
+    // `model: null` should instead SURVIVE as a "use provider default" marker is
+    // tracked in #6064; this refactor only preserves what main did.
     assert.equal(mgr._resolveCreateSessionPlan({}).resolvedModel, 'default-model')
     assert.equal(mgr._resolveCreateSessionPlan({ model: null }).resolvedModel, 'default-model')
     assert.equal(mgr._resolveCreateSessionPlan({ model: '' }).resolvedModel, '')

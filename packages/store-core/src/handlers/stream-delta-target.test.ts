@@ -8,6 +8,8 @@ import { resolveStreamDeltaTarget } from './stream'
 import type { ChatMessage } from '../types'
 
 const NOW = 1_700_000_000_000
+// resolveStreamDeltaTarget reads the clock lazily via a thunk (#6036 review).
+const nowFn = () => NOW
 
 function resolverState(opts: {
   postPermissionSplits?: string[]
@@ -31,7 +33,7 @@ function msg(id: string, type: ChatMessage['type']): ChatMessage {
 
 describe('resolveStreamDeltaTarget', () => {
   it('passes through when the id is unknown to every collection', () => {
-    const target = resolveStreamDeltaTarget('msg-1', resolverState({}), NOW)
+    const target = resolveStreamDeltaTarget('msg-1', resolverState({}), nowFn)
     expect(target).toEqual({ kind: 'passthrough', deltaId: 'msg-1' })
   })
 
@@ -39,7 +41,7 @@ describe('resolveStreamDeltaTarget', () => {
     const target = resolveStreamDeltaTarget(
       'msg-2',
       resolverState({ resolvedMessages: [msg('msg-2', 'response')] }),
-      NOW,
+      nowFn,
     )
     expect(target).toEqual({ kind: 'passthrough', deltaId: 'msg-2' })
   })
@@ -48,7 +50,7 @@ describe('resolveStreamDeltaTarget', () => {
     const target = resolveStreamDeltaTarget(
       'msg-3',
       resolverState({ postPermissionSplits: ['msg-3'] }),
-      NOW,
+      nowFn,
     )
     expect(target).toEqual({
       kind: 'permission-split',
@@ -64,7 +66,7 @@ describe('resolveStreamDeltaTarget', () => {
         postPermissionSplits: ['msg-4'],
         deltaIdRemaps: [['msg-4', 'msg-4-other']],
       }),
-      NOW,
+      nowFn,
     )
     expect(target).toEqual({
       kind: 'permission-split',
@@ -77,7 +79,7 @@ describe('resolveStreamDeltaTarget', () => {
     const target = resolveStreamDeltaTarget(
       'msg-5',
       resolverState({ deltaIdRemaps: [['msg-5', 'msg-5-cont-999']] }),
-      NOW,
+      nowFn,
     )
     expect(target).toEqual({ kind: 'remap', deltaId: 'msg-5-cont-999' })
   })
@@ -89,7 +91,7 @@ describe('resolveStreamDeltaTarget', () => {
         resolvedMessages: [msg('msg-6', 'tool_use')],
         targetForSuffix: 'sess-1',
       }),
-      NOW,
+      nowFn,
     )
     expect(target).toEqual({
       kind: 'suffix',
@@ -108,7 +110,7 @@ describe('resolveStreamDeltaTarget', () => {
         resolvedMessages: [msg('msg-7', 'tool_use'), msg('msg-7-response', 'response')],
         targetForSuffix: null,
       }),
-      NOW,
+      nowFn,
     )
     expect(target).toEqual({
       kind: 'suffix',
@@ -120,7 +122,7 @@ describe('resolveStreamDeltaTarget', () => {
     })
   })
 
-  it('does NOT suffix a thinking/error slot away from response — only non-response slots route', () => {
+  it('suffixes ANY non-response slot (e.g. thinking), mirroring the tool_use case', () => {
     // Mirrors the inline guard `existing && existing.type !== 'response'`: a
     // tool_use is the reused-id case, but a non-response slot of any other type
     // also suffixes. A response slot passes through (covered above); an absent
@@ -128,7 +130,7 @@ describe('resolveStreamDeltaTarget', () => {
     const thinking = resolveStreamDeltaTarget(
       'msg-8',
       resolverState({ resolvedMessages: [msg('msg-8', 'thinking')] }),
-      NOW,
+      nowFn,
     )
     expect(thinking.kind).toBe('suffix')
   })
