@@ -659,8 +659,10 @@ export class WsServer {
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
     // #5704: refcount of permission-INDUCED session subscriptions, per client.
     // clientId -> Map<sessionId, refcount>. _registerPermissionRoute increments
-    // it only when it auto-subscribes a client that wasn't already subscribed
-    // (so a permission can never "steal ownership" of an explicit subscription);
+    // it for a new route's auto-subscribe UNLESS that subscription is explicitly
+    // owned (the client holds it with refcount 0) — so a permission can never
+    // "steal ownership" of an explicit subscription, while a second concurrent
+    // permission on an already permission-owned session does count up;
     // _unregisterPermissionRoute (wired to every resolve/expire/cleanup site)
     // decrements it and tears the auto-subscription back down when the count
     // hits zero AND the client is neither active on nor explicitly subscribed to
@@ -2207,10 +2209,11 @@ export class WsServer {
     const sessionId = this._permissionSessionMap.get(requestId)
     this._permissionSessionMap.delete(requestId)
     if (!sessionId) return
-    // Decrement for every client that currently holds a permission-induced
-    // refcount on this session. We iterate the per-client refcount maps (not
-    // this.clients) so a client that already disconnected — its entry purged by
-    // _handleClientDeparture — is simply absent and never double-decremented.
+    // Decrement for every connected client that holds a permission-induced
+    // refcount on this session. We iterate this.clients (connected clients); a
+    // client that already disconnected had its refcount entry purged by
+    // _handleClientDeparture, so it's absent here and never double-decremented,
+    // and _decPermissionSub is a no-op for a client with no entry for sessionId.
     for (const [, client] of this.clients) {
       this._decPermissionSub(client, sessionId)
     }
