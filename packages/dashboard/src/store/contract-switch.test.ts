@@ -112,6 +112,10 @@ function seedStore(fx: ContractFixture) {
     activeSessionId: fx.init?.activeSessionId ?? null,
     sessionStates,
     messages: [],
+    // #6058: the real store always initialises sessionNotifications; seed it so
+    // permission_resolved's unconditional banner-drain (s.sessionNotifications.map)
+    // runs against a realistic store instead of throwing on undefined.
+    sessionNotifications: [],
     // Store methods the real stream/tool handlers reach for (terminal preview
     // writes, flat addMessage). No-op-ish so the session-state assertions stand
     // alone — the terminal-preview side-channel is covered by its own tests.
