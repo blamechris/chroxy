@@ -52,10 +52,12 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // ---------------------------------------------------------------------------
 // PENDING allowlist — both-clients switch types that do NOT yet have a
 // SWITCH_FIXTURES entry. This is the pre-existing backlog (epic #5556 sub-item
-// 5 covered only ~6 of these). The lint subtracts this set so it enforces
-// NO-NEW-DRIFT without forcing all ~57 fixtures at once. Each removal here must
-// be paired with a real, behaviour-verified fixture in fixtures.ts. SHRINKING
-// this set toward empty is tracked under #5618 / #5619.
+// 5 covered only ~6 of these; #6032 pinned the five hottest — permission_request,
+// permission_resolved, result, stream_end, error — leaving ~52). The lint
+// subtracts this set so it enforces NO-NEW-DRIFT without forcing all the
+// remaining fixtures at once. Each removal here must be paired with a real,
+// behaviour-verified fixture in fixtures.ts. SHRINKING this set toward empty is
+// tracked under #5618 / #5619 / #6032.
 //
 // Do NOT add a new type here to silence the lint for a freshly-introduced
 // both-clients case — add a real contract fixture instead. New entries are
@@ -77,7 +79,6 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'client_left',
   'conversations_list',
   'cost_update',
-  'error',
   'history_replay_end',
   'key_exchange_ok',
   'model_changed',
@@ -85,8 +86,6 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'pair_fail',
   'permission_expired',
   'permission_mode_changed',
-  'permission_request',
-  'permission_resolved',
   'permission_timeout',
   'plan_ready',
   'pong',
@@ -94,7 +93,6 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'provider_list',
   'raw',
   'raw_background',
-  'result',
   'search_results',
   'server_error',
   'server_mode',
@@ -111,7 +109,6 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'session_warning',
   'slash_commands',
   'stream_delta',
-  'stream_end',
   'terminal_output',
   'token_rotated',
   'tool_input_delta',
@@ -150,9 +147,15 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
   const covered = new Set(SWITCH_FIXTURES.map((f) => f.type))
 
   it('derives a non-trivial both-clients switch universe (extraction sanity)', () => {
-    // If this collapses to ~0 the regex/path drifted and the lint below would
-    // pass vacuously. Pin a floor well under the real count (~64).
-    expect(both.length).toBeGreaterThan(20)
+    // Pin the extraction to a band AROUND the real count (~64) so a parser
+    // regression fails LOUDLY (#6032). The old `> 20` floor was so far under the
+    // real universe that a parse dropping to ~25 passed vacuously — silently
+    // shrinking `both` so the anti-drift assertions below stopped protecting the
+    // types that fell out. The band ratchets: a real new both-clients switch type
+    // (the universe grows past the ceiling) is a DELIBERATE bump — raise both
+    // bounds in the same PR that adds its fixture / PENDING entry.
+    expect(both.length).toBeGreaterThanOrEqual(55)
+    expect(both.length).toBeLessThanOrEqual(80)
   })
 
   it('every both-clients switch type has a fixture or an explicit PENDING entry', () => {

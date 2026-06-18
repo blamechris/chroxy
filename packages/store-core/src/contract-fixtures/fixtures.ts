@@ -975,4 +975,140 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { messages: [{ id: 'old-1', type: 'response', content: 'stale' }] } },
     },
   },
+
+  // -------------------------------------------------------------------------
+  // Hot both-clients types (#6032). The five highest-traffic / highest-risk
+  // switch cases the #5619 lint allow-listed with NO behavioural fixture:
+  // the permission lifecycle (request → resolved), the turn-completion teardown
+  // (result), the streaming teardown (stream_end), and the global error path.
+  // Both clients parse these through the SAME store-core shared handlers
+  // (`handlePermissionRequest`, `handlePermissionResolved`, `handleResultUsage`,
+  // `handleStreamEnd`, `handleError`), so their `messages`-array effect is
+  // byte-identical — a single `expect` (no `divergent` block). The contract
+  // runners assert ONLY `sessions[id].messages` (normalised to
+  // {id,type,content,tool,toolUseId}); the per-client side effects these types
+  // also carry — the app's 'Allow for Session' option vs the dashboard's
+  // hardcoded allow/deny, the app's native error Alert vs the dashboard toast,
+  // the completion-notification gate — live OUTSIDE that slice and are covered
+  // by each client's own suites, so they do not surface here.
+  // -------------------------------------------------------------------------
+  {
+    // permission_request ADDS a 'prompt' bubble to the target session (the wire
+    // sessionId, else the active session). Both clients build the same bubble
+    // content from the shared parser: the tool name alone, or `"<tool>: <desc>"`.
+    // The options array differs per client (app gates 'Allow for Session') but
+    // is stripped by the runners' normalise, so the asserted slice agrees.
+    name: 'permission_request appends a prompt bubble to the active session',
+    type: 'permission_request',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'permission_request',
+      requestId: 'req-1',
+      tool: 'Bash',
+      description: 'rm -rf /tmp/x',
+      input: { command: 'rm -rf /tmp/x' },
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'prompt', content: 'Bash: rm -rf /tmp/x', tool: 'Bash' }] },
+      },
+    },
+  },
+  {
+    // permission_resolved MODIFIES the in-flight prompt in place (flips
+    // `answered`, clears `options`) — it never adds or removes a bubble. Seed an
+    // unanswered prompt and assert it survives as the same single 'prompt' bubble
+    // (the answered/options fields are outside the normalised assertion slice).
+    // The handler searches ALL session states by requestId, so it is independent
+    // of the active session.
+    name: 'permission_resolved marks the matching prompt answered without adding/removing a bubble',
+    type: 'permission_resolved',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'perm-seed-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: { type: 'permission_resolved', requestId: 'req-1', decision: 'allow' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [{ id: 'perm-seed-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x', tool: 'Bash' }],
+        },
+      },
+    },
+  },
+  {
+    // result ends a turn: both clients tear down streaming state and refresh the
+    // messages REFERENCE (`[...ss.messages]`) but DO NOT add/remove/edit any
+    // bubble — the transcript is preserved verbatim. Seed a response bubble and
+    // assert it is still the sole, unchanged entry after the teardown. (The
+    // completion-notification gate is a side effect outside the messages slice.)
+    name: 'result tears down the turn without mutating the transcript',
+    type: 'result',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'done' } as unknown as ChatMessage],
+        },
+      },
+    },
+    message: { type: 'result', sessionId: 's1', cost: 0.01, duration: 1200 },
+    expect: {
+      sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'done' }] } },
+    },
+  },
+  {
+    // stream_end is the asymmetric teardown gap (stream_start IS pinned above):
+    // both clients clear `streamingMessageId` and refresh the messages REFERENCE
+    // but leave the transcript untouched. Seed the in-flight response bubble and
+    // assert it survives the teardown unchanged.
+    name: 'stream_end closes streaming without mutating the transcript',
+    type: 'stream_end',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'partial' } as unknown as ChatMessage],
+          streamingMessageId: 'resp-1',
+        },
+      },
+    },
+    message: { type: 'stream_end', messageId: 'resp-1' },
+    expect: {
+      sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'partial' }] } },
+    },
+  },
+  {
+    // error is a GLOBAL surface (app → native Alert, dashboard → toast) — neither
+    // client routes it into a session transcript. Seed a response bubble on the
+    // active session and assert the error leaves the transcript completely
+    // untouched (the divergent Alert/toast side effect is outside this slice).
+    name: 'error does not touch the session transcript (surfaced globally)',
+    type: 'error',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'before error' } as unknown as ChatMessage],
+        },
+      },
+    },
+    message: { type: 'error', code: 'GENERIC', message: 'something failed' },
+    expect: {
+      sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'before error' }] } },
+    },
+  },
 ]
