@@ -129,9 +129,17 @@ import {
   formatPartialCostLine,
   // #5515 (epic #5514): latency instrumentation primitives.
   RollingPercentiles,
-  splitRtt,
   // #5556 (epic #5514): shared stateful EWMA RTT smoother.
   RttSmoother,
+  // #6035: shared connection runtime — the heartbeat ping loop, pong-timeout
+  // reaper, handshake-window timer, and pong RTT measurement. The dashboard
+  // injects its wsSend / quality-write sink / owned RttSmoother / latency-log
+  // hook; the timer mechanics are shared with the app. Constants aliased so the
+  // local `HEARTBEAT_INTERVAL_MS` / `HANDSHAKE_TIMEOUT_MS` exports re-source them.
+  createHeartbeatController,
+  HEARTBEAT_INTERVAL_MS as SC_HEARTBEAT_INTERVAL_MS,
+  HANDSHAKE_TIMEOUT_MS as SC_HANDSHAKE_TIMEOUT_MS,
+  LATENCY_LOG_INTERVAL_MS as SC_LATENCY_LOG_INTERVAL_MS,
   // #5556 (epic #5514): shared delta-flusher wiring (accumulator + timer +
   // override) — the dashboard supplies only its `applyDeltas` store mutation.
   createDeltaFlusher,
@@ -699,100 +707,77 @@ export function clearTerminalWriteBatching(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Client-side heartbeat
+// Client-side heartbeat + handshake timeout
 // ---------------------------------------------------------------------------
-let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
-let _lastPingSentAt = 0;
-// #5556: EWMA-smoothed RTT for stable quality display (shared smoother).
+// #6035: the heartbeat ping loop, the pong-timeout reaper, the handshake-window
+// timer, and the pong RTT measurement now live in the shared
+// `createHeartbeatController` (store-core/connection-runtime), lifted from the
+// byte-identical copy this file shared with the app's message-handler.ts. The
+// dashboard injects only the genuinely platform-specific effects: its `wsSend`
+// (E2E envelope), the quality-write sink (`getStore().setState`), the owned
+// `_rttSmoother` (also read by the delta-flusher), and the latency-log hook
+// that gates on the shared `_lastLatencyLogAt` throttle cursor.
+//
+// `_rttSmoother` stays declared here (not inside the controller) because the
+// delta-flusher reads `_rttSmoother.value` for its adaptive interval (#5556).
 const _rttSmoother = new RttSmoother();
-const HEARTBEAT_INTERVAL_MS = 15_000;
-const PONG_TIMEOUT_MS = 5_000;
-
-// #5721 (item 2) — client-side handshake timeout. The heartbeat above does NOT
-// start until `auth_ok` is processed (see startHeartbeat's caller), so the
-// handshake window (socket OPEN + `auth`/`pair` sent, awaiting
-// `auth_ok`/`key_exchange_ok`) has zero liveness coverage: a server that opens
-// the socket but never completes the handshake leaves the client wedged in
-// `connecting`/`reconnecting` until the transport drops on its own. A dedicated
-// ~10s timer — comfortably below the ~20s worst-case heartbeat detection once
-// connected — surfaces "Handshake failed — reconnecting" and hands off to the
-// normal reconnect ladder instead of a silent stall. Exported so connection.ts
-// arms/clears it around the socket lifecycle and tests can read the budget.
-export const HANDSHAKE_TIMEOUT_MS = 10_000;
-let _handshakeTimeoutId: ReturnType<typeof setTimeout> | null = null;
-
-// Arm the handshake timer with the caller's fire behaviour. The fire callback
-// is injected (not built here) because the reconnect machinery it needs lives
-// in connection.ts's per-socket closure — the same inversion createReconnectScheduler
-// uses. Clears any prior timer first (single-instance, mirroring startHeartbeat)
-// so a reconnect that re-enters onopen can never leak a second pending timer.
-export function armHandshakeTimer(onTimeout: () => void): void {
-  clearHandshakeTimer();
-  _handshakeTimeoutId = setTimeout(onTimeout, HANDSHAKE_TIMEOUT_MS);
-}
-
-export function clearHandshakeTimer(): void {
-  if (_handshakeTimeoutId) { clearTimeout(_handshakeTimeoutId); _handshakeTimeoutId = null; }
-}
 
 // #5515 (epic #5514): latency instrumentation. `_deltaServerTs` records the
 // server-stamped serverTs (and local recv time) of the OLDEST un-rendered
 // delta per messageId; on flush we measure serverTs→render (token-to-render)
 // and recv→render (client render cost) into the rolling p50/p95 buffers. See
 // store-core/latency-stats for the clock discipline. Dev-only console readout,
-// throttled so a streaming turn can't spam the log.
-const LATENCY_LOG_INTERVAL_MS = 3_000;
+// throttled so a streaming turn can't spam the log. `_lastLatencyLogAt` is the
+// shared throttle cursor for BOTH the pong-split log (in the controller's
+// onLatencyLog hook below) and recordLatencySamples (the delta path).
 const _deltaServerTs = new Map<string, { serverTs: number; recvAt: number }>();
 const _tokenToRender = new RollingPercentiles(200);
 const _clientRender = new RollingPercentiles(200);
 let _lastLatencyLogAt = 0;
 
+const _heartbeat = createHeartbeatController({
+  wsSend,
+  rttSmoother: _rttSmoother,
+  onPongQuality: (latencyMs, quality) => {
+    getStore().setState({ latencyMs, connectionQuality: quality });
+  },
+  // The dashboard runs in the browser where WebSocket.OPEN === 1.
+  openReadyState: WebSocket.OPEN,
+  onLatencyLog: (line, pongRecvAt) => {
+    if (pongRecvAt - _lastLatencyLogAt >= LATENCY_LOG_INTERVAL_MS) {
+      _lastLatencyLogAt = pongRecvAt;
+      console.log(line);
+    }
+  },
+});
+
+export const HEARTBEAT_INTERVAL_MS = SC_HEARTBEAT_INTERVAL_MS;
+// #5721 (item 2) — client-side handshake timeout budget (re-exported from
+// store-core so connection.ts and the tests can read it). The heartbeat does
+// NOT start until `auth_ok` is processed, so the handshake window had no
+// liveness coverage before this timer; it hands off to the reconnect ladder
+// ("Handshake failed — reconnecting") instead of a silent stall.
+export const HANDSHAKE_TIMEOUT_MS = SC_HANDSHAKE_TIMEOUT_MS;
+const LATENCY_LOG_INTERVAL_MS = SC_LATENCY_LOG_INTERVAL_MS;
+
 export function stopHeartbeat(): void {
-  if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-  _lastPingSentAt = 0;
-  _rttSmoother.reset(); // Reset smoothed RTT on disconnect
+  _heartbeat.stopHeartbeat();
 }
 
 export function startHeartbeat(socket: WebSocket): void {
-  stopHeartbeat();
-  _heartbeatInterval = setInterval(() => {
-    if (socket.readyState !== WebSocket.OPEN) { stopHeartbeat(); return; }
-    try {
-      _lastPingSentAt = Date.now();
-      wsSend(socket, { type: 'ping' });
-    } catch { stopHeartbeat(); return; }
-    _pongTimeout = setTimeout(() => {
-      console.warn('[ws] Heartbeat pong timeout — closing dead connection');
-      stopHeartbeat();
-      try { socket.close(); } catch {}
-    }, PONG_TIMEOUT_MS);
-  }, HEARTBEAT_INTERVAL_MS);
+  _heartbeat.startHeartbeat(socket);
+}
+
+export function armHandshakeTimer(onTimeout: () => void): void {
+  _heartbeat.armHandshakeTimer(onTimeout);
+}
+
+export function clearHandshakeTimer(): void {
+  _heartbeat.clearHandshakeTimer();
 }
 
 function _onPong(serverTs?: number): void {
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-  // Measure RTT and update connection quality using EWMA for stability
-  if (_lastPingSentAt > 0) {
-    const pongRecvAt = Date.now();
-    const rttMs = pongRecvAt - _lastPingSentAt;
-    // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
-    const smoothed = Math.round(_rttSmoother.update(rttMs));
-    const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
-    getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
-
-    // #5515 (epic #5514): split this RTT into approximate uplink/downlink
-    // halves using the server-stamped serverTs, positioned within the locally-
-    // measured [ping,pong] interval (skew-clamped) — see store-core/latency-
-    // stats. Dev-only, throttled by the same window as token-to-render.
-    const split = splitRtt({ pingSentAt: _lastPingSentAt, pongRecvAt, serverTs });
-    if (split.uplinkMs !== null && pongRecvAt - _lastLatencyLogAt >= LATENCY_LOG_INTERVAL_MS) {
-      _lastLatencyLogAt = pongRecvAt;
-      console.log(`[latency] rtt=${split.rttMs}ms split≈ up ${split.uplinkMs}ms / down ${split.downlinkMs}ms (approx, clock-skew)`);
-    }
-    _lastPingSentAt = 0;
-  }
+  _heartbeat.handlePong(serverTs);
 }
 
 // ---------------------------------------------------------------------------

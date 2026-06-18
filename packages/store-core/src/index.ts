@@ -688,6 +688,34 @@ export type {
   SelectReconnectEndpointInput,
 } from './connect-flow'
 
+// #6035 — shared client connection RUNTIME: the heartbeat ping loop and the
+// handshake-window timeout, lifted from the two clients' identical
+// `startHeartbeat`/`stopHeartbeat`/`armHandshakeTimer`/`clearHandshakeTimer`/
+// `_onPong` copies in their message-handler.ts files. The timer mechanics live
+// here once; each client injects its `wsSend` (encryption envelope), its
+// quality-write sink, and its owned `RttSmoother` (also read by the
+// delta-flusher). `createReconnectCounter` packages the backoff-ladder counter
+// whose `next` is the `nextRung` the `createReconnectScheduler` above consumes;
+// the clients keep their `reconnectAttempt` live binding for now (their suites
+// read it directly), so the counter is exported for future single-sourcing.
+export {
+  createHeartbeatController,
+  createReconnectCounter,
+  rttQuality,
+  HEARTBEAT_INTERVAL_MS,
+  PONG_TIMEOUT_MS,
+  HANDSHAKE_TIMEOUT_MS,
+  LATENCY_LOG_INTERVAL_MS,
+} from './connection-runtime'
+export type {
+  HeartbeatScheduler,
+  HeartbeatSocket,
+  HeartbeatController,
+  CreateHeartbeatControllerOptions,
+  ConnectionQuality,
+  ReconnectCounter,
+} from './connection-runtime'
+
 // epic #5556, sub-item 5: shared behavioral-contract fixtures. The
 // `(wire message in → expected store mutation out)` table is DATA, consumed by
 // BOTH clients' test suites (app jest, dashboard vitest) to drive the same rows
