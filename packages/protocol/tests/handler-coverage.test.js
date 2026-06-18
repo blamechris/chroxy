@@ -136,8 +136,11 @@ const PLATFORM_SPECIFIC = {
   // and mobile app (#4764 / PR #4862); no PLATFORM_SPECIFIC entry needed.
   // Coverage test passes because each handler has a
   // `case 'multi_question_intervention':` clause.
-  'terminal_output': 'dashboard', // #5835 (PR2) live claude-tui PTY mirror — the dashboard renders the raw bytes in xterm; the mobile WebView terminal render is a deferred follow-up per the epic
-  'terminal_size': 'dashboard', // #5835 Phase 2 authoritative live-PTY grid size — the dashboard letterboxes the mirror to it (setTerminalSize); same mobile follow-up as terminal_output
+  // 'terminal_output' is now handled by both dashboard (#5835 PR2) and the
+  // mobile app (#5987 — the user-shell read-only mirror routes it through the
+  // same write-callback → xterm path as 'raw'); no PLATFORM_SPECIFIC entry
+  // needed. Coverage passes because each handler has a `case 'terminal_output':`.
+  'terminal_size': 'dashboard', // #5835 Phase 2 authoritative live-PTY grid size — the dashboard letterboxes the mirror to it (setTerminalSize); mobile applies resize from its own pane measurement (#5987) but does not yet consume the server's terminal_size echo, so still dashboard-only
   'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
   'activity_snapshot': 'dashboard', // Control Room live activity tree (#5161 schema / #5160 server / #5162 reducer / #5163 dashboard panel) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5159
   'activity_delta': 'dashboard',    // Control Room activity delta — see activity_snapshot above; dashboard-only for v1, mobile parity is Phase-2 per epic #5159

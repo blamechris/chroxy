@@ -26,6 +26,7 @@ import type { SessionIntervention } from '@chroxy/store-core';
 // uses, so widening `SelectOptionValue` to a third object shape can't
 // silently misroute it as freeform.
 import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect } from '@chroxy/store-core';
+import { USER_SHELL_PROVIDER } from '@chroxy/protocol';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
@@ -378,6 +379,10 @@ export function SessionScreen() {
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const createSession = useConnectionStore((s) => s.createSession);
+  // #5987 — only surface the "New Shell" affordance when the server advertises
+  // the user-shell capability; when absent, render nothing (mirrors the
+  // notificationPrefs capability gate in SettingsScreen).
+  const userShellSupported = useConnectionLifecycleStore((s) => !!s.serverCapabilities?.userShell);
   const switchSession = useConnectionStore((s) => s.switchSession);
   const latencyMs = useConnectionLifecycleStore((s) => s.latencyMs);
   const connectionQuality = useConnectionLifecycleStore((s) => s.connectionQuality);
@@ -508,7 +513,16 @@ export function SessionScreen() {
 
   // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
-  const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
+  // #5987 — a user-shell ($SHELL PTY) session is terminal-only and drives the
+  // #5835 mirror channel (terminal_subscribe / terminal_output / terminal_resize)
+  // instead of claude-tui's legacy 'raw' + `resize` path. isPtyMirror gates the
+  // mirror subscribe/resize so claude-tui behavior stays exactly as before.
+  // Reuses the reactive `activeSessionProvider` selector declared above.
+  const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER;
+  const isPtyMirror = isUserShell;
+  // A user-shell session is terminal-only, so it always has a terminal even
+  // though it isn't a claude-tui PTY.
+  const hasTerminal = isUserShell || !isCliMode || (activeSession?.hasTerminal ?? false);
 
   // Wire up terminal write callback when terminal view is visible (including split view)
   const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files' && viewMode !== 'system')) && hasTerminal;
@@ -525,6 +539,30 @@ export function SessionScreen() {
     };
   }, [terminalVisible, activeSessionId, setTerminalWriteCallback]);
 
+  // #5835 / #5987 — opt into the live PTY mirror for a user-shell session while
+  // its terminal is visible, and opt out on leave / session switch. Only
+  // user-shell sessions use this channel (isPtyMirror); claude-tui stays on the
+  // legacy 'raw' stream and is unaffected. Mirrors the dashboard's subscribe
+  // effect — best-effort, the store actions no-op when the socket isn't open.
+  useEffect(() => {
+    if (!terminalVisible || !isPtyMirror || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    useConnectionStore.getState().subscribeTerminalMirror(sessionId);
+    return () => {
+      useConnectionStore.getState().unsubscribeTerminalMirror(sessionId);
+    };
+  }, [terminalVisible, isPtyMirror, activeSessionId]);
+
+  // #5987 — a user-shell session is terminal-only, so snap the view to the
+  // terminal when one becomes active while sitting on the chat default. Only
+  // flips away from 'chat' (the default) so it never fights a user who has
+  // intentionally opened Files/System for the shell session.
+  useEffect(() => {
+    if (isUserShell && viewMode === 'chat') {
+      setViewMode('terminal');
+    }
+  }, [isUserShell, viewMode, setViewMode]);
+
   // Replay raw buffer into xterm.js when it becomes ready (initial mount, view switch, or crash recovery)
   const handleTerminalReady = useCallback(() => {
     terminalRef.current?.clear();
@@ -534,9 +572,19 @@ export function SessionScreen() {
     }
   }, []);
 
-  // Forward terminal dimensions to server for PTY resize
+  // Forward terminal dimensions to server for PTY resize. A user-shell session
+  // drives the #5835 mirror resize (terminal_resize, per-sessionId); claude-tui
+  // keeps the legacy `resize` (active-session) path. Reads provider fresh from
+  // the store so the callback can stay stable (empty deps) without going stale.
   const handleTerminalResize = useCallback((cols: number, rows: number) => {
-    useConnectionStore.getState().resize(cols, rows);
+    const store = useConnectionStore.getState();
+    const { activeSessionId: sid, sessions: sess } = store;
+    const provider = sess.find((s) => s.sessionId === sid)?.provider;
+    if (sid && provider === USER_SHELL_PROVIDER) {
+      store.sendTerminalResize(sid, cols, rows);
+    } else {
+      store.resize(cols, rows);
+    }
   }, []);
 
   // #3595: dedicated restart handler for the StdinDisabledBanner. Creates a
@@ -941,6 +989,21 @@ export function SessionScreen() {
           <View style={styles.sessionPickerWrapper}>
             <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
           </View>
+          {/* #5987 — "New Shell" spins up a user-shell ($SHELL PTY) session.
+              Gated on the server's userShell capability; renders nothing when
+              the server doesn't advertise it. */}
+          {userShellSupported && (
+            <TouchableOpacity
+              testID="new-shell-button"
+              style={styles.overviewButton}
+              onPress={() => createSession({ name: 'Shell', provider: USER_SHELL_PROVIDER })}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              accessibilityRole="button"
+              accessibilityLabel="New shell session"
+            >
+              <Text style={styles.overviewButtonText}>{'>_'}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={styles.overviewButton}
             onPress={() => setShowSessionOverview(!showSessionOverview)}
@@ -981,18 +1044,22 @@ export function SessionScreen() {
         </View>
       ) : (
         <View style={styles.modeToggle}>
-          <TouchableOpacity
-            style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
-            onPress={() => setViewMode('chat')}
-            accessibilityRole="button"
-            accessibilityLabel="Chat"
-            accessibilityState={{ selected: viewMode === 'chat' }}
-          >
-            <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
-              Chat
-            </Text>
-          </TouchableOpacity>
-          {viewMode === 'chat' && (
+          {/* #5987 — a user-shell session is terminal-only; hide the Chat toggle
+              so there's no empty chat view to switch into. */}
+          {!isUserShell && (
+            <TouchableOpacity
+              style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
+              onPress={() => setViewMode('chat')}
+              accessibilityRole="button"
+              accessibilityLabel="Chat"
+              accessibilityState={{ selected: viewMode === 'chat' }}
+            >
+              <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
+                Chat
+              </Text>
+            </TouchableOpacity>
+          )}
+          {!isUserShell && viewMode === 'chat' && (
             <TouchableOpacity
               style={[styles.modeButton, chatFilterCompact && styles.modeButtonActive]}
               onPress={() => { setChatFilterCompact((v) => !v); clearSelection(); }}
@@ -1520,6 +1587,9 @@ export function SessionScreen() {
             />
           </ErrorBoundary>
         ) : (
+          // TODO(#6003): interactive keystroke input (xterm stdin + terminal_input) — PR2.
+          // PR1 is a read-only mirror: terminal_output renders here via the
+          // write-callback path, but no keystrokes are forwarded yet.
           <ErrorBoundary fallbackTitle="Terminal error">
             <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
           </ErrorBoundary>

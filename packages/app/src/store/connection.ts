@@ -1932,6 +1932,25 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     sendIfOpen(payload);
   },
 
+  // #5835 / #5987 — live PTY mirror (read-only on mobile in PR1). Opt in/out of
+  // a session's terminal_output stream; only opted-in clients receive the mirror
+  // (server-side filter), so this is sent when a user-shell terminal is visible
+  // and cleared on leave. Best-effort — a closed socket just means no mirror
+  // until reconnect (sendIfOpen no-ops when not OPEN). Mirrors the dashboard's
+  // subscribeTerminalMirror / requestTerminalResize.
+  subscribeTerminalMirror: (sessionId) => {
+    if (!sessionId) return;
+    sendIfOpen({ type: 'terminal_subscribe', sessionId });
+  },
+  unsubscribeTerminalMirror: (sessionId) => {
+    if (!sessionId) return;
+    sendIfOpen({ type: 'terminal_unsubscribe', sessionId });
+  },
+  sendTerminalResize: (sessionId, cols, rows) => {
+    if (!sessionId || cols <= 0 || rows <= 0) return;
+    sendIfOpen({ type: 'terminal_resize', sessionId, cols, rows });
+  },
+
   // Directory listing
 
   setDirectoryListingCallback: (cb) => {
