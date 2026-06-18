@@ -316,13 +316,29 @@ describe('createPermissionHandler', () => {
           createdAt: Date.now(),
         },
       })
+      // Capture warn-level logs so we can assert the skip is logged WITH the
+      // offending requestId (#6054 acceptance + Copilot review on #6067) — a
+      // regression that removed the log or dropped the requestId would slip past
+      // a send-only assertion.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'ws') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
       const ws = {}
-      assert.doesNotThrow(() => resendPendingPermissions(ws))
+      try {
+        assert.doesNotThrow(() => resendPendingPermissions(ws))
+      } finally {
+        removeLogListener(logSpy)
+      }
       // Only the valid one is sent; the malformed one is logged-and-skipped.
       assert.equal(opts.sendFn.mock.calls.length, 1)
       const [, msg] = opts.sendFn.mock.calls[0].arguments
       assert.equal(msg.type, 'permission_request')
       assert.equal(msg.requestId, 'req-good')
+      const skipWarn = warnLines.find((m) => m.includes('req-bad'))
+      assert.ok(skipWarn, `expected a warn log naming the skipped requestId, got: ${JSON.stringify(warnLines)}`)
+      assert.match(skipWarn, /Skipping malformed/, 'warn explains the skip')
     })
 
     it('skips a malformed SDK-mode permission but still resends the valid ones (#6054)', () => {
@@ -350,10 +366,22 @@ describe('createPermissionHandler', () => {
       const sm = { _sessions: new Map([['sess-mixed', { session }]]) }
       const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
       const { resendPendingPermissions } = createPermissionHandler(opts)
-      assert.doesNotThrow(() => resendPendingPermissions({}))
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'ws') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        assert.doesNotThrow(() => resendPendingPermissions({}))
+      } finally {
+        removeLogListener(logSpy)
+      }
       assert.equal(opts.sendFn.mock.calls.length, 1)
       const [, msg] = opts.sendFn.mock.calls[0].arguments
       assert.equal(msg.requestId, 'sdk-good')
+      const skipWarn = warnLines.find((m) => m.includes('sdk-bad'))
+      assert.ok(skipWarn, `expected a warn log naming the skipped requestId, got: ${JSON.stringify(warnLines)}`)
+      assert.match(skipWarn, /Skipping malformed/, 'warn explains the skip')
     })
 
     it('skips expired SDK-mode permissions', () => {
