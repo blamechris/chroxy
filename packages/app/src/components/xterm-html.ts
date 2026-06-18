@@ -78,6 +78,10 @@ export function buildXtermHtml(): string {
   // terminals. Covers typed keys, pasted text (bracketed paste — one onData),
   // and xterm-synthesized control sequences.
   term.onData(function(data) {
+    // Read-only safety belt: onData should only fire while stdin is enabled, but
+    // enforce it here too so a future xterm version that emits onData for
+    // programmatic writes can never leak input from a read-only terminal.
+    if (term.options.disableStdin) return;
     window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'input', data: data }));
   });
 

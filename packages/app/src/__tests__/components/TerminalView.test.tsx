@@ -245,6 +245,20 @@ describe('TerminalView interactive input (#6003)', () => {
     expect(findPosted('set-interactive')).toEqual({ type: 'set-interactive', enabled: true });
   });
 
+  it('re-applies interactive state on a crash-recovery reload (second ready)', () => {
+    act(() => {
+      create(<TerminalView interactive />);
+    });
+    markReady();
+    const wv = getWebView();
+    wv.postMessage.mockClear();
+    // Simulate the WebView content process being killed and the page reloading:
+    // it re-emits `ready`, and the handler must re-enable stdin (the reloaded
+    // page reset to disableStdin: true).
+    markReady();
+    expect(findPosted('set-interactive')).toEqual({ type: 'set-interactive', enabled: true });
+  });
+
   it('marks the WebView text-interaction-enabled only when interactive', () => {
     let roRenderer!: ReactTestRenderer;
     act(() => {

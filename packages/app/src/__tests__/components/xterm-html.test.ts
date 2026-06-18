@@ -60,6 +60,10 @@ describe('buildXtermHtml', () => {
     expect(html).toContain("type: 'input'");
   });
 
+  it('guards onData against firing while read-only (disableStdin safety belt)', () => {
+    expect(html).toContain('if (term.options.disableStdin) return');
+  });
+
   it('handles the set-interactive bridge message (toggles disableStdin)', () => {
     expect(html).toContain("case 'set-interactive'");
     expect(html).toContain('term.options.disableStdin = !msg.enabled');
