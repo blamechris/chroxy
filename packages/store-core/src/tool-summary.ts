@@ -217,3 +217,35 @@ export function getInputSummary(input: Record<string, unknown> | string | null |
   const generic = buildGenericSummary(inputObj)
   return generic ?? ''
 }
+
+// #4667 / #5770 — tools whose `tool_input` shape is internal and whose
+// canonical render path is a dedicated structured card driven by a parallel
+// event (AskUserQuestion → the `user_question` → QuestionPrompt card). For
+// these the raw input — including the `toolInputPartial` accumulator streamed
+// via `tool_input_delta` — must NEVER be surfaced in the chat: the collapsed
+// summary, the expanded partial-preview, AND the grouped-entry detail panel.
+// Otherwise the raw `{"questions":[...` JSON leaks as a bubble next to the
+// proper card (two bubbles for the same prompt).
+//
+// SINGLE SOURCE OF TRUTH (#5770): both the singleton `ToolBubble` and the
+// `ToolGroup` (2+ contiguous tools) render paths import this set so they can't
+// drift — previously `ToolGroup`'s detail panel had no suppression check and
+// leaked the raw JSON on the claude-tui provider whenever an AskUserQuestion
+// shared a turn with another tool.
+//
+// Add a tool here only when BOTH conditions hold: (a) a dedicated structured
+// renderer already exists for it (driven by a parallel event, the way
+// `user_question` drives QuestionPrompt) AND (b) the tool_input shape carries
+// no user-meaningful text on its own. "This shape looks ugly when rendered
+// raw" is NOT sufficient — that's what the #4655 generic key:value fallback
+// above is for.
+export const SUPPRESS_RAW_INPUT_TOOLS: ReadonlySet<string> = new Set(['AskUserQuestion'])
+
+/**
+ * Whether a tool's raw `tool_input` (final or the streaming
+ * `toolInputPartial` accumulator) must be suppressed from every chat render
+ * path. See {@link SUPPRESS_RAW_INPUT_TOOLS}.
+ */
+export function shouldSuppressRawToolInput(toolName: string | undefined | null): boolean {
+  return !!toolName && SUPPRESS_RAW_INPUT_TOOLS.has(toolName)
+}

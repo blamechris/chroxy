@@ -16,6 +16,7 @@ import {
   formatToolName,
   tryParseCompleteJson,
   getInputSummary,
+  shouldSuppressRawToolInput,
 } from '@chroxy/store-core'
 import { ChildAgentEventList } from './ChildAgentEventList'
 import { ChatExpandContext, useInitialExpanded } from './chatExpandRegistry'
@@ -87,7 +88,18 @@ function ToolGroupEntry({
     )
   }
   const toolName = formatToolName(message.tool ?? 'Tool', message.serverName)
-  const summary = getInputSummary(message.toolInput)
+  // #4667 / #5770 — internal-shape tools (currently AskUserQuestion) must
+  // never surface raw `tool_input` in the chat surface; a dedicated
+  // structured card (QuestionPrompt, driven by the parallel `user_question`
+  // event) owns the display. ToolBubble already gates this; the grouped-entry
+  // path must too, or the raw `{"questions":[...` JSON streamed via
+  // `tool_input_delta` leaks into the expanded detail panel beside the card
+  // (the #5770 claude-tui leak — an AskUserQuestion sharing a turn with
+  // another tool takes the ToolGroup path, not the singleton ToolBubble).
+  // Shared suppress set lives in @chroxy/store-core so the two paths can't
+  // drift.
+  const suppressRawInput = shouldSuppressRawToolInput(message.tool)
+  const summary = suppressRawInput ? '' : getInputSummary(message.toolInput)
   // `toolResult` is set to the server's result string by handleToolResult,
   // including the empty string when the tool produced no output. A bare
   // truthiness check (`!!toolResult`) wrongly classifies an empty result
@@ -115,7 +127,11 @@ function ToolGroupEntry({
     }
   }
 
-  const structuredInputDetail = formatInputForDetail(message.toolInput)
+  // #4667 / #5770 — suppressed tools skip BOTH the structured and the
+  // streaming partial detail so the expanded panel shows "(no input)"
+  // instead of leaking the raw JSON. The QuestionPrompt card is the
+  // canonical render path.
+  const structuredInputDetail = suppressRawInput ? '' : formatInputForDetail(message.toolInput)
   // #4341: fall through to the streaming `toolInputPartial` accumulator
   // when the structured `toolInput` is empty. Pre-fix the expanded panel
   // showed "(no input)" for in-flight Agent/Task tools even though
@@ -124,7 +140,7 @@ function ToolGroupEntry({
   // (#4081), so the expanded view now mirrors the same fallback.
   // `isStreamingInput` flags the panel as still arriving so styling can
   // hint at the in-flight state (data-streaming="true").
-  const partialInputDetail = structuredInputDetail
+  const partialInputDetail = structuredInputDetail || suppressRawInput
     ? ''
     : formatPartialForDetail(message.toolInputPartial)
   const inputDetail = structuredInputDetail || partialInputDetail

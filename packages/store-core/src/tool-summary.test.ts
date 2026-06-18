@@ -7,7 +7,12 @@
  * partial-JSON / final-input shapes.
  */
 import { describe, it, expect } from 'vitest'
-import { getInputSummary, getPartialSummary } from './tool-summary'
+import {
+  getInputSummary,
+  getPartialSummary,
+  SUPPRESS_RAW_INPUT_TOOLS,
+  shouldSuppressRawToolInput,
+} from './tool-summary'
 
 describe('getPartialSummary (#4243)', () => {
   it('prefers `command` over body when the partial JSON parses', () => {
@@ -300,5 +305,32 @@ describe('generic-fallback summary for unknown tool shapes (#4655)', () => {
     it('returns null for parseable but empty object (nothing to summarize)', () => {
       expect(getPartialSummary('{}')).toBeNull()
     })
+  })
+})
+
+// #4667 / #5770 — shared single source of truth for tools whose raw
+// tool_input must never reach any chat render path. Both ToolBubble (web +
+// mobile) and ToolGroup import this so the suppression can't drift.
+describe('shouldSuppressRawToolInput (#4667 / #5770)', () => {
+  it('suppresses AskUserQuestion — the claude-tui name shape on the wire', () => {
+    expect(shouldSuppressRawToolInput('AskUserQuestion')).toBe(true)
+    expect(SUPPRESS_RAW_INPUT_TOOLS.has('AskUserQuestion')).toBe(true)
+  })
+
+  it('does not suppress ordinary tools (their input is user-meaningful)', () => {
+    expect(shouldSuppressRawToolInput('Bash')).toBe(false)
+    expect(shouldSuppressRawToolInput('Read')).toBe(false)
+    expect(shouldSuppressRawToolInput('TodoWrite')).toBe(false)
+  })
+
+  it('is exact-match — no casing/prefix coercion (the wire name is canonical)', () => {
+    expect(shouldSuppressRawToolInput('askuserquestion')).toBe(false)
+    expect(shouldSuppressRawToolInput('mcp__x__AskUserQuestion')).toBe(false)
+  })
+
+  it('tolerates missing / null tool names', () => {
+    expect(shouldSuppressRawToolInput(undefined)).toBe(false)
+    expect(shouldSuppressRawToolInput(null)).toBe(false)
+    expect(shouldSuppressRawToolInput('')).toBe(false)
   })
 })
