@@ -824,6 +824,98 @@ export interface StreamDeltaContext {
 }
 
 /**
+ * The decision (`sharedStreamDelta`'s first responsibility, #6036) for which
+ * response slot an incoming delta belongs to, surfaced as data so the
+ * mutating caller stays separate from the routing logic. One of:
+ *
+ *   - `permission-split` — the id was flagged for a post-permission split, so a
+ *     fresh `<deltaId>-post-<now>` bubble is created and the old id remaps to it.
+ *   - `remap` — a single-hop remap already exists for the id; follow it.
+ *   - `suffix` — the id resolves to a NON-response bubble (a tool_use slot the
+ *     server reused), so route to a lazily-created `<deltaId>-response` bubble.
+ *   - `passthrough` — the id already targets the right response slot; no change.
+ */
+export type StreamDeltaTarget =
+  | { kind: 'permission-split'; deltaId: string; newId: string }
+  | { kind: 'remap'; deltaId: string }
+  | {
+      kind: 'suffix'
+      deltaId: string
+      /** The ORIGINAL (pre-suffix) id the caller must key the remap on. */
+      remapKey: string
+      suffixedId: string
+      targetForSuffix: string | null
+      needsAppend: boolean
+    }
+  | { kind: 'passthrough'; deltaId: string }
+
+/**
+ * Resolve which response slot an incoming `stream_delta` targets (#6036 — the
+ * first responsibility carved out of {@link sharedStreamDelta}). This is the
+ * pure decision half of the bubble-merge / stream_start-id reuse (#5697/#2546)
+ * logic: given the current id and the live state (the post-permission-split
+ * set, the remap map, and the resolved messages array), it returns the final
+ * `deltaId` plus a {@link StreamDeltaTarget} verdict describing the side
+ * effects the caller must apply. It performs NO mutation — the caller deletes
+ * from `postPermissionSplits`, writes `deltaIdRemaps`, and appends slots — so
+ * behaviour is byte-identical to the previous inline branch while being unit
+ * testable in isolation.
+ *
+ * @param incomingId The currently-resolved delta id (post original capture).
+ * @param state Membership + resolver snapshots from {@link StreamDeltaContext}.
+ * @param now Clock value for the post-permission split's `-post-<now>` id
+ *   (injected so the result is deterministic in tests; production passes
+ *   `Date.now()`).
+ */
+export function resolveStreamDeltaTarget(
+  incomingId: string,
+  state: {
+    postPermissionSplits: Set<string>
+    deltaIdRemaps: Map<string, string>
+    /**
+     * Resolve the effective messages array + session id the SAME way the
+     * defensive branch did: prefer the captured session's state, else the
+     * active session's, else the flat fallback (dashboard) — supplied as a
+     * thunk so the caller owns the platform-divergent resolution.
+     */
+    resolveMessages: () => {
+      resolvedMessages: readonly ChatMessage[]
+      targetForSuffix: string | null
+    }
+  },
+  now: number,
+): StreamDeltaTarget {
+  // Permission boundary split: first delta after a split creates a new message.
+  if (state.postPermissionSplits.has(incomingId)) {
+    const newId = `${incomingId}-post-${now}`
+    return { kind: 'permission-split', deltaId: incomingId, newId }
+  }
+  if (state.deltaIdRemaps.has(incomingId)) {
+    return { kind: 'remap', deltaId: state.deltaIdRemaps.get(incomingId)! }
+  }
+  // Defensive: server reuses messageId for tool_start and the post-tool
+  // stream_start. If stream_start was dropped or hasn't registered the remap
+  // yet, the delta would otherwise concatenate onto the tool_use bubble.
+  // Detect that here and route to a suffixed response id, lazy-creating the
+  // bubble.
+  const { resolvedMessages, targetForSuffix } = state.resolveMessages()
+  const existing = resolvedMessages.find((m) => m.id === incomingId)
+  if (existing && existing.type !== 'response') {
+    const suffixedId = `${incomingId}-response`
+    const needsAppend = !resolvedMessages.some((m) => m.id === suffixedId)
+    return {
+      kind: 'suffix',
+      deltaId: suffixedId,
+      remapKey: incomingId,
+      suffixedId,
+      targetForSuffix,
+      needsAppend,
+    }
+  }
+  return { kind: 'passthrough', deltaId: incomingId }
+}
+
+/**
  * Shared `stream_delta` handler (#4981). Owns the platform-neutral hot path:
  * the #4297 reorder dispatch, post-permission split, single-hop defensive
  * remap, post-tool continuation split (#4889) with the mid-sentence gate
@@ -903,13 +995,35 @@ export function sharedStreamDelta(
     return { sessionMessages, effectiveSessionId }
   }
 
-  // Permission boundary split: first delta after a split creates a new message.
-  if (ctx.postPermissionSplits.has(deltaId)) {
-    ctx.postPermissionSplits.delete(deltaId)
-    const newId = `${deltaId}-post-${Date.now()}`
-    ctx.deltaIdRemaps.set(deltaId, newId)
+  // #6036 — the target/reuse DECISION (permission split vs single-hop remap vs
+  // defensive `-response` suffix vs passthrough) lives in the pure
+  // `resolveStreamDeltaTarget`; this block only APPLIES the verdict's side
+  // effects, keeping the routing logic separately testable. The resolver re-
+  // reads `resolveSession()` itself (the defensive branch needs the captured→
+  // active→flat chain), so the `now` for the `-post-` id is captured up front
+  // exactly as the inline `${deltaId}-post-${Date.now()}` did. `newMsg`'s
+  // `timestamp` keeps its own `Date.now()` call, identical to before.
+  const target = resolveStreamDeltaTarget(
+    deltaId,
+    {
+      postPermissionSplits: ctx.postPermissionSplits,
+      deltaIdRemaps: ctx.deltaIdRemaps,
+      resolveMessages: () => {
+        const { sessionMessages, effectiveSessionId } = resolveSession()
+        return {
+          resolvedMessages: sessionMessages ?? ctx.getFlatMessages(),
+          targetForSuffix: sessionMessages ? effectiveSessionId : null,
+        }
+      },
+    },
+    Date.now(),
+  )
+  if (target.kind === 'permission-split') {
+    // Permission boundary split: first delta after a split creates a new message.
+    ctx.postPermissionSplits.delete(target.deltaId)
+    ctx.deltaIdRemaps.set(target.deltaId, target.newId)
     const newMsg: ChatMessage = {
-      id: newId,
+      id: target.newId,
       type: 'response',
       content: '',
       timestamp: Date.now(),
@@ -922,36 +1036,25 @@ export function sharedStreamDelta(
     //   - app: captured session when it has state, ELSE the active session;
     //     session-only (no flat fallback).
     ctx.appendResponseSlot(capturedSessionId, newMsg)
-    deltaId = newId
-  } else if (ctx.deltaIdRemaps.has(deltaId)) {
-    deltaId = ctx.deltaIdRemaps.get(deltaId)!
-  } else {
+    deltaId = target.newId
+  } else if (target.kind === 'remap') {
+    deltaId = target.deltaId
+  } else if (target.kind === 'suffix') {
     // Defensive: server reuses messageId for tool_start and the post-tool
     // stream_start. If stream_start was dropped or hasn't registered the
     // remap yet (e.g., session not in store at the time), the delta would
     // otherwise concatenate onto the tool_use bubble. Detect that here and
-    // route to a suffixed response id, lazy-creating the bubble.
-    //
-    // Resolve the effective target the same way both call sites did: prefer
-    // the captured session when it has state, else the active session; fall
-    // through to the flat messages when neither has session state (dashboard
-    // only — the app's `getSessionMessages`/`getFlatMessages` keep it inert).
-    const { sessionMessages, effectiveSessionId } = resolveSession()
-    const resolvedMessages = sessionMessages ?? ctx.getFlatMessages()
-    const targetForSuffix = sessionMessages ? effectiveSessionId : null
-    const existing = resolvedMessages.find((m) => m.id === deltaId)
-    if (existing && existing.type !== 'response') {
-      const suffixed = `${deltaId}-response`
-      ctx.deltaIdRemaps.set(deltaId, suffixed)
-      if (!resolvedMessages.some((m) => m.id === suffixed)) {
-        ctx.appendResponseSlot(
-          targetForSuffix,
-          { id: suffixed, type: 'response', content: '', timestamp: Date.now() },
-          { onlyIfAbsent: true },
-        )
-      }
-      deltaId = suffixed
+    // route to a suffixed response id, lazy-creating the bubble. The remap
+    // is keyed on the ORIGINAL (pre-suffix) id the resolver carried back.
+    ctx.deltaIdRemaps.set(target.remapKey, target.suffixedId)
+    if (target.needsAppend) {
+      ctx.appendResponseSlot(
+        target.targetForSuffix,
+        { id: target.suffixedId, type: 'response', content: '', timestamp: Date.now() },
+        { onlyIfAbsent: true },
+      )
     }
+    deltaId = target.deltaId
   }
 
   // #4889 — post-tool continuation split. The server reuses ONE messageId for
