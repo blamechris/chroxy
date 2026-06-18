@@ -505,14 +505,23 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
               } else {
                 permissionSessionMap.set(requestId, sessionId)
               }
-              sendFn(ws, buildPermissionRequestMessage({
-                requestId: permData.requestId ?? requestId,
-                tool: permData.tool,
-                description: permData.description,
-                input: permData.input,
-                remainingMs,
-                sessionId,
-              }))
+              // #6054: buildPermissionRequestMessage throws on field drift (the
+              // intended #6031 fail-loud guard). Isolate it per-permission so one
+              // malformed pending entry can't abort the loop and strand the
+              // remaining valid prompts for this reconnecting client.
+              try {
+                sendFn(ws, buildPermissionRequestMessage({
+                  requestId: permData.requestId ?? requestId,
+                  tool: permData.tool,
+                  description: permData.description,
+                  input: permData.input,
+                  remainingMs,
+                  sessionId,
+                }))
+              } catch (err) {
+                log.warn(`Skipping malformed pending permission ${requestId} on resend: ${err?.message ?? err}`)
+                continue
+              }
             }
           }
         }
@@ -536,13 +545,20 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
         } else {
           log.debug(`[session-binding-resend] legacy permission ${requestId} resent (client=unknown)`)
         }
-        sendFn(ws, buildPermissionRequestMessage({
-          requestId: pending.data.requestId ?? requestId,
-          tool: pending.data.tool,
-          description: pending.data.description,
-          input: pending.data.input,
-          remainingMs,
-        }))
+        // #6054: isolate the per-permission build+send so a single drifted
+        // legacy entry can't abort the loop (see SDK path above).
+        try {
+          sendFn(ws, buildPermissionRequestMessage({
+            requestId: pending.data.requestId ?? requestId,
+            tool: pending.data.tool,
+            description: pending.data.description,
+            input: pending.data.input,
+            remainingMs,
+          }))
+        } catch (err) {
+          log.warn(`Skipping malformed pending legacy permission ${requestId} on resend: ${err?.message ?? err}`)
+          continue
+        }
       }
     }
   }

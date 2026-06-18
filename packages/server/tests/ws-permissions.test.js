@@ -288,6 +288,74 @@ describe('createPermissionHandler', () => {
       assert.equal(permissionSessionMap.get('sdk-req-map'), 'sess-map')
     })
 
+    it('skips a malformed legacy permission but still resends the valid ones (#6054)', () => {
+      const opts = makeHandlerOpts()
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      // Malformed: `tool` is non-string → buildPermissionRequestMessage throws.
+      opts.pendingPermissions.set('req-bad', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'req-bad',
+          tool: 12345,
+          description: '/tmp/bad',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      opts.pendingPermissions.set('req-good', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'req-good',
+          tool: 'Write',
+          description: '/tmp/good',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      const ws = {}
+      assert.doesNotThrow(() => resendPendingPermissions(ws))
+      // Only the valid one is sent; the malformed one is logged-and-skipped.
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(msg.type, 'permission_request')
+      assert.equal(msg.requestId, 'req-good')
+    })
+
+    it('skips a malformed SDK-mode permission but still resends the valid ones (#6054)', () => {
+      const session = {
+        _pendingPermissions: new Map([['sdk-bad', {}], ['sdk-good', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-bad', {
+            requestId: 'sdk-bad',
+            tool: 999, // non-string → builder throws
+            description: '/tmp/bad',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+          ['sdk-good', {
+            requestId: 'sdk-good',
+            tool: 'Write',
+            description: '/tmp/good',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-mixed', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      assert.doesNotThrow(() => resendPendingPermissions({}))
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(msg.requestId, 'sdk-good')
+    })
+
     it('skips expired SDK-mode permissions', () => {
       const session = {
         _pendingPermissions: new Map([['sdk-req-exp', {}]]),
