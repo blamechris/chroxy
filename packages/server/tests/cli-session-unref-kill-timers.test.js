@@ -117,11 +117,15 @@ describe('#6043 cli-session force-kill timers are unref()-d', () => {
 
   it('source unref()s the destroy, respawn, and interrupt timers', () => {
     const src = readFileSync(join(__dirname, '../src/cli-session.js'), 'utf-8')
-    // Three distinct unref guards expected (destroy force-kill, respawn
-    // force-kill, interrupt safety) — count the issue-tagged unref pattern.
-    const unrefCount = (src.match(/if \(typeof \w[\w.]*\.unref === 'function'\) [\w.]*\.unref\(\)/g) || []).length
-    assert.ok(unrefCount >= 3,
-      `expected >=3 unref guards in cli-session.js for #6043, found ${unrefCount}`)
+    // Assert the SPECIFIC guards by timer name (not a generic unref count): a
+    // generic count can stay green if one #6043 site loses its guard while an
+    // unrelated unref exists. Both force-kill sites share the name
+    // `forceKillTimer` (destroy + respawn), plus the interrupt safety timer.
+    const forceKillGuards = (src.match(/if \(typeof forceKillTimer\.unref === 'function'\) forceKillTimer\.unref\(\)/g) || []).length
+    assert.ok(forceKillGuards >= 2,
+      `expected both cli-session forceKillTimer sites unref()-d for #6043, found ${forceKillGuards}`)
+    assert.ok(/if \(typeof this\._interruptTimer\.unref === 'function'\) this\._interruptTimer\.unref\(\)/.test(src),
+      'expected the interrupt timer to be unref()-d for #6043')
     assert.ok(src.includes('#6043'), 'expected #6043 rationale comments in cli-session.js')
   })
 })
@@ -129,9 +133,13 @@ describe('#6043 cli-session force-kill timers are unref()-d', () => {
 describe('#6043 supervisor force-kill timers are unref()-d', () => {
   it('source unref()s the drain and shutdown force-kill timers', () => {
     const src = readFileSync(join(__dirname, '../src/supervisor.js'), 'utf-8')
-    const unrefCount = (src.match(/if \(typeof \w[\w.]*\.unref === 'function'\) [\w.]*\.unref\(\)/g) || []).length
-    assert.ok(unrefCount >= 2,
-      `expected >=2 #6043 unref guards in supervisor.js, found ${unrefCount}`)
+    // Assert each specific timer by name. supervisor.js also has an unrelated
+    // `_heartbeatInterval.unref()`, so a generic unref count would false-pass
+    // even if a #6043 guard were dropped (Copilot review on #6051).
+    assert.ok(/if \(typeof drainTimer\.unref === 'function'\) drainTimer\.unref\(\)/.test(src),
+      'expected the graceful-restart drainTimer to be unref()-d for #6043')
+    assert.ok(/if \(typeof forceKillTimer\.unref === 'function'\) forceKillTimer\.unref\(\)/.test(src),
+      'expected the shutdown forceKillTimer to be unref()-d for #6043')
     assert.ok(src.includes('#6043'), 'expected #6043 rationale comments in supervisor.js')
   })
 })
