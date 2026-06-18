@@ -15,6 +15,7 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-camera';
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
+import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { setPendingPairingId, setPendingPairingIdentityKey } from '../store/message-handler';
 import { Icon } from '../components/Icon';
@@ -348,7 +349,7 @@ export function ConnectScreen() {
           style={styles.autoConnectCancel}
           onPress={() => {
             setAutoConnecting(false);
-            useConnectionStore.getState().disconnect();
+            disconnectWithQueueGuard();
           }}
           accessibilityRole="button"
           accessibilityLabel="Cancel connection attempt"

@@ -1,5 +1,5 @@
 /**
- * #5699 (part 2) — SessionScreen reconnect-banner queued-count + discard warning.
+ * #5699 (part 2) / #6081 — SessionScreen reconnect-banner queued-count + discard warning.
  *
  * While disconnected, typed input is buffered (message-handler queue) and mirrored
  * into the store as `queuedMessageCount`. The reconnect banner must surface that
@@ -8,10 +8,17 @@
  * the queue, so silently discarding typed input on a tap is the exact silent-loss
  * bug #5699 fixes.
  *
+ * #6081 refactored the inline Alert logic into the shared `disconnectWithQueueGuard`
+ * helper so all give-up paths (header button, ConnectScreen cancel, this banner)
+ * behave identically. SessionScreen now delegates to that helper rather than
+ * re-implementing the same Alert.
+ *
  * No `@testing-library/react-native` in this repo (see SessionScreenStoppedBanner
  * .test.ts), so this verifies the wire-up via source-text parsing; the queue/count
  * runtime behaviour is exercised against the real store in
- * __tests__/store/message-queue.test.ts and connection.test.ts.
+ * __tests__/store/message-queue.test.ts and connection.test.ts. The shared guard's
+ * logic (Alert shown / Disconnect calls disconnect / Keep waiting noop) is exercised
+ * in __tests__/store/disconnectWithQueueGuard.test.ts.
  */
 import * as fs from 'fs';
 import * as path from 'path';
@@ -21,7 +28,7 @@ const SessionScreenSrc = fs.readFileSync(
   'utf-8',
 );
 
-describe('SessionScreen reconnect queued-count banner (#5699)', () => {
+describe('SessionScreen reconnect queued-count banner (#5699 / #6081)', () => {
   it('selects queuedMessageCount from the store', () => {
     expect(SessionScreenSrc).toMatch(
       /const queuedMessageCount = useConnectionStore\(\(s\) => s\.queuedMessageCount\)/,
@@ -38,19 +45,15 @@ describe('SessionScreen reconnect queued-count banner (#5699)', () => {
     expect(SessionScreenSrc).toMatch(/onPress=\{handleStopReconnecting\}/);
   });
 
-  it('warns with a discard Alert before disconnecting when input is queued', () => {
-    expect(SessionScreenSrc).toMatch(/const handleStopReconnecting = useCallback\(\(\) => \{/);
-    expect(SessionScreenSrc).toMatch(/if \(queuedMessageCount > 0\)/);
-    expect(SessionScreenSrc).toMatch(/Alert\.alert\(\s*'Discard unsent messages\?'/);
+  it('handleStopReconnecting delegates to disconnectWithQueueGuard (DRY — no inline Alert copy)', () => {
+    // #6081: the inline useCallback + Alert logic moved to the shared helper.
+    expect(SessionScreenSrc).toMatch(/import \{ disconnectWithQueueGuard \} from ['"]\.\.\/store\/disconnectWithQueueGuard['"]/);
+    expect(SessionScreenSrc).toMatch(/const handleStopReconnecting = disconnectWithQueueGuard/);
   });
 
-  it('offers Keep waiting / Disconnect choices, with Disconnect calling disconnect', () => {
-    expect(SessionScreenSrc).toMatch(/text: 'Keep waiting', style: 'cancel'/);
-    expect(SessionScreenSrc).toMatch(/text: 'Disconnect', style: 'destructive', onPress: disconnect/);
-  });
-
-  it('falls through to a plain disconnect() when nothing is queued', () => {
-    // After the queued-count guard returns, the no-queue path calls disconnect directly.
-    expect(SessionScreenSrc).toMatch(/return;\s*\}\s*disconnect\(\);\s*\}, \[queuedMessageCount, disconnect\]\)/);
+  it('does NOT contain an inline "Discard unsent messages?" Alert in SessionScreen itself', () => {
+    // The shared helper owns this; verifying the copy was removed from the screen.
+    const inlineAlerts = SessionScreenSrc.match(/Alert\.alert\(\s*'Discard unsent messages\?'/g);
+    expect(inlineAlerts).toBeNull();
   });
 });

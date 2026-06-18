@@ -63,6 +63,7 @@ import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_A
 import type { Attachment } from '../utils/attachments';
 import { formatPasteMarker, expandPasteMarkers } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
+import { disconnectWithQueueGuard } from '../store/disconnectWithQueueGuard';
 
 
 // Stable empty arrays to avoid new-reference-per-render in Zustand selectors
@@ -223,9 +224,8 @@ export function SessionScreen() {
   const setViewMode = useConnectionStore((s) => s.setViewMode);
   const sendInput = useConnectionStore((s) => s.sendInput);
   const sendInterrupt = useConnectionStore((s) => s.sendInterrupt);
-  const disconnect = useConnectionStore((s) => s.disconnect);
   // #5699 — reactive count of queued (unsent) messages, surfaced in the
-  // reconnect banner and used to warn before a manual disconnect discards them.
+  // reconnect banner so held input isn't invisible to the user.
   const queuedMessageCount = useConnectionStore((s) => s.queuedMessageCount);
   // #5725 (#5698) — manual retry from the terminal `server_down` banner.
   const retryConnection = useConnectionStore((s) => s.retryConnection);
@@ -926,24 +926,10 @@ export function SessionScreen() {
     inputRef.current?.focus();
   }, []);
 
-  // #5699 — manual disconnect during a reconnect discards the outgoing queue
-  // (disconnect() calls clearMessageQueue). Warn first when there are unsent
-  // messages so the user doesn't silently lose typed input by giving up.
-  const handleStopReconnecting = useCallback(() => {
-    if (queuedMessageCount > 0) {
-      const n = queuedMessageCount;
-      Alert.alert(
-        'Discard unsent messages?',
-        `You have ${n} unsent message${n === 1 ? '' : 's'} waiting to send. Disconnecting will discard ${n === 1 ? 'it' : 'them'}.`,
-        [
-          { text: 'Keep waiting', style: 'cancel' },
-          { text: 'Disconnect', style: 'destructive', onPress: disconnect },
-        ],
-      );
-      return;
-    }
-    disconnect();
-  }, [queuedMessageCount, disconnect]);
+  // #5699 / #6081 — manual disconnect during a reconnect discards the outgoing
+  // queue (disconnect() calls clearMessageQueue). Delegate to the shared guard
+  // so all give-up paths warn identically before silently losing typed input.
+  const handleStopReconnecting = disconnectWithQueueGuard;
 
   const handleInvokeAgent = useCallback((agentName: string) => {
     inputRef.current?.setValue(`@${agentName} `);
