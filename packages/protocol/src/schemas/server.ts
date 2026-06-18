@@ -509,8 +509,12 @@ export const ServerPermissionRequestSchema = z.object({
 export function buildPermissionRequestMessage(fields: {
   requestId: string
   tool: string
+  // `input` is REQUIRED (not `input?:`): the schema's `input: z.any()` accepts a
+  // missing key at runtime, so the type system is the only thing that catches an
+  // emitter dropping `input` — keeping it required is what makes this builder a
+  // real drift guard (Copilot review on #6052). All emit sites pass it.
+  input: unknown
   description?: string
-  input?: unknown
   remainingMs?: number
   sessionId?: string
 }): ServerPermissionRequestMessage {

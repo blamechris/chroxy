@@ -323,8 +323,8 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
 export declare function buildPermissionRequestMessage(fields: {
     requestId: string;
     tool: string;
+    input: unknown;
     description?: string;
-    input?: unknown;
     remainingMs?: number;
     sessionId?: string;
 }): ServerPermissionRequestMessage;
