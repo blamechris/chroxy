@@ -1,8 +1,10 @@
-import { describe, it } from 'node:test'
+import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsBroadcaster } from '../src/ws-broadcaster.js'
 import { isSessionViewer } from '../src/handler-utils.js'
 import { resolveOriginSessionId } from '../src/permission-resolver.js'
+import { inputHandlers } from '../src/handlers/input-handlers.js'
+import { settingsHandlers } from '../src/handlers/settings-handlers.js'
 
 /**
  * #6030 — single-source-of-truth for the answer-authorization invariant:
@@ -91,5 +93,104 @@ describe('#6030 resolveOriginSessionId — single dispatch-origin computation (?
   it('with no mapping and no fallback, yields a falsy origin (guard is skipped)', () => {
     assert.equal(resolveOriginSessionId(undefined, undefined), undefined)
     assert.equal(resolveOriginSessionId(null, null), null)
+  })
+})
+
+/**
+ * #6059 — the predicate-equivalence tests above prove `isSessionViewer` is the
+ * SAME boolean as the broadcast recipient set, but NOT that the real handlers
+ * actually call it. A future edit could replace the `isSessionViewer(...)` call
+ * in handleUserQuestionResponse / handlePermissionResponse with an inline copy
+ * (re-introducing drift) without failing those tests. These cases drive the REAL
+ * handlers (via the exported dispatch tables) with a fake UNBOUND client and
+ * assert the end-to-end guard: a session viewer routes the answer/decision
+ * (mapping consumed, dispatch called); a non-recipient is dropped (mapping left
+ * intact, no dispatch). This closes the gap between "the predicate is correct"
+ * and "the handlers use the predicate".
+ */
+describe('#6059 handlers actually enforce the SSoT predicate (end-to-end)', () => {
+  const ws = {}
+
+  describe('user_question_response (input-handlers)', () => {
+    function makeCtx(respondToQuestion) {
+      return {
+        permissions: { questionSessionMap: new Map([['tool-1', 's1']]) },
+        sessions: {
+          sessionManager: {
+            getSession: (id) => (id === 's1' ? { session: { respondToQuestion } } : null),
+          },
+        },
+      }
+    }
+
+    it('a session viewer routes the answer (mapping consumed, respondToQuestion called)', () => {
+      const respondToQuestion = mock.fn()
+      const ctx = makeCtx(respondToQuestion)
+      // Unbound (no boundSessionId), active on s1 → a viewer of s1.
+      const client = { id: 'c1', activeSessionId: 's1', subscribedSessionIds: new Set() }
+
+      inputHandlers.user_question_response(ws, client, { toolUseId: 'tool-1', answer: 'yes' }, ctx)
+
+      assert.equal(respondToQuestion.mock.calls.length, 1, 'viewer answer should reach the session')
+      assert.equal(ctx.permissions.questionSessionMap.has('tool-1'), false, 'mapping should be consumed on a routed answer')
+    })
+
+    it('a non-recipient unbound client is dropped (mapping intact, no dispatch)', () => {
+      const respondToQuestion = mock.fn()
+      const ctx = makeCtx(respondToQuestion)
+      // Unbound, active on a DIFFERENT session, not subscribed to s1 → not a viewer.
+      const client = { id: 'c2', activeSessionId: 's2', subscribedSessionIds: new Set() }
+
+      inputHandlers.user_question_response(ws, client, { toolUseId: 'tool-1', answer: 'yes' }, ctx)
+
+      assert.equal(respondToQuestion.mock.calls.length, 0, 'non-recipient answer must not reach the session')
+      assert.equal(ctx.permissions.questionSessionMap.get('tool-1'), 's1', 'mapping must be left intact for the legitimate viewer')
+    })
+  })
+
+  describe('permission_response (settings-handlers)', () => {
+    function makeCtx(respondToPermission) {
+      const permissionSessionMap = new Map([['req-1', 's1']])
+      return {
+        ctx: {
+          transport: { send: mock.fn(), broadcast: mock.fn() },
+          permissions: {
+            permissionSessionMap,
+            pendingPermissions: new Map(),
+            permissions: { resolvePermission: mock.fn() },
+            permissionAudit: null,
+            unregisterPermissionRoute: (rid) => permissionSessionMap.delete(rid),
+          },
+          sessions: {
+            sessionManager: {
+              getSession: (id) => (id === 's1' ? { session: { respondToPermission } } : null),
+            },
+          },
+        },
+        permissionSessionMap,
+      }
+    }
+
+    it('a session viewer routes the decision (mapping consumed, respondToPermission called)', () => {
+      const respondToPermission = mock.fn(() => true) // SDK dispatch → resolved
+      const { ctx, permissionSessionMap } = makeCtx(respondToPermission)
+      const client = { id: 'c1', activeSessionId: 's1', subscribedSessionIds: new Set() }
+
+      settingsHandlers.permission_response(ws, client, { requestId: 'req-1', decision: 'allow' }, ctx)
+
+      assert.equal(respondToPermission.mock.calls.length, 1, 'viewer decision should reach the session')
+      assert.equal(permissionSessionMap.has('req-1'), false, 'mapping should be consumed on a routed decision')
+    })
+
+    it('a non-recipient unbound client is dropped (mapping intact, no dispatch)', () => {
+      const respondToPermission = mock.fn(() => true)
+      const { ctx, permissionSessionMap } = makeCtx(respondToPermission)
+      const client = { id: 'c2', activeSessionId: 's2', subscribedSessionIds: new Set() }
+
+      settingsHandlers.permission_response(ws, client, { requestId: 'req-1', decision: 'allow' }, ctx)
+
+      assert.equal(respondToPermission.mock.calls.length, 0, 'non-recipient decision must not reach the session')
+      assert.equal(permissionSessionMap.get('req-1'), 's1', 'mapping must be left intact for the legitimate viewer')
+    })
   })
 })
