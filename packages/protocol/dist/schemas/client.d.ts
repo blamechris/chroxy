@@ -609,6 +609,10 @@ export declare const SessionPresetRevokeSchema: z.ZodObject<{
     cwd: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const RevokeTokenSchema: z.ZodObject<{
+    type: z.ZodLiteral<"revoke_token">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ExtensionMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"extension_message">;
     provider: z.ZodString;
@@ -1036,6 +1040,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"session_preset_revoke">;
     cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"revoke_token">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"query_permission_audit">;

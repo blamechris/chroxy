@@ -329,4 +329,43 @@ describe('HeaderOverflowMenu (#4974)', () => {
       expect(screen.queryByTestId('header-overflow-menu')).not.toBeInTheDocument()
     })
   })
+
+  // #6006 — operator panic button. App.tsx passes `onRevokeToken` only when the
+  // server advertises the `tokenRevoke` capability (auth on + primary token), so
+  // the row's presence is purely a function of a truthy onClick. Pin both: it
+  // renders + fires when supplied, and is filtered out when undefined (gated).
+  describe('Revoke token menu item (#6006)', () => {
+    it('renders the revoke-token row when supplied and fires its handler on click', () => {
+      const onRevoke = vi.fn()
+      const items: HeaderOverflowItem[] = [
+        { id: 'settings', label: 'Settings', onClick: vi.fn() },
+        {
+          id: 'revoke-token',
+          label: 'Revoke token',
+          icon: '\u{1F6D1}',
+          title: 'Immediately revoke the API token (severs shells, forces re-auth)',
+          onClick: onRevoke,
+        },
+      ]
+      render(<HeaderOverflowMenu items={items} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      const row = screen.getByTestId('header-overflow-item-revoke-token')
+      expect(row).toBeInTheDocument()
+      expect(row.textContent).toMatch(/Revoke token/)
+      fireEvent.click(row)
+      expect(onRevoke).toHaveBeenCalledTimes(1)
+      expect(screen.queryByTestId('header-overflow-menu')).not.toBeInTheDocument()
+    })
+
+    it('omits the revoke-token row when onClick is undefined (capability-gated for non-primary / --no-auth)', () => {
+      const items: HeaderOverflowItem[] = [
+        { id: 'settings', label: 'Settings', onClick: vi.fn() },
+        { id: 'revoke-token', label: 'Revoke token', onClick: undefined },
+      ]
+      render(<HeaderOverflowMenu items={items} />)
+      fireEvent.click(screen.getByTestId('header-overflow-trigger'))
+      expect(screen.queryByTestId('header-overflow-item-revoke-token')).not.toBeInTheDocument()
+      expect(screen.getByTestId('header-overflow-item-settings')).toBeInTheDocument()
+    })
+  })
 })

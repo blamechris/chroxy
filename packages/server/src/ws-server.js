@@ -778,6 +778,10 @@ export class WsServer {
         // #5510: pairing-approval primitive — host-level approve/deny handlers.
         get pairingManager() { return self._pairingManager },
         get checkpointManager() { return self._checkpointManager },
+        // #6006: the token lifecycle manager — exposed so the primary-gated
+        // `revoke_token` handler can fire the operator panic button
+        // (TokenManager.revoke()). Null when auth is disabled (--no-auth).
+        get tokenManager() { return self._tokenManager },
         get devPreview() { return self._devPreview },
         get webTaskManager() { return self._webTaskManager },
         get environmentManager() { return self.environmentManager },
@@ -866,6 +870,11 @@ export class WsServer {
       // user-shell provider is hidden from listProviders, so the picker can't
       // advertise it). Late-bound getter so a test mutating self.config is seen.
       get userShellEnabled() { return isUserShellEnabled(self.config) },
+      // #6006: whether the operator panic button (revoke_token) can fire — true
+      // iff a rotating TokenManager exists (i.e. auth is on). Surfaced as the
+      // `tokenRevoke` capability, further gated to primary-token clients in
+      // ws-history so a paired device never sees a "Revoke token" affordance.
+      get tokenRevocable() { return self._tokenManager != null },
       // #4835: per-device active-session memory consulted during reconnect.
       // sendPostAuthInfo treats this as optional, but production wiring
       // always supplies the default disk-backed store from the WsServer

@@ -261,6 +261,40 @@ describe('sendPostAuthInfo — userShell capability (#5986)', () => {
   })
 })
 
+// #6006: the tokenRevoke capability gates the dashboard's "Revoke token" panic
+// button. It requires BOTH a rotating TokenManager (tokenRevocable — i.e. auth
+// is on) AND the primary-token class, mirroring the server-side handler gate, so
+// a paired (non-primary) or --no-auth client never sees a button it can't use.
+describe('sendPostAuthInfo — tokenRevoke capability (#6006)', () => {
+  it('advertises tokenRevoke:true only when a TokenManager exists AND the client is primary', () => {
+    const ctx = makeCtx({ tokenRevocable: true })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws, { isPrimaryToken: true })
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(ctx._sends[0].capabilities.tokenRevoke, true)
+  })
+
+  it('advertises tokenRevoke:false to a paired (non-primary) client even with a TokenManager', () => {
+    for (const primary of [false, undefined]) {
+      const ctx = makeCtx({ tokenRevocable: true })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, primary === undefined ? {} : { isPrimaryToken: primary })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.tokenRevoke, false)
+    }
+  })
+
+  it('advertises tokenRevoke:false when no TokenManager (fail-closed), even for a primary client', () => {
+    for (const v of [false, undefined]) {
+      const ctx = makeCtx(v === undefined ? {} : { tokenRevocable: v })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, { isPrimaryToken: true })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.tokenRevoke, false)
+    }
+  })
+})
+
 // #3760: surface the effective inactivity timeout in auth_ok so clients can
 // render their ActivityIndicator timeout warning against the real configured
 // value instead of a hardcoded reference.

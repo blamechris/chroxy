@@ -154,6 +154,11 @@ export function App() {
   // shell" affordance on it means paired devices / disabled hosts never see a
   // dead button.
   const userShellSupported = useConnectionStore(s => s.serverCapabilities?.userShell === true)
+  // #6006 — the operator panic button (Revoke token) is available only when the
+  // server has a rotating TokenManager (auth on) AND this client holds the
+  // primary token, both reflected in the `tokenRevoke` capability. Gating on it
+  // keeps paired / --no-auth clients from seeing a button they can't use.
+  const tokenRevokeSupported = useConnectionStore(s => s.serverCapabilities?.tokenRevoke === true)
   // Providers backed by a real PTY get the live Output terminal. claude-tui
   // mirrors its TUI PTY alongside the parsed Chat view; user-shell is
   // terminal-ONLY — a raw $SHELL with no Claude chat/tools/permissions
@@ -478,6 +483,7 @@ export function App() {
   const destroySession = useConnectionStore(s => s.destroySession)
   const renameSession = useConnectionStore(s => s.renameSession)
   const createSession = useConnectionStore(s => s.createSession)
+  const revokeToken = useConnectionStore(s => s.revokeToken)
   const confirmSessionClose = useConnectionStore(s => s.confirmSessionClose)
   const setViewMode = useConnectionStore(s => s.setViewMode)
   // #5835 (PR2) / #5986: drive the live PTY mirror's opt-in. While the Output
@@ -1525,6 +1531,20 @@ export function App() {
     createSession({ name: 'Shell', cwd: defaultCwd ?? undefined, provider: USER_SHELL_PROVIDER })
   }, [createSession, defaultCwd])
 
+  // #6006 — operator panic button. Revoke is destructive (it invalidates the
+  // current token with no grace, severs every live user-shell, and forces ALL
+  // connections — including this dashboard — to re-authenticate with the new
+  // token, obtained out-of-band). Confirm before firing.
+  const handleRevokeToken = useCallback(() => {
+    const ok = window.confirm(
+      'Revoke the API token now?\n\n' +
+      'This immediately invalidates the current token (no grace period), closes every embedded shell, ' +
+      'and signs out all connected devices — including this dashboard. You will need to re-pair with the ' +
+      'new token to reconnect.\n\nUse this only if the token may be compromised.',
+    )
+    if (ok) revokeToken()
+  }, [revokeToken])
+
   // #5202 — open the create-session picker pre-filled for an Investigate
   // action: cwd = the repo path, and the reason note seeded into the new
   // session's composer once it's created. The user still picks
@@ -1879,6 +1899,7 @@ export function App() {
         onDismissNotification={dismissSessionNotification}
         onNewSession={handleNewSession}
         onNewShell={userShellSupported ? handleNewShell : undefined}
+        onRevokeToken={tokenRevokeSupported ? handleRevokeToken : undefined}
         onToggleSkillsPanel={() => {
           setSkillsPanelOpen(prev => {
             const next = !prev

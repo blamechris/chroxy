@@ -834,6 +834,16 @@ export const SessionPresetRevokeSchema = z.object({
     cwd: z.string().min(1).max(4096),
     requestId: z.string().max(128).optional(),
 });
+// -- Token revoke (operator panic button, #6006) --
+// Primary-token-only request to immediately REVOKE the current API token: the
+// server kills the old token (no grace), severs every live user-shell session,
+// and forces every connection to re-authenticate with the new token (obtained
+// out-of-band). Distinct from scheduled rotation. Gated server-side on
+// `client.isPrimaryToken === true` — a paired/pairing client cannot revoke.
+export const RevokeTokenSchema = z.object({
+    type: z.literal('revoke_token'),
+    requestId: z.string().max(128).optional(),
+});
 // -- Extension message --
 export const ExtensionMessageSchema = z.object({
     type: z.literal('extension_message'),
@@ -1071,6 +1081,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SessionPresetSetSchema,
     SessionPresetApproveSchema,
     SessionPresetRevokeSchema,
+    RevokeTokenSchema,
     QueryPermissionAuditSchema,
     ExtensionMessageSchema,
     CreateEnvironmentSchema,

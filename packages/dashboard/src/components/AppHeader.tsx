@@ -50,6 +50,10 @@ export interface AppHeaderProps {
   // advertise the `userShell` capability (flag off, or this client isn't the
   // primary token), which filters the "New Shell" row out of the menu entirely.
   onNewShell?: () => void
+  // #6006 — operator panic button: revoke the API token now. Undefined unless
+  // the server advertises the `tokenRevoke` capability (auth on AND this client
+  // holds the primary token), which filters the "Revoke token" row out entirely.
+  onRevokeToken?: () => void
   onToggleSkillsPanel: () => void
   showCopyTranscript: boolean
   transcriptCopied: boolean
@@ -230,6 +234,17 @@ export function AppHeader(props: AppHeaderProps) {
               // #5544 — redirect to the Control Room Settings tab (the
               // single home) instead of opening the legacy slide-out modal.
               onClick: props.onOpenSettings,
+            },
+            // #6006 — operator panic button. `onRevokeToken` is undefined unless
+            // the server advertises the `tokenRevoke` capability (auth on + this
+            // client is primary), so the menu filters this row out otherwise.
+            // Listed last (destructive); App wraps it in a confirm dialog.
+            {
+              id: 'revoke-token',
+              label: 'Revoke token',
+              icon: '\u{1F6D1}',
+              title: 'Immediately revoke the API token (severs shells, forces re-auth)',
+              onClick: props.onRevokeToken,
             },
           ]
           return <HeaderOverflowMenu items={overflowItems} />
