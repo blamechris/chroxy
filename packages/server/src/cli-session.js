@@ -204,6 +204,23 @@ export class CliSession extends BaseSession {
   }
 
   /**
+   * #5698: `respawn_exhausted` is the terminal "session is dead (flapping)"
+   * signal — emitted by `_scheduleRespawn` once the bounded auto-respawn budget
+   * (the rolling rate cap or the consecutive max of 5) is spent. SessionManager
+   * listens for it and drops the session from its list (no input-rejecting
+   * zombie tab), mirroring ClaudeTuiSession's contract. Listing it here makes
+   * `_wireSessionEvents` bridge it onto the transient `session_event` channel
+   * as well. DockerSession is the only subclass of CliSession, so it inherits
+   * this getter and the terminal signal; the other subprocess providers
+   * (BYOK/DeepSeek extend BaseSession, Gemini/Codex extend
+   * JsonlSubprocessSession) have no auto-respawn loop, so there is nothing to
+   * exhaust there.
+   */
+  static get customEvents() {
+    return ['respawn_exhausted']
+  }
+
+  /**
    * Root data directory for this provider (#2965).
    * Consumers (conversation-scanner, ws-file-ops) use this to locate
    * provider-specific subdirs (projects/, agents/, commands/) without
@@ -599,14 +616,21 @@ export class CliSession extends BaseSession {
     if (!this._respawnRateLimiter.record()) {
       const { maxPerWindow, windowMs } = this._respawnRateLimiter
       log.error(`Respawn rate cap reached (>${maxPerWindow} in ${Math.round(windowMs / 60000)}min), giving up — session is flapping`)
-      this.emit('error', { message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      // #5698: a CODED terminal error (so the client can render a distinct
+      // "session ended (flapping)" final state instead of a transient toast)
+      // PLUS `respawn_exhausted` so SessionManager drops the dead session.
+      this.emit('error', { code: 'cli_respawn_exhausted', message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      this.emit('respawn_exhausted', { reason: 'cli_respawn_rate_capped' })
       return
     }
 
     this._respawnCount++
     if (this._respawnCount > 5) {
       log.error('Max respawn attempts reached (5), giving up')
-      this.emit('error', { message: 'Claude process failed to stay alive after 5 attempts' })
+      // #5698: see the rate-cap branch above — coded terminal error + the
+      // session-dropping `respawn_exhausted` signal.
+      this.emit('error', { code: 'cli_respawn_exhausted', message: 'Claude process failed to stay alive after 5 attempts' })
+      this.emit('respawn_exhausted', { reason: 'cli_respawn_exhausted', attempts: this._respawnCount - 1 })
       return
     }
 

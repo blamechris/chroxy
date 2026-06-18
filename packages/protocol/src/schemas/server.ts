@@ -308,6 +308,15 @@ export const ServerMessageSchema = z.object({
   //     post-fallback retry ALSO matched the unknown-resume pattern, the
   //     server has stopped auto-respawning, and the user must start a
   //     fresh session manually.
+  //   - `'cli_respawn_exhausted'` (#5698) — terminal; CliSession's bounded
+  //     auto-respawn budget (rolling rate cap or the consecutive max of 5) is
+  //     spent, the server has stopped respawning, and the session is being
+  //     dropped. Distinct from a transient error toast so the client can
+  //     render a final "session ended (flapping)" state. DockerSession (the
+  //     only CliSession subclass) inherits it; the other subprocess providers
+  //     have no auto-respawn loop, and the claude-tui PTY mirror emits the
+  //     sibling `pty_respawn_exhausted` / `resume_unknown_exhausted` codes for
+  //     the same terminal condition.
   // Carries the conversation id chroxy passed to `claude --resume <id>`
   // before the CLI rejected it; dashboards surface it under the affordance
   // for operator correlation against the persisted state file
