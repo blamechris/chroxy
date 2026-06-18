@@ -114,10 +114,12 @@ export function ViewSwitcher({
             panel slot (its header "Control Room" button) and opens as its own
             session-independent top-level tab in the SessionBar strip — not a
             per-session view tab here. */}
-        {/* #5997 — Split is a chat|terminal pane pair, so it needs a chat
-            surface. Hidden for terminal-only providers (user-shell) where the
-            Chat tab is also hidden — otherwise the chat half renders empty. */}
-        {showChatTab && (
+        {/* #5997 — Split renders BOTH a ChatView and a terminal pane, so it
+            needs both surfaces present. Hidden unless the provider has a Chat
+            tab AND an Output terminal — i.e. only claude-tui today. For a
+            terminal-only provider (user-shell, no chat) or a chat-only provider
+            (no PTY/Output) one half would render empty. */}
+        {showChatTab && showTerminalTab && (
           <button
             className={`view-tab${splitMode ? ' active' : ''}`}
             onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}

@@ -939,6 +939,9 @@ export function App() {
     viewMode,
     setViewMode,
     setSplitMode,
+    // #5997 — gate the chat/terminal toggle + split shortcuts off for a
+    // terminal-only user-shell session (no chat surface to toggle/split).
+    terminalOnly: isUserShell,
     setPaletteOpen,
     setSidebarOpen,
     setSettingsOpen,

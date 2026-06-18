@@ -52,14 +52,21 @@ describe('ViewSwitcher tab gates', () => {
     expect(screen.getByRole('button', { name: 'Output' })).toBeInTheDocument()
   })
 
-  it('hides the Split button for terminal-only providers (#5997)', () => {
-    // Split is a chat|terminal pane pair — meaningless without a chat surface,
-    // so it tracks showChatTab. Present by default, gone when chat is hidden.
+  it('shows Split only when BOTH chat and terminal surfaces exist (#5997)', () => {
+    // Split renders a ChatView + a terminal pane, so it needs both — present
+    // only when showChatTab AND showTerminalTab (claude-tui today).
     renderSwitcher({ showChatTab: true, showTerminalTab: true })
     expect(screen.getByRole('button', { name: 'Split' })).toBeInTheDocument()
 
+    // Terminal-only provider (user-shell): no chat surface → hidden.
     cleanup()
     renderSwitcher({ showChatTab: false, showTerminalTab: true })
+    expect(screen.queryByRole('button', { name: 'Split' })).not.toBeInTheDocument()
+
+    // Chat-only provider (no PTY/Output): no terminal surface → hidden too,
+    // otherwise the terminal half would render empty (Copilot review).
+    cleanup()
+    renderSwitcher({ showChatTab: true, showTerminalTab: false })
     expect(screen.queryByRole('button', { name: 'Split' })).not.toBeInTheDocument()
   })
 })
