@@ -13,6 +13,7 @@ import {
   sendError,
   sendSessionError,
   buildSessionTokenMismatchPayload,
+  isSessionViewer,
 } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
@@ -24,7 +25,7 @@ import {
   PER_SESSION_SETTINGS,
   buildPerSessionSettingHandler,
 } from '../per-session-settings.js'
-import { createPermissionResolver } from '../permission-resolver.js'
+import { createPermissionResolver, resolveOriginSessionId } from '../permission-resolver.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
 // These are safe file-operation tools that don't execute code or make network requests.
@@ -378,23 +379,27 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   // legacy `client.activeSessionId` fallback. That fallback is passed to the
   // resolver as `dispatchFallbackSessionId` (used ONLY to pick the dispatch
   // session, NEVER for the binding check — invariant B / the #2806 residual).
+  // #6030: computed via resolveOriginSessionId (the SAME helper the resolver
+  // uses), so the session this handler authorizes against is byte-identical to
+  // the one the resolver dispatches to — closing the prior `||` (here) vs `??`
+  // (resolver) split that disagreed on empty-string / 0-ish mapped ids.
   const mappedSessionId = ctx.permissions.permissionSessionMap.get(requestId)
-  const originSessionId = mappedSessionId || client.activeSessionId
+  const originSessionId = resolveOriginSessionId(mappedSessionId, client.activeSessionId)
 
   // #4798 (audit P0 symmetry with #4788): for UNBOUND clients, require the
   // originSessionId to match the client's active or subscribed sessions before
   // routing the decision. Without this, an unbound dashboard tab could
   // approve/deny a permission for any session by replaying a known requestId —
   // arguably MORE dangerous than the question hijack vector (#4788) because
-  // permission decisions gate file writes / shell exec. Mirrors the default
-  // filter used by _broadcastToSession (ws-broadcaster.js:106). Leaves the
-  // mapping intact so the legitimate subscribed client can still respond. WS-ONLY
-  // by design: a primary HTTP caller has full session authority (§3), so the HTTP
-  // path has no analog and must not inherit this restriction.
+  // permission decisions gate file writes / shell exec. Routes through
+  // isSessionViewer (#6030) — the SAME predicate _broadcastToSession uses to pick
+  // recipients (ws-broadcaster.js _matchesSession) — so "who may answer == who
+  // could receive" can never drift. Leaves the mapping intact so the legitimate
+  // subscribed client can still respond. WS-ONLY by design: a primary HTTP caller
+  // has full session authority (§3), so the HTTP path has no analog and must not
+  // inherit this restriction.
   if (!client.boundSessionId && originSessionId) {
-    const subscribed = originSessionId === client.activeSessionId
-      || (client.subscribedSessionIds && client.subscribedSessionIds.has(originSessionId))
-    if (!subscribed) {
+    if (!isSessionViewer(client, originSessionId)) {
       sessionLogger(originSessionId).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       return
     }

@@ -23,6 +23,28 @@
 //   { kind: 'not_found' }                                   -> HTTP 404 / WS permission_expired
 
 /**
+ * #6030: the single source of truth for the permission "dispatch origin"
+ * session id — the mapped session if the request was registered, else the
+ * WS-only legacy `client.activeSessionId` fallback (HTTP passes nothing).
+ *
+ * Both the WS handler (settings-handlers.js — for its unbound-subscription
+ * guard, invariant G) and the resolver below MUST compute this the SAME way, or
+ * the handler could authorize against one session while the resolver dispatches
+ * to another (issue #6030: the handler previously used `||` here while the
+ * resolver used `??`, so they disagreed on an empty-string / 0-ish mapped id).
+ * `??` is correct: a mapping is "present" iff it was actually registered
+ * (null/undefined absent), so an explicitly-mapped empty-string session id must
+ * be honoured, not silently coalesced to the active-session fallback.
+ *
+ * @param {string|null|undefined} mappedSessionId  the raw permissionSessionMap entry
+ * @param {string|null|undefined} fallbackSessionId  WS-only legacy fallback (client.activeSessionId); HTTP passes null
+ * @returns {string|null|undefined}
+ */
+export function resolveOriginSessionId(mappedSessionId, fallbackSessionId) {
+  return mappedSessionId ?? fallbackSessionId
+}
+
+/**
  * @param {{
  *   permissionSessionMap: Map<string, string>,
  *   pendingPermissions: Map<string, any>,
@@ -83,8 +105,9 @@ export function createPermissionResolver({
     }
 
     // Dispatch origin: the mapped session, or the WS-only legacy fallback. NEVER
-    // used for the binding check above.
-    const originSessionId = mappedSessionId ?? dispatchFallbackSessionId
+    // used for the binding check above. #6030: shared with the WS handler's guard
+    // via resolveOriginSessionId so both agree on empty-string/0-ish ids.
+    const originSessionId = resolveOriginSessionId(mappedSessionId, dispatchFallbackSessionId)
 
     // Invariant F: SDK-mode (in-process) dispatch is attempted before the legacy
     // store. Uses respondToPermission's RETURN VALUE as the resolved-vs-expired

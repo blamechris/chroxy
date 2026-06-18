@@ -1,5 +1,6 @@
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
+import { isSessionViewer } from './handler-utils.js'
 
 const log = createLogger('ws')
 
@@ -143,10 +144,15 @@ export class WsBroadcaster {
    * truth for the full-scan fallbacks of _broadcastToSession /
    * _countSessionSubscribers / _hasDeflateSubscriber so they can never drift
    * (deliver vs count vs deflate MUST agree).
+   *
+   * #6030: delegates to the shared isSessionViewer predicate (handler-utils.js)
+   * so the RECEIVER set defined here and the answer-authorization guards in
+   * input-handlers.js (#4788) / settings-handlers.js (#4798) are the SAME logic
+   * — "who may answer == who could receive" can never drift. The boolean is
+   * identical: `a === sid || Boolean(subscribed.has(sid))`.
    */
   _matchesSession(client, sessionId) {
-    if (client.activeSessionId === sessionId) return true
-    return !!(client.subscribedSessionIds && client.subscribedSessionIds.has(sessionId))
+    return isSessionViewer(client, sessionId)
   }
 
   /**
