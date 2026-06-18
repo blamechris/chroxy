@@ -711,73 +711,42 @@ export class SessionManager extends EventEmitter {
   }
 
   /**
-   * Create a new session.
-   * @param {object} [options]
-   * @param {string} [options.name]
-   * @param {string} [options.cwd]
-   * @param {string} [options.model]
-   * @param {string} [options.permissionMode]
-   * @param {string} [options.resumeSessionId]
-   * @param {string} [options.provider]
-   * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
-   * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
-   * @param {boolean} [options.promptEvaluator] - Per-session toggle for the auto-evaluator
-   *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
-   * @param {boolean} [options.chroxyContextHint] - Per-session opt-in toggle for
-   *   the Chroxy context-prefix in the system prompt (#3805). Default false —
-   *   when true, BaseSession._buildSystemPrompt prepends a short paragraph
-   *   telling the model it's running inside Chroxy so it can adjust output
-   *   for mobile clients. Persisted across reconnects.
-   * @param {string} [options.sessionPreamble] - Per-session user-authored
-   *   preamble prepended to the system prompt every turn (#4660). Default
-   *   empty string — when set, BaseSession._buildSystemPrompt puts the
-   *   preamble at the FRONT (before the optional chroxy hint and the
-   *   skills text). Trimmed + capped to SESSION_PREAMBLE_MAX_LENGTH by
-   *   BaseSession. Persisted across reconnects.
-   * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
-   *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
-   *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
-   *   this per-session override lands here in #3639). Pairs with the
-   *   per-session promptEvaluator toggle so different sessions can use
-   *   different skip heuristics (e.g. PR-review session skips 'lgtm',
-   *   triage session skips 'ack'). Default null — the global pattern from
-   *   #3187 still applies as the fallback.
-   * @param {boolean} [options.stdinForwardingDisabled] - Internal: hydrate the SidecarProcess
-   *   stdin_disabled latch (#3540) on a session being restored from disk. Only used by
-   *   `restoreState()`. Truthy = the prior process latched the flag; the new SdkSession
-   *   reports it via `listSessions` and `serializeState` round-trips it on the next write.
-   * @param {string} [options.bootedModel] - Internal/restore-only: pre-seed
-   *   `session.bootedModel` so the dashboard can show the actual model on a restored
-   *   session immediately, instead of falling back to the registry default until the
-   *   next CLI init event lands (#3700b). Empty / non-string ignored.
-   * @param {number} [options.messageCounter] - Internal/restore-only: pre-seed
-   *   `session._messageCounter` so a restored session's next sendMessage generates
-   *   `msg-{N+1}` instead of restarting from `msg-1` and colliding with messages
-   *   the dashboard cached from the previous process (#3700). Non-finite or
-   *   negative values ignored.
-   * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
-   *   `restoreState()`, which must seed history and budget after createSession before the
-   *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
-   *   empty history and destroy the very data we're restoring.
-   * @param {boolean} [options.skipPermissions] - #4208 / #4209: spawn the claude TUI with
-   *   `--dangerously-skip-permissions` (and elide chroxy's permission hook + sidecar
-   *   entirely). Forwarded to ClaudeTuiSession; other providers ignore it harmlessly via
-   *   destructuring. When omitted, falls back to the SessionManager-wide
-   *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
-   * @param {string} [options.preserveId] - Optional 32-char lower-case hex session id to
-   *   reuse instead of generating a fresh `randomBytes(16).toString('hex')`. Invalid
-   *   format OR a collision with an already-live entry falls back to a fresh random id
-   *   so callers can safely pass any value. Primary use: `restoreState` reusing the
-   *   persisted id so dashboard's localStorage-cached `activeSessionId` still resolves
-   *   after a daemon restart (#4983).
-   * @param {boolean} [options.isRestore] - Internal (#5316): marks a session created by
-   *   `restoreState()`. When a provider's start() rejects ASYNCHRONOUSLY, the rejection
-   *   handler preserves the restored history + worktree (registers a failed-restore)
-   *   instead of fully destroying the session. Fresh sessions omit it and take the
-   *   full-destroy path on start failure.
-   * @returns {string} sessionId
+   * Resolve the validated "create plan" for a session (#6036 — the front-half
+   * SRP extraction out of {@link SessionManager#createSession}). Owns exactly
+   * the preflight + isolation + provider/preset resolution responsibilities:
+   *
+   *   1. session-limit guard + cwd existence check (throws on failure),
+   *   2. id generation (preserve-id validation #4983) + name,
+   *   3. provider resolution + the #2962 preflight (binary/credential) + the
+   *      user-shell fail-closed gate (#5985) + the #3403 model soft-fallback,
+   *   4. worktree isolation (fresh `git worktree add` OR the #5310 restore
+   *      rebind with the path-safety check),
+   *   5. per-repo session-preset resolution + preamble fold (#5553).
+   *
+   * Returns a plain plan object; {@link SessionManager#createSession} consumes
+   * it to build `providerOpts`, construct the session, register it, and start.
+   * Splitting the validation from the wiring keeps them close enough to read
+   * together — the "middle-layer trap" (#3224/#3231/#4790) recurs when they
+   * drift apart. Behaviour is identical to the previous inline front-half: the
+   * same checks run in the same order and throw the same errors.
+   *
+   * @param {object} args The (already-destructured) createSession options that
+   *   the plan depends on.
+   * @returns {{
+   *   sessionId: string,
+   *   sessionName: string,
+   *   resolvedCwd: string,
+   *   resolvedModel: (string|null),
+   *   resolvedPermissionMode: string,
+   *   resolvedProvider: string,
+   *   ProviderClass: Function,
+   *   worktreePath: (string|null),
+   *   worktreeRepoDir: (string|null),
+   *   presetDescriptor: (object|null),
+   *   effectiveSessionPreamble: (string|undefined),
+   * }} the validated create plan.
    */
-  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, skipPersist = false, preserveId, isRestore = false } = {}) {
+  _resolveCreateSessionPlan({ name, cwd, model, permissionMode, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sessionPreamble, preserveId, isRestore = false } = {}) {
     if (this._sessions.size >= this.maxSessions) {
       log.error(`Cannot create session: limit reached (${this._sessions.size}/${this.maxSessions})`)
       throw new SessionLimitError(this.maxSessions)
@@ -998,6 +967,124 @@ export class SessionManager extends EventEmitter {
         effectiveSessionPreamble = sessionPreamble
       }
     }
+
+    return {
+      sessionId,
+      sessionName,
+      resolvedCwd,
+      resolvedModel,
+      resolvedPermissionMode,
+      resolvedProvider,
+      ProviderClass,
+      worktreePath,
+      worktreeRepoDir,
+      presetDescriptor,
+      effectiveSessionPreamble,
+    }
+  }
+
+  /**
+   * Create a new session.
+   * @param {object} [options]
+   * @param {string} [options.name]
+   * @param {string} [options.cwd]
+   * @param {string} [options.model]
+   * @param {string} [options.permissionMode]
+   * @param {string} [options.resumeSessionId]
+   * @param {string} [options.provider]
+   * @param {boolean} [options.worktree] - When true, creates a git worktree for isolation
+   * @param {object} [options.sandbox] - SDK sandbox settings for lightweight isolation
+   * @param {boolean} [options.promptEvaluator] - Per-session toggle for the auto-evaluator
+   *   chain (#3185). Default false — the manual `evaluate_draft` flow remains unaffected.
+   * @param {boolean} [options.chroxyContextHint] - Per-session opt-in toggle for
+   *   the Chroxy context-prefix in the system prompt (#3805). Default false —
+   *   when true, BaseSession._buildSystemPrompt prepends a short paragraph
+   *   telling the model it's running inside Chroxy so it can adjust output
+   *   for mobile clients. Persisted across reconnects.
+   * @param {string} [options.sessionPreamble] - Per-session user-authored
+   *   preamble prepended to the system prompt every turn (#4660). Default
+   *   empty string — when set, BaseSession._buildSystemPrompt puts the
+   *   preamble at the FRONT (before the optional chroxy hint and the
+   *   skills text). Trimmed + capped to SESSION_PREAMBLE_MAX_LENGTH by
+   *   BaseSession. Persisted across reconnects.
+   * @param {string} [options.promptEvaluatorSkipPattern] - Per-session regex source
+   *   string consulted by `shouldSkipEvaluator` BEFORE the server-wide
+   *   `config.promptEvaluatorSkipPattern` (the global knob landed in #3187;
+   *   this per-session override lands here in #3639). Pairs with the
+   *   per-session promptEvaluator toggle so different sessions can use
+   *   different skip heuristics (e.g. PR-review session skips 'lgtm',
+   *   triage session skips 'ack'). Default null — the global pattern from
+   *   #3187 still applies as the fallback.
+   * @param {boolean} [options.stdinForwardingDisabled] - Internal: hydrate the SidecarProcess
+   *   stdin_disabled latch (#3540) on a session being restored from disk. Only used by
+   *   `restoreState()`. Truthy = the prior process latched the flag; the new SdkSession
+   *   reports it via `listSessions` and `serializeState` round-trips it on the next write.
+   * @param {string} [options.bootedModel] - Internal/restore-only: pre-seed
+   *   `session.bootedModel` so the dashboard can show the actual model on a restored
+   *   session immediately, instead of falling back to the registry default until the
+   *   next CLI init event lands (#3700b). Empty / non-string ignored.
+   * @param {number} [options.messageCounter] - Internal/restore-only: pre-seed
+   *   `session._messageCounter` so a restored session's next sendMessage generates
+   *   `msg-{N+1}` instead of restarting from `msg-1` and colliding with messages
+   *   the dashboard cached from the previous process (#3700). Non-finite or
+   *   negative values ignored.
+   * @param {boolean} [options.skipPersist] - Internal: skip the sync persist flush. Used by
+   *   `restoreState()`, which must seed history and budget after createSession before the
+   *   state file is rewritten; otherwise each flush would overwrite the on-disk file with
+   *   empty history and destroy the very data we're restoring.
+   * @param {boolean} [options.skipPermissions] - #4208 / #4209: spawn the claude TUI with
+   *   `--dangerously-skip-permissions` (and elide chroxy's permission hook + sidecar
+   *   entirely). Forwarded to ClaudeTuiSession; other providers ignore it harmlessly via
+   *   destructuring. When omitted, falls back to the SessionManager-wide
+   *   `defaultSkipPermissions` (set from `chroxy start --dangerously-skip-permissions`).
+   * @param {string} [options.preserveId] - Optional 32-char lower-case hex session id to
+   *   reuse instead of generating a fresh `randomBytes(16).toString('hex')`. Invalid
+   *   format OR a collision with an already-live entry falls back to a fresh random id
+   *   so callers can safely pass any value. Primary use: `restoreState` reusing the
+   *   persisted id so dashboard's localStorage-cached `activeSessionId` still resolves
+   *   after a daemon restart (#4983).
+   * @param {boolean} [options.isRestore] - Internal (#5316): marks a session created by
+   *   `restoreState()`. When a provider's start() rejects ASYNCHRONOUSLY, the rejection
+   *   handler preserves the restored history + worktree (registers a failed-restore)
+   *   instead of fully destroying the session. Fresh sessions omit it and take the
+   *   full-destroy path on start failure.
+   * @returns {string} sessionId
+   */
+  createSession({ name, cwd, model, permissionMode, resumeSessionId, provider, worktree, restoreWorktreePath, restoreWorktreeRepoDir, sandbox, containerId, containerUser, containerCliPath, promptEvaluator, promptEvaluatorSkipPattern, chroxyContextHint, sessionPreamble, stdinForwardingDisabled, bootedModel, messageCounter, skipPermissions, agentCommId, skipPersist = false, preserveId, isRestore = false } = {}) {
+    // #6036 — front-half SRP extraction: preflight + isolation + provider/preset
+    // resolution (incl. the limit guard, cwd check, id/name, #2962 preflight,
+    // #5985 user-shell gate, #3403 model fallback, worktree create/restore, and
+    // #5553 preset fold) all live in `_resolveCreateSessionPlan`. It throws the
+    // same errors in the same order the inline code did; this method then
+    // consumes the validated plan to build providerOpts, construct, register,
+    // and start. Both halves stay in the same file so the BaseSession opt
+    // forwarding stays readable next to the construction it feeds.
+    const plan = this._resolveCreateSessionPlan({
+      name,
+      cwd,
+      model,
+      permissionMode,
+      provider,
+      worktree,
+      restoreWorktreePath,
+      restoreWorktreeRepoDir,
+      sessionPreamble,
+      preserveId,
+      isRestore,
+    })
+    const {
+      sessionId,
+      sessionName,
+      resolvedCwd,
+      resolvedModel,
+      resolvedPermissionMode,
+      resolvedProvider,
+      ProviderClass,
+      worktreePath,
+      worktreeRepoDir,
+      presetDescriptor,
+      effectiveSessionPreamble,
+    } = plan
 
     const providerOpts = {
       cwd: resolvedCwd,
