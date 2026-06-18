@@ -72,6 +72,7 @@ function sendJson(res, status, body, extraHeaders) {
  * @param {Map} opts.pendingPermissions - requestId -> { resolve, timer } (owned by WsServer)
  * @param {Map} opts.permissionSessionMap - requestId -> sessionId (owned by WsServer)
  * @param {Function} [opts.registerPermissionRoute] - (requestId, sessionId) => void. Optional WsServer-provided helper that records the permissionSessionMap entry AND auto-subscribes every currently-eligible authenticated client to sessionId, keeping the settings-handler's unbound-client subscription guard (#4798) symmetric with the _broadcastToSession recipient filter. When omitted (unit-test fixtures constructing the handler directly), all three dispatch paths (HTTP request, HTTP resend on reconnect, and any future direct map writes) fall back to a bare permissionSessionMap.set() — security-equivalent for tests because there are no real WS clients to auto-subscribe.
+ * @param {Function} [opts.unregisterPermissionRoute] - (requestId) => void. Optional WsServer-provided teardown counterpart to registerPermissionRoute (#5704): on resolve/expire it deletes the permissionSessionMap entry AND decrements the permission-induced subscription refcount, removing the auto-subscription once no permission still holds it (and the client is neither active on nor explicitly subscribed to the session). Omitted in unit-test fixtures (which use bare permissionSessionMap semantics).
  * @param {Function} opts.getSessionManager - () => sessionManager (late-bound for test compat)
  * @param {Object|null} opts.pairingManager - PairingManager instance used to look up token→sessionId bindings for the HTTP permission-response fallback. Optional — when null, HTTP responses skip the binding check (single-token mode).
  * @param {Function} [opts.findSessionByHookSecret] - (hookSecret) => session|null. Optional session lookup used during /permission handling to resolve the session associated with a per-session hook secret (#2831 — pause that session's inactivity timer while a hook permission is outstanding).
@@ -79,7 +80,7 @@ function sendJson(res, status, body, extraHeaders) {
  * @param {Object} [opts.rateLimit] - Override RateLimiter config for POST /permission. Mainly for tests; production uses the 30+10 default below.
  * @returns {Object} Permission handler methods
  */
-export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
+export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAuth, validateHookAuth, pushManager, pendingPermissions, permissionSessionMap, registerPermissionRoute, unregisterPermissionRoute, getSessionManager, pairingManager, findSessionByHookSecret, getPermissionAudit, rateLimit }) {
   let _permissionCounter = 0
 
   // Rate limiter for HTTP permission requests (per source IP)
@@ -93,6 +94,16 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
   // Fall back to validateBearerAuth if validateHookAuth is not provided (backwards compat for tests)
   const _validateHookAuth = validateHookAuth || validateBearerAuth
 
+  // #5704: tear down a permission route's map entry AND its permission-induced
+  // subscription refcount together. Prefer the WsServer-provided hook (which
+  // drops the refcount and unsubscribes idle clients); fall back to a bare
+  // delete for unit-test fixtures that construct the handler without it (no real
+  // WS clients to unsubscribe — behaviour-equivalent).
+  function tearDownRoute(requestId) {
+    if (typeof unregisterPermissionRoute === 'function') unregisterPermissionRoute(requestId)
+    else permissionSessionMap.delete(requestId)
+  }
+
   // #5373: the session-binding check + SDK-vs-legacy dispatch + audit live in
   // the shared permission-resolver (also used by the WS handler in
   // settings-handlers.js), so the binding rule lives in ONE place. The HTTP
@@ -105,6 +116,7 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
     getSessionManager,
     resolveLegacyPermission: resolvePermission,
     getPermissionAudit,
+    onRouteTeardown: tearDownRoute,
   })
 
   /** Handle POST /permission from the hook script */
@@ -258,7 +270,11 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       const cleanup = () => {
         if (timer) clearTimeout(timer)
         pendingPermissions.delete(requestId)
-        permissionSessionMap.delete(requestId)
+        // #5704: tear down the map entry + permission-induced subscription
+        // refcount together (resolve / timeout-auto-deny / connection-close all
+        // land here). Was a bare permissionSessionMap.delete that left the
+        // auto-subscription dangling for the permission's lifetime + forever.
+        tearDownRoute(requestId)
         // #2831: release the inactivity-timer pause, regardless of
         // whether we're cleaning up from a resolve, timeout, or abort.
         if (ownerSession && typeof ownerSession.notifyPermissionResolved === 'function') {
@@ -589,6 +605,13 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       try { pending.resolve('deny') } catch {}
     }
     pendingPermissions.clear()
+    // #5704: each resolve('deny') above ran cleanup()→tearDownRoute(), so most
+    // entries are already gone. Tear down any remainder (e.g. SDK-routed entries
+    // with no HTTP pending) through the same hook so the subscription refcount
+    // is released, not just the map — then clear to drop any helper-less leftovers.
+    for (const requestId of [...permissionSessionMap.keys()]) {
+      tearDownRoute(requestId)
+    }
     permissionSessionMap.clear()
   }
 

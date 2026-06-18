@@ -29,6 +29,7 @@
  *   getSessionManager: () => ({ getSession: Function } | null),
  *   resolveLegacyPermission: (requestId: string, decision: string) => void,
  *   getPermissionAudit: () => ({ logDecision: Function } | null),
+ *   onRouteTeardown?: (requestId: string) => void,
  * }} deps
  */
 export function createPermissionResolver({
@@ -37,7 +38,17 @@ export function createPermissionResolver({
   getSessionManager,
   resolveLegacyPermission,
   getPermissionAudit,
+  onRouteTeardown,
 }) {
+  // #5704: a route is consumed (resolved or expired) here. Route the map delete
+  // through the WsServer teardown hook when wired so the permission-induced
+  // subscription refcount is decremented in lockstep with the map entry. Falls
+  // back to a bare delete for unit-test fixtures that don't provide the hook
+  // (no real clients to unsubscribe — behaviour-equivalent).
+  function consumeRoute(requestId) {
+    if (typeof onRouteTeardown === 'function') onRouteTeardown(requestId)
+    else permissionSessionMap.delete(requestId)
+  }
   function audit(clientId, sessionId, requestId, decision) {
     // #3059: only user-initiated resolutions reach here (auto-deny is audited by
     // the unified pipeline), hence reason:'user'.
@@ -84,7 +95,7 @@ export function createPermissionResolver({
       const entry = sm.getSession(originSessionId)
       if (entry && typeof entry.session.respondToPermission === 'function') {
         const resolved = entry.session.respondToPermission(requestId, decision)
-        permissionSessionMap.delete(requestId)
+        consumeRoute(requestId)
         if (resolved) {
           audit(clientId, originSessionId, requestId, decision)
           return { kind: 'resolved', via: 'sdk', sessionId: originSessionId }
@@ -95,7 +106,7 @@ export function createPermissionResolver({
 
     // Legacy HTTP-held / pendingPermissions store.
     if (pendingPermissions.has(requestId)) {
-      permissionSessionMap.delete(requestId)
+      consumeRoute(requestId)
       resolveLegacyPermission(requestId, decision)
       audit(clientId, originSessionId ?? null, requestId, decision)
       return { kind: 'resolved', via: 'legacy', sessionId: originSessionId ?? null }
