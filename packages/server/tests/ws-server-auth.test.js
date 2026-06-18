@@ -1432,6 +1432,14 @@ describe('WsServer with TokenManager', () => {
     assert.equal(server.clients.get(encWs).authToken, tok1, 'encrypted client authToken refreshed to current')
     assert.equal(server.clients.get(plainWs).authToken, 'tok-0', 'unencrypted client NOT refreshed — must reconnect')
 
+    // Linkage to the #6004 create gate (real TokenManager): the refreshed
+    // encrypted client's token now satisfies isCurrentToken → it can open a NEW
+    // shell without reconnecting; the stale unencrypted client still fails it.
+    assert.equal(tokenManager.isCurrentToken(server.clients.get(encWs).authToken), true,
+      'refreshed encrypted client passes the #6004 current-token gate')
+    assert.equal(tokenManager.isCurrentToken(server.clients.get(plainWs).authToken), false,
+      'stale unencrypted client still fails the #6004 gate (must reconnect)')
+
     // Revoke must NOT refresh authToken (and de-auths instead)
     const tok2 = tokenManager.revoke()
     assert.equal(server.clients.get(encWs).authToken, tok1, 'revoke leaves authToken stale (no currency granted)')
