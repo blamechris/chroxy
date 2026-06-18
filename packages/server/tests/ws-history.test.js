@@ -226,22 +226,35 @@ describe('sendPostAuthInfo — eager-derivation storm fallback (#5622)', () => {
 })
 
 // #5986 (epic #5982): the userShell capability gates the dashboard's "New shell"
-// affordance. The provider is hidden from listProviders(), so this flag is the
-// only signal that creating a user-shell session will succeed — fail-closed.
+// affordance. It mirrors BOTH halves of the server create gate — the config flag
+// (userShell.enabled, #5985a) AND the primary-token class (#5985b) — so a paired
+// (non-primary) client never sees a button it would only get a
+// PRIMARY_TOKEN_REQUIRED rejection from. The provider is hidden from
+// listProviders(), so this flag is the only signal a user-shell create succeeds.
 describe('sendPostAuthInfo — userShell capability (#5986)', () => {
-  it('advertises userShell:true when the server enabled it', () => {
+  it('advertises userShell:true only when enabled AND the client is primary', () => {
     const ctx = makeCtx({ userShellEnabled: true })
     const ws = makeFakeWs()
-    registerClient(ctx, ws)
+    registerClient(ctx, ws, { isPrimaryToken: true })
     sendPostAuthInfo(ctx, ws)
     assert.equal(ctx._sends[0].capabilities.userShell, true)
   })
 
-  it('advertises userShell:false when disabled or absent (fail-closed)', () => {
+  it('advertises userShell:false to a paired (non-primary) client even when enabled', () => {
+    for (const primary of [false, undefined]) {
+      const ctx = makeCtx({ userShellEnabled: true })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, primary === undefined ? {} : { isPrimaryToken: primary })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.userShell, false)
+    }
+  })
+
+  it('advertises userShell:false when disabled or absent (fail-closed), even for a primary client', () => {
     for (const v of [false, undefined]) {
       const ctx = makeCtx(v === undefined ? {} : { userShellEnabled: v })
       const ws = makeFakeWs()
-      registerClient(ctx, ws)
+      registerClient(ctx, ws, { isPrimaryToken: true })
       sendPostAuthInfo(ctx, ws)
       assert.equal(ctx._sends[0].capabilities.userShell, false)
     }

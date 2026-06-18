@@ -480,11 +480,12 @@ export function App() {
   const createSession = useConnectionStore(s => s.createSession)
   const confirmSessionClose = useConnectionStore(s => s.confirmSessionClose)
   const setViewMode = useConnectionStore(s => s.setViewMode)
-  // #5835 (PR2): drive the live PTY mirror's opt-in. While the Output tab is
-  // shown for a claude-tui session, opt into terminal_output; opt out on leave /
-  // session switch / provider change. If the Output tab is somehow active on a
-  // non-tui session (e.g. after switching), fall back to chat — the tab is
-  // hidden there, so the user shouldn't be stranded on it.
+  // #5835 (PR2) / #5986: drive the live PTY mirror's opt-in. While the Output
+  // tab is shown for a PTY-backed session (claude-tui OR user-shell — see
+  // isPtyProvider), opt into terminal_output; opt out on leave / session switch
+  // / provider change. If the Output tab is somehow active on a session with no
+  // PTY mirror (e.g. after switching to a chat provider), fall back to chat —
+  // the tab is hidden there, so the user shouldn't be stranded on it.
   useEffect(() => {
     // #5986 — user-shell is terminal-only (no Chat view). Force the operator
     // onto the Output terminal whenever a user-shell session is active so they
