@@ -196,8 +196,9 @@ function handleCreateSession(ws, client, msg, ctx) {
         clientId: client.id,
         // Always 'primary' today — the gate above rejects every non-primary
         // class before we reach here. The ternary is future-proofing for if the
-        // authz ever widens; the 'other' branch is currently unreachable.
-        tokenClass: client.isPrimaryToken === true ? 'primary' : 'other',
+        // authz ever widens; 'pairing' (the only non-primary class) is currently
+        // unreachable.
+        tokenClass: client.isPrimaryToken === true ? 'primary' : 'pairing',
         cwd: entry?.cwd,
         shell: entry?.session?._shellPath,
         deviceName: client.deviceInfo?.deviceName,
