@@ -37,6 +37,10 @@ function makeReq(body, headers = {}) {
     emitter.emit('end')
   })
   emitter.destroy = mock.fn()
+  // Real IncomingMessage API used by the byte-accurate cap (#5433): the
+  // fake keeps emitting Buffers, which Buffer.byteLength handles the same.
+  emitter.setEncoding = mock.fn()
+  emitter.pause = mock.fn()
   return emitter
 }
 
@@ -45,7 +49,10 @@ function makeRes() {
   const res = {
     statusCode: null,
     body: null,
-    writeHead: mock.fn(function(code) { this.statusCode = code }),
+    // #5313 (WP-1.3): track headersSent like a real ServerResponse so the
+    // end-callback containment can decide between writeHead(500) and bare end().
+    headersSent: false,
+    writeHead: mock.fn(function(code) { this.statusCode = code; this.headersSent = true }),
     end: mock.fn(function(b) { this.body = b }),
     on(event, cb) { listeners[event] = cb; return this },
     emit(event, ...args) { if (listeners[event]) listeners[event](...args) },
@@ -105,6 +112,73 @@ describe('createPermissionHandler', () => {
       destroy()
       // Should not throw, timer should be cleared
       assert.equal(opts.pendingPermissions.size, 0)
+    })
+  })
+
+  describe('drainSessionPermissions (#5731 T7)', () => {
+    it('auto-denies only the destroyed session\'s pending permissions', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      const resolveA1 = mock.fn()
+      const resolveA2 = mock.fn()
+      const resolveB = mock.fn()
+      opts.pendingPermissions.set('a1', { resolve: resolveA1, timer: null })
+      opts.pendingPermissions.set('a2', { resolve: resolveA2, timer: null })
+      opts.pendingPermissions.set('b1', { resolve: resolveB, timer: null })
+      opts.permissionSessionMap.set('a1', 'sess-A')
+      opts.permissionSessionMap.set('a2', 'sess-A')
+      opts.permissionSessionMap.set('b1', 'sess-B')
+
+      const drained = drainSessionPermissions('sess-A')
+
+      assert.equal(drained, 2, 'both of sess-A\'s permissions drained')
+      assert.equal(resolveA1.mock.calls[0].arguments[0], 'deny')
+      assert.equal(resolveA2.mock.calls[0].arguments[0], 'deny')
+      assert.equal(resolveB.mock.calls.length, 0, 'sess-B\'s permission left untouched')
+    })
+
+    it('returns 0 and is a no-op for a session with no pending permissions', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      opts.pendingPermissions.set('b1', { resolve: mock.fn(), timer: null })
+      opts.permissionSessionMap.set('b1', 'sess-B')
+
+      assert.equal(drainSessionPermissions('sess-A'), 0)
+    })
+
+    it('returns 0 for a falsy sessionId without scanning', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      assert.equal(drainSessionPermissions(undefined), 0)
+      assert.equal(drainSessionPermissions(''), 0)
+    })
+
+    it('skips a mapping whose pending entry is already gone (orphaned map)', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      // Mapping exists but the pending permission already resolved/expired —
+      // drain must not throw and must report 0 drained for the orphan.
+      opts.permissionSessionMap.set('stale', 'sess-A')
+      assert.equal(drainSessionPermissions('sess-A'), 0)
+    })
+
+    it('does not throw and still counts an entry whose resolve write fails', () => {
+      const opts = makeHandlerOpts()
+      const { drainSessionPermissions } = createPermissionHandler(opts)
+      const ok = mock.fn()
+      // In production resolve() runs cleanup() BEFORE the response write, so a
+      // write-throw on a torn-down socket still means the entry was drained —
+      // the drain must swallow the error and count it.
+      const boom = mock.fn(() => { throw new Error('socket torn down') })
+      opts.pendingPermissions.set('ok', { resolve: ok, timer: null })
+      opts.pendingPermissions.set('boom', { resolve: boom, timer: null })
+      opts.permissionSessionMap.set('ok', 'sess-A')
+      opts.permissionSessionMap.set('boom', 'sess-A')
+
+      const drained = drainSessionPermissions('sess-A')
+      assert.equal(drained, 2, 'both entries counted as drained (cleanup runs before the write)')
+      assert.equal(ok.mock.calls.length, 1)
+      assert.equal(boom.mock.calls.length, 1, 'the throwing resolve was still attempted')
     })
   })
 
@@ -212,6 +286,102 @@ describe('createPermissionHandler', () => {
       resendPendingPermissions({})
       assert.equal(opts.sendFn.mock.calls.length, 1)
       assert.equal(permissionSessionMap.get('sdk-req-map'), 'sess-map')
+    })
+
+    it('skips a malformed legacy permission but still resends the valid ones (#6054)', () => {
+      const opts = makeHandlerOpts()
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      // Malformed: `tool` is non-string → buildPermissionRequestMessage throws.
+      opts.pendingPermissions.set('req-bad', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'req-bad',
+          tool: 12345,
+          description: '/tmp/bad',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      opts.pendingPermissions.set('req-good', {
+        resolve: () => {},
+        timer: null,
+        data: {
+          requestId: 'req-good',
+          tool: 'Write',
+          description: '/tmp/good',
+          input: {},
+          remainingMs: 300_000,
+          createdAt: Date.now(),
+        },
+      })
+      // Capture warn-level logs so we can assert the skip is logged WITH the
+      // offending requestId (#6054 acceptance + Copilot review on #6067) — a
+      // regression that removed the log or dropped the requestId would slip past
+      // a send-only assertion.
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'ws') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      const ws = {}
+      try {
+        assert.doesNotThrow(() => resendPendingPermissions(ws))
+      } finally {
+        removeLogListener(logSpy)
+      }
+      // Only the valid one is sent; the malformed one is logged-and-skipped.
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(msg.type, 'permission_request')
+      assert.equal(msg.requestId, 'req-good')
+      const skipWarn = warnLines.find((m) => m.includes('req-bad'))
+      assert.ok(skipWarn, `expected a warn log naming the skipped requestId, got: ${JSON.stringify(warnLines)}`)
+      assert.match(skipWarn, /Skipping malformed/, 'warn explains the skip')
+    })
+
+    it('skips a malformed SDK-mode permission but still resends the valid ones (#6054)', () => {
+      const session = {
+        _pendingPermissions: new Map([['sdk-bad', {}], ['sdk-good', {}]]),
+        _lastPermissionData: new Map([
+          ['sdk-bad', {
+            requestId: 'sdk-bad',
+            tool: 999, // non-string → builder throws
+            description: '/tmp/bad',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+          ['sdk-good', {
+            requestId: 'sdk-good',
+            tool: 'Write',
+            description: '/tmp/good',
+            input: {},
+            remainingMs: 300_000,
+            createdAt: Date.now(),
+          }],
+        ]),
+      }
+      const sm = { _sessions: new Map([['sess-mixed', { session }]]) }
+      const opts = makeHandlerOpts({ getSessionManager: mock.fn(() => sm) })
+      const { resendPendingPermissions } = createPermissionHandler(opts)
+      const warnLines = []
+      const logSpy = (entry) => {
+        if (entry.level === 'warn' && entry.component === 'ws') warnLines.push(entry.message)
+      }
+      addLogListener(logSpy)
+      try {
+        assert.doesNotThrow(() => resendPendingPermissions({}))
+      } finally {
+        removeLogListener(logSpy)
+      }
+      assert.equal(opts.sendFn.mock.calls.length, 1)
+      const [, msg] = opts.sendFn.mock.calls[0].arguments
+      assert.equal(msg.requestId, 'sdk-good')
+      const skipWarn = warnLines.find((m) => m.includes('sdk-bad'))
+      assert.ok(skipWarn, `expected a warn log naming the skipped requestId, got: ${JSON.stringify(warnLines)}`)
+      assert.match(skipWarn, /Skipping malformed/, 'warn explains the skip')
     })
 
     it('skips expired SDK-mode permissions', () => {
@@ -328,6 +498,34 @@ describe('createPermissionHandler', () => {
       assert.equal(mappedSessionId, 'chroxy-sess-7')
 
       assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+
+      // #5667 — the HTTP broadcast must carry the owning sessionId so clients
+      // route the prompt to the session that asked instead of the active tab.
+      assert.equal(opts.broadcastFn.mock.calls.length, 1)
+      const broadcast = opts.broadcastFn.mock.calls[0].arguments[0]
+      assert.equal(broadcast.type, 'permission_request')
+      assert.equal(broadcast.sessionId, 'chroxy-sess-7',
+        'mapped HTTP requests must broadcast sessionId for client routing (#5667)')
+    })
+
+    it('omits sessionId from the broadcast when the request maps to no chroxy session (#5667)', async () => {
+      // No hook secret → ownerSessionId stays null → the broadcast must NOT
+      // invent a sessionId (clients fall back to the active session for these
+      // genuinely unmapped legacy requests).
+      const opts = makeHandlerOpts()
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+      const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+      const req = makeReq(body)
+      const res = makeRes()
+      handlePermissionRequest(req, res)
+      await new Promise(r => setImmediate(r))
+
+      assert.equal(opts.broadcastFn.mock.calls.length, 1)
+      const broadcast = opts.broadcastFn.mock.calls[0].arguments[0]
+      assert.equal(broadcast.type, 'permission_request')
+      assert.equal(Object.prototype.hasOwnProperty.call(broadcast, 'sessionId'), false,
+        'unmapped requests must not carry a sessionId in the broadcast')
     })
 
     it('does not populate permissionSessionMap when hookSecret has no chroxy sessionId (legacy single-session mode)', async () => {
@@ -345,6 +543,66 @@ describe('createPermissionHandler', () => {
       await new Promise(r => setImmediate(r))
       assert.equal(opts.permissionSessionMap.size, 0)
       assert.equal(ownerSession.notifyPermissionPending.mock.calls.length, 1)
+    })
+
+    // #5313 (WP-1.3): the req.on('end', ...) callback fires on a later tick,
+    // after handlePermissionRequest has returned, so a throw inside it is NOT
+    // caught by the route handler's wrapper and escapes to uncaughtException →
+    // daemon crash. The whole callback body is now wrapped: log + 500 (or bare
+    // end if headers already sent).
+    it('contains a throw inside the end callback and returns 500 (#5313)', async () => {
+      // broadcastFn throws inside the end callback, after JSON.parse succeeds
+      // and before any response is written.
+      const opts = makeHandlerOpts({
+        broadcastFn: mock.fn(() => { throw new Error('boom: broadcast failed') }),
+      })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+
+      const req = makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))
+      const res = makeRes()
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        // The synchronous dispatch must not throw...
+        assert.doesNotThrow(() => handlePermissionRequest(req, res))
+        // ...and the deferred end-callback throw must be contained, not escape.
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      assert.equal(uncaught.length, 0, 'end-callback throw must not escape to uncaughtException')
+      assert.equal(res.statusCode, 500, 'client receives a 500 when the end callback throws pre-response')
+    })
+
+    it('does not re-crash when the recovery response itself throws (torn-down socket) (#5313 review)', async () => {
+      // Original fault AND the catch's recovery writeHead both throw (socket torn
+      // down). The catch's response attempt is guarded, so nothing escapes.
+      const opts = makeHandlerOpts({
+        broadcastFn: mock.fn(() => { throw new Error('boom: broadcast failed') }),
+      })
+      const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+      destroyFn = destroy
+
+      const req = makeReq(JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } }))
+      const res = makeRes()
+      res.writeHead = mock.fn(() => { throw new Error('EPIPE: socket torn down') })
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        assert.doesNotThrow(() => handlePermissionRequest(req, res))
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+      assert.equal(uncaught.length, 0, 'a throwing recovery response must not escape to uncaughtException')
     })
   })
 
@@ -919,6 +1177,36 @@ describe('createPermissionHandler', () => {
       assert.equal(audit.logDecision.mock.calls.length, 0,
         'expired SDK responses must not be audited — auto-deny already recorded')
     })
+
+    // #5313 (WP-1.3): like handlePermissionRequest, this end callback fires on
+    // a later tick and a throw inside it escapes the route wrapper → daemon
+    // crash. The body is now wrapped: log + 500 (or bare end if headers sent).
+    it('contains a throw inside the end callback and returns 500 (#5313)', async () => {
+      // getSessionManager throws inside the end callback, after JSON parse and
+      // decision validation succeed but before any response is written.
+      const permissionSessionMap = new Map([['req-x', 'sess-x']])
+      const opts = makeHandlerOpts({
+        permissionSessionMap,
+        getSessionManager: mock.fn(() => { throw new Error('boom: session manager unavailable') }),
+      })
+      const { handlePermissionResponseHttp } = createPermissionHandler(opts)
+      const req = makeReq(JSON.stringify({ requestId: 'req-x', decision: 'allow' }))
+      const res = makeRes()
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        assert.doesNotThrow(() => handlePermissionResponseHttp(req, res))
+        await new Promise((r) => setImmediate(r))
+        await new Promise((r) => setImmediate(r))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      assert.equal(uncaught.length, 0, 'end-callback throw must not escape to uncaughtException')
+      assert.equal(res.statusCode, 500, 'client receives a 500 when the end callback throws pre-response')
+    })
   })
 })
 
@@ -1266,5 +1554,95 @@ describe('sanitizeToolInput (#1845)', () => {
     assert.equal(sanitizeToolInput(null), null)
     assert.equal(sanitizeToolInput(undefined), undefined)
     assert.equal(sanitizeToolInput('string'), 'string')
+  })
+})
+
+/**
+ * Issue #3980 — /permission rate limiter must key off the forwarded source IP
+ * when the TCP peer is loopback (i.e. the request arrived via cloudflared).
+ *
+ * Background: the local cloudflared process is the TCP peer for every tunneled
+ * client, so keying on `req.socket.remoteAddress` collapses every real-world
+ * source IP into a single 127.0.0.1 bucket. A single noisy mobile client can
+ * then rate-limit every other tunnel user. The shared `getRateLimitKey()`
+ * helper (added in #3978 for /diagnostics) trusts `CF-Connecting-IP` /
+ * `X-Forwarded-For` only when the socket is loopback, so direct connections
+ * can't spoof the header to share/exhaust another IP's bucket.
+ */
+describe('handlePermissionRequest rate limiter (#3980)', () => {
+  // Helper that mimics what http.IncomingMessage exposes for our purposes.
+  // The existing makeReq() helper produces a bare EventEmitter; for these
+  // tests we need control over both `socket.remoteAddress` and forwarded
+  // headers so we can prove the limiter keys off the right one.
+  function makeReqWithSocket(body, { socketIp, headers = {} } = {}) {
+    const req = makeReq(body, headers)
+    req.socket = { remoteAddress: socketIp }
+    return req
+  }
+
+  it('separates buckets by CF-Connecting-IP when the TCP peer is loopback', async () => {
+    // Tight 1+0 limit so a single request exhausts the bucket — keeps the
+    // assertion focused on per-key isolation rather than the counting math.
+    const opts = makeHandlerOpts({ rateLimit: { windowMs: 60_000, maxMessages: 1, burst: 0 } })
+    const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+
+    const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+
+    // Client A from the loopback peer (cloudflared) — first request allowed
+    const reqA1 = makeReqWithSocket(body, { socketIp: '127.0.0.1', headers: { 'cf-connecting-ip': '203.0.113.7' } })
+    const resA1 = makeRes()
+    handlePermissionRequest(reqA1, resA1)
+    await new Promise(r => setImmediate(r))
+    assert.notEqual(resA1.statusCode, 429, 'first request from IP A should not be rate-limited')
+
+    // Client A again — bucket is now full, must be rate-limited
+    const reqA2 = makeReqWithSocket(body, { socketIp: '127.0.0.1', headers: { 'cf-connecting-ip': '203.0.113.7' } })
+    const resA2 = makeRes()
+    handlePermissionRequest(reqA2, resA2)
+    await new Promise(r => setImmediate(r))
+    assert.equal(resA2.statusCode, 429, 'second request from IP A must be rate-limited')
+
+    // Client B from the SAME loopback peer but a different forwarded IP —
+    // must get its own bucket. This is the bug from #3980: without the fix,
+    // IP B is starved out because every tunnel client shares 127.0.0.1.
+    const reqB = makeReqWithSocket(body, { socketIp: '127.0.0.1', headers: { 'cf-connecting-ip': '198.51.100.42' } })
+    const resB = makeRes()
+    handlePermissionRequest(reqB, resB)
+    await new Promise(r => setImmediate(r))
+    assert.notEqual(resB.statusCode, 429,
+      'a different CF-Connecting-IP through cloudflared must get its own bucket')
+
+    destroy()
+  })
+
+  it('keys off the socket address (not the forwarded header) for direct non-loopback peers', async () => {
+    // SECURITY: a direct attacker on a public IP could otherwise spoof
+    // CF-Connecting-IP to share or exhaust another client's bucket. The
+    // forwarded header must only be trusted when the TCP peer is loopback.
+    const opts = makeHandlerOpts({ rateLimit: { windowMs: 60_000, maxMessages: 1, burst: 0 } })
+    const { handlePermissionRequest, destroy } = createPermissionHandler(opts)
+
+    const body = JSON.stringify({ tool_name: 'Bash', tool_input: { command: 'ls' } })
+
+    // Direct connection from a public IP. The attacker forges
+    // CF-Connecting-IP=198.51.100.42 hoping the limiter will key off it.
+    const req1 = makeReqWithSocket(body, { socketIp: '203.0.113.99', headers: { 'cf-connecting-ip': '198.51.100.42' } })
+    const res1 = makeRes()
+    handlePermissionRequest(req1, res1)
+    await new Promise(r => setImmediate(r))
+    assert.notEqual(res1.statusCode, 429, 'first direct request should pass')
+
+    // Second request from the SAME socket IP but a DIFFERENT forged header.
+    // If the limiter trusted the header, this would slip through into a
+    // fresh bucket. The fix forces it to key off the socket address, so
+    // the bucket is shared and this request must be blocked.
+    const req2 = makeReqWithSocket(body, { socketIp: '203.0.113.99', headers: { 'cf-connecting-ip': '192.0.2.1' } })
+    const res2 = makeRes()
+    handlePermissionRequest(req2, res2)
+    await new Promise(r => setImmediate(r))
+    assert.equal(res2.statusCode, 429,
+      'header must NOT be trusted from a non-loopback peer — bucket keys off socket address')
+
+    destroy()
   })
 })

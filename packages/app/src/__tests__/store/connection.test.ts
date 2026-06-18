@@ -13,6 +13,13 @@ import {
 } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { clearAllCallbacks, getCallback } from '../../store/imperative-callbacks';
+import {
+  prepareEagerKeyExchange,
+  setPendingKeyPair,
+  getEncryptionState,
+  setEncryptionState,
+} from '../../store/message-handler';
+import { createKeyPair } from '@chroxy/store-core';
 
 // Reset store between tests
 beforeEach(() => {
@@ -381,14 +388,50 @@ describe('message queue', () => {
     expect(result).toBe('queued');
   });
 
-  it('queues permission_response when socket is not connected', () => {
+  it('REFUSES permission_response when socket is not connected (#5699 — never queued)', () => {
+    // The server expires the pending request on disconnect, so a queued
+    // response would drain into the void on reconnect while the prompt could
+    // look answered. Refuse with `false` instead of queuing.
     const result = useConnectionStore.getState().sendPermissionResponse('req-1', 'allow');
-    expect(result).toBe('queued');
+    expect(result).toBe(false);
   });
 
-  it('queues user_question_response when socket is not connected', () => {
+  it('REFUSES user_question_response when socket is not connected (#5699 — never queued)', () => {
     const result = useConnectionStore.getState().sendUserQuestionResponse('yes');
-    expect(result).toBe('queued');
+    expect(result).toBe(false);
+  });
+
+  it('a refused permission/question response consumes no queue capacity (#5699)', () => {
+    const store = useConnectionStore.getState();
+    // Refused responses must not occupy a queue slot — fill exactly to 10 with
+    // inputs after attempting to "answer" while disconnected.
+    expect(store.sendPermissionResponse('req-x', 'allow')).toBe(false);
+    expect(store.sendUserQuestionResponse('nope')).toBe(false);
+    for (let i = 0; i < 10; i++) {
+      expect(store.sendInput(`msg-${i}`)).toBe('queued');
+    }
+    // 11th input overflows — proving the two refused responses took no slots.
+    expect(store.sendInput('overflow')).toBe(false);
+  });
+
+  it('mirrors the queue length into reactive queuedMessageCount (#5699)', () => {
+    const store = useConnectionStore.getState();
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(0);
+    store.sendInput('one');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(1);
+    store.sendInput('two');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(2);
+    // Refused responses don't bump the count.
+    store.sendPermissionResponse('req-z', 'allow');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(2);
+    // A queued interrupt is an ephemeral control signal, not a "message" — it
+    // gets buffered (TTL 5s) but must NOT inflate the unsent-message count that
+    // drives the banner copy + discard warning (#5699 Copilot follow-up).
+    expect(store.sendInterrupt()).toBe('queued');
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(2);
+    // disconnect() clears the queue → count resets to 0.
+    store.disconnect();
+    expect(useConnectionStore.getState().queuedMessageCount).toBe(0);
   });
 
   it('returns false when queue is full (max 10)', () => {
@@ -504,6 +547,118 @@ describe('message queue internals', () => {
 
     expect(sent).toHaveLength(0);
     expect(_testQueueInternals.getQueue()).toHaveLength(0);
+  });
+});
+
+// -- sendUserQuestionResponse: widened payload shapes (#4761) --
+
+describe('sendUserQuestionResponse wire payload (#4761)', () => {
+  beforeEach(() => {
+    useConnectionStore.setState({
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+  });
+
+  it('emits the legacy single-question wire shape for a string answer (back-compat)', () => {
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const result = useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu_single');
+
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu_single',
+    });
+    // No `answers` field on the single-question path — that's reserved
+    // for multi-question forms so older servers ignore it cleanly.
+    expect(sent[0]).not.toHaveProperty('answers');
+  });
+
+  it('forwards multi-question Record<string, string | string[]> verbatim and flattens arrays in the answer summary', () => {
+    // #4761 — mirror the dashboard's `sendUserQuestionResponse` widening
+    // (#4760). The widened wire (`UserQuestionResponseSchema`) accepts
+    // `string | string[]` per question. The mobile store should:
+    //   1. Populate `answers` with the map shape unchanged (arrays stay
+    //      arrays — the server normalizes downstream).
+    //   2. Populate the string-only `answer` field with a flattened
+    //      comma-joined summary so older servers reading only `answer`
+    //      still see a human-readable line (no leaked JSON syntax).
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const answersMap = {
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    };
+    const result = useConnectionStore.getState().sendUserQuestionResponse(answersMap, 'toolu_multi');
+
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu_multi');
+    // `answers` passes the map through unchanged — arrays stay arrays.
+    expect(payload.answers).toEqual({
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    });
+    expect(Array.isArray(payload.answers['Which targets?'])).toBe(true);
+    // Summary flattens arrays as comma-joined labels.
+    expect(payload.answer).toBe(
+      'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
+    );
+  });
+
+  it('flattens legacy JSON-stringified array envelopes in the answer summary (back-compat)', () => {
+    // Pre-#4621 dashboards JSON-stringified multi-select arrays into a
+    // single string. If mixed-version rehydrated state replays such a
+    // payload through the widened store, the `answers` field should
+    // pass through unchanged BUT the `answer` summary should still
+    // flatten the JSON envelope so the terminal echo / older-server
+    // `answer` read stays readable.
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+    useConnectionStore.setState({ socket: mockSocket as unknown as WebSocket });
+
+    const legacyAnswersMap = {
+      'Which targets?': JSON.stringify(['App', 'Tests']),
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(legacyAnswersMap, 'toolu_legacy');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.answers).toEqual(legacyAnswersMap);
+    expect(payload.answer).toBe('Which targets?: App, Tests | Confirm?: Yes');
+    expect(payload.answer).not.toContain('["App"');
+  });
+
+  it('REFUSES the multi-question payload when socket is not connected (#5699 — never queued)', () => {
+    // A multi-question answer is still a user_question_response: the server
+    // expires the pending request on disconnect, so it must be refused (false),
+    // not queued, to avoid a silent drain-into-the-void on reconnect.
+    useConnectionStore.setState({ socket: null });
+    const result = useConnectionStore
+      .getState()
+      .sendUserQuestionResponse({ 'Q?': ['A', 'B'] }, 'toolu_q');
+    expect(result).toBe(false);
   });
 });
 
@@ -819,6 +974,62 @@ describe('WS message handler (direct)', () => {
       const state = useConnectionStore.getState();
       expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
       expect(state.connectedClients).toEqual([]);
+    });
+
+    // #5555 (eager key exchange) — onopen prepares the keypair eagerly and
+    // sends pubkey+salt with auth; if auth_ok carries serverPublicKey the
+    // client derives the shared key inline and sends the burst immediately,
+    // skipping the discrete key_exchange RTT. Uses real store-core crypto.
+    describe('eager key exchange (#5555)', () => {
+      afterEach(() => {
+        setEncryptionState(null);
+        setPendingKeyPair(null);
+      });
+
+      it('derives encryption inline and sends the burst when serverPublicKey is present', () => {
+        // Simulate onopen having generated + sent the eager keypair.
+        prepareEagerKeyExchange();
+        const serverKp = createKeyPair();
+        (mockSocket.send as jest.Mock).mockClear();
+
+        _testMessageHandler.handle({
+          type: 'auth_ok',
+          clientId: 'me-123',
+          serverMode: 'cli',
+          encryption: 'required',
+          serverPublicKey: serverKp.publicKey,
+        });
+
+        // Shared key established without a discrete key_exchange round trip.
+        expect(getEncryptionState()).not.toBeNull();
+        const sentTypes = (mockSocket.send as jest.Mock).mock.calls
+          .map((c) => JSON.parse(c[0] as string).type);
+        expect(sentTypes).not.toContain('key_exchange');
+        // Burst sends are encrypted envelopes (encryptionState is active).
+        expect(sentTypes).toContain('encrypted');
+      });
+
+      it('falls back to the discrete key_exchange when serverPublicKey is absent (old server)', () => {
+        prepareEagerKeyExchange();
+        (mockSocket.send as jest.Mock).mockClear();
+
+        _testMessageHandler.handle({
+          type: 'auth_ok',
+          clientId: 'me-123',
+          serverMode: 'cli',
+          encryption: 'required',
+          // no serverPublicKey → old server
+        });
+
+        // No shared key yet — waiting on key_exchange_ok.
+        expect(getEncryptionState()).toBeNull();
+        const sent = (mockSocket.send as jest.Mock).mock.calls
+          .map((c) => JSON.parse(c[0] as string));
+        const ke = sent.find((m) => m.type === 'key_exchange');
+        expect(ke).toBeTruthy();
+        expect(typeof ke.publicKey).toBe('string');
+        expect(typeof ke.salt).toBe('string');
+      });
     });
   });
 
@@ -1740,6 +1951,67 @@ describe('markPromptAnsweredByRequestId', () => {
   });
 });
 
+describe('markPromptAnsweredMulti (#4973)', () => {
+  it('stores the structured answers map and a comma-joined summary on the active session message', () => {
+    const promptMsg = {
+      id: 'mq-1',
+      type: 'prompt' as const,
+      content: 'Q1?',
+      toolUseId: 'toolu_multi',
+      timestamp: 1,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [promptMsg] },
+      },
+    });
+
+    const answers = {
+      'Q1 — deploy to production?': 'approve',
+      'Q2 — which areas to verify?': ['app', 'server'],
+    };
+    useConnectionStore.getState().markPromptAnsweredMulti('mq-1', answers);
+
+    const msg = useConnectionStore.getState().getActiveSessionState().messages[0] as any;
+    // Structured map preserved verbatim (multi-select stays a string[]).
+    expect(msg.answeredAnswers).toEqual(answers);
+    // Flat `answered` holds the human-readable comma-joined summary.
+    expect(msg.answered).toBe(
+      'Q1 — deploy to production?: approve | Q2 — which areas to verify?: app, server',
+    );
+    expect(typeof msg.answeredAt).toBe('number');
+  });
+
+  it('leaves other messages untouched', () => {
+    const promptMsg = {
+      id: 'mq-2',
+      type: 'prompt' as const,
+      content: 'Q?',
+      toolUseId: 'toolu_x',
+      timestamp: 1,
+    };
+    const otherMsg = {
+      id: 'resp-1',
+      type: 'response' as const,
+      content: 'Hi',
+      timestamp: 2,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [promptMsg, otherMsg] },
+      },
+    });
+
+    useConnectionStore.getState().markPromptAnsweredMulti('mq-2', { 'Q?': 'yes' });
+
+    const msgs = useConnectionStore.getState().getActiveSessionState().messages;
+    expect((msgs[1] as any).answered).toBeUndefined();
+    expect((msgs[1] as any).answeredAnswers).toBeUndefined();
+  });
+});
+
 describe('inactivityWarning cleanup (#3899)', () => {
   const WARNING = { idleMs: 1_800_000, prefab: 'Status update?', receivedAt: 1 };
 
@@ -1808,5 +2080,139 @@ describe('inactivityWarning cleanup (#3899)', () => {
 
     const sessionsRefAfter = useConnectionStore.getState().sessionStates.s1;
     expect(sessionsRefAfter).toBe(sessionsRefBefore);
+  });
+});
+
+// -- sendUserQuestionResponse Other / freeform shape (#4755) --
+//
+// Pins the wire-payload serialization for the single-question Other path,
+// mirroring the dashboard's #4651 store test. When `answer` is the
+// `{otherLabel, freeformText}` object shape, the wire payload must be
+// `{type:'user_question_response', answer:<otherLabel>, freeformText:<typed>,
+// toolUseId?}` so the server can drive the two-stage TUI write (Other digit
+// → text-input prompt → freeform text + Enter). String answers must keep
+// the legacy `{type, answer, toolUseId?}` shape unchanged.
+
+describe('sendUserQuestionResponse Other / freeform shape (#4755)', () => {
+  function makeMockSocket(): { socket: WebSocket; sent: string[] } {
+    const sent: string[] = [];
+    const socket = {
+      readyState: 1,
+      send: (data: string) => sent.push(data),
+      close: () => {},
+      onclose: null,
+    } as unknown as WebSocket;
+    return { socket, sent };
+  }
+
+  afterEach(() => {
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('emits {answer:<otherLabel>, freeformText, toolUseId} for the freeform object shape', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'my custom answer' },
+      'toolu_other_freeform',
+    );
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'my custom answer',
+      toolUseId: 'toolu_other_freeform',
+    });
+  });
+
+  it('preserves a model-supplied custom Other label on the wire', () => {
+    // Defends against a future regression where we forget to thread
+    // `otherLabel` through and instead hard-code the literal "Other"
+    // string — the server's digit-lookup would then resolve to the wrong
+    // hotkey for any custom-label Other option.
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Something else', freeformText: 'typed' },
+      'toolu-x',
+    );
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Something else',
+      freeformText: 'typed',
+      toolUseId: 'toolu-x',
+    });
+  });
+
+  it('keeps the legacy {answer:<string>, toolUseId} shape for plain string answers', () => {
+    // Regular option taps + zero-options free-text answers (#1245) must
+    // keep flowing through the legacy string serializer — older servers
+    // that ignore `freeformText` must continue to receive a payload they
+    // understand verbatim.
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu-string');
+    expect(JSON.parse(sent[0])).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu-string',
+    });
+    // Critically, `freeformText` MUST be absent in the legacy shape so
+    // server-side schema validators / handlers don't misclassify a plain
+    // option tap as an Other / freeform send.
+    expect(JSON.parse(sent[0])).not.toHaveProperty('freeformText');
+  });
+
+  it('omits toolUseId from the wire payload when not provided', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'no-tooluse case' },
+    );
+    const payload = JSON.parse(sent[0]);
+    expect(payload).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'no-tooluse case',
+    });
+    expect(payload).not.toHaveProperty('toolUseId');
+  });
+});
+
+// #5589 / #5281 — explicit primary (driver) ownership claim. The action sends
+// a `claim_primary` wire message; `force` overrides the current owner.
+describe('claimPrimary wire payload (#5589 / #5281)', () => {
+  function makeMockSocket(): { socket: WebSocket; sent: string[] } {
+    const sent: string[] = [];
+    const socket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(data); },
+    } as unknown as WebSocket;
+    return { socket, sent };
+  }
+
+  it('emits a plain claim (no force) by default', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().claimPrimary('s1');
+    expect(sent).toHaveLength(1);
+    const payload = JSON.parse(sent[0]);
+    expect(payload).toEqual({ type: 'claim_primary', sessionId: 's1' });
+    expect(payload).not.toHaveProperty('force');
+  });
+
+  it('emits force:true for an explicit take-over', () => {
+    const { socket, sent } = makeMockSocket();
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().claimPrimary('s1', { force: true });
+    expect(JSON.parse(sent[0])).toEqual({ type: 'claim_primary', sessionId: 's1', force: true });
+  });
+
+  it('no-ops when the socket is not open', () => {
+    const sent: string[] = [];
+    const socket = { readyState: 0, send: (d: string) => { sent.push(d); } } as unknown as WebSocket;
+    useConnectionStore.setState({ socket });
+    useConnectionStore.getState().claimPrimary('s1');
+    expect(sent).toHaveLength(0);
   });
 });

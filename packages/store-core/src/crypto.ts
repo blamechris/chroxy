@@ -58,6 +58,255 @@ export function createKeyPair(): KeyPair {
   return { publicKey: encodeBase64(kp.publicKey), secretKey: kp.secretKey }
 }
 
+// -- Server identity signing (#5536) --
+//
+// The transport key exchange (X25519 box, above) is per-connection and
+// ephemeral — it gives forward secrecy but NO server identity, so a MITM who
+// can swap the server's ephemeral public key in flight relays the whole
+// session (pure TOFU). To pin server identity we add a LONG-LIVED Ed25519
+// signing key. Its public half is conveyed out-of-band at pairing time (in the
+// QR / pairing-code, which already runs over a trusted channel) and pinned by
+// the client. On every handshake the server SIGNS its ephemeral exchange public
+// key with the identity key; the client verifies that signature against the
+// pinned identity key before trusting the exchange key. A MITM cannot forge the
+// signature without the identity secret, so swapping the ephemeral key is
+// detected and the connection is refused.
+//
+// Ed25519 (`nacl.sign`) is part of the tweetnacl dependency already used for
+// the box/secretbox primitives — no new crypto dependency is introduced.
+
+export interface SigningKeyPair {
+  publicKey: string // base64-encoded 32-byte Ed25519 public key
+  secretKey: Uint8Array // 64-byte Ed25519 secret key
+}
+
+/**
+ * Generate a long-lived Ed25519 identity (signing) keypair. The server
+ * persists this across restarts (keychain / state dir); the public half is the
+ * value pinned by clients at pairing time.
+ */
+export function createSigningKeyPair(): SigningKeyPair {
+  const kp = nacl.sign.keyPair()
+  return { publicKey: encodeBase64(kp.publicKey), secretKey: kp.secretKey }
+}
+
+/**
+ * #5604 — domain-separation label for the exchange-key signature. The identity
+ * key today signs ONLY the exchange key, so the bare 32 bytes are unambiguous;
+ * but if the key is ever reused to sign another payload (rotation statements,
+ * capability grants, …) a context-free signature invites cross-protocol
+ * confusion. Prefixing this versioned ASCII label binds a signature to "this is
+ * an exchange key" so it can never be replayed as another statement. `v1` marks
+ * the scheme so a future change can bump it.
+ *
+ * Rollout is a compat ramp (see `verifyExchangeKeySignature`): the verifier
+ * accepts BOTH the bare and domain-separated forms now, so the signer can flip
+ * to the domain-separated form in a later release without forcing already-pinned
+ * clients to re-pair.
+ */
+export const EXCHANGE_KEY_SIG_DOMAIN_V1 = 'chroxy-exchange-key-v1:'
+
+/**
+ * Build the byte string the identity key signs/verifies for an exchange key.
+ * Bare form = the raw 32 exchange-key bytes (today's wire format).
+ * Domain-separated form = `EXCHANGE_KEY_SIG_DOMAIN_V1` (ASCII) ++ the 32 bytes.
+ */
+function exchangeKeySigMessage(exchangeKeyBytes: Uint8Array, domainSeparated: boolean): Uint8Array {
+  if (!domainSeparated) return exchangeKeyBytes
+  const prefix = new TextEncoder().encode(EXCHANGE_KEY_SIG_DOMAIN_V1)
+  const msg = new Uint8Array(prefix.length + exchangeKeyBytes.length)
+  msg.set(prefix, 0)
+  msg.set(exchangeKeyBytes, prefix.length)
+  return msg
+}
+
+/**
+ * Sign an ephemeral exchange public key (base64) with the identity secret key.
+ * Returns the detached signature as base64. The signed message is the RAW bytes
+ * of the exchange public key (decoded from base64), so both sides sign/verify
+ * over identical bytes regardless of base64 canonicalisation.
+ *
+ * `opts.domainSeparated` (#5604) prepends `EXCHANGE_KEY_SIG_DOMAIN_V1` to the
+ * signed bytes. Defaults to `false` (bare form) so existing callers — and the
+ * live wire format — are unchanged until the compat ramp flips the signer; the
+ * accept-both verifier ships first.
+ *
+ * @param exchangePublicKeyBase64 - the per-connection X25519 public key to bind
+ * @param identitySecretKey - the 64-byte Ed25519 secret key
+ * @param opts.domainSeparated - sign the domain-separated payload (default false)
+ * @returns base64-encoded 64-byte detached signature
+ */
+export function signExchangeKey(
+  exchangePublicKeyBase64: string,
+  identitySecretKey: Uint8Array,
+  opts: { domainSeparated?: boolean } = {},
+): string {
+  if (typeof exchangePublicKeyBase64 !== 'string' || exchangePublicKeyBase64.trim().length === 0) {
+    throw new Error('signExchangeKey: exchange public key must be a non-empty base64 string')
+  }
+  if (!(identitySecretKey instanceof Uint8Array) || identitySecretKey.length !== nacl.sign.secretKeyLength) {
+    throw new Error(`signExchangeKey: identity secret key must be a ${nacl.sign.secretKeyLength}-byte Uint8Array`)
+  }
+  const exchangeKeyBytes = new Uint8Array(decodeBase64(exchangePublicKeyBase64))
+  const message = exchangeKeySigMessage(exchangeKeyBytes, opts.domainSeparated === true)
+  const sig = nacl.sign.detached(message, identitySecretKey)
+  return encodeBase64(sig)
+}
+
+/**
+ * Verify that `signatureBase64` is a valid Ed25519 signature over
+ * `exchangePublicKeyBase64`, produced by the holder of the secret key matching
+ * `identityPublicKeyBase64` (the pinned identity key). Returns true on a valid
+ * signature, false on any mismatch / malformed input. NEVER throws — a bad or
+ * absent signature is a verification FAILURE the caller must treat as a refusal,
+ * not an exception to swallow.
+ *
+ * #5604 — accepts a signature over EITHER the bare exchange-key bytes (today's
+ * signer) OR the domain-separated payload (`EXCHANGE_KEY_SIG_DOMAIN_V1` ++ bytes,
+ * the form the signer flips to in a later release). Both require the identity
+ * secret to produce, so accepting both does not weaken pinning — it only lets
+ * the signer migrate without forcing already-pinned clients to re-pair. A future
+ * release can drop the bare branch once the signer no longer emits it.
+ *
+ * @param exchangePublicKeyBase64 - the per-connection X25519 public key offered
+ * @param signatureBase64 - the detached signature offered by the server
+ * @param identityPublicKeyBase64 - the PINNED identity public key to verify against
+ */
+export function verifyExchangeKeySignature(
+  exchangePublicKeyBase64: string,
+  signatureBase64: string,
+  identityPublicKeyBase64: string,
+): boolean {
+  try {
+    if (typeof exchangePublicKeyBase64 !== 'string' || exchangePublicKeyBase64.length === 0) return false
+    if (typeof signatureBase64 !== 'string' || signatureBase64.length === 0) return false
+    if (typeof identityPublicKeyBase64 !== 'string' || identityPublicKeyBase64.length === 0) return false
+    const exchangeKeyBytes = new Uint8Array(decodeBase64(exchangePublicKeyBase64))
+    const sig = new Uint8Array(decodeBase64(signatureBase64))
+    const identityPub = new Uint8Array(decodeBase64(identityPublicKeyBase64))
+    // This function only ever verifies an X25519 EXCHANGE public key, so reject
+    // anything that isn't 32 bytes up front — a wrong-length key is malformed
+    // input, not a genuine signature mismatch. deriveSharedKey enforces the same
+    // length downstream, but checking here keeps the signature API honest.
+    if (exchangeKeyBytes.length !== nacl.box.publicKeyLength) return false
+    if (sig.length !== nacl.sign.signatureLength) return false
+    if (identityPub.length !== nacl.sign.publicKeyLength) return false
+    // Bare form first (the live wire format — the common path); fall back to the
+    // domain-separated form so a future signer flip verifies without a re-pair.
+    // TODO(#5959 phase 3): once the signer has emitted ONLY the domain-separated
+    // form for a full release, DROP the bare branch below — leaving it forever
+    // would defeat the domain separation (a context-free signature stays
+    // accepted). This accept-both window is deliberately temporary.
+    return (
+      nacl.sign.detached.verify(exchangeKeyBytes, sig, identityPub) ||
+      nacl.sign.detached.verify(exchangeKeySigMessage(exchangeKeyBytes, true), sig, identityPub)
+    )
+  } catch {
+    return false
+  }
+}
+
+/**
+ * #5616 — domain-separation label for an identity-key ROTATION statement: the
+ * OLD identity secret signs the NEW identity PUBLIC key so a pinned client can
+ * chain its pin forward (reinstall / machine migration / #5229 master-key
+ * rotation) instead of refusing + forcing a manual re-pair.
+ *
+ * This is a SECOND statement the identity key signs (the first being the
+ * exchange key, #5604), so domain separation is mandatory: without it a rotation
+ * cert (old signs new-identity-bytes) and an exchange-key signature (identity
+ * signs exchange-key-bytes) could be confused if their byte lengths ever
+ * coincided. Both labels are versioned ASCII; this scheme is domain-separated
+ * from the START (unlike the exchange-key ramp), since there is no legacy bare
+ * rotation-cert wire format to stay compatible with — it's a new message.
+ */
+export const IDENTITY_ROTATION_DOMAIN_V1 = 'chroxy-identity-rotation-v1:'
+
+/**
+ * Build the byte string the OLD identity key signs to bless a NEW identity:
+ * `IDENTITY_ROTATION_DOMAIN_V1` (ASCII) ++ the raw 32 bytes of the new identity
+ * Ed25519 public key.
+ */
+function identityRotationSigMessage(newIdentityPublicKeyBytes: Uint8Array): Uint8Array {
+  const prefix = new TextEncoder().encode(IDENTITY_ROTATION_DOMAIN_V1)
+  const msg = new Uint8Array(prefix.length + newIdentityPublicKeyBytes.length)
+  msg.set(prefix, 0)
+  msg.set(newIdentityPublicKeyBytes, prefix.length)
+  return msg
+}
+
+/**
+ * Sign an identity-rotation cert: the OLD identity secret signs the NEW identity
+ * public key (domain-separated). A pinned client presented this cert at handshake
+ * can verify the new identity was authorised by the identity it already trusts,
+ * and chain its pin forward without a manual re-pair (#5616).
+ *
+ * The cert alone is NOT sufficient to accept a rotation — the verifier must ALSO
+ * confirm the new identity signed the live exchange key (proving the server holds
+ * the new secret, not just a replayed cert). See `verifyIdentityRotation` +
+ * `decideKeyPin`'s rotation branch.
+ *
+ * @param newIdentityPublicKeyBase64 - the NEW identity Ed25519 public key (base64)
+ * @param oldIdentitySecretKey - the 64-byte OLD identity Ed25519 secret key
+ * @returns base64-encoded 64-byte detached rotation cert
+ */
+export function signIdentityRotation(
+  newIdentityPublicKeyBase64: string,
+  oldIdentitySecretKey: Uint8Array,
+): string {
+  if (typeof newIdentityPublicKeyBase64 !== 'string' || newIdentityPublicKeyBase64.trim().length === 0) {
+    throw new Error('signIdentityRotation: new identity public key must be a non-empty base64 string')
+  }
+  if (!(oldIdentitySecretKey instanceof Uint8Array) || oldIdentitySecretKey.length !== nacl.sign.secretKeyLength) {
+    throw new Error(`signIdentityRotation: old identity secret key must be a ${nacl.sign.secretKeyLength}-byte Uint8Array`)
+  }
+  const newIdentityBytes = new Uint8Array(decodeBase64(newIdentityPublicKeyBase64))
+  if (newIdentityBytes.length !== nacl.sign.publicKeyLength) {
+    throw new Error(`signIdentityRotation: new identity public key must decode to ${nacl.sign.publicKeyLength} bytes`)
+  }
+  const sig = nacl.sign.detached(identityRotationSigMessage(newIdentityBytes), oldIdentitySecretKey)
+  return encodeBase64(sig)
+}
+
+/**
+ * Verify an identity-rotation cert: that `certBase64` is a valid signature over
+ * the NEW identity public key, produced by the holder of the OLD (pinned)
+ * identity secret. Returns true on a valid cert, false on any mismatch /
+ * malformed input. NEVER throws — an invalid cert is a verification FAILURE the
+ * caller must treat as "no valid rotation", not an exception to swallow.
+ *
+ * Only the domain-separated form is accepted (this statement type never had a
+ * bare wire form), so a context-free signature — or an exchange-key signature
+ * replayed as a rotation cert — cannot pass.
+ *
+ * @param newIdentityPublicKeyBase64 - the NEW identity Ed25519 public key offered
+ * @param certBase64 - the rotation cert offered by the server
+ * @param oldIdentityPublicKeyBase64 - the PINNED (old) identity public key to verify against
+ */
+export function verifyIdentityRotation(
+  newIdentityPublicKeyBase64: string,
+  certBase64: string,
+  oldIdentityPublicKeyBase64: string,
+): boolean {
+  try {
+    if (typeof newIdentityPublicKeyBase64 !== 'string' || newIdentityPublicKeyBase64.length === 0) return false
+    if (typeof certBase64 !== 'string' || certBase64.length === 0) return false
+    if (typeof oldIdentityPublicKeyBase64 !== 'string' || oldIdentityPublicKeyBase64.length === 0) return false
+    const newIdentityBytes = new Uint8Array(decodeBase64(newIdentityPublicKeyBase64))
+    const cert = new Uint8Array(decodeBase64(certBase64))
+    const oldIdentityPub = new Uint8Array(decodeBase64(oldIdentityPublicKeyBase64))
+    // Both the new identity key and the verifying old identity key are Ed25519
+    // public keys; the cert is a detached Ed25519 signature. Reject wrong lengths
+    // as malformed input up front rather than as a genuine mismatch.
+    if (newIdentityBytes.length !== nacl.sign.publicKeyLength) return false
+    if (cert.length !== nacl.sign.signatureLength) return false
+    if (oldIdentityPub.length !== nacl.sign.publicKeyLength) return false
+    return nacl.sign.detached.verify(identityRotationSigMessage(newIdentityBytes), cert, oldIdentityPub)
+  } catch {
+    return false
+  }
+}
+
 /**
  * Derive a shared symmetric key from the other side's public key and our secret key.
  */
@@ -139,6 +388,7 @@ export function encrypt(jsonString: string, sharedKey: Uint8Array, nonceCounter:
  *                        used to namespace the nonce and prevent cross-direction replays.
  * @throws {Error} `'Unexpected nonce: got <n>, expected <e>'` when `envelope.n !== expectedNonce`
  * @throws {Error} `'Decryption failed: message tampered or wrong key'` when MAC verification fails
+ * @throws {Error} `'Decryption failed: plaintext is not valid JSON'` when the verified plaintext does not parse as JSON
  * @throws {TypeError} `'decrypt: envelope.d must be a base64 string'` / `'decrypt: envelope.n must be a number'`
  */
 export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expectedNonce: number, direction: number): Record<string, unknown> {
@@ -157,7 +407,21 @@ export function decrypt(envelope: EncryptedEnvelope, sharedKey: Uint8Array, expe
   if (!plaintext) {
     throw new Error('Decryption failed: message tampered or wrong key')
   }
-  return JSON.parse(new TextDecoder().decode(plaintext))
+  // The MAC verified, so the bytes are authentic — but a peer bug (or a
+  // future protocol change) could still hand us non-JSON plaintext. Re-throw
+  // on the documented `'Decryption failed: …'`-prefixed contract instead of
+  // leaking a raw SyntaxError, so the three call sites' close-the-connection
+  // handling stays uniform. (audit P2-12)
+  try {
+    return JSON.parse(new TextDecoder().decode(plaintext))
+  } catch (cause) {
+    // Preserve the original SyntaxError as `cause` for debugging while keeping
+    // the documented 'Decryption failed: …' message contract. Set via
+    // Object.assign rather than the two-arg Error ctor so this compiles under
+    // every consumer's tsconfig lib (the dashboard pulls this source in under a
+    // lib without ES2022's Error-cause overload).
+    throw Object.assign(new Error('Decryption failed: plaintext is not valid JSON'), { cause })
+  }
 }
 
 /**

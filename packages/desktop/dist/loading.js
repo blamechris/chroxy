@@ -4,31 +4,110 @@
   var spinner = document.getElementById('spinner');
   var wizard = document.getElementById('wizard');
 
+  var invoke = (window.__TAURI__ && window.__TAURI__.core)
+    ? window.__TAURI__.core.invoke
+    : null;
+
+  // -- Splash failure surfacing (issue #5492) --
+  // The splash used to spin on "Starting server..." forever when the spawned
+  // server child died before health succeeded (e.g. EADDRINUSE because
+  // another chroxy owns the port). Two safety nets:
+  //   1. `server_error` (now also emitted on child exit, Rust side) switches
+  //      to an error state with the buffered server log and a Retry button.
+  //   2. A 30s splash-side timeout: if neither ready nor error has fired,
+  //      reframe as "still starting" and show the log view — without
+  //      touching the (still alive) child.
+  var STARTUP_TIMEOUT_MS = 30000;
+  var LOG_REFRESH_MS = 5000;
+  var startupTimer = null;
+  var logRefreshTimer = null;
+
+  function stopLogRefresh() {
+    if (logRefreshTimer) { clearInterval(logRefreshTimer); logRefreshTimer = null; }
+  }
+
+  function clearStartupTimers() {
+    if (startupTimer) { clearTimeout(startupTimer); startupTimer = null; }
+    stopLogRefresh();
+  }
+
+  function armStartupTimeout() {
+    clearStartupTimers();
+    startupTimer = setTimeout(function() {
+      startupTimer = null;
+      // The child is still alive as far as we know — don't kill anything,
+      // just stop spinning silently: reframe the text and show the buffered
+      // server log so the user can see what's slow. Keep refreshing it.
+      status.textContent = 'Still starting... (taking longer than usual)';
+      status.className = 'status';
+      renderStartupLogs(true);
+      logRefreshTimer = setInterval(renderStartupLogs, LOG_REFRESH_MS);
+    }, STARTUP_TIMEOUT_MS);
+  }
+
+  function removeStartupLogs() {
+    var panel = document.getElementById('startup-logs');
+    if (panel) panel.parentNode.removeChild(panel);
+  }
+
+  function hideRetryButton() {
+    var btn = document.getElementById('retry-btn');
+    if (btn) btn.parentNode.removeChild(btn);
+  }
+
+  function showRetryButton() {
+    if (!invoke || document.getElementById('retry-btn')) return;
+    var btn = document.createElement('button');
+    btn.id = 'retry-btn';
+    btn.textContent = 'Retry';
+    btn.className = 'btn btn-primary';
+    btn.style.cssText = 'margin-top:1rem;';
+    btn.addEventListener('click', function() {
+      hideRetryButton();
+      removeStartupLogs();
+      spinner.style.display = '';
+      status.textContent = 'Starting server...';
+      status.className = 'status';
+      armStartupTimeout();
+      invoke('start_server');
+    });
+    // Directly under the status line, above any logs panel.
+    status.parentNode.insertBefore(btn, status.nextSibling);
+  }
+
   // -- Event listeners for loading view --
   function listenForEvents() {
     if (!window.__TAURI__ || !window.__TAURI__.event) return;
 
     window.__TAURI__.event.listen('server_ready', function(event) {
+      clearStartupTimers();
+      hideRetryButton();
+      removeStartupLogs();
       status.textContent = 'Connected!';
       status.className = 'status';
       window.location.href = event.payload.url;
     });
 
     window.__TAURI__.event.listen('server_error', function(event) {
+      clearStartupTimers();
       spinner.style.display = 'none';
       status.textContent = event.payload.message || 'Server error';
       status.className = 'status error';
-      renderStartupLogs();
+      showRetryButton();
+      renderStartupLogs(true);
     });
 
     window.__TAURI__.event.listen('server_restarting', function(event) {
       var p = event.payload;
+      hideRetryButton();
       status.textContent = 'Restarting... (attempt ' + p.attempt + '/' + p.max_attempts + ')';
       status.className = 'status';
       spinner.style.display = '';
+      armStartupTimeout();
     });
 
     window.__TAURI__.event.listen('server_stopped', function() {
+      clearStartupTimers();
       spinner.style.display = 'none';
       status.textContent = 'Server stopped';
       status.className = 'status';
@@ -38,8 +117,7 @@
   listenForEvents();
 
   // -- Check if first run --
-  if (!window.__TAURI__ || !window.__TAURI__.core) return;
-  var invoke = window.__TAURI__.core.invoke;
+  if (!invoke) return;
 
   // -- Startup log inspection (issue #2835 sub-fix C) --
   // When a startup error fires, fetch the last ~30 server log lines and
@@ -52,7 +130,12 @@
   // to see the latest picture. We preserve the `open` state of the
   // <details> element across refreshes so the user's interaction isn't
   // clobbered when they've already expanded the panel.
-  function renderStartupLogs() {
+  //
+  // `forceOpen` (#5492): error and still-starting states pass true so the
+  // log lines are visible immediately instead of collapsed behind the
+  // summary; periodic refreshes omit it and inherit the user's state.
+  function renderStartupLogs(forceOpen) {
+    if (!invoke) return;
     invoke('get_startup_logs', { limit: 30 }).then(function(lines) {
       if (!lines || lines.length === 0) return;
 
@@ -73,7 +156,7 @@
       var details = document.createElement('details');
       details.id = 'startup-logs';
       details.style.cssText = 'margin-top:1.25rem;text-align:left;font-size:0.75rem;';
-      if (wasOpen) details.setAttribute('open', '');
+      if (wasOpen || forceOpen === true) details.setAttribute('open', '');
 
       var summary = document.createElement('summary');
       summary.textContent = 'Show server logs (' + lines.length + ' lines)';
@@ -113,8 +196,12 @@
       loading.style.display = 'none';
       wizard.classList.add('active');
       runDependencyCheck();
+    } else {
+      // Not first run: a start is normally in flight when this page shows.
+      // Arm the splash timeout so we never spin silently forever (#5492) —
+      // server_ready / server_error / server_stopped all cancel it.
+      armStartupTimeout();
     }
-    // If not first run and server is already running, the event listeners handle navigation
   });
 
   // -- Wizard state --
@@ -230,6 +317,7 @@
       status.textContent = 'Starting server...';
       status.className = 'status';
 
+      armStartupTimeout();
       invoke('start_server');
     });
   });

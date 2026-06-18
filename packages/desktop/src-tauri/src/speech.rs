@@ -204,6 +204,19 @@ pub fn stop(state: &SpeechState) {
                     unsafe {
                         let status = libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG);
                         if status == 0 {
+                            // #4986 — the helper ignored the clean "stop\n"
+                            // signal AND the EOF on stdin. Log loudly so
+                            // future regressions like #4985 (where the
+                            // helper was silently SIGTERM'd every session
+                            // since 0.8.x and voice never actually
+                            // transcribed) surface instead of hiding behind
+                            // a "graceful" kill. The no-op branch (process
+                            // already exited cleanly) stays silent.
+                            eprintln!(
+                                "[speech] WARN: helper (pid {}) did not exit within 3s of clean shutdown; sending SIGTERM. \
+This usually means the helper crashed or hung — voice transcription may have silently failed for this session.",
+                                pid
+                            );
                             libc::kill(pid as i32, libc::SIGTERM);
                         }
                     }

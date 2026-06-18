@@ -18,6 +18,7 @@
 import { appendFileSync, statSync, renameSync, mkdirSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
+import { SENSITIVE_PATTERNS, API_KEY_PATTERNS, redactValue } from './redaction.js'
 
 const DEFAULT_LOG_DIR = join(homedir(), '.chroxy', 'logs')
 const MAX_LOG_SIZE = 5 * 1024 * 1024  // 5MB
@@ -26,59 +27,84 @@ const ROTATION_CHECK_INTERVAL = 100  // check every N writes
 
 const LOG_LEVELS = { debug: 0, info: 1, warn: 2, error: 3 }
 
-// Sensitive patterns to redact from log messages
-const SENSITIVE_PATTERNS = [
-  // Bearer tokens in headers
-  /Bearer\s+[A-Za-z0-9_\-./+=]{8,}/gi,
-  // API tokens (base64url, UUID, hex) after common key names
-  /(?:token|password|secret|apiKey|api_key|authorization|credential|private_key)\s*[:=]\s*["']?[A-Za-z0-9_\-./+=]{8,}["']?/gi,
-]
-
-// Provider API key patterns (#2961). These run separately so we can emit a
-// bare "[REDACTED]" regardless of any surrounding key/value syntax — the raw
-// key often appears mid-sentence in stderr (e.g., "invalid api key sk-...").
-// Length floors are tuned to avoid false positives on short identifiers like
-// product SKUs or the literal word "AIzawa".
-const API_KEY_PATTERNS = [
-  // Anthropic: sk-ant-api03-... (checked before generic sk- so the longer
-  // prefix wins). Real keys are well over 40 trailing chars.
-  /\bsk-ant-(?:api\d{2}-)?[A-Za-z0-9_-]{40,}/g,
-  // OpenAI project-scoped keys: sk-proj-... (typically 40+ chars after prefix)
-  /\bsk-proj-[A-Za-z0-9_-]{40,}/g,
-  // OpenAI legacy secret keys: sk- followed by 40+ chars. Must not match
-  // sk-ant- / sk-proj- (already handled above) — negative lookahead keeps
-  // them from being partially redacted.
-  /\bsk-(?!ant-|proj-)[A-Za-z0-9]{40,}/g,
-  // Google API keys: AIza + exactly 35 chars of [A-Za-z0-9_-].
-  // Trailing \b prevents matching into longer alphanumerics (e.g., AIzawa…).
-  /\bAIza[A-Za-z0-9_-]{35}\b/g,
-]
+// #6029: the value-SHAPE patterns (SENSITIVE_PATTERNS / API_KEY_PATTERNS) and
+// the contiguous redaction logic now live in redaction.js as the single source
+// of truth, shared with the tool-broadcast sanitizer (ws-permissions.js). The
+// constants are imported here for redactSensitivePreservingEscapes (the
+// escape-aware PTY-dump pass that still needs the raw pattern list).
 
 /**
- * Redact sensitive data from a log message.
+ * Redact sensitive data from a log message. Delegates to the shared
+ * `redactValue` (redaction.js) so the logger and the tool-broadcast path apply
+ * identical patterns and replacement rules.
  * @param {string} msg
  * @returns {string}
  */
 export function redactSensitive(msg) {
-  let result = msg
-  for (const pattern of SENSITIVE_PATTERNS) {
-    result = result.replace(pattern, (match) => {
-      // Keep the key name, redact the value
-      const colonIdx = match.indexOf(':')
-      const eqIdx = match.indexOf('=')
-      const sepIdx = colonIdx >= 0 ? (eqIdx >= 0 ? Math.min(colonIdx, eqIdx) : colonIdx) : eqIdx
-      if (sepIdx >= 0) {
-        return match.slice(0, sepIdx + 1) + ' [REDACTED]'
-      }
-      // For Bearer tokens
-      if (match.startsWith('Bearer')) return 'Bearer [REDACTED]'
-      return '[REDACTED]'
-    })
+  return redactValue(msg)
+}
+
+// #5358: escape/control sequences a TUI can interleave INTO a token while
+// styling it (e.g. `sk-ant-oat01-AAAA\x1b[1mBBBB`), splitting the run so the
+// contiguous patterns above miss it. Mirrors the claude-tui ANSI_STRIP set,
+// kept local so logger.js stays dependency-free.
+const TOKEN_SPLITTING_ESCAPE = new RegExp(
+  [
+    '\\x1b\\[[0-9;?]*[\\x40-\\x7E]', // CSI
+    '\\x1b\\][^\\x07\\x1b]*(?:\\x07|\\x1b\\\\)', // OSC ... BEL/ST
+    '\\x1bO.', // SS3
+    '\\x1b[=>cN]', // single-char terminal-mode codes
+    '[\\x00-\\x08\\x0b-\\x1f\\x7f]', // stray C0 controls (except \t and \n)
+  ].join('|'),
+  'g',
+)
+
+/**
+ * #5358: redact tokens from a string that may have escape sequences interleaved
+ * MID-TOKEN — the PTY hex-dump source. The contiguous `redactSensitive` misses
+ * a token split by an escape; this detects tokens in an escape-STRIPPED copy,
+ * then redacts the corresponding characters in the ORIGINAL while LEAVING the
+ * escape bytes in place. So a hex dump keeps the escape structure it exists to
+ * show, but the token leaks in neither the hex nor the ASCII column.
+ *
+ * Length-preserving (each token char → 'X'), so escape-byte offsets in the dump
+ * stay meaningful. Intended to be layered AFTER redactSensitive (which handles
+ * the contiguous case + key-name preservation); this pass only changes a string
+ * when a split token survived.
+ *
+ * NOTE: a generic high-entropy "any token-shaped string" heuristic is
+ * deliberately NOT added — on a diagnostic dump it would redact UUIDs, git
+ * SHAs, and base64 payloads (the very content the dump exists to show). The
+ * marker-prefixed patterns (sk-/AIza/Bearer/JWT/key=value) are the safe set.
+ *
+ * @param {string} s latin1/utf8 string (one char per byte for the dump path)
+ * @returns {string}
+ */
+export function redactSensitivePreservingEscapes(s) {
+  // Walk s, skipping escape runs, building a stripped copy + index map back to s.
+  let stripped = ''
+  const map = []
+  let i = 0
+  while (i < s.length) {
+    TOKEN_SPLITTING_ESCAPE.lastIndex = i
+    const m = TOKEN_SPLITTING_ESCAPE.exec(s)
+    if (m && m.index === i) { i += m[0].length || 1; continue }
+    stripped += s[i]
+    map.push(i)
+    i++
   }
-  for (const pattern of API_KEY_PATTERNS) {
-    result = result.replace(pattern, '[REDACTED]')
+  const chars = s.split('')
+  let changed = false
+  for (const pattern of [...SENSITIVE_PATTERNS, ...API_KEY_PATTERNS]) {
+    pattern.lastIndex = 0
+    let match
+    while ((match = pattern.exec(stripped)) !== null) {
+      for (let k = match.index; k < match.index + match[0].length; k++) chars[map[k]] = 'X'
+      changed = true
+      if (match[0].length === 0) pattern.lastIndex++ // guard against a zero-width match
+    }
   }
-  return result
+  return changed ? chars.join('') : s
 }
 
 let _logLevel = LOG_LEVELS[process.env.LOG_LEVEL] ?? LOG_LEVELS.info
@@ -229,11 +255,14 @@ export function getLogLevel() {
  * Create a component logger. Backward-compatible with existing API.
  * @param {string} component - Component name for log prefix
  * @param {object} [context] - Optional context (e.g. { sessionId })
- * @returns {{ debug: Function, info: Function, warn: Function, error: Function, log: Function, withSession: Function }}
+ * @returns {{ debug: Function, info: Function, warn: Function, error: Function, audit: Function, log: Function, withSession: Function }}
  */
 export function createLogger(component, context = {}) {
-  const write = (level, msg) => {
-    if (LOG_LEVELS[level] < _logLevel) return
+  const write = (level, msg, { always = false } = {}) => {
+    // `always` bypasses the configured level gate (#6001) so an audit trail is
+    // never dropped by LOG_LEVEL. Everything else (redaction, console routing,
+    // listener broadcast, file write) is identical to a normal line.
+    if (!always && LOG_LEVELS[level] < _logLevel) return
 
     const safeMsg = redactSensitive(msg)
     const timestamp = new Date().toISOString()
@@ -279,9 +308,76 @@ export function createLogger(component, context = {}) {
     info(msg) { write('info', msg) },
     warn(msg) { write('warn', msg) },
     error(msg) { write('error', msg) },
+    /**
+     * Always-on audit line (#6001) — bypasses the configured LOG_LEVEL so a
+     * security audit trail (e.g. shell-audit) is never suppressed by a quiet
+     * production log level. Tagged `[AUDIT]`; still redacted, broadcast to log
+     * listeners, and written to the daemon log file like any other line.
+     */
+    audit(msg) { write('audit', msg, { always: true }) },
     // Backward compat alias
     log(msg) { write('info', msg) },
     /** Create a child logger tagged with a session ID. */
     withSession(sessionId) { return createLogger(component, { ...context, sessionId }) },
   }
+}
+
+/**
+ * Create a session-scoped component logger.
+ *
+ * This is the preferred factory for any code that operates within session
+ * context (`ClaudeTuiSession`, `SdkSession`, `CliSession`, per-session
+ * handlers in `handlers/*`, etc.). It guarantees that every log entry
+ * the returned logger emits is tagged with `sessionId`, which the
+ * WsServer `_logListener` (#4787) uses to route log entries to the
+ * correct bound client. An unscoped `createLogger(component)` in a
+ * session-aware module silently drops to "global only" fan-out, leaking
+ * PTY hex dumps and prompt sizes to operators on other sessions.
+ *
+ * Equivalent to `createLogger(component).withSession(sessionId)` but
+ * explicit at the call site. Throws if either argument is missing — the
+ * whole point of the helper is to prevent unscoped session logs, so a
+ * silent fallback would defeat its purpose.
+ *
+ * @example
+ *   // In a per-session class constructor:
+ *   this._log = loggerForSession('claude-tui-session', this._sessionId)
+ *   this._log.info('sendMessage start')  // entry.sessionId is set
+ *
+ * @param {string} component - Component tag (same as createLogger).
+ * @param {string} sessionId - Session id to bind. Required.
+ * @returns {ReturnType<typeof createLogger>}
+ */
+export function loggerForSession(component, sessionId) {
+  if (typeof component !== 'string' || component.length === 0) {
+    throw new TypeError('loggerForSession: component must be a non-empty string')
+  }
+  if (typeof sessionId !== 'string' || sessionId.length === 0) {
+    throw new TypeError('loggerForSession: sessionId must be a non-empty string')
+  }
+  return createLogger(component, { sessionId })
+}
+
+/**
+ * #5378 — pick a session-scoped logger when `sessionId` is present, else the
+ * unscoped component logger. Centralizes the
+ * `sessionId ? loggerForSession('ws', sessionId) : log` ternary that was
+ * hand-written across the WS handlers (#4828), where inlining it everywhere
+ * invited picking the wrong sessionId variable or inverting the condition — and
+ * emitting an operator log to the wrong scope is silent.
+ *
+ * Semantics match that ternary EXACTLY: a falsy `sessionId` (null / undefined /
+ * empty string — the legitimate single-session fallback) uses the unscoped
+ * logger, while a truthy value is passed to `loggerForSession`, which THROWS on
+ * a non-string. That deliberate throw is preserved (not swallowed) so a
+ * programming error — e.g. passing an object/number — fails loudly instead of
+ * silently reintroducing the wrong-scope logging this helper exists to prevent
+ * (#5390 review).
+ *
+ * @param {string|null|undefined} sessionId
+ * @param {string} [component='ws']
+ * @returns {ReturnType<typeof createLogger>}
+ */
+export function sessionLogger(sessionId, component = 'ws') {
+  return sessionId ? loggerForSession(component, sessionId) : createLogger(component)
 }

@@ -1,6 +1,7 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
+import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 
 /**
  * Minimal harness that mirrors CliSession's respawn logic.
@@ -8,13 +9,16 @@ import { EventEmitter } from 'node:events'
  * This avoids pulling in spawn/permission-hook/etc dependencies.
  */
 class RespawnTestHarness extends EventEmitter {
-  constructor() {
+  constructor(rateLimiter) {
     super()
     this._destroying = false
     this._respawnCount = 0
     this._respawnTimer = null
     this._respawnScheduled = false
     this._startCallCount = 0
+    // #5349: mirrors cli-session.js — a rolling-window cap independent of the
+    // warmup-resetting _respawnCount.
+    this._respawnRateLimiter = rateLimiter || new RespawnRateLimiter()
   }
 
   start() {
@@ -26,9 +30,20 @@ class RespawnTestHarness extends EventEmitter {
     if (this._destroying) return
     if (this._respawnScheduled) return
 
+    // #5349: rolling-window cap, checked BEFORE _respawnCount.
+    if (!this._respawnRateLimiter.record()) {
+      const { maxPerWindow, windowMs } = this._respawnRateLimiter
+      // #5698: coded terminal error + the session-dropping signal.
+      this.emit('error', { code: 'cli_respawn_exhausted', message: `Claude process is flapping — exceeded ${maxPerWindow} respawns in ${Math.round(windowMs / 60000)} minutes` })
+      this.emit('respawn_exhausted', { reason: 'cli_respawn_rate_capped' })
+      return
+    }
+
     this._respawnCount++
     if (this._respawnCount > 5) {
-      this.emit('error', { message: 'Claude process failed to stay alive after 5 attempts' })
+      // #5698: coded terminal error + the session-dropping signal.
+      this.emit('error', { code: 'cli_respawn_exhausted', message: 'Claude process failed to stay alive after 5 attempts' })
+      this.emit('respawn_exhausted', { reason: 'cli_respawn_exhausted', attempts: this._respawnCount - 1 })
       return
     }
 
@@ -69,6 +84,25 @@ describe('CliSession _scheduleRespawn guard', () => {
     session.destroy()
   })
 
+  it('a flapping session (system.init keeps resetting _respawnCount) gives up via the rolling rate cap (#5349)', () => {
+    // Fixed clock + small cap: each respawn "survives warmup" (resets the
+    // consecutive _respawnCount on system.init), so the consecutive cap of 5
+    // never trips — only the rolling rate cap can stop the flap.
+    const limited = new RespawnTestHarness(new RespawnRateLimiter({ maxPerWindow: 3, windowMs: 5 * 60_000, now: () => 1000 }))
+    const errors = []
+    limited.on('error', (e) => errors.push(e))
+    for (let i = 0; i < 4; i++) {
+      limited._respawnCount = 0          // system.init warmup reset
+      if (limited._respawnTimer) { clearTimeout(limited._respawnTimer); limited._respawnTimer = null }
+      limited._respawnScheduled = false  // allow the next schedule
+      limited._scheduleRespawn()
+    }
+    assert.equal(errors.length, 1, 'gives up exactly once despite the warmup resets')
+    assert.match(errors[0].message, /flapping/, 'error names the flapping rate cap')
+    assert.equal(limited._respawnScheduled, false, 'no respawn scheduled after the rate cap')
+    limited.destroy()
+  })
+
   it('calling _scheduleRespawn twice only creates one timer', () => {
     session._scheduleRespawn()
     const firstTimer = session._respawnTimer
@@ -102,5 +136,43 @@ describe('CliSession _scheduleRespawn guard', () => {
     // Second call is blocked
     session._scheduleRespawn()
     assert.strictEqual(session._respawnCount, 1, 'count still 1 — second call blocked')
+  })
+
+  // #5381 — the exhaustion branch (count > 5) is the loop-stopping safety valve:
+  // it emits a terminal error and must NOT schedule any further respawn. An
+  // off-by-one here would either hang (never give up) or loop forever.
+  it('emits a terminal error and schedules NO timer once the cap (5) is exceeded', () => {
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    // Five respawns already consumed; the scheduled flag is clear (the prior
+    // timer fired), so this call is the 6th attempt.
+    session._respawnCount = 5
+    session._respawnScheduled = false
+
+    session._scheduleRespawn()
+
+    assert.strictEqual(session._respawnCount, 6, 'count increments to 6 then bails')
+    assert.strictEqual(session._respawnTimer, null, 'no respawn timer is scheduled after exhaustion')
+    assert.strictEqual(session._respawnScheduled, false, 'no respawn is marked scheduled after exhaustion')
+    assert.strictEqual(errors.length, 1, 'exactly one terminal error is emitted')
+    assert.match(errors[0].message, /failed to stay alive after 5 attempts/)
+  })
+
+  it('never resumes scheduling on repeated calls after exhaustion', () => {
+    const errors = []
+    session.on('error', (e) => errors.push(e))
+    session._respawnCount = 6 // already past the cap
+
+    for (let i = 0; i < 3; i++) {
+      session._respawnScheduled = false // simulate the guard being clear each round
+      session._scheduleRespawn()
+      assert.strictEqual(session._respawnTimer, null, `still no timer scheduled (round ${i})`)
+    }
+    // The invariant is "no respawn is ever scheduled past the cap" (asserted
+    // each round above) plus "a terminal error is signalled". We deliberately
+    // don't assert the exact final count or how many times the error fires, so
+    // a future change (clamping _respawnCount, de-duping the error) can't break
+    // this test while keeping the guarantee (#5385 review).
+    assert.ok(errors.length >= 1, 'a terminal error is signalled after exhaustion')
   })
 })

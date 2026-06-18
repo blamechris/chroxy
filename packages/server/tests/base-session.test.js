@@ -1,9 +1,17 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { BaseSession } from '../src/base-session.js'
+import {
+  BaseSession,
+  DEFAULT_RESULT_TIMEOUT_MS,
+  DEFAULT_HARD_TIMEOUT_MS,
+  DEFAULT_STREAM_STALL_TIMEOUT_MS,
+  BACKGROUND_SHELL_HARD_QUIESCE_MS,
+  BASE_SESSION_OPT_KEYS,
+  buildBaseSessionOpts,
+} from '../src/base-session.js'
 import { SkillsTrustStore, sha256Hex } from '../src/skills-trust.js'
 
 describe('BaseSession', () => {
@@ -55,6 +63,23 @@ describe('BaseSession', () => {
       assert.match(session._messageIdPrefix, /^[0-9a-f]{6}$/, 'matches 6-hex format')
     })
 
+    // #5288 / #5304: the configurable hard-quiesce opt must land in the field,
+    // with the constant as default and an explicit 0 preserved (?? not ||).
+    it('backgroundShellHardQuiesceMs: defaults to the constant when unset (#5288)', () => {
+      const s = new BaseSession()
+      assert.equal(s._backgroundShellHardQuiesceMs, BACKGROUND_SHELL_HARD_QUIESCE_MS)
+    })
+
+    it('backgroundShellHardQuiesceMs: explicit 0 disables (preserved, not defaulted) (#5288)', () => {
+      const s = new BaseSession({ backgroundShellHardQuiesceMs: 0 })
+      assert.equal(s._backgroundShellHardQuiesceMs, 0)
+    })
+
+    it('backgroundShellHardQuiesceMs: a positive value is applied verbatim (#5288)', () => {
+      const s = new BaseSession({ backgroundShellHardQuiesceMs: 6 * 60 * 60 * 1000 })
+      assert.equal(s._backgroundShellHardQuiesceMs, 6 * 60 * 60 * 1000)
+    })
+
     it('each new BaseSession draws an independent _messageIdPrefix (#3700)', () => {
       // Each instance MUST call randomBytes(3) at construction so prefixes
       // are independent across server boots. Asserting strict uniqueness
@@ -92,6 +117,39 @@ describe('BaseSession', () => {
     })
   })
 
+  describe('intentional-stop flag (#5375 — hoisted from the 3 providers)', () => {
+    it('initializes disarmed', () => {
+      assert.equal(new BaseSession()._intentionalStop, false)
+    })
+
+    it('markIntentionalStop arms it', () => {
+      const s = new BaseSession()
+      s.markIntentionalStop()
+      assert.equal(s._intentionalStop, true)
+    })
+
+    it('_consumeIntentionalStop captures-and-clears in one step', () => {
+      const s = new BaseSession()
+      s.markIntentionalStop()
+      // First consume returns the armed state AND disarms.
+      assert.equal(s._consumeIntentionalStop(), true)
+      assert.equal(s._intentionalStop, false)
+      // Second consume sees the cleared state — the next natural exit is not
+      // misread as a user stop.
+      assert.equal(s._consumeIntentionalStop(), false)
+    })
+
+    it('_clearIntentionalStop disarms without reading (kept separate from consume so SDK catch-then-finally stays two-step)', () => {
+      const s = new BaseSession()
+      s.markIntentionalStop()
+      s._clearIntentionalStop()
+      assert.equal(s._intentionalStop, false)
+      // Idempotent — a finally safety-net after the catch already consumed it.
+      s._clearIntentionalStop()
+      assert.equal(s._intentionalStop, false)
+    })
+  })
+
   describe('setModel', () => {
     it('returns false when busy', () => {
       session._isBusy = true
@@ -108,6 +166,38 @@ describe('BaseSession', () => {
       const result = session.setModel('claude-sonnet-4-5-20250514')
       assert.equal(result, true)
       assert.equal(session.model, 'claude-sonnet-4-5-20250514')
+    })
+  })
+
+  describe('setter hooks (#5374)', () => {
+    it('setModel fires _onModelChanged once with the resolved model, only when it changes', () => {
+      const s = new BaseSession()
+      const calls = []
+      s._onModelChanged = (m) => calls.push(m)
+      s.model = null
+      assert.equal(s.setModel('claude-sonnet-4-5-20250514'), true)
+      assert.deepEqual(calls, [s.model], 'hook fired once with the resolved model')
+      // No-op set (same model) must NOT fire the hook.
+      assert.equal(s.setModel('claude-sonnet-4-5-20250514'), false)
+      assert.equal(calls.length, 1, 'hook not fired on a no-op set')
+      // Busy guard rejects → hook not fired.
+      s._isBusy = true
+      assert.equal(s.setModel('claude-opus-4-1-20250805'), false)
+      assert.equal(calls.length, 1, 'hook not fired when busy guard rejects')
+    })
+
+    it('setPermissionMode fires _onPermissionModeChanged once with the mode, only when it changes', () => {
+      const s = new BaseSession()
+      const calls = []
+      s._onPermissionModeChanged = (m) => calls.push(m)
+      s.permissionMode = 'approve'
+      assert.equal(s.setPermissionMode('plan'), true)
+      assert.deepEqual(calls, ['plan'], 'hook fired once with the new mode')
+      // Invalid mode rejected → hook not fired.
+      assert.equal(s.setPermissionMode('bogus'), false)
+      // No-op (same mode) → hook not fired.
+      assert.equal(s.setPermissionMode('plan'), false)
+      assert.equal(calls.length, 1, 'hook only fired on the real change')
     })
   })
 
@@ -372,10 +462,14 @@ describe('BaseSession', () => {
     // that's the method that invokes loadActiveSkillsLayered. After
     // the refactor, validation no longer scans (it reads the cached
     // `_manualSkillNames` populated by the most-recent `_loadSkills`).
+    // #5376: the layered scan moved to SkillsManager.loadSkills — activate /
+    // deactivate now call it on the manager, not via session._loadSkills — so
+    // spy there to count the real scans.
     function countScans(s) {
       const counts = { load: 0 }
-      const origLoad = s._loadSkills.bind(s)
-      s._loadSkills = function loadSpy(...args) {
+      const mgr = s._skillsManager
+      const origLoad = mgr.loadSkills.bind(mgr)
+      mgr.loadSkills = function loadSpy(...args) {
         counts.load++
         return origLoad(...args)
       }
@@ -707,13 +801,247 @@ describe('BaseSession', () => {
     })
   })
 
+  // #3805: opt-in Chroxy context hint. When enabled, a short paragraph
+  // telling the model it's running inside Chroxy is prepended to the
+  // system prompt so it can adjust output (narrower code blocks, no
+  // wide ASCII diagrams) for mobile clients.
+  describe('chroxyContextHint (#3805)', () => {
+    it('defaults to false when omitted from constructor opts', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.chroxyContextHint, false)
+    })
+
+    it('coerces truthy / falsy constructor values to a strict boolean', () => {
+      const a = new BaseSession({ chroxyContextHint: true, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const b = new BaseSession({ chroxyContextHint: false, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const c = new BaseSession({ chroxyContextHint: 1, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      const d = new BaseSession({ chroxyContextHint: undefined, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(a.chroxyContextHint, true)
+      assert.equal(b.chroxyContextHint, false)
+      assert.equal(c.chroxyContextHint, true)
+      assert.equal(typeof c.chroxyContextHint, 'boolean')
+      assert.equal(d.chroxyContextHint, false)
+    })
+
+    describe('_buildSystemPrompt with hint', () => {
+      it('returns empty string when hint is OFF and no skills loaded (default OFF — byte-identical to pre-#3805)', () => {
+        session._skillsText = ''
+        assert.equal(session.chroxyContextHint, false)
+        assert.equal(session._buildSystemPrompt(), '')
+      })
+
+      it('prepends the Chroxy hint paragraph when flag is ON and no skills loaded', () => {
+        session._skillsText = ''
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        assert.ok(out.length > 0, 'hint paragraph is non-empty')
+        assert.ok(/Chroxy/.test(out), `expected output to mention "Chroxy": ${out}`)
+        assert.ok(/mobile/i.test(out), `expected hint to mention mobile context: ${out}`)
+      })
+
+      it('prepends hint BEFORE skills text when both are present (skills not overwritten)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        const hintIdx = out.indexOf('Chroxy')
+        const skillsIdx = out.indexOf('body text')
+        assert.ok(hintIdx >= 0, 'hint present')
+        assert.ok(skillsIdx >= 0, 'skills text still present (not overwritten)')
+        assert.ok(hintIdx < skillsIdx, `hint should precede skills text (hint at ${hintIdx}, skills at ${skillsIdx})`)
+      })
+
+      it('leaves skills text byte-identical when hint is OFF (no observable change for existing users)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        // Compare with the existing pre-#3805 behaviour: skills text only.
+        const out = session._buildSystemPrompt()
+        assert.equal(out, '# Skill: foo\n\nbody text')
+        assert.ok(!out.includes('Chroxy'), 'no Chroxy hint when flag is OFF')
+      })
+    })
+
+    describe('setChroxyContextHint', () => {
+      it('accepts boolean true and updates state', () => {
+        assert.equal(session.chroxyContextHint, false)
+        const result = session.setChroxyContextHint(true)
+        assert.equal(result, true)
+        assert.equal(session.chroxyContextHint, true)
+      })
+
+      it('accepts boolean false and updates state', () => {
+        session.chroxyContextHint = true
+        const result = session.setChroxyContextHint(false)
+        assert.equal(result, true)
+        assert.equal(session.chroxyContextHint, false)
+      })
+
+      it('returns false when value is unchanged (idempotent no-op)', () => {
+        assert.equal(session.chroxyContextHint, false)
+        assert.equal(session.setChroxyContextHint(false), false)
+      })
+
+      it('rejects non-boolean inputs without mutating state', () => {
+        for (const bad of ['true', 1, 0, null, undefined, {}, []]) {
+          assert.equal(session.setChroxyContextHint(bad), false, `expected setChroxyContextHint(${JSON.stringify(bad)}) to return false`)
+          assert.equal(session.chroxyContextHint, false)
+        }
+      })
+    })
+  })
+
+  // #4660: per-session user-authored preamble. Free-text string prepended
+  // to the system prompt every turn so the user can pre-load context
+  // (style rules, stack notes, response format) without retyping it.
+  describe('sessionPreamble (#4660)', () => {
+    it('defaults to empty string when omitted from constructor opts', () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: emptySkillsDir,
+        repoSkillsDir: null,
+      })
+      assert.equal(s.sessionPreamble, '')
+    })
+
+    it('coerces non-string constructor values to empty string', () => {
+      for (const bad of [123, true, null, undefined, {}, []]) {
+        const s = new BaseSession({ sessionPreamble: bad, skillsDir: emptySkillsDir, repoSkillsDir: null })
+        assert.equal(s.sessionPreamble, '', `expected non-string ${JSON.stringify(bad)} → ''`)
+      }
+    })
+
+    it('trims whitespace on construction', () => {
+      const s = new BaseSession({ sessionPreamble: '   hello world   ', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s.sessionPreamble, 'hello world')
+    })
+
+    it('treats whitespace-only as empty string', () => {
+      const s = new BaseSession({ sessionPreamble: '   \n\t  ', skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s.sessionPreamble, '')
+    })
+
+    it('caps over-length input at SESSION_PREAMBLE_MAX_LENGTH (4000 chars)', () => {
+      const huge = 'x'.repeat(5000)
+      const s = new BaseSession({ sessionPreamble: huge, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      assert.equal(s.sessionPreamble.length, 4000)
+    })
+
+    describe('_buildSystemPrompt with preamble', () => {
+      it('returns empty string when preamble is empty and hint is OFF (byte-identical to pre-#4660)', () => {
+        session._skillsText = ''
+        assert.equal(session.sessionPreamble, '')
+        assert.equal(session.chroxyContextHint, false)
+        assert.equal(session._buildSystemPrompt(), '')
+      })
+
+      it('returns just the preamble when set and hint is OFF and no skills', () => {
+        session._skillsText = ''
+        session.sessionPreamble = 'always use bullet points'
+        assert.equal(session._buildSystemPrompt(), 'always use bullet points')
+      })
+
+      it('puts preamble BEFORE chroxy hint when both are present', () => {
+        session._skillsText = ''
+        session.sessionPreamble = 'always use bullet points'
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        const preIdx = out.indexOf('always use bullet points')
+        const hintIdx = out.indexOf('Chroxy')
+        assert.ok(preIdx >= 0 && hintIdx >= 0)
+        assert.ok(preIdx < hintIdx, `preamble should precede chroxy hint (preamble at ${preIdx}, hint at ${hintIdx})`)
+      })
+
+      it('puts preamble BEFORE skills text when both are present (skills not overwritten)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        session.sessionPreamble = 'always use bullet points'
+        const out = session._buildSystemPrompt()
+        const preIdx = out.indexOf('always use bullet points')
+        const skillsIdx = out.indexOf('body text')
+        assert.ok(preIdx >= 0 && skillsIdx >= 0)
+        assert.ok(preIdx < skillsIdx)
+      })
+
+      it('full ordering — preamble, then hint, then skills', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        session.sessionPreamble = 'always use bullet points'
+        session.chroxyContextHint = true
+        const out = session._buildSystemPrompt()
+        const preIdx = out.indexOf('always use bullet points')
+        const hintIdx = out.indexOf('Chroxy')
+        const skillsIdx = out.indexOf('body text')
+        assert.ok(preIdx < hintIdx && hintIdx < skillsIdx,
+          `expected preamble (${preIdx}) < hint (${hintIdx}) < skills (${skillsIdx})`)
+      })
+
+      it('byte-identical to pre-#4660 when preamble is empty (skills only)', () => {
+        session._skillsText = '# Skill: foo\n\nbody text'
+        const out = session._buildSystemPrompt()
+        assert.equal(out, '# Skill: foo\n\nbody text')
+      })
+
+      it('joins multiple non-empty layers with double-newline', () => {
+        session._skillsText = 'SKILL'
+        session.sessionPreamble = 'PRE'
+        session.chroxyContextHint = false
+        assert.equal(session._buildSystemPrompt(), 'PRE\n\nSKILL')
+      })
+    })
+
+    describe('setSessionPreamble', () => {
+      it('accepts a string and updates state', () => {
+        assert.equal(session.sessionPreamble, '')
+        const result = session.setSessionPreamble('hello')
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble, 'hello')
+      })
+
+      it('accepts empty string to clear', () => {
+        session.sessionPreamble = 'something'
+        const result = session.setSessionPreamble('')
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble, '')
+      })
+
+      it('trims input on set', () => {
+        const result = session.setSessionPreamble('   trimmed   ')
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble, 'trimmed')
+      })
+
+      it('returns false when the trimmed value is unchanged (idempotent no-op)', () => {
+        session.sessionPreamble = 'hello'
+        assert.equal(session.setSessionPreamble('hello'), false)
+        assert.equal(session.setSessionPreamble('  hello  '), false, 'whitespace-only differences should not count as a change')
+      })
+
+      it('rejects non-string inputs without mutating state', () => {
+        session.sessionPreamble = 'existing'
+        for (const bad of [123, true, null, undefined, {}, []]) {
+          assert.equal(session.setSessionPreamble(bad), false, `expected setSessionPreamble(${JSON.stringify(bad)}) to return false`)
+          assert.equal(session.sessionPreamble, 'existing')
+        }
+      })
+
+      it('caps over-length input at SESSION_PREAMBLE_MAX_LENGTH', () => {
+        const huge = 'y'.repeat(5000)
+        const result = session.setSessionPreamble(huge)
+        assert.equal(result, true)
+        assert.equal(session.sessionPreamble.length, 4000)
+      })
+    })
+  })
+
   describe('_getSkills', () => {
     it('returns empty array by default (no skills loaded)', () => {
       assert.deepEqual(session._getSkills(), [])
     })
 
     it('returns cached skills when set', () => {
-      session._skills = [{ name: 'a', body: 'x', description: 'x' }]
+      // #5376: skills state lives on the manager; set it there (the session
+      // exposes `_skills` as a read-through getter).
+      session._skillsManager._skills = [{ name: 'a', body: 'x', description: 'x' }]
       const out = session._getSkills()
       assert.equal(out.length, 1)
       assert.equal(out[0].name, 'a')
@@ -1229,4 +1557,319 @@ describe('BaseSession', () => {
       assert.equal(s._getSkills().length, 1, 'malformed trust file must not break loading')
     })
   })
+
+  // #4628: in-flight tool_start tracking + sweep at turn-end
+  describe('in-flight tool_start sweep (#4628)', () => {
+    let s, sweepSkillsDir
+    beforeEach(() => {
+      sweepSkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-bs-4628-'))
+      s = new BaseSession({ cwd: '/tmp', skillsDir: sweepSkillsDir, repoSkillsDir: null })
+    })
+    afterEach(() => { rmSync(sweepSkillsDir, { recursive: true, force: true }) })
+
+    it('_trackToolStart adds to in-flight map; _trackToolResult removes', () => {
+      s._trackToolStart('toolu_1', 'Bash')
+      s._trackToolStart('toolu_2', 'Read')
+      assert.equal(s._inFlightToolStarts.size, 2)
+      s._trackToolResult('toolu_1')
+      assert.equal(s._inFlightToolStarts.size, 1)
+      assert.ok(s._inFlightToolStarts.has('toolu_2'))
+    })
+
+    it('_trackToolStart ignores empty / non-string ids (defensive)', () => {
+      s._trackToolStart('', 'Bash')
+      s._trackToolStart(null, 'Bash')
+      s._trackToolStart(undefined, 'Bash')
+      s._trackToolStart(42, 'Bash')
+      assert.equal(s._inFlightToolStarts.size, 0)
+    })
+
+    it('_sweepUnresolvedToolStarts emits one synthetic tool_result per orphan and clears the map', () => {
+      s._trackToolStart('toolu_A', 'Bash')
+      s._trackToolStart('toolu_B', 'Read')
+      const events = []
+      s.on('tool_result', (ev) => events.push(ev))
+      const swept = s._sweepUnresolvedToolStarts('test_reason')
+      assert.equal(swept, 2)
+      assert.equal(events.length, 2)
+      const ids = events.map((e) => e.toolUseId).sort()
+      assert.deepEqual(ids, ['toolu_A', 'toolu_B'])
+      for (const ev of events) {
+        assert.equal(ev.synthetic, true, 'synthetic flag for grep-ability')
+        assert.equal(ev.interrupted, true)
+        assert.equal(ev.isError, true)
+        assert.equal(ev.reason, 'test_reason')
+        assert.equal(ev.truncated, false)
+        assert.ok(typeof ev.result === 'string' && ev.result.length > 0)
+      }
+      assert.equal(s._inFlightToolStarts.size, 0, 'map cleared after sweep')
+    })
+
+    it('_sweepUnresolvedToolStarts is a no-op when no orphans (returns 0, emits nothing)', () => {
+      const events = []
+      s.on('tool_result', (ev) => events.push(ev))
+      const swept = s._sweepUnresolvedToolStarts('test_reason')
+      assert.equal(swept, 0)
+      assert.equal(events.length, 0)
+    })
+
+    it('_emitResult sweeps orphans BEFORE emitting result (ordering matters for dashboard activeTools clear)', () => {
+      s._trackToolStart('toolu_orphan', 'Bash')
+      const events = []
+      s.on('tool_result', (ev) => events.push({ type: 'tool_result', toolUseId: ev.toolUseId, synthetic: ev.synthetic }))
+      s.on('result', (ev) => events.push({ type: 'result', cost: ev.cost }))
+      s._emitResult({ cost: null, duration: 100, usage: null, sessionId: 'sess_1' }, 'turn_end')
+      assert.equal(events.length, 2)
+      assert.equal(events[0].type, 'tool_result', 'synthetic tool_result fires FIRST')
+      assert.equal(events[0].toolUseId, 'toolu_orphan')
+      assert.equal(events[0].synthetic, true)
+      assert.equal(events[1].type, 'result', 'result fires SECOND')
+    })
+
+    it('_clearMessageState sweeps orphans (belt-and-braces for paths that bypass _emitResult)', () => {
+      s._trackToolStart('toolu_orphan', 'Bash')
+      const events = []
+      s.on('tool_result', (ev) => events.push(ev))
+      s._clearMessageState()
+      assert.equal(events.length, 1, 'sweep ran from within _clearMessageState')
+      assert.equal(events[0].toolUseId, 'toolu_orphan')
+      assert.equal(events[0].synthetic, true)
+      assert.equal(s._inFlightToolStarts.size, 0)
+    })
+  })
+})
+
+// #4509: BaseSession's three per-session inactivity timeouts must also clamp
+// to the shared MAX_SANE_DURATION_MS (24h) ceiling. Even when an operator
+// over-ceiling value somehow gets past session-manager (e.g. a provider
+// that hand-builds providerOpts), BaseSession is the final destination — it
+// arms the actual setTimeout against the value and a >24h timer would
+// silently make the inactivity-warning / hard-cap / stream-stall paths
+// effectively never fire.
+describe('BaseSession operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', () => {
+  const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+
+  // Each row: ctor key, internal slot the value lands in, BaseSession default
+  // it falls back to, display name in the warn log.
+  const TIMEOUT_SPECS = [
+    {
+      ctorKey: 'resultTimeoutMs',
+      internalField: '_resultTimeoutMs',
+      fallback: DEFAULT_RESULT_TIMEOUT_MS,
+      displayName: 'resultTimeoutMs',
+    },
+    {
+      ctorKey: 'hardTimeoutMs',
+      internalField: '_hardTimeoutMs',
+      fallback: DEFAULT_HARD_TIMEOUT_MS,
+      displayName: 'hardTimeoutMs',
+    },
+    {
+      ctorKey: 'streamStallTimeoutMs',
+      internalField: '_streamStallTimeoutMs',
+      fallback: DEFAULT_STREAM_STALL_TIMEOUT_MS,
+      displayName: 'streamStallTimeoutMs',
+    },
+  ]
+
+  let skillsDirLocal
+
+  beforeEach(() => {
+    skillsDirLocal = mkdtempSync(join(tmpdir(), 'chroxy-base-ceiling-'))
+  })
+
+  afterEach(() => {
+    if (skillsDirLocal) rmSync(skillsDirLocal, { recursive: true, force: true })
+    skillsDirLocal = null
+    mock.restoreAll()
+  })
+
+  for (const { ctorKey, internalField, fallback, displayName } of TIMEOUT_SPECS) {
+    it(`clamps ${ctorKey} above MAX_SANE_DURATION_MS back to the default and warns`, () => {
+      const warnings = []
+      mock.method(console, 'warn', (msg) => warnings.push(msg))
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: skillsDirLocal,
+        repoSkillsDir: null,
+        [ctorKey]: MAX_SANE_DURATION_MS + 1,
+      })
+      assert.equal(s[internalField], fallback,
+        `${internalField} must fall back to its BaseSession default when ${ctorKey} exceeds the 24h ceiling`)
+      const hit = warnings.find((w) => w.includes(displayName) && w.includes('MAX_SANE_DURATION_MS'))
+      assert.ok(hit, `expected a single warn log mentioning ${displayName} + MAX_SANE_DURATION_MS, got: ${warnings.join(' | ')}`)
+    })
+
+    it(`accepts the exact MAX_SANE_DURATION_MS boundary for ${ctorKey}`, () => {
+      const s = new BaseSession({
+        cwd: '/tmp',
+        skillsDir: skillsDirLocal,
+        repoSkillsDir: null,
+        [ctorKey]: MAX_SANE_DURATION_MS,
+      })
+      assert.equal(s[internalField], MAX_SANE_DURATION_MS,
+        `the boundary must be INCLUSIVE — clamping it would surprise operators who tuned the dial to exactly 24h`)
+    })
+  }
+})
+
+// #5367: the canonical opt picker that every session subclass now uses to
+// forward BaseSession opts via `super(buildBaseSessionOpts(opts, overrides))`.
+describe('buildBaseSessionOpts (#5367)', () => {
+  it('copies only BaseSession opts, omitting absent keys and subclass-local opts', () => {
+    const out = buildBaseSessionOpts({
+      cwd: '/tmp/x',
+      model: 'sonnet',
+      // subclass-local opts that must NOT be copied:
+      allowedTools: ['Bash'],
+      resumeSessionId: 'abc',
+      port: 9999,
+    })
+    assert.deepEqual(Object.keys(out).sort(), ['cwd', 'model'])
+    assert.equal(out.cwd, '/tmp/x')
+    assert.equal(out.model, 'sonnet')
+  })
+
+  it('preserves an explicit falsy value (backgroundShellHardQuiesceMs: 0) via `in`, not `??`', () => {
+    const out = buildBaseSessionOpts({ backgroundShellHardQuiesceMs: 0 })
+    assert.ok('backgroundShellHardQuiesceMs' in out, 'explicit 0 must be carried through')
+    assert.equal(out.backgroundShellHardQuiesceMs, 0)
+  })
+
+  it('omits keys that are absent entirely (no undefined leakage)', () => {
+    const out = buildBaseSessionOpts({ cwd: '/tmp/x' })
+    assert.equal('model' in out, false, 'absent keys must be omitted so BaseSession `|| default` fallbacks apply')
+  })
+
+  it('overrides win over picked values', () => {
+    const out = buildBaseSessionOpts({ provider: 'gemini', model: 'm1' }, { provider: 'codex' })
+    assert.equal(out.provider, 'codex')
+    assert.equal(out.model, 'm1')
+  })
+
+  it('every key it can emit is a real BaseSession opt (array is the source of truth)', () => {
+    // Build a full bag and confirm the picker never invents a key.
+    const full = Object.fromEntries(BASE_SESSION_OPT_KEYS.map((k) => [k, `s_${k}`]))
+    const out = buildBaseSessionOpts(full)
+    for (const k of Object.keys(out)) {
+      assert.ok(BASE_SESSION_OPT_KEYS.includes(k), `${k} is not in BASE_SESSION_OPT_KEYS`)
+    }
+    assert.equal(Object.keys(out).length, BASE_SESSION_OPT_KEYS.length)
+  })
+})
+
+// #5367: the "no opt dropped" proof. Instantiate every session subclass with
+// every BaseSession opt set to a distinct, coercion-surviving sentinel and
+// assert each landed on the resulting instance's BaseSession-owned field. This
+// is hand-list-INDEPENDENT: it derives the opt list from BASE_SESSION_OPT_KEYS,
+// so a future opt added to the array (and the ctor) is automatically covered.
+describe('subclass opt forwarding — no opt dropped (#5367)', () => {
+  let tmpDir
+  let trustStore
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'chroxy-opt-fwd-'))
+    trustStore = new SkillsTrustStore({ filePath: join(tmpDir, 'trust.json'), mode: 'warn' })
+  })
+  afterEach(() => {
+    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+  })
+
+  // Each entry: how to make a valid sentinel for the opt, the instance field
+  // BaseSession stores it on, and how to assert it landed. Values are chosen to
+  // SURVIVE BaseSession's coercion (valid permissionMode, in-range timeouts,
+  // real regex, object allowlist, etc.) so a forwarded value is observable.
+  function sentinelOpts() {
+    return {
+      cwd: join(tmpDir, 'work'),
+      model: 'sentinel-model',
+      permissionMode: 'plan',
+      skillsDir: join(tmpDir, 'skills'),
+      repoSkillsDir: join(tmpDir, 'repo-skills'),
+      maxSkillBytes: 4242,
+      maxTotalSkillBytes: 8484,
+      // An explicit truthy provider survives every subclass's
+      // `opts.provider || '<default>'` override, so it lands verbatim.
+      provider: 'sentinel-provider',
+      activeManualSkills: ['skill-a', 'skill-b'],
+      providerSkillAllowlist: { 'claude-sdk': ['x'] },
+      trustStore,
+      trustMismatchMode: 'block',
+      promptEvaluator: true,
+      promptEvaluatorSkipPattern: '^ack$',
+      chroxyContextHint: true,
+      sessionPreamble: 'sentinel preamble',
+      resultTimeoutMs: 11 * 60 * 1000,
+      hardTimeoutMs: 33 * 60 * 1000,
+      streamStallTimeoutMs: 7 * 60 * 1000,
+      backgroundShellHardQuiesceMs: 0, // explicit 0 — the falsy-preservation case
+    }
+  }
+
+  // (instance) => assertions. Each checks the BaseSession-owned field landed.
+  // permissionMode is special: jsonl-family subclasses default it to 'auto',
+  // but an explicit 'plan' survives the `|| 'auto'` override, so it lands.
+  const assertions = {
+    cwd: (s, o) => assert.equal(s.cwd, o.cwd),
+    model: (s, o) => assert.equal(s.model, o.model),
+    permissionMode: (s, o) => assert.equal(s.permissionMode, o.permissionMode),
+    skillsDir: (s, o) => assert.equal(s._skillsDir, o.skillsDir),
+    repoSkillsDir: (s, o) => assert.equal(s._repoSkillsDir, o.repoSkillsDir),
+    maxSkillBytes: (s, o) => assert.equal(s._maxSkillBytes, o.maxSkillBytes),
+    maxTotalSkillBytes: (s, o) => assert.equal(s._maxTotalSkillBytes, o.maxTotalSkillBytes),
+    provider: (s, o) => assert.equal(s._provider, o.provider),
+    activeManualSkills: (s) => {
+      assert.ok(s._activeManualSkills.has('skill-a'))
+      assert.ok(s._activeManualSkills.has('skill-b'))
+    },
+    providerSkillAllowlist: (s, o) => assert.deepEqual(s._providerSkillAllowlist, o.providerSkillAllowlist),
+    trustStore: (s) => assert.equal(s._trustStore, trustStore),
+    // trustMismatchMode only matters when trustStore is absent; with an
+    // explicit trustStore the store wins (so no separate field to assert).
+    trustMismatchMode: () => {},
+    promptEvaluator: (s) => assert.equal(s.promptEvaluator, true),
+    promptEvaluatorSkipPattern: (s, o) => assert.equal(s.promptEvaluatorSkipPattern, o.promptEvaluatorSkipPattern),
+    chroxyContextHint: (s) => assert.equal(s.chroxyContextHint, true),
+    sessionPreamble: (s, o) => assert.equal(s.sessionPreamble, o.sessionPreamble),
+    resultTimeoutMs: (s, o) => assert.equal(s._resultTimeoutMs, o.resultTimeoutMs),
+    hardTimeoutMs: (s, o) => assert.equal(s._hardTimeoutMs, o.hardTimeoutMs),
+    streamStallTimeoutMs: (s, o) => assert.equal(s._streamStallTimeoutMs, o.streamStallTimeoutMs),
+    backgroundShellHardQuiesceMs: (s) => assert.equal(s._backgroundShellHardQuiesceMs, 0),
+  }
+
+  // Guard: the assertion table must cover exactly the canonical opt set, so a
+  // new BaseSession opt forces this test to be extended (it can't silently
+  // pass with a stale list).
+  it('assertion table covers exactly BASE_SESSION_OPT_KEYS', () => {
+    assert.deepEqual(
+      Object.keys(assertions).sort(),
+      [...BASE_SESSION_OPT_KEYS].sort(),
+      'add the new opt to BOTH the sentinel bag and the assertions table',
+    )
+  })
+
+  const subclasses = [
+    ['CliSession', '../src/cli-session.js', 'CliSession'],
+    ['SdkSession', '../src/sdk-session.js', 'SdkSession'],
+    ['ClaudeTuiSession', '../src/claude-tui-session.js', 'ClaudeTuiSession'],
+    ['ClaudeByokSession', '../src/byok-session.js', 'ClaudeByokSession'],
+    ['JsonlSubprocessSession', '../src/jsonl-subprocess-session.js', 'JsonlSubprocessSession'],
+    ['CodexSession', '../src/codex-session.js', 'CodexSession'],
+    ['GeminiSession', '../src/gemini-session.js', 'GeminiSession'],
+  ]
+
+  for (const [label, modPath, exportName] of subclasses) {
+    it(`${label} forwards every BaseSession opt to super()`, async () => {
+      const mod = await import(modPath)
+      const Klass = mod[exportName]
+      const opts = sentinelOpts()
+      const inst = new Klass(opts)
+      for (const key of BASE_SESSION_OPT_KEYS) {
+        assertions[key](inst, opts)
+      }
+      // Clean teardown so timers/processes don't leak between cases.
+      if (typeof inst.destroy === 'function') {
+        try { await inst.destroy() } catch {}
+      }
+    })
+  }
 })

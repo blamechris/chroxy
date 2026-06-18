@@ -1,7 +1,106 @@
 import { EventEmitter } from 'node:events'
+import { WsClientManager } from '../src/ws-client-manager.js'
+import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 
 // Re-export GIT from the source module so test files can import it from here
 export { GIT } from '../src/git.js'
+
+// Re-export the ctx-shape assert so handler tests can guard their mocks.
+export { assertCtxShape } from '../src/ws-handler-context.js'
+
+// Reverse index: flat field name -> namespace it belongs to. Derived from the
+// single source of truth (CTX_NAMESPACES) so the test mock builder can't drift.
+const FIELD_TO_NS = {}
+for (const ns of CTX_NAMESPACE_NAMES) {
+  for (const key of CTX_NAMESPACES[ns]) FIELD_TO_NS[key] = ns
+}
+
+/**
+ * Build a namespaced handler ctx (#5558) from a FLAT bag of fields.
+ *
+ * Handler tests historically built a flat `{ send, broadcast, sessionManager,
+ * … }` ctx. The production ctx is now role-scoped into `ctx.transport` /
+ * `ctx.sessions` / `ctx.permissions` / `ctx.services` / `ctx.runtime`. Rather
+ * than hand-bucket every field in every test, wrap the existing flat literal:
+ *
+ *   const ctx = nsCtx({ send, broadcast, sessionManager, fileOps, … })
+ *
+ * Each known production field is routed into its namespace. Unknown keys —
+ * including the optional DI seams handlers read with `ctx?.X ?? defaultX`
+ * (`evaluateDraft`, `summarizeSession`, `scanConversations`, `resolveRepoSet`,
+ * `surveyRunners`, `realpath`, `_pendingEvaluatorAwaits`, `correlationId`, …)
+ * and the legacy `clientManager` handle from makeSessionIndexCtx — are left at
+ * the top level, exactly where the handlers and tests expect them.
+ *
+ * A `transport` / `sessions` / … key in the flat bag whose VALUE is already an
+ * object is treated as a pre-built namespace and MERGED (so callers can spread
+ * `makeSessionIndexCtx()`'s namespaced output straight in).
+ *
+ * Every namespace bucket is always created (even if empty) so a handler that
+ * reads `ctx.transport.send` never trips over an undefined bucket. Pass
+ * `{ assert: true }` (2nd arg) to additionally run `assertCtxShape(ctx, { deep })`.
+ *
+ * @param {Record<string, any>} [flat={}] - Flat field bag (may also carry pre-built namespace objects).
+ * @param {{assert?: boolean, deep?: boolean}} [options]
+ * @returns {object} a namespaced ctx.
+ */
+export function nsCtx(flat = {}, { assert = false, deep = false } = {}) {
+  const ctx = {}
+  for (const ns of CTX_NAMESPACE_NAMES) ctx[ns] = {}
+  for (const [key, value] of Object.entries(flat)) {
+    // A key that names a namespace AND is NOT itself a field (i.e. not the
+    // `permissions` collision — there is both a `permissions` namespace and a
+    // `permissions` field) and whose value is an object is a pre-built
+    // namespace bag, e.g. makeSessionIndexCtx()'s `transport`. Merge it.
+    if (CTX_NAMESPACE_NAMES.includes(key) && !(key in FIELD_TO_NS) && value && typeof value === 'object') {
+      Object.assign(ctx[key], value)
+      continue
+    }
+    const ns = FIELD_TO_NS[key]
+    if (ns) ctx[ns][key] = value
+    else ctx[key] = value // test-injection seam / unknown — keep flat
+  }
+  if (assert) assertCtxShape(ctx, { deep })
+  return ctx
+}
+
+/**
+ * #5563/#5558: build the index-maintaining transport ctx fields backed by a
+ * real WsClientManager so handler tests exercise the production
+ * sessionId→clients reverse-index path. Returns the fields already bucketed
+ * under a `transport` namespace plus a top-level `clientManager` handle:
+ *
+ *   { clientManager, transport: { clients, subscribeClient, unsubscribeClient, setActiveSession } }
+ *
+ * Spread the returned object into a flat bag passed to `nsCtx` (which merges a
+ * pre-built `transport` bag) — `clients` IS the manager's Map, so clients
+ * inserted directly into it are visible to the index and to
+ * `verifyIndexIntegrity()`. `clientManager` stays top-level because tests call
+ * its methods directly (it is not a handler-ctx field).
+ *
+ * @returns {{clientManager: WsClientManager, transport: {clients: Map, subscribeClient: Function, unsubscribeClient: Function, setActiveSession: Function}}}
+ */
+export function makeSessionIndexCtx() {
+  const clientManager = new WsClientManager()
+  return {
+    clientManager,
+    transport: {
+      clients: clientManager.clients,
+      subscribeClient: (client, sid) => clientManager.subscribe(client, sid),
+      unsubscribeClient: (client, sid) => clientManager.unsubscribe(client, sid),
+      setActiveSession: (client, sid) => clientManager.setActiveSession(client, sid),
+      // #5563: primary-ownership surface backed by the real manager so handler
+      // tests exercise the production claim/observe gate. These do NOT broadcast
+      // (the full ws-server announces session_role/primary_changed) — they only
+      // mutate the manager's primary map so getPrimary/isPrimary read correctly.
+      updatePrimary: (sid, cid) => clientManager.claimPrimary(sid, cid, { force: true }),
+      claimPrimary: (sid, cid, opts) => clientManager.claimPrimary(sid, cid, opts),
+      getPrimary: (sid) => clientManager.getPrimary(sid),
+      isPrimary: (sid, cid) => clientManager.isPrimary(sid, cid),
+      clearPrimary: (sid) => clientManager.clearPrimary(sid),
+    },
+  }
+}
 
 /**
  * Poll until a predicate returns a truthy value, then return it.
@@ -162,6 +261,20 @@ export function createMockSessionManager(sessions = [], overrides = {}) {
     return list
   }
   manager.getHistory = () => []
+  // #5555.3 — seq helpers used by replayHistory's cursor logic. Default to the
+  // _seq stamped on the (overridable) getHistory entries so cursor-replay tests
+  // can drive them by supplying entries with `_seq`; tests that don't care get
+  // the no-history defaults (null oldest, 0 latest).
+  manager.getOldestHistorySeq = () => {
+    const h = manager.getHistory()
+    if (!Array.isArray(h) || h.length === 0) return null
+    return typeof h[0]._seq === 'number' ? h[0]._seq : null
+  }
+  manager.getLatestHistorySeq = () => {
+    const h = manager.getHistory()
+    if (!Array.isArray(h) || h.length === 0) return 0
+    return typeof h[h.length - 1]._seq === 'number' ? h[h.length - 1]._seq : 0
+  }
   manager.recordUserInput = () => {}
   manager.touchActivity = () => {}
   manager.getFullHistoryAsync = async () => []
@@ -214,9 +327,31 @@ export function createMockSession(overrides = {}) {
   // BaseSession.setPromptEvaluatorSkipPattern semantics: empty/null clears,
   // valid regex source flips state, malformed source rejected.
   session.promptEvaluatorSkipPattern = null
+  // #3805: per-session Chroxy context hint, default off. Setter mirrors
+  // BaseSession.setChroxyContextHint: strict-boolean validation, returns
+  // true only when state actually changes.
+  session.chroxyContextHint = false
+  // #4660: per-session preamble, default empty string. Setter mirrors
+  // BaseSession.setSessionPreamble: string validation, trim+cap, returns
+  // true only when the trimmed value differs from the stored value.
+  session.sessionPreamble = ''
   session.sendMessage = createSpy()
   session.interrupt = createSpy()
-  session.setModel = createSpy()
+  // #5696: mirror the real BaseSession.setModel contract — returns true only
+  // when the change actually lands (false when busy mid-turn or a same-model
+  // no-op). The handler now reads this return to decide whether to broadcast
+  // model_changed, so the mock must report it (matches setPermissionMode etc).
+  // NOTE: this deliberately does a RAW id compare and skips the production
+  // resolveModelId() alias collapse (so e.g. 'sonnet' vs 'claude-sonnet-4-6'
+  // reads as a change here). That keeps alias-sending handler tests on the
+  // broadcast path without coupling the mock to the live model registry;
+  // tests that must exercise a no-op set _isBusy or reuse the exact model id.
+  session.setModel = createSpy((model) => {
+    if (session._isBusy) return false
+    if (model === session.model) return false
+    session.model = model
+    return true
+  })
   // #3729: handler now reads session.permissionMode AFTER setPermissionMode
   // returns to detect silently-rejected mid-turn changes. Mock the real
   // contract: state mutates on a successful set so handler tests don't
@@ -230,6 +365,19 @@ export function createMockSession(overrides = {}) {
   session.setPromptEvaluator = createSpy((value) => {
     if (typeof value !== 'boolean' || value === session.promptEvaluator) return false
     session.promptEvaluator = value
+    return true
+  })
+  session.setChroxyContextHint = createSpy((value) => {
+    if (typeof value !== 'boolean' || value === session.chroxyContextHint) return false
+    session.chroxyContextHint = value
+    return true
+  })
+  session.setSessionPreamble = createSpy((value) => {
+    if (typeof value !== 'string') return false
+    const trimmed = value.trim()
+    const next = trimmed.length > 4000 ? trimmed.slice(0, 4000) : trimmed
+    if (next === session.sessionPreamble) return false
+    session.sessionPreamble = next
     return true
   })
   session.setPromptEvaluatorSkipPattern = createSpy((value) => {
@@ -337,8 +485,10 @@ export function armResultTimeoutForTest(session, messageId, hasStreamStarted = f
   const reset = () => {
     if (session._resultTimeout) clearTimeout(session._resultTimeout)
     if (session._hardTimeout) clearTimeout(session._hardTimeout)
+    if (session._streamStallTimeout) clearTimeout(session._streamStallTimeout)
     session._resultTimeout = null
     session._hardTimeout = null
+    session._streamStallTimeout = null
     if (session._resultTimeoutPaused) return
     session._resultTimeout = setTimeout(() => {
       session._resultTimeout = null
@@ -348,6 +498,15 @@ export function armResultTimeoutForTest(session, messageId, hasStreamStarted = f
       session._hardTimeout = null
       session._handleHardTimeout(messageId, hasStreamStarted)
     }, session._hardTimeoutMs)
+    // #4467: stream-stall recovery — only arm when the operator has not
+    // disabled the active-recovery path (value > 0). Mirrors the
+    // production reset closure in `sdk-session.js`.
+    if (session._streamStallTimeoutMs > 0 && typeof session._handleStreamStall === 'function') {
+      session._streamStallTimeout = setTimeout(() => {
+        session._streamStallTimeout = null
+        session._handleStreamStall(messageId, hasStreamStarted)
+      }, session._streamStallTimeoutMs)
+    }
   }
   session._resetResultTimeout = reset
   reset()

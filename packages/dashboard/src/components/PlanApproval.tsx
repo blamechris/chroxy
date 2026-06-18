@@ -17,7 +17,17 @@ export function PlanApproval({ planHtml, onApprove, onFeedback }: PlanApprovalPr
   if (!planHtml) return null
 
   return (
-    <div className="plan-approval" data-testid="plan-approval">
+    // #5731 (a11y): a plan appearing is a blocking decision point; the bare div
+    // announced nothing to a screen-reader user. Mark it as a labelled live
+    // region so its arrival is spoken (polite — a plan isn't as time-critical as
+    // the auto-denying permission prompt, which is assertive).
+    <div
+      className="plan-approval"
+      data-testid="plan-approval"
+      role="region"
+      aria-label="Plan ready for approval"
+      aria-live="polite"
+    >
       <div
         className="plan-content"
         data-testid="plan-content"

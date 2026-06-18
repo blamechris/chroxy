@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-set-summon-hotkey"
+description = "Enables the set_summon_hotkey command without any pre-configured scope."
+commands.allow = ["set_summon_hotkey"]
+
+[[permission]]
+identifier = "deny-set-summon-hotkey"
+description = "Denies the set_summon_hotkey command without any pre-configured scope."
+commands.deny = ["set_summon_hotkey"]

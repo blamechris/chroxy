@@ -29,7 +29,18 @@ export type ToastAction = ServerErrorAction
 export interface ToastItem {
   id: string
   message: string
-  level?: 'error' | 'info'
+  /**
+   * #5039: optional secondary line rendered under `message` as a small
+   * sub-text. Used to surface the PR #5037 error-path partial-cost line
+   * ("This turn cost $0.087 (1.2K in · 3.4K out)") without restyling
+   * the main toast layout — when unset (the common path) the toast
+   * keeps its single-line look from before.
+   */
+  subMessage?: string
+  // #4148: 'warning' is a non-destructive yellow toast — used for
+  // MAX_TOOL_ROUNDS_REACHED and other fatal: false server signals so
+  // the user doesn't see a red error for a recoverable condition.
+  level?: 'error' | 'info' | 'warning'
   /** #3587: optional inline recovery action. When set, the toast
    * renders an action button between the message and the close button. */
   action?: ToastAction
@@ -198,9 +209,16 @@ export function Toast({ items, onDismiss }: ToastProps) {
       {items.map(item => (
         <div
           key={item.id}
-          className={`toast ${item.level === 'info' ? 'toast-info' : 'toast-error'}`}
-          role={item.level === 'info' ? 'status' : 'alert'}
-          aria-live={item.level === 'info' ? 'polite' : 'assertive'}
+          className={`toast ${
+            item.level === 'info' ? 'toast-info'
+              : item.level === 'warning' ? 'toast-warning'
+              : 'toast-error'
+          }`}
+          // #4148: warnings are informational (not destructive) so they
+          // get role=status / aria-live=polite like info, not the
+          // assertive alert treatment errors use.
+          role={item.level === 'info' || item.level === 'warning' ? 'status' : 'alert'}
+          aria-live={item.level === 'info' || item.level === 'warning' ? 'polite' : 'assertive'}
           data-testid={`toast-${item.id}`}
           // #3604: pause auto-dismiss on hover and on keyboard focus
           // (focus events bubble from descendant buttons to this
@@ -232,7 +250,20 @@ export function Toast({ items, onDismiss }: ToastProps) {
             resumeTimer(item.id, 'focus')
           }}
         >
-          <span className="toast-msg">{item.message}</span>
+          <span className="toast-msg">
+            {item.message}
+            {item.subMessage ? (
+              // #5039: error-path partial-cost sub-line. Rendered as a
+              // small block under the main message; testID lets Maestro
+              // assert presence on mobile-mirror parity tests too.
+              <span
+                className="toast-submsg"
+                data-testid={`toast-partial-cost-${item.id}`}
+              >
+                {item.subMessage}
+              </span>
+            ) : null}
+          </span>
           {item.action ? (
             <button
               className="toast-action"

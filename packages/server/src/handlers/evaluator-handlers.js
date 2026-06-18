@@ -27,7 +27,7 @@ async function handleEvaluateDraft(ws, client, msg, ctx) {
   const draft = typeof msg?.draft === 'string' ? msg.draft : ''
 
   if (!draft.trim()) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'evaluate_draft_result',
       requestId,
       error: { code: 'INVALID_DRAFT', message: 'evaluate_draft requires a non-empty draft string' },
@@ -36,7 +36,7 @@ async function handleEvaluateDraft(ws, client, msg, ctx) {
   }
 
   if (Buffer.byteLength(draft, 'utf8') > MAX_DRAFT_BYTES) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'evaluate_draft_result',
       requestId,
       error: {
@@ -71,7 +71,7 @@ async function handleEvaluateDraft(ws, client, msg, ctx) {
     if (typeof err.status === 'number') {
       errEnvelope.status = err.status
     }
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'evaluate_draft_result',
       requestId,
       error: errEnvelope,
@@ -79,7 +79,7 @@ async function handleEvaluateDraft(ws, client, msg, ctx) {
     return
   }
 
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'evaluate_draft_result',
     requestId,
     verdict: result.verdict,

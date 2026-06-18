@@ -13,19 +13,22 @@ Essential development notes for working with Claude on Chroxy.
 ```
 chroxy/
 ├── packages/
-│   ├── server/      # Node.js daemon + CLI + web dashboard (ES modules, no TypeScript)
-│   ├── app/         # React Native mobile app (TypeScript, Expo 54)
-│   ├── desktop/     # Tauri tray app (Rust + web dashboard)
-│   ├── protocol/    # Shared protocol types and Zod schemas (@chroxy/protocol)
-│   └── store-core/  # Shared store logic and crypto (@chroxy/store-core)
+│   ├── server/       # Node.js daemon + CLI (ES modules, no TypeScript)
+│   ├── app/          # React Native mobile app (TypeScript, Expo 54)
+│   ├── desktop/      # Tauri tray app (Rust, wraps the dashboard)
+│   ├── dashboard/    # Web dashboard (React + Vite, served by the server)
+│   ├── protocol/     # Shared protocol types and Zod schemas (@chroxy/protocol)
+│   ├── store-core/   # Shared store logic and crypto (@chroxy/store-core)
+│   └── claude-hooks/ # Hook emitters for external Claude Code sessions (@chroxy/claude-hooks)
 ├── docs/            # Setup guides, architecture
 └── scripts/         # Install helpers
 ```
 
-**Current Status (v0.6.0):**
-- Server works: CLI headless mode, WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, session management, model switching, plan mode detection, background agent tracking, web dashboard, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, permission rule engine, extensible provider/handler system
-- Desktop works: Tauri tray app, web dashboard with syntax highlighting, xterm.js terminal, notifications, session tabs, voice-to-text (macOS), console page, environment management panel
+**Current Status (v0.9.46):**
+- Server works: CLI headless mode, multi-provider registry (Claude SDK/CLI/TUI, BYOK, Gemini, Codex, DeepSeek, Ollama, config-driven Anthropic-compatible endpoints), WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications + Discord status-embed sink, external-session event ingest (`POST /api/events` + ingest secret), session management, model switching, plan mode detection, background agent tracking, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, K8s/Rancher backends, permission rule engine, encrypted credentials at rest (OS keychain), extensible provider/handler system
+- Desktop works: Tauri tray app, multi-host LAN client (server picker, mDNS discovery, shared-session join), web dashboard with syntax highlighting, xterm.js terminal, Control Room, notifications, session tabs, voice-to-text (macOS), console page, environment management panel, startup-failure surfacing with retry
 - App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input, session rules UI, worktree toggle
+- Claude-hooks works: `chroxy-hooks install` registers six stateless emitters in Claude Code settings so plain (non-chroxy) sessions feed the daemon's notification pipeline — see `docs/guides/discord-notifications.md`
 - **Dev build required** — `expo-speech-recognition` native module means Expo Go no longer works. Use `npx expo run:ios` or `npx expo run:android`.
 
 ## Critical Dev Notes
@@ -62,19 +65,51 @@ npx chroxy tunnel setup
 **When user says "Resume" or "Let's start":**
 1. `cat CLAUDE.md` - Read this file
 2. `git status && git log --oneline -5` - Check current state
-3. Review any open PRs: `gh pr list`
-4. Check for skill template updates: `~/Projects/skill-templates/sync.sh chroxy`
+3. Review open PRs, **separated by author** so external contributions don't get lost in your own queue:
+   - Yours: `gh pr list --state open --author @me`
+   - **External:** `gh pr list --state open --search "-author:@me"` — flag any results for review attention before starting new marathons (an open external PR may already cover an issue you'd otherwise queue)
+4. Check for skill drift: `/skill outdated` (then `/skill update [name]` to refresh)
 
-### Skill Templates
+### Skills (pull-based registry)
 
-Reusable skill templates (check-pr, agent-review, etc.) are maintained in the private repo `blamechris/skill-templates`. When the sync script reports drift, review the generic template and customization notes, then update local skills as needed.
+Skills live in the `blamechris/skill-templates` **registry** and install **on demand** via the
+`/skill` client — think `npm`/`brew` for `.claude/commands/*.md`. There is no push-deploy and no
+`sync.sh`; the old push/`customizations/` workflow is retired.
 
-```
-~/Projects/skill-templates/
-├── generic/           # Gold standard templates
-├── customizations/    # Per-repo adaptation notes (chroxy.md)
-└── sync.sh           # Drift detection
-```
+- **`/skill add <name>`** — resolve from the registry → fetch `generic/<name>.md` → fill its
+  `{{CUSTOMIZE: ...}}` markers from this repo's `CLAUDE.md` + `.claude/skill-profile.md` + code →
+  write a version-stamped `.claude/commands/<name>.md` → **compile to native targets** → record
+  in `.claude/skills.lock`.
+- **`/skill list` / `/skill outdated` / `/skill update [name]` / `/skill remove <name>`** — manage installed skills.
+- **Install-on-miss is a rule:** if `/X` is requested but unavailable, distinguish two
+  cases by the **neutral source** `.claude/commands/X.md`: if it's missing, the skill isn't
+  installed — run `/skill add X` (fetch + customize + compile). If the source exists but the
+  native artifact (`.claude/skills/X/SKILL.md`) is missing, it's just not compiled — run
+  `node scripts/compile-skill-targets.mjs --name X` (no registry fetch needed). Then invoke.
+
+**Model-agnostic compile (multi-target).** `.claude/commands/<name>.md` is the provider-NEUTRAL
+source; `scripts/compile-skill-targets.mjs` compiles each skill into every coding agent's NATIVE
+custom-command format, so the same skill is first-party under whichever model you drive:
+- **claude** → `.claude/skills/<name>/SKILL.md` (the v2.1.x "skills" path; the legacy
+  `.claude/commands/` slash-command discovery is broken — GH anthropics/claude-code#31846 — so
+  Claude loads from `.claude/skills/`). *Version-controlled.*
+- **gemini** → `.gemini/commands/<name>.toml` (TOML; `$ARGUMENTS`→`{{args}}`). *Version-controlled.*
+- **codex** *(opt-in)* → `~/.codex/prompts/<name>.md` (invoked `/prompts:<name>`; user-global,
+  not version-controlled, deprecated upstream).
+
+The active target list is the `targets:` line in `.claude/skill-profile.md` (this repo:
+`claude, gemini` — both in-repo/version-controlled; codex is per-machine opt-in via
+`--targets codex`, kept out of the committed default so a clone never writes to an unaware
+machine's `~/.codex`). With no `targets:` line the compiler falls back to `claude` only and
+`/skill` prompts you. After editing a skill's generic source by hand, recompile:
+`node scripts/compile-skill-targets.mjs --name <name>` (`--dry-run` to preview).
+
+This repo carries `.claude/skill-profile.md` (the customization profile + `targets:`) and
+`.claude/skills.lock` (what's installed, at which template hash). Maintainers edit templates in
+the registry's `generic/` and run its `scripts/build-index.sh`; consumers pick changes up on the
+next `/skill update`. **Registry follow-up:** the multi-target compile step should also land in the
+registry's `generic/skill.md` so other repos inherit it (this repo's `/skill` is ahead of the
+template until then).
 
 ## Git Workflow
 
@@ -137,10 +172,12 @@ type(scope): Short summary in present tense
 1. Create feature branch from `main`
 2. Develop and test
 3. Push and create PR
-4. Get user confirmation before merging
+4. Get user confirmation before merging (interactive sessions) or pass the Unattended Merge Gate (autonomous sessions — see below)
 5. Squash merge to main
 
-**NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
+**Unattended Merge Authority:** During autonomous/unattended sessions, a session-created PR may be self-merged ONLY after the full review pipeline (`/full-review`: agent review + thread triage) passes with a clean verdict, ALL CI checks are green on the final commit, and ALL review threads are resolved. NEVER use `gh pr merge --auto` or GitHub auto-merge — verify the gates, then merge synchronously and confirm the PR reports `MERGED`. No `--admin`, no protection overrides. Every self-merged PR MUST appear as its own entry in the end-of-session report (PR, issue, review verdict, checks, merge SHA). If any gate fails, flag the PR with the failed gate named and leave it for the user.
+
+**Outside autonomous sessions, NEVER auto-merge.** Always present a summary and wait for explicit user confirmation.
 
 **Merge Gate — MANDATORY triage when merge is blocked:**
 
@@ -172,6 +209,29 @@ When `gh pr merge` fails with "not mergeable" or "base branch policy prohibits t
 - Zustand for state management
 - React Navigation for routing
 
+## Testing Conventions
+
+### Server tests must not touch real user state (#4633)
+
+Every test that constructs a `SessionManager` **must** pass `stateFilePath` pointing at a temp file. Otherwise the manager defaults to `~/.chroxy/session-state.json` and the test silently clobbers your live state (this happened on 2026-05-30 — see `feedback_test_state_contamination.md`).
+
+Two layers of defence are wired up:
+
+1. **Sandbox guard** (`packages/server/tests/_setup.mjs`, loaded via `node --import`) — monkey-patches `fs.writeFileSync`/`promises.writeFile`/`renameSync`/`mkdirSync`/`createWriteStream`/`openSync(w*)` to throw `CHROXY_TEST_SANDBOX` if any test writes to the real `~/.chroxy/` or `~/.claude/` tree. The error includes the call site, so the next bare `new SessionManager()` fails loudly at the offending test.
+2. **CI lint** (`packages/server/scripts/lint-tests-state-file-path.sh`) — fails the build if any `new SessionManager(...)` in `tests/` is missing `stateFilePath`. Run locally with `cd packages/server && ./scripts/lint-tests-state-file-path.sh`.
+
+If you need to write to the real home for a legitimate reason (no current test does), set `process.env.CHROXY_TEST_ALLOW_REAL_HOME_WRITES = '1'` scoped to the test and restore it after. The sandbox guard MUST stay enabled in `package.json`.
+
+### Provider session constructors must forward every BaseSession opt (#4797 / #5367)
+
+Every class that extends `BaseSession` (or `JsonlSubprocessSession`, the middle layer above the subprocess providers) **must** forward every opt accepted by `BaseSession`'s constructor. Dropping one silently disables it on its way down — the "middle-layer trap" that has bitten three times (#3224, #3231, #4790) and is documented in project memory as `feedback_jsonl_subprocess_middle_layer.md`.
+
+Since #5367, the canonical way to forward is the **picker**, not a hand-maintained parallel destructure: each subclass takes a single `constructor(opts = {})` and calls `super(buildBaseSessionOpts(opts, { ...overrides }))`, where `buildBaseSessionOpts` (in `base-session.js`) copies exactly the keys in the exported `BASE_SESSION_OPT_KEYS` array. Subclass-local opts are read off `opts` directly; per-subclass defaults (e.g. `provider`, `model`) go in the `overrides` bag (which wins). The single source of truth is `BASE_SESSION_OPT_KEYS` + the `BaseSession` ctor destructure — the lint asserts they stay equal.
+
+The CI lint (`packages/server/scripts/lint-session-opt-forwarding.sh`) now: (1) asserts `BASE_SESSION_OPT_KEYS` equals the `BaseSession` ctor destructure (drift → fail), and (2) requires every subclass to forward via `super(buildBaseSessionOpts(...))` (or a rest-spread, or the legacy explicit `super({ ... })` which is still checked per-key) — a hand-rolled `super({ a, b })` that drops keys, or a `super(someOtherFn(opts))`, fails. Run locally with `cd packages/server && ./scripts/lint-session-opt-forwarding.sh`.
+
+**When adding a new BaseSession opt:** add it to the `BaseSession` constructor destructure AND to `BASE_SESSION_OPT_KEYS` (same PR) — every picker subclass then inherits it for free. If an opt deliberately should not propagate to a particular subclass (rare), add `// lint-ignore-opt-forwarding: <key>` immediately above the class declaration and explain why.
+
 ## Architecture
 
 Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / desktop dashboard:
@@ -182,6 +242,11 @@ Server streams through `ws-server.js` → Cloudflare tunnel → mobile app / des
 - **App:** ConnectScreen → SessionScreen (ChatView + TerminalView), Zustand store (`connection.ts`)
 
 For component tables, WS protocol messages, data flow diagrams, and file listings: see `docs/architecture/reference.md`
+
+### Security model
+
+- [`docs/security/bearer-token-authority.md`](docs/security/bearer-token-authority.md) — token classes (primary / pairing-bound / hook secret), what each one grants, and the checklist for adding new endpoints. Read this before touching `ws-auth.js`, `ws-permissions.js`, `pairing.js`, or any new HTTP route that touches session state.
+- [`docs/security/encryption-threat-model.md`](docs/security/encryption-threat-model.md) — transport-layer (key exchange + message encryption) threat model.
 
 ## Dev Commands
 
@@ -243,8 +308,15 @@ curl -Ls "https://get.maestro.mobile.dev" | bash
 # Boot a simulator
 xcrun simctl boot <device-id>   # e.g. xcrun simctl list devices available
 
+# Build + install the chroxy dev client once (flows target com.blamechris.chroxy;
+# Expo Go can no longer load the app — native modules)
+cd packages/app && npx expo run:ios
+
 # Start Metro dev server (from packages/app/)
 npx expo start
+
+# Session/chat flows need the mock server on port 9876
+bash packages/app/.maestro/scripts/start-mock-server.sh
 ```
 
 ### Running Flows
@@ -272,22 +344,57 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 | Flow | What it verifies |
 |------|------------------|
 | `connect-screen.yaml` | ConnectScreen elements: title, QR button, LAN scan, manual entry, port |
-| `manual-connect.yaml` | Manual entry form expansion, URL input, Connect button, SessionScreen transition |
-| `lan-scan.yaml` | LAN scan trigger, scanning state with spinner |
-| `run-all.yaml` | Runs all flows sequentially |
+| `manual-connect.yaml` | Manual entry form, URL input, Connect → optimistic SessionScreen + reconnect banner on unreachable server, header Disconnect back to ConnectScreen |
+| `lan-scan.yaml` | LAN scan trigger, in-progress or results state (scan can finish near-instantly) |
+| `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, entry expands, structured TodoList renders with testIDs) |
+| `run-all.yaml` | Runs all 20 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, …) |
+
+### Fixture Seeding for Structured Renderers
+
+Tests for chat message renderers (TodoList, future MCP tools, `tool_input_delta`, etc.) seed fixtures via **mock-server trigger phrases** rather than an in-app debug menu. The pattern:
+
+1. The Maestro flow types a trigger phrase (e.g. `show-todos`) into the chat input.
+2. `mock-server.mjs` detects the phrase in its `case 'input'` handler and emits the corresponding `tool_start` + `tool_result` pair on the WebSocket.
+3. The app processes these through `store-core/handlers/{handleToolStart,handleToolResult}` — the production wire path — and lights up the renderer.
+4. The flow taps the bubble to expand and asserts on `testID` props (`todo-list-header`, `todo-list-item-<id>`, etc.).
+
+Adding a new renderer to the suite:
+
+- Add a `text.includes('<phrase>')` branch alongside the `show-todos` block in `mock-server.mjs` that emits the right `tool_start`/`tool_result` for the renderer.
+- Add `testID` props to the renderer's key elements if not already present.
+- Add `<renderer>.yaml` using `setup/ensure-session-screen.yaml`, the input + send sequence, an `extendedWaitUntil` for the bubble header, tap-to-expand, and `assertVisible: id:` checks.
+- Add the new flow to `run-all.yaml`.
+
+This keeps the app dependency-free (no debug menu, no URL scheme handler) and tests the same path production tool messages take.
 
 ### Gotchas
 
 - **Always use `run-all.yaml`** for multiple flows — passing multiple `.yaml` files runs them in parallel (breaks on one simulator)
-- **Expo dev menu** appears on every `openLink` call — the setup flow dismisses it automatically
+- **Dev-client menu + onboarding** can appear on launch — flows dismiss them with `optional: true` taps (the dev menu's "Continue" sheet / a top-of-screen tap, then onboarding "Skip"); expect these as WARNED/SKIPPED steps in green runs
+- **Flow `name:` must not contain "/"** — Maestro derives report filenames from it; a slash crashes standalone runs with FileNotFoundException
 - **`wait` is not a valid command** — use `waitForAnimationToEnd` or `extendedWaitUntil`
-- **Emoji text matching** requires regex: `text: ".*Scan QR Code.*"` (not literal match)
+- **Emoji/icon text matching** is unreliable — prefer `testID` anchors; an `accessibilityLabel` overrides the visible text in Maestro's matcher, and accessible containers flatten children so exact text matches need `.*wildcards.*`
 - **Screenshots save to CWD** — always clean up after verification
-- **Device compatibility** — tested on iPhone 15 Pro and iPhone SE 3 (iOS 17+), portrait only; iPad and Android are untested (tap coordinates may differ)
+- **Device compatibility** — tested on iPhone 16 Pro (iOS 18.6), portrait only; iPad and Android are untested (tap coordinates may differ)
 
 ## Repo Memory MCP
 
-The `repo-memory` MCP is available. Prefer `get_file_summary` over `Read` when exploring code you won't edit — it returns cached summaries and saves tokens. Also available: `get_project_map`, `get_related_files`, `search_by_purpose`. Use `Read` when you need exact lines or plan to edit. When launching subagents, tell them repo-memory tools are available.
+This repo has the `repo-memory` MCP server configured, with ~1,500 files pre-indexed (AST summaries) and a `post-merge` hook that keeps the cache warm. Use it to avoid re-reading files and save tokens — it is heavily underused (the cache is warm but agents rarely call it).
+
+### Exploration protocol — try repo-memory before Read/grep
+
+- **Before you `Read` a file, call `get_file_summary`** — it returns exports, imports, purpose, and line count for a fraction of a full Read (a summary runs ~150–400 tokens; a full Read of a large file is several thousand). Use `batch_file_summaries` for several related files at once (preferred over N× `get_file_summary`).
+- **Before you grep for a concept** (auth, validation, tunnel, pairing…), call `search_by_purpose`.
+- Use `get_related_files` to find what else to look at, and `get_dependency_graph` to trace imports/dependents (useful for review-impact checks).
+- `get_project_map` for structure/entry points at the start of a task; `get_changed_files` to see what moved since the last session.
+
+### When to Read the full file anyway
+
+Read the full file (not just the summary) when you need exact implementation details, control flow, or to write code that matches the file's style — or when a summary returns `suggestFullRead: true` (low-quality summary, read instead).
+
+### Subagents
+
+Spawned subagents get a fresh context and **do not inherit this guidance** — when a skill or prompt launches an exploration/review subagent, repeat the exploration protocol in that subagent's prompt (the exploration-heavy skills already do). `get_token_report` summarizes savings; the `repo-memory report` CLI reads the same data at zero token cost.
 
 ## Reference
 
@@ -295,5 +402,5 @@ For detailed component tables, WebSocket protocol messages, file listings, and s
 
 ---
 
-*Last Updated: 2026-03-18*
-*Version: 0.6.0*
+*Last Updated: 2026-06-13*
+*Version: 0.9.46*

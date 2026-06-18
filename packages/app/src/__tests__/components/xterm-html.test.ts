@@ -50,6 +50,31 @@ describe('buildXtermHtml', () => {
     expect(html).toContain('ReactNativeWebView.postMessage');
   });
 
+  // #6003 — interactive user-shell input wiring.
+  it('starts stdin disabled (read-only by default)', () => {
+    expect(html).toContain('disableStdin: true');
+  });
+
+  it('streams keystrokes to RN via onData → {type:\'input\'}', () => {
+    expect(html).toContain('term.onData(');
+    expect(html).toContain("type: 'input'");
+  });
+
+  it('guards onData against firing while read-only (disableStdin safety belt)', () => {
+    expect(html).toContain('if (term.options.disableStdin) return');
+  });
+
+  it('handles the set-interactive bridge message (toggles disableStdin)', () => {
+    expect(html).toContain("case 'set-interactive'");
+    expect(html).toContain('term.options.disableStdin = !msg.enabled');
+  });
+
+  it('handles the focus bridge message and focuses on tap when interactive', () => {
+    expect(html).toContain("case 'focus'");
+    expect(html).toContain("addEventListener('click'");
+    expect(html).toContain('term.focus()');
+  });
+
   it('has no external stylesheet links', () => {
     expect(html).not.toMatch(/<link[^>]*rel="stylesheet"[^>]*href="http/);
   });

@@ -2,7 +2,7 @@ import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { homedir } from 'node:os'
 import { handleSessionMessage } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, makeSessionIndexCtx, nsCtx } from './test-helpers.js'
 
 /**
  * Integration tests for untested WebSocket message handlers (#994).
@@ -44,7 +44,7 @@ function createMockCtx(sessionManager, opts = {}) {
     teleportTask: createSpy(async () => {}),
   }
 
-  return {
+  return nsCtx({
     sessionManager,
     broadcast: broadcastSpy,
     send: sendSpy,
@@ -56,8 +56,10 @@ function createMockCtx(sessionManager, opts = {}) {
     checkpointManager,
     devPreview,
     webTaskManager,
-    primaryClients: new Map(),
-    clients: new Map(),
+    // #5563: index-maintaining helpers + clients Map + the primary-ownership
+    // surface (getPrimary / claimPrimary / clearPrimary), all backed by a real
+    // WsClientManager so create/destroy/switch handlers route through them.
+    ...makeSessionIndexCtx(),
     permissionSessionMap: new Map(),
     questionSessionMap: new Map(),
     pendingPermissions: new Map(),
@@ -74,7 +76,7 @@ function createMockCtx(sessionManager, opts = {}) {
       broadcastToSession: broadcastToSessionSpy,
       broadcastSessionList: broadcastSessionListSpy,
     },
-  }
+  })
 }
 
 // ---------------------------------------------------------------------------
@@ -98,7 +100,7 @@ describe('resume_budget handler', () => {
     const msg = { type: 'resume_budget', sessionId: 'sess-1' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.resumeBudget.callCount, 1)
+    assert.equal(ctx.sessions.sessionManager.resumeBudget.callCount, 1)
     assert.equal(ctx._spies.broadcastToSession.callCount, 1)
     const [sessionId, payload] = ctx._spies.broadcastToSession.lastCall
     assert.equal(sessionId, 'sess-1')
@@ -107,11 +109,11 @@ describe('resume_budget handler', () => {
   })
 
   it('does nothing when budget is not paused', async () => {
-    ctx.sessionManager.isBudgetPaused = () => false
+    ctx.sessions.sessionManager.isBudgetPaused = () => false
     const msg = { type: 'resume_budget', sessionId: 'sess-1' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.resumeBudget.callCount, 0)
+    assert.equal(ctx.sessions.sessionManager.resumeBudget.callCount, 0)
     assert.equal(ctx._spies.broadcastToSession.callCount, 0)
   })
 
@@ -157,7 +159,7 @@ describe('create_session handler', () => {
     const msg = { type: 'create_session', name: 'My Session' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.createSession.callCount, 1)
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1)
     assert.equal(client.activeSessionId, 'sess-new')
     assert.ok(client.subscribedSessionIds.has('sess-new'))
 
@@ -172,7 +174,7 @@ describe('create_session handler', () => {
     const msg = { type: 'create_session', cwd: '/etc/passwd' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.createSession.callCount, 0)
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
   })
@@ -181,14 +183,14 @@ describe('create_session handler', () => {
     const msg = { type: 'create_session', cwd: '/tmp/definitely-does-not-exist-xyz123' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.createSession.callCount, 0)
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0)
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
     assert.match(payload.message, /does not exist/)
   })
 
   it('sends error when createSession throws', async () => {
-    ctx.sessionManager.createSession = createSpy(() => { throw new Error('limit reached') })
+    ctx.sessions.sessionManager.createSession = createSpy(() => { throw new Error('limit reached') })
     const msg = { type: 'create_session' }
     await handleSessionMessage(ws, client, msg, ctx)
 
@@ -201,7 +203,7 @@ describe('create_session handler', () => {
     const msg = { type: 'create_session', name: 'Isolated', worktree: true }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.createSession.callCount, 0, 'should not create session')
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'should not create session')
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
     assert.match(payload.message, /Worktree requires an explicit CWD/)
@@ -211,7 +213,7 @@ describe('create_session handler', () => {
     const msg = { type: 'create_session', name: 'Isolated', cwd: '  ', worktree: true }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.createSession.callCount, 0, 'should not create session')
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 0, 'should not create session')
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
     assert.match(payload.message, /Worktree requires an explicit CWD/)
@@ -221,8 +223,8 @@ describe('create_session handler', () => {
     const msg = { type: 'create_session', name: 'Isolated', cwd: homedir(), worktree: true }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.createSession.callCount, 1, 'should create session')
-    const args = ctx.sessionManager.createSession.lastCall[0]
+    assert.equal(ctx.sessions.sessionManager.createSession.callCount, 1, 'should create session')
+    const args = ctx.sessions.sessionManager.createSession.lastCall[0]
     assert.equal(args.worktree, true)
     assert.equal(args.cwd, homedir())
   })
@@ -245,7 +247,7 @@ describe('destroy_session handler', () => {
     // Simulate a connected client
     const clientWs = {}
     const clientData = { id: 'client-A', activeSessionId: 'sess-2', authenticated: true, subscribedSessionIds: new Set(['sess-1', 'sess-2']) }
-    ctx.clients.set(clientWs, clientData)
+    ctx.transport.clients.set(clientWs, clientData)
     client = clientData
     ws = clientWs
   })
@@ -263,7 +265,7 @@ describe('destroy_session handler', () => {
     assert.ok(destroyedMsg, 'should broadcast session_destroyed')
     assert.equal(destroyedMsg[0].sessionId, 'sess-2')
 
-    assert.ok(ctx.broadcastSessionList.callCount > 0, 'should broadcast session_list')
+    assert.ok(ctx.transport.broadcastSessionList.callCount > 0, 'should broadcast session_list')
   })
 
   it('refuses to destroy last session', async () => {
@@ -314,25 +316,25 @@ describe('rename_session handler', () => {
     const msg = { type: 'rename_session', sessionId: 'sess-1', name: 'New Name' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.renameSession.callCount, 1)
-    assert.deepEqual(ctx.sessionManager.renameSession.lastCall, ['sess-1', 'New Name'])
+    assert.equal(ctx.sessions.sessionManager.renameSession.callCount, 1)
+    assert.deepEqual(ctx.sessions.sessionManager.renameSession.lastCall, ['sess-1', 'New Name'])
 
     await new Promise(r => setTimeout(r, 20))
-    assert.ok(ctx.broadcastSessionList.callCount > 0, 'should broadcast session_list')
+    assert.ok(ctx.transport.broadcastSessionList.callCount > 0, 'should broadcast session_list')
   })
 
   it('sends error when name is empty', async () => {
     const msg = { type: 'rename_session', sessionId: 'sess-1', name: '   ' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.sessionManager.renameSession.callCount, 0)
+    assert.equal(ctx.sessions.sessionManager.renameSession.callCount, 0)
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'session_error')
     assert.match(payload.message, /Name is required/)
   })
 
   it('sends error when session not found', async () => {
-    ctx.sessionManager.renameSession = createSpy(() => false)
+    ctx.sessions.sessionManager.renameSession = createSpy(() => false)
     const msg = { type: 'rename_session', sessionId: 'nonexistent', name: 'Test' }
     await handleSessionMessage(ws, client, msg, ctx)
 
@@ -437,8 +439,8 @@ describe('create_checkpoint handler', () => {
     const msg = { type: 'create_checkpoint', name: 'Before refactor', description: 'Safe point' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.checkpointManager.createCheckpoint.callCount, 1)
-    const callArgs = ctx.checkpointManager.createCheckpoint.lastCall[0]
+    assert.equal(ctx.services.checkpointManager.createCheckpoint.callCount, 1)
+    const callArgs = ctx.services.checkpointManager.createCheckpoint.lastCall[0]
     assert.equal(callArgs.sessionId, 'sess-1')
     assert.equal(callArgs.resumeSessionId, 'conv-uuid-123')
     assert.equal(callArgs.name, 'Before refactor')
@@ -486,7 +488,7 @@ describe('list_checkpoints handler', () => {
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
     ctx = createMockCtx(manager)
-    ctx.checkpointManager.listCheckpoints = createSpy(() => [
+    ctx.services.checkpointManager.listCheckpoints = createSpy(() => [
       { id: 'cp-1', name: 'First', createdAt: 1000 },
       { id: 'cp-2', name: 'Second', createdAt: 2000 },
     ])
@@ -498,8 +500,8 @@ describe('list_checkpoints handler', () => {
     const msg = { type: 'list_checkpoints' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.checkpointManager.listCheckpoints.callCount, 1)
-    assert.deepEqual(ctx.checkpointManager.listCheckpoints.lastCall, ['sess-1'])
+    assert.equal(ctx.services.checkpointManager.listCheckpoints.callCount, 1)
+    assert.deepEqual(ctx.services.checkpointManager.listCheckpoints.lastCall, ['sess-1'])
 
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'checkpoint_list')
@@ -530,8 +532,8 @@ describe('delete_checkpoint handler', () => {
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
     ctx = createMockCtx(manager)
-    ctx.checkpointManager.deleteCheckpoint = createSpy()
-    ctx.checkpointManager.listCheckpoints = createSpy(() => [])
+    ctx.services.checkpointManager.deleteCheckpoint = createSpy()
+    ctx.services.checkpointManager.listCheckpoints = createSpy(() => [])
     client = { id: 'client-A', activeSessionId: 'sess-1' }
     ws = {}
   })
@@ -540,8 +542,8 @@ describe('delete_checkpoint handler', () => {
     const msg = { type: 'delete_checkpoint', checkpointId: 'cp-1' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.checkpointManager.deleteCheckpoint.callCount, 1)
-    assert.deepEqual(ctx.checkpointManager.deleteCheckpoint.lastCall, ['sess-1', 'cp-1'])
+    assert.equal(ctx.services.checkpointManager.deleteCheckpoint.callCount, 1)
+    assert.deepEqual(ctx.services.checkpointManager.deleteCheckpoint.lastCall, ['sess-1', 'cp-1'])
 
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'checkpoint_list')
@@ -553,7 +555,7 @@ describe('delete_checkpoint handler', () => {
     const msg = { type: 'delete_checkpoint', checkpointId: 'cp-1' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.checkpointManager.deleteCheckpoint.callCount, 0)
+    assert.equal(ctx.services.checkpointManager.deleteCheckpoint.callCount, 0)
     assert.equal(ctx._spies.send.callCount, 0)
   })
 
@@ -561,7 +563,7 @@ describe('delete_checkpoint handler', () => {
     const msg = { type: 'delete_checkpoint' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.checkpointManager.deleteCheckpoint.callCount, 0)
+    assert.equal(ctx.services.checkpointManager.deleteCheckpoint.callCount, 0)
   })
 })
 
@@ -584,23 +586,23 @@ describe('close_dev_preview handler', () => {
     const msg = { type: 'close_dev_preview', sessionId: 'sess-1', port: 3000 }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.devPreview.closePreview.callCount, 1)
-    assert.deepEqual(ctx.devPreview.closePreview.lastCall, ['sess-1', 3000])
+    assert.equal(ctx.services.devPreview.closePreview.callCount, 1)
+    assert.deepEqual(ctx.services.devPreview.closePreview.lastCall, ['sess-1', 3000])
   })
 
   it('uses active session when sessionId not provided', async () => {
     const msg = { type: 'close_dev_preview', port: 8080 }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.devPreview.closePreview.callCount, 1)
-    assert.deepEqual(ctx.devPreview.closePreview.lastCall, ['sess-1', 8080])
+    assert.equal(ctx.services.devPreview.closePreview.callCount, 1)
+    assert.deepEqual(ctx.services.devPreview.closePreview.lastCall, ['sess-1', 8080])
   })
 
   it('does nothing when port is not a number', async () => {
     const msg = { type: 'close_dev_preview', port: 'abc' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.devPreview.closePreview.callCount, 0)
+    assert.equal(ctx.services.devPreview.closePreview.callCount, 0)
   })
 })
 
@@ -623,21 +625,21 @@ describe('launch_web_task handler', () => {
     const msg = { type: 'launch_web_task', prompt: 'fix the bug' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.webTaskManager.launchTask.callCount, 1)
-    assert.equal(ctx.webTaskManager.launchTask.lastCall[0], 'fix the bug')
+    assert.equal(ctx.services.webTaskManager.launchTask.callCount, 1)
+    assert.equal(ctx.services.webTaskManager.launchTask.lastCall[0], 'fix the bug')
   })
 
   it('rejects CWD outside home directory', async () => {
     const msg = { type: 'launch_web_task', prompt: 'test', cwd: '/etc' }
     await handleSessionMessage(ws, client, msg, ctx)
 
-    assert.equal(ctx.webTaskManager.launchTask.callCount, 0)
+    assert.equal(ctx.services.webTaskManager.launchTask.callCount, 0)
     const [, payload] = ctx._spies.send.lastCall
     assert.equal(payload.type, 'web_task_error')
   })
 
   it('sends error when launchTask throws', async () => {
-    ctx.webTaskManager.launchTask = createSpy(() => { throw new Error('no slots') })
+    ctx.services.webTaskManager.launchTask = createSpy(() => { throw new Error('no slots') })
     const msg = { type: 'launch_web_task', prompt: 'test' }
     await handleSessionMessage(ws, client, msg, ctx)
 
@@ -658,7 +660,7 @@ describe('list_web_tasks handler', () => {
       { id: 'sess-1', name: 'Test', cwd: '/tmp' },
     ])
     ctx = createMockCtx(manager)
-    ctx.webTaskManager.listTasks = createSpy(() => [
+    ctx.services.webTaskManager.listTasks = createSpy(() => [
       { taskId: 'task-1', status: 'running' },
       { taskId: 'task-2', status: 'done' },
     ])
@@ -694,13 +696,13 @@ describe('teleport_web_task handler', () => {
   })
 
   it('teleports task and sends server_status on success', async () => {
-    ctx.webTaskManager.teleportTask = createSpy(async () => {})
+    ctx.services.webTaskManager.teleportTask = createSpy(async () => {})
     const msg = { type: 'teleport_web_task', taskId: 'task-1' }
     await handleSessionMessage(ws, client, msg, ctx)
 
     // teleportTask returns a promise; wait for it
-    assert.equal(ctx.webTaskManager.teleportTask.callCount, 1)
-    assert.equal(ctx.webTaskManager.teleportTask.lastCall[0], 'task-1')
+    assert.equal(ctx.services.webTaskManager.teleportTask.callCount, 1)
+    assert.equal(ctx.services.webTaskManager.teleportTask.lastCall[0], 'task-1')
 
     // The handler uses .then/.catch so we need to wait a tick for the promise chain
     await new Promise(r => setTimeout(r, 10))
@@ -712,7 +714,7 @@ describe('teleport_web_task handler', () => {
   })
 
   it('sends web_task_error on failure', async () => {
-    ctx.webTaskManager.teleportTask = createSpy(async () => { throw new Error('not found') })
+    ctx.services.webTaskManager.teleportTask = createSpy(async () => { throw new Error('not found') })
     const msg = { type: 'teleport_web_task', taskId: 'task-99' }
     await handleSessionMessage(ws, client, msg, ctx)
 

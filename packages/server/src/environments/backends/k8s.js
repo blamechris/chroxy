@@ -1,4 +1,4 @@
-import { randomBytes } from 'crypto'
+import { createHash, randomBytes } from 'crypto'
 import { EventEmitter } from 'events'
 import { PassThrough } from 'stream'
 import { KubeConfig, CoreV1Api, PortForward } from '@kubernetes/client-node'
@@ -32,6 +32,29 @@ const DEFAULT_SIDECAR_IMAGE = 'chroxy-pod-agent:latest'
 const AGENT_PORT = 7681
 
 /**
+ * Default resource requests/limits applied to the sidecar container when a
+ * createEnvironment call does not specify its own (#3195).
+ *
+ * Requests are what the scheduler reserves (and what the pod is guaranteed);
+ * limits are the hard ceiling the kernel/cgroup enforces. The defaults keep a
+ * single runaway session from starving the node while leaving generous
+ * headroom for a real Claude Code workload:
+ *   - request 500m CPU / 512Mi memory — modest reservation so several
+ *     environments can be packed onto one node.
+ *   - limit   2 CPU  / 4Gi  memory — a session may burst well above its
+ *     request but is capped before it can consume the whole node.
+ *
+ * Operators override any field per-call via `opts.resources` (or the legacy
+ * `opts.memoryLimit`/`opts.cpuLimit`); see createEnvironment's JSDoc.
+ */
+export const DEFAULT_RESOURCES = Object.freeze({
+  cpu: '500m',
+  memory: '512Mi',
+  cpuLimit: '2',
+  memoryLimit: '4Gi',
+})
+
+/**
  * Default container CLI path — used to remap the host's absolute cli.js path
  * (passed by the SDK as args[0]) to a path that exists inside the Pod.
  * Mirrors DEFAULT_CONTAINER_CLI_PATH in docker.js.
@@ -45,7 +68,6 @@ const NOT_IMPLEMENTED_REASON = {
   createComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   destroyComposeEnvironment: 'N/A for K8s — compose is a Docker-only concept',
   removeImage: 'N/A for K8s — image lifecycle is owned by the cluster registry/CRI',
-  listEnvironments: 'deferred to Phase 2',
   commitEnvironment: 'deferred to Phase 2',
   restoreEnvironment: 'deferred to Phase 2',
 }
@@ -128,6 +150,355 @@ function validateNamespace(ns, context) {
 }
 
 /**
+ * Static prefix for per-user/per-project namespaces derived by the default
+ * mapping function (#3194).  Kept short so the sanitized identity gets the
+ * lion's share of the 63-char RFC 1123 budget.
+ */
+const DEFAULT_NAMESPACE_PREFIX = 'chroxy-user-'
+
+/**
+ * Sanitize an arbitrary identity string (userId / projectId) into a fragment
+ * safe to splice into an RFC 1123 DNS label (#3194).
+ *
+ * Multi-tenant safety: the namespace is the tenant-isolation boundary, so the
+ * sanitizer must be *deterministic* (the same identity always maps to the same
+ * namespace) and *collision-resistant* (distinct identities should not silently
+ * collapse onto the same namespace and thereby share another tenant's Pods).
+ *
+ * Transform:
+ *   - Lowercase (RFC 1123 labels are lowercase only).
+ *   - Replace every run of disallowed characters with a single '-'.
+ *   - Strip leading/trailing '-' so the fragment starts/ends alphanumeric.
+ *
+ * Collision handling: because the lossy character replacement above can map two
+ * different identities onto the same fragment (e.g. `a.b` and `a/b` → `a-b`), a
+ * short deterministic hash of the ORIGINAL identity is appended whenever the
+ * sanitized fragment differs from the input or has to be truncated.  Two
+ * identities that sanitize identically will therefore still produce different
+ * namespaces (their hashes differ), preserving tenant isolation.
+ *
+ * Length: the returned fragment is capped at `maxLength` (default 50) leaving
+ * headroom for the caller's prefix; the hash suffix is included within the cap.
+ *
+ * @param {string} identity  - Raw identity (userId or projectId)
+ * @param {Object} [opts]
+ * @param {number} [opts.maxLength=50] - Max length of the returned fragment
+ * @returns {string} An RFC 1123-label-safe fragment (non-empty)
+ * @throws {Error} If `identity` is not a non-empty string
+ */
+export function sanitizeNamespaceLabel(identity, { maxLength = 50 } = {}) {
+  if (typeof identity !== 'string' || identity.length === 0) {
+    throw new Error('sanitizeNamespaceLabel: identity must be a non-empty string')
+  }
+
+  const lowered = identity.toLowerCase()
+  // Collapse every run of non-[a-z0-9] into a single '-', then trim '-' ends.
+  let fragment = lowered.replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '')
+
+  // A short deterministic hash of the ORIGINAL identity disambiguates two
+  // identities that sanitize to the same fragment (lossy replacement) and two
+  // that share a truncated prefix.  8 hex chars (32 bits) is ample for the
+  // expected tenant cardinality and keeps the suffix compact.
+  const hash = createHash('sha256').update(identity).digest('hex').slice(0, 8)
+
+  // Decide whether disambiguation is needed: the sanitize step lost information
+  // (the result differs from the ORIGINAL identity — this also catches case
+  // folding, so `alice` and `Alice` map to different namespaces), the fragment
+  // is empty (all-symbol identity), or the raw fragment exceeds the budget.
+  const needsHash = fragment.length === 0 ||
+    fragment !== identity ||
+    fragment.length > maxLength
+
+  if (!needsHash) {
+    return fragment
+  }
+
+  // Reserve room for "-<hash>" within maxLength, then re-trim any '-' the
+  // truncation may have exposed at the boundary.
+  const suffix = `-${hash}`
+  // When maxLength is too small to hold even "<1char>-<hash>", drop the fragment
+  // entirely and return the hash truncated to maxLength. This keeps the
+  // documented length cap a hard guarantee (the `head + suffix` path below would
+  // otherwise overshoot for pathologically small maxLength values).  The hash is
+  // [a-f0-9], so any prefix of it is still a valid RFC 1123 label.
+  if (maxLength <= suffix.length) {
+    return hash.slice(0, Math.max(1, maxLength))
+  }
+  const budget = maxLength - suffix.length
+  const head = fragment.slice(0, budget).replace(/-+$/g, '')
+  // `head` can be empty when the identity was all symbols; fall back to the
+  // hash alone (always [a-f0-9], a valid label).
+  return head.length > 0 ? `${head}${suffix}` : hash
+}
+
+/**
+ * Default namespace mapping function (#3194).
+ *
+ * Maps a per-call identity to a Kubernetes namespace name:
+ *   - `userId`    → `chroxy-user-<sanitized-userId>`
+ *   - `projectId` (no userId) → `chroxy-user-<sanitized-projectId>`
+ *   - neither     → `null` (caller falls back to the static default namespace)
+ *
+ * The result is validated by `validateNamespace()` at the call site, so this
+ * function only needs to produce a candidate; the sanitizer guarantees a valid
+ * RFC 1123 label fragment and the short prefix keeps the total within 63 chars.
+ *
+ * @param {Object} identity
+ * @param {string} [identity.userId]    - User identity
+ * @param {string} [identity.projectId] - Project identity (used when no userId)
+ * @returns {string|null} Namespace name, or null when no identity was supplied
+ */
+function defaultNamespaceFor({ userId, projectId } = {}) {
+  const id = (typeof userId === 'string' && userId.length > 0)
+    ? userId
+    : (typeof projectId === 'string' && projectId.length > 0 ? projectId : null)
+  if (id == null) return null
+  // Reserve the prefix length out of the 63-char budget for the fragment.
+  const maxLength = RFC_1123_MAX_LENGTH - DEFAULT_NAMESPACE_PREFIX.length
+  return `${DEFAULT_NAMESPACE_PREFIX}${sanitizeNamespaceLabel(id, { maxLength })}`
+}
+
+/**
+ * Validate `opts.workspacePVC` for createEnvironment (#3385).
+ *
+ * Accepts:
+ *   - `undefined` / `null` — no PVC workspace requested (caller will fall back
+ *     to the hostPath strategy via opts.cwd, or no workspace at all).
+ *   - `{ claimName: string, mountPath?: string, readOnly?: boolean }` — operator
+ *     opts into the PVC strategy.  `claimName` is required and must be a
+ *     non-empty string.
+ *
+ * Also enforces the mutual exclusion with `opts.cwd` (hostPath strategy):
+ * passing both is an operator-intent ambiguity, not a fallback chain.
+ *
+ * @param {*}      workspacePVC - Raw opts.workspacePVC value
+ * @param {*}      cwd          - opts.cwd value (for mutual-exclusion check)
+ * @throws {Error} If the value is malformed or both strategies are passed.
+ */
+function validateWorkspacePVC(workspacePVC, cwd) {
+  if (workspacePVC == null) return
+  if (typeof workspacePVC !== 'object' || Array.isArray(workspacePVC)) {
+    throw new Error(
+      'createEnvironment: opts.workspacePVC must be an object with a claimName property',
+    )
+  }
+  if (typeof workspacePVC.claimName !== 'string' || workspacePVC.claimName.length === 0) {
+    throw new Error(
+      'createEnvironment: opts.workspacePVC.claimName must be a non-empty string',
+    )
+  }
+  if (cwd != null && cwd !== '') {
+    throw new Error(
+      'createEnvironment: opts.cwd and opts.workspacePVC are mutually exclusive — ' +
+      'choose either the hostPath strategy (opts.cwd, single-node clusters) ' +
+      'or the PVC strategy (opts.workspacePVC, multi-node clusters), not both',
+    )
+  }
+}
+
+/** Default git image used by the clone init container — overridable via opts. */
+const DEFAULT_GIT_IMAGE = 'alpine/git:latest'
+
+/** Default mount path the workspace volume is exposed at inside the Pod. */
+const DEFAULT_WORKSPACE_MOUNT_PATH = '/workspace'
+
+/**
+ * Reject argv values that git would interpret as an option rather than a
+ * positional argument (argument-injection hardening, #3193).
+ *
+ * git-clone argv is NOT passed through a shell — the init container runs
+ * `command: ['git']` with an explicit `args` array — so classic shell
+ * metacharacter injection (`;`, `|`, `$()`, backticks) is structurally
+ * impossible. The residual risk is *argument* injection: a value beginning
+ * with `-` (e.g. `--upload-pack=…`, `--config=…`) would be parsed by git as a
+ * flag. We reject any value whose first character is `-`; the clone argv also
+ * uses `--` to terminate option parsing as belt-and-braces.
+ *
+ * @param {string} value
+ * @param {string} field - Field name for the error message
+ * @throws {Error} If the value starts with '-'
+ */
+function rejectGitOptionLike(value, field) {
+  if (typeof value === 'string' && value.startsWith('-')) {
+    throw new Error(
+      `createEnvironment: opts.gitRepo.${field} must not start with "-" ` +
+      '(rejected to prevent git argument injection)',
+    )
+  }
+}
+
+/**
+ * Validate + normalise `opts.gitRepo` for createEnvironment (#3193).
+ *
+ * The git-clone workspace strategy (Phase 1) provisions the Pod's workspace by
+ * cloning a repo into an `emptyDir` volume via an init container, instead of
+ * mounting a host path (`opts.cwd`) or referencing a pre-provisioned PVC
+ * (`opts.workspacePVC`). It is the K8s-native answer to "the pod is on a remote
+ * node and can't see the operator's filesystem" without requiring an
+ * out-of-band PVC seed step.
+ *
+ * Accepts:
+ *   - `undefined` / `null` — git-clone strategy not requested.
+ *   - A non-empty string — shorthand for `{ url: <string> }`.
+ *   - `{ url, branch?, commit?, depth?, mountPath? }` — `url` is required and
+ *     must be a non-empty string. `branch` / `commit` pin the checkout. `depth`
+ *     (positive integer) requests a shallow clone. `mountPath` overrides the
+ *     pod-side mount (default `/workspace`).
+ *
+ * Enforces mutual exclusion with the other two workspace strategies (`opts.cwd`
+ * and `opts.workspacePVC`): exactly one strategy may be chosen. The alternative
+ * — a silent precedence rule — would hide operator intent.
+ *
+ * branch + commit may both be supplied: git supports `clone --branch <branch>`
+ * followed by a `checkout <commit>`, so the clone fetches the branch tip and a
+ * second step pins the exact commit.
+ *
+ * @param {*} gitRepo - Raw opts.gitRepo value
+ * @param {*} cwd     - opts.cwd value (mutual-exclusion check)
+ * @param {*} workspacePVC - opts.workspacePVC value (mutual-exclusion check)
+ * @returns {{ url: string, branch: string|null, commit: string|null, depth: number|null, mountPath: string }|null}
+ *   Normalised descriptor, or null when no git-clone strategy was requested.
+ * @throws {Error} If the value is malformed or conflicts with another strategy.
+ */
+function validateGitRepo(gitRepo, cwd, workspacePVC) {
+  if (gitRepo == null) return null
+
+  // Normalise the string shorthand to the object form.
+  const spec = typeof gitRepo === 'string' ? { url: gitRepo } : gitRepo
+
+  if (typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error(
+      'createEnvironment: opts.gitRepo must be a non-empty URL string or ' +
+      'an object with a url property',
+    )
+  }
+  if (typeof spec.url !== 'string' || spec.url.length === 0) {
+    throw new Error(
+      'createEnvironment: opts.gitRepo.url must be a non-empty string',
+    )
+  }
+  rejectGitOptionLike(spec.url, 'url')
+
+  if (spec.branch != null) {
+    if (typeof spec.branch !== 'string' || spec.branch.length === 0) {
+      throw new Error('createEnvironment: opts.gitRepo.branch must be a non-empty string')
+    }
+    rejectGitOptionLike(spec.branch, 'branch')
+  }
+
+  if (spec.commit != null) {
+    if (typeof spec.commit !== 'string' || spec.commit.length === 0) {
+      throw new Error('createEnvironment: opts.gitRepo.commit must be a non-empty string')
+    }
+    rejectGitOptionLike(spec.commit, 'commit')
+  }
+
+  let depth = null
+  if (spec.depth != null) {
+    if (!Number.isInteger(spec.depth) || spec.depth < 1) {
+      throw new Error('createEnvironment: opts.gitRepo.depth must be a positive integer')
+    }
+    depth = spec.depth
+  }
+
+  let mountPath = DEFAULT_WORKSPACE_MOUNT_PATH
+  if (spec.mountPath != null) {
+    if (typeof spec.mountPath !== 'string' || spec.mountPath.length === 0) {
+      throw new Error('createEnvironment: opts.gitRepo.mountPath must be a non-empty string')
+    }
+    // K8s requires volumeMount.mountPath to be absolute; a relative value would
+    // be rejected at Pod-create time with an opaque API error. Reject `.`/`..`
+    // segments too so the path can't escape the intended workspace root.
+    if (!spec.mountPath.startsWith('/')) {
+      throw new Error(
+        'createEnvironment: opts.gitRepo.mountPath must be an absolute path (start with "/")',
+      )
+    }
+    if (spec.mountPath.split('/').some((seg) => seg === '.' || seg === '..')) {
+      throw new Error(
+        'createEnvironment: opts.gitRepo.mountPath must not contain "." or ".." segments',
+      )
+    }
+    mountPath = spec.mountPath
+  }
+
+  // Mutual exclusion with the other two strategies.
+  if (cwd != null && cwd !== '') {
+    throw new Error(
+      'createEnvironment: opts.cwd and opts.gitRepo are mutually exclusive — ' +
+      'choose exactly one workspace strategy (hostPath, PVC, or git-clone)',
+    )
+  }
+  if (workspacePVC != null) {
+    throw new Error(
+      'createEnvironment: opts.workspacePVC and opts.gitRepo are mutually exclusive — ' +
+      'choose exactly one workspace strategy (hostPath, PVC, or git-clone)',
+    )
+  }
+
+  return { url: spec.url, branch: spec.branch ?? null, commit: spec.commit ?? null, depth, mountPath }
+}
+
+/**
+ * Build the git-clone init container spec(s) for the git-clone workspace
+ * strategy (#3193).
+ *
+ * Each container runs `git` with an explicit argv array (never a shell string),
+ * cloning `descriptor.url` into the shared `emptyDir` workspace volume mounted
+ * at `descriptor.mountPath`. Branch / commit pinning and shallow depth are
+ * honoured:
+ *   - `--branch <branch>` checks out the named branch/tag at clone time.
+ *   - `--depth <n>` requests a shallow clone.
+ *   - `commit` pins the exact SHA via a SECOND init container running
+ *     `git -C <dir> checkout --detach <commit>`. K8s runs init containers
+ *     sequentially over the shared emptyDir, so the clone completes before the
+ *     checkout starts. Splitting into two containers keeps every value in an
+ *     argv slot — no shell is ever invoked, so neither the URL nor the SHA can
+ *     be interpreted as a command.
+ *
+ * @param {{ url: string, branch: string|null, commit: string|null, depth: number|null, mountPath: string }} descriptor
+ * @param {string} gitImage - Image providing the `git` binary
+ * @returns {Array<object>} One or two init container specs (clone, optional checkout)
+ */
+function buildGitCloneInitContainers(descriptor, gitImage) {
+  const { url, branch, commit, depth, mountPath } = descriptor
+
+  const cloneArgs = ['clone']
+  if (depth != null) {
+    cloneArgs.push('--depth', String(depth))
+  }
+  if (branch != null) {
+    cloneArgs.push('--branch', branch)
+  }
+  // `--` terminates option parsing so url/mountPath can never be read as flags.
+  cloneArgs.push('--', url, mountPath)
+
+  const volumeMount = { name: 'workspace', mountPath }
+
+  const containers = [{
+    name: 'git-clone',
+    image: gitImage,
+    command: ['git'],
+    args: cloneArgs,
+    volumeMounts: [volumeMount],
+  }]
+
+  if (commit != null) {
+    containers.push({
+      name: 'git-checkout',
+      image: gitImage,
+      command: ['git'],
+      // `-C <dir>` runs git in the cloned tree; `checkout --detach` pins the
+      // exact commit. `--` terminates option parsing before the SHA.
+      args: ['-C', mountPath, 'checkout', '--detach', '--', commit],
+      volumeMounts: [volumeMount],
+    })
+  }
+
+  return containers
+}
+
+/**
  * K8sBackend implements the Backend interface (see types.js) using the
  * Kubernetes API via @kubernetes/client-node.
  *
@@ -139,18 +510,28 @@ function validateNamespace(ns, context) {
  * (Pod name) from the caller's in-memory record.  The "handle" stored by
  * EnvironmentManager for a K8s environment is the Pod name string.
  *
- * Namespace contract (#3571):
- *   - `_resolveNamespace(callNs)` returns `callNs ?? this._namespace` so an
- *     explicit empty string from the caller is preserved verbatim (#3493).
+ * Namespace contract (#3571, #3194):
+ *   - `_resolveNamespace(callNs, identity)` precedence: explicit `callNs`
+ *     (`callNs != null`, so an empty string is preserved verbatim — #3493) >
+ *     identity-derived namespace (`namespaceFor({ userId, projectId })`, #3194) >
+ *     the static `this._namespace`.
  *   - `_validateNamespace(ns, context)` enforces the RFC 1123 DNS label rules
  *     the K8s API server applies: 1-63 chars, lowercase alphanumeric + hyphens,
  *     start/end alphanumeric.  Throws with a `${context}:` prefix.
- *   - The five per-call sites (createEnvironment, destroyEnvironment,
- *     getEnvironmentStatus, streamCliInEnvironment, reconnectAgentToken) call
- *     `_validateNamespace(_resolveNamespace(opts.namespace), '<method>')` so
- *     bad namespaces (empty, uppercase, too long, bad characters, leading or
- *     trailing dashes) are rejected client-side before any K8s API call is
- *     issued.
+ *   - Per-call sites call `_namespaceForCall(opts, '<method>')` which resolves
+ *     (explicit > identity > static) and validates in one step, so bad
+ *     namespaces (empty, uppercase, too long, bad characters, leading/trailing
+ *     dashes) are rejected client-side before any K8s API call is issued.
+ *
+ * Multi-tenant isolation (#3194):
+ *   - The constructor `namespaceFor` mapping turns a per-call `userId`/`projectId`
+ *     into a deterministic, sanitized, collision-resistant namespace name
+ *     (default `chroxy-user-<sanitized-id>`).
+ *   - `createEnvironment` calls `ensureNamespace(ns)` (idempotent read-or-create;
+ *     409 AlreadyExists swallowed) so each tenant's namespace exists on demand.
+ *   - `listEnvironments` is scoped to exactly one namespace and label-filtered to
+ *     `app.kubernetes.io/managed-by=chroxy`, so a tenant never sees another
+ *     tenant's Pods.  destroy/status/stream all target the resolved namespace.
  *
  * Connection modes for streamCliInEnvironment (constructor-gated):
  *   'portforward' (default) — uses @kubernetes/client-node PortForward to tunnel
@@ -162,14 +543,46 @@ function validateNamespace(ns, context) {
 export class K8sBackend {
   /**
    * @param {Object} [opts]
-   * @param {string} [opts.namespace='default']         - Kubernetes namespace for all Pods
+   * @param {string} [opts.namespace='default']         - Static fallback namespace, used when a
+   *   per-call invocation carries no identity (no userId/projectId) and no explicit `opts.namespace`.
+   * @param {Function} [opts.namespaceFor]              - Namespace mapping function (#3194):
+   *   `({ userId, projectId }) => string|null`. Called per createEnvironment/destroy/etc. to derive
+   *   the tenant-isolated namespace from caller identity. Default maps `userId` (or `projectId`) to
+   *   `chroxy-user-<sanitized-id>` and returns `null` when neither is present (→ static fallback).
+   *   The returned name is validated against RFC 1123 before any K8s API call. Pass a custom function
+   *   to project namespaces differently (e.g. `chroxy-proj-<projectId>`).
    * @param {boolean} [opts.inCluster]                  - Force in-cluster auth (default: auto-detect via KUBERNETES_SERVICE_HOST)
    * @param {string}  [opts.kubeconfigPath]             - Path to kubeconfig file (overrides default search)
    * @param {string}  [opts.sidecarImage]               - Sidecar image to use in createEnvironment (default: chroxy-pod-agent:latest)
+   * @param {string}  [opts.gitImage]                   - Image providing `git` for the git-clone workspace
+   *   init container (default: alpine/git:latest). Used only when a createEnvironment call passes
+   *   `opts.gitRepo` (#3193).
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - imagePullPolicy applied to all
    *   containers in the Pod spec. When unset the field is omitted and Kubernetes applies its own default
    *   ('Always' for :latest tags, 'IfNotPresent' otherwise). Set to 'IfNotPresent' for air-gapped
    *   clusters or local kind-based CI where images are loaded directly into the cluster.
+   * @param {Object|null} [opts.defaultResources] - Cluster-wide default resource requests/limits
+   *   applied to the sidecar container when a createEnvironment call does not override them (#3195).
+   *   Same shape as `createEnvironment`'s `opts.resources` (`{ cpu, memory, cpuLimit, memoryLimit }`).
+   *   An object is merged over the built-in {@link DEFAULT_RESOURCES} (so partial overrides are fine)
+   *   and validated at construction. Pass `null` to disable defaults entirely — then only explicit
+   *   per-call resource values produce a `resources` block. Omit to use the built-in defaults.
+   * @param {Object|null} [opts.namespaceQuota] - Per-tenant aggregate ResourceQuota spec (#5142).
+   *   When set, a namespace-scoped `ResourceQuota` capping the tenant's TOTAL CPU/memory (and
+   *   optionally Pod count) across all their Pods is ensured (idempotent create) whenever a tenant
+   *   namespace is ensured. Shape: `{ cpu, memory, cpuLimit, memoryLimit, pods }` — `cpu`/`memory`
+   *   map to aggregate `requests.*`, `cpuLimit`/`memoryLimit` to aggregate `limits.*`, `pods` to the
+   *   max object count. At least one field is required. Quantities are validated at construction.
+   *   Distinct from per-pod `defaultResources` (#3195), which limits each individual Pod. Omit (or
+   *   `null`) to skip — the namespace-ensure path is unchanged. Never applied to the static default
+   *   namespace.
+   * @param {Object|null} [opts.namespaceLimitRange] - Per-tenant LimitRange defaults (#5142).
+   *   When set, a namespace-scoped `LimitRange` is ensured so Pods created WITHOUT explicit
+   *   requests/limits inherit namespace defaults at the cluster level (defence-in-depth on top of
+   *   `defaultResources`). Same flat shape as `defaultResources`: `{ cpu, memory, cpuLimit,
+   *   memoryLimit }` — `cpu`/`memory` become `defaultRequest.*`, `cpuLimit`/`memoryLimit` become
+   *   `default.*`. At least one field required. Quantities validated at construction. Omit (or
+   *   `null`) to skip. Never applied to the static default namespace.
    * @param {'portforward'|'clusterip'} [opts.connectMode='portforward'] - How to reach the sidecar
    * @param {object}  [opts._coreV1Api]                 - Injected CoreV1Api for testing
    * @param {object}  [opts._portForward]               - Injected PortForward for testing
@@ -180,14 +593,87 @@ export class K8sBackend {
    * @param {Function} [opts._setTimeout]               - Override setTimeout for deterministic testing
    * @param {Function} [opts._clearTimeout]             - Override clearTimeout for deterministic testing
    */
-  constructor({ namespace, inCluster, kubeconfigPath, sidecarImage, imagePullPolicy,
-    connectMode, _coreV1Api, _portForward, _dialWs, _net,
+  constructor({ namespace, namespaceFor, inCluster, kubeconfigPath, sidecarImage, gitImage, imagePullPolicy,
+    defaultResources, namespaceQuota, namespaceLimitRange, connectMode, _coreV1Api, _portForward, _dialWs, _net,
     _reconnectDelays, _maxRetries, _maxStdinBufferBytes,
     _setTimeout: setTimeoutImpl, _clearTimeout: clearTimeoutImpl } = {}) {
     validateImagePullPolicy(imagePullPolicy, 'constructor opts')
     this._namespace = namespace ?? 'default'
+    // Namespace mapping function (#3194). A non-function override is rejected
+    // up-front rather than blowing up later inside _resolveNamespace.
+    if (namespaceFor != null && typeof namespaceFor !== 'function') {
+      throw new TypeError('K8sBackend: opts.namespaceFor must be a function')
+    }
+    this._namespaceFor = namespaceFor || defaultNamespaceFor
+    // Namespaces we have already ensured exist this process, so repeated
+    // createEnvironment calls for the same tenant skip the read/create roundtrip.
+    this._ensuredNamespaces = new Set()
     this._sidecarImage = sidecarImage ?? DEFAULT_SIDECAR_IMAGE
+    this._gitImage = gitImage ?? DEFAULT_GIT_IMAGE
     this._imagePullPolicy = imagePullPolicy ?? null
+    // Default resource requests/limits applied to the sidecar container (#3195).
+    //   - undefined → use the module DEFAULT_RESOURCES
+    //   - an object → merge over DEFAULT_RESOURCES (operator-set cluster-wide defaults)
+    //   - null      → disable defaults entirely (only explicit per-call values apply)
+    // Validate any object form up-front so a malformed quantity surfaces at
+    // construction rather than at the first createEnvironment call.
+    if (defaultResources === null) {
+      this._defaultResources = null
+    } else if (defaultResources === undefined) {
+      this._defaultResources = { ...DEFAULT_RESOURCES }
+    } else if (typeof defaultResources === 'object' && !Array.isArray(defaultResources)) {
+      const merged = { ...DEFAULT_RESOURCES, ...defaultResources }
+      // Reuse the per-call builder purely to validate the merged quantities
+      // (defaults disabled so only the merged object is validated). Re-scope
+      // any failure to opts.defaultResources — buildResourceBlock blames
+      // `resources.*`/`createEnvironment`, which points at the wrong call
+      // site for constructor config (#3195 review) — preserving the
+      // underlying error as `cause`.
+      try {
+        buildResourceBlock(merged, undefined, undefined, null)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.defaultResources is invalid — ${err.message}`, { cause: err })
+      }
+      this._defaultResources = merged
+    } else {
+      throw new TypeError('K8sBackend: opts.defaultResources must be an object or null')
+    }
+
+    // Namespace-level (per-tenant) ResourceQuota / LimitRange (#5142). These are
+    // OPT-IN: when unset the namespace-ensure path is unchanged. Build the canonical
+    // K8s spec up-front so a malformed quantity surfaces at construction rather than
+    // at the first createEnvironment call (mirrors defaultResources).
+    //   - undefined/null → feature off (no quota / limitrange ensured)
+    //   - object         → validated + cached spec, ensured per tenant namespace
+    // Re-scope any builder failure to the constructor option (mirrors how
+    // defaultResources wraps buildResourceBlock above) — the builders blame
+    // `namespaceQuota.*` via _validateResourceQuantity's `createEnvironment:`
+    // prefix, which points at the wrong call site for constructor config. The
+    // original error is preserved as `cause`.
+    if (namespaceQuota == null) {
+      this._namespaceQuotaSpec = null
+    } else {
+      try {
+        this._namespaceQuotaSpec = buildResourceQuotaSpec(namespaceQuota)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.namespaceQuota is invalid — ${err.message}`, { cause: err })
+      }
+    }
+    if (namespaceLimitRange == null) {
+      this._namespaceLimitRangeSpec = null
+    } else {
+      try {
+        this._namespaceLimitRangeSpec = buildLimitRangeSpec(namespaceLimitRange)
+      } catch (err) {
+        throw new Error(`K8sBackend: opts.namespaceLimitRange is invalid — ${err.message}`, { cause: err })
+      }
+    }
+    // Namespaces whose ResourceQuota / LimitRange we have already ensured this
+    // process, so repeated createEnvironment calls for the same tenant skip the
+    // read/create roundtrip (mirrors _ensuredNamespaces).
+    this._ensuredQuotas = new Set()
+    this._ensuredLimitRanges = new Set()
+
     this._connectMode = connectMode ?? 'portforward'
 
     if (_coreV1Api) {
@@ -259,16 +745,204 @@ export class K8sBackend {
   /**
    * Resolve the effective namespace for a per-call invocation.
    *
-   * Returns the per-call override when provided (including the empty string —
-   * see #3493), otherwise falls back to the constructor-stored namespace.
-   * Uses `??` so an explicit `''` is preserved verbatim and surfaces to the
-   * K8s API rather than being silently rewritten to the default.
+   * Precedence (highest first):
+   *   1. Explicit per-call `callNamespace` — including the empty string (#3493).
+   *      `??` preserves `''` verbatim so it surfaces to the K8s API (and is
+   *      rejected by `_validateNamespace`) rather than being silently rewritten.
+   *   2. Identity-derived namespace (#3194) — when `callNamespace` is
+   *      null/undefined and `identity` carries a userId/projectId, the
+   *      constructor-supplied `namespaceFor` mapping derives a tenant-isolated
+   *      namespace. A `null` from the mapping means "no identity" → fall through.
+   *   3. The constructor-stored static `namespace` (default 'default').
+   *
+   * The mapping function runs only on the fall-through path so an explicit
+   * namespace always wins and an identity-less call keeps the legacy behaviour.
    *
    * @param {string|undefined|null} callNamespace - Per-call namespace override
+   * @param {Object} [identity]            - Per-call tenant identity (#3194)
+   * @param {string} [identity.userId]     - User identity for namespace mapping
+   * @param {string} [identity.projectId]  - Project identity for namespace mapping
    * @returns {string} Resolved namespace
    */
-  _resolveNamespace(callNamespace) {
-    return callNamespace ?? this._namespace
+  _resolveNamespace(callNamespace, identity) {
+    if (callNamespace != null) return callNamespace
+    if (identity && (identity.userId != null || identity.projectId != null)) {
+      const mapped = this._namespaceFor(identity)
+      if (mapped != null) return mapped
+    }
+    return this._namespace
+  }
+
+  /**
+   * Idempotently ensure a namespace exists (#3194).
+   *
+   * Multi-tenant isolation requires the per-user/per-project namespace to be
+   * present before any Pod/Secret is created in it.  This method is safe to call
+   * repeatedly and concurrently:
+   *   - The first call reads the namespace; a 404 triggers a create.
+   *   - A create that races another creator (409 AlreadyExists) is swallowed —
+   *     the namespace exists, which is the post-condition we want.
+   *   - Once ensured, the name is cached for the process so subsequent calls are
+   *     a no-op (no API roundtrip).
+   *
+   * The static default namespace ('default', or any operator-supplied static
+   * `namespace`) is treated as pre-existing and never created — it is part of the
+   * cluster bootstrap, and a chroxy service account is unlikely to hold
+   * cluster-scoped namespace-create RBAC for it. Only namespaces *derived* from
+   * tenant identity are created on demand.
+   *
+   * @param {string} ns - A namespace name already validated as an RFC 1123 label
+   * @returns {Promise<void>}
+   */
+  async ensureNamespace(ns) {
+    if (this._ensuredNamespaces.has(ns)) return
+    // Never attempt to create the static fallback namespace — it is assumed to
+    // exist (cluster bootstrap) and chroxy may lack RBAC to create it.
+    if (ns === this._namespace) {
+      this._ensuredNamespaces.add(ns)
+      return
+    }
+
+    try {
+      await this._api.readNamespace({ name: ns })
+      this._ensuredNamespaces.add(ns)
+      return
+    } catch (err) {
+      if (!_isNotFound(err)) throw err
+      // 404 → fall through and create it.
+    }
+
+    const body = {
+      apiVersion: 'v1',
+      kind: 'Namespace',
+      metadata: {
+        name: ns,
+        labels: { 'app.kubernetes.io/managed-by': 'chroxy' },
+      },
+    }
+    try {
+      log.info(`Creating namespace ${ns}`)
+      await this._api.createNamespace({ body })
+    } catch (err) {
+      // Another creator won the race (or it already existed) — AlreadyExists is
+      // success for an idempotent ensure, not an error.
+      if (!_isAlreadyExists(err)) throw err
+      log.info(`Namespace ${ns} already exists (concurrent create)`)
+    }
+    this._ensuredNamespaces.add(ns)
+  }
+
+  /**
+   * Idempotently ensure a per-tenant `ResourceQuota` exists in `ns` (#5142).
+   *
+   * A namespace-scoped ResourceQuota caps the AGGREGATE CPU/memory (and
+   * optionally Pod count) a tenant may consume across ALL their Pods — distinct
+   * from the per-pod requests/limits #3195 sets on each container. It is the
+   * tenant-level guardrail that becomes meaningful now that #3194 gives every
+   * tenant their own namespace.
+   *
+   * Opt-in + safe by construction:
+   *   - No-op when the backend was constructed without `namespaceQuota`.
+   *   - No-op for the static default namespace (treated as cluster bootstrap,
+   *     chroxy is unlikely to hold RBAC there) — mirrors ensureNamespace.
+   *   - Read-or-create, idempotent, safe to call repeatedly/concurrently: a 404
+   *     read triggers a create; a 409 AlreadyExists on create is swallowed.
+   *   - Once ensured, the namespace is cached so subsequent calls are a no-op.
+   *
+   * @param {string} ns - A namespace name already validated as an RFC 1123 label
+   * @returns {Promise<void>}
+   */
+  async ensureResourceQuota(ns) {
+    if (this._namespaceQuotaSpec == null) return
+    if (this._ensuredQuotas.has(ns)) return
+    // Never touch the static default namespace — assumed pre-existing, and chroxy
+    // may lack RBAC to write ResourceQuota objects there.
+    if (ns === this._namespace) {
+      this._ensuredQuotas.add(ns)
+      return
+    }
+
+    const name = 'chroxy-quota'
+    try {
+      await this._api.readNamespacedResourceQuota({ name, namespace: ns })
+      this._ensuredQuotas.add(ns)
+      return
+    } catch (err) {
+      if (!_isNotFound(err)) throw err
+      // 404 → fall through and create it.
+    }
+
+    const body = {
+      apiVersion: 'v1',
+      kind: 'ResourceQuota',
+      metadata: {
+        name,
+        labels: { 'app.kubernetes.io/managed-by': 'chroxy' },
+      },
+      spec: { hard: this._namespaceQuotaSpec },
+    }
+    try {
+      log.info(`Creating ResourceQuota ${name} in namespace ${ns}`)
+      await this._api.createNamespacedResourceQuota({ namespace: ns, body })
+    } catch (err) {
+      // Another creator won the race (or it already existed) — AlreadyExists is
+      // success for an idempotent ensure, not an error.
+      if (!_isAlreadyExists(err)) throw err
+      log.info(`ResourceQuota ${name} already exists in ${ns} (concurrent create)`)
+    }
+    this._ensuredQuotas.add(ns)
+  }
+
+  /**
+   * Idempotently ensure a per-tenant `LimitRange` exists in `ns` (#5142).
+   *
+   * A namespace-scoped LimitRange supplies cluster-level DEFAULT requests/limits
+   * so Pods created WITHOUT explicit resources inherit sane values — a
+   * defence-in-depth layer on top of the backend's own DEFAULT_RESOURCES.
+   *
+   * Same opt-in + idempotency semantics as {@link ensureResourceQuota}:
+   *   - No-op when constructed without `namespaceLimitRange`.
+   *   - No-op for the static default namespace.
+   *   - Read-or-create (404 → create, 409 → swallowed), cached per process.
+   *
+   * @param {string} ns - A namespace name already validated as an RFC 1123 label
+   * @returns {Promise<void>}
+   */
+  async ensureLimitRange(ns) {
+    if (this._namespaceLimitRangeSpec == null) return
+    if (this._ensuredLimitRanges.has(ns)) return
+    if (ns === this._namespace) {
+      this._ensuredLimitRanges.add(ns)
+      return
+    }
+
+    const name = 'chroxy-limits'
+    try {
+      await this._api.readNamespacedLimitRange({ name, namespace: ns })
+      this._ensuredLimitRanges.add(ns)
+      return
+    } catch (err) {
+      if (!_isNotFound(err)) throw err
+      // 404 → fall through and create it.
+    }
+
+    const body = {
+      apiVersion: 'v1',
+      kind: 'LimitRange',
+      metadata: {
+        name,
+        labels: { 'app.kubernetes.io/managed-by': 'chroxy' },
+      },
+      spec: { limits: [this._namespaceLimitRangeSpec] },
+    }
+    try {
+      log.info(`Creating LimitRange ${name} in namespace ${ns}`)
+      await this._api.createNamespacedLimitRange({ namespace: ns, body })
+    } catch (err) {
+      if (!_isAlreadyExists(err)) throw err
+      log.info(`LimitRange ${name} already exists in ${ns} (concurrent create)`)
+    }
+    this._ensuredLimitRanges.add(ns)
   }
 
   /**
@@ -287,6 +961,28 @@ export class K8sBackend {
     return validateNamespace(ns, context)
   }
 
+  /**
+   * Resolve + validate the namespace for a per-call invocation in one step
+   * (#3194).  Reads `namespace`, `userId`, and `projectId` from the caller's
+   * opts, runs them through `_resolveNamespace` (explicit > identity > static),
+   * then validates the result against RFC 1123.  Used by every per-call site so
+   * identity-based isolation and validation stay consistent.
+   *
+   * @param {Object} opts             - The method's opts object
+   * @param {string} [opts.namespace] - Explicit namespace override
+   * @param {string} [opts.userId]    - Tenant identity
+   * @param {string} [opts.projectId] - Project identity
+   * @param {string} context          - Call-site label for the error message
+   * @returns {string} Validated namespace
+   */
+  _namespaceForCall(opts, context) {
+    const resolved = this._resolveNamespace(opts.namespace, {
+      userId: opts.userId,
+      projectId: opts.projectId,
+    })
+    return this._validateNamespace(resolved, context)
+  }
+
   // ─────────────────────────────────────────────────────────────────────────
   // createEnvironment — create a sidecar Pod + per-Pod Secret
   // ─────────────────────────────────────────────────────────────────────────
@@ -299,14 +995,59 @@ export class K8sBackend {
    * Returns as soon as `createNamespacedPod` resolves — the Pod has been accepted
    * by the API server but may not yet be scheduled or Running.
    *
-   * Workspace mount strategy — hostPath:
-   *   `opts.cwd` is mounted into the Pod as a `hostPath` volume at `/workspace`.
-   *   This is the simplest strategy for local clusters (kind, minikube, Docker
-   *   Desktop) where the Node running the Pod shares the host filesystem.  For
-   *   production clusters where Pods run on remote nodes the host path will not
-   *   exist; operators should provision a PVC pre-populated with the workspace and
-   *   pass it via `opts.mounts` instead.  Cluster-side requirement: the K8s node
-   *   must be able to read the path provided in opts.cwd from its local filesystem.
+   * Workspace mount strategies (mutually exclusive — pick exactly one):
+   *
+   * 1. hostPath (single-node clusters) — pass `opts.cwd`:
+   *      `opts.cwd` is mounted into the Pod as a `hostPath` volume at `/workspace`.
+   *      This is the simplest strategy for local clusters (kind, minikube, Docker
+   *      Desktop) where the Node running the Pod shares the host filesystem.
+   *      Cluster-side requirement: the K8s node the Pod schedules onto must be
+   *      able to read `opts.cwd` from its local filesystem.
+   *
+   *      Failure mode on multi-node clusters: the Pod schedules onto a node that
+   *      does not have the path, which `hostPath` `DirectoryOrCreate` silently
+   *      papers over by creating an empty directory — the workload then sees an
+   *      empty workspace with no surface error.
+   *
+   * 2. PersistentVolumeClaim (multi-node clusters) — pass `opts.workspacePVC`:
+   *      `opts.workspacePVC = { claimName, mountPath?, readOnly? }` translates to
+   *      a `persistentVolumeClaim` volume + matching `volumeMount`.  This is the
+   *      recommended strategy for production / multi-node clusters where the
+   *      workspace must follow the Pod across nodes.  Operators are responsible
+   *      for provisioning the PVC and seeding its contents out-of-band; the
+   *      backend only references the claim by name.  `mountPath` defaults to
+   *      `/workspace` to match the hostPath strategy.
+   *
+   *      Migration from hostPath → PVC:
+   *        - Drop `opts.cwd` and pass `opts.workspacePVC.claimName` instead.
+   *        - Pre-populate the PVC with the workspace contents (e.g. an initContainer
+   *          that clones a repo, a Job that rsyncs from object storage, or a
+   *          manual `kubectl cp`) before relying on the workspace inside the Pod.
+   *        - `opts.cwd` and `opts.workspacePVC` are mutually exclusive — passing
+   *          both throws.  Operators must explicitly choose one strategy.
+   *
+   * 3. git-clone (Phase 1, #3193) — pass `opts.gitRepo`:
+   *      `opts.gitRepo = { url, branch?, commit?, depth?, mountPath? }` (or a bare
+   *      URL string) provisions an ephemeral `emptyDir` workspace that a
+   *      `git clone` init container populates before the main container starts.
+   *      This is the K8s-native answer to "the Pod runs on a remote node that
+   *      can't see the operator's filesystem" without requiring an out-of-band
+   *      PVC seed step. Branch / commit pinning and shallow `depth` are honoured.
+   *      The git binary comes from the constructor `gitImage` (default
+   *      `alpine/git:latest`).
+   *
+   *      Persistence caveat: `emptyDir` is tied to the Pod lifecycle — when the
+   *      Pod is deleted the cloned tree is gone. PVC-backed persistence for the
+   *      git-clone strategy is the explicit follow-up (#3385); until then a
+   *      git-clone workspace is for ephemeral, single-Pod sessions only.
+   *
+   *      mountPath caveat (#3193 phase 1): the default `mountPath` of
+   *      `/workspace` aligns with `streamCliInEnvironment`'s host→Pod cwd
+   *      remap, so exec sessions land on the cloned tree automatically. A
+   *      NON-default `mountPath` is supported in the Pod manifest, but the cwd
+   *      remap still targets `/workspace` — callers that override `mountPath`
+   *      must pass the matching `cwd` to `streamCliInEnvironment` themselves.
+   *      Per-Pod workspace-root tracking is left as follow-up.
    *
    * **Security warning — hostPath privilege escalation:**
    *   `hostPath` volumes (used for both `opts.cwd` and `opts.mounts`) give the
@@ -321,11 +1062,12 @@ export class K8sBackend {
    *   PSA `restricted` and `baseline` policies both prohibit it, so Pod
    *   creation will be rejected by the PSA admission controller (the API
    *   server returns a 4xx at create time, before the Pod ever reaches the
-   *   scheduler).
+   *   scheduler).  The PVC strategy above does NOT have this restriction and
+   *   is the safe default for shared / multi-tenant clusters.
    *
    *   **This mode is not safe for shared / multi-tenant clusters.** Operators
-   *   running on shared infrastructure should use a PVC-based workspace
-   *   strategy (see follow-up #3385) instead of relying on `hostPath`. Use
+   *   running on shared infrastructure should use the PVC-based workspace
+   *   strategy (`opts.workspacePVC`) instead of relying on `hostPath`. Use
    *   this backend only on single-tenant clusters where you control every
    *   workload, or on a namespace where Pod Security Admission is enforced
    *   at the `privileged` level (or with an equivalent policy exemption) so
@@ -333,13 +1075,39 @@ export class K8sBackend {
    *
    * @param {Object} opts - See Backend interface in types.js
    * @param {string}   opts.envId          - Unique environment ID
-   * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod
+   * @param {string}   [opts.cwd]          - Host path to mount as /workspace inside the Pod (hostPath strategy).
+   *   Mutually exclusive with `opts.workspacePVC` — passing both throws.
+   * @param {Object}   [opts.workspacePVC] - PVC-based workspace strategy for multi-node clusters.
+   * @param {string}   opts.workspacePVC.claimName   - Name of a pre-provisioned PVC in the target namespace
+   * @param {string}   [opts.workspacePVC.mountPath] - Pod-side mount path (default: `/workspace`)
+   * @param {boolean}  [opts.workspacePVC.readOnly]  - Mount the PVC read-only (default: false)
+   * @param {string|Object} [opts.gitRepo]  - git-clone workspace strategy (#3193). A bare URL string is
+   *   shorthand for `{ url }`. Provisions an `emptyDir` workspace populated by a `git clone` init container.
+   *   Mutually exclusive with `opts.cwd` and `opts.workspacePVC` — passing more than one throws.
+   * @param {string}   opts.gitRepo.url        - Repo URL to clone (required; must not start with "-")
+   * @param {string}   [opts.gitRepo.branch]   - Branch/tag to check out at clone time (`--branch`)
+   * @param {string}   [opts.gitRepo.commit]   - Exact commit SHA to pin via a follow-up checkout init container
+   * @param {number}   [opts.gitRepo.depth]    - Positive integer for a shallow clone (`--depth`)
+   * @param {string}   [opts.gitRepo.mountPath] - Pod-side workspace mount path (default: `/workspace`)
    * @param {string}   [opts.image]        - Overrides the constructor sidecarImage
-   * @param {string}   [opts.memoryLimit]  - K8s memory quantity string (e.g. "2Gi").
-   *   Applied to both `resources.limits.memory` and `resources.requests.memory`.
+   * @param {Object}   [opts.resources]    - Structured resource requests/limits (#3195).
+   *   All four fields are optional K8s quantity strings, validated before any API call:
+   *     - `resources.cpu`         → `resources.requests.cpu`    (e.g. "500m", "1")
+   *     - `resources.memory`      → `resources.requests.memory` (e.g. "512Mi", "1Gi")
+   *     - `resources.cpuLimit`    → `resources.limits.cpu`      (e.g. "2")
+   *     - `resources.memoryLimit` → `resources.limits.memory`   (e.g. "4Gi")
+   *   Unset fields fall back to the legacy flat opts (below), then to the
+   *   constructor `defaultResources` (default {@link DEFAULT_RESOURCES}). Pass the
+   *   constructor `defaultResources: null` to omit defaults entirely.
+   * @param {string}   [opts.memoryLimit]  - Legacy flat K8s memory quantity string (e.g. "2Gi").
+   *   Applied to BOTH `resources.limits.memory` and `resources.requests.memory` for the
+   *   memory dimension (pre-#3195 behaviour). Superseded by `opts.resources.memory` /
+   *   `opts.resources.memoryLimit` when those are set.
    *   Accepts Docker-style suffixes ("g"/"m") and standard K8s suffixes ("Gi"/"Mi").
-   * @param {string}   [opts.cpuLimit]     - K8s CPU quantity string (e.g. "2" or "500m").
-   *   Applied to both `resources.limits.cpu` and `resources.requests.cpu`.
+   * @param {string}   [opts.cpuLimit]     - Legacy flat K8s CPU quantity string (e.g. "2" or "500m").
+   *   Applied to BOTH `resources.limits.cpu` and `resources.requests.cpu` for the CPU
+   *   dimension (pre-#3195 behaviour). Superseded by `opts.resources.cpu` /
+   *   `opts.resources.cpuLimit` when those are set.
    *   A plain integer or float (e.g. "2", "0.5") is valid K8s CPU quantity syntax.
    * @param {number[]|string[]} [opts.forwardPorts] - Extra ports to expose from the container
    *   (in addition to the built-in AGENT_PORT).  Each value may be a bare port number
@@ -349,7 +1117,14 @@ export class K8sBackend {
    *   `hostPath` volume + corresponding `volumeMount`.  The volume name is derived
    *   from the entry index ("extra-vol-0", "extra-vol-1", …).
    * @param {Object.<string,string>} [opts.containerEnv] - Extra environment variables
-   * @param {string}   [opts.namespace]    - Overrides the constructor default namespace
+   * @param {string}   [opts.namespace]    - Explicit namespace; overrides both the identity mapping
+   *   and the constructor default.
+   * @param {string}   [opts.userId]       - Tenant identity for namespace isolation (#3194). When set
+   *   (and no explicit `opts.namespace`), the Pod/Secret are created in the namespace produced by the
+   *   constructor `namespaceFor` mapping (default `chroxy-user-<userId>`). The namespace is created
+   *   on demand if it does not yet exist.
+   * @param {string}   [opts.projectId]    - Project identity for namespace isolation (#3194), used by
+   *   the default mapping only when no `userId` is supplied.
    * @param {'Always'|'IfNotPresent'|'Never'} [opts.imagePullPolicy] - Per-call override for the
    *   container imagePullPolicy. Falls back to the constructor-level option when unset.
    * @returns {Promise<{ containerId: string, containerCliPath: string, agentToken: string, secretName: string }>}
@@ -360,12 +1135,31 @@ export class K8sBackend {
    */
   async createEnvironment(opts) {
     const {
-      envId, cwd, containerEnv, namespace,
-      memoryLimit, cpuLimit, forwardPorts, mounts,
+      envId, cwd, containerEnv, namespace, userId, projectId,
+      memoryLimit, cpuLimit, resources: callResources, forwardPorts, mounts,
       imagePullPolicy: callImagePullPolicy,
+      workspacePVC, gitRepo,
     } = opts
     validateImagePullPolicy(callImagePullPolicy, 'createEnvironment opts')
-    const ns = this._validateNamespace(this._resolveNamespace(namespace), 'createEnvironment')
+    // Workspace-strategy validation: three mutually-exclusive strategies decide
+    // what backs /workspace:
+    //   - opts.cwd          → hostPath volume      (single-node clusters, #3316)
+    //   - opts.workspacePVC → persistentVolumeClaim (multi-node clusters, #3385)
+    //   - opts.gitRepo      → git-clone init container into an emptyDir (#3193)
+    // Accept exactly one — passing more than one throws. The alternative would
+    // be a silent precedence rule that hides operator intent.
+    validateWorkspacePVC(workspacePVC, cwd)
+    const gitClone = validateGitRepo(gitRepo, cwd, workspacePVC)
+    const ns = this._namespaceForCall({ namespace, userId, projectId }, 'createEnvironment')
+    // Ensure the tenant namespace exists before provisioning any resource in it
+    // (#3194). Idempotent + cached; a no-op for the static default namespace.
+    await this.ensureNamespace(ns)
+    // Ensure per-tenant namespace-level guardrails (#5142). Both are opt-in
+    // (no-op unless the backend was constructed with namespaceQuota /
+    // namespaceLimitRange) and idempotent + cached. Run after ensureNamespace so
+    // the namespace is guaranteed to exist before the quota/limitrange is written.
+    await this.ensureResourceQuota(ns)
+    await this.ensureLimitRange(ns)
     const podName = `chroxy-env-${envId}`
     const secretName = `chroxy-token-${envId}`
     // K8sBackend ALWAYS runs the chroxy-pod-agent sidecar — the sidecar is
@@ -384,6 +1178,14 @@ export class K8sBackend {
         parsedMounts.push(_parseMountString(mounts[i]))
       }
     }
+
+    // Build + validate the resources block up-front too (#3195). A malformed
+    // quantity throws here, BEFORE the Secret/Pod create, so a bad value never
+    // leaks a half-provisioned Secret. Defaults are applied unless the operator
+    // disabled them (constructor `defaultResources: null`).
+    const resources = buildResourceBlock(
+      callResources, cpuLimit, memoryLimit, this._defaultResources,
+    )
 
     // 1. Generate per-Pod auth token
     const agentToken = randomBytes(32).toString('base64url')
@@ -432,15 +1234,41 @@ export class K8sBackend {
     const imagePullPolicy = callImagePullPolicy || this._imagePullPolicy
 
     // 4. Build volumes + volumeMounts
-    // 4a. Workspace: mount opts.cwd as /workspace via hostPath.
-    //     Requirement: the K8s node must be able to read opts.cwd from its local
-    //     filesystem.  Satisfied automatically for single-node clusters (kind,
-    //     minikube, Docker Desktop).  For multi-node clusters operators must ensure
-    //     the path exists on the scheduled node or use a PVC passed via opts.mounts.
+    // 4a. Workspace volume — one of three mutually-exclusive strategies:
+    //   - `opts.cwd`          → hostPath volume (single-node clusters, #3316)
+    //   - `opts.workspacePVC` → persistentVolumeClaim volume (multi-node clusters, #3385)
+    //   - `opts.gitRepo`      → emptyDir populated by a git-clone init container (#3193)
+    //   See the createEnvironment JSDoc for the strategy comparison and migration
+    //   guidance. The validators above already rejected any both-set combination.
     const volumes = []
     const volumeMounts = []
+    // Init containers populate the workspace before the main container starts
+    // (git-clone strategy). Empty for the other strategies.
+    const initContainers = []
 
-    if (cwd) {
+    if (gitClone) {
+      // git-clone strategy: an emptyDir is shared between the clone init
+      // container(s) and the main container. The init container clones the repo
+      // into the emptyDir; the main container then sees the populated tree.
+      // emptyDir is ephemeral — PVC-backed persistence is the explicit
+      // follow-up (#3385); see the createEnvironment JSDoc.
+      volumes.push({ name: 'workspace', emptyDir: {} })
+      volumeMounts.push({ name: 'workspace', mountPath: gitClone.mountPath })
+      const cloneContainers = buildGitCloneInitContainers(gitClone, this._gitImage)
+      if (imagePullPolicy) {
+        for (const c of cloneContainers) c.imagePullPolicy = imagePullPolicy
+      }
+      initContainers.push(...cloneContainers)
+    } else if (workspacePVC) {
+      const mountPath = workspacePVC.mountPath || '/workspace'
+      volumes.push({
+        name: 'workspace',
+        persistentVolumeClaim: { claimName: workspacePVC.claimName },
+      })
+      const vm = { name: 'workspace', mountPath }
+      if (workspacePVC.readOnly) vm.readOnly = true
+      volumeMounts.push(vm)
+    } else if (cwd) {
       volumes.push({
         name: 'workspace',
         hostPath: { path: cwd, type: 'DirectoryOrCreate' },
@@ -488,27 +1316,9 @@ export class K8sBackend {
       }
     }
 
-    // 6. Build resource limits/requests.
-    //    Convert Docker-style suffixes (g → Gi, m → Mi) to K8s quantity strings.
-    //    A plain integer/float string (e.g. "2", "0.5") is already valid K8s CPU syntax.
-    //    Note: the g→Gi / m→Mi mapping errs generous (~7 % / ~5 % over SI).
-    //    See _normaliseMemoryQuantity JSDoc for details.
-    const resources = {}
-    if (memoryLimit || cpuLimit) {
-      const limits = {}
-      const requests = {}
-      if (memoryLimit) {
-        const mem = _normaliseMemoryQuantity(memoryLimit)
-        limits.memory = mem
-        requests.memory = mem
-      }
-      if (cpuLimit) {
-        limits.cpu = String(cpuLimit)
-        requests.cpu = String(cpuLimit)
-      }
-      resources.limits = limits
-      resources.requests = requests
-    }
+    // 6. Resources block (requests/limits) was built + validated up-front in
+    //    step 0 (`resources`). See buildResourceBlock for the precedence rules
+    //    and DEFAULT_RESOURCES for the defaults (#3195).
 
     // 7. Assemble container spec
     const containerSpec = {
@@ -544,6 +1354,10 @@ export class K8sBackend {
     const podSpec = {
       restartPolicy: 'Never',
       containers: [containerSpec],
+    }
+
+    if (initContainers.length > 0) {
+      podSpec.initContainers = initContainers
     }
 
     if (volumes.length > 0) {
@@ -607,12 +1421,14 @@ export class K8sBackend {
    *
    * @param {string} podName - Pod name (the containerId handle stored by EnvironmentManager)
    * @param {Object} [opts]
-   * @param {string} [opts.namespace]   - Overrides the constructor default namespace
+   * @param {string} [opts.namespace]   - Explicit namespace override
+   * @param {string} [opts.userId]      - Tenant identity for namespace isolation (#3194)
+   * @param {string} [opts.projectId]   - Project identity for namespace isolation (#3194)
    * @param {string} [opts.secretName]  - Per-Pod Secret to delete (default: derived from podName)
    * @returns {Promise<void>}
    */
   async destroyEnvironment(podName, opts = {}) {
-    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'destroyEnvironment')
+    const ns = this._namespaceForCall(opts, 'destroyEnvironment')
     const secretName = opts.secretName || _deriveSecretName(podName)
 
     // Always drop the cached token first so a partial failure can't leave
@@ -668,12 +1484,14 @@ export class K8sBackend {
    *
    * @param {string} podName
    * @param {Object} [opts]
-   * @param {string} [opts.namespace]
+   * @param {string} [opts.namespace]  - Explicit namespace override
+   * @param {string} [opts.userId]     - Tenant identity for namespace isolation (#3194)
+   * @param {string} [opts.projectId]  - Project identity for namespace isolation (#3194)
    * @returns {Promise<boolean>}
    * @throws {Error} If the Pod does not exist
    */
   async getEnvironmentStatus(podName, opts = {}) {
-    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'getEnvironmentStatus')
+    const ns = this._namespaceForCall(opts, 'getEnvironmentStatus')
     const result = await this._api.readNamespacedPod({ name: podName, namespace: ns })
     const phase = result?.status?.phase
     return phase === 'Running'
@@ -800,16 +1618,18 @@ export class K8sBackend {
    * @param {string}   [opts.agentToken] - Override the registered bearer token (test seam)
    * @param {string}   [opts.containerCliPath] - Pod-side cli.js path (default fallback)
    * @param {string}   [opts.hostCwd]   - Host CWD mount root for path remapping
-   * @param {string}   [opts.namespace] - Namespace override
+   * @param {string}   [opts.namespace] - Explicit namespace override
+   * @param {string}   [opts.userId]    - Tenant identity for namespace isolation (#3194)
+   * @param {string}   [opts.projectId] - Project identity for namespace isolation (#3194)
    * @returns {SidecarProcess} ChildProcess-shaped handle
    */
   streamCliInEnvironment(podName, opts = {}) {
     const {
-      cmd, args = [], env, cwd, signal, namespace,
+      cmd, args = [], env, cwd, signal,
       containerCliPath = DEFAULT_CONTAINER_CLI_PATH,
       hostCwd,
     } = opts
-    const ns = this._validateNamespace(this._resolveNamespace(namespace), 'streamCliInEnvironment')
+    const ns = this._namespaceForCall(opts, 'streamCliInEnvironment')
 
     // Prefer explicit token (test seam), fall back to the in-memory cache, and
     // lazily fetch from the K8s Secret when neither is available (e.g. after a
@@ -919,11 +1739,13 @@ export class K8sBackend {
    *
    * @param {string} podName - Pod name (the containerId handle)
    * @param {Object} [opts]
-   * @param {string} [opts.namespace] - Overrides the constructor default namespace
+   * @param {string} [opts.namespace]  - Explicit namespace override
+   * @param {string} [opts.userId]     - Tenant identity for namespace isolation (#3194)
+   * @param {string} [opts.projectId]  - Project identity for namespace isolation (#3194)
    * @returns {Promise<boolean>}
    */
   async reconnectAgentToken(podName, opts = {}) {
-    const ns = this._validateNamespace(this._resolveNamespace(opts.namespace), 'reconnectAgentToken')
+    const ns = this._namespaceForCall(opts, 'reconnectAgentToken')
     const token = await this._readAgentToken(podName, ns)
     return token !== null
   }
@@ -944,8 +1766,48 @@ export class K8sBackend {
     return Promise.reject(notImplemented('removeImage'))
   }
 
-  listEnvironments() {
-    return Promise.reject(notImplemented('listEnvironments'))
+  // ─────────────────────────────────────────────────────────────────────────
+  // listEnvironments — list chroxy-managed Pods, scoped to one namespace (#3194)
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /**
+   * List the names of chroxy-managed Pods in a single namespace (#3194).
+   *
+   * Multi-tenant isolation: the list is scoped to exactly one namespace — the
+   * one resolved from the caller's identity (or the explicit/static namespace) —
+   * and filtered by the `app.kubernetes.io/managed-by=chroxy` label so it never
+   * returns Pods belonging to other tenants or unrelated workloads in the same
+   * namespace.  There is intentionally no cluster-wide list: a tenant must only
+   * ever see its own environments.
+   *
+   * A brand-new tenant whose namespace has not been created yet has, by
+   * definition, no environments.  The K8s API returns 404 ("namespace not
+   * found") for `listNamespacedPod` in that case, which we translate to an empty
+   * list rather than surfacing as an error.
+   *
+   * @param {Object} [opts]
+   * @param {string} [opts.namespace]  - Explicit namespace to list
+   * @param {string} [opts.userId]     - Tenant identity for namespace resolution
+   * @param {string} [opts.projectId]  - Project identity for namespace resolution
+   * @returns {Promise<string[]>} Pod names (the containerId handles) in the namespace
+   */
+  async listEnvironments(opts = {}) {
+    const ns = this._namespaceForCall(opts, 'listEnvironments')
+    let result
+    try {
+      result = await this._api.listNamespacedPod({
+        namespace: ns,
+        labelSelector: 'app.kubernetes.io/managed-by=chroxy',
+      })
+    } catch (err) {
+      // The tenant namespace does not exist yet → no environments.
+      if (_isNotFound(err)) return []
+      throw err
+    }
+    const items = result?.items || []
+    return items
+      .map((pod) => pod?.metadata?.name)
+      .filter((name) => typeof name === 'string' && name.length > 0)
   }
 
   commitEnvironment(_containerId, _imageTag) {
@@ -1797,6 +2659,16 @@ function _isNotFound(err) {
     err?.body?.code === 404
 }
 
+// Detects a Kubernetes 409 Conflict (AlreadyExists) across the client shapes,
+// mirroring _isNotFound. Used to make namespace create idempotent: a 409 from
+// createNamespace means another creator won the race (#3194).
+function _isAlreadyExists(err) {
+  return err?.code === 409 ||
+    err?.statusCode === 409 ||
+    err?.response?.statusCode === 409 ||
+    err?.body?.code === 409
+}
+
 function _sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms))
 }
@@ -1937,4 +2809,222 @@ function _normaliseMemoryQuantity(value) {
     const map = { g: 'Gi', G: 'Gi', m: 'Mi', M: 'Mi', k: 'Ki', K: 'Ki' }
     return num + (map[unit] || unit)
   })
+}
+
+// Valid Kubernetes CPU quantity: a plain decimal number ("2", "0.5", "1.5")
+// or a milli-cpu value with the `m` suffix ("500m", "1500m"). Exponent /
+// binary-SI suffixes are not meaningful for CPU and are rejected.
+const _CPU_QUANTITY_RE = /^(?:\d+(?:\.\d+)?|\.\d+|\d+m)$/
+
+// Valid Kubernetes memory quantity AFTER normalisation: a number with an
+// optional binary-SI ("Ki"/"Mi"/"Gi"/"Ti"/"Pi"/"Ei"), decimal-SI
+// ("k"/"M"/"G"/"T"/"P"/"E"), or exponent ("e6") suffix, or a bare byte count.
+// We normalise Docker-style lone-letter suffixes first, then validate.
+const _MEMORY_QUANTITY_RE =
+  /^(?:\d+(?:\.\d+)?|\.\d+)(?:[eE][+-]?\d+|Ki|Mi|Gi|Ti|Pi|Ei|[kKMGTPE])?$/
+
+/**
+ * Validate + normalise a single resource quantity string (#3195).
+ *
+ * @param {string} value    - The caller-supplied quantity (e.g. "500m", "2Gi")
+ * @param {'cpu'|'memory'} kind - Which quantity grammar to enforce
+ * @param {string} field    - Field label for the error message (e.g. "resources.cpu")
+ * @returns {string} The validated (and, for memory, normalised) quantity string
+ * @throws {Error} If `value` is not a string or is not a valid K8s quantity
+ */
+function _validateResourceQuantity(value, kind, field) {
+  if (typeof value !== 'string' || value.trim() === '') {
+    throw new Error(
+      `createEnvironment: ${field} must be a non-empty K8s quantity string`,
+    )
+  }
+  const trimmed = value.trim()
+  if (kind === 'cpu') {
+    if (!_CPU_QUANTITY_RE.test(trimmed)) {
+      throw new Error(
+        `createEnvironment: ${field} "${value}" is not a valid K8s CPU quantity ` +
+        '(expected e.g. "500m", "1", "0.5")',
+      )
+    }
+    return trimmed
+  }
+  // memory
+  const normalised = _normaliseMemoryQuantity(trimmed)
+  if (!_MEMORY_QUANTITY_RE.test(normalised)) {
+    throw new Error(
+      `createEnvironment: ${field} "${value}" is not a valid K8s memory quantity ` +
+      '(expected e.g. "512Mi", "2Gi", "1G")',
+    )
+  }
+  return normalised
+}
+
+/**
+ * Build a Pod container `resources` block from caller opts + defaults (#3195).
+ *
+ * Resolution precedence per field (highest first):
+ *   1. The structured `opts.resources` object: `{ cpu, memory, cpuLimit, memoryLimit }`
+ *      where `cpu`/`memory` map to `requests` and `cpuLimit`/`memoryLimit` to `limits`.
+ *   2. The legacy flat opts `opts.cpuLimit` / `opts.memoryLimit` (applied to BOTH
+ *      the request and the limit for that dimension — the pre-#3195 behaviour).
+ *   3. The supplied `defaults` object (constructor `defaultResources`, itself
+ *      seeded from the module-level {@link DEFAULT_RESOURCES}). Pass `null` to
+ *      disable defaults so only explicit per-call values produce a block.
+ *
+ * Every resolved quantity is validated against the K8s quantity grammar; an
+ * invalid string throws before the Pod/Secret are created — `createEnvironment`
+ * awaits `ensureNamespace()` first, so the tenant namespace may already exist,
+ * but no workload is provisioned with a bad value.
+ *
+ * @param {Object} [resources]            - opts.resources (structured form)
+ * @param {string} [legacyCpuLimit]       - opts.cpuLimit (flat form)
+ * @param {string} [legacyMemoryLimit]    - opts.memoryLimit (flat form)
+ * @param {Object|null} [defaults=DEFAULT_RESOURCES] - Per-field defaults, or null to disable
+ * @returns {{ requests?: Object, limits?: Object }} A resources block (possibly empty)
+ */
+function _resolveResourceField(structured, structuredLabel, legacy, legacyLabel, dflt, defaultLabel) {
+  if (structured != null) return { value: structured, field: structuredLabel }
+  if (legacy != null) return { value: legacy, field: legacyLabel }
+  if (dflt != null) return { value: dflt, field: defaultLabel }
+  return { value: null, field: null }
+}
+
+export function buildResourceBlock(resources, legacyCpuLimit, legacyMemoryLimit, defaults = DEFAULT_RESOURCES) {
+  if (resources != null && (typeof resources !== 'object' || Array.isArray(resources))) {
+    throw new Error('createEnvironment: opts.resources must be an object')
+  }
+  const r = resources || {}
+  const d = defaults || {}
+
+  // Resolve each of the four dimensions through the precedence chain,
+  // tracking which source actually supplied the value so a validation
+  // failure names the option the operator set (#3195 review) — the legacy
+  // flat opt or a constructor default — instead of always blaming
+  // `resources.*`.
+  const cpuRequest = _resolveResourceField(r.cpu, 'resources.cpu', legacyCpuLimit, 'cpuLimit', d.cpu, 'defaultResources.cpu')
+  const memRequest = _resolveResourceField(r.memory, 'resources.memory', legacyMemoryLimit, 'memoryLimit', d.memory, 'defaultResources.memory')
+  const cpuLimit = _resolveResourceField(r.cpuLimit, 'resources.cpuLimit', legacyCpuLimit, 'cpuLimit', d.cpuLimit, 'defaultResources.cpuLimit')
+  const memLimit = _resolveResourceField(r.memoryLimit, 'resources.memoryLimit', legacyMemoryLimit, 'memoryLimit', d.memoryLimit, 'defaultResources.memoryLimit')
+
+  const requests = {}
+  const limits = {}
+  if (cpuRequest.value != null) requests.cpu = _validateResourceQuantity(cpuRequest.value, 'cpu', cpuRequest.field)
+  if (memRequest.value != null) requests.memory = _validateResourceQuantity(memRequest.value, 'memory', memRequest.field)
+  if (cpuLimit.value != null) limits.cpu = _validateResourceQuantity(cpuLimit.value, 'cpu', cpuLimit.field)
+  if (memLimit.value != null) limits.memory = _validateResourceQuantity(memLimit.value, 'memory', memLimit.field)
+
+  const block = {}
+  if (Object.keys(requests).length > 0) block.requests = requests
+  if (Object.keys(limits).length > 0) block.limits = limits
+  return block
+}
+
+/**
+ * Map a tenant-friendly quota spec to the K8s `ResourceQuota.spec.hard` keys
+ * (#5142).
+ *
+ * The operator supplies a small, intention-revealing object; this builder
+ * translates it into the canonical `hard` map the API server understands and
+ * validates every quantity through the same grammar the per-pod path uses
+ * (`_validateResourceQuantity`). CPU/memory values become the standard
+ * `requests.*` / `limits.*` aggregate keys, and the pod count maps to the
+ * `pods` object-count quota.
+ *
+ *   { cpu, memory }             → requests.cpu / requests.memory
+ *   { cpuLimit, memoryLimit }   → limits.cpu   / limits.memory
+ *   { pods }                    → pods         (max object count, integer)
+ *
+ * @param {Object} spec
+ * @param {string} [spec.cpu]         - Aggregate CPU request cap (e.g. "8")
+ * @param {string} [spec.memory]      - Aggregate memory request cap (e.g. "16Gi")
+ * @param {string} [spec.cpuLimit]    - Aggregate CPU limit cap (e.g. "16")
+ * @param {string} [spec.memoryLimit] - Aggregate memory limit cap (e.g. "32Gi")
+ * @param {number} [spec.pods]        - Max number of Pods in the namespace
+ * @returns {Object} A `ResourceQuota.spec.hard` map (at least one entry)
+ * @throws {Error} If the spec is malformed or yields no caps
+ */
+export function buildResourceQuotaSpec(spec) {
+  if (spec == null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error('K8sBackend: namespaceQuota must be an object')
+  }
+  const hard = {}
+  if (spec.cpu != null) {
+    hard['requests.cpu'] = _validateResourceQuantity(spec.cpu, 'cpu', 'namespaceQuota.cpu')
+  }
+  if (spec.memory != null) {
+    hard['requests.memory'] = _validateResourceQuantity(spec.memory, 'memory', 'namespaceQuota.memory')
+  }
+  if (spec.cpuLimit != null) {
+    hard['limits.cpu'] = _validateResourceQuantity(spec.cpuLimit, 'cpu', 'namespaceQuota.cpuLimit')
+  }
+  if (spec.memoryLimit != null) {
+    hard['limits.memory'] = _validateResourceQuantity(spec.memoryLimit, 'memory', 'namespaceQuota.memoryLimit')
+  }
+  if (spec.pods != null) {
+    if (!Number.isInteger(spec.pods) || spec.pods < 1) {
+      throw new Error('K8sBackend: namespaceQuota.pods must be a positive integer')
+    }
+    // ResourceQuota `hard` values are all quantity strings, including counts.
+    hard.pods = String(spec.pods)
+  }
+  if (Object.keys(hard).length === 0) {
+    throw new Error(
+      'K8sBackend: namespaceQuota must set at least one of ' +
+      'cpu, memory, cpuLimit, memoryLimit, pods',
+    )
+  }
+  return hard
+}
+
+/**
+ * Map a tenant-friendly LimitRange spec to a single container-scoped
+ * `LimitRange.spec.limits[]` entry (#5142).
+ *
+ * A LimitRange supplies *namespace-level* defaults so Pods created WITHOUT
+ * explicit requests/limits inherit sane values at the cluster level — a
+ * defence-in-depth layer on top of the backend's own DEFAULT_RESOURCES. The
+ * operator supplies the same flat shape as `defaultResources`; this builder
+ * splits it into the `default` (limits) and `defaultRequest` (requests) maps a
+ * container-type LimitRange item expects, validating every quantity.
+ *
+ *   { cpu, memory }           → defaultRequest.cpu / defaultRequest.memory
+ *   { cpuLimit, memoryLimit } → default.cpu        / default.memory
+ *
+ * @param {Object} spec
+ * @param {string} [spec.cpu]         - Default CPU request (e.g. "250m")
+ * @param {string} [spec.memory]      - Default memory request (e.g. "256Mi")
+ * @param {string} [spec.cpuLimit]    - Default CPU limit (e.g. "1")
+ * @param {string} [spec.memoryLimit] - Default memory limit (e.g. "1Gi")
+ * @returns {{ type: 'Container', default?: Object, defaultRequest?: Object }}
+ *   A single LimitRange item (at least one of default/defaultRequest set)
+ * @throws {Error} If the spec is malformed or yields no defaults
+ */
+export function buildLimitRangeSpec(spec) {
+  if (spec == null || typeof spec !== 'object' || Array.isArray(spec)) {
+    throw new Error('K8sBackend: namespaceLimitRange must be an object')
+  }
+  const defaultRequest = {}
+  const defaultLimit = {}
+  if (spec.cpu != null) {
+    defaultRequest.cpu = _validateResourceQuantity(spec.cpu, 'cpu', 'namespaceLimitRange.cpu')
+  }
+  if (spec.memory != null) {
+    defaultRequest.memory = _validateResourceQuantity(spec.memory, 'memory', 'namespaceLimitRange.memory')
+  }
+  if (spec.cpuLimit != null) {
+    defaultLimit.cpu = _validateResourceQuantity(spec.cpuLimit, 'cpu', 'namespaceLimitRange.cpuLimit')
+  }
+  if (spec.memoryLimit != null) {
+    defaultLimit.memory = _validateResourceQuantity(spec.memoryLimit, 'memory', 'namespaceLimitRange.memoryLimit')
+  }
+  const item = { type: 'Container' }
+  if (Object.keys(defaultLimit).length > 0) item.default = defaultLimit
+  if (Object.keys(defaultRequest).length > 0) item.defaultRequest = defaultRequest
+  if (item.default == null && item.defaultRequest == null) {
+    throw new Error(
+      'K8sBackend: namespaceLimitRange must set at least one of ' +
+      'cpu, memory, cpuLimit, memoryLimit',
+    )
+  }
+  return item
 }

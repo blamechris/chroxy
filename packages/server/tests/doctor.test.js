@@ -3,7 +3,8 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, parse as parsePath, relative } from 'node:path'
-import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext } from '../src/doctor.js'
+import { runDoctorChecks, checkBinary, isBundledOrSupervisedContext, parseLeadingSemver, compareSemver, checkClaudeTuiCliVersion, checkTunnelRoutability } from '../src/doctor.js'
+import { TESTED_CLAUDE_TUI_CLI_VERSION } from '../src/claude-tui/tested-cli-version.js'
 
 /**
  * Integration tests for doctor.js.
@@ -61,6 +62,55 @@ describe('runDoctorChecks', () => {
     const { checks } = await runDoctorChecks({ providers: ['claude-sdk'] })
     const configCheck = checks.find(c => c.name === 'Config')
     assert.ok(configCheck)
+  })
+
+  describe('Billing check (#5821)', () => {
+    const AFTER = Date.UTC(2026, 5, 16) // one day into the programmatic-credit era
+    const BEFORE = Date.UTC(2026, 5, 1) // before the cutover
+
+    // The claude-sdk billing class depends on ANTHROPIC_API_KEY (env → api-key
+    // billing). Pin the env per test so results don't depend on the dev/CI shell.
+    const withEnv = async (apiKey, fn) => {
+      const saved = process.env.ANTHROPIC_API_KEY
+      if (apiKey === null) delete process.env.ANTHROPIC_API_KEY
+      else process.env.ANTHROPIC_API_KEY = apiKey
+      try { return await fn() } finally {
+        if (saved === undefined) delete process.env.ANTHROPIC_API_KEY
+        else process.env.ANTHROPIC_API_KEY = saved
+      }
+    }
+
+    it('warns when the default provider meters silently on/after the cutover', async () => {
+      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: AFTER }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'warn')
+      assert.match(billing.message, /metered programmatic-credit pool/)
+    })
+
+    it('does NOT warn for claude-sdk when ANTHROPIC_API_KEY is set (BYOK)', async () => {
+      const { checks } = await withEnv('sk-test-key', () => runDoctorChecks({ providers: ['claude-sdk'], now: AFTER }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /API key/) // billingDetailForClass(api-key)
+    })
+
+    it('passes for a subscription default (claude-tui) in the era', async () => {
+      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-tui'], now: AFTER }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /claude-tui/)
+    })
+
+    it('passes before the cutover and surfaces the upcoming date', async () => {
+      const { checks } = await withEnv(null, () => runDoctorChecks({ providers: ['claude-sdk'], now: BEFORE }))
+      const billing = checks.find(c => c.name === 'Billing')
+      assert.ok(billing)
+      assert.equal(billing.status, 'pass')
+      assert.match(billing.message, /cutover: 2026-06-15/)
+    })
   })
 
   it('dependencies check is present', async () => {
@@ -211,6 +261,119 @@ describe('runDoctorChecks', () => {
         process.env.PATH = originalPath
       }
     }
+  })
+})
+
+// #3953 — provider preflight can declare a minimum binary version (e.g.
+// claude-channel needs `claude` ≥ 2.1.80). checkBinary parses the leading
+// semver and fails below the floor.
+describe('checkBinary minVersion gate (#3953)', () => {
+  it('passes when the binary version meets the floor', () => {
+    // Node prints `v22.x.y`; any floor at-or-below the running Node passes.
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '18.0.0',
+    })
+    assert.equal(result.status, 'pass',
+      `expected pass for floor 18.0.0 vs running ${process.versions.node}, got ${result.status}: ${result.message}`)
+  })
+
+  it('fails when the binary version is below the floor', () => {
+    // A floor far above any plausible Node major forces the fail branch.
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node ≥ 999.0.0',
+      minVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'fail')
+    assert.match(result.message, /requires node ≥ 999\.0\.0/)
+    assert.match(result.message, /install node ≥ 999\.0\.0/)
+  })
+
+  it('downgrades a below-floor optional binary to warn (not fail)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: false,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '999.0.0',
+    })
+    assert.equal(result.status, 'warn')
+  })
+
+  it('warns (does not hard-fail) when the version cannot be parsed', () => {
+    const result = checkBinary('node', ['--version'], {
+      // Intentionally return an unparseable version string.
+      parseVersion: () => 'some weird build identifier',
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+      minVersion: '2.1.80',
+    })
+    assert.equal(result.status, 'warn')
+    assert.match(result.message, /could not parse version/)
+  })
+
+  it('ignores minVersion when not declared (back-compat)', () => {
+    const result = checkBinary('node', ['--version'], {
+      parseVersion: (out) => out.trim(),
+      required: true,
+      candidates: [process.execPath],
+      installHint: 'install node',
+    })
+    assert.equal(result.status, 'pass')
+  })
+})
+
+describe('parseLeadingSemver / compareSemver helpers (#3953)', () => {
+  it('parses a leading semver out of a decorated version string', () => {
+    assert.deepEqual(parseLeadingSemver('2.1.163 (Claude Code)'), [2, 1, 163])
+    assert.deepEqual(parseLeadingSemver('v22.14.0'), [22, 14, 0])
+  })
+
+  it('returns null for unparseable input', () => {
+    assert.equal(parseLeadingSemver('not a version'), null)
+    assert.equal(parseLeadingSemver(''), null)
+    assert.equal(parseLeadingSemver(null), null)
+  })
+
+  it('orders versions correctly', () => {
+    assert.ok(compareSemver('2.1.79', '2.1.80') < 0)
+    assert.ok(compareSemver('2.1.80', '2.1.80') === 0)
+    assert.ok(compareSemver('2.1.163', '2.1.80') > 0)
+    assert.ok(compareSemver('3.0.0', '2.9.9') > 0)
+    assert.ok(compareSemver('2.0.0', '2.1.0') < 0)
+  })
+
+  it('sorts an unparseable found-version as less-than the floor', () => {
+    assert.ok(compareSemver('garbage', '2.1.80') < 0)
+  })
+
+  // Copilot review on #3953: a malformed `required` floor must also fail
+  // closed, otherwise a provider that supplies ">=2.1.80" / "2.1.80-beta"
+  // would silently disable minVersion enforcement (compareSemver returning
+  // positive → "satisfied").
+  it('fails closed when the required floor has no parseable leading semver', () => {
+    // No leading `major.minor.patch` → parseLeadingSemver returns null →
+    // fail closed (less-than), so the floor is never silently satisfied.
+    assert.ok(compareSemver('2.1.163', '>=2.1.80') < 0)
+    assert.ok(compareSemver('2.1.163', 'v2') < 0)
+    assert.ok(compareSemver('2.1.163', 'not-a-version') < 0)
+    // Both sides invalid is still less-than.
+    assert.ok(compareSemver('garbage', 'also-garbage') < 0)
+  })
+
+  it('still satisfies a floor that carries a pre-release/build suffix after a valid core', () => {
+    // "2.1.80-beta" HAS a parseable leading core (2.1.80), so a higher
+    // found version legitimately satisfies it — the suffix is ignored, not
+    // treated as unparseable.
+    assert.ok(compareSemver('2.1.163', '2.1.80-beta') > 0)
+    assert.ok(compareSemver('2.1.80', '2.1.80-beta') === 0)
   })
 })
 
@@ -478,6 +641,163 @@ describe('isBundledOrSupervisedContext (issue #3023)', () => {
       }
     } finally {
       restoreEnv()
+    }
+  })
+})
+
+// audit P1-3 / #5821: claude-tui CLI-version pin — the backstop against silent
+// AskUserQuestion mis-drive after a claude CLI UI change.
+describe('checkClaudeTuiCliVersion', () => {
+  it('passes when the installed claude matches the tested baseline (major.minor)', () => {
+    const tested = '2.1.177'
+    const check = checkClaudeTuiCliVersion({ tested, exec: () => '2.1.177 (Claude Code)' })
+    assert.equal(check.status, 'pass')
+    assert.match(check.message, /matches the tested TUI-driving baseline/)
+  })
+
+  it('passes on a patch-only difference (same major.minor)', () => {
+    const check = checkClaudeTuiCliVersion({ tested: '2.1.177', exec: () => '2.1.200 (Claude Code)' })
+    assert.equal(check.status, 'pass')
+  })
+
+  it('warns on a major.minor drift (a UI change may mis-drive forms)', () => {
+    const check = checkClaudeTuiCliVersion({ tested: '2.1.177', exec: () => '2.2.0 (Claude Code)' })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /differs from the tested TUI-driving baseline/)
+    assert.match(check.message, /mis-drive AskUserQuestion forms silently/)
+  })
+
+  it('warns (does not throw) when claude --version is unparseable', () => {
+    const check = checkClaudeTuiCliVersion({ tested: '2.1.177', exec: () => 'some unexpected output' })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /Could not parse/)
+  })
+
+  it('returns null when claude cannot be run (provider check covers a missing claude)', () => {
+    const check = checkClaudeTuiCliVersion({ exec: () => { throw new Error('ENOENT') } })
+    assert.equal(check, null)
+  })
+
+  it('the shipped baseline constant is a parseable semver', () => {
+    assert.notEqual(parseLeadingSemver(TESTED_CLAUDE_TUI_CLI_VERSION), null)
+  })
+})
+
+describe('checkTunnelRoutability (#5328 WP-5.6)', () => {
+  it('returns null when no named tunnel is configured (quick / none / no hostname)', async () => {
+    assert.equal(await checkTunnelRoutability({ mode: 'quick', hostname: 'x.example.com' }), null)
+    assert.equal(await checkTunnelRoutability({ mode: 'none', hostname: null }), null)
+    assert.equal(await checkTunnelRoutability({ mode: 'named', hostname: '' }), null)
+    assert.equal(await checkTunnelRoutability({}), null)
+  })
+
+  it('passes when the probe reaches the hostname (any HTTP response is routable)', async () => {
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      probe: async () => ({ ok: true, status: 426 }),
+    })
+    assert.equal(check.status, 'pass')
+    assert.match(check.message, /chroxy\.example\.com is reachable/)
+    assert.match(check.message, /HTTP 426/)
+  })
+
+  it('warns when the probe cannot reach the hostname (DNS/route down)', async () => {
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      probe: async () => ({ ok: false, error: 'getaddrinfo ENOTFOUND chroxy.example.com' }),
+    })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /did not respond \(getaddrinfo ENOTFOUND/)
+    assert.match(check.message, /chroxy tunnel setup/)
+  })
+
+  it('warns (never throws) when the probe itself rejects', async () => {
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      probe: async () => { throw new Error('boom') },
+    })
+    assert.equal(check.status, 'warn')
+    assert.match(check.message, /did not respond \(boom\)/)
+  })
+
+  it('trims surrounding whitespace from the hostname before probing', async () => {
+    let seenUrl = null
+    const check = await checkTunnelRoutability({
+      mode: 'named',
+      hostname: '  chroxy.example.com  ',
+      probe: async (url) => { seenUrl = url; return { ok: true, status: 200 } },
+    })
+    assert.equal(seenUrl, 'https://chroxy.example.com/')
+    assert.equal(check.status, 'pass')
+  })
+
+  it('warns (without probing) when the hostname is not a bare host', async () => {
+    for (const bad of ['https://chroxy.example.com', 'evil.com/@chroxy.example.com', 'a b.example.com', 'chroxy.example.com/path']) {
+      let probed = false
+      const check = await checkTunnelRoutability({
+        mode: 'named',
+        hostname: bad,
+        probe: async () => { probed = true; return { ok: true } },
+      })
+      assert.equal(probed, false, `should not probe a malformed host: ${bad}`)
+      assert.equal(check.status, 'warn')
+      assert.match(check.message, /is not a bare host/)
+    }
+  })
+
+  it('returns null for a whitespace-only hostname', async () => {
+    assert.equal(await checkTunnelRoutability({ mode: 'named', hostname: '   ' }), null)
+  })
+
+  it('passes the hostname URL and a numeric timeout to the probe', async () => {
+    let seenUrl = null
+    let seenTimeout = null
+    await checkTunnelRoutability({
+      mode: 'named',
+      hostname: 'chroxy.example.com',
+      timeoutMs: 1234,
+      probe: async (url, timeoutMs) => { seenUrl = url; seenTimeout = timeoutMs; return { ok: true } },
+    })
+    assert.equal(seenUrl, 'https://chroxy.example.com/')
+    assert.equal(seenTimeout, 1234)
+  })
+
+  it('runDoctorChecks omits the routability check by default (no named tunnel) and never calls the real network', async () => {
+    let probed = false
+    const { checks } = await runDoctorChecks({
+      providers: ['claude-sdk'],
+      tunnelProbe: async () => { probed = true; return { ok: true } },
+    })
+    // CHROXY_CONFIG_DIR is redirected to a tmp dir by _setup.mjs and has no
+    // named tunnel, so the probe must not fire and no routability check is added.
+    assert.equal(probed, false)
+    assert.equal(checks.find(c => c.name === 'Tunnel routability'), undefined)
+  })
+
+  it('runDoctorChecks fires the probe for a configured named tunnel, incl. the cloudflare:named alias', async () => {
+    const { writeFileSync, rmSync } = await import('node:fs')
+    // _setup.mjs points CHROXY_CONFIG_DIR at a writable tmp dir and doctor's
+    // CONFIG_FILE now honors it (the hermeticity fix), so this lands in the
+    // sandbox, not the real ~/.chroxy.
+    const cfgPath = join(process.env.CHROXY_CONFIG_DIR, 'config.json')
+    writeFileSync(cfgPath, JSON.stringify({ tunnel: 'cloudflare:named', tunnelHostname: 'chroxy.example.com' }))
+    try {
+      let probedUrl = null
+      const { checks } = await runDoctorChecks({
+        providers: ['claude-sdk'],
+        tunnelProbe: async (url) => { probedUrl = url; return { ok: true, status: 200 } },
+      })
+      // The `cloudflare:named` alias must normalize to mode 'named' (not be
+      // skipped), and the probe must receive the configured hostname URL.
+      assert.equal(probedUrl, 'https://chroxy.example.com/')
+      const routability = checks.find(c => c.name === 'Tunnel routability')
+      assert.ok(routability)
+      assert.equal(routability.status, 'pass')
+    } finally {
+      rmSync(cfgPath, { force: true })
     }
   })
 })

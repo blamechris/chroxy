@@ -1,0 +1,198 @@
+appId: com.blamechris.chroxy
+name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
+---
+
+# #4762 / #4973 — Mobile Maestro coverage for the mixed multi-question
+# AskUserQuestion wire payload. Sibling to ask-user-question-multi.yaml
+# (which pins the all-single-select 4-question shape #4604 Chunk B).
+# This flow exercises the *mixed* wire shape #4735 / #4760 wired into
+# the React Native MultiQuestionForm (#4973):
+#
+#   - Q[0]: single-select with model-supplied 'Other' label
+#   - Q[1]: multi-select (`multiSelect: true`)
+#   - Q[2]: single-select with synthetic 'Other' sentinel
+#
+# Trigger: 'show-multi-question' user input → mock-server.mjs emits a
+# `user_question` envelope with the 3-question mixed shape. Fixture
+# seeding pattern is documented in CLAUDE.md → "Fixture Seeding for
+# Structured Renderers".
+#
+# Coverage (#4973 — the mobile React Native MultiQuestionForm now
+# renders all N questions for SDK-mode sessions; the mock session is
+# `provider: 'claude-sdk'`, so `allowMultiQuestion` is true):
+#
+#   - Pins the wire→render path for the mixed payload: a regression in
+#     handleUserQuestion's normalizeQuestion that mishandled
+#     multi-select or the model-supplied Other label on a sibling
+#     question would either (a) drop the whole `user_question`
+#     envelope at the `firstNormalized == null` guard or (b) corrupt
+#     a question's options. The `question-prompt-multi` wait + the
+#     per-question option assertions catch both.
+#   - Pins the interactive multi-question form (#4973 acceptance
+#     criteria): `question-prompt-multi` container,
+#     `question-multi-option-<idx>-<value>` per option, and the single
+#     `question-multi-submit` button.
+#   - Pins the model-supplied 'Other' branch on Q[0] — Q[0]'s third
+#     option uses the model-supplied 'Other' label (not the synthetic
+#     OTHER_OPTION_VALUE sentinel), so the testID resolves to
+#     `question-multi-option-0-Other` (value === label).
+#   - Exercises every selection branch in one payload: single-select
+#     radio (Q[0] / Q[2]) and multi-select checkbox (Q[1] — two taps
+#     add `app` + `server` to the array).
+#   - Pins the post-answer summary chip showing the comma-joined
+#     multi-select labels per question (`Q2 — which areas to verify?:
+#     app, server`) per #4716 / #4735 readability.
+#
+# Tested devices: portrait iPhone (iOS 17+). Mirrors
+# ask-user-question.yaml / ask-user-question-multi.yaml. Requires the
+# dev client + mock server on port 9876:
+#
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Self-contained (no `runFlow: setup/...`) because the existing setup/
+# flows target Expo Go (appId host.exp.Exponent), whereas this needs
+# the chroxy dev client (com.blamechris.chroxy).
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Ensure Chat tab.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit the mixed
+# 3-question multi-question payload (single-select + multi-select +
+# with-Other).
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-multi-question"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for the interactive multi-question form container to render
+# (#4973). The mock session is `provider: 'claude-sdk'`, so the mobile
+# `allowMultiQuestion` gate is true and MessageBubble renders the
+# React Native MultiQuestionForm instead of the legacy Q[0]-only UI.
+- extendedWaitUntil:
+    visible:
+      id: "question-prompt-multi"
+    timeout: 10000
+
+- takeScreenshot: chat-multi-question-form-rendered
+
+# Assert every question's options rendered with the parity testIDs.
+#   - Q[0] single-select: 'approve' / 'deny' (lowercase, value === label)
+#     plus the model-supplied 'Other' (value === label === 'Other').
+#   - Q[1] multi-select: 'app' / 'server' / 'dashboard'.
+#   - Q[2] single-select: 'auto-rollback' / 'manual-rollback' plus the
+#     synthetic `__chroxy_other__` sentinel appended by handleUserQuestion.
+- assertVisible:
+    id: "question-multi-option-0-approve"
+- assertVisible:
+    id: "question-multi-option-0-deny"
+- assertVisible:
+    id: "question-multi-option-0-Other"
+- assertVisible:
+    id: "question-multi-option-1-app"
+- assertVisible:
+    id: "question-multi-option-1-server"
+- assertVisible:
+    id: "question-multi-option-1-dashboard"
+- assertVisible:
+    id: "question-multi-option-2-auto-rollback"
+- assertVisible:
+    id: "question-multi-option-2-manual-rollback"
+# Wildcard matches — the multi-question card flattens its children
+# into accessible containers, so exact text matches find nothing.
+- assertVisible:
+    text: ".*Q1 — deploy to production\\?.*"
+- assertVisible:
+    text: ".*Q2 — which areas to verify\\?.*"
+- assertVisible:
+    text: ".*Q3 — rollback strategy\\?.*"
+
+# Answer every question: Q[0] approve (single-select radio), Q[1]
+# app + server (multi-select checkbox — two taps add to the array),
+# Q[2] auto-rollback (single-select radio).
+- tapOn:
+    id: "question-multi-option-0-approve"
+- tapOn:
+    id: "question-multi-option-1-app"
+- tapOn:
+    id: "question-multi-option-1-server"
+- tapOn:
+    id: "question-multi-option-2-auto-rollback"
+
+- takeScreenshot: chat-multi-question-form-filled
+
+# Submit the form. The mobile `sendUserQuestionResponse` (widened in
+# #4761 / PR #4859) serializes the per-question `answers` map (with
+# multi-select as a native `string[]`) plus a comma-joined `answer`
+# summary on the wire.
+- tapOn:
+    id: "question-multi-submit"
+- waitForAnimationToEnd
+
+# Post-answer the form is replaced by the summary chip (#4973). Assert
+# the multi-select summary line shows the comma-joined labels per the
+# #4716 / #4735 readability AC.
+- extendedWaitUntil:
+    visible:
+      id: "question-multi-summary"
+    timeout: 10000
+# Wildcard match — the summary chip flattens like the card above.
+- assertVisible:
+    text: ".*Q2 — which areas to verify\\?: app, server.*"
+
+- takeScreenshot: chat-multi-question-answered

@@ -1,0 +1,45 @@
+name: Stale PRs
+
+on:
+  schedule:
+    # Daily at 01:30 UTC
+    - cron: '30 1 * * *'
+  workflow_dispatch:
+
+permissions:
+  pull-requests: write
+
+jobs:
+  stale:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/stale@5bef64f19d7facfb25b37b414482c7164d639639 # v9.1.0
+        with:
+          # PRs only — issues are not affected by this policy
+          days-before-issue-stale: -1
+          days-before-issue-close: -1
+
+          # 7 days idle -> mark stale; 7 more days idle -> close (14 days total)
+          days-before-pr-stale: 7
+          days-before-pr-close: 7
+
+          # Never stale the repo owner's own PRs
+          exempt-pr-authors: blamechris
+
+          # PRs carrying any of these labels are parked indefinitely.
+          # actions/stale@v9 matches labels literally (no glob support),
+          # so enumerate each blocked:* label explicitly.
+          exempt-pr-labels: 'pinned,needs-discussion,blocked:developer-program,priority: critical,priority: high'
+
+          stale-pr-label: stale
+
+          stale-pr-message: >
+            Hey, thanks for your contribution! This PR hasn't had any activity
+            in the last 7 days, so it's been marked `stale`. If you're still
+            working on it, just leave a comment (anything works) or push a
+            new commit to reset the timer. Otherwise it'll be closed in
+            another 7 days — no hard feelings, you can always reopen later.
+
+          close-pr-message: >
+            Closing this out due to inactivity. Thanks again for the
+            contribution — feel free to reopen if you come back to this!

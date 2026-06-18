@@ -4,8 +4,8 @@
  * Verifies that Codex and Gemini models return sensible cost estimates and
  * that unknown models return null rather than NaN or incorrect values.
  */
-import { describe, it, expect } from 'vitest'
-import { calculateCost, getModelPricing, MODEL_PRICING } from './model-pricing'
+import { describe, it, expect, vi, afterEach } from 'vitest'
+import { calculateCost, getModelPricing, MODEL_PRICING, _resetPricingDriftWarnings } from './model-pricing'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -25,7 +25,15 @@ function sig(n: number, digits = 6): number {
 // ---------------------------------------------------------------------------
 
 describe('calculateCost — unknown model', () => {
+  // Suppress the drift warning's stderr (asserted separately below) and keep the
+  // module-level deduped set clean across files.
+  afterEach(() => {
+    _resetPricingDriftWarnings()
+    vi.restoreAllMocks()
+  })
+
   it('returns null for an unrecognised model id', () => {
+    vi.spyOn(console, 'warn').mockImplementation(() => {})
     expect(calculateCost('some-unknown-model-xyz', 1000, 500)).toBeNull()
   })
 })
@@ -169,5 +177,72 @@ describe('MODEL_PRICING table integrity', () => {
     for (const model of required) {
       expect(MODEL_PRICING[model], `${model} missing`).toBeDefined()
     }
+  })
+
+  // #5731 Tier-2: gemini-2.0-pro is offered by the Gemini provider but had no
+  // pricing row, so its cost badge rendered blank.
+  it('prices gemini-2.0-pro (was an offered-but-unpriced model)', () => {
+    expect(MODEL_PRICING['gemini-2.0-pro']).toBeDefined()
+    const cost = calculateCost('gemini-2.0-pro', 1000, 1000)
+    expect(cost).not.toBeNull()
+    expect(cost).toBeGreaterThan(0)
+  })
+
+  // #5631 — current-generation Claude models were missing from the table
+  // (only 3.x/3.5/3.7 rows existed). These rows keep MODEL_PRICING correct +
+  // consistent with the server's authoritative table. (Note: the table is not
+  // on a live Claude cost path today — CLIENT_ESTIMATED_COST_PROVIDERS is
+  // {codex, gemini} — so this guards table correctness, not a rendered cost.)
+  it('prices the current-generation Claude models (#5631)', () => {
+    for (const id of ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5']) {
+      expect(MODEL_PRICING[id], `${id} missing`).toBeDefined()
+      const cost = calculateCost(id, 1000, 1000)
+      expect(cost, `${id} cost`).not.toBeNull()
+      expect(cost, `${id} cost`).toBeGreaterThan(0)
+    }
+    // Rates mirror the server's authoritative table (USD/Mtok → USD/1k).
+    expect(MODEL_PRICING['claude-opus-4-7']!.inputPer1k).toBe(0.015)
+    expect(MODEL_PRICING['claude-opus-4-7']!.outputPer1k).toBe(0.075)
+    expect(MODEL_PRICING['claude-sonnet-4-6']!.inputPer1k).toBe(0.003)
+    expect(MODEL_PRICING['claude-sonnet-4-6']!.outputPer1k).toBe(0.015)
+    expect(MODEL_PRICING['claude-haiku-4-5']!.inputPer1k).toBe(0.001)
+    expect(MODEL_PRICING['claude-haiku-4-5']!.outputPer1k).toBe(0.005)
+  })
+
+  // #5631 — claude-sonnet-4-5 was mislabeled "Claude 3.7 Sonnet".
+  it('labels claude-sonnet-4-5 correctly (was "Claude 3.7 Sonnet")', () => {
+    expect(MODEL_PRICING['claude-sonnet-4-5']!.label).toBe('Claude Sonnet 4.5')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Drift detection (#5731 Tier-2)
+// ---------------------------------------------------------------------------
+
+describe('calculateCost — unknown-model drift warning', () => {
+  afterEach(() => {
+    _resetPricingDriftWarnings()
+    vi.restoreAllMocks()
+  })
+
+  it('warns once (deduped) for an unpriced model and still returns null', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    expect(calculateCost('totally-new-model-v9', 1000, 500)).toBeNull()
+    expect(calculateCost('totally-new-model-v9', 10, 10)).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
+    expect(warn.mock.calls[0]![0]).toContain('totally-new-model-v9')
+  })
+
+  it('does not warn for a known model', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    calculateCost('gemini-2.0-pro', 1000, 500)
+    expect(warn).not.toHaveBeenCalled()
+  })
+
+  it('warns separately for distinct unknown models', () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    calculateCost('unknown-a', 1, 1)
+    calculateCost('unknown-b', 1, 1)
+    expect(warn).toHaveBeenCalledTimes(2)
   })
 })

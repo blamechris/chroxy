@@ -11,6 +11,7 @@ import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from '../src/base-
 import { createKeyPair, deriveSharedKey, deriveConnectionKey, generateConnectionSalt, encrypt, decrypt, DIRECTION_SERVER, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
+import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
 // Also clears the log listener that WsServer.start() registers, so log_entry broadcasts
@@ -461,6 +462,32 @@ describe('multi-client awareness', () => {
     assert.ok(Array.isArray(authOk.connectedClients), 'auth_ok should include connectedClients array')
     assert.equal(authOk.connectedClients.length, 1, 'Should have one connected client (self)')
     assert.equal(authOk.connectedClients[0].clientId, authOk.clientId, 'Connected client should match our clientId')
+
+    ws.close()
+  })
+
+  // #4560 — the Notifications settings section sits on "Loading preferences…"
+  // forever when connecting to a pre-#4541 server (no `notification_prefs_get`
+  // handler). Advertising `notificationPrefs: true` in the auth_ok capability
+  // map lets clients gate the section render so older servers either hide it
+  // or show a "not supported on this server" message instead of dead UI.
+  it('advertises notificationPrefs capability in auth_ok (#4560)', async () => {
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      cliSession: mockSession,
+      authRequired: true,
+    })
+    const port = await startServerAndGetPort(server)
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'test-token' })
+
+    const authOk = await waitForMessage(messages, 'auth_ok', 2000)
+    assert.ok(authOk, 'Should receive auth_ok')
+    assert.ok(authOk.capabilities, 'auth_ok should include capabilities map')
+    assert.equal(authOk.capabilities.notificationPrefs, true, 'capabilities.notificationPrefs should be true')
 
     ws.close()
   })
@@ -994,8 +1021,11 @@ describe('outbound message sequence numbers', () => {
 
     const { ws, messages } = await createClient(port, true)
 
-    // Wait for initial messages to settle (auth_ok, server_mode, status, etc.)
+    // Wait for initial messages to settle (auth_ok, server_mode, status, etc.).
+    // #5555: also wait for the async auth_bootstrap burst so it's included in
+    // the monotonic-seq sweep deterministically rather than racing the assert.
     await waitForMessage(messages, 'status')
+    await waitForMessage(messages, 'auth_bootstrap', 1000)
 
     // All messages should have a seq field
     assert.ok(messages.length > 0, 'Should have received messages')
@@ -1024,8 +1054,12 @@ describe('outbound message sequence numbers', () => {
 
     const { ws, messages } = await createClient(port, true)
 
-    // Wait for initial messages
+    // Wait for initial messages. #5555: the connect-time auth_bootstrap burst
+    // (providers + slash commands + agents) is fire-and-forget (async disk
+    // scans), so it can land AFTER `status`. Wait for it before snapshotting the
+    // count so the pong-seq continuity check isn't shifted by a late burst frame.
     await waitForMessage(messages, 'status')
+    await waitForMessage(messages, 'auth_bootstrap', 1000)
 
     const initialCount = messages.length
 
@@ -1037,6 +1071,11 @@ describe('outbound message sequence numbers', () => {
     assert.ok(pong, 'Should receive pong')
     assert.equal(pong.seq, initialCount + 1,
       'pong seq should continue from where initial messages left off')
+
+    // #5515 (epic #5514): the pong reply carries a wall-clock serverTs so
+    // clients can split the ping/pong RTT into uplink/downlink halves.
+    assert.equal(typeof pong.serverTs, 'number', 'pong should carry a serverTs')
+    assert.ok(pong.serverTs > 0, 'serverTs should be a positive ms epoch')
 
     ws.close()
   })
@@ -1271,8 +1310,12 @@ describe('_replayHistory()', () => {
     const endIdx = messages.indexOf(replayEnd)
     assert.ok(startIdx < endIdx, 'history_replay_start should come before history_replay_end')
 
-    // Full ring buffer is replayed — all 5 messages including user_input
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: replay also emits synthetic `agent_idle` after each `result`
+    // to mirror the live event-normalizer fan-out (so dashboard handleAgentIdle
+    // fires for replayed sessions). Filter those out — this test is about the
+    // original history entries, not the fan-out (which has its own test in
+    // ws-history.test.js).
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
     assert.equal(replayed.length, 5, 'Should replay full ring buffer (all 5 entries)')
     assert.equal(replayed[0].type, 'message')
     assert.equal(replayed[0].messageType, 'user_input')
@@ -1314,7 +1357,9 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: filter out synthetic agent_idle (fan-out after each `result`)
+    // — this test asserts on original history entries.
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
 
     assert.equal(replayed.length, 3, 'Should replay all 3 entries')
     for (const entry of replayed) {
@@ -1352,7 +1397,9 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: filter out synthetic agent_idle (fan-out after each `result`)
+    // — this test asserts on original history entries.
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
 
     // Full ring buffer replayed — all 5 messages across both turns
     assert.equal(replayed.length, 5, 'Should replay all turns (5 entries)')
@@ -1419,7 +1466,9 @@ describe('_replayHistory()', () => {
     const replayStart = messages.find(m => m.type === 'history_replay_start')
     const startIdx = messages.indexOf(replayStart)
     const endIdx = messages.indexOf(replayEnd)
-    const replayed = messages.slice(startIdx + 1, endIdx)
+    // #4628: filter out synthetic agent_idle (fan-out after each `result`)
+    // — this test asserts on original history entries.
+    const replayed = messages.slice(startIdx + 1, endIdx).filter(m => m.type !== 'agent_idle')
 
     assert.equal(replayed.length, 4)
 
@@ -4558,5 +4607,193 @@ describe('WsServer _historyCtx.resultTimeoutMs late-binds to config (#3766)', ()
     const authOk = captureAuthOk(server)
     assert.equal(authOk.resultTimeoutMs, DEFAULT_RESULT_TIMEOUT_MS)
     assert.equal(authOk.hardTimeoutMs, DEFAULT_HARD_TIMEOUT_MS)
+  })
+})
+
+// #5516 (epic #5514): permessage-deflate is skipped for local/LAN peers so a
+// fast local link doesn't pay per-frame gzip CPU, but kept for tunnel
+// connections (real WAN bandwidth saving). The decision keys off the
+// unspoofable socket peer; a forged proxy header can only KEEP deflate.
+describe('WsServer permessage-deflate locality (#5516)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  /** Open a ws client (offering permessage-deflate) and return its negotiated extensions string. */
+  async function negotiatedExtensions(port, headers) {
+    const ws = new WebSocket(`ws://127.0.0.1:${port}`, { headers })
+    await withTimeout(
+      new Promise((resolve, reject) => {
+        ws.once('open', resolve)
+        ws.once('error', reject)
+      }),
+      2000,
+      'connection timeout',
+    )
+    // ws exposes the negotiated extensions; permessage-deflate present => compression on.
+    const ext = ws.extensions || ''
+    ws.close()
+    return ext
+  }
+
+  it('does NOT negotiate permessage-deflate for a direct loopback peer', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-deflate',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const ext = await negotiatedExtensions(port)
+    assert.ok(
+      !/permessage-deflate/.test(ext),
+      `loopback peer should skip deflate, got extensions: "${ext}"`,
+    )
+  })
+
+  it('DOES negotiate permessage-deflate when a proxy header marks the connection as remote (tunnel)', async () => {
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-deflate',
+      cliSession: createMockSession(),
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    // A real tunnel arrives from loopback but stamps cf-connecting-ip; simulate
+    // that so isLocalOrLanPeer treats the connection as remote and keeps deflate.
+    const ext = await negotiatedExtensions(port, { 'cf-connecting-ip': '203.0.113.9' })
+    assert.ok(
+      /permessage-deflate/.test(ext),
+      `tunnel peer should keep deflate, got extensions: "${ext}"`,
+    )
+  })
+})
+
+describe('#5579: production handler ctx is deep-asserted at construction', () => {
+  let server = null
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('a real WsServer constructs cleanly — every CTX_NAMESPACES field is wired', () => {
+    // ws-server.js calls `assertCtxShape(this._handlerCtx, { deep: true })` in
+    // the constructor. If any CTX_NAMESPACES field were missing from
+    // _handlerCtx, this `new WsServer(...)` would throw before returning. The
+    // act of constructing is the assertion.
+    assert.doesNotThrow(() => {
+      server = new WsServer({
+        port: 0,
+        apiToken: 'tok-ctx-deep',
+        cliSession: createMockSession(),
+        authRequired: true,
+      })
+    }, 'WsServer construction must pass the deep ctx assert')
+  })
+
+  it('a CTX_NAMESPACES field dropped from a construction-shaped ctx throws (deep)', () => {
+    // Build a ctx with EVERY declared field present (the production happy path),
+    // then delete exactly one field and confirm the deep assert — the same call
+    // ws-server.js makes at construction — throws naming the missing key. This
+    // is the guard that turns a forgotten _handlerCtx field from a silent
+    // `undefined` read in prod into a construction-time crash.
+    const ctx = {}
+    for (const ns of CTX_NAMESPACE_NAMES) {
+      ctx[ns] = {}
+      for (const key of CTX_NAMESPACES[ns]) ctx[ns][key] = null
+    }
+    // Sanity: the fully-populated ctx passes deep.
+    assert.doesNotThrow(() => assertCtxShape(ctx, { deep: true }))
+
+    const droppedNs = 'services'
+    const droppedKey = CTX_NAMESPACES[droppedNs][0]
+    delete ctx[droppedNs][droppedKey]
+    assert.throws(
+      () => assertCtxShape(ctx, { deep: true }),
+      new RegExp(`ctx\\.${droppedNs} is missing required key '${droppedKey}'`),
+      'deep assert must throw naming the dropped field',
+    )
+
+    // And the SHALLOW assert would NOT catch it — proving the deep upgrade is
+    // what closes the gap (the namespace object is still present).
+    assert.doesNotThrow(() => assertCtxShape(ctx), 'shallow assert misses a missing key — that is the bug deep closes')
+  })
+
+  // #5837: the terminal-mirror coalescer gate. These drive _syncTerminalMirror /
+  // _handleClientDeparture directly (no socket) to lock in the 0↔1 crossing on
+  // the disconnect path — the riskiest one (a stuck-OFF mirror = a viewer sees a
+  // dead terminal; a stuck-ON mirror = wasted work forever).
+  describe('terminal-mirror gate (#5837)', () => {
+    function makeMirrorServer() {
+      const calls = []
+      const session = { setTerminalMirrorActive: (a) => { calls.push(a) } }
+      const sessionsMap = new Map([['s1', { session, name: 'S', cwd: '/tmp', type: 'cli' }]])
+      const manager = new EventEmitter()
+      manager.getSession = (id) => sessionsMap.get(id)
+      manager.listSessions = () => []
+      const srv = new WsServer({ port: 0, apiToken: 't', sessionManager: manager, authRequired: false })
+      return { srv, calls }
+    }
+    // A viewer subscribed to the terminal: opted-in AND subscribed to the session
+    // (the terminalSubscriberFilter audience that actually receives terminal_output).
+    function fakeClient(id, terminalSids = []) {
+      return { id, authenticated: true, terminalSessionIds: new Set(terminalSids), subscribedSessionIds: new Set(terminalSids), _ownedPushTokens: null }
+    }
+    // A ws is the clients-Map KEY; srv.close() calls ws.close()/terminate() on each.
+    const fakeWs = () => ({ readyState: 3, close: () => {}, terminate: () => {} })
+
+    it('_syncTerminalMirror toggles ON iff a connected viewer subscribes', () => {
+      const { srv, calls } = makeMirrorServer()
+      try {
+        srv._syncTerminalMirror('s1')
+        assert.deepEqual(calls, [false], 'no subscribers → OFF')
+        srv.clients.set(fakeWs(), fakeClient('c1', ['s1']))
+        srv._syncTerminalMirror('s1')
+        assert.deepEqual(calls, [false, true], 'one viewing subscriber → ON')
+      } finally { srv.close() }
+    })
+
+    it('_syncTerminalMirror ignores an opted-in client that is NOT viewing the session (#5844 review)', () => {
+      const { srv, calls } = makeMirrorServer()
+      try {
+        // Opted into the terminal but neither active nor subscribed → receives no
+        // bytes, so it must not keep the coalescer on.
+        const c = { id: 'c1', authenticated: true, terminalSessionIds: new Set(['s1']), subscribedSessionIds: new Set(), activeSessionId: 'other', _ownedPushTokens: null }
+        srv.clients.set(fakeWs(), c)
+        srv._syncTerminalMirror('s1')
+        assert.deepEqual(calls, [false], 'opted-in non-viewer → OFF')
+      } finally { srv.close() }
+    })
+
+    it('last-viewer departure turns the mirror OFF; a remaining viewer keeps it ON', () => {
+      const { srv, calls } = makeMirrorServer()
+      try {
+        const wsA = fakeWs()
+        const wsB = fakeWs()
+        const a = fakeClient('a', ['s1'])
+        const b = fakeClient('b', ['s1'])
+        srv.clients.set(wsA, a)
+        srv.clients.set(wsB, b)
+
+        // b departs while still in the map (production order: removeClient comes
+        // after departure). a still subscribes → mirror stays ON.
+        srv._handleClientDeparture(b)
+        assert.equal(b.terminalSessionIds.size, 0, 'departing client subs cleared')
+        assert.equal(calls[calls.length - 1], true, 'non-last departure → still ON')
+
+        // removeClient would now drop b; then a (the last viewer) departs → OFF.
+        srv.clients.delete(wsB)
+        srv._handleClientDeparture(a)
+        assert.equal(calls[calls.length - 1], false, 'last-viewer departure → OFF')
+      } finally { srv.close() }
+    })
   })
 })

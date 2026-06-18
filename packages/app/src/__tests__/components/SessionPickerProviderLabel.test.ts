@@ -27,8 +27,10 @@ describe('SessionPicker long-press alert title — provider suffix (#3937)', () 
     expect(alertTitleSection).not.toMatch(/session\.provider\s*===\s*['"]claude-cli['"]/);
   });
 
-  it("only suffixes when the session's provider is not the claude-sdk default", () => {
-    expect(alertTitleSection).toMatch(/session\.provider\s*&&\s*session\.provider\s*!==\s*['"]claude-sdk['"]/);
+  it("only suffixes when the session's provider is not the default", () => {
+    // Keyed on the shared DEFAULT_PROVIDER constant (#5823), not a hardcoded
+    // 'claude-sdk', so a default flip can't reintroduce the stale-literal drift.
+    expect(alertTitleSection).toMatch(/session\.provider\s*&&\s*session\.provider\s*!==\s*DEFAULT_PROVIDER/);
   });
 
   it('feeds the computed providerLabel into the Alert.alert title argument', () => {

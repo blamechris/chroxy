@@ -6,10 +6,11 @@
         "hooks": [
           {
             "type": "command",
-            "command": "bash scripts/require-review-before-merge.sh"
+            "command": "bash \"$CLAUDE_PROJECT_DIR/scripts/require-review-before-merge.sh\""
           }
         ]
       }
     ]
-  }
+  },
+  "includeCoAuthoredBy": false
 }

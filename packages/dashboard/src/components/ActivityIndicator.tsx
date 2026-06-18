@@ -21,8 +21,74 @@
  * payload (#3760), falling back to BaseSession.DEFAULT_RESULT_TIMEOUT_MS
  * (30 min) when connected to an older server that doesn't broadcast it.
  */
-import { useEffect, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useShallow } from 'zustand/react/shallow'
+import { formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
+import { formatDurationTerse } from '../utils/duration'
+
+/**
+ * #4420 — Tail-ellipsis truncation for the pending-shell command label. User-
+ * controlled shell commands can be arbitrarily long (`npm test -- --coverage
+ * --reporter=json --bail …`). Without a cap they wrap or stretch the chip,
+ * breaking the pill shape and pushing siblings around on narrow viewports.
+ *
+ * Strategy: tail-ellipsis (preserve the start). The command's prefix is what
+ * identifies it ("npm test", "docker run", "pytest"). The trailing flags are
+ * still reachable via the chip's `title` attribute (hover tooltip), so the
+ * truncation isn't lossy. 40 chars matches the chip's comfortable single-line
+ * width at the dashboard's xs font size without forcing a max-width that
+ * fights the inline-flex layout.
+ */
+export const PENDING_SHELL_COMMAND_MAX_LEN = 40
+
+export function truncatePendingShellCommand(cmd: string): string {
+  if (cmd.length <= PENDING_SHELL_COMMAND_MAX_LEN) return cmd
+  // -1 to leave room for the single ellipsis char.
+  return cmd.slice(0, PENDING_SHELL_COMMAND_MAX_LEN - 1) + '…'
+}
+
+/**
+ * #4319 — Walk a session's `messages[]` backwards looking for the most-recent
+ * `tool_use` that has no result attached. Bails out on the first unresolved
+ * tool (typical case: the in-flight tool is at the tail of the array, so the
+ * walk is O(1) in practice). Returns `null` when every tool has resolved.
+ *
+ * Used by the in-flight selector below — the selector projects the result
+ * down to primitives (`tool`, `startedAt`, `serverName`) so React only
+ * re-renders when those primitives change, not on every `messages[]`
+ * reference churn from `stream_delta` / `tool_input_delta` updates.
+ *
+ * #4337 — Exported so the in-flight tests
+ * (`ActivityIndicator.inflight.test.tsx`) exercise the production predicate
+ * directly instead of re-implementing the same shape inline. A change to
+ * the "resolved" gate (e.g. a new `toolError` field counted as resolved)
+ * must cause the imported assertions to fail.
+ */
+export type InFlightMessage = {
+  type: string
+  tool?: string
+  serverName?: string
+  timestamp: number
+  toolResult?: unknown
+  toolResultImages?: ReadonlyArray<unknown>
+}
+
+export function findInFlightToolUse(
+  messages: ReadonlyArray<InFlightMessage> | null | undefined,
+): { tool: string; serverName?: string; startedAt: number } | null {
+  if (!messages) return null
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const m = messages[i]!
+    if (m.type !== 'tool_use') continue
+    const hasResult =
+      m.toolResult !== undefined || (m.toolResultImages?.length ?? 0) > 0
+    if (!hasResult) {
+      return { tool: m.tool ?? 'tool', serverName: m.serverName, startedAt: m.timestamp }
+    }
+  }
+  return null
+}
 
 /** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754 / #3884) */
 const FALLBACK_TIMEOUT_MS = 30 * 60 * 1000
@@ -38,6 +104,12 @@ function formatElapsed(ms: number): string {
   return `${h}h ${m % 60}m ago`
 }
 
+// #4308 — duration without the "ago" suffix, used for the "Running X · 12s"
+// label (the named tool is current, not past, so "ago" is wrong). #4510 — the
+// implementation lives in `utils/duration.ts` (`formatDurationTerse`) so the
+// terse register is shared with any future consumer; ActivityIndicator
+// continues to consume the terse form because the chip's compact pill layout
+// can't accommodate "5 minutes 12 seconds".
 function statusClass(elapsedMs: number, timeoutMs: number): string {
   if (elapsedMs >= timeoutMs - 60_000) return 'activity-indicator--red'
   if (elapsedMs >= 60_000) return 'activity-indicator--orange'
@@ -54,6 +126,162 @@ export function ActivityIndicator() {
     const id = s.activeSessionId
     return id ? s.sessionStates[id]?.lastClientActivityAt ?? null : null
   })
+  // #4319 / #4336 — Single `useShallow` selector that projects the active
+  // session's in-flight tool down to a plain object of primitives. Subscribing
+  // to the whole `messages` array (the #4308 approach) re-rendered this
+  // component on every stream_delta / tool_input_delta because the store
+  // immutably swaps the array reference on each update. By selecting only
+  // the primitives we depend on, React re-renders ONLY when the in-flight
+  // tool actually changes.
+  //
+  // Why one `useShallow` object instead of N primitive selectors: pre-#4336
+  // this called `findInFlightToolUse` three separate times (once per primitive
+  // selector), walking the messages array three times per store update. The
+  // `useShallow` selector runs the walk ONCE and lets zustand do a shallow
+  // compare on the returned object — same re-render guarantee, one walk per
+  // update, and a cleaner consumer shape.
+  //
+  // #4308 (this PR) — prefer `activeTools` (state slot driven by tool_start /
+  // tool_result) over the derive-from-messages walk when present. The walk
+  // is kept as a fallback so history-replay / pre-state-bootstrap paths that
+  // never fired tool_start still surface a tool name. Also subscribe to the
+  // active sub-agent (most-recent activeAgents entry) so the chip can name
+  // sub-agent work via its description rather than just a count.
+  const {
+    tool: inFlightTool,
+    startedAt: inFlightStartedAt,
+    serverName: inFlightServerName,
+    agentDescription,
+    agentStartedAt,
+    pendingShells,
+    transcriptTasks,
+    scheduledWakeup,
+  } = useConnectionStore(
+    useShallow((s) => {
+      const id = s.activeSessionId
+      const ss = id ? s.sessionStates[id] : null
+      // Prefer the structured activeTools slot — most-recent entry is the
+      // visible in-flight tool when the renderer has room for one label.
+      const activeTools = ss?.activeTools
+      const fromState = activeTools && activeTools.length > 0
+        ? activeTools[activeTools.length - 1]!
+        : null
+      // Fall back to the messages walk when activeTools is empty (replay,
+      // pre-bootstrap, or a tool_use rendered from history without a live
+      // tool_start). #4337 — exported helper, exercised by inflight tests.
+      const fromMessages = fromState
+        ? null
+        : findInFlightToolUse(ss?.messages)
+      const inFlight = fromState ?? fromMessages
+      const activeAgents = ss?.activeAgents
+      const mostRecentAgent = activeAgents && activeAgents.length > 0
+        ? activeAgents[activeAgents.length - 1]!
+        : null
+      // #4418 / #4421 — surface the full pending-background-shell list so the
+      // chip can show the most-recently-started one as the headline AND offer
+      // a click-to-expand popover with every shell when there's more than one.
+      // We pass the array reference straight through — `useShallow` does an
+      // identity check on the projection object's top-level keys, so a no-op
+      // `background_work_changed` from another session won't re-render this
+      // component (the store keeps the array reference stable when nothing
+      // changes). The render-side `useMemo` below projects the array down to
+      // the headline / overflow primitives.
+      return {
+        tool: inFlight?.tool ?? null,
+        startedAt: inFlight?.startedAt ?? null,
+        serverName: inFlight?.serverName ?? null,
+        agentDescription: mostRecentAgent?.description ?? null,
+        agentStartedAt: mostRecentAgent?.startedAt ?? null,
+        pendingShells: ss?.pendingBackgroundShells ?? null,
+        // #5431 — transcript-derived outstanding work + pending wakeup, the
+        // idle-state fallbacks when the PTY shell tracker has nothing (or
+        // falsely reaped a silent watcher via the mtime-quiescence sweep).
+        transcriptTasks: ss?.transcriptBackgroundTasks ?? null,
+        scheduledWakeup: ss?.scheduledWakeup ?? null,
+      }
+    }),
+  )
+
+  // #4421 — split the pending shells into "headline" (most-recently-started,
+  // shown inline on the chip) and "overflow" (everything else, shown in the
+  // click-to-expand popover). Memoised against the array reference so we don't
+  // re-sort on every clock tick.
+  const { headlineShell, overflowShells } = useMemo(() => {
+    if (!pendingShells || pendingShells.length === 0) {
+      return { headlineShell: null, overflowShells: [] as NonNullable<typeof pendingShells> }
+    }
+    // Most-recently-started wins the headline slot — matches #4418's behaviour.
+    let headline = pendingShells[0]!
+    for (let i = 1; i < pendingShells.length; i++) {
+      if (pendingShells[i]!.startedAt > headline.startedAt) headline = pendingShells[i]!
+    }
+    const overflow = pendingShells.filter((s) => s !== headline)
+    // Sort overflow by most-recent first so the popover reads top-down newest→oldest.
+    overflow.sort((a, b) => b.startedAt - a.startedAt)
+    return { headlineShell: headline, overflowShells: overflow }
+  }, [pendingShells])
+
+  // #4421 — popover open/closed state. Click the disclosure button to toggle.
+  // Defaulting to closed keeps the chip's resting footprint small; the user
+  // opts into the full list only when they care about the overflow.
+  const [popoverOpen, setPopoverOpen] = useState(false)
+  // Auto-close the popover when the overflow goes away (e.g. shells finish).
+  useEffect(() => {
+    if (overflowShells.length === 0 && popoverOpen) setPopoverOpen(false)
+  }, [overflowShells.length, popoverOpen])
+
+  // #4427 — refs let the dismiss handlers below decide whether an event
+  // originated inside the popover/disclosure (ignored) or outside (close).
+  // Typed as the concrete element so consumers don't need null guards beyond
+  // the ref-not-yet-attached case.
+  const popoverRef = useRef<HTMLDivElement | null>(null)
+  const disclosureRef = useRef<HTMLButtonElement | null>(null)
+
+  // #4444 — useId() keeps the disclosure↔popover aria-controls relationship
+  // unique even if <ActivityIndicator /> is ever rendered twice (e.g. a
+  // future split-pane sidebar), and stays stable across SSR/hydration.
+  // Matches the pattern SidebarTokenView and ToolBubble already use.
+  const popoverId = useId()
+
+  // #4427 — outside-click + Escape dismiss for the overflow popover. Without
+  // these the popover only closes by re-toggling the same disclosure button or
+  // waiting for every shell to drain, which traps focus and surprises users
+  // who click anywhere else expecting the menu to dismiss.
+  //
+  // Listeners are mounted lazily — only while `popoverOpen` is true — so the
+  // idle chip pays no document-event cost when the popover is closed.
+  useEffect(() => {
+    if (!popoverOpen) return
+    const onMouseDown = (event: MouseEvent) => {
+      const target = event.target as Node | null
+      if (!target) return
+      if (popoverRef.current && popoverRef.current.contains(target)) return
+      if (disclosureRef.current && disclosureRef.current.contains(target)) return
+      // #4445 — outside-click dismiss intentionally does NOT restore focus
+      // to the disclosure button: the user explicitly clicked elsewhere,
+      // so stealing focus back would fight their pointer intent. Escape
+      // dismiss (below) is the keyboard-only path that needs focus
+      // restoration per WAI-ARIA APG disclosure guidance.
+      setPopoverOpen(false)
+    }
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setPopoverOpen(false)
+        // #4445 — WAI-ARIA APG: a disclosure-triggered dialog dismissed
+        // via Escape should return focus to the invoker so keyboard users
+        // don't get parked on document.body and lose their place in the
+        // tab order. The popover has role="dialog" which reinforces the
+        // expectation.
+        disclosureRef.current?.focus()
+      }
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [popoverOpen])
   const referenceTimeoutMs = useConnectionStore(
     (s) => s.serverResultTimeoutMs ?? FALLBACK_TIMEOUT_MS,
   )
@@ -69,15 +297,183 @@ export function ActivityIndicator() {
     return () => window.clearInterval(id)
   }, [isIdle])
 
-  if (isIdle) return null
+  if (isIdle) {
+    // #4418 — when the turn ends but the agent backgrounded a Bash shell, the
+    // session is still effectively waiting on work. Surface that as a chip so
+    // the user can tell "idle and done" from "idle but parked on a long-
+    // running shell". The most-recently-started shell wins the headline slot
+    // (falling back to its shellId when the command string is empty). The
+    // chip uses the same neutral green styling as the connect-race fallback
+    // rather than the elapsed-driven color escalation; pending shells aren't
+    // a timeout candidate the way an agent turn is.
+    //
+    // #4420 — the command is user-controlled and unbounded, so the inline
+    // headline gets a tail-ellipsis cap to keep the pill shape intact on
+    // narrow viewports. The full command is still reachable via the chip's
+    // `title` attribute (hover tooltip).
+    //
+    // #4421 — when there's more than one pending shell, a "+N more" badge +
+    // disclosure button reveal a popover listing every pending shell with
+    // its full command and elapsed time. The disclosure is a real <button>
+    // so it's keyboard-navigable (Enter/Space toggle), not hover-only.
+    if (headlineShell) {
+      const rawDetail = headlineShell.command && headlineShell.command.length > 0
+        ? headlineShell.command
+        : headlineShell.shellId
+      const detail = truncatePendingShellCommand(rawDetail)
+      const overflowCount = overflowShells.length
+      // #4428 — the popover lists the headline shell + every overflow shell,
+      // so the screen-reader announcement on the disclosure button must
+      // describe the TOTAL count (overflowCount + 1), not just the overflow.
+      // The previous "Show N additional…" wording understated the dialog by
+      // one and left assistive tech expecting fewer items than rendered.
+      const totalShellCount = overflowCount + 1
+      return (
+        <div
+          className="activity-indicator activity-indicator--green"
+          aria-label="Waiting on background work"
+          title={rawDetail}
+        >
+          <span className="activity-indicator__dot" aria-hidden="true" />
+          <span
+            className="activity-indicator__label"
+            data-testid="activity-indicator-label"
+          >
+            Waiting on background work · {detail}
+          </span>
+          {overflowCount > 0 && (
+            <button
+              ref={disclosureRef}
+              type="button"
+              className="activity-indicator__disclosure"
+              data-testid="activity-indicator-disclosure"
+              aria-expanded={popoverOpen}
+              aria-controls={popoverOpen ? popoverId : undefined}
+              aria-label={`Show all ${totalShellCount} pending background shells`}
+              onClick={() => setPopoverOpen((v) => !v)}
+            >
+              <span data-testid="activity-indicator-more-badge">
+                +{overflowCount} more
+              </span>
+            </button>
+          )}
+          {popoverOpen && overflowCount > 0 && (
+            <div
+              id={popoverId}
+              ref={popoverRef}
+              className="activity-indicator__popover"
+              data-testid="activity-indicator-popover"
+              role="dialog"
+              aria-label="Pending background shells"
+            >
+              <ul className="activity-indicator__popover-list">
+                {[headlineShell, ...overflowShells].map((shell) => {
+                  const cmd = shell.command && shell.command.length > 0
+                    ? shell.command
+                    : shell.shellId
+                  const elapsed = formatDurationTerse(Math.max(0, now - shell.startedAt))
+                  return (
+                    <li
+                      key={shell.shellId}
+                      className="activity-indicator__popover-item"
+                      data-testid={`activity-indicator-popover-item-${shell.shellId}`}
+                    >
+                      <code className="activity-indicator__popover-command" title={cmd}>
+                        {cmd}
+                      </code>
+                      <span className="activity-indicator__popover-elapsed">{elapsed}</span>
+                    </li>
+                  )
+                })}
+              </ul>
+            </div>
+          )}
+        </div>
+      )
+    }
+    // #5431 — no PTY-tracked shell, but the transcript reports outstanding
+    // background work (run_in_background Bash/Agent or Monitor without a
+    // matching task-notification yet). Transcript pairing is exact, so this
+    // chip survives the mtime-quiescence sweep falsely reaping silent
+    // watcher loops that write no output until they finish. Same neutral
+    // green chip as the pending-shell state.
+    if (transcriptTasks && transcriptTasks.length > 0) {
+      let newest = transcriptTasks[0]!
+      for (let i = 1; i < transcriptTasks.length; i++) {
+        if (transcriptTasks[i]!.startedAt > newest.startedAt) newest = transcriptTasks[i]!
+      }
+      const rawDetail = newest.description || newest.toolUseId
+      const detail = truncatePendingShellCommand(rawDetail)
+      const extra = transcriptTasks.length - 1
+      return (
+        <div
+          className="activity-indicator activity-indicator--green"
+          aria-label="Waiting on background work"
+          title={rawDetail}
+          data-testid="activity-indicator-transcript-tasks"
+        >
+          <span className="activity-indicator__dot" aria-hidden="true" />
+          <span
+            className="activity-indicator__label"
+            data-testid="activity-indicator-label"
+          >
+            Waiting on background work · {detail}{extra > 0 ? ` (+${extra} more)` : ''}
+          </span>
+        </div>
+      )
+    }
+    // #5431 — turn ended with a ScheduleWakeup armed: the agent will resume
+    // on its own. Say so instead of presenting the session as done.
+    if (scheduledWakeup) {
+      const at = new Date(scheduledWakeup.at)
+      const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`
+      const reasonSuffix = scheduledWakeup.reason
+        ? ` · ${truncatePendingShellCommand(scheduledWakeup.reason)}`
+        : ''
+      return (
+        <div
+          className="activity-indicator activity-indicator--green"
+          aria-label="Agent resumes automatically"
+          title={scheduledWakeup.reason || undefined}
+          data-testid="activity-indicator-scheduled-wakeup"
+        >
+          <span className="activity-indicator__dot" aria-hidden="true" />
+          <span
+            className="activity-indicator__label"
+            data-testid="activity-indicator-label"
+          >
+            Resumes at {hhmm}{reasonSuffix}
+          </span>
+        </div>
+      )
+    }
+    return null
+  }
   if (lastActivityAt == null) {
     // Busy but we haven't seen an activity event yet (race on connect).
     // Render the indicator in its baseline green state without an elapsed
     // value so users still see "Working…" rather than nothing.
+    //
+    // #4320 — if a tool_use already landed (tool_start can arrive before
+    // any event that updates lastClientActivityAt), surface its name so
+    // the user sees "Running Bash" instead of a generic "Working…". No
+    // elapsed value here because we have no clock anchor — startedAt is
+    // a server timestamp and clock-skew makes a "Ns" suffix unreliable.
+    //
+    // #4308 (this PR) — when an active sub-agent is present, surface its
+    // description first ("Running my-sub-agent" / "Waiting on …"). Sub-agent
+    // work is the more specific named activity; the parent's in-flight tool
+    // is usually `Task` while a sub-agent runs.
+    const label =
+      agentDescription != null
+        ? `Running ${agentDescription}`
+        : inFlightTool != null
+        ? `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)}`
+        : 'Working…'
     return (
       <div className="activity-indicator activity-indicator--green" aria-label="Agent is working">
         <span className="activity-indicator__dot" aria-hidden="true" />
-        <span className="activity-indicator__label">Working…</span>
+        <span className="activity-indicator__label" data-testid="activity-indicator-label">{label}</span>
       </div>
     )
   }
@@ -87,10 +483,30 @@ export function ActivityIndicator() {
   const approaching = remaining > 0 && remaining <= 60_000
   const klass = statusClass(elapsed, referenceTimeoutMs)
 
+  // #4308 — preference order during an active turn (`_isBusy === true`):
+  //   1. Active sub-agent (description + elapsed since its startedAt) — more
+  //      specific than the parent's `Task` tool wrapper.
+  //   2. In-flight tool (name + elapsed since its startedAt) — both
+  //      activeTools (live) and the derive-from-messages fallback.
+  //   3. Generic "Working… last activity Ns ago" — no current named work.
+  //
+  // #4418 — pending background shells are surfaced ONLY when the session is
+  // idle (handled above). During an active turn the live tool/agent label
+  // dominates; pending shells are SECONDARY per the issue's acceptance
+  // criteria and intentionally do not enter the preference order here.
+  let label: string
+  if (agentDescription != null && agentStartedAt != null) {
+    label = `Running ${agentDescription} · ${formatDurationTerse(now - agentStartedAt)}`
+  } else if (inFlightTool != null && inFlightStartedAt != null) {
+    label = `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)} · ${formatDurationTerse(now - inFlightStartedAt)}`
+  } else {
+    label = `Working… last activity ${formatElapsed(elapsed)}`
+  }
+
   return (
     <div className={`activity-indicator ${klass}`} aria-label="Agent is working">
       <span className="activity-indicator__dot" aria-hidden="true" />
-      <span className="activity-indicator__label">Working… last activity {formatElapsed(elapsed)}</span>
+      <span className="activity-indicator__label" data-testid="activity-indicator-label">{label}</span>
       {approaching && (
         <span className="activity-indicator__warning">
           approaching timeout ({Math.ceil(remaining / 1000)}s left)

@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-discover-lan-servers"
+description = "Enables the discover_lan_servers command without any pre-configured scope."
+commands.allow = ["discover_lan_servers"]
+
+[[permission]]
+identifier = "deny-discover-lan-servers"
+description = "Denies the discover_lan_servers command without any pre-configured scope."
+commands.deny = ["discover_lan_servers"]

@@ -5,10 +5,24 @@
  * - Detects user scroll-up, pauses auto-scroll
  * - Shows scroll-to-bottom button when scrolled up
  * - Deduplicates messages by id for reconnect replay
+ *
+ * #5561 — the message list is windowed (virtualized) above a row-count
+ * threshold. Long sessions previously mapped the ENTIRE deduped array to the
+ * DOM (the responsiveness wall the issue names); now only the rows intersecting
+ * the viewport (plus a small overscan) mount, with top/bottom spacer divs
+ * preserving scroll geometry. Below the threshold every row renders exactly as
+ * before — no behaviour change for short histories. Mirrors the mobile #5534
+ * patterns: pinned-to-bottom while streaming, scroll position preserved when
+ * scrolled up, and an id-keyed expand registry so tool-bubble expand state
+ * survives a row scrolling out of and back into the window.
  */
-import { useRef, useState, useCallback, useEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
-import { ThinkingDots } from './ThinkingDots'
+import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
+import { bumpRenderCount } from '@chroxy/store-core'
+import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
+import { MessageRowShell } from './MeasuredRow'
+import { ChatExpandContext, type ChatExpandRegistry } from './chatExpandRegistry'
+import { useWindowedRange } from './useWindowedRange'
 
 /* ---- Sender Icons ---- */
 
@@ -90,6 +104,13 @@ export interface ChatViewMessage {
   content: string
   timestamp: number
   isStreaming?: boolean
+  /**
+   * #4476: structured error code mirrored from the store ChatMessage.
+   * Renderers may switch on this to surface a distinct variant for known
+   * error categories (e.g. `'stream_stall'` → chip + retry). Undefined
+   * for legacy errors without a structured code.
+   */
+  code?: string
 }
 
 export interface ChatViewProps {
@@ -99,6 +120,52 @@ export interface ChatViewProps {
   isBusy?: boolean
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
+  /**
+   * #4398 — when true, the ChatView is mounted but hidden via a parent
+   * `display:none` wrapper (sibling-tab kept-alive pattern from #4305).
+   * The memo wrapper below uses this flag to skip re-renders entirely
+   * while hidden: parent prop changes from store updates won't trigger
+   * markdown re-parsing or renderMessage invocations. On the first render
+   * after `hidden` flips back to false, React applies the latest props
+   * in a single batch, so user-visible state is up-to-date instantly.
+   *
+   * Hook-local state (`userScrolledUp`, scroll position, child
+   * `ToolGroup`/`ToolBubble` expand state) is preserved across the
+   * hidden window because the component instance never unmounts.
+   */
+  hidden?: boolean
+  /**
+   * #5780 — monotonically-increasing nonce the parent bumps when the user
+   * performs an explicit "jump to the latest" action. Today that is sending a
+   * message; wiring approve/answer flows is tracked in #5786. Unlike the
+   * count-change auto-follow — which deliberately leaves a scrolled-up reader in place —
+   * a bump here ALWAYS snaps the view to the bottom and clears
+   * `userScrolledUp`, because the user just acted on the conversation and
+   * expects to see their input plus the incoming response. A nonce (rather
+   * than an imperative ref handle) keeps ChatView's memo wrapper intact and
+   * is robust to rapid sends: each distinct value fires the effect exactly
+   * once. The initial value is ignored (the mount effect already lands at
+   * the bottom); only changes trigger a scroll.
+   */
+  scrollToBottomSignal?: number
+  /**
+   * #5939 (epic #5935 ④): ids of `user_input` messages currently held in the
+   * server's outgoing queue (send-while-busy). A row whose id is in this set
+   * renders a "Queued" badge + a cancel affordance instead of a plain sent
+   * bubble; the badge clears when the id leaves the set (flush / cancel /
+   * interrupt). A `Set` of scalars keeps the per-row prop a stable boolean so
+   * the row memo still skips unaffected rows.
+   */
+  queuedIds?: ReadonlySet<string>
+  /** #5939: cancel a single queued follow-up by its message id (cancel_queued). */
+  onCancelQueued?: (id: string) => void
+  /**
+   * #5953 (epic #5951): label for the in-chat "Claude is working" indicator
+   * shown at the streaming tail. The parent derives it from the active session's
+   * in-flight tool ("Running Bash…") or passes nothing for the generic default
+   * ("Claude is working…"). A stable string so it doesn't churn per token.
+   */
+  workingLabel?: string
 }
 
 const TYPE_CLASS: Record<string, string> = {
@@ -110,7 +177,38 @@ const TYPE_CLASS: Record<string, string> = {
   tool_use: 'tool',
 }
 
-const SCROLL_THRESHOLD = 60
+/**
+ * #5780 — "near the bottom" tolerance (px). A new incoming message/tool result
+ * auto-follows ONLY when the viewport is within this distance of the bottom, so
+ * a user who has scrolled up to read history keeps their position. Widened from
+ * 60 to 100 to match the standard chat affordance (a small manual nudge off the
+ * very bottom still counts as "following the conversation").
+ */
+const SCROLL_THRESHOLD = 100
+
+/**
+ * #5561 — fallback `gap` between rows in `.chat-messages` (theme/components.css).
+ * Folded into the windowing height math so the spacer heights match the real
+ * scroll geometry. The live value is read from `getComputedStyle().rowGap` at
+ * runtime (it drops to 8px under the narrow-viewport media query in
+ * components.css), so this constant is only the fallback used when computed
+ * style is unavailable (jsdom) or unparseable. Keep in sync with the CSS base
+ * rule (`.chat-messages { gap: 12px }`).
+ */
+const CHAT_MESSAGES_ROW_GAP = 12
+
+/**
+ * Read the live row gap (px) from the scroll container's computed style so the
+ * windowing math tracks the responsive `.chat-messages` gap (12px desktop / 8px
+ * narrow). Falls back to {@link CHAT_MESSAGES_ROW_GAP} when computed style is
+ * unavailable (jsdom returns `''`) or yields a non-finite value.
+ */
+function readRowGap(el: HTMLElement | null): number {
+  if (!el || typeof getComputedStyle !== 'function') return CHAT_MESSAGES_ROW_GAP
+  const raw = getComputedStyle(el).rowGap
+  const parsed = parseFloat(raw)
+  return Number.isFinite(parsed) ? parsed : CHAT_MESSAGES_ROW_GAP
+}
 
 function formatTime(ts: number): string {
   const d = new Date(ts)
@@ -121,11 +219,132 @@ function formatTime(ts: number): string {
   return `${h}:${m} ${ampm}`
 }
 
-export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatViewProps) {
+const IS_DEV = typeof import.meta !== 'undefined' && Boolean(import.meta.env?.DEV)
+
+/**
+ * #5516 (epic #5514): the default (non-renderMessage) message row, extracted
+ * into a memoized component so a streaming delta flush only re-runs the
+ * markdown parse (`renderMarkdown`) for the ONE message whose content changed.
+ *
+ * Before #5516 every store update re-ran the whole `dedupedMessages.map`,
+ * calling `renderMarkdown(msg.content)` inline for EVERY response/tool_use row
+ * — an O(conversation) markdown re-parse ~10×/sec while streaming. By keying
+ * the memo on the render-affecting scalars (id/type/content/timestamp), only
+ * the tail bubble (whose content is appended each flush) re-parses; the rest of
+ * the transcript is skipped entirely. The store hands each row a fresh object
+ * per render, so a shallow scalar compare — not reference equality — is what
+ * makes the skip fire.
+ */
+/** Row container class for a message type (was computed inline in the map). */
+function rowClassFor(type: string, hasIcon: boolean): string {
+  if (type === 'user_input') return 'msg-row msg-row-user'
+  if (type === 'system') return 'msg-row msg-row-system'
+  return hasIcon ? 'msg-row' : ''
+}
+
+const DefaultMessageRow = memo(function DefaultMessageRow({
+  id,
+  type,
+  content,
+  timestamp,
+  isStreaming,
+  queued,
+  onCancelQueued,
+}: {
+  id: string
+  type: ChatViewMessage['type']
+  content: string
+  timestamp: number
+  isStreaming?: boolean
+  /** #5939: this user_input is held in the server's outgoing queue. */
+  queued?: boolean
+  /** #5939: cancel this queued follow-up (stable callback from ChatView). */
+  onCancelQueued?: (id: string) => void
+}) {
+  // Dev-only render tally — proves (in the memoization test + ad-hoc
+  // profiling) non-tail rows don't re-render on a delta flush. Never read on
+  // the hot path.
+  if (IS_DEV) bumpRenderCount(`ChatMessageRow:${id}`)
+
+  // Derive icon from `type` INSIDE the memo. Computing it in the parent map
+  // would hand the memo a fresh `icon` JSX element identity every render and
+  // defeat the skip — every prop must be a stable scalar. The outer `.msg-row`
+  // container (class + data-testid) is now rendered by ChatView's row shell
+  // (`MessageRowShell`, #5561) so the measurement ResizeObserver can attach to
+  // the same element that carries the flex layout; this memo renders only the
+  // inner content.
+  const icon = senderIconFor(type)
+
+  const body =
+    type === 'response' || type === 'tool_use'
+      ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
+      : content
+
+  return (
+    <>
+      {type !== 'user_input' && icon}
+      <div className={`msg ${TYPE_CLASS[type] || 'assistant'}${isStreaming ? ' streaming' : ''}${queued ? ' queued' : ''}`}>
+        {body}
+        {queued && (
+          <span className="msg-queued" data-testid={`msg-queued-${id}`}>
+            <span className="msg-queued-label">Queued</span>
+            {onCancelQueued && (
+              <button
+                type="button"
+                className="msg-queued-cancel"
+                aria-label="Cancel queued message"
+                title="Cancel queued message"
+                data-testid={`msg-queued-cancel-${id}`}
+                onClick={() => onCancelQueued(id)}
+              >
+                ✕
+              </button>
+            )}
+          </span>
+        )}
+        {timestamp > 0 && <span className="msg-timestamp">{formatTime(timestamp)}</span>}
+      </div>
+      {type === 'user_input' && icon}
+    </>
+  )
+})
+
+function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
-  const prevStreamingRef = useRef(isStreaming)
+  // #5954 — a ref mirror of `userScrolledUp` so the ResizeObserver callback can
+  // read the live follow-state without re-subscribing the observer every time
+  // the user crosses the bottom threshold. Kept in sync by the effect below.
+  const userScrolledUpRef = useRef(false)
+
+  // #5561 — scroll-anchor compensation state. WKWebView (the Tauri desktop's
+  // engine, and the dashboard's PRIMARY consumer) does NOT implement default
+  // CSS scroll anchoring (no `overflow-anchor` support), so when a height-cache
+  // correction changes the height of content ABOVE the viewport, the browser
+  // does NOT keep the visible rows pinned the way Blink/Gecko would — the
+  // content visibly jumps. We compensate by hand: track the windowing anchor
+  // (the first visible row + its content-space top offset) and, when that
+  // offset shifts for the SAME anchor row, add the delta back to `scrollTop`
+  // before paint (useLayoutEffect). See the compensation effect below.
+  const anchorRef = useRef<{ index: number; offset: number } | null>(null)
+  // The scrollTop value we just wrote during compensation. The resulting
+  // `scroll` event must NOT be treated as a user scroll (it would otherwise
+  // re-seed `scrollTop` state with a value the next render's anchor math has
+  // already accounted for, and could flip `userScrolledUp`). The handler clears
+  // this once it sees the matching offset — an expected-scrollTop guard against
+  // a compensation→scroll→recompute feedback loop.
+  const expectedScrollTopRef = useRef<number | null>(null)
+
+  // #5561 — scroll/viewport geometry that drives the windowing hook. Kept in
+  // state (not just the DOM) so a scroll or resize recomputes the visible
+  // range. Seeded to 0 and synced on mount + every scroll/resize.
+  const [scrollTop, setScrollTop] = useState(0)
+  const [viewportHeight, setViewportHeight] = useState(0)
+  // #5561 — live row gap from the container's computed style, re-read on resize
+  // (the same geometry sync that tracks viewport height) so the windowing math
+  // follows the responsive `.chat-messages` gap instead of a hard-coded 12px.
+  const [rowGap, setRowGap] = useState(CHAT_MESSAGES_ROW_GAP)
 
   // Deduplicate by id — keep first occurrence
   const dedupedMessages = useMemo(() => {
@@ -137,23 +356,106 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
     })
   }, [messages])
 
+  // #5561 — id-keyed expand-state registry (mirror of mobile #5534). Lives in a
+  // ref so a tool bubble persisting its expand flag never re-renders ChatView;
+  // a row that scrolled out and back re-reads its flag on remount via
+  // `useInitialExpanded`. The Provider value is memoized so the context
+  // identity is stable across renders.
+  const expandedStateRef = useRef<Map<string, boolean>>(new Map())
+  const expandRegistry = useMemo<ChatExpandRegistry>(
+    () => ({
+      get: (key) => expandedStateRef.current.get(key),
+      set: (key, expanded) => {
+        if (expanded) expandedStateRef.current.set(key, true)
+        else expandedStateRef.current.delete(key)
+      },
+    }),
+    [],
+  )
+
+  // #5561 — stable per-row key lookup for the height cache. Rows key by message
+  // id (the dedup pass already guarantees uniqueness), matching the React
+  // `key` used in the map so a row's measured height tracks the row, not its
+  // index, across windowing churn.
+  const keyAt = useCallback(
+    (index: number) => dedupedMessages[index]?.id ?? `__row_${index}`,
+    [dedupedMessages],
+  )
+
+  const range = useWindowedRange({
+    itemCount: dedupedMessages.length,
+    scrollTop,
+    viewportHeight,
+    // Live `.chat-messages` row gap (12px desktop / 8px narrow), re-read on
+    // resize via syncGeometry, so the windowing spacers reserve the same total
+    // height the real responsive flex column occupies (rows + inter-row gaps).
+    rowGap,
+    keyAt,
+  })
+
+  const syncGeometry = useCallback(() => {
+    const el = containerRef.current
+    if (!el) return
+    // Functional updates that bail when unchanged — a no-op sync (e.g. the
+    // mount sync in jsdom where scrollTop/clientHeight are both 0) must not
+    // schedule a spurious re-render. This keeps the #4398 hidden-memoization
+    // contract (renderMessage invoked exactly once on first mount) intact.
+    setScrollTop(prev => (prev === el.scrollTop ? prev : el.scrollTop))
+    setViewportHeight(prev => (prev === el.clientHeight ? prev : el.clientHeight))
+    // Re-read the responsive row gap from computed style — a viewport resize can
+    // cross the narrow-viewport media query and flip 12px↔8px. Same bail-when-
+    // unchanged pattern so a no-op sync doesn't churn a re-render.
+    const liveGap = readRowGap(el)
+    setRowGap(prev => (prev === liveGap ? prev : liveGap))
+  }, [])
+
   const handleScroll = useCallback(() => {
     const el = containerRef.current
     if (!el) return
+    // #5561 — ignore the synthetic `scroll` event our own compensation write
+    // produced. `el.scrollTop` already equals the value the layout effect set,
+    // and the anchor math that produced it is consistent with the current
+    // `scrollTop` state, so re-seeding state (or re-evaluating `userScrolledUp`)
+    // here would either be a no-op churn or, worse, feed the delta back in.
+    if (expectedScrollTopRef.current !== null && Math.abs(el.scrollTop - expectedScrollTopRef.current) < 1) {
+      expectedScrollTopRef.current = null
+      return
+    }
+    // A real user scroll invalidates any pending expected value.
+    expectedScrollTopRef.current = null
+    // #5561 — feed the windowing hook the live scroll offset so the visible
+    // slice tracks the viewport. clientHeight is stable per scroll but cheap
+    // to read here, keeping the range correct if a scroll coincides with a
+    // layout change.
+    setScrollTop(el.scrollTop)
+    setViewportHeight(el.clientHeight)
     const atBottom = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_THRESHOLD
     // During programmatic scrolls, only update if we're at bottom (don't falsely set scrolledUp)
     if (programmaticScrollRef.current && atBottom) return
     setUserScrolledUp(!atBottom)
   }, [])
 
-  const scrollToBottom = useCallback(() => {
+  // The bare "snap to bottom" primitive shared by the mount, count-follow, and
+  // scrollToBottomSignal effects: flag the write as programmatic (so the
+  // resulting synthetic scroll event isn't misread as a user scroll-up), write
+  // scrollTop to scrollHeight, then clear the flag on the next frame. Reads the
+  // container ref itself and no-ops when unmounted, so callers don't repeat the
+  // null guard. Does NOT touch userScrolledUp — that's the caller's contract
+  // (the signal effect clears it; the count-follow effect only runs when already
+  // at bottom). Keeping the suppression contract in one place is the #5786 DRY
+  // ask — do not change its behavior.
+  const scrollToBottomNow = useCallback(() => {
     const el = containerRef.current
     if (!el) return
     programmaticScrollRef.current = true
     el.scrollTop = el.scrollHeight
-    setUserScrolledUp(false)
     requestAnimationFrame(() => { programmaticScrollRef.current = false })
   }, [])
+
+  const scrollToBottom = useCallback(() => {
+    scrollToBottomNow()
+    setUserScrolledUp(false)
+  }, [scrollToBottomNow])
 
   // Scroll to the bottom on initial mount so switching back to the chat
   // tab always lands on the most-recent message above the input bar.
@@ -161,108 +463,265 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
   // ChatView when the parent toggles viewMode away and back, so this
   // effect re-runs naturally on every tab return.
   useEffect(() => {
-    const el = containerRef.current
-    if (!el) return
-    programmaticScrollRef.current = true
-    el.scrollTop = el.scrollHeight
-    requestAnimationFrame(() => { programmaticScrollRef.current = false })
-  }, [])
+    if (!containerRef.current) return
+    scrollToBottomNow()
+    // #5561 — seed the windowing geometry from the real container size on mount
+    // so the first render after layout has an accurate viewport height.
+    syncGeometry()
+  }, [syncGeometry, scrollToBottomNow])
 
-  // Reset userScrolledUp when streaming ends — show the final response
+  // #5954 — mirror `userScrolledUp` into a ref so the ResizeObserver callback
+  // (which we don't want to re-subscribe on every threshold crossing) reads the
+  // current follow-state.
   useEffect(() => {
-    if (prevStreamingRef.current && !isStreaming) {
-      setUserScrolledUp(false)
-    }
-    prevStreamingRef.current = isStreaming
-  }, [isStreaming])
+    userScrolledUpRef.current = userScrolledUp
+  }, [userScrolledUp])
 
-  // Auto-scroll on new messages or busy state change (stable count-based trigger).
+  // #5561 — keep the windowed range correct when the container resizes (panel
+  // split drag, window resize, sidebar toggle) without a scroll event firing.
+  //
+  // #5954 — also re-pin to the tail on a container resize. The motivating case
+  // is a SHRINK because the input area grew (a multi-line textarea, attachments,
+  // or the activity / check-in chips appearing all push `.chat-messages`
+  // shorter), which slides a previously bottom-pinned tail below the now-shorter
+  // fold so it renders *behind* the input bar. ResizeObserver also fires on
+  // width changes (split-pane drag, sidebar toggle) and on grow — re-pinning
+  // there while following is harmless-to-helpful (it keeps the tail in view on
+  // any geometry change), so we don't try to distinguish the trigger. What this
+  // observer does NOT see is streamed content growth: that changes `scrollHeight`,
+  // not the container's own box size, so it never fires here — the streaming RAF
+  // owns that path (no double-pin). Gated on following (`!userScrolledUpRef`) so
+  // a user reading history is never yanked down (#4652 / AC3). `scrollToBottomNow`
+  // keeps the programmatic-scroll suppression contract (#5957) intact, and only
+  // ever runs when the #5561 anchor compensation is dormant (it bails unless
+  // `userScrolledUp`), so the two never fight.
+  useEffect(() => {
+    const el = containerRef.current
+    if (!el || typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(() => {
+      syncGeometry()
+      if (!userScrolledUpRef.current) scrollToBottomNow()
+    })
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [syncGeometry, scrollToBottomNow])
+
+  // #5561 — engine-independent scroll-position compensation.
+  //
+  // WHY: Browsers with CSS scroll anchoring (Blink/Gecko) automatically keep
+  // the visible content fixed when above-viewport content changes height — the
+  // approve rationale for #5561 relied on that. But the Tauri desktop, the
+  // dashboard's PRIMARY consumer, renders in WKWebView (Safari's engine), which
+  // ships NO default scroll anchoring and does not honour `overflow-anchor`.
+  // There, scrolling UP through history — where freshly-mounted top rows
+  // re-measure away from their estimated heights and the top spacer is
+  // recalculated — would visibly jump/jitter. We restore the missing behaviour
+  // by hand for ALL engines (cheap and idempotent where anchoring already
+  // works, since the offset delta is 0 once heights are correct).
+  //
+  // HOW: each render we remember the first-visible row (`firstVisibleIndex`) and
+  // its content-space top offset (`firstVisibleOffset`). On the NEXT render we
+  // re-read that SAME row's offset via `range.offsetAt(prevIndex)` — anchoring on
+  // the fixed row identity, not on "whatever is first-visible now", because a
+  // remeasure above the viewport shifts which row is first-visible at a fixed
+  // scrollTop. The change in that fixed row's offset is exactly how far the
+  // content under the viewport moved; we add it to `scrollTop` synchronously
+  // (useLayoutEffect → before paint) so the anchor row stays under the same
+  // pixel. The pinned-to-bottom path is left alone — the streaming /
+  // count-change effects already force it to the bottom, and compensating there
+  // would fight them.
+  useLayoutEffect(() => {
+    const el = containerRef.current
+    const prev = anchorRef.current
+    // The anchor we remember for NEXT render is the current first-visible row.
+    const next = { index: range.firstVisibleIndex, offset: range.firstVisibleOffset }
+
+    if (!el || !range.virtualized) {
+      anchorRef.current = next
+      return
+    }
+    // Only compensate while the user is reading history. When pinned to bottom
+    // (and especially while streaming) the dedicated effects own scrollTop.
+    if (!userScrolledUp || programmaticScrollRef.current || !prev) {
+      anchorRef.current = next
+      return
+    }
+
+    // KEY POINT: a re-measure of a row ABOVE the viewport shifts which row is
+    // first-visible *at a fixed scrollTop* (more content above the same pixel),
+    // so we must NOT compare first-visible-row to first-visible-row. Instead we
+    // re-read the offset of the SAME anchor row we recorded last render (its
+    // index is stable — the row did not move in the array). If that fixed row's
+    // content-space top edge moved, the delta is exactly how far the content
+    // under the viewport shifted, and we add it back to scrollTop so the anchor
+    // stays under the same pixel. WKWebView (the Tauri desktop's engine) has no
+    // native scroll anchoring, so without this the content visibly jumps.
+    const prevAnchorNowOffset = range.offsetAt(prev.index)
+    const delta = prevAnchorNowOffset - prev.offset
+    if (delta === 0) {
+      anchorRef.current = next
+      return
+    }
+    const target = el.scrollTop + delta
+    // Record the value we're about to write so the synthetic scroll event the
+    // assignment fires is recognised and ignored (feedback-loop guard).
+    expectedScrollTopRef.current = target
+    el.scrollTop = target
+    // Keep `scrollTop` state consistent with the DOM so the next windowing
+    // recompute starts from the compensated position rather than re-deriving the
+    // pre-shift one (which would re-introduce the jump on the following render).
+    // The settling render restores the original anchor row as first-visible at
+    // its new offset, so store THAT as the anchor for the next round.
+    anchorRef.current = { index: prev.index, offset: prevAnchorNowOffset }
+    setScrollTop(target)
+  }, [range, userScrolledUp])
+
+  // #4652: previously a separate streaming-end effect reset
+  // `userScrolledUp` to false — that snapped the user back to the
+  // bottom the moment an AskUserQuestion arrived (the question flips
+  // `isStreaming` from true to false), making it impossible to read
+  // history while a prompt was visible. The reset is no longer needed:
+  // the count-change effect below handles the "follow latest" path
+  // when the user is at the bottom, and the scroll-to-bottom button
+  // gives a one-click return when they're scrolled up.
+
+  // #4652: auto-scroll on new messages (stable count-based trigger) only
+  // when the user is at the bottom. Previously we unconditionally snapped
+  // to bottom on every count change, which made scrolling up through
+  // history while an AskUserQuestion form was open impossible — any
+  // downstream tool_use / tool_result event would yank the viewport back
+  // down. The scroll-to-bottom button (already rendered when
+  // `userScrolledUp`) is the user's one-click escape hatch.
   const prevCountRef = useRef(dedupedMessages.length)
   useEffect(() => {
     const countChanged = dedupedMessages.length !== prevCountRef.current
     prevCountRef.current = dedupedMessages.length
-    if (countChanged) {
-      setUserScrolledUp(false)
-      requestAnimationFrame(() => {
-        const el = containerRef.current
-        if (el) {
-          programmaticScrollRef.current = true
-          el.scrollTop = el.scrollHeight
-          requestAnimationFrame(() => { programmaticScrollRef.current = false })
-        }
-      })
+    if (countChanged && !userScrolledUp) {
+      requestAnimationFrame(() => { scrollToBottomNow() })
     }
-  }, [dedupedMessages.length, userScrolledUp, isBusy])
+  }, [dedupedMessages.length, userScrolledUp, isBusy, scrollToBottomNow])
 
-  // During streaming, continuously scroll to bottom via RAF
+  // #5780 / #5786 — explicit "jump to latest" on a user action: send, approving
+  // a permission/plan, or answering an AskUserQuestion (the parent bumps the
+  // nonce for all three). Watches the parent's `scrollToBottomSignal` nonce:
+  // whenever it changes we force the view to the bottom and clear
+  // `userScrolledUp`, even if the user had scrolled up to read history. This is
+  // the deliberate exception to the count-change auto-follow above — those
+  // actions are the user asking to see the resulting response, so we always
+  // follow. Seeded
+  // with the initial value so the first render (and mount) is a no-op; only a
+  // genuine bump scrolls. Robust to rapid sends: each distinct nonce fires
+  // once, and the RAF defers the write until after the new row has laid out so
+  // `scrollHeight` already includes it.
+  const lastScrollSignalRef = useRef(scrollToBottomSignal)
+  useEffect(() => {
+    if (scrollToBottomSignal === lastScrollSignalRef.current) return
+    lastScrollSignalRef.current = scrollToBottomSignal
+    setUserScrolledUp(false)
+    requestAnimationFrame(() => { scrollToBottomNow() })
+  }, [scrollToBottomSignal, scrollToBottomNow])
+
+  // During streaming, continuously re-pin to the bottom via RAF so the growing
+  // tail stays in view. #5954: reuse `scrollToBottomNow()` rather than an inline
+  // `scrollTop = scrollHeight` with a SYNCHRONOUS `programmaticScrollRef` clear.
+  // The synchronous clear violated the suppression contract (the flag was
+  // already false by the time the write's async `scroll` event reached
+  // `handleScroll`), so a streaming scroll event landing in a transient
+  // not-quite-at-bottom window (windowing churn / content growth between the
+  // write and the event) was misread as a user scroll-up — which flipped
+  // `userScrolledUp` and KILLED the auto-follow effect, dropping the live tail
+  // below the fold ("doesn't consistently stay at the bottom"). `scrollToBottomNow`
+  // holds the flag until the next frame, so `handleScroll`'s
+  // `programmaticScrollRef.current && atBottom` guard reliably ignores the
+  // self-induced events while a genuine user scroll-up (atBottom false) is still
+  // honored.
   useEffect(() => {
     if (!isStreaming || userScrolledUp) return
     let rafId: number
     const tick = () => {
-      const el = containerRef.current
-      if (el) {
-        programmaticScrollRef.current = true
-        el.scrollTop = el.scrollHeight
-        programmaticScrollRef.current = false
-      }
+      scrollToBottomNow()
       rafId = requestAnimationFrame(tick)
     }
     rafId = requestAnimationFrame(tick)
     return () => cancelAnimationFrame(rafId)
-  }, [isStreaming, userScrolledUp])
+  }, [isStreaming, userScrolledUp, scrollToBottomNow])
+
+  // #5561 — the windowed slice. Only rows in [startIndex, endIndex) mount; the
+  // top/bottom spacers reserve the height of the skipped rows so the scrollbar
+  // geometry (and therefore scroll position when content appends above the
+  // viewport) is preserved. Below the threshold `range` covers the whole list
+  // and both spacers are 0, so short conversations render exactly as before.
+  const visible = dedupedMessages.slice(range.startIndex, range.endIndex)
 
   return (
     <div className="chat-view" data-testid="chat-view">
-      <div
-        ref={containerRef}
-        className="chat-messages"
-        data-testid="chat-messages"
-        onScroll={handleScroll}
-      >
-        {dedupedMessages.map(msg => {
-          const icon = senderIconFor(msg.type)
-          const rowClass = msg.type === 'user_input' ? 'msg-row msg-row-user'
-            : msg.type === 'system' ? 'msg-row msg-row-system'
-            : icon ? 'msg-row' : ''
-          const custom = renderMessage?.(msg)
-          if (custom !== undefined && custom !== null) {
-            return (
-              <div
-                key={msg.id}
-                data-testid={`msg-${msg.id}`}
-                className={rowClass}
-              >
-                {msg.type !== 'user_input' && icon}
-                <div style={{ display: 'contents' }}>{custom}</div>
-                {msg.type === 'user_input' && icon}
-              </div>
-            )
-          }
-          return (
+      <ChatExpandContext.Provider value={expandRegistry}>
+        <div
+          ref={containerRef}
+          className="chat-messages"
+          data-testid="chat-messages"
+          onScroll={handleScroll}
+        >
+          {/* Top spacer — reserves the height of windowed-out leading rows. The
+              `flex: 0 0 auto` style keeps it from being squeezed by the flex
+              column the way a normal flex child would be. */}
+          {range.topSpacer > 0 && (
             <div
-              key={msg.id}
-              data-testid={`msg-${msg.id}`}
-              className={rowClass}
-            >
-              {msg.type !== 'user_input' && icon}
-              <div
-                className={`msg ${TYPE_CLASS[msg.type] || 'assistant'}${msg.isStreaming ? ' streaming' : ''}`}
+              aria-hidden="true"
+              data-testid="chat-window-top-spacer"
+              style={{ flex: '0 0 auto', height: range.topSpacer }}
+            />
+          )}
+          {visible.map(msg => {
+            const icon = senderIconFor(msg.type)
+            const rowClass = rowClassFor(msg.type, icon !== null)
+            const custom = renderMessage?.(msg)
+            if (custom !== undefined && custom !== null) {
+              return (
+                <MessageRowShell
+                  key={msg.id}
+                  rowKey={msg.id}
+                  measureRow={range.measureRow}
+                  className={rowClass}
+                  testId={`msg-${msg.id}`}
+                >
+                  {msg.type !== 'user_input' && icon}
+                  <div style={{ display: 'contents' }}>{custom}</div>
+                  {msg.type === 'user_input' && icon}
+                </MessageRowShell>
+              )
+            }
+            return (
+              <MessageRowShell
+                key={msg.id}
+                rowKey={msg.id}
+                measureRow={range.measureRow}
+                className={rowClass}
+                testId={`msg-${msg.id}`}
               >
-                {(msg.type === 'response' || msg.type === 'tool_use') ? (
-                  <div dangerouslySetInnerHTML={{ __html: renderMarkdown(msg.content) }} />
-                ) : (
-                  msg.content
-                )}
-                {msg.timestamp > 0 && (
-                  <span className="msg-timestamp">{formatTime(msg.timestamp)}</span>
-                )}
-              </div>
-              {msg.type === 'user_input' && icon}
-            </div>
-          )
-        })}
-        {(isStreaming || isBusy) && <ThinkingDots />}
-      </div>
+                <DefaultMessageRow
+                  id={msg.id}
+                  type={msg.type}
+                  content={msg.content}
+                  timestamp={msg.timestamp}
+                  isStreaming={msg.isStreaming}
+                  queued={queuedIds?.has(msg.id) ?? false}
+                  onCancelQueued={onCancelQueued}
+                />
+              </MessageRowShell>
+            )
+          })}
+          {/* Bottom spacer — reserves the height of windowed-out trailing rows. */}
+          {range.bottomSpacer > 0 && (
+            <div
+              aria-hidden="true"
+              data-testid="chat-window-bottom-spacer"
+              style={{ flex: '0 0 auto', height: range.bottomSpacer }}
+            />
+          )}
+          {(isStreaming || isBusy) && <WorkingIndicator label={workingLabel} />}
+        </div>
+      </ChatExpandContext.Provider>
 
       {userScrolledUp && (
         <button
@@ -278,4 +737,28 @@ export function ChatView({ messages, isStreaming, isBusy, renderMessage }: ChatV
     </div>
   )
 }
+
+/**
+ * #4398 — skip re-rendering while the parent has hidden us. After #4305
+ * (Bug B) we stay mounted across tab switches so user-set expand state
+ * survives the round-trip, but the trade-off was that every store
+ * update still flowed in and re-rendered the off-screen ChatView. On
+ * long sessions that doubled the per-update render cost (markdown
+ * re-parse, dedup pass, renderMessage callbacks for every tool group)
+ * for work nobody could see.
+ *
+ * This comparator returns `true` (skip re-render) only when we were
+ * hidden AND we're still hidden. The first render where `hidden` flips
+ * to `false` always proceeds — at that point React has already
+ * committed the latest props, so the user sees an up-to-date view in
+ * the very same frame they switched tabs. Going from visible → hidden
+ * still renders once so the wrapper transition completes cleanly.
+ *
+ * Note: a parent that wants the hidden ChatView to skip work MUST pass
+ * `hidden={true}`. Without the prop (e.g. SplitPane path), every render
+ * proceeds — the optimization is opt-in.
+ */
+export const ChatView = memo(ChatViewImpl, (prev, next) => {
+  return Boolean(prev.hidden) && Boolean(next.hidden)
+})
 

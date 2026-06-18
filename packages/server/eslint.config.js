@@ -13,6 +13,7 @@ export default [
         setInterval: 'readonly',
         clearInterval: 'readonly',
         setImmediate: 'readonly',
+        clearImmediate: 'readonly',
         URL: 'readonly',
         Buffer: 'readonly',
         AbortController: 'readonly',
@@ -57,6 +58,9 @@ export default [
     },
   },
   {
-    ignores: ['node_modules/', 'tests/'],
+    // `src/dashboard-next/` is a Vite-built static bundle served by the
+    // server; its `dist/assets/*.js` is minified browser code that would
+    // otherwise trip every `no-undef` rule for `window`, `document`, etc.
+    ignores: ['node_modules/', 'tests/', 'src/dashboard-next/'],
   },
 ]

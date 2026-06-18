@@ -1,5 +1,10 @@
 import { EventEmitter } from 'events'
+import { randomUUID } from 'crypto'
 import { createLogger } from './logger.js'
+// #6038: the SDK/TUI permission path broadcasts to clients too, so it must apply
+// the same redaction as the hook path. Shared sanitizer + value redactor live in
+// redaction.js (a leaf module — no import cycle / HTTP-handler weight).
+import { sanitizeToolInput, redactValue } from './redaction.js'
 
 const _fallbackLog = createLogger('permission-manager')
 
@@ -39,13 +44,24 @@ export class PermissionManager extends EventEmitter {
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
     this._permissionCounter = 0
+    // Per-instance (per-session) nonce so requestIds are globally unique
+    // across sessions. Without it the id was `perm-${counter}-${ms}` with a
+    // counter that restarts at 0 every session — two sessions could mint the
+    // same id (same counter + same millisecond), and the parent-level
+    // subagent routing table (byok-session.js) would then alias a parent's
+    // own pending id against a child's (#5121). The counter is retained for
+    // human-readable ordering in logs; global uniqueness comes from the
+    // nonce. The id is opaque to all consumers — nothing parses its shape.
+    // Full 128-bit UUID (dashes stripped so the nonce stays a single id
+    // segment) — 32 bits would be birthday-bound vulnerable at scale.
+    this._idNonce = randomUUID().replace(/-/g, '')
     this._lastPermissionData = new Map() // requestId -> emitted permission_request payload
 
     // Session-scoped permission rules
     this._sessionRules = [] // [{ tool, decision }]
 
     // AskUserQuestion handling
-    this._pendingUserAnswer = null // { resolve, input } when waiting for user answer
+    this._pendingUserAnswer = null // { resolve, input, toolUseId } when waiting for user answer
     this._questionTimer = null
     this._waitingForAnswer = false
   }
@@ -161,7 +177,7 @@ export class PermissionManager extends EventEmitter {
     }
 
     return new Promise((resolve) => {
-      const requestId = `perm-${++this._permissionCounter}-${Date.now()}`
+      const requestId = `perm-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
       this._pendingPermissions.set(requestId, {
         resolve,
         input: input || {},
@@ -172,20 +188,30 @@ export class PermissionManager extends EventEmitter {
       })
 
       const toolInput = input || {}
-      const description = toolInput.description
+      const rawDescription = toolInput.description
         || toolInput.command
         || toolInput.file_path
         || toolInput.pattern
         || toolInput.query
-        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput).slice(0, 200) : toolName)
+        || (Object.keys(toolInput).length > 0 ? JSON.stringify(toolInput) : toolName)
+      // #6038/#6048/#6049: build the broadcast description by REDACTING the full
+      // string first, THEN truncating — truncating first (the old order) could
+      // leave a secret straddling the cap as a sub-floor partial prefix that the
+      // pattern scan misses. String() coerces a non-string field so a malformed
+      // tool input can't crash the emit path (.replace on a non-string throws).
+      const description = redactValue(String(rawDescription)).slice(0, 200)
 
       this._logInfo(`Permission request ${requestId}: ${toolName}`)
 
+      // #6038: redact before broadcast. The raw input/description are kept for
+      // execution via the _pendingPermissions entry above; this payload is
+      // broadcast/display only, so a secret in a value (or the stringified
+      // fallback description) must not reach subscribed clients.
       const permPayload = {
         requestId,
         tool: toolName,
         description,
-        input: toolInput,
+        input: sanitizeToolInput(toolInput),
         remainingMs: this._timeoutMs,
         createdAt: Date.now(),
       }
@@ -229,9 +255,15 @@ export class PermissionManager extends EventEmitter {
     return new Promise((resolve) => {
       const questionInput = input || {}
       this._waitingForAnswer = true
-      this._pendingUserAnswer = { resolve, input: questionInput }
-
-      const toolUseId = `ask-${++this._permissionCounter}-${Date.now()}`
+      const toolUseId = `ask-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
+      // #3975: stash toolUseId on the pending entry so clearAll() can
+      // emit it on the cleared-variant permission_resolved. Without
+      // toolUseId the sdk-session re-emit gate at sdk-session.js:281
+      // drops the event and the unified pipeline never prunes the
+      // questionSessionMap entry — small leak (~80 bytes) per
+      // message-completion-while-question-pending event, bounded only by
+      // session_destroyed cleanup.
+      this._pendingUserAnswer = { resolve, input: questionInput, toolUseId }
       this._logInfo(`AskUserQuestion detected (${toolUseId})`)
 
       this.emit('user_question', {
@@ -330,7 +362,21 @@ export class PermissionManager extends EventEmitter {
   respondToQuestion(text, answersMap) {
     if (!this._pendingUserAnswer) return
     this._clearQuestionTimer()
-    const { resolve, input } = this._pendingUserAnswer
+    // #3988: include toolUseId on the answered emit for symmetry with the
+    // other 3 question-variant emit sites (aborted/timeout/cleared). The
+    // 'auto' path applies only to requestId-based prompts —
+    // autoAllowPending() leaves AskUserQuestion entries untouched — so
+    // there is no auto-variant question emit to mirror.
+    //
+    // The user-response handler at packages/server/src/handlers/input-handlers.js:451
+    // already prunes questionSessionMap eagerly before calling this method,
+    // so the unified-pipeline cleanup is redundant on the happy path — but
+    // the sdk-session re-emit gate at sdk-session.js:281 keys on
+    // (data.requestId || data.toolUseId), and any future internal path
+    // (or refactor that drops the eager delete) would silently leak. Read
+    // toolUseId BEFORE the null-out below, mirroring the clearAll #3975
+    // pattern.
+    const { resolve, input, toolUseId } = this._pendingUserAnswer
     this._pendingUserAnswer = null
     this._waitingForAnswer = false
 
@@ -339,9 +385,17 @@ export class PermissionManager extends EventEmitter {
     // Emit before resolve() so listeners (e.g. the SdkSession
     // inactivity-timer resumer, #2831) see the state flip before any
     // downstream synchronous work runs.
-    this.emit('permission_resolved', { reason: 'answered' })
+    this.emit('permission_resolved', { toolUseId, reason: 'answered' })
 
-    // Build structured answers map: SDK expects { [questionText]: selectedLabel }
+    // Build structured answers map: SDK expects { [questionText]: selectedLabel }.
+    // Per @anthropic-ai/claude-agent-sdk sdk-tools.d.ts (AskUserQuestionOutput.answers,
+    // ~line 2696) the contract is explicit: each value is a plain string,
+    // and multi-select answers are comma-separated. So this layer
+    // normalizes the dashboard's wire shape (native string | string[] post-
+    // #4731, or legacy JSON-stringified arrays from #4604 Chunk B
+    // dashboards) into that canonical string-per-question shape before
+    // resolving the canUseTool Promise — otherwise the model would receive
+    // raw JSON literals like '["A","B"]' as the user's answer text (#4731).
     const answers = {}
     const questions = input.questions || []
     const questionKeys = new Set(questions.map(q => q.question))
@@ -349,7 +403,7 @@ export class PermissionManager extends EventEmitter {
       // Per-question answers provided by the client — only copy known question keys
       for (const key of Object.keys(answersMap)) {
         if (questionKeys.has(key)) {
-          answers[key] = answersMap[key]
+          answers[key] = normalizeAnswerValue(answersMap[key])
         }
       }
     } else if (questions.length > 0) {
@@ -396,20 +450,49 @@ export class PermissionManager extends EventEmitter {
    * resolve as if they had clicked Allow rather than sit there until
    * timeout. Pending AskUserQuestion prompts are NOT touched: those are
    * solicited user input, not permission gates.
+   *
+   * #4462: MCP trust prompts (requestMcpTrust) are also exempt — their
+   * allow path PERSISTS the binary to ~/.chroxy/mcp-trust.json forever
+   * via byok-mcp-fleet's recordTrust call. A panic-button bypass is "I
+   * trust everything for this turn" semantics, NOT "trust this MCP
+   * binary forever." Treating mcp_spawn under auto as deny re-prompts
+   * the user next start — they can explicitly approve then, when the
+   * decision is in front of them.
    */
   autoAllowPending() {
     if (this._pendingPermissions.size === 0) return
     const pendingIds = Array.from(this._pendingPermissions.keys())
+    let allowed = 0
+    let deniedMcpTrust = 0
     for (const requestId of pendingIds) {
       const pending = this._pendingPermissions.get(requestId)
       if (!pending) continue
       this._pendingPermissions.delete(requestId)
       this._lastPermissionData.delete(requestId)
       this._clearPermissionTimer(requestId)
+      if (pending.mcpTrust === true) {
+        // Don't silently persist trust on bypass. Deny — the MCP server
+        // won't spawn for this session, but no on-disk trust entry is
+        // written, and the user re-prompts next start.
+        pending.resolve({
+          behavior: 'deny',
+          message: 'MCP trust not persisted via auto-mode bypass; approve explicitly to trust this server',
+        })
+        this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'auto_mode_mcp_trust_bypass' })
+        deniedMcpTrust += 1
+        continue
+      }
       pending.resolve({ behavior: 'allow', updatedInput: pending.input })
       this.emit('permission_resolved', { requestId, decision: 'allow', reason: 'auto_mode' })
+      allowed += 1
     }
-    this._logInfo(`Auto-allowed ${pendingIds.length} pending permission(s) on auto mode switch`)
+    if (deniedMcpTrust > 0) {
+      this._logInfo(
+        `Auto-allowed ${allowed} pending permission(s) and denied ${deniedMcpTrust} MCP trust prompt(s) on auto mode switch (trust not persisted via bypass — #4462)`,
+      )
+    } else {
+      this._logInfo(`Auto-allowed ${allowed} pending permission(s) on auto mode switch`)
+    }
   }
 
   /**
@@ -421,7 +504,12 @@ export class PermissionManager extends EventEmitter {
     // the maps are cleared — the SdkSession timeout-pause listener decrements
     // its counter on each event and should see a consistent final state.
     const pendingIds = Array.from(this._pendingPermissions.keys())
-    const hadUserAnswer = !!this._pendingUserAnswer
+    // #3975: capture the pending-answer entry (not just a boolean) so we
+    // can include its toolUseId on the cleared emit. Without toolUseId the
+    // sdk-session re-emit gate drops the event and questionSessionMap
+    // leaks. Reading toolUseId BEFORE the null-out below avoids races
+    // with any synchronous listeners on the resolve.
+    const clearedUserAnswer = this._pendingUserAnswer
 
     // Auto-deny pending permissions and clear timers
     for (const [requestId, pending] of this._pendingPermissions) {
@@ -430,6 +518,13 @@ export class PermissionManager extends EventEmitter {
     }
     this._pendingPermissions.clear()
     this._lastPermissionData.clear()
+
+    // #6027: belt-and-braces — the loop above only clears timers for entries
+    // still in _pendingPermissions. A permission timer whose requestId has
+    // already left that map would otherwise survive destroy() and keep the
+    // suite alive without --test-force-exit. Drop any stragglers.
+    for (const timer of this._permissionTimers.values()) clearTimeout(timer)
+    this._permissionTimers.clear()
 
     // Auto-deny pending user answer
     this._clearQuestionTimer()
@@ -443,9 +538,92 @@ export class PermissionManager extends EventEmitter {
     for (const requestId of pendingIds) {
       this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'cleared' })
     }
-    if (hadUserAnswer) {
-      this.emit('permission_resolved', { reason: 'cleared' })
+    if (clearedUserAnswer) {
+      // #3975: toolUseId is required for the EventNormalizer to prune
+      // questionSessionMap on the cleared path. The SdkSession
+      // timeout-pause listener (#2831) ignores fields it doesn't know
+      // about, so the extra toolUseId is harmless there.
+      this.emit('permission_resolved', { toolUseId: clearedUserAnswer.toolUseId, reason: 'cleared' })
     }
+  }
+
+  /**
+   * #4457: trust gate for spawning an MCP server child. Reuses the
+   * existing _pendingPermissions machinery so the dashboard / mobile
+   * permission UIs render this with zero changes — they receive a
+   * standard `permission_request` event and call `respondToPermission`
+   * with allow/deny.
+   *
+   * Behavior:
+   *  - On allow (or allowAlways): resolves to true; caller persists trust.
+   *  - On deny: resolves to false; caller marks the client DEAD.
+   *  - On timeout (default permissionTimeout): treated as deny.
+   *
+   * @param {{ name: string, command: string, args?: string[], envKeys?: string[] }} server
+   * @returns {Promise<boolean>}
+   */
+  requestMcpTrust(server) {
+    return new Promise((resolve) => {
+      const requestId = `mcp-trust-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
+      const argv0 = Array.isArray(server.args) && server.args.length > 0 ? server.args[0] : ''
+      const input = {
+        mcpServer: {
+          name: server.name,
+          command: server.command,
+          args: Array.isArray(server.args) ? [...server.args] : [],
+          envKeys: Array.isArray(server.envKeys) ? [...server.envKeys] : [],
+        },
+      }
+      const description = `Spawn MCP server "${server.name}" running ${server.command}${argv0 ? ' ' + argv0 : ''}`
+
+      // Wrap pending entry so respondToPermission's standard mapping
+      // ({behavior:'allow'} or {behavior:'deny'}) translates to a boolean
+      // for the caller. updatedInput / suggestions are unused on the trust
+      // path — we only care about allow-vs-deny.
+      //
+      // #4462: mark this entry as an MCP-trust prompt so autoAllowPending
+      // can treat it differently. Auto-allow is the "panic button"
+      // bypass — it's the right call for one-shot Read/Bash/Edit prompts
+      // (the user just declared "approve everything") but the WRONG call
+      // for MCP trust, which persists forever via recordTrust on allow.
+      // The persistence semantics turn a bypass into a "trust this binary
+      // forever" decision the user never explicitly made. We tag the
+      // entry and have autoAllowPending deny it instead.
+      this._pendingPermissions.set(requestId, {
+        resolve: (result) => resolve(result?.behavior === 'allow'),
+        input,
+        suggestions: [],
+        mcpTrust: true,
+      })
+
+      this._logInfo(`MCP trust request ${requestId}: ${server.name}`)
+
+      // #6038: redact before broadcast (description embeds server.command/argv0;
+      // input carries args/envKeys). Raw values for execution live on the
+      // _pendingPermissions entry above.
+      const permPayload = {
+        requestId,
+        tool: 'mcp_spawn',
+        description: redactValue(String(description)).slice(0, 200),
+        input: sanitizeToolInput(input),
+        remainingMs: this._timeoutMs,
+        createdAt: Date.now(),
+      }
+      this._lastPermissionData.set(requestId, permPayload)
+      this.emit('permission_request', permPayload)
+
+      const timer = setTimeout(() => {
+        this._permissionTimers.delete(requestId)
+        if (this._pendingPermissions.has(requestId)) {
+          this._logInfo(`MCP trust ${requestId} timed out, auto-denying`)
+          this._pendingPermissions.delete(requestId)
+          this._lastPermissionData.delete(requestId)
+          resolve(false)
+          this.emit('permission_resolved', { requestId, decision: 'deny', reason: 'timeout' })
+        }
+      }, this._timeoutMs)
+      this._permissionTimers.set(requestId, timer)
+    })
   }
 
   /**
@@ -473,4 +651,94 @@ export class PermissionManager extends EventEmitter {
       _fallbackLog.warn(msg)
     }
   }
+}
+
+/**
+ * #4731 — coerce a dashboard-supplied per-question answer value into the
+ * SDK's canonical string shape. The SDK's `AskUserQuestionOutput.answers`
+ * (see `@anthropic-ai/claude-agent-sdk/sdk-tools.d.ts:2696`) types every
+ * value as a plain string with multi-select answers comma-separated.
+ *
+ * Accepted inputs:
+ *   - Array of labels (post-#4731 wire shape from updated dashboards) →
+ *     joined as `"A, B, C"`.
+ *   - JSON-stringified array (`'["A","B"]'` — the legacy #4604 Chunk B
+ *     dashboard JSON.stringifies multi-select arrays to fit the original
+ *     `Record<string,string>` schema) → parsed then joined.
+ *   - Plain string (single-select, freeform, or model-side "Other"
+ *     sentinel) → passed through unchanged.
+ *
+ * Anything else (null, undefined, object, number) coerces to the empty
+ * string — the SDK then receives a null-equivalent answer and the model
+ * surfaces "no preference" semantics, which is safer than throwing and
+ * stalling the canUseTool Promise.
+ */
+function normalizeAnswerValue(value) {
+  if (Array.isArray(value)) {
+    return value.map((v) => String(v ?? '')).join(', ')
+  }
+  if (typeof value === 'string') {
+    // Detect the legacy JSON-stringified-array shape. Bare strings (e.g.
+    // `"Red"`) never look like JSON arrays, so this gate is tight enough
+    // that no plain-string answer is accidentally parsed. The try/catch
+    // means a string that merely starts with `[` but isn't valid JSON
+    // (e.g. someone literally answered `"[note]"`) falls through to the
+    // pass-through return below — no data loss.
+    if (value.length >= 2 && value.startsWith('[') && value.endsWith(']')) {
+      try {
+        const parsed = JSON.parse(value)
+        if (Array.isArray(parsed)) {
+          return parsed.map((v) => String(v ?? '')).join(', ')
+        }
+      } catch {
+        // not JSON — fall through
+      }
+    }
+    return value
+  }
+  return ''
+}
+
+/**
+ * Wire a PermissionManager's three events to a session's own EventEmitter and
+ * install the back-compat accessors (`_pendingPermissions` / `_lastPermissionData`,
+ * read by ws-permissions.js + settings-handlers.js). Extracted from the two
+ * in-process providers (SdkSession, ByokSession) that each hand-rolled the same
+ * wiring (audit P2-9); Docker variants inherit from these.
+ *
+ * The only real asymmetry is SdkSession's inactivity-timer pause/resume around a
+ * pending permission (#2831) — passed as optional `onRequest` (fired on both
+ * permission_request and user_question, before the re-emit) and `onResolved`
+ * (fired on every permission_resolved, before the requestId/toolUseId re-emit
+ * guard). ByokSession passes neither.
+ *
+ * @param {import('events').EventEmitter} session  the session to re-emit on
+ * @param {PermissionManager} permissions
+ * @param {{ onRequest?: () => void, onResolved?: () => void }} [hooks]
+ */
+export function wirePermissionManager(session, permissions, { onRequest, onResolved } = {}) {
+  permissions.on('permission_request', (data) => {
+    if (onRequest) onRequest()
+    session.emit('permission_request', data)
+  })
+  permissions.on('user_question', (data) => {
+    if (onRequest) onRequest()
+    session.emit('user_question', data)
+  })
+  permissions.on('permission_resolved', (data) => {
+    if (onResolved) onResolved()
+    // #3048: re-emit so the unified pipeline (SessionManager → ws-forwarding →
+    // EventNormalizer → broadcast) fans the resolution out to every client.
+    // #3736: AskUserQuestion resolutions carry `toolUseId` instead of
+    // `requestId` — re-emit both shapes so the EventNormalizer can prune the
+    // questionSessionMap entry (pre-fix this branch was dropped and the map
+    // leaked one entry per timeout/abort/clear). The permission-audit listener
+    // in ws-server.js gates on `data.requestId` and ignores the question variant.
+    if (data && (data.requestId || data.toolUseId)) {
+      session.emit('permission_resolved', data)
+    }
+  })
+  // Backward-compatible accessors used by ws-permissions.js + settings-handlers.js.
+  session._pendingPermissions = permissions._pendingPermissions
+  session._lastPermissionData = permissions._lastPermissionData
 }

@@ -95,6 +95,11 @@ describe('WS protocol schema coverage', () => {
       'key_exchange',  // E2E encryption handshake, handled before dispatch
       'ping',          // keepalive, handled at connection layer
       'encrypted',     // envelope unwrapped before dispatch
+      // #5174 (epic #5170): host_status_request now has a real handler
+      // (control-room-handlers.js), so it is covered by the forward
+      // schema-coverage check and no longer belongs in KNOWN_PRE_REGISTRY.
+      // #5271 (Control Room Phase 2a): cancel_activity likewise now has a real
+      // handler (input-handlers.js), so its temporary entry was removed here.
     ])
 
     const unexplained = schemaOnly.filter((t) => !KNOWN_PRE_REGISTRY.has(t))

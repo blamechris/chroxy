@@ -7,7 +7,7 @@ Launch a swarm of specialized agents to perform a multi-perspective audit of any
 - `$ARGUMENTS` - Path to the document or topic to audit, plus optional agent count (default: 6). Examples:
   - `docs/architecture/proposal.md`
   - `docs/rfc-001.md 8` (8 agents)
-  - `"the authentication flow in packages/server/src/ws-server.js" 4`
+  - `"the authentication flow in src/auth.js" 4`
 
 ## Instructions
 
@@ -45,10 +45,12 @@ Choose AGENT_COUNT agents from this roster. Always include the first 4 (core pan
 |-------|----------|------|-----------------|
 | Operator | "Operator" | UX walkthrough, daily experience, error states, accessibility | Target involves user-facing features, UI, or interaction flows |
 | Futurist | "Futurist" | Extensibility, technical debt forecast, plugin architecture | Target involves architecture decisions with long-term implications |
-| Domain Expert | "Expert" | Deep domain knowledge for the specific technology | Target involves specific tech (Expo, Cloudflare, databases, auth, etc.). Name the agent after the domain. |
+| Domain Expert | "Expert" | Deep domain knowledge for the specific technology | Target involves specific tech. Name the agent after the domain. |
 | Adversary | "Adversary" | Attack surface, abuse cases, security boundaries | Target involves auth, networking, data handling, or external interfaces |
 | Tester | "Tester" | Testability, edge cases, coverage gaps, test strategy | Target involves complex logic, state machines, or protocol design |
 | Historian | "Historian" | Precedent, prior art, industry patterns, what others have done | Target involves novel architecture or unconventional approaches |
+| Expo Expert | "Expo Expert" | Expo SDK lifecycle, React Native constraints, OTA updates, dev client vs Expo Go | Target involves mobile app architecture, updates, or Expo-specific features |
+| Tunneler | "Tunneler" | Cloudflare tunnels, DNS, TLS, WebSocket proxying, network reliability | Target involves tunnel configuration, connectivity, or networking |
 
 ### 4. Launch Agent Swarm
 
@@ -79,7 +81,7 @@ Your job is to audit the following from the lens of **{LENS}**.
 ## Rules
 - READ the actual codebase, not just the document. Verify claims against code.
 - Be specific. "This might be a problem" is useless. "Line 42 of ws-server.js does X which contradicts the doc's claim of Y" is useful.
-- Rate honestly. 3/5 means "adequate." 5/5 means "I cannot find fault." 1/5 means "fundamentally broken."
+- Rate honestly. 3/5 means "adequate." 5/5 means "I cannot find meaningful fault." 1/5 means "fundamentally broken."
 - End with a single overall rating and one-paragraph verdict.
 ```
 
@@ -182,6 +184,12 @@ Output a concise summary:
 | 2/5 | Concerning. Significant issues that may cause failures. |
 | 1/5 | Fundamentally broken. Needs rethinking, not patching. |
 
+### Grading Criteria for Chroxy
+
+- **Operator** should weight mobile UX: touch targets, offline behavior, reconnect experience
+- **Guardian** should weight WebSocket edge cases: stale sockets, tunnel drops, concurrent writes
+- **Expert agents** should verify claims against actual Cloudflare/Expo documentation
+
 ### Agent Behavior Rules
 
 - Agents MUST read actual source code, not just the target document
@@ -193,9 +201,9 @@ Output a concise summary:
 ## Examples
 
 ```
-/swarm-audit docs/architecture/in-app-dev.md 8
-/swarm-audit "the WebSocket protocol in packages/server/src/ws-server.js" 4
+/swarm-audit docs/architecture/proposal.md 8
+/swarm-audit "the WebSocket protocol in server/ws-server.js" 4
 /swarm-audit docs/rfc-push-notifications.md
 /swarm-audit "session management across server restart" 6
 ```
-<!-- skill-templates: swarm-audit 0000000 2026-05-15 -->
+<!-- skill-templates: swarm-audit ebdb14e 2026-06-02 -->

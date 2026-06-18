@@ -24,9 +24,57 @@ export class SessionMessageHistory extends EventEmitter {
     super()
     this._maxHistory = maxMessages ?? maxHistory ?? 1000
     this._maxToolInput = maxToolInput || null
-    this._messageHistory = new Map()    // sessionId -> Array<{ type, ...data }>
+    this._messageHistory = new Map()    // sessionId -> Array<{ type, _seq, ...data }>
     this._pendingStreams = new Map()     // sessionId:messageId -> accumulated delta text
     this._historyTruncated = new Map()  // sessionId -> boolean
+    // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
+    // Every entry pushed into the ring buffer is stamped with a strictly
+    // increasing `_seq` (1-based). The counter NEVER resets while a session
+    // lives, even as the ring buffer trims old entries off the front — so a
+    // client cursor (`lastSeq`) can be compared against the oldest RETAINED
+    // entry's seq to detect a trim gap and fall back to a full replay. The
+    // seq is server-internal bookkeeping; the wire only exposes it as
+    // `historySeq` on replayed entries (see ws-history.js).
+    this._seqCounters = new Map()        // sessionId -> next seq to assign (>= 1)
+  }
+
+  /**
+   * #5555.3 — allocate the next monotonic seq for a session.
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  _nextSeq(sessionId) {
+    const next = this._seqCounters.get(sessionId) || 1
+    this._seqCounters.set(sessionId, next + 1)
+    return next
+  }
+
+  /**
+   * #5555.3 — seq of the oldest entry still retained in the ring buffer, or
+   * null when the session has no history. Used by the cursor-replay path to
+   * detect whether a client's cursor points at an entry that has since been
+   * trimmed off the front (gap → full-replay fallback).
+   * @param {string} sessionId
+   * @returns {number|null}
+   */
+  getOldestSeq(sessionId) {
+    const history = this._messageHistory.get(sessionId)
+    if (!history || history.length === 0) return null
+    const seq = history[0]._seq
+    return typeof seq === 'number' ? seq : null
+  }
+
+  /**
+   * #5555.3 — seq of the newest entry, or 0 when the session has no history
+   * (so `lastSeq >= getLatestSeq` cleanly means "nothing newer to replay").
+   * @param {string} sessionId
+   * @returns {number}
+   */
+  getLatestSeq(sessionId) {
+    const history = this._messageHistory.get(sessionId)
+    if (!history || history.length === 0) return 0
+    const seq = history[history.length - 1]._seq
+    return typeof seq === 'number' ? seq : 0
   }
 
   /**
@@ -106,7 +154,90 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {Array} history
    */
   setHistory(sessionId, history) {
+    // #5555.3 — restored entries predate the seq scheme (it is server-internal
+    // and not persisted), so stamp them with a fresh 1..N sequence and advance
+    // the counter past the end. A reconnecting client's cursor from a PRIOR
+    // server process can't be honoured across a restart (seqs reset to 1), so
+    // it will simply fall through to a full replay — the safe default.
+    if (Array.isArray(history)) {
+      let seq = 1
+      for (const entry of history) {
+        if (entry && typeof entry === 'object') entry._seq = seq
+        seq++
+      }
+      this._seqCounters.set(sessionId, seq)
+    }
     this._messageHistory.set(sessionId, history)
+  }
+
+  /**
+   * Sweep an in-memory history array for `tool_start` entries that lack a
+   * matching `tool_result` and splice in a synthetic `tool_result` right
+   * after each one. Used during session restore (#4617) so that a session
+   * which was wedged on a tool when chroxy shut down does not zombify the
+   * dashboard's `activeTools` pill on the next history replay — the
+   * synthetic result rides the same handler path that normally clears
+   * activeTools (`handleToolResult.applyToActiveTools`).
+   *
+   * Returns a NEW array; the input is not mutated. The original ordering
+   * is preserved and the synthetic result is inserted immediately after
+   * its matching `tool_start`, with a timestamp one millisecond later so
+   * downstream consumers that sort by timestamp stay monotonic without
+   * pretending the tool completed "now".
+   *
+   * Safe to call on:
+   *   - empty / non-array input (returns the input unchanged)
+   *   - history with no tool_start entries (returns a shallow copy)
+   *   - history with all tool_starts already matched (returns a shallow copy)
+   *
+   * @param {Array} history
+   * @returns {Array}
+   */
+  static sweepUnresolvedToolStarts(history) {
+    if (!Array.isArray(history) || history.length === 0) return history
+    const resolved = new Set()
+    for (const entry of history) {
+      if (entry && entry.type === 'tool_result' && typeof entry.toolUseId === 'string') {
+        resolved.add(entry.toolUseId)
+      }
+    }
+    const out = []
+    for (const entry of history) {
+      out.push(entry)
+      if (
+        entry
+        && entry.type === 'tool_start'
+        && typeof entry.toolUseId === 'string'
+        && !resolved.has(entry.toolUseId)
+      ) {
+        const baseTs = typeof entry.timestamp === 'number' && Number.isFinite(entry.timestamp)
+          ? entry.timestamp
+          : Date.now()
+        // `synthetic` / `interrupted` / `isError` / `reason` are diagnostic
+        // hints only — no client code branches on them today, and the wire
+        // schema (`ServerToolResultSchema` in packages/protocol) strips
+        // unknown fields on parse. The behaviour that clears the dashboard's
+        // activeTools entry is driven purely by the `tool_result` type +
+        // matching `toolUseId` going through `handleToolResult.applyToActiveTools`
+        // (store-core/handlers/index.ts). Keep these fields anyway so the
+        // synthetic stays grep-able on disk and a future renderer can show
+        // a distinct "interrupted" badge without a protocol change.
+        out.push({
+          type: 'tool_result',
+          toolUseId: entry.toolUseId,
+          result: 'Tool was in flight when chroxy was last shut down. Tool may have continued or been cancelled — no record of outcome.',
+          interrupted: true,
+          isError: true,
+          synthetic: true,
+          reason: 'session_restored',
+          timestamp: baseTs + 1,
+        })
+        // Mark this toolUseId resolved so a malformed history with two
+        // tool_starts for the same id does not get two synthetic results.
+        resolved.add(entry.toolUseId)
+      }
+    }
+    return out
   }
 
   /**
@@ -257,6 +388,12 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {string} sessionId
    */
   _pushHistory(history, entry, sessionId) {
+    // #5555.3 — stamp the monotonic per-session seq before pushing. The counter
+    // keeps climbing past any front-trim below, so a cursor can always be
+    // compared against the oldest retained entry's seq to detect a trim gap.
+    if (entry && typeof entry === 'object' && entry._seq === undefined) {
+      entry._seq = this._nextSeq(sessionId)
+    }
     history.push(entry)
     if (history.length > this._maxHistory) {
       history.shift()
@@ -273,6 +410,9 @@ export class SessionMessageHistory extends EventEmitter {
   truncateEntry(entry) {
     const MAX = 50 * 1024
     const clone = { ...entry }
+    // #5555.3 — `_seq` is per-process server bookkeeping (reassigned 1..N on
+    // restore via setHistory), so keep it out of the persisted state file.
+    delete clone._seq
     if (typeof clone.content === 'string' && clone.content.length > MAX) {
       clone.content = clone.content.slice(0, MAX) + '[truncated]'
     }
@@ -326,6 +466,7 @@ export class SessionMessageHistory extends EventEmitter {
   cleanupSession(sessionId) {
     this._messageHistory.delete(sessionId)
     this._historyTruncated.delete(sessionId)
+    this._seqCounters.delete(sessionId)
 
     // Clean up pending stream state (composite keys: `${sessionId}:messageId`)
     const prefix = sessionId + ':'
@@ -343,5 +484,6 @@ export class SessionMessageHistory extends EventEmitter {
     this._messageHistory.clear()
     this._historyTruncated.clear()
     this._pendingStreams.clear()
+    this._seqCounters.clear()
   }
 }

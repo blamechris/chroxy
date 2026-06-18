@@ -1,11 +1,37 @@
-import { describe, it, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert'
 import { EventEmitter } from 'events'
 import { mkdtempSync, rmSync, existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { Readable } from 'stream'
+import { createServer as createNetServer } from 'net'
 import { Supervisor } from '../src/supervisor.js'
+
+// Bind without a host arg so these probes match how the supervisor's standby
+// server binds (`listen(port)` → the unspecified address), otherwise an
+// IPv4-vs-IPv6/dual-stack mismatch makes the EADDRINUSE check flaky.
+
+/** Bind an ephemeral port, read it, release it — a free port for a test. */
+function findFreePort() {
+  return new Promise((resolve, reject) => {
+    const srv = createNetServer()
+    srv.on('error', reject)
+    srv.listen(0, () => {
+      const { port } = srv.address()
+      srv.close(() => resolve(port))
+    })
+  })
+}
+
+/** Try to listen on a port; resolve with the error code (or null on success). */
+function tryListen(port) {
+  return new Promise((resolve) => {
+    const srv = createNetServer()
+    srv.on('error', (err) => resolve(err.code))
+    srv.listen(port, () => srv.close(() => resolve(null)))
+  })
+}
 
 /**
  * Create a mock child process (EventEmitter with send/kill/stdout/stderr).
@@ -128,12 +154,27 @@ function createTestSupervisor(overrides = {}) {
 describe('Supervisor', () => {
   let tmpDirs = []
   let supervisors = []
+  let savedConfigDir
+
+  beforeEach(() => {
+    // Supervisor.start() calls writeConnectionInfo() which writes to
+    // ~/.chroxy/connection.json unless CHROXY_CONFIG_DIR is set (#4633).
+    // Point it at a tmp dir so the sandbox guard doesn't fire and the
+    // developer's real connection.json isn't clobbered.
+    const cfgDir = mkdtempSync(join(tmpdir(), 'chroxy-supervisor-cfg-'))
+    tmpDirs.push(cfgDir)
+    savedConfigDir = process.env.CHROXY_CONFIG_DIR
+    process.env.CHROXY_CONFIG_DIR = cfgDir
+  })
 
   afterEach(() => {
     // Force all supervisors into shutdown state to prevent lingering timers
     for (const s of supervisors) {
       s._shuttingDown = true
       if (s._heartbeatInterval) clearInterval(s._heartbeatInterval)
+      // #6027: a child that went ready (deploy window) but never exited leaves
+      // _deployResetTimer pending; the exit handler that would clear it never ran.
+      if (s._deployResetTimer) { clearTimeout(s._deployResetTimer); s._deployResetTimer = null }
       s._stopStandbyServer()
     }
     supervisors = []
@@ -141,6 +182,8 @@ describe('Supervisor', () => {
       try { rmSync(dir, { recursive: true, force: true }) } catch {}
     }
     tmpDirs = []
+    if (savedConfigDir === undefined) delete process.env.CHROXY_CONFIG_DIR
+    else process.env.CHROXY_CONFIG_DIR = savedConfigDir
   })
 
   function setup(overrides) {
@@ -260,6 +303,54 @@ describe('Supervisor', () => {
       // Child restart happens on setTimeout — verify state is correct
       assert.equal(supervisor._child, null)
       assert.equal(supervisor._childReady, false)
+    })
+
+    // Regression: the standby health server that runs while the child is down
+    // binds `this._port`. Before the fix, it kept listening when the next child
+    // forked, so the child hit EADDRINUSE, exited before `ready`, and the
+    // `_stopStandbyServer()` on `ready` never ran — every restart hit the same
+    // EADDRINUSE until the cap, bricking the daemon. startChild() must free the
+    // port BEFORE forking. Uses a REAL listening socket so a mocked fork can't
+    // hide the port conflict.
+    it('frees the standby port before forking the replacement child (no EADDRINUSE crash-loop)', async () => {
+      const port = await findFreePort()
+      const { supervisor } = setup({ port })
+
+      // Stand up a real standby health server, as the crash path does. Keep a
+      // handle to the server object — _stopStandbyServer() nulls the field, but
+      // we still need to observe its 'close' to prove the port is released.
+      supervisor._startStandbyServer()
+      const standby = supervisor._standbyServer
+      await new Promise((resolve) => standby.once('listening', resolve))
+
+      // Sanity: the standby genuinely holds the port (real-listener check) — a
+      // fresh listener on it must fail, mirroring what the forked child sees.
+      assert.equal(await tryListen(port), 'EADDRINUSE')
+
+      // Capture the standby state at the moment the child would fork.
+      let standbyAtForkTime = 'unset'
+      const realFork = supervisor._fork.bind(supervisor)
+      supervisor._fork = (script, args, opts) => {
+        standbyAtForkTime = supervisor._standbyServer
+        return realFork(script, args, opts)
+      }
+
+      supervisor.startChild()
+
+      // startChild() must stop the standby before forking.
+      assert.equal(standbyAtForkTime, null, 'standby server must be stopped before the replacement child forks')
+
+      // …and the stop must ACTUALLY release the port, not just null the field:
+      // once the standby socket finishes closing, the port is bindable again
+      // (server.close() releases the listening socket; the real child cannot
+      // call listen() before this tick — it is a separate forked process that
+      // must spawn + init Node + load modules first, far longer than one loop
+      // tick). This closes the "test passes while the port is still bound" gap.
+      await new Promise((resolve) => standby.once('close', resolve))
+      assert.equal(await tryListen(port), null, 'standby close must release the port for the child to bind')
+
+      // No pending restart timer to leak into other tests.
+      if (supervisor._restartTimer) { clearTimeout(supervisor._restartTimer); supervisor._restartTimer = null }
     })
 
     it('emits child_exit event on crash', async () => {
@@ -670,6 +761,50 @@ describe('Supervisor', () => {
       assert.equal(supervisor._standbyRetries, 0,
         'Retry counter should reset on successful listen')
     })
+
+    it('tracks the EADDRINUSE retry timer and clears it on stop (no leaked timer)', async () => {
+      const { supervisor } = setup()
+
+      // Occupy a port so the standby server's listen() fails with EADDRINUSE,
+      // exercising the retry-scheduling branch of the error handler. Bind the
+      // blocker to port 0 and read the assigned port (no findFreePort TOCTOU gap).
+      const blocker = createNetServer()
+      await new Promise((resolve, reject) => {
+        blocker.on('error', reject)
+        blocker.listen(0, resolve)
+      })
+      const port = blocker.address().port
+
+      try {
+        supervisor._port = port
+
+        // Capture the standby server handle before its listen() errors.
+        supervisor._startStandbyServer()
+        const standby = supervisor._standbyServer
+        assert.ok(standby !== null, 'standby server object created')
+
+        // Wait for the EADDRINUSE error handler to run.
+        await new Promise((resolve) => standby.once('error', () => setImmediate(resolve)))
+
+        assert.equal(supervisor._standbyRetries, 1, 'retry counter incremented on EADDRINUSE')
+        assert.ok(supervisor._standbyRetryTimer !== null,
+          'pending retry must be tracked on the instance so it can be cancelled')
+
+        // Stopping must cancel the pending retry timer (and null it) so it cannot
+        // fire across a stop/shutdown boundary.
+        supervisor._stopStandbyServer()
+        assert.equal(supervisor._standbyRetryTimer, null, 'retry timer cleared on stop')
+        assert.equal(supervisor._standbyServer, null, 'standby server cleared on stop')
+
+        // Prove the cancelled retry does not resurrect the standby after its delay
+        // (STANDBY_EADDRINUSE_RETRY_DELAY_MS is 500ms; wait past it).
+        await new Promise((resolve) => setTimeout(resolve, 600))
+        assert.equal(supervisor._standbyServer, null,
+          'cancelled retry must not restart the standby')
+      } finally {
+        await new Promise((resolve) => blocker.close(resolve))
+      }
+    })
   })
 
   describe('deploy crash detection', () => {
@@ -843,6 +978,67 @@ describe('Supervisor', () => {
       const { version } = JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf-8'))
       const expectedBanner = `Chroxy Supervisor v${version}`
       assert.ok(output.includes(expectedBanner), `Banner should contain "${expectedBanner}"`)
+
+      supervisor._shuttingDown = true
+      clearInterval(supervisor._heartbeatInterval)
+    })
+  })
+
+  // #5314 (WP-1.4) — supervisor crash safety + cloudflared boot leak.
+  describe('crash safety (#5314)', () => {
+    it('_onProcessError logs and stays alive (does not exit) when not shutting down', () => {
+      const { supervisor } = setup()
+      supervisor._onProcessError('uncaughtException', new Error('stray fault'))
+      assert.equal(supervisor._exitCalled, null, 'supervisor must keep supervising after an uncaught error')
+    })
+
+    it('_onProcessError exits(1) when a shutdown is already underway', () => {
+      const { supervisor } = setup()
+      supervisor._shuttingDown = true
+      supervisor._onProcessError('unhandledRejection', new Error('during shutdown'))
+      assert.equal(supervisor._exitCalled, 1)
+    })
+
+    it('stops cloudflared and exits(1) when the tunnel is not routable on boot (no leak)', async () => {
+      const { supervisor } = setup()
+      // waitForTunnel throws on failure; the cloudflared child is already running.
+      supervisor._waitForTunnel = () => Promise.reject(new Error('tunnel not routable'))
+      await supervisor.start()
+      assert.equal(supervisor._mockTunnel.stop.mock.callCount(), 1, 'cloudflared stopped — not leaked')
+      assert.equal(supervisor._exitCalled, 1, 'exits(1) on boot tunnel failure')
+      assert.equal(supervisor._mockChildren.length, 0, 'never forked the child (failed before fork)')
+    })
+
+    it('stops cloudflared and exits(1) when a pre-fork boot step (_displayQr) throws (no leak)', async () => {
+      // #5314 review — the boot guard covers not just waitForTunnel but every
+      // pre-fork step (displayQr/writeConnectionInfo), since each runs while
+      // cloudflared is up but before the child fork.
+      const { supervisor } = setup()
+      supervisor._displayQr = () => Promise.reject(new Error('QR encode failed'))
+      await supervisor.start()
+      assert.equal(supervisor._mockTunnel.stop.mock.callCount(), 1, 'cloudflared stopped on a pre-fork boot throw')
+      assert.equal(supervisor._exitCalled, 1)
+      assert.equal(supervisor._mockChildren.length, 0, 'never forked the child')
+    })
+
+    it('tunnel_recovered handler contains a waitForTunnel rejection (no unhandledRejection)', async () => {
+      const { supervisor } = setup()
+      await supervisor.start() // default _waitForTunnel resolves → handler wired
+      // A routine DNS-settle failure on recovery: waitForTunnel rejects.
+      supervisor._waitForTunnel = () => Promise.reject(new Error('DNS not settled'))
+
+      const uncaught = []
+      const onUnhandled = (e) => uncaught.push(e)
+      process.on('unhandledRejection', onUnhandled)
+      try {
+        supervisor._mockTunnel.emit('tunnel_recovered', {
+          httpUrl: 'https://new.example.com', wsUrl: 'wss://new.example.com', attempt: 1,
+        })
+        await new Promise((r) => setTimeout(r, 30))
+      } finally {
+        process.removeListener('unhandledRejection', onUnhandled)
+      }
+      assert.equal(uncaught.length, 0, 'a recovery waitForTunnel rejection must be contained, not crash the supervisor')
 
       supervisor._shuttingDown = true
       clearInterval(supervisor._heartbeatInterval)

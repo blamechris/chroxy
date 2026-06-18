@@ -1,14 +1,14 @@
 # /merge
 
-Merge PRs, verify auto-version bump, and rebuild the Tauri desktop app.
+Merge PRs, verify post-merge version bump, and run post-merge actions (build, deploy, etc.).
 
 ## Arguments
 
 - `$ARGUMENTS` - PR numbers, `all`, or flags:
-  - `2248` or `2248 2249` — specific PR(s)
+  - `123` or `123 456` — specific PR(s)
   - `all` — all open PRs targeting main
-  - `--no-build` — skip desktop app rebuild
-  - `--build-only` — skip merging, just rebuild from current main
+  - `--no-build` — skip post-merge Tauri desktop rebuild
+  - `--build-only` — rebuild desktop on current main without merging
   - `--skip-version-check` — don't wait for auto-version CI
 
 ## Instructions
@@ -26,7 +26,7 @@ gh api repos/${REPO}/issues/${PR_NUM}/comments --jq '[.[] | select(.body | test(
 
 If no review exists, run `/full-review ${PR_NUM}` **before proceeding to merge**. For multiple PRs, run reviews in parallel (background agents), then merge sequentially after all reviews complete.
 
-**The only exception:** Pure documentation/skill file changes (`.md` files in `.claude/commands/`, `docs/`) with zero code changes may skip review.
+Pure documentation/skill file changes (.md files) with zero code changes may skip review.
 
 ### Phase 1: Pre-Merge Preparation
 
@@ -34,7 +34,7 @@ If no review exists, run `/full-review ${PR_NUM}` **before proceeding to merge**
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 ```
 
-If `--build-only`, skip to Phase 3.
+If the post-merge-only flag is set, skip to Phase 3.
 
 Parse PR numbers from arguments. For `all`:
 
@@ -52,7 +52,7 @@ gh pr checks ${PR_NUM}
 gh pr view ${PR_NUM} --json mergeable,mergeStateStatus
 ```
 
-Display summary table (no confirmation gate — user invoked explicitly):
+Display summary table (no confirmation gate — user invoked the command explicitly):
 
 ```markdown
 ## Merge Queue ({N} PRs)
@@ -88,7 +88,7 @@ For each PR:
    python3 -c "
    import subprocess, json
    result = subprocess.run(['gh', 'api', 'graphql', '-f',
-     'query={repository(owner:\"blamechris\",name:\"chroxy\"){pullRequest(number:PR_NUM){reviewThreads(first:50){nodes{id,isResolved}}}}}'],
+     'query={repository(owner:\"OWNER\",name:\"REPO\"){pullRequest(number:PR_NUM){reviewThreads(first:50){nodes{id,isResolved}}}}}'],
      capture_output=True, text=True)
    data = json.loads(result.stdout)
    for t in [x for x in data['data']['repository']['pullRequest']['reviewThreads']['nodes'] if not x['isResolved']]:
@@ -108,24 +108,22 @@ For each PR:
 
 Run `/batch-merge ${PR_NUMS}` — it handles sequential merge with update-branch, CI waiting, Copilot gating, and conflict resolution. After delegation completes, continue to Phase 2b with the list of successfully merged PRs.
 
-### Phase 2b: Version Bump (Manual)
+### Phase 2b: Version Verification
 
-Version bumps are manual. After merging, ask the user if they want to bump the version:
+After merging, ask the user if they want to bump the version:
 
 ```
-Current version: v0.5.0
-Bump version? (patch → v0.5.1, or skip)
+Current version: vX.Y.Z
+Bump version? (patch → vX.Y.(Z+1), or skip)
 ```
 
 If yes:
 
 ```bash
-PATH="/opt/homebrew/opt/node@22/bin:$PATH" bash scripts/bump-version.sh
+bash scripts/bump-version.sh
 git checkout -b chore/bump-version main
-git add package.json packages/server/package.json packages/app/package.json \
-  packages/desktop/package.json packages/desktop/src-tauri/tauri.conf.json \
-  packages/desktop/src-tauri/Cargo.toml packages/desktop/src-tauri/Cargo.lock
-NEXT=$(node -p "require('./packages/server/package.json').version")
+git add packages/server/package.json packages/app/package.json packages/desktop/package.json packages/protocol/package.json packages/dashboard/package.json packages/store-core/package.json package.json packages/desktop/src-tauri/tauri.conf.json packages/desktop/src-tauri/Cargo.toml
+NEXT=$(grep '"version":' packages/server/package.json | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
 git commit -m "chore: bump version to v${NEXT}"
 git push -u origin chore/bump-version
 gh pr create --title "chore: bump version to v${NEXT}" --body "Patch version bump."
@@ -135,19 +133,14 @@ Merge after CI passes (version-only change, review gate exception).
 
 If `--skip-version-check` is set, skip this phase.
 
-### Phase 3: Desktop App Rebuild (Tauri)
+### Phase 3: Post-Merge Actions
 
-**Skip if ANY of:**
+**Skip conditions:**
 - `--no-build` flag is set
 - No PRs were merged (all skipped/blocked)
-- Merged PRs only touch files in: `docs/`, `.github/`, `packages/app/`, `scripts/`, `*.md`
+- Merged PRs only touch: `docs/`, `.github/`, `packages/app/`, `scripts/`, `*.md`
 
-**Always rebuild when ANY merged PR touches:**
-- `packages/server/` (server code or dashboard)
-- `packages/desktop/` (Tauri app)
-- `packages/protocol/` (shared protocol)
-
-#### Step 3a: Pull version-bumped main
+#### Step 3a: Pull latest main
 
 ```bash
 git checkout main
@@ -156,68 +149,44 @@ git pull --ff-only origin main
 # git reset --hard origin/main
 ```
 
-Verify local version matches expected:
+Verify local version matches the auto-versioned remote:
 ```bash
-LOCAL_VERSION=$(node -p "require('./packages/server/package.json').version")
-echo "Local version: v${LOCAL_VERSION}"
+echo "Local version: $(grep '"version":' packages/server/package.json | head -1 | sed 's/.*"\([^"]*\)".*/\1/')"
 ```
 
-#### Step 3b: Build dashboard
-
-**CRITICAL: Set `TAURI_ENV_PLATFORM=darwin` — without it, Vite uses `/dashboard/` base path instead of `/`, causing white screen in the Tauri webview.**
+#### Step 3b: Rebuild Tauri Desktop App
 
 ```bash
-TAURI_ENV_PLATFORM=darwin PATH="/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH" \
-  npm run --workspace=packages/server dashboard:build
-```
+set -e
 
-#### Step 3c: Verify dashboard base path
+# Set Node 22 and full PATH for npm/sh
+export PATH="/opt/homebrew/opt/node@22/bin:$PATH:/usr/bin:/bin:/usr/sbin:/sbin"
 
-```bash
-grep 'src=' packages/server/src/dashboard-next/dist/index.html
-# MUST show: src="/assets/..."
-# If it shows: src="/dashboard/assets/..." → STOP. Rebuild with TAURI_ENV_PLATFORM=darwin.
-```
+# Build dashboard with Tauri environment variable
+cd packages/dashboard
+TAURI_ENV_PLATFORM=darwin npm run build
 
-#### Step 3d: Bundle server
+# Bundle server resources
+cd ../desktop
+bash scripts/bundle-server.sh
 
-```bash
-PATH="/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH" \
-  bash packages/desktop/scripts/bundle-server.sh
-```
+# Force binary relink and rebuild
+touch src-tauri/src/lib.rs
+cd src-tauri
+cargo build --release
 
-#### Step 3e: Build Rust binary
+# Clear aggressively cached bundles and create new one
+rm -rf ../target/release/bundle
+cargo tauri bundle
 
-```bash
-cd packages/desktop
-touch src-tauri/src/lib.rs    # Force relink to pick up new resources
-cargo build --release --manifest-path src-tauri/Cargo.toml
-```
-
-#### Step 3f: Bundle, sign, and install
-
-```bash
-cd packages/desktop
-rm -rf src-tauri/target/release/bundle    # Clear cached bundles
-cargo tauri bundle --bundles app
-# Tauri's codesign will fail ($APPLE_SIGNING_IDENTITY not set) — ad-hoc sign instead:
-codesign --force --deep --sign - src-tauri/target/release/bundle/macos/Chroxy.app
+# Ad-hoc sign and install
+codesign --force --deep --sign - ../target/release/bundle/macos/Chroxy.app
+pkill Chroxy 2>/dev/null || true
 rm -rf /Applications/Chroxy.app
-cp -R src-tauri/target/release/bundle/macos/Chroxy.app /Applications/Chroxy.app
-```
+cp -R ../target/release/bundle/macos/Chroxy.app /Applications/
 
-#### Step 3g: Verify installation
-
-```bash
-# Binary exists
-ls -la /Applications/Chroxy.app/Contents/MacOS/chroxy-desktop
-
-# Server bundle exists
-ls /Applications/Chroxy.app/Contents/Resources/server/src/
-
-# Dashboard base path is correct
-grep 'src=' /Applications/Chroxy.app/Contents/Resources/server/src/dashboard-next/dist/index.html
-# MUST show: src="/assets/..." NOT src="/dashboard/assets/..."
+# Verify dashboard base path is correct (not /dashboard/)
+grep 'src=' ../target/release/bundle/macos/Chroxy.app/Contents/Resources/app.html | grep -q '/assets/' && echo "✓ Dashboard base path correct" || echo "✗ Dashboard base path incorrect"
 ```
 
 ### Phase 4: Report
@@ -230,35 +199,36 @@ grep 'src=' /Applications/Chroxy.app/Contents/Resources/server/src/dashboard-nex
 | #123 | feat: add feature | Merged |
 | #456 | fix: resolve crash | Skipped (conflict) |
 
-**Version:** v0.5.0 → v0.5.1
-**Desktop app:** Rebuilt and installed at /Applications/Chroxy.app (v0.5.1)
-**Dashboard base path:** /assets/ (verified)
+**Version:** v1.2.3 → v1.2.4
+**Desktop app:** Rebuilt and installed to /Applications/Chroxy.app
 ```
 
-## Common Pitfalls
+## Error Recovery
 
-1. **White screen after launch**: Dashboard built without `TAURI_ENV_PLATFORM=darwin` — assets load from `/dashboard/assets/` which doesn't exist in Tauri webview. Always set `TAURI_ENV_PLATFORM=darwin`.
-
-2. **Stale .app after rebuild**: `cargo tauri bundle` only re-bundles when the binary is relinked. `touch src-tauri/src/lib.rs` forces relink. Also `rm -rf target/release/bundle` clears cached bundles.
-
-3. **`npm` commands fail with `ENOENT spawn sh`**: PATH doesn't include `/usr/bin:/bin`. Use full PATH: `PATH="/opt/homebrew/opt/node@22/bin:/usr/bin:/bin:/usr/sbin:/sbin:/usr/local/bin:$PATH"`
-
-4. **Cargo.lock outdated after dependency changes**: Run `cargo generate-lockfile` in `src-tauri/` and commit.
-
-5. **Divergent branches after cherry-pick sessions**: `git reset --hard origin/main` to sync.
-
-6. **Code signing fails**: No Apple signing identity on dev machine. Use ad-hoc: `codesign --force --deep --sign -`
+| Error | Recovery |
+|---|---|
+| CI failure on PR | Run `/fix-ci`, wait, retry merge |
+| Unresolved review threads | Resolve via GraphQL Python script, retry |
+| Merge conflict | Skip PR, report to user |
+| Version bump timeout | Warn and continue to post-merge actions |
+| Dashboard build failure | Check `TAURI_ENV_PLATFORM=darwin` is set, verify Node 22, retry |
+| Cargo build failure | `touch src-tauri/src/lib.rs` to force relink, retry |
+| Bundle cache stale | `rm -rf target/release/bundle` before `cargo tauri bundle` |
+| White screen in Tauri app | Verify `grep 'src=' .../dist/index.html` shows `/assets/` not `/dashboard/assets/` |
+| Divergent local branches | `git reset --hard origin/main` |
 
 ## Critical Rules
 
-1. **NEVER merge without /full-review** — every PR must be reviewed before merging. This is a hard gate. Run Phase 0 first. The only exception is pure .md skill/doc files with zero code changes.
+1. **NEVER merge without /full-review** — every PR must be reviewed before merging. This is a hard gate. Run Phase 0 first.
 2. **For 3+ PRs, delegate to /batch-merge** — don't reinvent sequential merge logic
-3. **Always set TAURI_ENV_PLATFORM=darwin** for dashboard builds
-3. **Always touch src-tauri/src/lib.rs** before cargo build to force resource re-bundling
-4. **Always rm -rf target/release/bundle** before cargo tauri bundle
-5. **Always verify dashboard base path** — `/assets/` not `/dashboard/assets/`
-6. **Version verification is informational** — never block the rebuild on it
-7. **GraphQL resolveReviewThread must use Python** — bash corrupts Base64 thread IDs
-8. **No attribution** — Zero Attribution Policy applies to all commits
-9. **Node 22 required** — always prefix npm commands with Node 22 PATH
-<!-- skill-templates: merge 0000000 2026-05-15 -->
+3. **Version verification is informational** — never block post-merge actions on it
+4. **GraphQL resolveReviewThread must use Python** — bash corrupts Base64 thread IDs
+5. **Never use --admin** — respect branch protections
+6. **Idempotent** — safe to re-run; already-merged PRs detected and skipped
+7. **No attribution** — Zero Attribution Policy applies to all commits
+8. **TAURI_ENV_PLATFORM=darwin is mandatory** — without it, Vite uses `/dashboard/` base path and dashboard is blank in Tauri webview
+9. **Always rebuild dashboard before bundling** — Vite output is not live-reloaded into the Tauri bundle
+10. **Clear bundle cache aggressively** — `rm -rf target/release/bundle` before `cargo tauri bundle` or stale .app is installed
+11. **Node 22 required** — use `PATH="/opt/homebrew/opt/node@22/bin:$PATH"` for all npm commands
+12. **Full PATH required** — include `/usr/bin:/bin:/usr/sbin:/sbin` so npm can find `sh`
+<!-- skill-templates: merge ebdb14e 2026-06-02 -->

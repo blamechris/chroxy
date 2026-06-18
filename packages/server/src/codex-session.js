@@ -1,8 +1,15 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
+import { buildBaseSessionOpts } from './base-session.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import {
+  CONTEXT_WINDOW_HEADROOM,
+  getRatchetCap,
+  maybeRatchetContextWindow,
+} from './utils/context-window-learn.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 /**
  * Manages a Codex CLI session using `codex exec --json`.
@@ -55,6 +62,75 @@ const BINARY_CANDIDATES = [
 const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
 
 /**
+ * Codex CLI sandbox modes. Source: `codex exec --sandbox <MODE>` accepts
+ * exactly these three values (verified against codex-cli 0.128.0). Exported
+ * so tests and consumers can pin the canonical list without re-declaring it.
+ */
+export const CODEX_SANDBOX_MODES = Object.freeze([
+  'read-only',
+  'workspace-write',
+  'danger-full-access',
+])
+
+/**
+ * Default sandbox mode when nothing overrides it. Matches the #3846 stopgap
+ * — Codex would otherwise fall back to read-only in any non-trusted dir and
+ * be unable to edit files in fresh chroxy sessions.
+ */
+export const CODEX_DEFAULT_SANDBOX = 'workspace-write'
+
+/**
+ * Module-level cache of invalid `CHROXY_CODEX_SANDBOX` values we have
+ * already warned about (#3981). Because `resolveCodexSandbox()` runs on
+ * every `sendMessage()`, a single typo in an operator's environment would
+ * otherwise spam `console.warn` for every turn of every session for the
+ * lifetime of the server. We still want loud-on-first-call so the typo is
+ * discoverable, but bounded volume after that — one log line per distinct
+ * bad value per process.
+ *
+ * Keyed by the trimmed raw string so a later typo-correction to a *different*
+ * invalid value still surfaces. Never cleared; the set is bounded by the
+ * number of distinct invalid values an operator types, which in practice is
+ * 1 or 2.
+ */
+const _warnedSandboxValues = new Set()
+
+/**
+ * Resolve the Codex sandbox mode from the environment (#3847).
+ *
+ * Operators may pin a non-default sandbox without source edits by setting
+ * `CHROXY_CODEX_SANDBOX` to one of {@link CODEX_SANDBOX_MODES}. Unknown values
+ * log a warning (once per distinct value per process — see #3981) and fall
+ * back to {@link CODEX_DEFAULT_SANDBOX} — refusing to start the whole server
+ * would be the wrong failure mode for a stopgap env knob, and a silent
+ * fall-through would hide typos.
+ *
+ * Read at call time (not module-load time) so the override responds to test
+ * harnesses, hot reload, and in-process env changes.
+ *
+ * @returns {'read-only'|'workspace-write'|'danger-full-access'}
+ */
+export function resolveCodexSandbox() {
+  const raw = process.env.CHROXY_CODEX_SANDBOX
+  if (typeof raw !== 'string' || raw.length === 0) return CODEX_DEFAULT_SANDBOX
+  const trimmed = raw.trim()
+  if (trimmed.length === 0) return CODEX_DEFAULT_SANDBOX
+  if (CODEX_SANDBOX_MODES.includes(trimmed)) return trimmed
+  // Case-sensitive match — Codex CLI is case-sensitive on these values, so
+  // silently coercing `Read-Only` would mask a typo that would have failed
+  // loudly downstream.
+  if (!_warnedSandboxValues.has(trimmed)) {
+    _warnedSandboxValues.add(trimmed)
+    console.warn(
+      `[codex] CHROXY_CODEX_SANDBOX="${trimmed}" is not a valid sandbox mode `
+      + `(expected one of: ${CODEX_SANDBOX_MODES.join(', ')}); `
+      + `falling back to ${CODEX_DEFAULT_SANDBOX}`,
+    )
+  }
+  return CODEX_DEFAULT_SANDBOX
+}
+
+/**
  * Build the argv passed to `codex exec`. Exported for unit testing.
  *
  * `--skip-git-repo-check` is always passed: chroxy owns its own session-trust
@@ -70,14 +146,16 @@ const CODEX = resolveBinary('codex', BINARY_CANDIDATES)
  * adds a second line of defence. Until that UX lands, always-on is correct
  * because the user picking a cwd in chroxy IS today's trust signal.
  *
- * `--sandbox workspace-write` is always passed (#3837 stopgap): without it
- * Codex falls back to `read-only` in any directory that isn't explicitly
- * listed under `[projects."…"]` with `trust_level = "trusted"` in
+ * `--sandbox <mode>` is always passed (#3837 stopgap): without it Codex
+ * falls back to `read-only` in any directory that isn't explicitly listed
+ * under `[projects."…"]` with `trust_level = "trusted"` in
  * `~/.codex/config.toml`, which makes Codex unable to write files in
  * fresh chroxy sessions and looks like a chroxy bug. The user picking
- * a directory in chroxy IS the trust signal, so workspace-write is the
- * right default. A per-session sandbox selector (read-only / workspace-write
- * / danger-full-access) is tracked separately under #3837.
+ * a directory in chroxy IS the trust signal, so `workspace-write` is the
+ * right default. Operators may override the default via the
+ * `CHROXY_CODEX_SANDBOX` env var (#3847) — e.g. on a multi-tenant host
+ * where Codex should start `read-only` until the user opts in. A
+ * per-session sandbox selector is tracked separately under #3837.
  *
  * SECURITY INVARIANT (#3843, #3869): `text`, `model`, and `threadId` are
  * interpolated into argv passed directly to `spawn()` — no shell, so shell
@@ -121,9 +199,10 @@ export function buildCodexArgs(text, model, threadId = null) {
   // `unexpected argument '--sandbox' found` (verified against codex-cli
   // 0.128.0) because --sandbox is only declared on the parent `exec` command.
   // Keep --sandbox BEFORE the `resume` subcommand on the resume path.
+  const sandbox = resolveCodexSandbox()
   const args = threadId
-    ? ['exec', '--sandbox', 'workspace-write', 'resume', threadId, text, '--json', '--skip-git-repo-check']
-    : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', 'workspace-write']
+    ? ['exec', '--sandbox', sandbox, 'resume', threadId, text, '--json', '--skip-git-repo-check']
+    : ['exec', text, '--json', '--skip-git-repo-check', '--sandbox', sandbox]
   if (model) {
     args.push('-c', `model="${model}"`)
   }
@@ -139,9 +218,20 @@ export function buildCodexArgs(text, model, threadId = null) {
 // Context-window values come from the OpenAI model docs; `contextWindow` is
 // used both in the token-usage HUD and as the Codex-side override for the
 // generic 200k default shipped by `models.js`.
+//
+// #3857: gpt-5 / gpt-5-codex bumped from 272k → 400k. The 272k value was an
+// internal pre-launch limit that was never updated when OpenAI shipped the
+// public 400k Codex window — surfaced as a permanent 100% footer meter at
+// ~321k tokens even though Codex kept responding coherently (issue #3857,
+// also captured upstream in openai/codex#19319 + community.openai.com:
+// "Input tokens exceed the configured limit of 272,000 tokens"). The runtime
+// learn-loop in `_processJsonlLine` ratchets these upward when the SDK
+// reports an `input_tokens` value larger than the static entry, so a future
+// upstream bump (1M variants on certain plans) self-corrects without
+// requiring another source-code change.
 const CODEX_MODEL_METADATA = Object.freeze({
-  'gpt-5-codex': { label: 'GPT-5 Codex', contextWindow: 272_000 },
-  'gpt-5':       { label: 'GPT-5',        contextWindow: 272_000 },
+  'gpt-5-codex': { label: 'GPT-5 Codex', contextWindow: 400_000 },
+  'gpt-5':       { label: 'GPT-5',        contextWindow: 400_000 },
   'gpt-4.1':     { label: 'GPT-4.1',      contextWindow: 1_000_000 },
   'gpt-4o':      { label: 'GPT-4o',       contextWindow: 128_000 },
   'o1':          { label: 'o1',           contextWindow: 200_000 },
@@ -159,6 +249,47 @@ const CODEX_FALLBACK_MODELS = Object.freeze(CODEX_ALLOWED_MODELS.map(id => {
     contextWindow: meta.contextWindow,
   })
 }))
+
+/**
+ * Headroom multiplier for the learn-loop. Re-exported from the shared
+ * `CONTEXT_WINDOW_HEADROOM` constant in `utils/context-window-learn.js`
+ * (#4414) so the value lives in one place and any future provider that
+ * adopts the learn-loop picks up the same headroom.
+ *
+ * Kept exported under the legacy `CODEX_*` name so existing tests and any
+ * consumers continue to compile unchanged.
+ */
+export const CODEX_CONTEXT_WINDOW_HEADROOM = CONTEXT_WINDOW_HEADROOM
+
+/**
+ * Sanity cap on the learn-loop ratchet target for the Codex provider —
+ * a single `turn.completed` event with a corrupt or malicious
+ * `input_tokens` value (overflow, JSONL parse glitch, future Codex CLI
+ * bug) must not be able to balloon the registered window to an absurd
+ * number. 2,000,000 tokens is well above today's largest published Codex
+ * window (1M for gpt-4.1 / certain 1M GPT-5 variants on plan tiers).
+ *
+ * Sourced from the per-provider cap table in `utils/context-window-learn.js`
+ * (#4414) — bump it there if a legit future Codex model exceeds 2M.
+ */
+export const CODEX_CONTEXT_WINDOW_RATCHET_CAP = getRatchetCap('codex')
+
+/**
+ * #3857 learn-loop helper. Thin Codex-specific wrapper around the shared
+ * `maybeRatchetContextWindow` (#4414) so the existing test suite and any
+ * direct callers continue to compile unchanged.
+ *
+ * @param {import('events').EventEmitter} session  The CodexSession instance
+ * @param {string} modelId  Short id or fullId of the active Codex model
+ * @param {number} inputTokens  `usage.input_tokens` from `turn.completed`
+ * @returns {boolean}  true when the registry was updated, false when no-op
+ */
+export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
+  // #4413 persistence behavior is preserved by the shared helper, which
+  // calls `registry.saveCache()` after a successful update. Both Codex
+  // and Gemini providers route through the same path now.
+  return maybeRatchetContextWindow('codex', modelId, inputTokens, session.emit.bind(session))
+}
 
 export class CodexSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
@@ -282,15 +413,77 @@ export class CodexSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId } = {}) {
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Codex authenticates via OPENAI_API_KEY env OR the OAuth tokens cached
+   * under `~/.codex/auth.json` by `codex login`. The CLI works fine even
+   * when the file's OPENAI_API_KEY field is null because the tokens block
+   * carries the round-trip (#4301). Env wins; OAuth file fallback covers
+   * users who logged in via the CLI instead of exporting a key.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ hasCodexOAuthCreds: () => boolean }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `OpenAI API (${matched} set)`,
+        billingClass: BILLING_CLASSES.API_KEY,
+      }
+    }
+    if (helpers.hasCodexOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: 'OpenAI API (OAuth from `codex login`)',
+        billingClass: BILLING_CLASSES.API_KEY,
+      }
+    }
+    const resolvedHint = hint
+      ? `${hint} or run \`codex login\``
+      : 'run `codex login` or set OPENAI_API_KEY'
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: resolvedHint,
+      detail: envVars.length ? `Not configured — ${resolvedHint}` : 'Not configured',
+      // Non-Claude provider — always per-token api-key billing, era-independent.
+      billingClass: BILLING_CLASSES.API_KEY,
+    }
+  }
+
+  constructor(opts = {}) {
     // `model` may be null/undefined — BaseSession coerces to null and
     // _buildArgs() omits the `-c model=...` flag so Codex CLI defers
     // to its own default from ~/.codex/config.toml.
-    // #3899: hardTimeoutMs forwarded to BaseSession even though Codex
-    // doesn't (yet) split its timer into soft/hard — the config flows
-    // through here so when Codex gets the #3899 treatment as a follow-
-    // up the plumbing is already in place.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'codex', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId })
+    // #5367: forward every BaseSession opt via the canonical picker (which
+    // preserves the #3899 hardTimeoutMs / #4790 streamStallTimeoutMs plumbing
+    // that used to be hand-maintained here). Overrides: provider default,
+    // `model || DEFAULT_MODEL`, and `resumeSessionId` — the last is a
+    // JsonlSubprocessSession-local opt (not a BaseSession key) so it must ride
+    // through the overrides bag to reach the middle layer.
+    super(buildBaseSessionOpts(opts, {
+      provider: opts.provider || 'codex',
+      model: opts.model || DEFAULT_MODEL,
+      resumeSessionId: opts.resumeSessionId,
+    }))
   }
 
   // ------------------------------------------------------------------
@@ -355,12 +548,31 @@ export class CodexSession extends JsonlSubprocessSession {
           ctx.didStreamStart = false
         }
         const usage = event.usage || {}
+        const inputTokens = usage.input_tokens || 0
+        const outputTokens = usage.output_tokens || 0
+        // #3857 learn-loop: when Codex reports an `input_tokens` value that
+        // exceeds the registered context window for the active model, the
+        // static window is stale (this is exactly how we found the original
+        // 272k drift — 321k turns kept succeeding past 100%). Ratchet the
+        // registry upward to at least `input_tokens * 1.1` so the next turn's
+        // meter reflects reality, and emit `models_updated` so connected
+        // dashboards pick up the corrected value without waiting for a
+        // refresh. Mirrors the Claude path in sdk-session.js:741 — except
+        // the SDK there has an explicit `contextWindow` field; here we infer
+        // it from the observed token count.
+        //
+        // Only ratchets *up* — a single small turn must never shrink the
+        // registered window (the model didn't change, only the prompt size
+        // for this one turn did).
+        if (this.model && inputTokens > 0) {
+          _maybeRatchetContextWindow(this, this.model, inputTokens)
+        }
         this.emit('result', {
           cost: null,
           duration: null,
           usage: {
-            input_tokens: usage.input_tokens || 0,
-            output_tokens: usage.output_tokens || 0,
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
           },
           sessionId: this.resumeSessionId,
         })

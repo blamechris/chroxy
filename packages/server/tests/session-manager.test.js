@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { EventEmitter } from 'events'
 import { SessionManager, formatIdleDuration } from '../src/session-manager.js'
+import { assertForwardingPattern, captureProviderOpts } from './helpers/provider-forwarding.js'
 
 /**
  * Tests for SessionManager serialization, restoration, and allIdle.
@@ -266,6 +267,66 @@ describe('SessionManager.serializeState', () => {
     assert.equal(typeof onEntry.promptEvaluator, 'boolean')
   })
 
+  // #3805: persisted chroxyContextHint survives the round-trip so a
+  // restart restores the toggle state.
+  it('serializes chroxyContextHint on each session entry (#3805)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionOn = new EventEmitter()
+    sessionOn.model = 'sonnet'
+    sessionOn.permissionMode = 'approve'
+    sessionOn.chroxyContextHint = true
+    Object.defineProperty(sessionOn, 'resumeSessionId', { get: () => null })
+    sessionOn.destroy = () => {}
+    mgr._sessions.set('s-on', { session: sessionOn, name: 'HintOn', cwd: '/tmp' })
+
+    const sessionOff = new EventEmitter()
+    sessionOff.model = 'sonnet'
+    sessionOff.permissionMode = 'approve'
+    sessionOff.chroxyContextHint = false
+    Object.defineProperty(sessionOff, 'resumeSessionId', { get: () => null })
+    sessionOff.destroy = () => {}
+    mgr._sessions.set('s-off', { session: sessionOff, name: 'HintOff', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    const onEntry = state.sessions.find(s => s.name === 'HintOn')
+    const offEntry = state.sessions.find(s => s.name === 'HintOff')
+    assert.equal(onEntry.chroxyContextHint, true)
+    assert.equal(offEntry.chroxyContextHint, false)
+    assert.equal(typeof onEntry.chroxyContextHint, 'boolean')
+    assert.equal(typeof offEntry.chroxyContextHint, 'boolean')
+  })
+
+  // #4660: per-session preamble surfaces on each session entry so the
+  // dashboard can hydrate its text area without an extra round-trip.
+  it('serializes sessionPreamble on each session entry (#4660)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+
+    const sessionWith = new EventEmitter()
+    sessionWith.model = 'sonnet'
+    sessionWith.permissionMode = 'approve'
+    sessionWith.sessionPreamble = 'always use bullet points'
+    Object.defineProperty(sessionWith, 'resumeSessionId', { get: () => null })
+    sessionWith.destroy = () => {}
+    mgr._sessions.set('s-with', { session: sessionWith, name: 'WithPreamble', cwd: '/tmp' })
+
+    const sessionEmpty = new EventEmitter()
+    sessionEmpty.model = 'sonnet'
+    sessionEmpty.permissionMode = 'approve'
+    sessionEmpty.sessionPreamble = ''
+    Object.defineProperty(sessionEmpty, 'resumeSessionId', { get: () => null })
+    sessionEmpty.destroy = () => {}
+    mgr._sessions.set('s-empty', { session: sessionEmpty, name: 'EmptyPreamble', cwd: '/tmp' })
+
+    const state = mgr.serializeState()
+    const withEntry = state.sessions.find(s => s.name === 'WithPreamble')
+    const emptyEntry = state.sessions.find(s => s.name === 'EmptyPreamble')
+    assert.equal(withEntry.sessionPreamble, 'always use bullet points')
+    assert.equal(emptyEntry.sessionPreamble, '')
+    assert.equal(typeof withEntry.sessionPreamble, 'string')
+    assert.equal(typeof emptyEntry.sessionPreamble, 'string')
+  })
+
   // #3639: per-session promptEvaluatorSkipPattern survives the
   // round-trip so a restart preserves the operator's per-session
   // skip-list override.
@@ -344,6 +405,72 @@ describe('SessionManager.serializeState', () => {
     const missingEntry = state2.sessions.find(s => s.name === 'Missing')
     assert.equal(missingEntry.stdinForwardingDisabled, false)
     assert.equal(typeof missingEntry.stdinForwardingDisabled, 'boolean')
+  })
+
+  it('persists cumulativeUsage so the badge survives a restart (#4089)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const session = new EventEmitter()
+    session.model = 'claude-opus-4-7'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      type: 'cli',
+      name: 'Cost Session',
+      cwd: '/tmp',
+      cumulativeUsage: {
+        inputTokens: 1000,
+        outputTokens: 500,
+        cacheReadTokens: 200,
+        cacheCreationTokens: 100,
+        costUsd: 0.0345,
+        turnsBilled: 3,
+      },
+    })
+    const state = mgr.serializeState()
+    assert.deepEqual(state.sessions[0].cumulativeUsage, {
+      inputTokens: 1000,
+      outputTokens: 500,
+      cacheReadTokens: 200,
+      cacheCreationTokens: 100,
+      costUsd: 0.0345,
+      turnsBilled: 3,
+    })
+  })
+
+  it('persists costThresholdNotified latch (#4124)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const session = new EventEmitter()
+    session.model = 'claude-opus-4-7'
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      type: 'cli',
+      name: 'Latched',
+      cwd: '/tmp',
+      cumulativeUsage: { inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0, turnsBilled: 0 },
+      costThresholdNotified: true,
+    })
+    const state = mgr.serializeState()
+    assert.equal(state.sessions[0].costThresholdNotified, true)
+  })
+
+  it('round-trips missing fields as defaults (older state files)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: stateFile })
+    const session = new EventEmitter()
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    // Entry without cumulativeUsage or costThresholdNotified (pre-#4089/#4124 shape)
+    mgr._sessions.set('s1', { session, type: 'cli', name: 'Legacy', cwd: '/tmp' })
+    const state = mgr.serializeState()
+    // Persistence emits explicit defaults — null for missing usage, false for missing latch.
+    assert.equal(state.sessions[0].cumulativeUsage, null)
+    assert.equal(state.sessions[0].costThresholdNotified, false)
   })
 })
 
@@ -433,12 +560,158 @@ describe('SessionManager.restoreState', () => {
     mgr.destroyAll()
   })
 
-  it('restores lastActivityAt from state file', () => {
+  it('restores cumulativeUsage and threshold latch (#4089 / #4124)', () => {
     writeFileSync(stateFile, JSON.stringify({
       version: 1,
       timestamp: Date.now(),
       sessions: [
-        { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: 12_345 },
+        {
+          name: 'Restored',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'approve',
+          sdkSessionId: null,
+          cumulativeUsage: {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadTokens: 200,
+            cacheCreationTokens: 100,
+            costUsd: 0.0345,
+            turnsBilled: 3,
+          },
+          costThresholdNotified: true,
+        },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 1)
+    // cumulativeUsage survives the restart — badge shows the running cost.
+    assert.equal(sessions[0].cumulativeUsage.costUsd, 0.0345)
+    assert.equal(sessions[0].cumulativeUsage.turnsBilled, 3)
+    // #5630/#5629: listSessions stamps an era-aware billing class per session.
+    assert.ok(
+      ['api-key', 'subscription', 'programmatic-credit'].includes(sessions[0].billingClass),
+      `expected a valid billingClass, got ${sessions[0].billingClass}`,
+    )
+    // Latch survives — the threshold warning won't re-fire on next priced turn.
+    const restoredSessionId = sessions[0].sessionId
+    const entry = mgr._sessions.get(restoredSessionId)
+    assert.equal(entry.costThresholdNotified, true,
+      'threshold-notified latch must round-trip so the warning fires once per LOGICAL session')
+    mgr.destroyAll()
+  })
+
+  it('coerces corrupt cumulativeUsage fields to defaults on restore (#4089 defensive)', () => {
+    // A truncated/corrupt entry in session-state.json must not poison
+    // the renderer. Two paths to test:
+    //
+    //   (a) JSON-representable corruption that round-trips intact:
+    //       strings, nulls, negative numbers, missing fields. The
+    //       restore-side coercion (nonNegFinite for tokens / turnsBilled,
+    //       Number.isFinite for costUsd) defends against these.
+    //
+    //   (b) Non-JSON-serialisable values (NaN, Infinity) — these are
+    //       serialised by JSON.stringify as `null`, so by the time the
+    //       restored state lands they're already null. The "missing
+    //       field" handler covers this case implicitly. We pin one
+    //       NaN/Infinity input separately below to document the
+    //       JSON conversion contract.
+    //
+    // #4128 review: previous version of this test labelled each
+    // assertion with the input type pre-serialisation (e.g. "NaN → 0"),
+    // which was misleading — by the time restoreState saw the value it
+    // was already `null` because JSON had erased the NaN/Infinity.
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        {
+          name: 'Corrupt',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'approve',
+          sdkSessionId: null,
+          cumulativeUsage: {
+            // JSON.stringify(NaN) === 'null' and JSON.stringify(Infinity) === 'null'.
+            // The labels below describe what arrives at restoreState,
+            // not what was passed in.
+            inputTokens: NaN,
+            outputTokens: 'oops',
+            cacheReadTokens: Infinity,
+            cacheCreationTokens: null,
+            // costUsd intentionally missing
+            turnsBilled: -5, // negative, JSON-preserved
+          },
+        },
+      ],
+    }))
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    // null (was NaN) → 0
+    assert.equal(sessions[0].cumulativeUsage.inputTokens, 0, 'restored as null after JSON; clamped to 0')
+    // string preserved by JSON → 0 via nonNegFinite
+    assert.equal(sessions[0].cumulativeUsage.outputTokens, 0, 'non-number string clamped to 0')
+    // null (was Infinity) → 0
+    assert.equal(sessions[0].cumulativeUsage.cacheReadTokens, 0, 'restored as null after JSON; clamped to 0')
+    // explicit null → 0
+    assert.equal(sessions[0].cumulativeUsage.cacheCreationTokens, 0, 'explicit null clamped to 0')
+    // missing field → 0
+    assert.equal(sessions[0].cumulativeUsage.costUsd, 0, 'missing field falls back to 0')
+    // #4128 review: negative tokens / turnsBilled clamp to 0 — they're
+    // monotonic counters and a negative value indicates corruption.
+    // costUsd is the exception (refunds, #4099) but turnsBilled is not.
+    assert.equal(sessions[0].cumulativeUsage.turnsBilled, 0, 'negative turnsBilled clamps to 0')
+    mgr.destroyAll()
+  })
+
+  it('preserves a legitimate negative costUsd on restore (#4099 refund flow)', () => {
+    // costUsd is the one cumulativeUsage field allowed to be negative —
+    // a refund / credit-adjustment turn subtracts from the running
+    // total, and a session that received only refunds could legitimately
+    // end up below zero. The restore clamp uses `Number.isFinite` (no
+    // sign check) specifically to preserve this case (#4128 review).
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        {
+          name: 'Refunded',
+          cwd: '/tmp',
+          model: null,
+          permissionMode: 'approve',
+          sdkSessionId: null,
+          cumulativeUsage: {
+            inputTokens: 1000,
+            outputTokens: 500,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            costUsd: -0.25, // refund net-negative
+            turnsBilled: 3,
+          },
+        },
+      ],
+    }))
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    assert.equal(sessions[0].cumulativeUsage.costUsd, -0.25,
+      'negative costUsd is preserved — refunds flow through restore')
+    mgr.destroyAll()
+  })
+
+  it('restores lastActivityAt from state file', () => {
+    // A RECENT lastActivityAt so the per-entry TTL filter (audit P2-12) keeps
+    // the session; the test asserts the field round-trips, not staleness.
+    const recentActivity = Date.now() - 60_000
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'Session A', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, lastActivityAt: recentActivity },
       ],
     }))
 
@@ -447,7 +720,7 @@ describe('SessionManager.restoreState', () => {
 
     const sessions = mgr.listSessions()
     assert.equal(sessions.length, 1)
-    assert.equal(sessions[0].lastActivityAt, 12_345)
+    assert.equal(sessions[0].lastActivityAt, recentActivity)
 
     mgr.destroyAll()
   })
@@ -477,6 +750,86 @@ describe('SessionManager.restoreState', () => {
     // `undefined` on the wire.
     assert.equal(withoutEval.promptEvaluator, false)
     assert.equal(typeof withoutEval.promptEvaluator, 'boolean')
+
+    mgr.destroyAll()
+  })
+
+  // #3805: chroxyContextHint round-trips. A state file written with the
+  // flag ON must restore with the flag still ON (so a long-running
+  // session keeps the model "mobile-aware" across a daemon restart);
+  // pre-#3805 state files (no field) restore as `false` so legacy state
+  // files keep the safe default. This also exercises the full plumbing
+  // — `createSession` → providerOpts → SdkSession/CliSession constructor
+  // → super(...) → BaseSession field. The middle-layer forwarding bug
+  // [[feedback_jsonl_subprocess_middle_layer]] surfaces here as the
+  // restored session having `chroxyContextHint=false` despite the
+  // state file saying true.
+  it('restores chroxyContextHint across the state cycle (#3805)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'HintOn', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, chroxyContextHint: true },
+        { name: 'HintOff', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, chroxyContextHint: false },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    const hintOn = sessions.find(s => s.name === 'HintOn')
+    const hintOff = sessions.find(s => s.name === 'HintOff')
+    const noField = sessions.find(s => s.name === 'NoField')
+    assert.equal(hintOn.chroxyContextHint, true,
+      'a state file with chroxyContextHint:true must round-trip through createSession + providerOpts + provider constructor + super() into the BaseSession field')
+    assert.equal(hintOff.chroxyContextHint, false)
+    assert.equal(noField.chroxyContextHint, false,
+      'pre-#3805 state files (no field) restore with the flag OFF — safe default')
+    assert.equal(typeof noField.chroxyContextHint, 'boolean')
+
+    mgr.destroyAll()
+  })
+
+  // #4660: per-session preamble round-trips through the full restore
+  // path — `restoreState` → `createSession` → providerOpts → provider
+  // constructor → super() → BaseSession.sessionPreamble. Exercises the
+  // jsonl-subprocess middle-layer trap (memory
+  // [[feedback_jsonl_subprocess_middle_layer]]): if any provider's
+  // constructor drops `sessionPreamble` from its destructured params
+  // or its super({...}) call, restored Codex / Gemini sessions would
+  // silently lose the preamble despite the state file containing it.
+  it('restores sessionPreamble across the state cycle (#4660)', () => {
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'WithPreamble', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, sessionPreamble: 'always bullet points' },
+        { name: 'EmptyPreamble', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, sessionPreamble: '' },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Non-string field in the state file (hand-edited or schema
+        // drift) — restore must fall back to '' rather than throwing
+        // or carrying a non-string field through to BaseSession.
+        { name: 'BadShape', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, sessionPreamble: 12345 },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+    const sessions = mgr.listSessions()
+    const withP = sessions.find(s => s.name === 'WithPreamble')
+    const emptyP = sessions.find(s => s.name === 'EmptyPreamble')
+    const noField = sessions.find(s => s.name === 'NoField')
+    const badShape = sessions.find(s => s.name === 'BadShape')
+    assert.equal(withP.sessionPreamble, 'always bullet points',
+      'a state file with sessionPreamble must round-trip through the full provider constructor chain into BaseSession')
+    assert.equal(emptyP.sessionPreamble, '')
+    assert.equal(noField.sessionPreamble, '',
+      'pre-#4660 state files (no field) restore with the empty default')
+    assert.equal(badShape.sessionPreamble, '',
+      'non-string field in state file falls back to empty default rather than crashing')
+    assert.equal(typeof withP.sessionPreamble, 'string')
+    assert.equal(typeof noField.sessionPreamble, 'string')
 
     mgr.destroyAll()
   })
@@ -524,9 +877,12 @@ describe('SessionManager.restoreState', () => {
       version: 1,
       timestamp: Date.now(),
       sessions: [
-        { name: 'StdinDisabled', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: true },
-        { name: 'StdinOk', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, stdinForwardingDisabled: false },
-        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // stdinForwardingDisabled is an SdkSession-specific latch, so pin the
+        // provider rather than rely on the manager default (claude-tui since
+        // #5819) — these fixtures predate the per-session provider field.
+        { name: 'StdinDisabled', cwd: '/tmp', model: null, permissionMode: 'approve', provider: 'claude-sdk', sdkSessionId: null, stdinForwardingDisabled: true },
+        { name: 'StdinOk', cwd: '/tmp', model: null, permissionMode: 'approve', provider: 'claude-sdk', sdkSessionId: null, stdinForwardingDisabled: false },
+        { name: 'NoField', cwd: '/tmp', model: null, permissionMode: 'approve', provider: 'claude-sdk', sdkSessionId: null },
       ],
     }))
 
@@ -626,6 +982,58 @@ describe('SessionManager.restoreState', () => {
     assert.equal(restored[0].content, 'hello')
     assert.equal(restored[1].content, 'world')
     assert.equal(restored[2].cost, 0.01)
+
+    mgr.destroyAll()
+  })
+
+  // #4617 — a session wedged on a tool at shutdown persists a tool_start
+  // without a matching tool_result. Restore must splice in a synthetic
+  // interrupted tool_result so history replay clears the dashboard's
+  // activeTools entry instead of zombifying ("Running X · 4h+ forever").
+  it('sweeps unresolved tool_starts on restore so activeTools cannot zombify (#4617)', () => {
+    const wedgedHistory = [
+      { type: 'message', messageType: 'user_input', content: 'do something', timestamp: 1000 },
+      { type: 'tool_start', toolUseId: 'wedged-tool', tool: 'AskUserQuestion', timestamp: 1100 },
+      // No tool_result here — process died before it could complete.
+    ]
+    const completedHistory = [
+      { type: 'tool_start', toolUseId: 'completed', tool: 'Bash', timestamp: 2000 },
+      { type: 'tool_result', toolUseId: 'completed', result: 'done', timestamp: 2100 },
+    ]
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { name: 'Wedged', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: wedgedHistory },
+        { name: 'Healthy', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null, history: completedHistory },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    const wedged = sessions.find(s => s.name === 'Wedged')
+    const healthy = sessions.find(s => s.name === 'Healthy')
+    assert.ok(wedged && healthy)
+
+    const wedgedAfter = mgr.getHistory(wedged.sessionId)
+    assert.equal(wedgedAfter.length, 3, 'synthetic tool_result spliced after the orphan tool_start')
+    assert.equal(wedgedAfter[1].type, 'tool_start')
+    assert.equal(wedgedAfter[1].toolUseId, 'wedged-tool')
+    assert.equal(wedgedAfter[2].type, 'tool_result')
+    assert.equal(wedgedAfter[2].toolUseId, 'wedged-tool')
+    assert.equal(wedgedAfter[2].synthetic, true)
+    assert.equal(wedgedAfter[2].interrupted, true)
+    assert.equal(wedgedAfter[2].isError, true)
+    assert.equal(wedgedAfter[2].reason, 'session_restored')
+    assert.ok(wedgedAfter[2].timestamp > wedgedAfter[1].timestamp, 'synthetic timestamp stays monotonic')
+
+    // The healthy session must NOT pick up any synthetic results — its
+    // tool_start already had a matching tool_result.
+    const healthyAfter = mgr.getHistory(healthy.sessionId)
+    assert.equal(healthyAfter.length, 2)
+    assert.notEqual(healthyAfter[1].synthetic, true)
 
     mgr.destroyAll()
   })
@@ -790,6 +1198,91 @@ describe('SessionManager.restoreState', () => {
     assert.equal(failed[0].provider, 'gemini-cli')
     assert.equal(failed[0].needsAttention, true)
     assert.ok(failed[0].errorMessage)
+
+    mgr.destroyAll()
+  })
+
+  // #4983 — restoreState preserves persisted IDs so the dashboard's
+  // localStorage-cached activeSessionId still resolves after a daemon
+  // restart. Inverts the original #4935 test, which asserted the
+  // opposite (`restored sessions get fresh IDs`) — that contract was
+  // the root cause of the wedge investigated in #4935, and #4979
+  // shipped a visibility safety net (SESSION_NOT_FOUND). This PR is the
+  // deeper fix: preserve the ID so the safety net never has to fire on
+  // a same-host daemon restart.
+  it('restoreState reuses persisted session IDs so dashboard lookups survive a daemon restart (#4983)', () => {
+    const stateFile1 = join(tempDir, 'state-v1.json')
+
+    // Persisted IDs in valid 32-char lower-case hex (matches the format
+    // createSession emits via randomBytes(16).toString('hex')). Pre-#4983
+    // versions of this test used placeholder strings that wouldn't match
+    // the validation regex; real state files always carry the canonical
+    // hex shape.
+    const persistedIdA = 'a'.repeat(32)
+    const persistedIdB = 'b'.repeat(32)
+    writeFileSync(stateFile1, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        { id: persistedIdA, name: 'Rah6', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        { id: persistedIdB, name: 'No-it-all', cwd: '/tmp', model: null, permissionMode: 'auto', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr2 = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
+    const firstNewId = mgr2.restoreState()
+    assert.ok(firstNewId, 'restoreState should return the first restored session ID')
+
+    // The whole point of #4983: persisted IDs survive intact.
+    assert.equal(firstNewId, persistedIdA,
+      'restored session ID must match the persisted ID so dashboard\'s cached activeSessionId resolves')
+    const sessions = mgr2.listSessions()
+    assert.equal(sessions.length, 2, 'both sessions should restore')
+    const ids = sessions.map(s => s.sessionId)
+    assert.ok(ids.includes(persistedIdA), `expected ${persistedIdA} in restored ids: ${ids.join(', ')}`)
+    assert.ok(ids.includes(persistedIdB), `expected ${persistedIdB} in restored ids: ${ids.join(', ')}`)
+
+    // The actual #4935 wedge scenario: dashboard input addressed to the
+    // pre-restart ID now resolves, instead of triggering SESSION_NOT_FOUND.
+    assert.ok(mgr2.getSession(persistedIdA), 'lookup by persisted ID must succeed — no resend loop')
+    assert.ok(mgr2.getSession(persistedIdB))
+
+    mgr2.destroyAll()
+  })
+
+  // #4983 — defense-in-depth: a malformed persisted ID (wrong length,
+  // non-hex chars, etc.) must fall back to a fresh random ID instead of
+  // throwing or polluting the session map. Future state-file corruption
+  // (downgrade-then-upgrade, manual edits, etc.) must not wedge boot.
+  it('restoreState falls back to a fresh ID when the persisted id is malformed (#4983)', () => {
+    const stateFile1 = join(tempDir, 'state-malformed.json')
+    writeFileSync(stateFile1, JSON.stringify({
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [
+        // Too short
+        { id: 'deadbeef', name: 'short', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Wrong charset (uppercase + dashes)
+        { id: 'AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE', name: 'uuid-style', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+        // Valid 32-char hex — must still survive intact
+        { id: 'c'.repeat(32), name: 'ok', cwd: '/tmp', model: null, permissionMode: 'approve', sdkSessionId: null },
+      ],
+    }))
+
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, defaultCwd: '/tmp', stateFilePath: stateFile1 })
+    mgr.restoreState()
+
+    const sessions = mgr.listSessions()
+    assert.equal(sessions.length, 3, 'all three sessions should restore even with malformed ids')
+    const validHex = /^[a-f0-9]{32}$/
+    for (const s of sessions) {
+      assert.match(s.sessionId, validHex, `session id ${s.sessionId} must be valid hex (corrupted persisted ids reassigned)`)
+    }
+    // Valid id survived; malformed ones reassigned to a new random hex.
+    const ids = sessions.map(s => s.sessionId)
+    assert.ok(ids.includes('c'.repeat(32)), 'the well-formed persisted id must survive intact')
+    assert.equal(mgr.getSession('deadbeef'), null, 'malformed short id must not be looked-up-able')
+    assert.equal(mgr.getSession('AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE'), null, 'uppercase/dash id must not be looked-up-able')
 
     mgr.destroyAll()
   })
@@ -1002,10 +1495,52 @@ describe('SessionManager.listSessions includes stdinDroppedTotals (#3573)', () =
   })
 })
 
-describe('SessionManager provider support', () => {
-  it('defaults to claude-sdk provider', () => {
+// #4307: pending-background-shells snapshot in session_list. A client
+// joining mid-flight (fresh tab, server reconnect, app resume) must
+// see the waiting state through the session-list snapshot without
+// waiting for the next `background_work_changed` event.
+describe('SessionManager.listSessions includes pendingBackgroundShells (#4307)', () => {
+  it('reads getPendingBackgroundShells() and surfaces the entries', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    assert.equal(mgr._providerType, 'claude-sdk')
+    const pending = [
+      { shellId: 'a', command: 'sleep 600', startedAt: 100 },
+      { shellId: 'b', command: 'tail -f log', startedAt: 200 },
+    ]
+    const session = new EventEmitter()
+    session.isRunning = true
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.getPendingBackgroundShells = () => pending
+    session.destroy = () => {}
+    mgr._sessions.set('s-bg', { session, name: 'Waiting', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.ok(Array.isArray(entry.pendingBackgroundShells))
+    assert.equal(entry.pendingBackgroundShells.length, 2)
+    assert.equal(entry.pendingBackgroundShells[0].shellId, 'a')
+    assert.equal(entry.pendingBackgroundShells[1].shellId, 'b')
+  })
+
+  it('defaults to an empty array for providers without the getter', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.model = null
+    session.permissionMode = 'approve'
+    Object.defineProperty(session, 'resumeSessionId', { get: () => null })
+    session.destroy = () => {}
+    mgr._sessions.set('s-old', { session, name: 'NoGetter', cwd: '/tmp', createdAt: Date.now() })
+
+    const [entry] = mgr.listSessions()
+    assert.deepEqual(entry.pendingBackgroundShells, [])
+  })
+})
+
+describe('SessionManager provider support', () => {
+  it('defaults to the shared DEFAULT_PROVIDER (claude-tui since #5819)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    assert.equal(mgr._providerType, 'claude-tui')
   })
 
   it('accepts providerType parameter', () => {
@@ -1510,6 +2045,124 @@ describe('createSession failure cleanup (FM-03)', () => {
       /init crashed/
     )
     assert.equal(destroyCalled, true, 'session.destroy() should be called on start() failure')
+  })
+})
+
+describe('#5316 (WP-2.2) — async start() rejection handling', () => {
+  // A provider whose start() is async and REJECTS (mirrors claude-tui's PTY
+  // warmup death). The #1141 `.catch()` guard routes the rejection to
+  // _handleAsyncStartFailure, which destroys a fresh session but PRESERVES a
+  // restored one (history + worktree).
+  class AsyncFailProvider extends EventEmitter {
+    constructor(opts) {
+      super()
+      this.cwd = opts.cwd
+      this.model = opts.model || null
+      this.permissionMode = opts.permissionMode || 'approve'
+      this.isRunning = false
+      this.resumeSessionId = opts.resumeSessionId || null
+      this._messageCounter = 0
+      this.bootedModel = null
+      this.destroyed = false
+    }
+    static get capabilities() { return {} }
+    async start() { throw new Error('claude PTY exited during warmup (code=1)') }
+    destroy() { this.destroyed = true }
+    interrupt() {}
+    sendMessage() {}
+    setModel() {}
+    setPermissionMode() {}
+  }
+
+  // Let the rejected start() promise's microtask `.catch()` run.
+  const tick = () => new Promise((r) => setImmediate(r))
+
+  it('destroys a FRESH session and registers no failed-restore', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const { registerProvider } = await import('../src/providers.js')
+    registerProvider('test-async-fail-fresh', AsyncFailProvider)
+
+    const id = mgr.createSession({ cwd: '/tmp', provider: 'test-async-fail-fresh' })
+    assert.equal(mgr._sessions.has(id), true, 'session live until the async rejection lands')
+    await tick()
+
+    assert.equal(mgr._sessions.has(id), false, 'fresh session destroyed on async start failure')
+    assert.equal(mgr.getFailedRestores().length, 0, 'no failed-restore for a fresh session')
+  })
+
+  it('surfaces session_create_failed BEFORE session_destroyed for a FRESH session (#5731 T6)', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const { registerProvider } = await import('../src/providers.js')
+    registerProvider('test-async-fail-fresh-event', AsyncFailProvider)
+
+    // Capture both lifecycle events with order so we can prove the client gets
+    // the REASON (session_create_failed) while the session is still mapped,
+    // before it vanishes (session_destroyed). The forwarder relies on this
+    // ordering to broadcastToSession before subscribers are torn down.
+    const order = []
+    const createFailed = []
+    mgr.on('session_create_failed', (e) => { order.push('create_failed'); createFailed.push(e) })
+    mgr.on('session_destroyed', () => order.push('destroyed'))
+    const restoreFailed = []
+    mgr.on('session_restore_failed', (e) => restoreFailed.push(e))
+
+    const id = mgr.createSession({ cwd: '/tmp', provider: 'test-async-fail-fresh-event', name: 'Doomed' })
+    await tick()
+
+    assert.equal(createFailed.length, 1, 'exactly one session_create_failed for a fresh start failure')
+    assert.equal(restoreFailed.length, 0, 'fresh session must NOT surface as a restore failure')
+    const ev = createFailed[0]
+    assert.equal(ev.sessionId, id)
+    assert.equal(ev.name, 'Doomed')
+    assert.equal(ev.provider, 'test-async-fail-fresh-event')
+    assert.equal(ev.cwd, '/tmp')
+    assert.equal(ev.errorCode, 'START_FAILED', 'code-less Error is stamped START_FAILED')
+    assert.match(ev.errorMessage, /PTY exited during warmup/, 'carries the provider rejection reason')
+    assert.deepEqual(order, ['create_failed', 'destroyed'],
+      'reason is emitted before the session is destroyed so the client can toast it')
+  })
+
+  it('PRESERVES restored history + surfaces session_restore_failed for a RESTORED session', async () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const { registerProvider } = await import('../src/providers.js')
+    registerProvider('test-async-fail-restore', AsyncFailProvider)
+    const failedEvents = []
+    mgr.on('session_restore_failed', (e) => failedEvents.push(e))
+
+    const preserveId = 'a'.repeat(32)
+    const id = mgr.createSession({
+      cwd: '/tmp',
+      provider: 'test-async-fail-restore',
+      preserveId,
+      skipPersist: true,
+      isRestore: true,
+    })
+    // restoreState() seeds history AFTER createSession returns, synchronously,
+    // before the async rejection lands — replicate that ordering here.
+    mgr._recordHistory(id, 'message', { role: 'user', text: 'hello from before the crash' })
+    assert.ok(mgr._history.getHistory(id).length >= 1, 'history seeded pre-rejection')
+
+    await tick()
+
+    assert.equal(mgr._sessions.has(id), false, 'dead provider removed from the live session map')
+    const failed = mgr.getFailedRestores()
+    assert.equal(failed.length, 1, 'registered as a failed restore (history preserved on disk)')
+    assert.equal(failed[0].sessionId, preserveId, 'failed-restore keyed by the preserved id')
+    assert.ok(failed[0].historyLength >= 1, 'restored history preserved in the failed-restore payload')
+    assert.equal(failedEvents.length, 1, 'session_restore_failed emitted once')
+    assert.equal(failedEvents[0].originalHistoryPreserved, true)
+    assert.equal(failedEvents[0].errorCode, 'START_FAILED')
+    // The live event and a LATER reconnect (getFailedRestores) must agree on the
+    // errorCode for the same failure — claude-tui rejects with a code-less Error,
+    // so the handler stamps START_FAILED before storing (#5350 review).
+    assert.equal(failed[0].errorCode, 'START_FAILED', 'late-reconnect errorCode matches the live event')
+
+    // serializeState must write the preserved session back to disk so a future
+    // restart can retry it — proving the history is not lost.
+    const serialized = mgr.serializeState()
+    const persisted = serialized.sessions.find((s) => s.id === preserveId)
+    assert.ok(persisted, 'failed-restore session is written back to disk')
+    assert.ok(Array.isArray(persisted.history) && persisted.history.length >= 1, 'persisted payload carries the history')
   })
 })
 
@@ -2251,5 +2904,1210 @@ describe('#3697 — shutdown race must not overwrite good state with empty state
     } finally {
       rmSync(tempDir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('SessionManager._trackUsage (#4072)', () => {
+  function makeWiredManager() {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    // Mimic the entry shape `createSession` builds. The new cumulativeUsage
+    // field on the entry is what `_trackUsage` increments.
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s1', session)
+    return { mgr, session }
+  }
+
+  function captureSessionUsage(mgr) {
+    const events = []
+    mgr.on('session_event', (e) => {
+      if (e.event === 'session_usage') events.push(e)
+    })
+    return events
+  }
+
+  it('accumulates usage + cost across multiple result events', () => {
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 10, output_tokens: 5 }, cost: 0.001 })
+    mgr._trackUsage('s1', { usage: { input_tokens: 7, output_tokens: 3 }, cost: 0.0005 })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 17)
+    assert.equal(got.outputTokens, 8)
+    assert.ok(Math.abs(got.costUsd - 0.0015) < 1e-9, `expected 0.0015, got ${got.costUsd}`)
+    assert.equal(got.turnsBilled, 2)
+  })
+
+  it('emits session_usage on every priced result event', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { usage: { input_tokens: 5, output_tokens: 4 }, cost: 0.000375 })
+    assert.equal(events.length, 1)
+    assert.equal(events[0].sessionId, 's1')
+    assert.equal(events[0].data.cumulativeUsage.inputTokens, 5)
+    assert.equal(events[0].data.cumulativeUsage.turnsBilled, 1)
+    assert.ok(Math.abs(events[0].data.cumulativeUsage.costUsd - 0.000375) < 1e-9)
+  })
+
+  it('DOES accumulate tokens when result has usage but no `cost` (subscription-only providers, #5115)', () => {
+    // #5115: a subscription-billed `claude -p` turn reports
+    // `total_cost_usd: null` but carries real token counts. The usage gate
+    // re-keys on finite `usage.input_tokens` so the dashboard header meter
+    // ratchets even though the cost accumulator stays at 0.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    // claude-tui-style result — usage present, but no cost field.
+    session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 } })
+    assert.equal(events.length, 1, 'usage with finite input_tokens fires session_usage')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1, 'a subscription turn IS a billed turn')
+    assert.equal(got.inputTokens, 1000, 'tokens ratchet')
+    assert.equal(got.outputTokens, 500)
+    assert.equal(got.costUsd, 0, 'cost accumulator stays zero — no cost to add')
+  })
+
+  it('DOES accumulate tokens when result has `cost: null` but finite usage (#5115)', () => {
+    // #5115: claude-tui emits `cost: null` to mean "subscription-billed,
+    // not measured" — but the usage payload still carries real tokens. The
+    // token accumulator must ratchet (header meter) while the cost
+    // accumulator stays at 0 (no dollar budget on a flat subscription).
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: null, usage: { input_tokens: 250, output_tokens: 80 } })
+    assert.equal(events.length, 1, 'cost: null with finite usage fires session_usage')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.inputTokens, 250)
+    assert.equal(got.costUsd, 0, 'null cost must not poison cumulativeCost')
+  })
+
+  it('does NOT accumulate when result has `cost: null` AND `usage: null` (interrupted/stall shape)', () => {
+    // #4072 / #5115: a synthetic interrupted-turn result
+    // (_emitInterruptedTurnResult) carries BOTH `cost: null` and
+    // `usage: null`. With no finite cost and no finite input_tokens, both
+    // gates filter it — the stall path stays single-counted.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: null, usage: null })
+    assert.equal(events.length, 0, 'cost: null + usage: null must not fire session_usage')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0)
+  })
+
+  it('DOES accumulate when result has `cost: 0` (legitimate free turn)', () => {
+    // A genuinely-free turn (all cache-read, output truncated) is still a
+    // billable interaction we want to count in turnsBilled. Distinguishing
+    // semantically: cost: 0 = "tracked, and zero"; cost: null = "not
+    // tracked." This test pins the semantics so a future widening of the
+    // gate to `cost > 0` doesn't accidentally drop these.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: 0, usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 1000 } })
+    assert.equal(events.length, 1, 'cost: 0 IS a tracked turn (free, but tracked)')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.cacheReadTokens, 1000)
+    assert.equal(got.costUsd, 0)
+  })
+
+  it('accumulates tokens but NOT cost when `cost` is NaN with finite usage (#4088 / #5115)', () => {
+    // #4088: a NaN cost is a provider bug and must never poison the cost
+    // accumulator. #5115: but if the usage payload carries finite tokens,
+    // those ARE legitimate and ratchet the token meter. The usage gate keys
+    // on input_tokens; _trackUsage coerces the NaN cost to 0.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: NaN, usage: { input_tokens: 100 } })
+    assert.equal(events.length, 1, 'finite usage fires session_usage even with NaN cost')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.inputTokens, 100)
+    assert.equal(got.costUsd, 0, 'NaN cost must not poison cumulativeCost')
+  })
+
+  it('accumulates tokens but NOT cost when `cost` is Infinity with finite usage (#4088 / #5115)', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: Infinity, usage: { input_tokens: 100 } })
+    assert.equal(events.length, 1, 'finite usage fires session_usage even with Infinity cost')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 1)
+    assert.equal(got.inputTokens, 100)
+    assert.equal(got.costUsd, 0, 'Infinity cost must not poison cumulativeCost')
+  })
+
+  it('clamps NEGATIVE token deltas to 0 (monotonic counter contract, #5115 review)', () => {
+    // Token fields are non-negative monotonic counters per
+    // CumulativeUsageSchema (@chroxy/protocol). A provider bug emitting a
+    // negative delta must NOT drive the running total below zero. costUsd
+    // stays signed (refund/credit turns subtract, #4099).
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 100, output_tokens: 50, cache_read_input_tokens: 200 } })
+    // Provider bug: a turn reports negative tokens.
+    mgr._trackUsage('s1', {
+      usage: { input_tokens: -10, output_tokens: -5, cache_read_input_tokens: -1, cache_creation_input_tokens: -3 },
+      cost: -0.25,
+    })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 100, 'negative input delta dropped, total holds')
+    assert.equal(got.outputTokens, 50, 'negative output delta dropped')
+    assert.equal(got.cacheReadTokens, 200, 'negative cache-read delta dropped')
+    assert.equal(got.cacheCreationTokens, 0, 'negative cache-creation delta dropped')
+    assert.ok(got.inputTokens >= 0 && got.outputTokens >= 0, 'counters never go negative')
+    // costUsd is the one signed field — the -0.25 refund IS applied.
+    assert.ok(Math.abs(got.costUsd - (-0.25)) < 1e-9, `signed costUsd applies the refund; got ${got.costUsd}`)
+  })
+
+  it('does NOT accumulate when both `cost` and `usage.input_tokens` are non-finite (#4088 / #5115)', () => {
+    // Neither gate passes: NaN cost (cost gate fails) and no finite
+    // input_tokens (usage gate fails). Nothing is tracked, nothing emits.
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { cost: NaN, usage: { output_tokens: 50 } })
+    assert.equal(events.length, 0, 'NaN cost + no input_tokens passes neither gate')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.turnsBilled, 0)
+    assert.equal(got.outputTokens, 0)
+  })
+
+  it('handles missing usage object on result gracefully (no NaN)', () => {
+    const { mgr, session } = makeWiredManager()
+    session.emit('result', { cost: 0.001 }) // usage missing entirely
+    const got = mgr.getCumulativeUsage('s1')
+    assert.ok(Number.isFinite(got.inputTokens) && got.inputTokens === 0)
+    assert.equal(got.turnsBilled, 1)
+    assert.ok(Math.abs(got.costUsd - 0.001) < 1e-9)
+  })
+
+  it('cache token fields accumulate independently of input/output', () => {
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', {
+      usage: {
+        input_tokens: 0,
+        output_tokens: 100,
+        cache_read_input_tokens: 5000,
+        cache_creation_input_tokens: 2000,
+      },
+      cost: 0.05,
+    })
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 0)
+    assert.equal(got.outputTokens, 100)
+    assert.equal(got.cacheReadTokens, 5000)
+    assert.equal(got.cacheCreationTokens, 2000)
+  })
+
+  it('getCumulativeUsage returns a shallow copy (callers cannot mutate the entry)', () => {
+    const { mgr } = makeWiredManager()
+    mgr._trackUsage('s1', { usage: { input_tokens: 10 }, cost: 0.001 })
+    const snap = mgr.getCumulativeUsage('s1')
+    snap.inputTokens = 999999
+    snap.turnsBilled = 999999
+    const fresh = mgr.getCumulativeUsage('s1')
+    assert.equal(fresh.inputTokens, 10, 'mutating the snapshot must not corrupt the entry')
+    assert.equal(fresh.turnsBilled, 1)
+  })
+
+  it('session_usage payload is a shallow copy (subscribers cannot mutate the entry)', () => {
+    const { mgr, session } = makeWiredManager()
+    const events = captureSessionUsage(mgr)
+    session.emit('result', { usage: { input_tokens: 10 }, cost: 0.001 })
+    // A subscriber mutates the payload.
+    events[0].data.cumulativeUsage.inputTokens = 0
+    events[0].data.cumulativeUsage.turnsBilled = 0
+    // The entry stays correct.
+    const fresh = mgr.getCumulativeUsage('s1')
+    assert.equal(fresh.inputTokens, 10)
+    assert.equal(fresh.turnsBilled, 1)
+  })
+
+  it('getCumulativeUsage returns null for unknown sessionId', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.getCumulativeUsage('nope'), null)
+  })
+
+  it('listSessions snapshot includes cumulativeUsage (late-subscriber AC)', () => {
+    const { mgr, session } = makeWiredManager()
+    // Make the entry minimally-shaped enough for listSessions() to consume it.
+    const entry = mgr._sessions.get('s1')
+    Object.assign(entry.session, {
+      model: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-7',
+      permissionMode: 'approve',
+      isRunning: false,
+      _stdinForwardingDisabled: false,
+      stdinDroppedTotals: { bytes: 0, count: 0 },
+      promptEvaluator: false,
+      promptEvaluatorSkipPattern: null,
+      resumeSessionId: null,
+    })
+    Object.assign(entry, { provider: 'claude-byok' })
+    // Two turns happen BEFORE the late client connects.
+    session.emit('result', { usage: { input_tokens: 10, output_tokens: 20 }, cost: 0.001 })
+    session.emit('result', { usage: { input_tokens: 5, output_tokens: 3 }, cost: 0.0005 })
+    // The late client calls `listSessions()` and gets the totals immediately.
+    const snap = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.ok(snap)
+    assert.ok(snap.cumulativeUsage, 'listSessions entries must include cumulativeUsage')
+    assert.equal(snap.cumulativeUsage.inputTokens, 15)
+    assert.equal(snap.cumulativeUsage.outputTokens, 23)
+    assert.equal(snap.cumulativeUsage.turnsBilled, 2)
+    assert.ok(Math.abs(snap.cumulativeUsage.costUsd - 0.0015) < 1e-9)
+    // Snapshot is a copy — mutating it must not corrupt future snapshots.
+    snap.cumulativeUsage.inputTokens = 999
+    const second = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.equal(second.cumulativeUsage.inputTokens, 15, 'snapshot must be a fresh copy each call')
+  })
+
+  it('listSessions fills missing keys from the zero template (#4088 review)', () => {
+    // A custom provider builds an entry with a partial cumulativeUsage
+    // object — e.g. only inputTokens is tracked. The snapshot wire shape
+    // must still carry every key (with zero defaults) so consumers can
+    // safely destructure without optional-chaining each field.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    Object.assign(session, {
+      model: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-7',
+      permissionMode: 'approve',
+      _stdinForwardingDisabled: false,
+      stdinDroppedTotals: { bytes: 0, count: 0 },
+      promptEvaluator: false,
+      promptEvaluatorSkipPattern: null,
+      resumeSessionId: null,
+    })
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: { inputTokens: 42 }, // partial object — missing the other 5 fields
+    })
+    const snap = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.ok(snap.cumulativeUsage)
+    assert.equal(snap.cumulativeUsage.inputTokens, 42, 'partial value passes through')
+    // All other fields default to zero — wire shape stays stable.
+    assert.equal(snap.cumulativeUsage.outputTokens, 0)
+    assert.equal(snap.cumulativeUsage.cacheReadTokens, 0)
+    assert.equal(snap.cumulativeUsage.cacheCreationTokens, 0)
+    assert.equal(snap.cumulativeUsage.costUsd, 0)
+    assert.equal(snap.cumulativeUsage.turnsBilled, 0)
+  })
+
+  it('listSessions provides a zero-default for entries built without cumulativeUsage', () => {
+    // Defends against a custom provider building entries directly (without
+    // going through createSession). The shape stays stable on the wire.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    Object.assign(session, {
+      model: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-7',
+      permissionMode: 'approve',
+      _stdinForwardingDisabled: false,
+      stdinDroppedTotals: { bytes: 0, count: 0 },
+      promptEvaluator: false,
+      promptEvaluatorSkipPattern: null,
+      resumeSessionId: null,
+    })
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-byok', createdAt: Date.now() })
+    const snap = mgr.listSessions().find((s) => s.sessionId === 's1')
+    assert.ok(snap.cumulativeUsage)
+    assert.equal(snap.cumulativeUsage.turnsBilled, 0)
+  })
+})
+
+describe('SessionManager._trackCost integration with result events (#4086)', () => {
+  // #4086 / #4056 AC #4: lock down the production wire end-to-end.
+  // ClaudeByokSession (or any provider) emits `result` with cost →
+  // SessionManager._wireSessionEvents → Number.isFinite(data?.cost) gate →
+  // _trackCost(sessionId, cost, model) → CostBudgetManager.trackCost →
+  // 'cost_update' session_event broadcast. A refactor of any link in
+  // this chain (rename, gate-tightening, gate-swap to a different
+  // predicate) would silently kill BYOK cost accounting; these tests
+  // catch that.
+  //
+  // The CostBudgetManager itself is unit-tested in cost-budget-manager.test.js.
+  // What's NEW here is the wire from a session's `result` event through
+  // SessionManager's listener to the budget tracker.
+
+  // Track managers so afterEach can cancel pending persistence timers
+  // (#4086 review — emitting result events records history and schedules
+  // a debounced persist; without explicit cancellation we leak timers
+  // and extra state-file writes past the test).
+  const _managers = []
+  afterEach(() => {
+    for (const mgr of _managers) {
+      try { mgr._persistence?.cancelPersist?.() } catch {}
+    }
+    _managers.length = 0
+  })
+
+  function makeWired({ budget = null } = {}) {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      costBudget: budget,
+    })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    session.currentModel = 'claude-opus-4-7'
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s1', session)
+    _managers.push(mgr)
+    return { mgr, session }
+  }
+
+  function captureSessionEvents(mgr, eventName) {
+    const events = []
+    mgr.on('session_event', (e) => {
+      if (e.event === eventName) events.push(e)
+    })
+    return events
+  }
+
+  it('a single BYOK result event drives _trackCost end-to-end', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    // Emit the exact shape a BYOK turn produces.
+    session.emit('result', {
+      messageId: 'msg_1',
+      stopReason: 'end_turn',
+      duration: 123,
+      usage: { input_tokens: 100, output_tokens: 50 },
+      cost: 0.025,
+    })
+    // CostBudgetManager has the cumulative.
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.025) < 1e-9,
+      `getSessionCost should reflect the trackCost call: got ${mgr.getSessionCost('s1')}`)
+    // The wire broadcasts the cost_update.
+    assert.equal(costUpdates.length, 1, 'one cost_update per priced result')
+    assert.ok(Math.abs(costUpdates[0].data.sessionCost - 0.025) < 1e-9)
+    // #4098: the cost_update payload also carries totalCost (multi-session
+    // aggregator the dashboard reads) and budget (the gauge denominator).
+    // Both fields are unpinned by sessionCost alone — a refactor that
+    // drops either passes the sessionCost assertion silently.
+    const payload = costUpdates[0].data
+    assert.ok(Math.abs(payload.totalCost - 0.025) < 1e-9,
+      `totalCost should match sessionCost when only one session is priced; got ${payload.totalCost}`)
+    // No budget configured → budget field is null (CostBudgetManager.getBudget()).
+    assert.equal(payload.budget, null)
+  })
+
+  it('cost_update payload carries the configured budget when one is set (#4098)', () => {
+    // Pin that the gauge denominator (budget) actually arrives on the
+    // wire when configured. Without this, a future refactor that drops
+    // the budget field would break the dashboard's progress-bar render
+    // with no test failure.
+    const { mgr, session } = makeWired({ budget: 5.00 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    assert.equal(costUpdates.length, 1, 'wire must emit one cost_update per priced result')
+    assert.equal(costUpdates[0].data.budget, 5.00)
+  })
+
+  it('multiple result events accumulate via _trackCost', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: 0.01, usage: { input_tokens: 10 } })
+    session.emit('result', { cost: 0.02, usage: { input_tokens: 20 } })
+    session.emit('result', { cost: 0.005, usage: { input_tokens: 5 } })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.035) < 1e-9,
+      `expected cumulative 0.035, got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 3)
+    // The third event's payload reflects the FULL cumulative, not just
+    // the delta — locks down the budget-display contract.
+    assert.ok(Math.abs(costUpdates[2].data.sessionCost - 0.035) < 1e-9)
+  })
+
+  it('configured budget triggers budget_warning at 80% via the wire', () => {
+    // $1 budget; emit a single result that crosses 80% ($0.80+).
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('result', { cost: 0.85, usage: { input_tokens: 1 } })
+    assert.equal(warnings.length, 1, 'budget_warning fires on the wire when cumulative crosses 80%')
+    assert.equal(warnings[0].data.percent, 85)
+    assert.ok(warnings[0].data.message.includes('85% of the $1.00 budget'))
+  })
+
+  it('configured budget triggers budget_exceeded at 100% via the wire', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('result', { cost: 1.05, usage: { input_tokens: 1 } })
+    assert.equal(exceeded.length, 1)
+    assert.equal(exceeded[0].data.percent, 105)
+  })
+
+  it('budget_exceeded fires only once per session, not on every subsequent priced turn (#4100)', () => {
+    // CostBudgetManager._budgetExceeded uses a Set as a one-shot guard.
+    // Without this, every priced turn over budget would push a duplicate
+    // notification to the dashboard + mobile app — a notification storm.
+    // Pin the dedupe so a refactor that drops the Set fails loudly.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('result', { cost: 1.05, usage: { input_tokens: 1 } })
+    session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    session.emit('result', { cost: 0.10, usage: { input_tokens: 1 } })
+    assert.equal(exceeded.length, 1, 'dedupe via _budgetExceeded Set — one notification per session')
+  })
+
+  it('budget_warning fires only once per session between 80% and 100% (#4100)', () => {
+    // Same dedupe semantics as budget_exceeded, but for the 80%-100%
+    // band. _budgetWarned Set should prevent a notification storm during
+    // a tool-heavy session approaching the budget.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('result', { cost: 0.85, usage: { input_tokens: 1 } }) // 85% — fires
+    session.emit('result', { cost: 0.05, usage: { input_tokens: 1 } }) // 90% — should NOT re-fire
+    session.emit('result', { cost: 0.04, usage: { input_tokens: 1 } }) // 94% — should NOT re-fire
+    assert.equal(warnings.length, 1, 'dedupe via _budgetWarned Set — one notification per session in the warn band')
+  })
+
+  it('allows negative cost (refund / credit-adjustment flows through, does not bypass gate) (#4099)', () => {
+    // Per #4083 review: a weird-provider edge case (refund, credit
+    // adjustment) could legitimately produce a negative cost. The gate
+    // at session-manager.js (`Number.isFinite(data.cost)`) accepts
+    // negative numbers and CostBudgetManager subtracts them from the
+    // cumulative. Pin this so a future "tighten to cost >= 0" refactor
+    // doesn't silently drop refunds.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: 0.05, usage: { input_tokens: 100 } })
+    session.emit('result', { cost: -0.01, usage: { input_tokens: 0 } })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.04) < 1e-9,
+      `cumulative after refund should be 0.04, got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 2, 'both priced events emit cost_update (the negative is not silently dropped)')
+    assert.ok(Math.abs(costUpdates[1].data.sessionCost - 0.04) < 1e-9)
+  })
+
+  it('refuses to trackCost when `cost` is a string (gate is Number.isFinite, not typeof)', () => {
+    // The #4086 issue body specifically calls out the regression risk
+    // of a future change persisting + rehydrating cost and producing a
+    // string-typed value. The gate (#4088) is Number.isFinite, which
+    // rejects strings. Lock it down: a string-cost result must NOT
+    // tick the cost counter or fire cost_update.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: '0.025', usage: { input_tokens: 100 } })
+    assert.equal(mgr.getSessionCost('s1'), 0, 'string cost must be rejected')
+    assert.equal(costUpdates.length, 0, 'no cost_update for string cost')
+  })
+
+  it('refuses to trackCost when `cost` is missing (claude-tui subscription shape)', () => {
+    // Subscription-only providers emit result without cost — must not
+    // tick the budget tracker.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('result', { usage: { input_tokens: 100 } })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(warnings.length, 0)
+  })
+
+  it('refuses to trackCost when `cost` is null (claude-tui new shape)', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('result', { cost: null, usage: null })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+  })
+
+  // -------------------------------------------------------------------------
+  // #5038: fold error-path partial usage + cost into the cumulative tracker
+  // -------------------------------------------------------------------------
+  //
+  // PR #5037 surfaces partial `usage` + `cost` on the session `error` event
+  // payload (ABORT and STREAM_ERROR) so the user can see what a failed turn
+  // cost. But the cumulative tracker was gated on `event === 'result'`, so
+  // the partial spend on a failed turn was silently dropped from
+  // cumulativeUsage / sessionCost / budget gates. This pins the widened
+  // gate so the user-billed tokens on a failed turn DO show up in cumulative
+  // totals and budget gates fire as expected.
+
+  it('folds partial cost on STREAM_ERROR into cumulative session cost (#5038)', () => {
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    // Mirror the PR #5037 error envelope shape — `usage` + `cost` are
+    // spread flat onto the error payload (not nested under `partials`).
+    session.emit('error', {
+      messageId: 'msg_err',
+      message: 'upstream blew up',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 100, output_tokens: 50 },
+      cost: 0.025,
+    })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.025) < 1e-9,
+      `getSessionCost must include error-path cost; got ${mgr.getSessionCost('s1')}`)
+    assert.equal(costUpdates.length, 1, 'error event with finite cost must emit cost_update')
+    assert.ok(Math.abs(costUpdates[0].data.sessionCost - 0.025) < 1e-9)
+  })
+
+  it('folds partial cost on ABORT into cumulative session cost (#5038)', () => {
+    // The ABORT path (user-initiated interrupt) is the other error path
+    // that carries partials — pin it too so a refactor that only handles
+    // STREAM_ERROR doesn't half-fix the bug.
+    const { mgr, session } = makeWired()
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('error', {
+      messageId: 'msg_abort',
+      message: 'Interrupted by user',
+      code: 'ABORT',
+      usage: { input_tokens: 30, output_tokens: 10 },
+      cost: 0.0075,
+    })
+    assert.ok(Math.abs(mgr.getSessionCost('s1') - 0.0075) < 1e-9)
+    assert.equal(costUpdates.length, 1, 'ABORT with finite cost must emit cost_update')
+  })
+
+  it('error-path partial cost accumulates token usage into cumulativeUsage (#5038)', () => {
+    const { mgr, session } = makeWired()
+    const usageEvents = captureSessionEvents(mgr, 'session_usage')
+    session.emit('error', {
+      messageId: 'msg_err',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 200, output_tokens: 80, cache_read_input_tokens: 50 },
+      cost: 0.005,
+    })
+    assert.equal(usageEvents.length, 1, 'session_usage must fire for error-path priced turn')
+    const got = mgr.getCumulativeUsage('s1')
+    assert.equal(got.inputTokens, 200)
+    assert.equal(got.outputTokens, 80)
+    assert.equal(got.cacheReadTokens, 50)
+    assert.equal(got.turnsBilled, 1,
+      'an errored turn counts as a billed turn (the user was charged for it)')
+    assert.ok(Math.abs(got.costUsd - 0.005) < 1e-9)
+  })
+
+  it('error-path partial cost can trigger budget_warning (#5038)', () => {
+    // $1 budget; a single failed turn that cost $0.85 must STILL trip the
+    // 80% warning — otherwise the user can blow past the warning threshold
+    // by chaining errored turns and never see the alert.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const warnings = captureSessionEvents(mgr, 'budget_warning')
+    session.emit('error', {
+      messageId: 'm',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 1 },
+      cost: 0.85,
+    })
+    assert.equal(warnings.length, 1, 'budget_warning must fire on error-path spend')
+    assert.equal(warnings[0].data.percent, 85)
+  })
+
+  it('error-path partial cost can trigger budget_exceeded (#5038)', () => {
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const exceeded = captureSessionEvents(mgr, 'budget_exceeded')
+    session.emit('error', {
+      messageId: 'm',
+      message: 'boom',
+      code: 'STREAM_ERROR',
+      usage: { input_tokens: 1 },
+      cost: 1.05,
+    })
+    assert.equal(exceeded.length, 1, 'budget_exceeded must fire on error-path spend')
+    assert.equal(exceeded[0].data.percent, 105)
+  })
+
+  it('error event without `cost` does NOT tick the tracker (subscription / pre-#5037 shape) (#5038)', () => {
+    // Pre-#5037 errors carried only { code, message }. Subscription-only
+    // providers (cost: null) also emit errors with no cost. Neither must
+    // tick the cumulative tracker.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    const usageEvents = captureSessionEvents(mgr, 'session_usage')
+    session.emit('error', { messageId: 'm', message: 'boom', code: 'STREAM_ERROR' })
+    session.emit('error', { messageId: 'm', message: 'boom', code: 'ABORT', cost: null, usage: null })
+    assert.equal(mgr.getSessionCost('s1'), 0)
+    assert.equal(costUpdates.length, 0)
+    assert.equal(usageEvents.length, 0)
+  })
+
+  it('error event with NaN / Infinity `cost` does NOT poison cumulative cost (#5038 / #4088)', () => {
+    // #4088: NaN / Infinity cost must never poison the cost accumulator or
+    // trigger spurious budget events. #5115: but finite tokens on the same
+    // error payload ARE legitimate partial spend and ratchet the token
+    // meter — the usage gate keys on input_tokens, the cost gate on cost.
+    const { mgr, session } = makeWired({ budget: 1.0 })
+    const costUpdates = captureSessionEvents(mgr, 'cost_update')
+    session.emit('error', {
+      messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
+      cost: NaN, usage: { input_tokens: 999 },
+    })
+    session.emit('error', {
+      messageId: 'm', message: 'boom', code: 'STREAM_ERROR',
+      cost: Infinity, usage: { input_tokens: 999 },
+    })
+    // Cost accumulator stays clean — neither error ticked the budget.
+    assert.equal(mgr.getSessionCost('s1'), 0, 'NaN / Infinity cost must not poison cumulativeCost')
+    assert.equal(costUpdates.length, 0, 'non-finite cost must not fire cost_update')
+    assert.equal(mgr.getCumulativeUsage('s1').costUsd, 0)
+    // #5115: tokens ratchet (both errors carried finite input_tokens).
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 1998)
+    assert.equal(mgr.getCumulativeUsage('s1').turnsBilled, 2)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// SessionManager cost-threshold soft warning (#4075)
+// ---------------------------------------------------------------------------
+
+describe('SessionManager cost-threshold soft warning (#4075)', () => {
+  function makeMgr({ threshold } = {}) {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      costThresholdUsd: threshold,
+    })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', {
+      session,
+      name: 'S1',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s1', session)
+    return { mgr, session }
+  }
+
+  function captureCrossings(mgr) {
+    const events = []
+    mgr.on('session_event', (e) => {
+      if (e.event === 'session_cost_threshold_crossed') events.push(e)
+    })
+    return events
+  }
+
+  it('defaults to $5.00 when no costThresholdUsd is configured', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    assert.equal(mgr.getCostThresholdUsd(), 5.00)
+  })
+
+  it('accepts a custom threshold from config', () => {
+    const { mgr } = makeMgr({ threshold: 10.50 })
+    assert.equal(mgr.getCostThresholdUsd(), 10.50)
+  })
+
+  it('emits session_cost_threshold_crossed exactly once when the running cost crosses the threshold', () => {
+    const { mgr } = makeMgr({ threshold: 1.00 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.50 })
+    assert.equal(crossings.length, 0, 'still under threshold')
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.49 })
+    assert.equal(crossings.length, 0, 'still under threshold (0.99)')
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.02 })
+    assert.equal(crossings.length, 1, 'fires on first crossing')
+    assert.ok(crossings[0].data.costUsd >= 1.00, `costUsd should be >= 1.00; got ${crossings[0].data.costUsd}`)
+    assert.equal(crossings[0].data.thresholdUsd, 1.00)
+  })
+
+  it('does NOT re-fire on subsequent turns once the latch is set (one warning per session)', () => {
+    const { mgr } = makeMgr({ threshold: 1.00 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 1.50 })
+    assert.equal(crossings.length, 1)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 5.00 })
+    assert.equal(crossings.length, 1, 'must not re-fire even at much higher cost')
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 100.00 })
+    assert.equal(crossings.length, 1, 'still no re-fire')
+  })
+
+  it('does NOT fire the COST threshold for subscription-billed sessions, but DOES ratchet tokens (#5115)', () => {
+    const { mgr, session } = makeMgr({ threshold: 0.001 })
+    const crossings = captureCrossings(mgr)
+    // claude-tui-like flow: cost is null on the result event but the usage
+    // payload carries real tokens. #5115: the usage gate keys on
+    // input_tokens so the token meter ratchets, while costUsd stays at 0 —
+    // so the dollar-denominated soft threshold never crosses (no $ budget
+    // applies to a flat subscription). Both invariants hold simultaneously.
+    session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 }, cost: null })
+    session.emit('result', { usage: { input_tokens: 1000, output_tokens: 500 }, cost: null })
+    assert.equal(crossings.length, 0, 'subscription sessions must never trigger the COST threshold')
+    assert.equal(mgr.getCumulativeUsage('s1').costUsd, 0, 'costUsd stays at 0 — no cost to add')
+    assert.equal(mgr.getCumulativeUsage('s1').inputTokens, 2000, 'tokens ARE tracked even when cost is null (#5115)')
+    assert.equal(mgr.getCumulativeUsage('s1').turnsBilled, 2)
+  })
+
+  it('is disabled when threshold is 0', () => {
+    const { mgr } = makeMgr({ threshold: 0 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 100.00 })
+    assert.equal(crossings.length, 0, 'threshold=0 must disable the soft warning')
+  })
+
+  it('coerces invalid threshold values to the default', () => {
+    // Negative, NaN, Infinity, strings all fall back to default $5.
+    const mgrA = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: -5 })
+    assert.equal(mgrA.getCostThresholdUsd(), 5.00)
+    const mgrB = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: NaN })
+    assert.equal(mgrB.getCostThresholdUsd(), 5.00)
+    const mgrC = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: Infinity })
+    assert.equal(mgrC.getCostThresholdUsd(), 5.00)
+    const mgrD = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile(), costThresholdUsd: '5.00' })
+    assert.equal(mgrD.getCostThresholdUsd(), 5.00)
+  })
+
+  it('setCostThresholdUsd updates the active threshold at runtime', () => {
+    const { mgr } = makeMgr({ threshold: 10 })
+    const crossings = captureCrossings(mgr)
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 5.00 })
+    assert.equal(crossings.length, 0)
+    mgr.setCostThresholdUsd(4.00)
+    assert.equal(mgr.getCostThresholdUsd(), 4.00)
+    // Next turn crosses the NEW (lower) threshold.
+    mgr._trackUsage('s1', { usage: { input_tokens: 1 }, cost: 0.01 })
+    assert.equal(crossings.length, 1, 'lowered threshold should fire on the next crossing')
+  })
+
+  it('latches per-session (multiple sessions each fire once independently)', () => {
+    const { mgr, session } = makeMgr({ threshold: 1.00 })
+    // Add a second session.
+    const session2 = new EventEmitter()
+    session2.isRunning = false
+    session2.destroy = () => {}
+    mgr._sessions.set('s2', {
+      session: session2,
+      name: 'S2',
+      cwd: '/tmp',
+      provider: 'claude-byok',
+      createdAt: Date.now(),
+      cumulativeUsage: {
+        inputTokens: 0, outputTokens: 0, cacheReadTokens: 0,
+        cacheCreationTokens: 0, costUsd: 0, turnsBilled: 0,
+      },
+    })
+    mgr._wireSessionEvents('s2', session2)
+    const crossings = captureCrossings(mgr)
+    session.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    session2.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    assert.equal(crossings.length, 2, 'each session fires its own latch')
+    assert.deepEqual(crossings.map((e) => e.sessionId).sort(), ['s1', 's2'])
+    // Second tick on each does NOT re-fire.
+    session.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    session2.emit('result', { usage: { input_tokens: 1 }, cost: 2.00 })
+    assert.equal(crossings.length, 2)
+  })
+})
+
+// SessionManager forwards four operator-tunable timeout knobs via providerOpts
+// using a "forward only when set" pattern: a configured positive value is
+// passed through verbatim, while a null/unset value is OMITTED from
+// providerOpts (rather than set to null) so each provider's BaseSession-level
+// default applies. The consumer side (byok-session / base-session) has direct
+// coverage for each knob; these tests close the forwarding-side gap (#4487).
+//
+// The `CapturingProvider` + `captureProviderOpts` + `assertForwardingPattern`
+// trio used here was extracted to `helpers/provider-forwarding.js` (#4511) so
+// future per-knob coverage can be added as one-liners.
+describe('SessionManager providerOpts timeout forwarding (#4487)', () => {
+  it('forwards resultTimeoutMs when set; omits when null (#3749)', async () => {
+    await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'resultTimeoutMs',
+      providerOptsKey: 'resultTimeoutMs',
+      setValue: 90_000,
+    })
+  })
+
+  it('forwards hardTimeoutMs when set; omits when null (#3899)', async () => {
+    await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'hardTimeoutMs',
+      providerOptsKey: 'hardTimeoutMs',
+      setValue: 3_600_000,
+    })
+  })
+
+  it('forwards streamStallTimeoutMs when set; omits when null (#4467)', async () => {
+    // `extraSetValues: [0]` covers the #4508 edge: streamStallTimeoutMs is the
+    // only one of the four knobs that gates on `>= 0` (vs `> 0` for the
+    // others) — operators can explicitly disable stream-stall recovery by
+    // passing 0, which must flow through providerOpts verbatim and not be
+    // dropped by a `!= null` regression (see session-manager.js:607). The
+    // other three knobs reject 0 per their `> 0` gate so they don't need it.
+    await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'streamStallTimeoutMs',
+      providerOptsKey: 'streamStallTimeoutMs',
+      setValue: 120_000,
+      extraSetValues: [0],
+    })
+  })
+
+  it('forwards mcpToolCallTimeoutMs when set; omits when null (#4482)', async () => {
+    await assertForwardingPattern({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'mcpToolCallTimeoutMs',
+      providerOptsKey: 'mcpToolCallTimeoutMs',
+      setValue: 45_000,
+    })
+  })
+})
+
+// #4601: per-provider override map for streamStallTimeoutMs. When a session is
+// created for a provider listed in the map, that provider's override wins over
+// the global streamStallTimeoutMs. When the provider isn't listed (or the map
+// is empty / unset) the global value (or BaseSession default) applies — no
+// regression to existing single-knob behaviour.
+describe('SessionManager providerStreamStallTimeoutMs forwarding (#4601)', () => {
+  it('forwards the per-provider override for the resolved provider', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 900_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      900_000,
+      'per-provider override should win for the resolved provider',
+    )
+  })
+
+  it('per-provider override wins over the global streamStallTimeoutMs', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 600_000 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      600_000,
+      'per-provider override should beat the global value when both are set',
+    )
+  })
+
+  it('falls back to the global streamStallTimeoutMs when the provider has no override entry', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { codex: 900_000 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      300_000,
+      'a provider with no entry in the map should still inherit the global value',
+    )
+  })
+
+  it('omits streamStallTimeoutMs from providerOpts when neither per-provider nor global is set', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { codex: 900_000 },
+    })
+    assert.equal(
+      Object.prototype.hasOwnProperty.call(opts, 'streamStallTimeoutMs'),
+      false,
+      'an unmatched provider with no global value should leave streamStallTimeoutMs unset (BaseSession default applies)',
+    )
+  })
+
+  it('forwards 0 as an explicit per-provider disable (matches global semantics)', async () => {
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': 0 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      0,
+      '0 must flow through verbatim — it explicitly disables stream-stall recovery for this provider',
+    )
+  })
+
+  it('ignores out-of-range per-provider entries and falls through to the global value', async () => {
+    const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+    const opts = await captureProviderOpts({
+      SessionManager,
+      tmpStateFile,
+      configKey: 'providerStreamStallTimeoutMs',
+      configValue: { 'test-timeout-capture': MAX_SANE_DURATION_MS + 1 },
+      extraConfig: { streamStallTimeoutMs: 300_000 },
+    })
+    assert.equal(
+      opts.streamStallTimeoutMs,
+      300_000,
+      'an over-ceiling per-provider entry must fall back to the global value rather than silently producing a >24h timer',
+    )
+  })
+})
+
+// #4509 + #4517: SessionManager's four operator-facing timeouts
+// (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs /
+// mcpToolCallTimeoutMs) are clamped to the shared MAX_SANE_DURATION_MS (24h)
+// ceiling that the protocol schemas apply via `.max(MAX_SANE_DURATION_MS)`.
+// Mirrors the wire-side guard #4503 added to `ws-history.js sendPostAuthInfo`.
+// A typoed CHROXY_* env var (extra digit, accidental exponent) is the
+// realistic source of an over-ceiling value; without this guard the operator
+// silently gets a >24h internal timer instead of the BaseSession / MCP
+// client default.
+describe('SessionManager operator-timeout MAX_SANE_DURATION_MS ceiling (#4509)', () => {
+  const MAX_SANE_DURATION_MS = 24 * 60 * 60 * 1000
+
+  // Spec table — each row is one operator-tunable timeout we expect to be
+  // clamped. `internalField` is the underscore-prefixed slot the constructor
+  // sets; `displayName` is the warn-log token the helper uses (matches the
+  // CHROXY_* env-var stem so an operator scanning logs can correlate).
+  const TIMEOUT_SPECS = [
+    { configKey: 'resultTimeoutMs', internalField: '_resultTimeoutMs', displayName: 'resultTimeoutMs' },
+    { configKey: 'hardTimeoutMs', internalField: '_hardTimeoutMs', displayName: 'hardTimeoutMs' },
+    { configKey: 'streamStallTimeoutMs', internalField: '_streamStallTimeoutMs', displayName: 'streamStallTimeoutMs' },
+    // #4517: mcpToolCallTimeoutMs joined the ceiling-clamped family — same
+    // operator-typo class as the other three. The internal `_mcpToolCallTimeoutMs`
+    // slot follows the identical fall-back-to-null contract.
+    { configKey: 'mcpToolCallTimeoutMs', internalField: '_mcpToolCallTimeoutMs', displayName: 'mcpToolCallTimeoutMs' },
+  ]
+
+  afterEach(() => {
+    mock.restoreAll()
+  })
+
+  for (const { configKey, internalField, displayName } of TIMEOUT_SPECS) {
+    it(`clamps ${configKey} above MAX_SANE_DURATION_MS back to null and warns`, () => {
+      const warnings = []
+      mock.method(console, 'warn', (msg) => warnings.push(msg))
+      const mgr = new SessionManager({
+        skipPreflight: true,
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        [configKey]: MAX_SANE_DURATION_MS + 1,
+      })
+      assert.equal(mgr[internalField], null,
+        `${internalField} must fall back to null when ${configKey} exceeds the 24h ceiling (operator typo guardrail)`)
+      const hit = warnings.find((w) => w.includes(displayName) && w.includes('MAX_SANE_DURATION_MS'))
+      assert.ok(hit, `expected a single warn log mentioning ${displayName} + MAX_SANE_DURATION_MS, got: ${warnings.join(' | ')}`)
+    })
+
+    it(`accepts the exact MAX_SANE_DURATION_MS boundary for ${configKey}`, () => {
+      const mgr = new SessionManager({
+        skipPreflight: true,
+        maxSessions: 5,
+        stateFilePath: tmpStateFile(),
+        [configKey]: MAX_SANE_DURATION_MS,
+      })
+      assert.equal(mgr[internalField], MAX_SANE_DURATION_MS,
+        `the exact boundary is INCLUSIVE — clamping it would surprise operators who tuned the dial to exactly 24h`)
+    })
+  }
+})
+
+// #4756 — `stopped` event proxying.
+//
+// CliSession emits `stopped` after `_handleChildClose` confirms a clean
+// SIGINT exit (gated on `_intentionalStop`). PR #4750 added the emit but
+// neither the SessionManager event proxy nor the ws-forwarding broadcaster
+// included it, so no consumer ever saw the confirmation. This block locks
+// in the session-event proxy half of the wiring — the ws-forwarding +
+// normalizer half is covered in ws-forwarding.test.js and
+// event-normalizer.test.js's "stopped event (#4756)" describes.
+describe('_wireSessionEvents — stopped event proxy (#4756)', () => {
+  it('proxies session.emit("stopped") to mgr session_event with event="stopped"', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => events.push(evt))
+
+    session.emit('stopped', { code: 0 })
+
+    const stoppedEvents = events.filter(e => e.event === 'stopped')
+    assert.equal(stoppedEvents.length, 1, 'expected exactly one stopped session_event')
+    assert.equal(stoppedEvents[0].sessionId, 's1')
+    assert.deepEqual(stoppedEvents[0].data, { code: 0 })
+  })
+
+  it('forwards the numeric exit code on the data payload (e.g. 143 = SIGTERM)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    const events = []
+    mgr.on('session_event', (evt) => { if (evt.event === 'stopped') events.push(evt) })
+
+    session.emit('stopped', { code: 143 })
+
+    assert.equal(events.length, 1)
+    assert.equal(events[0].data.code, 143, 'code field must reach the wire layer for diagnostic UX')
+  })
+
+  it('treats stopped as transient — not recorded into history (no replay on reconnect)', () => {
+    // History replay re-fires PROXIED_EVENTS to a reconnecting client.
+    // `stopped` is informational (the user just clicked Stop a moment
+    // ago) — replaying it would surface a misleading "Session stopped."
+    // toast minutes later when the user reconnects. Keep it transient,
+    // mirroring the `permission_request` / `inactivity_warning` policy.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+
+    session.emit('stopped', { code: 0 })
+
+    const history = mgr.getHistory('s1') || []
+    const recordedStopped = history.filter(h => h.event === 'stopped')
+    assert.equal(recordedStopped.length, 0, 'stopped must not be persisted to history')
+  })
+
+  it('does not touchActivity for stopped (lifecycle signal, not user input)', () => {
+    // The idle-timeout machinery ticks on `message` / `stream_start` /
+    // `tool_start` / `result` / `user_question` only. A `stopped` event
+    // is the OPPOSITE of activity — the user just ended the turn — so
+    // resetting the idle timer would defer destruction of an already-
+    // stopped session, opposite of the intent.
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const session = new EventEmitter()
+    session.isRunning = false
+    session.destroy = () => {}
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-cli' })
+    mgr._wireSessionEvents('s1', session)
+    // Pin lastActivity to a known past timestamp and assert it doesn't move.
+    const beforeTs = Date.now() - 60_000
+    mgr._sessionLastActivityAt.set('s1', beforeTs)
+
+    session.emit('stopped', { code: 0 })
+
+    const after = mgr._sessionLastActivityAt.get('s1')
+    assert.equal(after, beforeTs, 'stopped must not reset lastActivity')
+  })
+})
+
+// #5315 (WP-2.1) — exhaustion coordination. When a provider's bounded PTY
+// auto-respawn gives up it emits `respawn_exhausted`; SessionManager must drop
+// the session from its list so it doesn't linger as an input-rejecting zombie
+// tab (the audit AC). _wireSessionEvents installs the listener.
+describe('#5315 — respawn_exhausted destroys the session', () => {
+  it('drops the session from the list on respawn_exhausted', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    // Fake session whose constructor declares respawn_exhausted as a custom
+    // event (mirrors ClaudeTuiSession.customEvents) so the transient forward +
+    // the destroy listener both wire up.
+    class RespawnProvider extends EventEmitter {
+      static get customEvents() { return ['respawn_exhausted'] }
+      static get capabilities() { return {} }
+    }
+    const session = new RespawnProvider()
+    session.isRunning = true
+    let destroyed = false
+    session.destroy = () => { destroyed = true }
+    mgr._sessions.set('s1', { session, name: 'S1', cwd: '/tmp', provider: 'claude-tui' })
+    mgr._wireSessionEvents('s1', session)
+
+    const destroyedEvents = []
+    mgr.on('session_destroyed', (e) => destroyedEvents.push(e))
+
+    session.emit('respawn_exhausted', { reason: 'pty_respawn_exhausted', attempts: 5 })
+
+    assert.equal(mgr._sessions.has('s1'), false, 'session removed from the list (no zombie tab)')
+    assert.equal(destroyed, true, 'session.destroy() called')
+    assert.ok(destroyedEvents.some((e) => e.sessionId === 's1'), 'session_destroyed emitted for the dropped session')
+  })
+})
+
+// #5665 — monthly programmatic-credit budget meter wiring. The spend/era
+// behaviour is covered by billing-budget.test.js; this asserts the
+// SessionManager constructs the meter from the `billing` config block and
+// exposes the on-connect snapshot.
+describe('#5665 — monthly programmatic-credit budget meter', () => {
+  it('exposes a budget snapshot whose cap comes from the billing config', () => {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      billing: { creditTier: 'max5x' },
+    })
+    const status = mgr.getMonthlyBudgetStatus()
+    assert.equal(status.budgetUsd, 100, 'max5x tier → $100 cap')
+    assert.equal(status.spentUsd, 0, 'no spend recorded yet')
+    assert.equal(status.warningPercent, 80, 'default warning threshold')
+    assert.match(status.month, /^\d{4}-\d{2}$/, 'UTC month key')
+  })
+
+  it('a raw monthlyCreditBudgetUsd override wins over the tier preset', () => {
+    const mgr = new SessionManager({
+      skipPreflight: true,
+      maxSessions: 5,
+      stateFilePath: tmpStateFile(),
+      billing: { creditTier: 'pro', monthlyCreditBudgetUsd: 250, budgetWarningPercent: 90 },
+    })
+    const status = mgr.getMonthlyBudgetStatus()
+    assert.equal(status.budgetUsd, 250)
+    assert.equal(status.warningPercent, 90)
+  })
+
+  it('reports a null cap when billing is unconfigured (meter shows spend, no percent)', () => {
+    const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
+    const status = mgr.getMonthlyBudgetStatus()
+    assert.equal(status.budgetUsd, null)
+    assert.equal(status.percent, null)
+    assert.equal(status.warning, false)
+    assert.equal(status.exceeded, false)
   })
 })

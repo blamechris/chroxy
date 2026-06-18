@@ -4,8 +4,8 @@
  * Extracted from ws-server.js _handleMessage to separate auth/encryption
  * concerns from message routing.
  */
-import { createKeyPair, deriveSharedKey, deriveConnectionKey } from '@chroxy/store-core/crypto'
-import { AuthSchema, KeyExchangeSchema, PairSchema } from './ws-schemas.js'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey, signExchangeKey } from '@chroxy/store-core/crypto'
+import { AuthSchema, KeyExchangeSchema, PairSchema, PairRequestSchema } from './ws-schemas.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 
@@ -14,6 +14,12 @@ const log = createLogger('ws')
 /** Maximum number of IP entries tracked in the auth-failure rate-limit map.
  *  When the cap is reached the oldest entry is evicted before inserting. */
 export const MAX_AUTH_FAILURE_ENTRIES = 10_000
+
+/** #5555.3 — cap on the number of per-session history cursors honoured from a
+ *  single `auth` message. A client only ever replays its bound/active session
+ *  on connect, so a handful is the realistic case; this bound keeps a
+ *  malformed/oversized map from inflating the post-auth path. */
+export const MAX_HISTORY_CURSORS = 64
 
 /** Lenient counter for benign pairing failures (already_used / expired).
  *
@@ -135,6 +141,13 @@ export function handleAuthMessage(ctx, ws, msg) {
   if (!authRequired || isTokenValid(msg.token)) {
     client.authenticated = true
     client.authTime = Date.now()
+    // #6004 — remember the exact token this connection authed with so the
+    // user-shell create gate can require it still be the CURRENT token (not a
+    // grace/previous token after a rotation). In-memory only, for the
+    // connection lifetime — the client already holds the E2E shared key, so
+    // this is comparable exposure. Undefined in --no-auth (no token), where the
+    // shell gate's current-token check is skipped (no TokenManager).
+    client.authToken = msg.token
     authFailures.delete(rateLimitKey)
 
     const hasVersion = typeof msg.protocolVersion === 'number' && Number.isInteger(msg.protocolVersion)
@@ -169,7 +182,55 @@ export function handleAuthMessage(ctx, ws, msg) {
       }
     }
 
+    // #5985b (epic #5982) — the WS analog of the HTTP-only
+    // `_validatePrimaryBearerAuth`. The WS layer previously could not tell the
+    // primary token from an unbound linking-mode pairing token (both have no
+    // `boundSessionId`), so a high-privilege capability gated only on
+    // "unbound" would admit a paired phone (swarm-audit finding C1). A token is
+    // the PRIMARY class iff it is NOT a PairingManager-issued session token
+    // (`isSessionTokenValid` is true for every pairing token — bound and
+    // unbound — and false for the static/rotated primary). In no-auth mode every
+    // local client is trusted as primary, matching `_validatePrimaryBearerAuth`'s
+    // `!authRequired` short-circuit. The `pair`-message path never sets this, so
+    // paired clients default to undefined (non-primary) — gates use strict
+    // `=== true`. Consumed by the user-shell create + terminal_* gates.
+    client.isPrimaryToken = !authRequired || !pairingManager?.isSessionTokenValid(msg.token)
+
     client.clientCapabilities = new Set(authData.capabilities ?? [])
+
+    // #5555 (eager key exchange) — stash the client's ephemeral public key +
+    // salt if it supplied BOTH in the auth message. sendPostAuthInfo (called
+    // from onAuthSuccess) consumes these to derive the shared key inline and
+    // returns the server's public key in auth_ok, skipping the discrete
+    // `key_exchange` round trip. Both fields are required together; a client
+    // that sends only one (or empty strings) is treated as not-eager and falls
+    // through to the discrete handshake. The derivation is identical to the
+    // discrete path (deriveSharedKey → deriveConnectionKey with the same salt
+    // semantics) — only the transport timing changes.
+    if (typeof authData.eagerPublicKey === 'string' && authData.eagerPublicKey &&
+        typeof authData.eagerSalt === 'string' && authData.eagerSalt) {
+      client.eagerKeyExchange = { publicKey: authData.eagerPublicKey, salt: authData.eagerSalt }
+    }
+
+    // #5555.3 (lastSeq delta replay) — stash the per-session history cursor map
+    // so replayHistory (via sendPostAuthInfo → onAuthSuccess) can send only the
+    // entries newer than the client's cursor. The schema already coerced it to
+    // a { [sessionId]: nonNegativeInt } record; cap the honoured keys
+    // defensively (MAX_HISTORY_CURSORS) so an oversized map can't bloat the
+    // post-auth path. Absent → client.historyCursors stays undefined → full
+    // replay (the backward-compatible default).
+    if (authData.historyCursors && typeof authData.historyCursors === 'object') {
+      const cursors = {}
+      let n = 0
+      for (const [sid, seq] of Object.entries(authData.historyCursors)) {
+        if (n >= MAX_HISTORY_CURSORS) break
+        if (typeof seq === 'number' && Number.isFinite(seq) && seq >= 0) {
+          cursors[sid] = seq
+          n++
+        }
+      }
+      if (n > 0) client.historyCursors = cursors
+    }
 
     onAuthSuccess(ws, client)
     log.info(`Client ${client.id} authenticated`)
@@ -303,6 +364,25 @@ export function handlePairMessage(ctx, ws, msg) {
     return true
   }
 
+  // Approval-gated id (#5513, epic #5509): a Discord-delivered pairing link
+  // carries a flagged id that mints NO token. validatePairing consumed it
+  // (single-use) and reported `requires_approval`. This is NOT a failure — it
+  // is the intended routing: possession of the link is never sufficient; the
+  // device must request pairing and the host must approve it (#5510). We reply
+  // with a legible `pair_fail { reason: 'requires_approval' }` and close:
+  //   - old clients surface the reason and clean up (no hang);
+  //   - new dashboards detect the reason and transparently open the
+  //     request-pair UX (RequestPairPanel), which issues a fresh `pair_request`
+  //     on its own connection through the existing #5510 flow.
+  // It does NOT count toward either rate-limit bucket — this is a normal,
+  // expected redemption, not a brute-force or benign-hammer signal.
+  if (result.reason === 'requires_approval') {
+    log.info(`Gated pairing id redeemed from ${rateLimitKey} — routing to host approval (requires_approval)`)
+    send(ws, { type: 'pair_fail', reason: 'requires_approval' })
+    ws.close()
+    return true
+  }
+
   // Pairing failure — only increment the shared rate-limiter bucket for
   // genuine brute-force signals (invalid_pairing_id).
   //
@@ -348,6 +428,95 @@ export function handlePairMessage(ctx, ws, msg) {
 }
 
 /**
+ * Handle a `pair_request` from an UNAUTHENTICATED client (#5510, epic #5509).
+ *
+ * Same exposure class as `handlePairMessage`: pre-auth, rate-limited (the
+ * PairingManager queue enforces a global cap + per-request TTL + per-source rate
+ * limit), and the connection is kept OPEN so the requester can later receive its
+ * terminal `pair_result`.
+ *
+ * The verify code is generated SERVER-SIDE inside enqueuePendingRequest and only
+ * ever travels server→requester (display) and server→host surfaces (compare).
+ * The requester never echoes it back, so a mismatch is impossible by
+ * construction. deviceName is attacker-controlled — capped at the schema and
+ * relayed as plain text (never interpolated into a log format).
+ *
+ * Returns true if the message was consumed.
+ *
+ * @param {object} ctx - Server context (pairingManager, registerPairRequester,
+ *   broadcastPairPending, send)
+ * @param {WebSocket} ws
+ * @param {object} msg
+ * @returns {boolean}
+ */
+export function handlePairRequestMessage(ctx, ws, msg) {
+  const {
+    clients, pairingManager, send,
+    registerPairRequester, broadcastPairPending,
+  } = ctx
+  const client = clients.get(ws)
+  if (!client || client.authenticated) return false
+  if (msg.type !== 'pair_request') return false
+
+  if (!pairingManager) {
+    send(ws, { type: 'pair_result', requestId: typeof msg?.requestId === 'string' ? msg.requestId : '', ok: false, reason: 'pairing_not_enabled' })
+    ws.close()
+    return true
+  }
+
+  // Validate shape.
+  const parsed = PairRequestSchema.safeParse(msg)
+  if (!parsed.success) {
+    send(ws, { type: 'pair_result', requestId: typeof msg?.requestId === 'string' ? msg.requestId : '', ok: false, reason: 'invalid_message' })
+    ws.close()
+    return true
+  }
+  const data = parsed.data
+
+  // Rate-limit key: CF-Connecting-IP behind the tunnel, else socket ip (same
+  // rationale as handlePairMessage — keying off socketIp behind cloudflared lets
+  // one source lock out everyone).
+  const source = client.rateLimitKey || client.socketIp || ''
+
+  const result = pairingManager.enqueuePendingRequest({
+    requestId: data.requestId,
+    deviceName: data.deviceName || '',
+    source,
+  })
+
+  if (!result.ok) {
+    // Bounded rejection (rate_limited / queue_full / duplicate_request). Do NOT
+    // log deviceName (attacker-controlled). The connection closes — the
+    // requester can retry with backoff / a fresh requestId.
+    log.warn(`pair_request rejected for ${source}: ${result.reason}`)
+    send(ws, { type: 'pair_result', requestId: data.requestId, ok: false, reason: result.reason })
+    ws.close()
+    return true
+  }
+
+  // Track the requester's open connection so approve/deny/expire can reach it.
+  registerPairRequester(data.requestId, ws)
+
+  // Tell the requester its code to display.
+  send(ws, { type: 'pair_request_pending', requestId: data.requestId, verifyCode: result.verifyCode })
+
+  // Fan the request out to host-level approval surfaces. deviceName relayed
+  // verbatim (plain text); never logged.
+  broadcastPairPending({
+    type: 'pair_pending',
+    requestId: data.requestId,
+    deviceName: data.deviceName ? String(data.deviceName).slice(0, 64) : '',
+    verifyCode: result.verifyCode,
+    expiresAt: result.expiresAt,
+  })
+
+  // requestId is pre-auth attacker-controlled (the schema permits newlines /
+  // control chars); JSON.stringify keeps it a single well-formed log record.
+  log.info(`pair_request queued from ${source} (requestId ${JSON.stringify(data.requestId)})`)
+  return true
+}
+
+/**
  * Handle key exchange for E2E encryption.
  * Returns true if the message was consumed (caller should return).
  *
@@ -357,7 +526,7 @@ export function handlePairMessage(ctx, ws, msg) {
  * @returns {boolean}
  */
 export function handleKeyExchange(ctx, ws, msg) {
-  const { clients, flushPostAuthQueue } = ctx
+  const { clients, flushPostAuthQueue, serverIdentity } = ctx
   const client = clients.get(ws)
 
   if (!client?.encryptionPending) return false
@@ -416,10 +585,38 @@ export function handleKeyExchange(ctx, ws, msg) {
     const encryptionKey = deriveConnectionKey(rawSharedKey, msg.salt)
     client.encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 }
     client.encryptionPending = false
+    // #5536 — sign the ephemeral exchange public key with the long-lived
+    // identity key so a client that pinned our identity (at pairing time) can
+    // verify this exchange key really came from this daemon, defeating a MITM
+    // key swap. Absent when pinning is unavailable (no identity / signing
+    // error) — old clients ignore the field and the exchange stays TOFU.
+    let serverKeySig = null
+    if (serverIdentity?.secretKey) {
+      try {
+        serverKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey)
+      } catch (err) {
+        log.warn(`Failed to sign exchange key for ${client.id}: ${err.message}`)
+      }
+    }
     try {
-      ws.send(JSON.stringify({ type: 'key_exchange_ok', publicKey: serverKp.publicKey }))
+      ws.send(JSON.stringify({
+        type: 'key_exchange_ok',
+        publicKey: serverKp.publicKey,
+        ...(serverKeySig ? { serverKeySig } : {}),
+      }))
     } catch (err) {
-      log.error(`Failed to send key_exchange_ok: ${err.message}`)
+      // #5702 (8b): the client never received the exchange key, so we must NOT
+      // mark E2E established or flush the post-auth queue. `encryptionState` was
+      // already set above, so proceeding would encrypt frames the client can't
+      // decrypt — a wedged session (the client waits forever for key_exchange_ok
+      // while the server speaks ciphertext it can't read). Roll the crypto state
+      // back and close so the client reconnects and retries the handshake.
+      log.error(`Failed to send key_exchange_ok to ${client.id}: ${String(err?.message || err)} — aborting handshake`)
+      client.encryptionState = null
+      client.encryptionPending = false
+      client.postAuthQueue = null
+      try { ws.close(1011, 'Key exchange failed') } catch { /* socket already gone */ }
+      return true
     }
     log.info(`E2E encryption established with ${client.id}`)
     const queue = client.postAuthQueue

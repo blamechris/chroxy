@@ -1,0 +1,4138 @@
+import { describe, it, beforeEach, afterEach } from 'node:test'
+import assert from 'node:assert/strict'
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { EventEmitter } from 'node:events'
+
+import { DockerByokSession, remapToContainerPath, CONTAINER_WORKSPACE } from '../src/docker-byok-session.js'
+import { ClaudeByokSession } from '../src/byok-session.js'
+import { registerDockerProvider, getProvider } from '../src/providers.js'
+
+/**
+ * Tests for the docker-byok provider (#4053).
+ *
+ * The session extends ClaudeByokSession — the agent loop and Anthropic
+ * client are exercised in byok-session.test.js, so this suite focuses
+ * on the docker-byok additions:
+ *   - constructor wiring (provider id, defaults, opt validation)
+ *   - container preflight + lifecycle (start, destroy, attach-external)
+ *   - host→container path remapping (incl. traversal refusal)
+ *   - the _dispatchBuiltinTool override routes Read/Write/Edit/Bash/Glob/
+ *     Grep into the container while leaving TodoWrite/WebFetch host-side
+ *   - provider registration via registerDockerProvider()
+ *
+ * No real Docker daemon is required — every shellout to docker(8) is
+ * stubbed via the `_execFile` and `_dockerBackend` constructor seams.
+ */
+
+/**
+ * Build a stub `execFile` that records calls and returns canned results.
+ * Keyed by the first docker subcommand (`info`, `run`, `exec`, `rm`).
+ *
+ *   execFileStub({
+ *     info: { stdout: 'ok', stderr: '', error: null },
+ *     run:  { stdout: 'CONTAINER_ID_0123456789ab\n', stderr: '', error: null },
+ *     exec: { stdout: '', stderr: '', error: null },
+ *     rm:   { stdout: '', stderr: '', error: null },
+ *   })
+ */
+function execFileStub(byCmd = {}) {
+  const calls = []
+  const fn = (cmd, args, opts, callback) => {
+    const sub = args[0]
+    calls.push({ cmd, args: [...args], opts })
+    const cfg = byCmd[sub] || { stdout: '', stderr: '', error: null }
+    if (typeof callback !== 'function') return
+    if (cfg.error) {
+      const err = cfg.error instanceof Error ? cfg.error : new Error(cfg.error)
+      err.stderr = cfg.stderr || ''
+      callback(err, cfg.stdout || '', cfg.stderr || '')
+      return
+    }
+    callback(null, cfg.stdout || '', cfg.stderr || '')
+  }
+  fn.calls = calls
+  return fn
+}
+
+/**
+ * Stub DockerBackend that captures `execInEnvironment` calls and returns
+ * a canned `{ stdout, stderr }`. Lets us assert the exact bash commands
+ * the docker-byok tool dispatcher constructs for each tool.
+ */
+function backendStub({ execResponses = {}, defaultResponse = { stdout: '', stderr: '' } } = {}) {
+  const calls = []
+  return {
+    calls,
+    async execInEnvironment(containerId, opts) {
+      calls.push({ containerId, ...opts })
+      const matcher = Object.keys(execResponses).find((needle) => opts.cmd.includes(needle))
+      const resp = matcher ? execResponses[matcher] : defaultResponse
+      return { stdout: resp.stdout || '', stderr: resp.stderr || '' }
+    },
+  }
+}
+
+let tmpHome
+let originalHome
+let originalApiKey
+let originalMcpTrustPath
+
+beforeEach(() => {
+  tmpHome = mkdtempSync(join(tmpdir(), 'chroxy-docker-byok-test-'))
+  originalHome = process.env.HOME
+  originalApiKey = process.env.ANTHROPIC_API_KEY
+  originalMcpTrustPath = process.env.CHROXY_MCP_TRUST_PATH
+  process.env.HOME = tmpHome
+  process.env.ANTHROPIC_API_KEY = 'sk-ant-test-key-fixture'
+  process.env.CHROXY_MCP_TRUST_PATH = join(tmpHome, 'mcp-trust.json')
+})
+
+afterEach(() => {
+  if (originalHome) process.env.HOME = originalHome
+  else delete process.env.HOME
+  if (originalApiKey) process.env.ANTHROPIC_API_KEY = originalApiKey
+  else delete process.env.ANTHROPIC_API_KEY
+  if (originalMcpTrustPath) process.env.CHROXY_MCP_TRUST_PATH = originalMcpTrustPath
+  else delete process.env.CHROXY_MCP_TRUST_PATH
+  rmSync(tmpHome, { recursive: true, force: true })
+})
+
+describe('DockerByokSession static configuration', () => {
+  it('exposes the expected displayLabel', () => {
+    assert.equal(DockerByokSession.displayLabel, 'Claude (BYOK — Docker container)')
+  })
+
+  it('inherits BYOK capabilities and adds containerized: true', () => {
+    const caps = DockerByokSession.capabilities
+    assert.equal(caps.containerized, true)
+    // Sanity-check that the inherited BYOK capabilities still flow:
+    assert.equal(caps.permissions, true)
+    assert.equal(caps.inProcessPermissions, true)
+    assert.equal(caps.streaming, true)
+  })
+
+  it('declares BYOK credentials in preflight (label overridden)', () => {
+    const pf = DockerByokSession.preflight
+    assert.deepEqual(pf.credentials.envVars, ['ANTHROPIC_API_KEY'])
+    assert.equal(pf.credentials.optional, false)
+    assert.match(pf.label, /BYOK.*Docker/)
+  })
+
+  it('resolveAuth() returns the BYOK ready shape when ANTHROPIC_API_KEY is set', () => {
+    const helpers = {
+      cachedResolveCredentialFile: () => ({ key: 'sk-ant-test', source: 'env' }),
+    }
+    const result = DockerByokSession.resolveAuth({ ANTHROPIC_API_KEY: 'sk-ant-test' }, helpers)
+    assert.equal(result.ready, true)
+    assert.equal(result.source, 'env')
+    assert.equal(result.envVar, 'ANTHROPIC_API_KEY')
+    // #5630: docker-byok delegates to ClaudeByokSession.resolveAuth — api-key,
+    // era-independent (your own ANTHROPIC_API_KEY).
+    assert.equal(result.billingClass, 'api-key')
+  })
+
+  it('resolveAuth() returns not-ready when no key resolved', () => {
+    const helpers = {
+      cachedResolveCredentialFile: () => ({ key: null, source: 'none', reason: 'no credential file' }),
+    }
+    const result = DockerByokSession.resolveAuth({}, helpers)
+    assert.equal(result.ready, false)
+    assert.equal(result.source, 'none')
+  })
+})
+
+describe('DockerByokSession constructor', () => {
+  it('reports provider id "docker-byok"', () => {
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile: execFileStub(), _dockerBackend: backendStub() })
+    assert.equal(session._provider, 'docker-byok')
+  })
+
+  it('extends ClaudeByokSession so the agent loop is inherited', () => {
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile: execFileStub(), _dockerBackend: backendStub() })
+    assert.ok(session instanceof ClaudeByokSession)
+  })
+
+  it('applies sane defaults for image / memory / cpu / user', () => {
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile: execFileStub(), _dockerBackend: backendStub() })
+    assert.equal(session._image, 'node:22-slim')
+    assert.equal(session._memoryLimit, '2g')
+    assert.equal(session._cpuLimit, '2')
+    assert.equal(session._containerUser, 'chroxy')
+    assert.equal(session._containerOwned, true)
+    assert.equal(session._containerId, null)
+  })
+
+  it('honors caller-provided overrides', () => {
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      image: 'node:22-bookworm',
+      memoryLimit: '4g',
+      cpuLimit: '4',
+      containerUser: 'agent',
+      _execFile: execFileStub(),
+      _dockerBackend: backendStub(),
+    })
+    assert.equal(session._image, 'node:22-bookworm')
+    assert.equal(session._memoryLimit, '4g')
+    assert.equal(session._cpuLimit, '4')
+    assert.equal(session._containerUser, 'agent')
+  })
+
+  it('refuses an invalid containerUser', () => {
+    assert.throws(
+      () => new DockerByokSession({ cwd: tmpHome, containerUser: 'BAD;USER', _execFile: execFileStub(), _dockerBackend: backendStub() }),
+      /Invalid containerUser/,
+    )
+  })
+
+  it('marks the session as not-owning when containerId is supplied', () => {
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      containerId: 'external-id-1234',
+      _execFile: execFileStub(),
+      _dockerBackend: backendStub(),
+    })
+    assert.equal(session._containerOwned, false)
+    assert.equal(session._containerId, 'external-id-1234')
+  })
+})
+
+describe('DockerByokSession start() — preflight + lifecycle', () => {
+  it('emits a docker_not_running error when `docker info` fails', async () => {
+    const _execFile = execFileStub({
+      info: { error: new Error('Cannot connect to the Docker daemon at unix:///var/run/docker.sock. Is the docker daemon running?'), stderr: 'Cannot connect to the Docker daemon' },
+    })
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile, _dockerBackend: backendStub() })
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+    assert.equal(events.length, 1)
+    assert.equal(events[0].code, 'docker_not_running')
+    assert.match(events[0].message, /preflight/)
+  })
+
+  it('launches a container with the cwd mounted and ANTHROPIC_API_KEY forwarded', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_ID_0123456789ab\n' },
+      exec: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/tmp/chroxy-workspace',
+      _execFile,
+      _dockerBackend: backendStub(),
+    })
+    // Stub the Anthropic client so super.start() doesn't need network.
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // First call: `docker info` (preflight).
+    assert.equal(_execFile.calls[0].args[0], 'info')
+    // Second call: `docker run`.
+    const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+    assert.ok(runCall, 'expected a `docker run` call')
+    assert.ok(runCall.args.includes('-v'), 'volume flag missing')
+    const volumeFlag = runCall.args[runCall.args.indexOf('-v') + 1]
+    assert.equal(volumeFlag, '/tmp/chroxy-workspace:/workspace')
+    // API key is forwarded.
+    assert.ok(
+      runCall.args.some((a) => a.startsWith('ANTHROPIC_API_KEY=sk-ant-test-key-fixture')),
+      'ANTHROPIC_API_KEY not forwarded into container',
+    )
+    // Container hardening flags.
+    assert.ok(runCall.args.includes('--cap-drop'))
+    assert.ok(runCall.args.includes('--security-opt'))
+    assert.ok(runCall.args.includes('--pids-limit'))
+
+    assert.equal(session._containerId, 'CONTAINER_ID_0123456789ab')
+    assert.equal(session._containerReady, true)
+
+    await session.destroy()
+  })
+
+  it('destroys the container on session destroy when owned', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_ID_owned_999\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile, _dockerBackend: backendStub() })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    await session.destroy()
+
+    const rmCall = _execFile.calls.find((c) => c.args[0] === 'rm')
+    assert.ok(rmCall, 'docker rm -f was not called on destroy')
+    assert.ok(rmCall.args.includes('CONTAINER_ID_owned_999'))
+  })
+
+  it('does NOT destroy the container on session destroy when externally provided', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      containerId: 'external-managed',
+      _execFile,
+      _dockerBackend: backendStub(),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    await session.destroy()
+
+    const rmCall = _execFile.calls.find((c) => c.args[0] === 'rm')
+    assert.equal(rmCall, undefined, 'external container must not be removed by the session')
+  })
+
+  it('tears down owned container and stays not-ready when super.start fails (missing creds)', async () => {
+    // PR #5021 review fix (Copilot, comment id 3348029212): pre-fix,
+    // _containerReady was set BEFORE super.start(); a missing-creds
+    // failure would leak the owned container.
+    delete process.env.ANTHROPIC_API_KEY
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_ID_leak_test\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({ cwd: tmpHome, _execFile, _dockerBackend: backendStub() })
+    // Do NOT stub _client — let super.start() see no key and bail.
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+    // super.start() emits an error from byok-session.js:369. The
+    // session should NOT mark itself ready, and the owned container
+    // must have been destroyed.
+    assert.equal(session._containerReady, false)
+    assert.equal(session._processReady, false)
+    const rmCall = _execFile.calls.find((c) => c.args[0] === 'rm')
+    assert.ok(rmCall, 'docker rm -f must be called when super.start fails')
+    assert.ok(rmCall.args.includes('CONTAINER_ID_leak_test'))
+  })
+
+  it('surfaces a docker_image_not_found error when the run fails', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { error: new Error('Unable to find image \'nonexistent:latest\' locally\nno such image: nonexistent'), stderr: 'no such image: nonexistent' },
+    })
+    const session = new DockerByokSession({ cwd: tmpHome, image: 'nonexistent:latest', _execFile, _dockerBackend: backendStub() })
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+    assert.ok(events.length >= 1)
+    assert.equal(events[0].code, 'docker_image_not_found')
+  })
+})
+
+describe('remapToContainerPath()', () => {
+  it('maps an absolute path under cwd to /workspace/<suffix>', () => {
+    const result = remapToContainerPath('/host/cwd/src/foo.js', '/host/cwd')
+    assert.equal(result, '/workspace/src/foo.js')
+  })
+
+  it('maps the cwd itself to /workspace', () => {
+    assert.equal(remapToContainerPath('/host/cwd', '/host/cwd'), '/workspace')
+  })
+
+  it('maps a relative path onto /workspace', () => {
+    assert.equal(remapToContainerPath('src/foo.js', '/host/cwd'), '/workspace/src/foo.js')
+  })
+
+  it('refuses an absolute path outside cwd', () => {
+    assert.throws(
+      () => remapToContainerPath('/etc/passwd', '/host/cwd'),
+      /outside workspace/,
+    )
+  })
+
+  it('refuses a relative path that escapes via ..', () => {
+    assert.throws(
+      () => remapToContainerPath('../../etc/passwd', '/host/cwd'),
+      /outside workspace/,
+    )
+  })
+
+  it('refuses an absolute path that starts with cwd but escapes via ..', () => {
+    // Regression for PR #5021 review (path traversal):
+    // /host/cwd/../etc/passwd has `slice(cwd.length)` -> '/../etc/passwd',
+    // and posix.join('/workspace', '/../etc/passwd') returns '/etc/passwd'
+    // because the second arg is absolute. Re-asserting startsWith catches it.
+    assert.throws(
+      () => remapToContainerPath('/host/cwd/../etc/passwd', '/host/cwd'),
+      /outside workspace/,
+    )
+    assert.throws(
+      () => remapToContainerPath('/host/cwd/legit/../../etc/passwd', '/host/cwd'),
+      /outside workspace/,
+    )
+    assert.throws(
+      () => remapToContainerPath('/host/cwd/../../root/.ssh/id_rsa', '/host/cwd'),
+      /outside workspace/,
+    )
+  })
+
+  it('refuses a sibling path that shares the cwd prefix (e.g. /host/cwd-evil)', () => {
+    // /host/cwd-evil/secret begins with '/host/cwd' but is not under it.
+    // The `startsWith(normHostCwd + '/')` check covers this — verify it.
+    assert.throws(
+      () => remapToContainerPath('/host/cwd-evil/secret', '/host/cwd'),
+      /outside workspace/,
+    )
+  })
+
+  it('refuses an empty file_path', () => {
+    assert.throws(
+      () => remapToContainerPath('', '/host/cwd'),
+      /required/,
+    )
+  })
+
+  it('normalizes a cwd with a trailing slash', () => {
+    assert.equal(remapToContainerPath('/host/cwd/foo', '/host/cwd/'), '/workspace/foo')
+  })
+
+  it('exports the canonical /workspace mount root', () => {
+    assert.equal(CONTAINER_WORKSPACE, '/workspace')
+  })
+})
+
+describe('DockerByokSession _dispatchBuiltinTool — tool routing', () => {
+  function buildSession({ backend, execFile } = {}) {
+    const _dockerBackend = backend || backendStub()
+    const _execFile = execFile || execFileStub({ info: { stdout: 'ok' }, run: { stdout: 'CONTAINER_ID_aaa\n' }, exec: { stdout: '' } })
+    const session = new DockerByokSession({ cwd: '/host/cwd', _execFile, _dockerBackend })
+    // Simulate a started container so tool dispatch is allowed.
+    session._containerReady = true
+    session._containerId = 'CONTAINER_ID_aaa'
+    return { session, _dockerBackend, _execFile }
+  }
+
+  it('refuses tools when the container is not ready', async () => {
+    const _dockerBackend = backendStub()
+    const session = new DockerByokSession({ cwd: '/host/cwd', _execFile: execFileStub(), _dockerBackend })
+    // container NOT ready — default constructor state
+    const result = await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'true' } })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /container not ready/)
+    assert.equal(_dockerBackend.calls.length, 0)
+  })
+
+  it('Read routes to `sed | head | awk` inside the container and forwards the container user', async () => {
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: '    1→file contents here\n', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Read',
+      input: { file_path: '/host/cwd/foo.txt' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /file contents here/)
+    assert.equal(_dockerBackend.calls.length, 1)
+    assert.match(_dockerBackend.calls[0].cmd, /sed -n '1,2000p' '\/workspace\/foo\.txt'/)
+    assert.match(_dockerBackend.calls[0].cmd, /head -c/)
+    // PR #5021 review fix (Copilot, comment id 3348029235): the awk
+    // pass formats each line as 5-space-padded line number + arrow,
+    // matching readFileTool's output shape.
+    assert.match(_dockerBackend.calls[0].cmd, /awk.*printf.*%5d→%s/)
+    // PR #5021 review fix (Copilot, comment id 3348029166): every
+    // tool dispatch must forward the non-root container user to
+    // docker exec so the useradd + chown setup is respected.
+    assert.equal(_dockerBackend.calls[0].user, 'chroxy')
+  })
+
+  it('Read with offset and limit slices in the container', async () => {
+    const _dockerBackend = backendStub({ defaultResponse: { stdout: 'lines 10-15\n' } })
+    const { session } = buildSession({ backend: _dockerBackend })
+    await session._dispatchBuiltinTool({
+      toolName: 'Read',
+      input: { file_path: '/host/cwd/foo.txt', offset: 10, limit: 6 },
+    })
+    assert.match(_dockerBackend.calls[0].cmd, /sed -n '10,15p'/)
+  })
+
+  it('Read refuses a path outside cwd (returns is_error)', async () => {
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Read',
+      input: { file_path: '/etc/passwd' },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /outside workspace/)
+    assert.equal(_dockerBackend.calls.length, 0, 'must not docker exec a path-escape attempt')
+  })
+
+  it('Write base64-encodes content and pipes it into the container', async () => {
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: '5\n', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'src/new.js', content: 'hello' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /Wrote 5 bytes/)
+    assert.equal(_dockerBackend.calls.length, 1)
+    const cmd = _dockerBackend.calls[0].cmd
+    assert.match(cmd, /mkdir -p '\/workspace\/src'/)
+    assert.match(cmd, /base64 -d > '\/workspace\/src\/new\.js'/)
+    // The base64 of 'hello' is aGVsbG8=
+    assert.match(cmd, /aGVsbG8=/)
+  })
+
+  it('Write refuses missing/non-string content with EINVAL', async () => {
+    // PR #5021 review fix (Copilot, comment id 3348029266): pre-fix,
+    // a missing `content` field silently truncated the file to zero
+    // bytes. Now it returns EINVAL like host-side writeFileTool.
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'foo.txt' },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /EINVAL.*content is required/)
+    assert.equal(_dockerBackend.calls.length, 0, 'must not docker exec when content is missing')
+    // Non-string types should also be refused.
+    const result2 = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'foo.txt', content: 12345 },
+    })
+    assert.equal(result2.isError, true)
+    assert.match(result2.content, /EINVAL/)
+    assert.equal(_dockerBackend.calls.length, 0)
+    // Empty string is legitimate (clearing a file) — must still succeed.
+    const result3 = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'foo.txt', content: '' },
+    })
+    assert.equal(result3.isError, false)
+  })
+
+  it('Write refuses oversize content', async () => {
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const bigContent = 'x'.repeat(512 * 1024 + 1)
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Write',
+      input: { file_path: 'big.bin', content: bigContent },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /exceeds/)
+    assert.equal(_dockerBackend.calls.length, 0)
+  })
+
+  // #5882 — the container Edit path was previously untested and had drifted
+  // from host-side editFileTool (no NO_CHANGE guard, slice vs replace). It now
+  // delegates the semantics to the shared applyEdit transform.
+  describe('Edit (container, via shared applyEdit) #5882', () => {
+    function editBackend(fileContent) {
+      return backendStub({
+        execResponses: {
+          'cat ': { stdout: fileContent },
+          'wc -c': { stdout: '1\n' },
+        },
+      })
+    }
+    function decodeWrittenContent(calls) {
+      const writeCall = calls.find((c) => c.cmd.includes('base64 -d'))
+      if (!writeCall) return null
+      const m = writeCall.cmd.match(/echo '([^']+)' \| base64 -d/)
+      return m ? Buffer.from(m[1], 'base64').toString('utf8') : null
+    }
+
+    it('applies a unique edit and writes the updated content', async () => {
+      const backend = editBackend('foo bar baz')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'bar', new_string: 'QUX' },
+      })
+      assert.equal(result.isError, false)
+      assert.match(result.content, /Replaced 1 occurrence\(s\) in foo\.txt/)
+      assert.equal(decodeWrittenContent(backend.calls), 'foo QUX baz')
+    })
+
+    it('refuses a no-op edit (old === new) — NO_CHANGE, the drift this closes', async () => {
+      const backend = editBackend('hello hello')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'hello', new_string: 'hello' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /identical/)
+      // It read the file (cat) but must NOT have written it.
+      assert.equal(backend.calls.some((c) => c.cmd.includes('base64 -d')), false)
+    })
+
+    it('refuses a non-unique edit without replace_all', async () => {
+      const backend = editBackend('aa aa aa')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'aa', new_string: 'b' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /matches multiple sites/)
+    })
+
+    it('replaces every occurrence with replace_all', async () => {
+      const backend = editBackend('aa aa aa')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'aa', new_string: 'b', replace_all: true },
+      })
+      assert.equal(result.isError, false)
+      assert.match(result.content, /Replaced 3 occurrence\(s\)/)
+      assert.equal(decodeWrittenContent(backend.calls), 'b b b')
+    })
+
+    it('refuses when old_string is not found', async () => {
+      const backend = editBackend('hello world')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: 'xyz', new_string: 'abc' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /not found/)
+    })
+
+    it('refuses an empty old_string before touching the container', async () => {
+      const backend = editBackend('whatever')
+      const { session } = buildSession({ backend })
+      const result = await session._dispatchBuiltinTool({
+        toolName: 'Edit',
+        input: { file_path: 'foo.txt', old_string: '', new_string: 'x' },
+      })
+      assert.equal(result.isError, true)
+      assert.match(result.content, /old_string is required/)
+      assert.equal(backend.calls.length, 0)
+    })
+  })
+
+  it('Bash routes the raw command through docker exec', async () => {
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: 'hello\n', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Bash',
+      input: { command: 'echo hello' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /stdout:\nhello/)
+    assert.equal(_dockerBackend.calls.length, 1)
+    assert.equal(_dockerBackend.calls[0].cmd, 'echo hello')
+  })
+
+  it('Bash refuses when command is empty', async () => {
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Bash',
+      input: { command: '' },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /command is required/)
+    assert.equal(_dockerBackend.calls.length, 0)
+  })
+
+  it('Bash honors a pre-aborted signal without docker-exec', async () => {
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const controller = new AbortController()
+    controller.abort()
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Bash',
+      input: { command: 'rm -rf /' },
+      signal: controller.signal,
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /Interrupted/)
+    assert.equal(_dockerBackend.calls.length, 0)
+  })
+
+  it('Glob refuses shell-dangerous patterns', async () => {
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Glob',
+      input: { pattern: '*.js; rm -rf /' },
+    })
+    assert.equal(result.isError, true)
+    assert.match(result.content, /shell-dangerous/)
+    assert.equal(_dockerBackend.calls.length, 0)
+  })
+
+  it('Grep falls back to grep when rg is unavailable (cmd shape)', async () => {
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: 'foo.js:1:match\n', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Grep',
+      input: { pattern: 'match' },
+    })
+    assert.equal(result.isError, false)
+    assert.equal(_dockerBackend.calls.length, 1)
+    // Cmd is the rg-or-grep wrapper so both binaries appear:
+    assert.match(_dockerBackend.calls[0].cmd, /rg /)
+    assert.match(_dockerBackend.calls[0].cmd, /grep -r/)
+    // PR #5021 review fix (Copilot, comment id 3348029186): the
+    // command is suffixed with `; true` so rg/grep's exit code 1
+    // (no matches) doesn't bubble up to execInEnvironment's reject.
+    assert.match(_dockerBackend.calls[0].cmd, /; true$/)
+  })
+
+  it('Grep returns "No matches" when stdout is empty and stderr is clean', async () => {
+    // PR #5021 review fix (Copilot, comment id 3348029186): the
+    // no-match branch was unreachable pre-fix because rg/grep exit 1.
+    // With `; true` masking the exit code, this branch now fires.
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: '', stderr: '' },
+    })
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'Grep',
+      input: { pattern: 'nosuchstring' },
+    })
+    assert.equal(result.isError, false)
+    assert.match(result.content, /No matches for nosuchstring/)
+  })
+
+  it('TodoWrite remains host-side (falls through to super._dispatchBuiltinTool)', async () => {
+    const _dockerBackend = backendStub()
+    const { session } = buildSession({ backend: _dockerBackend })
+    const result = await session._dispatchBuiltinTool({
+      toolName: 'TodoWrite',
+      input: { todos: [{ id: 't1', content: 'thing', status: 'pending', activeForm: 'doing thing' }] },
+    })
+    // Super's executor will accept this — no docker call.
+    assert.equal(_dockerBackend.calls.length, 0)
+    assert.equal(result.isError, false)
+  })
+})
+
+describe('DockerByokSession — per-session container reuse', () => {
+  /**
+   * #5022 invariant: one `docker run` per session, regardless of how
+   * many tool dispatches the session performs. This is the baseline
+   * the pool layer builds on top of — without it, even one warm-pool
+   * acquire would only save the first turn's cold-start.
+   */
+  it('keeps the same container id across multiple tool dispatches (no fresh docker run)', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_REUSE_42\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const _dockerBackend = backendStub({
+      defaultResponse: { stdout: 'hello\n', stderr: '' },
+    })
+    const session = new DockerByokSession({ cwd: '/host/cwd', _execFile, _dockerBackend })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const idAfterStart = session._containerId
+    assert.equal(idAfterStart, 'CONTAINER_REUSE_42')
+
+    // Three back-to-back tool dispatches.
+    await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'echo a' } })
+    await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'echo b' } })
+    await session._dispatchBuiltinTool({ toolName: 'Bash', input: { command: 'echo c' } })
+
+    // Same container id throughout the session.
+    assert.equal(session._containerId, idAfterStart)
+    // Only ONE `docker run` for the entire session (the initial launch).
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1, 'expected exactly one docker run per session')
+    // All three dispatches went through the backend (not via docker run).
+    assert.equal(_dockerBackend.calls.length, 3)
+    for (const call of _dockerBackend.calls) {
+      assert.equal(call.containerId, idAfterStart)
+    }
+
+    await session.destroy()
+  })
+})
+
+describe('DockerByokSession — across-session pool (#5022)', () => {
+  /**
+   * Minimal pool stub: records `acquire` / `release` calls so we can
+   * assert the session's start/destroy paths flow through the pool
+   * without spinning up a real DockerContainerPool.
+   */
+  function poolStub({ acquireReturn = null } = {}) {
+    const calls = { acquire: [], release: [], forget: [] }
+    let nextAcquire = acquireReturn
+    return {
+      calls,
+      acquire(key) {
+        calls.acquire.push(key)
+        const v = nextAcquire
+        nextAcquire = null
+        return v
+      },
+      async release(key, containerId) {
+        calls.release.push({ key, containerId })
+        return true
+      },
+      async forget(containerId) {
+        // Mirrors the real pool's contract: drop tracking + best-effort
+        // docker rm -f. The stub just records the call; tests inspect
+        // `pool.calls.forget` instead of asserting on `execFile` rm
+        // invocations, because the real pool owns its own _execFile.
+        calls.forget.push(containerId)
+      },
+      setNextAcquire(id) {
+        nextAcquire = id
+      },
+    }
+  }
+
+  it('cache miss: launches a fresh container and releases it to the pool on destroy', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_FRESH\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const _dockerBackend = backendStub()
+    const pool = poolStub({ acquireReturn: null })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // Pool was asked, but missed → docker run was called.
+    assert.equal(pool.calls.acquire.length, 1)
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1)
+    assert.equal(session._containerId, 'CONTAINER_FRESH')
+    assert.equal(session._acquiredFromPool, false)
+
+    await session.destroy()
+
+    // On destroy, the container is released to the pool (not docker-rm-f'd).
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_FRESH')
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0, 'destroy must NOT inline-rm when releasing to pool')
+  })
+
+  it('cache hit: reuses the pooled container, skips docker run + useradd', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      // `exec` matches the verify call (`docker exec <id> true`).
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const _dockerBackend = backendStub()
+    const pool = poolStub({ acquireReturn: 'CONTAINER_POOLED' })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerId, 'CONTAINER_POOLED')
+    assert.equal(session._acquiredFromPool, true)
+    // Crucially: no `docker run` happened.
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 0, 'pool hit must skip docker run')
+    // And no `useradd` on the reused container (already provisioned).
+    const setupCalls = _execFile.calls.filter((c) =>
+      c.args[0] === 'exec' && c.args.some((a) => typeof a === 'string' && a.includes('useradd')))
+    assert.equal(setupCalls.length, 0, 'pool hit must skip useradd')
+
+    await session.destroy()
+    // Container released back to the pool.
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_POOLED')
+  })
+
+  it('cache hit but pooled container dead: evicts the dead id and launches fresh', async () => {
+    // The verify call (`docker exec <id> true`) fails — pooled
+    // container died while idle. The session should drop it and
+    // launch a fresh container.
+    let execCount = 0
+    const _execFile = (cmd, args, opts, callback) => {
+      _execFile.calls.push({ cmd, args: [...args], opts })
+      const sub = args[0]
+      if (sub === 'info') return callback(null, 'ok', '')
+      if (sub === 'exec') {
+        execCount++
+        // First exec is the verify of the pooled container — fail it.
+        // Subsequent execs (useradd + chown for the fresh container) succeed.
+        if (execCount === 1) {
+          const err = new Error('No such container: CONTAINER_DEAD')
+          err.stderr = 'No such container: CONTAINER_DEAD'
+          return callback(err, '', 'No such container: CONTAINER_DEAD')
+        }
+        return callback(null, '', '')
+      }
+      if (sub === 'run') return callback(null, 'CONTAINER_FALLBACK\n', '')
+      if (sub === 'rm') return callback(null, '', '')
+      callback(null, '', '')
+    }
+    _execFile.calls = []
+
+    const _dockerBackend = backendStub()
+    const pool = poolStub({ acquireReturn: 'CONTAINER_DEAD' })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // Fell back to docker run with a new id.
+    assert.equal(session._containerId, 'CONTAINER_FALLBACK')
+    assert.equal(session._acquiredFromPool, false)
+    const runCalls = _execFile.calls.filter((c) => c.args[0] === 'run')
+    assert.equal(runCalls.length, 1)
+    // The dead pooled id was routed through `pool.forget()` so the
+    // pool's `_createdAt` map gets cleared alongside the `docker rm -f`.
+    // The actual `docker rm -f` runs through the pool's own _execFile
+    // (not the session's), so we assert on `pool.calls.forget` here.
+    assert.deepEqual(pool.calls.forget, ['CONTAINER_DEAD'])
+
+    await session.destroy()
+  })
+
+  it('does NOT engage the pool when externally-managed containerId is supplied', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+    })
+    const pool = poolStub()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      containerId: 'EXTERNAL_MANAGED',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // External container path — pool was never consulted.
+    assert.equal(pool.calls.acquire.length, 0)
+    assert.equal(session._containerId, 'EXTERNAL_MANAGED')
+
+    await session.destroy()
+
+    // External container is NOT released to the pool, and NOT removed.
+    assert.equal(pool.calls.release.length, 0)
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0)
+  })
+
+  it('does NOT engage the pool when pool flag is disabled (default behaviour)', async () => {
+    // No _pool injected, no CHROXY_DOCKER_BYOK_POOL env var → session
+    // should fall through to the existing inline `docker rm -f` path.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_DEFAULT\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _poolEnv: {}, // explicitly empty env → disabled
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(session._pool, null)
+
+    await session.destroy()
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 1, 'with pool disabled, destroy() falls back to docker rm -f')
+    assert.ok(rmCalls[0].args.includes('CONTAINER_DEFAULT'))
+  })
+
+  it('skips pool release when session start failed (no leak via dirty pool)', async () => {
+    // Missing creds → super.start() bails before _containerReady is set.
+    // The pool MUST NOT receive a container that never went healthy.
+    delete process.env.ANTHROPIC_API_KEY
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_HALF\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStub()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    // Do NOT stub _client — super.start() will see no key and bail.
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, false)
+    // Pool was never released — the dirty container was docker-rm-f'd.
+    assert.equal(pool.calls.release.length, 0)
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_HALF')),
+      'half-started container must be rm-f\'d, not pooled')
+  })
+})
+
+describe('DockerByokSession — snapshot soiling integration (#5043)', () => {
+  /**
+   * Same shape as the across-session pool stub above, but with the
+   * `markSoiled` hook the session calls when its container has taken
+   * (or restored from) a snapshot. Records every markSoiled call.
+   */
+  function poolStubWithSoiling({ acquireReturn = null } = {}) {
+    const calls = { acquire: [], release: [], markSoiled: [] }
+    const soiled = new Set()
+    let nextAcquire = acquireReturn
+    return {
+      calls,
+      acquire(key) {
+        calls.acquire.push(key)
+        const v = nextAcquire
+        nextAcquire = null
+        return v
+      },
+      async release(key, containerId) {
+        calls.release.push({ key, containerId })
+        if (soiled.has(containerId)) {
+          soiled.delete(containerId)
+          return false
+        }
+        return true
+      },
+      markSoiled(containerId) {
+        if (!containerId) return
+        soiled.add(containerId)
+        calls.markSoiled.push(containerId)
+      },
+      isSoiled(containerId) {
+        return soiled.has(containerId)
+      },
+    }
+  }
+
+  it('markActiveContainerSoiled forwards the live container id to the pool', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_SNAP\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerId, 'CONTAINER_SNAP')
+    session.markActiveContainerSoiled()
+    assert.deepEqual(pool.calls.markSoiled, ['CONTAINER_SNAP'])
+    assert.equal(pool.isSoiled('CONTAINER_SNAP'), true)
+
+    await session.destroy()
+  })
+
+  it('markActiveContainerSoiled is a no-op when pooling is disabled', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_NOPOOL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _poolEnv: {}, // pool disabled
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(session._pool, null)
+    // Must not throw, must not crash — just silently no-op.
+    session.markActiveContainerSoiled()
+    await session.destroy()
+  })
+
+  it('markActiveContainerSoiled is a no-op when there is no live container', () => {
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile: execFileStub({ info: { stdout: 'ok' } }),
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    // No start() — no container assigned. Should not crash and should
+    // not call into the pool with a null id.
+    session.markActiveContainerSoiled()
+    assert.deepEqual(pool.calls.markSoiled, [])
+  })
+
+  it('soiled containers are docker-rm-f\'d on destroy, not pooled', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_DIRTY\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStub(),
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // Snapshot taken mid-session — mark the container soiled.
+    session.markActiveContainerSoiled()
+
+    await session.destroy()
+
+    // The session called release(), and the pool returned false
+    // (evicted) because of the soiled marker. From the session's POV
+    // it released to the pool — the pool is responsible for the actual
+    // `docker rm -f`. We assert release WAS called (so the session
+    // didn't bypass the pool, which would defeat the design hook).
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_DIRTY')
+  })
+})
+
+describe('DockerByokSession — snapshot / restore (#5023)', () => {
+  /**
+   * Snapshot tests cover the MVP shape:
+   *   - snapshot()  → docker commit + markSoiled + metadata write
+   *   - restore via `snapshotImage` opt → docker run with the snapshot
+   *     tag, skip useradd, and auto-soil the live container so the
+   *     restored conversation's FS doesn't leak into the next acquirer.
+   *
+   * Same pool-with-soiling stub shape as #5043 — snapshot integration
+   * runs through markSoiled so a snapshotted container always exits via
+   * inline `docker rm -f` rather than going back to the pool.
+   */
+  function poolStubWithSoiling({ acquireReturn = null } = {}) {
+    const calls = { acquire: [], release: [], markSoiled: [] }
+    const soiled = new Set()
+    let nextAcquire = acquireReturn
+    return {
+      calls,
+      acquire(key) {
+        calls.acquire.push(key)
+        const v = nextAcquire
+        nextAcquire = null
+        return v
+      },
+      async release(key, containerId) {
+        calls.release.push({ key, containerId })
+        if (soiled.has(containerId)) {
+          soiled.delete(containerId)
+          return false
+        }
+        return true
+      },
+      markSoiled(containerId) {
+        if (!containerId) return
+        soiled.add(containerId)
+        calls.markSoiled.push(containerId)
+      },
+      isSoiled(containerId) {
+        return soiled.has(containerId)
+      },
+    }
+  }
+
+  /**
+   * Docker backend stub specialised for snapshot tests — records every
+   * `commitEnvironment` call so we can assert the snapshot tag shape.
+   */
+  function backendStubWithCommit(opts = {}) {
+    const calls = { exec: [], commit: [] }
+    return {
+      calls,
+      async execInEnvironment(containerId, execOpts) {
+        calls.exec.push({ containerId, ...execOpts })
+        return { stdout: '', stderr: '' }
+      },
+      async commitEnvironment(containerId, imageTag) {
+        calls.commit.push({ containerId, imageTag })
+        if (opts.commitError) throw opts.commitError
+        return opts.commitSha || `sha256:${imageTag.replace(/[^a-z0-9]/gi, '').slice(0, 64)}`
+      },
+    }
+  }
+
+  it('snapshot() commits the live container under a chroxy-byok-snap tag', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_SNAP_OK\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = backendStubWithCommit()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend,
+      snapshotsDir: join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const snap = await session.snapshot({ name: 'after-deps' })
+
+    assert.equal(backend.calls.commit.length, 1, 'commitEnvironment was called exactly once')
+    const commit = backend.calls.commit[0]
+    assert.equal(commit.containerId, 'CONTAINER_SNAP_OK')
+    assert.match(commit.imageTag, /^chroxy-byok-snap:/, 'snapshot tag uses chroxy-byok-snap prefix')
+
+    // Snapshot result shape: tag, name, createdAt, sourceCwd, sourceImage.
+    assert.equal(snap.tag, commit.imageTag)
+    assert.equal(snap.name, 'after-deps')
+    assert.ok(typeof snap.createdAt === 'string' && snap.createdAt.length > 0)
+    assert.equal(snap.sourceCwd, '/host/cwd')
+    assert.equal(snap.sourceImage, 'node:22-slim')
+
+    await session.destroy()
+  })
+
+  it('snapshot() marks the live container soiled so the pool evicts on release', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_SNAP_DIRTY\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      _pool: pool,
+      snapshotsDir: join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    await session.snapshot({ name: 'mid-session' })
+
+    // Pool was told this container is dirty — release will evict.
+    assert.deepEqual(pool.calls.markSoiled, ['CONTAINER_SNAP_DIRTY'])
+    assert.equal(pool.isSoiled('CONTAINER_SNAP_DIRTY'), true)
+
+    await session.destroy()
+
+    // Release fired and the pool returned false (evicted, not pooled).
+    assert.equal(pool.calls.release.length, 1)
+    assert.equal(pool.calls.release[0].containerId, 'CONTAINER_SNAP_DIRTY')
+  })
+
+  it('snapshot() persists metadata JSON to snapshotsDir for ops visibility', async () => {
+    const { existsSync, readFileSync, readdirSync } = await import('node:fs')
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_META\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const snapshotsDir = join(tmpHome, 'snapshots')
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      snapshotsDir,
+      sourceSessionId: 'sess-abc',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const snap = await session.snapshot({ name: 'with-meta' })
+    assert.ok(existsSync(snapshotsDir), 'snapshotsDir was created')
+    const files = readdirSync(snapshotsDir).filter((f) => f.endsWith('.json'))
+    assert.equal(files.length, 1, 'one metadata JSON was written')
+    const meta = JSON.parse(readFileSync(join(snapshotsDir, files[0]), 'utf-8'))
+    assert.equal(meta.tag, snap.tag)
+    assert.equal(meta.name, 'with-meta')
+    assert.equal(meta.sourceCwd, '/host/cwd')
+    assert.equal(meta.sourceImage, 'node:22-slim')
+    assert.equal(meta.sourceSessionId, 'sess-abc')
+    assert.equal(typeof meta.createdAt, 'string')
+
+    await session.destroy()
+  })
+
+  it('snapshot() rejects when the container is not ready', async () => {
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile: execFileStub({ info: { stdout: 'ok' } }),
+      _dockerBackend: backendStubWithCommit(),
+    })
+    // No start() — container is not ready.
+    await assert.rejects(
+      () => session.snapshot({ name: 'too-early' }),
+      /not ready/i,
+    )
+  })
+
+  it('snapshot() surfaces docker commit failures as Error', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_FAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = backendStubWithCommit({
+      commitError: new Error('disk full'),
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend,
+      snapshotsDir: join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    await assert.rejects(
+      () => session.snapshot({ name: 'will-fail' }),
+      /disk full/,
+    )
+    await session.destroy()
+  })
+
+  it('snapshotImage opt restores: uses the snapshot tag and skips useradd', async () => {
+    const runCalls = []
+    const execCmds = []
+    const _execFile = (cmd, args, opts, callback) => {
+      const sub = args[0]
+      if (sub === 'info') return callback(null, 'ok', '')
+      if (sub === 'run') {
+        runCalls.push([...args])
+        return callback(null, 'CONTAINER_RESTORED\n', '')
+      }
+      if (sub === 'exec') {
+        execCmds.push([...args])
+        return callback(null, '', '')
+      }
+      if (sub === 'rm') return callback(null, '', '')
+      callback(null, '', '')
+    }
+
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      snapshotImage: 'chroxy-byok-snap:abc123-1700000000000',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // The `docker run` invocation used the snapshot tag as the image.
+    assert.equal(runCalls.length, 1)
+    const runArgs = runCalls[0]
+    // Anchor on the known `sleep infinity` command tail rather than the
+    // arg-list length so adding/removing unrelated `docker run` flags
+    // doesn't shift the assertion off the image position (#5100 review).
+    const sleepIdx = runArgs.indexOf('sleep')
+    assert.ok(sleepIdx > 0 && runArgs[sleepIdx + 1] === 'infinity',
+      'docker run tail must end "<image> sleep infinity"')
+    assert.equal(runArgs[sleepIdx - 1], 'chroxy-byok-snap:abc123-1700000000000')
+
+    // No `useradd` should have run on the restored container — the
+    // snapshot image already has the user baked in.
+    const setupCalls = execCmds.filter((args) =>
+      args.some((a) => typeof a === 'string' && a.includes('useradd')))
+    assert.equal(setupCalls.length, 0, 'restore must skip useradd')
+
+    await session.destroy()
+  })
+
+  it('snapshotImage opt auto-soils the restored container so reuse cannot leak', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_RESTORED_DIRTY\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const pool = poolStubWithSoiling()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      _pool: pool,
+      snapshotImage: 'chroxy-byok-snap:abc-123',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // The restored container is automatically marked soiled — its FS is
+    // coupled to the source conversation's history.
+    assert.deepEqual(pool.calls.markSoiled, ['CONTAINER_RESTORED_DIRTY'])
+
+    await session.destroy()
+
+    // And it's evicted on release, not pooled.
+    assert.equal(pool.calls.release.length, 1)
+  })
+
+  it('snapshot() persists metadata even when snapshotsDir is brand-new', async () => {
+    const { existsSync, readdirSync } = await import('node:fs')
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_MK\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const nested = join(tmpHome, 'deeply', 'nested', 'snaps')
+    assert.equal(existsSync(nested), false)
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      snapshotsDir: nested,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    await session.snapshot({ name: 'mkdir-test' })
+    assert.ok(existsSync(nested))
+    assert.equal(readdirSync(nested).filter((f) => f.endsWith('.json')).length, 1)
+
+    await session.destroy()
+  })
+
+  it('snapshotImage opt bypasses pool acquire — always launches fresh from the snapshot tag', async () => {
+    // Regression: pre-fix, _acquireOrStartContainer would call
+    // _pool.acquire() even when snapshotImage was set. A pool hit
+    // (matching the resource key — image/cwd/memory/cpu/user) returned
+    // a stock container and _startContainer() never ran, so the
+    // snapshot tag was silently ignored AND the recycled container's
+    // writable layer (unrelated auth/scratch) leaked in.
+    const runCalls = []
+    const _execFile = (cmd, args, opts, callback) => {
+      const sub = args[0]
+      if (sub === 'info') return callback(null, 'ok', '')
+      if (sub === 'run') {
+        runCalls.push([...args])
+        return callback(null, 'CONTAINER_FRESH_FROM_SNAP\n', '')
+      }
+      if (sub === 'exec') return callback(null, '', '')
+      if (sub === 'rm') return callback(null, '', '')
+      callback(null, '', '')
+    }
+    // Pool would happily return POOLED_STOCK_CID for this session's
+    // resource shape — if the bypass guard ever regresses, this stub
+    // makes the regression load-bearing.
+    const pool = poolStubWithSoiling({ acquireReturn: 'POOLED_STOCK_CID' })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backendStubWithCommit(),
+      _pool: pool,
+      snapshotImage: 'chroxy-byok-snap:bypass-test',
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // The pool MUST NOT have been asked for a container — restore is
+    // not poolable.
+    assert.equal(pool.calls.acquire.length, 0, 'pool.acquire() must not be called when snapshotImage is set')
+    // Docker run fired with the snapshot tag as the image. Anchor on
+    // the known `sleep infinity` command tail so unrelated `docker run`
+    // flag changes don't shift the assertion (#5100 review).
+    assert.equal(runCalls.length, 1)
+    const runArgs = runCalls[0]
+    const sleepIdx = runArgs.indexOf('sleep')
+    assert.ok(sleepIdx > 0 && runArgs[sleepIdx + 1] === 'infinity',
+      'docker run tail must end "<image> sleep infinity"')
+    assert.equal(runArgs[sleepIdx - 1], 'chroxy-byok-snap:bypass-test')
+    // And the active container id is the freshly-launched one, NOT the
+    // pool's would-be hit.
+    assert.equal(session._containerId, 'CONTAINER_FRESH_FROM_SNAP')
+
+    await session.destroy()
+  })
+})
+
+describe('DockerByokSession — snapshot name validation (#5076)', () => {
+  /**
+   * The `name` arg is currently only persisted into the metadata
+   * sidecar (the tag is auto-generated), but it is validated up front
+   * against Docker tag rules so a future revision can surface it into
+   * the tag without breaking callers.
+   *
+   * Rules enforced by `_resolveSnapshotName`:
+   *   - undefined / null   → fall back to tag slug (the omitted case)
+   *   - whitespace-only    → EINVAL (per #5076 AC)
+   *   - non-string         → EINVAL
+   *   - > 64 chars         → EINVAL
+   *   - uppercase or       → EINVAL
+   *     chars outside
+   *     [a-z0-9._-], or
+   *     leading . / -
+   *
+   * The validation runs BEFORE docker commit so a bad name does not
+   * leave a stranded tag in the daemon.
+   */
+  function backendStubCounting() {
+    const calls = { commit: [] }
+    return {
+      calls,
+      async execInEnvironment() {
+        return { stdout: '', stderr: '' }
+      },
+      async commitEnvironment(containerId, imageTag) {
+        calls.commit.push({ containerId, imageTag })
+        return `sha256:${imageTag.replace(/[^a-z0-9]/gi, '').slice(0, 64)}`
+      },
+    }
+  }
+
+  async function startedSession({ backend, snapshotsDir } = {}) {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_NV\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend || backendStubCounting(),
+      snapshotsDir: snapshotsDir || join(tmpHome, 'snapshots'),
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    return session
+  }
+
+  it('accepts a valid lowercase name and propagates it through to metadata', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap = await session.snapshot({ name: 'after-deps.v1_2' })
+    assert.equal(snap.name, 'after-deps.v1_2')
+    // Commit still ran (validation passed; docker side fired).
+    assert.equal(backend.calls.commit.length, 1)
+    await session.destroy()
+  })
+
+  it('omitted name falls back to the tag slug (auto-generated)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap = await session.snapshot()
+    // Tag slug shape: `<16-hex>-<13+ digit ts>`
+    assert.match(snap.name, /^[a-f0-9]{16}-\d{13,}$/)
+    assert.equal(snap.tag.split(':').pop(), snap.name)
+    await session.destroy()
+  })
+
+  it('null and undefined name both fall back to the tag slug', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap1 = await session.snapshot({ name: undefined })
+    assert.equal(snap1.tag.split(':').pop(), snap1.name)
+    const snap2 = await session.snapshot({ name: null })
+    assert.equal(snap2.tag.split(':').pop(), snap2.name)
+    await session.destroy()
+  })
+
+  it('rejects whitespace-only name with EINVAL BEFORE docker commit fires', async () => {
+    // #5076 AC: a string that trims to nothing is not "omitted" — the
+    // caller passed something and it carries no usable identifier, so
+    // reject at the API boundary rather than silently substituting the
+    // slug. `undefined`/`null` remain the "name is optional" sentinel.
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    for (const bad of ['', '   ', '\t', '\n', ' \t \n ']) {
+      await assert.rejects(
+        () => session.snapshot({ name: bad }),
+        (err) => err.code === 'EINVAL' && /empty|whitespace/i.test(err.message),
+        `expected EINVAL for ${JSON.stringify(bad)}`,
+      )
+    }
+    assert.equal(backend.calls.commit.length, 0, 'commit must not run on whitespace-only name')
+    await session.destroy()
+  })
+
+  it('rejects non-string name with EINVAL BEFORE docker commit fires', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    for (const bad of [123, true, {}, [], Symbol('x')]) {
+      await assert.rejects(
+        () => session.snapshot({ name: bad }),
+        (err) => err.code === 'EINVAL' && /must be a string/i.test(err.message),
+      )
+    }
+    assert.equal(backend.calls.commit.length, 0, 'commit must not run on invalid name')
+    await session.destroy()
+  })
+
+  it('rejects name with uppercase characters', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    await assert.rejects(
+      () => session.snapshot({ name: 'After-Deps' }),
+      (err) => err.code === 'EINVAL' && /lowercase/i.test(err.message),
+    )
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('rejects name with invalid characters (space, slash, colon, etc.)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    for (const bad of ['has space', 'has/slash', 'has:colon', 'has@at', 'has!bang', 'has,comma']) {
+      await assert.rejects(
+        () => session.snapshot({ name: bad }),
+        (err) => err.code === 'EINVAL' && /lowercase|\[a-z0-9/i.test(err.message),
+        `expected EINVAL for ${JSON.stringify(bad)}`,
+      )
+    }
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('rejects name with a leading dot or dash (not a valid Docker tag start)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    await assert.rejects(
+      () => session.snapshot({ name: '.hidden' }),
+      (err) => err.code === 'EINVAL',
+    )
+    await assert.rejects(
+      () => session.snapshot({ name: '-leading-dash' }),
+      (err) => err.code === 'EINVAL',
+    )
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('accepts a name with a leading underscore (Docker tag grammar permits it)', async () => {
+    // Docker's tag grammar is `[a-zA-Z0-9_][a-zA-Z0-9._-]{0,127}` — a
+    // leading `_` is explicitly valid. We mirror that minus the
+    // uppercase half. Pins the difference vs. leading `.` / `-`, which
+    // ARE rejected.
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const snap = await session.snapshot({ name: '_internal' })
+    assert.equal(snap.name, '_internal')
+    assert.equal(backend.calls.commit.length, 1)
+    await session.destroy()
+  })
+
+  it('rejects name longer than 64 characters', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const tooLong = 'a'.repeat(65)
+    await assert.rejects(
+      () => session.snapshot({ name: tooLong }),
+      (err) => err.code === 'EINVAL' && /65 chars.*max is 64/i.test(err.message),
+    )
+    assert.equal(backend.calls.commit.length, 0)
+    await session.destroy()
+  })
+
+  it('accepts a name of exactly 64 characters (boundary)', async () => {
+    const backend = backendStubCounting()
+    const session = await startedSession({ backend })
+    const max = 'a'.repeat(64)
+    const snap = await session.snapshot({ name: max })
+    assert.equal(snap.name, max)
+    assert.equal(backend.calls.commit.length, 1)
+    await session.destroy()
+  })
+})
+
+describe('DockerByokSession — postCreateCommand hook (#5025)', () => {
+  /**
+   * Acceptance: a `postCreateCommand: string | string[]` opt that runs
+   * once after the container is started (or first reused) and before
+   * the session is marked ready.
+   *
+   *   - Success → marker file written inside the container; subsequent
+   *     reuses with the same command skip the run.
+   *   - Failure (non-zero exit, timeout, or any throw from the backend)
+   *     → 'error' event with code 'post_create_command_failed', session
+   *     not marked ready, owned container torn down.
+   *   - Configurable timeout (default 5 min).
+   *   - Externally-managed containerId → caller owns lifecycle, so we
+   *     do NOT run the post-create hook.
+   */
+
+  /**
+   * "Fresh container" backend stub: the marker probe (`test -f
+   * /tmp/.chroxy-post-create-<hash>`) throws on first contact because
+   * the marker file does NOT yet exist. After the impl runs the
+   * postCreateCommand and writes the marker via `touch`, subsequent
+   * probes resolve clean — modelling the real container's filesystem.
+   *
+   * Extra `execResponses` (string-include-keyed) override the default
+   * `{ stdout: '', stderr: '' }` for the command itself, mirroring the
+   * non-post-create `backendStub` helper.
+   */
+  function freshContainerBackend({ execResponses = {}, markerWriteError = null } = {}) {
+    let markerPresent = false
+    const calls = []
+    return {
+      calls,
+      async execInEnvironment(containerId, opts) {
+        calls.push({ containerId, ...opts })
+        const cmd = opts.cmd || ''
+        if (cmd.includes('.chroxy-post-create')) {
+          if (cmd.startsWith('test -f ')) {
+            if (markerPresent) return { stdout: '', stderr: '' }
+            const err = new Error('exit 1')
+            err.code = 'exec_failed'
+            err.exitCode = 1
+            throw err
+          }
+          if (cmd.startsWith('touch ')) {
+            // #5068: opt-in marker-write failure so the
+            // command-success / marker-write-failure path is testable.
+            // Without this we'd have to write a bespoke backend stub
+            // for every test in that family.
+            if (markerWriteError) throw markerWriteError
+            markerPresent = true
+            return { stdout: '', stderr: '' }
+          }
+        }
+        const matcher = Object.keys(execResponses).find((needle) => cmd.includes(needle))
+        if (matcher) {
+          const resp = execResponses[matcher]
+          if (resp.throw) throw resp.throw
+          return { stdout: resp.stdout || '', stderr: resp.stderr || '' }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+  }
+
+  it('runs the postCreateCommand inside the container as the non-root user', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend({
+      execResponses: {
+        'npm install': { stdout: 'added 42 packages\n', stderr: '' },
+      },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    const installCalls = backend.calls.filter(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.equal(installCalls.length, 1, 'expected one npm install invocation')
+    assert.equal(installCalls[0].user, 'chroxy', 'post-create must run as the non-root user')
+
+    await session.destroy()
+  })
+
+  it('joins an array postCreateCommand with && so steps run sequentially and stop on the first failure', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_ARR\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: ['npm install', 'npm run build'],
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const combined = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && c.cmd.includes('npm run build'),
+    )
+    assert.ok(combined, 'expected the combined && command to run')
+    assert.match(combined.cmd, /npm install.*&&.*npm run build/)
+
+    await session.destroy()
+  })
+
+  it('throws on a non-string entry inside a postCreateCommand array (no silent drop)', () => {
+    // #5063 review (Copilot, comment id 3349258851): silently mapping a
+    // non-string entry to '' would mask misconfiguration — e.g. an
+    // array like ['npm install', null, 'npm test'] would have run only
+    // the first and last steps, skipping the middle slot without any
+    // surface. Now we throw at construction so the operator sees the
+    // typo / templating bug immediately.
+    assert.throws(
+      () => new DockerByokSession({
+        cwd: '/host/cwd',
+        postCreateCommand: ['npm install', null, 'npm test'],
+        _execFile: execFileStub({ info: { stdout: 'ok' } }),
+        _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+      }),
+      /postCreateCommand\[1\] must be a string \(got null\)/,
+    )
+    assert.throws(
+      () => new DockerByokSession({
+        cwd: '/host/cwd',
+        postCreateCommand: ['npm install', 42, 'npm test'],
+        _execFile: execFileStub({ info: { stdout: 'ok' } }),
+        _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+      }),
+      /postCreateCommand\[1\] must be a string \(got number\)/,
+    )
+    assert.throws(
+      () => new DockerByokSession({
+        cwd: '/host/cwd',
+        postCreateCommand: ['npm install', '   ', 'npm test'],
+        _execFile: execFileStub({ info: { stdout: 'ok' } }),
+        _dockerBackend: { async execInEnvironment() { return { stdout: '', stderr: '' } } },
+      }),
+      /postCreateCommand\[1\] must be a non-empty string/,
+    )
+  })
+
+  it('fails session start with a clear error event when post-create exits non-zero', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_FAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const installErr = Object.assign(new Error('exit 1: npm install failed'), {
+      code: 'exec_failed',
+      exitCode: 1,
+      stderr: 'npm ERR! missing package.json',
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'npm install': { throw: installErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, false, 'failed post-create must not mark session ready')
+    const postCreateErr = events.find((e) => /postCreateCommand/.test(e.message))
+    assert.ok(postCreateErr, 'expected a postCreateCommand error event')
+    assert.equal(postCreateErr.code, 'post_create_command_failed')
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.ok(rmCalls.some((c) => c.args.includes('CONTAINER_POSTCREATE_FAIL')),
+      'failed start must tear down the owned container')
+  })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // #5067 — capture stdout/stderr from a failed postCreateCommand so the
+  // operator can debug without re-running the broken setup
+  // ─────────────────────────────────────────────────────────────────────
+
+  it('#5067: includes captured stderr in the failure event when stderr is the diagnostic stream', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_STDERR\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const stderrText = 'npm ERR! code ENOENT\nnpm ERR! syscall open\nnpm ERR! missing package.json'
+    const installErr = Object.assign(new Error(stderrText), {
+      code: 'exec_failed',
+      exitCode: 1,
+      stdout: '',
+      stderr: stderrText,
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'npm install': { throw: installErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    assert.equal(typeof errEvent.stdout, 'string', 'event must include a stdout field')
+    assert.equal(typeof errEvent.stderr, 'string', 'event must include a stderr field')
+    assert.equal(errEvent.stdout, '', 'stderr-only failure: stdout field is empty string')
+    assert.match(errEvent.stderr, /npm ERR! missing package\.json/,
+      'stderr capture must include the diagnostic tail')
+  })
+
+  it('#5067: includes captured stdout in the failure event when stdout is the diagnostic stream', async () => {
+    // Repository bootstrap scripts often `echo "ERROR: ..."` to stdout
+    // before exiting non-zero — the issue's motivating case. Pre-#5067,
+    // the operator saw only the (empty) stderr and had to re-run.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_STDOUT\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const stdoutText = 'Bootstrapping...\nERROR: missing required env var ACME_TOKEN\nAborting.\n'
+    const bootstrapErr = Object.assign(new Error(''), {
+      code: 'exec_failed',
+      exitCode: 2,
+      stdout: stdoutText,
+      stderr: '',
+    })
+    const backend = freshContainerBackend({
+      execResponses: { './scripts/setup.sh': { throw: bootstrapErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: './scripts/setup.sh',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    assert.match(errEvent.stdout, /ERROR: missing required env var ACME_TOKEN/,
+      'stdout-only failure: the bootstrap diagnostic must be captured')
+    assert.equal(errEvent.stderr, '', 'stdout-only failure: stderr field is empty string')
+  })
+
+  it('#5067: includes both streams in the failure event when both have output', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_BOTH\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const stdoutText = 'Reading package lists...\nBuilding dependency tree...\nE: Unable to locate package gibberish-xyz\n'
+    const stderrText = 'W: apt-get is being run by an unprivileged user\n'
+    const aptErr = Object.assign(new Error(stderrText.trim()), {
+      code: 'exec_failed',
+      exitCode: 100,
+      stdout: stdoutText,
+      stderr: stderrText,
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'apt-get install': { throw: aptErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'apt-get install gibberish-xyz',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    assert.match(errEvent.stdout, /Unable to locate package gibberish-xyz/,
+      'both-streams failure: stdout must be captured')
+    assert.match(errEvent.stderr, /apt-get is being run by an unprivileged user/,
+      'both-streams failure: stderr must be captured')
+  })
+
+  it('#5067: tail-caps a runaway postCreateCommand output stream so the error payload stays bounded', async () => {
+    // A misbehaving setup script (`yes "spam" | head -c 100000`) must
+    // not produce an unbounded error event — the WS frame would explode
+    // past the encryption ceiling. We keep the TAIL because the actual
+    // diagnostic (the throw, the ENOENT, the exit code) almost always
+    // lands in the final lines.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_PC_HUGE\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const noise = 'spam line that gets repeated forever\n'.repeat(5000)
+    const tailMarker = '\nFATAL: final-line-diagnostic-marker-XYZ\n'
+    const hugeStdout = noise + tailMarker
+    const hugeErr = Object.assign(new Error(''), {
+      code: 'exec_failed',
+      exitCode: 1,
+      stdout: hugeStdout,
+      stderr: '',
+    })
+    const backend = freshContainerBackend({
+      execResponses: { 'huge-setup.sh': { throw: hugeErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'huge-setup.sh',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const errEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(errEvent, 'expected post_create_command_failed error event')
+    // Cap is 4 KiB per stream; allow the truncation-marker line (~50 B)
+    // on top.
+    assert.ok(errEvent.stdout.length < 5000,
+      `stdout must be tail-capped (got ${errEvent.stdout.length} bytes)`)
+    assert.match(errEvent.stdout, /FATAL: final-line-diagnostic-marker-XYZ/,
+      'tail must preserve the trailing diagnostic — that is where the actual error lives')
+    assert.match(errEvent.stdout, /\[truncated — first \d+ bytes omitted\]/,
+      'truncation must be surfaced inline so the operator knows the prefix was dropped')
+  })
+
+  it('emits post_create_marker_write_failed (not post_create_command_failed) when the command succeeded but the marker touch failed', async () => {
+    // #5068: the marker-write path is internal infrastructure — if the
+    // command itself succeeded, the operator should not see a
+    // `post_create_command_failed` and assume their setup script
+    // exploded. They should see a distinct code that tells them future
+    // pool reuses will re-run setup because the cache stamp didn't land.
+    // The session itself stays alive because setup DID apply inside the
+    // container — it's the cache that broke, not the workload.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_MARKERFAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const markerErr = Object.assign(new Error('exec_failed: cannot touch /tmp/.chroxy-post-create-…: Read-only file system'), {
+      code: 'exec_failed',
+      exitCode: 1,
+    })
+    const backend = freshContainerBackend({
+      execResponses: {
+        'npm install': { stdout: 'added 42 packages\n', stderr: '' },
+      },
+      markerWriteError: markerErr,
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    const markerEvent = events.find((e) => e.code === 'post_create_marker_write_failed')
+    assert.ok(markerEvent, 'expected a post_create_marker_write_failed error event')
+    assert.equal(markerEvent.fatal, false, 'marker-write failure must be flagged non-fatal — the command did succeed')
+    assert.match(markerEvent.message, /marker write failed/)
+
+    const cmdFailEvent = events.find((e) => e.code === 'post_create_command_failed')
+    assert.equal(cmdFailEvent, undefined,
+      'marker-write failure must NOT surface as post_create_command_failed (the command actually succeeded)')
+
+    // Command succeeded → session should still come up ready and the
+    // owned container MUST NOT be torn down. An operator can retry on
+    // the next session; the workload is functional now.
+    assert.equal(session._containerReady, true,
+      'marker-write failure must not tear down — the command succeeded and the session is functional')
+    const rmCalls = _execFile.calls.filter((c) => c.args[0] === 'rm')
+    assert.equal(rmCalls.length, 0,
+      'marker-write failure must not trigger container tear-down')
+
+    await session.destroy()
+  })
+
+  it('soils the pool container when the marker write fails so it is evicted on release (#5089 review)', async () => {
+    // #5089 review (Copilot, comment id 3349977279): a container whose
+    // marker write failed is broken in a real way for the cache stamp
+    // (likely read-only /tmp, no space, AppArmor profile). If we let
+    // it back into the pool, the next acquire will re-run the full
+    // postCreateCommand, find no marker, and re-fail the touch for the
+    // same underlying reason — wasteful for `npm install`, potentially
+    // incorrect for `apt-get install`. Soiling the container makes the
+    // pool evict it on release(), so the next session gets a fresh
+    // container. THIS session still completes because the command did
+    // succeed inside the container.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_MARKERSOIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const markerErr = Object.assign(new Error('exec_failed: cannot touch /tmp/.chroxy-post-create-…: Read-only file system'), {
+      code: 'exec_failed',
+      exitCode: 1,
+    })
+    const backend = freshContainerBackend({
+      execResponses: {
+        'npm install': { stdout: 'added 42 packages\n', stderr: '' },
+      },
+      markerWriteError: markerErr,
+    })
+    // Tiny pool spy — only `markSoiled` is exercised by the path under
+    // test. `acquire`/`release` return null/undefined so the start()
+    // flow falls through to the normal owned-container path used by the
+    // sibling marker-fail test.
+    const soilCalls = []
+    const poolSpy = {
+      acquire: () => null,
+      release: async () => {},
+      markSoiled: (id) => { soilCalls.push(id) },
+      forget: async () => {},
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+      _pool: poolSpy,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    // Distinct marker code still surfaces (regression guard on #5068).
+    const markerEvent = events.find((e) => e.code === 'post_create_marker_write_failed')
+    assert.ok(markerEvent, 'expected post_create_marker_write_failed event')
+
+    // Session continues to ready — the command DID succeed.
+    assert.equal(session._containerReady, true,
+      'marker-write failure must not tear down — session still functional')
+
+    // The container must have been soiled exactly once with this
+    // session's containerId. Without the soil call, the pool would
+    // recycle a container whose marker write keeps failing.
+    assert.equal(soilCalls.length, 1, 'expected exactly one markSoiled call')
+    assert.equal(soilCalls[0], session._containerId,
+      'soil call must target this session\'s container id')
+
+    await session.destroy()
+  })
+
+  it('forwards a configurable postCreateTimeoutMs to the backend exec', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_TO\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      postCreateTimeoutMs: 60_000,
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const installCall = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.ok(installCall, 'expected install invocation')
+    assert.equal(installCall.timeout, 60_000)
+
+    await session.destroy()
+  })
+
+  it('defaults the post-create timeout to 5 minutes', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_DEFTO\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const installCall = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.ok(installCall, 'expected install invocation')
+    assert.equal(installCall.timeout, 300_000)
+
+    await session.destroy()
+  })
+
+  it('caps a typoed postCreateTimeoutMs above MAX_SANE_DURATION_MS (24h) back to the 5-min default', async () => {
+    // #5063 review (Copilot, comment id 3349258916): a typoed timeout
+    // like `99999999999` (extra digit) should fall back to the default
+    // rather than producing a many-hours docker exec. The shared
+    // `isOperatorTimeoutInRange` helper applies the same ceiling the
+    // protocol schemas already enforce.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_HUGE\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      // 25h — just over MAX_SANE_DURATION_MS (24h)
+      postCreateTimeoutMs: 25 * 60 * 60 * 1000,
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    const installCall = backend.calls.find(
+      (c) => c.cmd && c.cmd.includes('npm install') && !c.cmd.includes('.chroxy-post-create'),
+    )
+    assert.ok(installCall, 'expected install invocation')
+    assert.equal(installCall.timeout, 300_000,
+      'over-ceiling timeout must fall back to the 5-min default')
+
+    await session.destroy()
+  })
+
+  it('surfaces a post-create timeout as a clear error event', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_HANG\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const timeoutErr = Object.assign(new Error('exec timed out after 100ms'), { code: 'ETIMEDOUT' })
+    const backend = freshContainerBackend({
+      execResponses: { 'sleep 999': { throw: timeoutErr } },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'sleep 999',
+      postCreateTimeoutMs: 100,
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    const events = []
+    session.on('error', (e) => events.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, false)
+    const event = events.find((e) => /postCreateCommand/.test(e.message))
+    assert.ok(event, 'expected post-create timeout error event')
+    assert.equal(event.code, 'post_create_command_failed')
+    assert.match(event.message, /timed out|ETIMEDOUT/)
+  })
+
+  it('writes a cache marker after a successful run', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_POSTCREATE_MARKER\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = freshContainerBackend()
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    // After the command runs, the impl touches a marker file under
+    // /tmp/.chroxy-post-create-<hash> so a future reuse can skip the run.
+    const markerWrite = backend.calls.find(
+      (c) => c.cmd
+        && c.cmd.includes('.chroxy-post-create')
+        && (c.cmd.includes('touch ') || c.cmd.includes('> ')),
+    )
+    assert.ok(markerWrite, 'expected a marker-write call after successful post-create')
+
+    await session.destroy()
+  })
+
+  it('skips re-running postCreateCommand on pool reuse when the cache marker is present', async () => {
+    // Pool hit + marker present → command MUST NOT run again.
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    let postCreateInvocations = 0
+    const backend = {
+      calls: [],
+      async execInEnvironment(containerId, opts) {
+        backend.calls.push({ containerId, ...opts })
+        // Marker probe: empty stdout/stderr signals "present" — the impl
+        // uses `test -f <marker>` which resolves clean on a hit.
+        if (opts.cmd && opts.cmd.includes('.chroxy-post-create') && !opts.cmd.includes('touch')) {
+          return { stdout: '', stderr: '' }
+        }
+        if (opts.cmd && opts.cmd.includes('npm install')) {
+          postCreateInvocations++
+          return { stdout: '', stderr: '' }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const pool = {
+      acquire() { return 'CONTAINER_WARM' },
+      async release() { return true },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._acquiredFromPool, true)
+    assert.equal(session._containerId, 'CONTAINER_WARM')
+    assert.equal(postCreateInvocations, 0,
+      'cache hit: postCreateCommand must not re-execute when marker is present')
+    const probeCalls = backend.calls.filter(
+      (c) => c.cmd && c.cmd.includes('.chroxy-post-create') && !c.cmd.includes('touch'),
+    )
+    assert.ok(probeCalls.length >= 1, 'expected at least one marker probe on pool reuse')
+
+    await session.destroy()
+  })
+
+  it('re-runs postCreateCommand on pool reuse if the marker is missing', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    let postCreateInvocations = 0
+    const backend = {
+      calls: [],
+      async execInEnvironment(containerId, opts) {
+        backend.calls.push({ containerId, ...opts })
+        // Marker probe: throw with exit 1 → "missing".
+        if (opts.cmd && opts.cmd.includes('.chroxy-post-create') && !opts.cmd.includes('touch')) {
+          const err = new Error('exit 1')
+          err.code = 'exec_failed'
+          err.exitCode = 1
+          err.stderr = ''
+          throw err
+        }
+        if (opts.cmd && opts.cmd.includes('npm ci')) {
+          postCreateInvocations++
+          return { stdout: '', stderr: '' }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const pool = {
+      acquire() { return 'CONTAINER_WARM_NEW_CMD' },
+      async release() { return true },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm ci',
+      _execFile,
+      _dockerBackend: backend,
+      _pool: pool,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._acquiredFromPool, true)
+    assert.equal(postCreateInvocations, 1,
+      'cache miss on warm container: postCreateCommand must run')
+
+    await session.destroy()
+  })
+
+  it('does NOT run postCreateCommand when the session attaches to an external container', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      exec: { stdout: '' },
+    })
+    let postCreateInvocations = 0
+    const backend = {
+      calls: [],
+      async execInEnvironment(containerId, opts) {
+        backend.calls.push({ containerId, ...opts })
+        if (opts.cmd && opts.cmd.includes('npm install')) {
+          postCreateInvocations++
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      containerId: 'EXTERNAL_MANAGED',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(postCreateInvocations, 0,
+      'external container: postCreateCommand must NOT run (caller-owned)')
+
+    await session.destroy()
+  })
+
+  it('default: postCreateCommand is null and no extra backend calls happen at start', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_NOPC\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = backendStub({ defaultResponse: { stdout: '', stderr: '' } })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    assert.equal(backend.calls.length, 0,
+      'with no postCreateCommand, the session must not probe / write any markers')
+
+    await session.destroy()
+  })
+
+  // ─────────────────────────────────────────────────────────────────────
+  // #5069 — stream postCreateCommand output to the session log surface as
+  // bytes arrive (long-running setup feedback)
+  // ─────────────────────────────────────────────────────────────────────
+
+  /**
+   * Streaming-aware "fresh container" backend. Like freshContainerBackend
+   * but, for the postCreateCommand run (any cmd matching a key in
+   * `streamChunks`), it invokes `opts.onData(chunk, stream)` with each
+   * canned chunk in order BEFORE resolving — modelling the docker backend's
+   * spawn path firing 'data' events as bytes arrive. The marker probe /
+   * touch behaviour is identical so idempotency stays testable.
+   *
+   * `failAfterStream` (an Error) makes the matched command reject AFTER
+   * streaming the chunks, so we can assert that the buffered tail is still
+   * attached to the failure event even when output was streamed.
+   */
+  function streamingContainerBackend({ streamChunks = {}, failAfterStream = null } = {}) {
+    let markerPresent = false
+    const calls = []
+    return {
+      calls,
+      async execInEnvironment(containerId, opts) {
+        calls.push({ containerId, ...opts })
+        const cmd = opts.cmd || ''
+        if (cmd.includes('.chroxy-post-create')) {
+          if (cmd.startsWith('test -f ')) {
+            if (markerPresent) return { stdout: '', stderr: '' }
+            const err = new Error('exit 1')
+            err.code = 'exec_failed'
+            throw err
+          }
+          if (cmd.startsWith('touch ')) {
+            markerPresent = true
+            return { stdout: '', stderr: '' }
+          }
+        }
+        const matcher = Object.keys(streamChunks).find((needle) => cmd.includes(needle))
+        if (matcher) {
+          let stdout = ''
+          let stderr = ''
+          for (const [stream, chunk] of streamChunks[matcher]) {
+            if (stream === 'stdout') stdout += chunk
+            else stderr += chunk
+            if (typeof opts.onData === 'function') opts.onData(chunk, stream)
+          }
+          if (failAfterStream) {
+            const err = failAfterStream instanceof Error ? failAfterStream : new Error(failAfterStream)
+            err.stdout = stdout
+            err.stderr = stderr
+            throw err
+          }
+          return { stdout, stderr }
+        }
+        return { stdout: '', stderr: '' }
+      },
+    }
+  }
+
+  it('#5069: streams postCreateCommand output as setup_log events in arrival order', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_STREAM\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const backend = streamingContainerBackend({
+      streamChunks: {
+        'npm install': [
+          ['stdout', 'npm WARN deprecated foo@1\n'],
+          ['stderr', 'fetching metadata...\n'],
+          ['stdout', 'added 42 packages in 3s\n'],
+        ],
+      },
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+
+    const logs = []
+    session.on('setup_log', (e) => logs.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    assert.equal(logs.length, 3, 'expected one setup_log per streamed chunk')
+    assert.deepEqual(
+      logs.map((l) => [l.stream, l.chunk]),
+      [
+        ['stdout', 'npm WARN deprecated foo@1\n'],
+        ['stderr', 'fetching metadata...\n'],
+        ['stdout', 'added 42 packages in 3s\n'],
+      ],
+      'setup_log events must preserve arrival order and stream tagging',
+    )
+    assert.ok(logs.every((l) => l.phase === 'post_create'), 'every chunk tagged with phase post_create')
+
+    await session.destroy()
+  })
+
+  it('#5069: setup_log is declared in customEvents so it reaches ws-forwarding', () => {
+    // session-manager.js:_wireSessionEvents only bridges events listed in
+    // the constructor's customEvents to session_event listeners. Without
+    // this, setup_log would fire on the local EventEmitter and never reach
+    // the dashboard.
+    assert.ok(
+      DockerByokSession.customEvents.includes('setup_log'),
+      'setup_log must be in customEvents',
+    )
+    // Inherited BYOK events must still be present (extend, not replace).
+    assert.ok(DockerByokSession.customEvents.includes('tool_start'))
+    assert.ok(DockerByokSession.customEvents.includes('tool_result'))
+  })
+
+  it('#5069: a failed streamed postCreateCommand still attaches the buffered tail to the error event', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_STREAM_FAIL\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    const failErr = Object.assign(new Error('exit 1'), { code: 1 })
+    const backend = streamingContainerBackend({
+      streamChunks: {
+        'npm install': [
+          ['stdout', 'OUT: building native module\n'],
+          ['stderr', 'ERR: node-gyp rebuild failed\n'],
+        ],
+      },
+      failAfterStream: failErr,
+    })
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+
+    const logs = []
+    const errors = []
+    session.on('setup_log', (e) => logs.push(e))
+    session.on('error', (e) => errors.push(e))
+    await session.start()
+
+    // Streaming still happened before the failure.
+    assert.equal(logs.length, 2, 'chunks streamed before the failure')
+    // Failure event carries the buffered tail (#5067 preserved).
+    const pcErr = errors.find((e) => e.code === 'post_create_command_failed')
+    assert.ok(pcErr, 'expected a post_create_command_failed error event')
+    assert.match(pcErr.stdout, /OUT: building native module/, 'buffered stdout tail attached')
+    assert.match(pcErr.stderr, /ERR: node-gyp rebuild failed/, 'buffered stderr tail attached')
+    assert.equal(session._containerReady, false, 'failed post-create must not mark ready')
+  })
+
+  it('#5069: cached marker skips the run — no setup_log when command already applied', async () => {
+    const _execFile = execFileStub({
+      info: { stdout: 'ok' },
+      run: { stdout: 'CONTAINER_STREAM_CACHED\n' },
+      exec: { stdout: '' },
+      rm: { stdout: '' },
+    })
+    // Marker probe resolves clean (marker present) → run path is skipped.
+    const calls = []
+    const backend = {
+      calls,
+      async execInEnvironment(containerId, opts) {
+        calls.push({ containerId, ...opts })
+        const cmd = opts.cmd || ''
+        if (cmd.startsWith('test -f ') && cmd.includes('.chroxy-post-create')) {
+          return { stdout: '', stderr: '' } // marker present
+        }
+        if (typeof opts.onData === 'function') opts.onData('should-not-stream', 'stdout')
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const session = new DockerByokSession({
+      cwd: '/host/cwd',
+      postCreateCommand: 'npm install',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+
+    const logs = []
+    session.on('setup_log', (e) => logs.push(e))
+    await session.start()
+
+    assert.equal(session._containerReady, true)
+    assert.equal(logs.length, 0, 'cached marker must skip the run — no streamed output')
+    const installRun = calls.find((c) => c.cmd === 'npm install')
+    assert.ok(!installRun, 'the postCreateCommand itself must not run when marker is present')
+
+    await session.destroy()
+  })
+})
+
+describe('docker-byok provider registration', () => {
+  it('registerDockerProvider() wires docker-byok when environments are enabled and docker is available', async () => {
+    // Spy on console.warn so accidental log noise during the test
+    // doesn't leak into the suite output.
+    const config = { environments: { enabled: true } }
+    // The lazy import inside registerDockerProvider() shellsout to
+    // `docker info` via execFileSync. We can't stub that without
+    // patching child_process globally — but the registration is
+    // idempotent: if docker is unavailable, the function returns
+    // early. Either way, the result we care about is the registry
+    // shape after the call.
+    await registerDockerProvider(config).catch(() => {})
+    try {
+      const Klass = getProvider('docker-byok')
+      assert.ok(Klass === DockerByokSession, 'docker-byok must point at DockerByokSession')
+    } catch (err) {
+      // docker info failed on the CI runner → docker providers were
+      // skipped. That's an expected no-op path; the provider class is
+      // still importable and the lazy registration is idempotent.
+      assert.match(err.message, /Unknown provider/)
+    }
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// #5024 — DevContainer + Compose support
+// ─────────────────────────────────────────────────────────────────────
+
+describe('DockerByokSession — devcontainer.json overlay (#5024)', () => {
+  /**
+   * Write a .devcontainer/devcontainer.json fixture into a fresh tmp
+   * dir and return the dir for use as cwd.
+   */
+  function makeDevcontainerCwd(content, { sidecar = false } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-dc-test-'))
+    if (sidecar) {
+      writeFileSync(join(dir, '.devcontainer.json'), JSON.stringify(content))
+    } else {
+      mkdirSync(join(dir, '.devcontainer'), { recursive: true })
+      writeFileSync(join(dir, '.devcontainer', 'devcontainer.json'), JSON.stringify(content))
+    }
+    return dir
+  }
+
+  it('constructor records useDevcontainer flag but defers parsing', () => {
+    const cwd = makeDevcontainerCwd({ image: 'python:3.12-slim' })
+    try {
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile: execFileStub(),
+        _dockerBackend: backendStub(),
+      })
+      assert.equal(session._useDevcontainer, true)
+      assert.equal(session._dcConfig, null, 'parse should be deferred to start()')
+      assert.equal(session._image, 'node:22-slim', 'default preserved before resolve')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() overlays devcontainer.json image when no explicit image is passed', async () => {
+    const cwd = makeDevcontainerCwd({ image: 'python:3.12-slim' })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_dc_image\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      assert.ok(runCall, 'docker run was not called')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.ok(sleepIdx > 0, 'expected sleep as command')
+      assert.equal(runCall.args[sleepIdx - 1], 'python:3.12-slim')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('explicit constructor image wins over devcontainer.json image', async () => {
+    const cwd = makeDevcontainerCwd({ image: 'python:3.12-slim' })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_explicit\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        image: 'node:22-bookworm',
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], 'node:22-bookworm')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() applies containerEnv from devcontainer.json as --env flags', async () => {
+    const cwd = makeDevcontainerCwd({
+      image: 'node:22-slim',
+      containerEnv: { LANG: 'en_US.UTF-8', NODE_OPTIONS: '--max-old-space-size=2048' },
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_env\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      assert.ok(runCall.args.some(a => a === 'LANG=en_US.UTF-8'), 'LANG env not forwarded')
+      assert.ok(runCall.args.some(a => a === 'NODE_OPTIONS=--max-old-space-size=2048'), 'NODE_OPTIONS env not forwarded')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() drops invalid containerEnv keys (defence-in-depth)', async () => {
+    const cwd = makeDevcontainerCwd({
+      containerEnv: { 'BAD;KEY': 'evil', 'GOOD_KEY': 'fine' },
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_sanitize\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      assert.ok(!runCall.args.some(a => a.startsWith('BAD;KEY=')), 'invalid key leaked through')
+      assert.ok(runCall.args.some(a => a === 'GOOD_KEY=fine'), 'valid key missing')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() applies forwardPorts as -p flags', async () => {
+    const cwd = makeDevcontainerCwd({
+      forwardPorts: [3000, 5432, '8080:80'],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_ports\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const ports = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '-p') ports.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(ports, ['3000:3000', '5432:5432', '8080:80'])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() normalises bare-port strings to host:container — fix from PR #5070 review', async () => {
+    // Pre-fix, a string "3000" would become `docker run -p 3000`,
+    // which Docker treats as "publish container port 3000 to a RANDOM
+    // host port" — surprising for a DevContainer forward where the
+    // model expects 3000:3000. Both numeric `3000` and bare-string
+    // `"3000"` should now produce the same `-p 3000:3000` mapping.
+    const cwd = makeDevcontainerCwd({
+      forwardPorts: ['3000', '5432', '8080:80'],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_str_ports\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const ports = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '-p') ports.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(ports, ['3000:3000', '5432:5432', '8080:80'])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() rejects mounts pointing outside cwd', async () => {
+    const cwd = makeDevcontainerCwd({
+      mounts: [
+        'source=/etc/shadow,target=/workspace/shadow,type=bind',
+        `source=${tmpdir()}/safe,target=/safe,type=bind`,
+      ],
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_mount\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const mounts = []
+      for (let i = 0; i < runCall.args.length; i++) {
+        if (runCall.args[i] === '--mount') mounts.push(runCall.args[i + 1])
+      }
+      assert.deepEqual(mounts, [])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('start() runs postCreateCommand as the non-root user after useradd', async () => {
+    const cwd = makeDevcontainerCwd({ postCreateCommand: 'npm install' })
+    try {
+      const execCalls = []
+      const _execFile = (cmd, args, opts, cb) => {
+        execCalls.push({ cmd, args: [...args] })
+        if (args[0] === 'info') return cb(null, 'ok', '')
+        if (args[0] === 'run') return cb(null, 'CONTAINER_post\n', '')
+        if (args[0] === 'exec') return cb(null, '', '')
+        if (args[0] === 'rm') return cb(null, '', '')
+        return cb(null, '', '')
+      }
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const postCall = execCalls.find(c => c.args[0] === 'exec' && c.args.includes('npm install'))
+      assert.ok(postCall, 'postCreateCommand exec not found')
+      assert.ok(postCall.args.includes('-u'), 'postCreateCommand missing -u flag')
+      assert.equal(postCall.args[postCall.args.indexOf('-u') + 1], 'chroxy')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('useDevcontainer with no devcontainer.json is a no-op (default v1 path)', async () => {
+    const cwd = mkdtempSync(join(tmpdir(), 'chroxy-dc-nofile-'))
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_nodc\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], 'node:22-slim')
+      const mounts = runCall.args.filter(a => a === '--mount')
+      assert.equal(mounts.length, 0)
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('reads .devcontainer.json sidecar form when .devcontainer/ is absent', async () => {
+    const cwd = makeDevcontainerCwd({ image: 'alpine:3.20' }, { sidecar: true })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_sidecar\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const runCall = _execFile.calls.find((c) => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], 'alpine:3.20')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('devcontainer.json remoteUser is applied when validated', async () => {
+    const cwd = makeDevcontainerCwd({ remoteUser: 'devuser' })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        run: { stdout: 'CONTAINER_user\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const setupCall = _execFile.calls.find(c =>
+        c.args[0] === 'exec' && c.args.includes('bash') && c.args.some(a => typeof a === 'string' && a.includes('useradd')))
+      assert.ok(setupCall, 'useradd exec not found')
+      assert.ok(setupCall.args.some(a => typeof a === 'string' && a.includes('useradd -m -s /bin/bash devuser')),
+        `expected useradd for devuser, got: ${setupCall.args.join(' ')}`)
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('DockerByokSession — devcontainer fingerprint in pool key (#5080)', () => {
+  /**
+   * The stale-config hazard fixed by #5080:
+   *   1. Session A starts with devcontainer.json A. Container provisioned
+   *      with A's `containerEnv` / `mounts` / `postCreateCommand`. Pool
+   *      caches it on release.
+   *   2. Operator edits devcontainer.json.
+   *   3. Session B starts at the same cwd; without the fingerprint the
+   *      pool key matches A's and B silently picks up the stale container.
+   *
+   * These tests assert the post-fix behaviour: a changed overlay produces
+   * a different pool key, an unchanged overlay produces the same key, and
+   * a non-devcontainer session keeps the pre-#5080 5-segment key shape.
+   */
+  function makeDevcontainerCwd(content) {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(dir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(dir, '.devcontainer', 'devcontainer.json'), JSON.stringify(content))
+    return dir
+  }
+
+  function makeSession(cwd, opts = {}) {
+    return new DockerByokSession({
+      cwd,
+      useDevcontainer: true,
+      _execFile: execFileStub(),
+      _dockerBackend: backendStub(),
+      ...opts,
+    })
+  }
+
+  it('useDevcontainer: false → key has the pre-#5080 5-segment shape (backward compat)', () => {
+    // A non-devcontainer session must NOT have a trailing fingerprint
+    // segment, so old pool entries (released before this PR) still hit
+    // and non-devcontainer sessions all share one bucket.
+    const session = new DockerByokSession({
+      cwd: '/tmp/non-devcontainer-cwd',
+      _execFile: execFileStub(),
+      _dockerBackend: backendStub(),
+    })
+    const key = session._poolKey()
+    // image|cwd|memoryLimit|cpuLimit|containerUser → 5 segments, no
+    // trailing |<fingerprint>.
+    assert.equal(key.split('|').length, 5)
+    assert.equal(session._devcontainerFingerprint, null)
+  })
+
+  it('useDevcontainer: true → fingerprint is populated and folded into the key', () => {
+    const cwd = makeDevcontainerCwd({
+      containerEnv: { LANG: 'fr_FR.UTF-8' },
+    })
+    try {
+      const session = makeSession(cwd)
+      // Before _resolveDevContainer, the fingerprint is null.
+      assert.equal(session._devcontainerFingerprint, null)
+      session._resolveDevContainer()
+      assert.ok(session._devcontainerFingerprint, 'fingerprint should be populated after resolve')
+      assert.equal(typeof session._devcontainerFingerprint, 'string')
+      assert.equal(session._devcontainerFingerprint.length, 16)
+      // 16 hex chars
+      assert.match(session._devcontainerFingerprint, /^[0-9a-f]{16}$/)
+      const key = session._poolKey()
+      // Now 6 segments — base shape + fingerprint suffix.
+      assert.equal(key.split('|').length, 6)
+      assert.ok(key.endsWith(`|${session._devcontainerFingerprint}`),
+        `expected key to end with |<fingerprint>, got ${key}`)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('two identical devcontainer.json files → SAME pool key (warm pool can hit)', () => {
+    // The fingerprint is purely a function of the resolved overlay, so
+    // two sessions parsing identical devcontainer.json content must
+    // produce identical fingerprints — otherwise the pool would never
+    // hit across sessions in the common case (an unchanged file).
+    const dc = {
+      image: 'node:22-slim',
+      containerEnv: { LANG: 'en_US.UTF-8' },
+      forwardPorts: [3000],
+    }
+    const cwdA = makeDevcontainerCwd(dc)
+    const cwdB = makeDevcontainerCwd(dc)
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      // Same fingerprint even though cwd differs (cwd is part of the
+      // key, but the fingerprint should not depend on cwd).
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'identical devcontainer.json content must fingerprint identically')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed containerEnv → DIFFERENT fingerprint and pool key (#5080 stale-config fix)', () => {
+    // This is the concrete hazard scenario from the issue:
+    //   - sessionA with LANG=fr_FR.UTF-8
+    //   - operator edits the file
+    //   - sessionB with LANG=en_US.UTF-8 at the same cwd
+    // Pre-#5080 both produced the same key. Post-#5080 they must differ.
+    const cwdA = makeDevcontainerCwd({ containerEnv: { LANG: 'fr_FR.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+      // The cwds differ too (separate tmpdirs) so use _poolKey directly
+      // to make sure the bust survives even with matching resource shape.
+      const baseSpec = {
+        image: sessionA._image,
+        cwd: '/host/fixed-cwd',
+        memoryLimit: sessionA._memoryLimit,
+        cpuLimit: sessionA._cpuLimit,
+        containerUser: sessionA._containerUser,
+      }
+      const keyA = `${[baseSpec.image, baseSpec.cwd, baseSpec.memoryLimit, baseSpec.cpuLimit, baseSpec.containerUser].join('|')}|${sessionA._devcontainerFingerprint}`
+      const keyB = `${[baseSpec.image, baseSpec.cwd, baseSpec.memoryLimit, baseSpec.cpuLimit, baseSpec.containerUser].join('|')}|${sessionB._devcontainerFingerprint}`
+      assert.notEqual(keyA, keyB, 'changed containerEnv must produce a different pool key')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed forwardPorts → DIFFERENT fingerprint', () => {
+    const cwdA = makeDevcontainerCwd({ forwardPorts: [3000] })
+    const cwdB = makeDevcontainerCwd({ forwardPorts: [3000, 5432] })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed postCreateCommand → DIFFERENT fingerprint', () => {
+    const cwdA = makeDevcontainerCwd({ postCreateCommand: 'npm install' })
+    const cwdB = makeDevcontainerCwd({ postCreateCommand: 'pnpm install' })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed mounts → DIFFERENT fingerprint (when mount survives validation)', () => {
+    // Mounts outside cwd are filtered out by validateMounts(), so to
+    // get two different post-validation overlays we need two mounts
+    // that both live inside their respective cwds. The mount strings
+    // differ in shape so the fingerprint must bust.
+    const cwdA = makeDevcontainerCwd({})
+    const cwdB = makeDevcontainerCwd({})
+    try {
+      // Put a mount that's actually inside each cwd so validateMounts
+      // keeps it. Reference the cwd via a subdirectory.
+      mkdirSync(join(cwdA, 'src'), { recursive: true })
+      mkdirSync(join(cwdB, 'src'), { recursive: true })
+      writeFileSync(join(cwdA, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+        mounts: [`${cwdA}/src:/workspace/src`],
+      }))
+      writeFileSync(join(cwdB, '.devcontainer', 'devcontainer.json'), JSON.stringify({
+        mounts: [`${cwdB}/src:/workspace/src-other`],
+      }))
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint)
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('no devcontainer.json file → fingerprint is the empty-object hash (stable, non-null)', () => {
+    // useDevcontainer: true with no actual devcontainer.json is a
+    // documented no-op (see the "useDevcontainer with no devcontainer.json
+    // is a no-op" test above). The resolved overlay is essentially
+    // empty, so the fingerprint should still be computed and stable —
+    // two such sessions should pool together.
+    const cwdA = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-no-file-a-'))
+    const cwdB = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-no-file-b-'))
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.ok(sessionA._devcontainerFingerprint, 'empty overlay should still fingerprint')
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'two empty overlays must fingerprint identically')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('devcontainer session and non-devcontainer session at the same cwd produce DIFFERENT keys', () => {
+    // Otherwise the non-devcontainer session could pick up a container
+    // provisioned with the devcontainer overlay (different env / mounts
+    // baked in), silently surfacing the overlay state.
+    const cwd = makeDevcontainerCwd({ containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionDc = makeSession(cwd)
+      const sessionPlain = new DockerByokSession({
+        cwd,
+        _execFile: execFileStub(),
+        _dockerBackend: backendStub(),
+      })
+      sessionDc._resolveDevContainer()
+      const keyDc = sessionDc._poolKey()
+      const keyPlain = sessionPlain._poolKey()
+      assert.notEqual(keyDc, keyPlain)
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('changed image (overridden by explicit opt) → SAME fingerprint (no spurious cache miss)', () => {
+    // image and remoteUser are first-class segments of the pool key,
+    // not part of the fingerprint. If a session pins image via an
+    // explicit constructor opt, editing the devcontainer.json image
+    // field doesn't change the resolved launch shape — so the
+    // fingerprint must not bust. (The base key would still match
+    // because explicit image wins, so the pool entry remains valid.)
+    const cwdA = makeDevcontainerCwd({ image: 'node:20-slim', containerEnv: { LANG: 'en_US.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ image: 'node:22-slim', containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA, { image: 'pinned-image:latest' })
+      const sessionB = makeSession(cwdB, { image: 'pinned-image:latest' })
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'image is not fingerprinted — it is a first-class key segment')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('changed remoteUser → SAME fingerprint (already a first-class key segment)', () => {
+    // Same logic as image — remoteUser drives the `containerUser` slot
+    // of the base key, so fingerprinting it would double-count.
+    const cwdA = makeDevcontainerCwd({ remoteUser: 'vscode', containerEnv: { LANG: 'en_US.UTF-8' } })
+    const cwdB = makeDevcontainerCwd({ remoteUser: 'node', containerEnv: { LANG: 'en_US.UTF-8' } })
+    try {
+      const sessionA = makeSession(cwdA, { containerUser: 'pinned-user' })
+      const sessionB = makeSession(cwdB, { containerUser: 'pinned-user' })
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'remoteUser is not fingerprinted — it is a first-class key segment')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('#5103: containerEnv key order in devcontainer.json does NOT change fingerprint', () => {
+    // The pre-#5103 fingerprint used JSON.stringify, which serialises
+    // object keys in insertion order. An editor that alphabetises keys
+    // (or a hand-edit that reorders them) would produce a different
+    // fingerprint for semantically identical overlays, busting the pool
+    // unnecessarily. The fix: canonical-stringify (sort object keys
+    // recursively) before hashing. JSON parsing preserves source order,
+    // so writing the file with two different key orders is a faithful
+    // proxy for the editor-reformat scenario.
+    const cwdA = makeDevcontainerCwd({ containerEnv: { LANG: 'en_US.UTF-8', TZ: 'UTC' } })
+    const cwdB = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(cwdB, '.devcontainer'), { recursive: true })
+    // Hand-craft the JSON so the key order is preserved on parse —
+    // JSON.stringify({LANG, TZ}) and JSON.stringify({TZ, LANG}) produce
+    // different strings, and so do their parsed-then-restringified forms
+    // without canonicalisation.
+    writeFileSync(
+      join(cwdB, '.devcontainer', 'devcontainer.json'),
+      '{"containerEnv":{"TZ":"UTC","LANG":"en_US.UTF-8"}}'
+    )
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'containerEnv key order must not affect the fingerprint')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('#5103: nested object key order does NOT change fingerprint', () => {
+    // Recursion check — a nested object inside the overlay must also be
+    // canonicalised. We exercise this via containerEnv (the most likely
+    // map field) but the contract is: every plain object at every depth
+    // is key-sorted before hashing.
+    const cwdA = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    const cwdB = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(cwdA, '.devcontainer'), { recursive: true })
+    mkdirSync(join(cwdB, '.devcontainer'), { recursive: true })
+    writeFileSync(
+      join(cwdA, '.devcontainer', 'devcontainer.json'),
+      '{"containerEnv":{"A":"1","B":"2","C":"3"},"postCreateCommand":"echo hi"}'
+    )
+    writeFileSync(
+      join(cwdB, '.devcontainer', 'devcontainer.json'),
+      '{"postCreateCommand":"echo hi","containerEnv":{"C":"3","B":"2","A":"1"}}'
+    )
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.equal(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'top-level and nested key reordering must not affect the fingerprint')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('#5103: forwardPorts array order DOES change fingerprint (arrays are order-sensitive)', () => {
+    // Arrays in devcontainer.json are NOT semantically order-insensitive —
+    // forwardPorts: [3000, 8080] is not the same as [8080, 3000] in
+    // every consuming tool, and mounts order can matter for overlay
+    // shadowing. The canonical serializer must NOT sort array values,
+    // only object keys. Two overlays differing only in array order
+    // must therefore still fingerprint differently.
+    const cwdA = makeDevcontainerCwd({ forwardPorts: [3000, 8080] })
+    const cwdB = makeDevcontainerCwd({ forwardPorts: [8080, 3000] })
+    try {
+      const sessionA = makeSession(cwdA)
+      const sessionB = makeSession(cwdB)
+      sessionA._resolveDevContainer()
+      sessionB._resolveDevContainer()
+      assert.notEqual(sessionA._devcontainerFingerprint, sessionB._devcontainerFingerprint,
+        'array order must still bust the fingerprint — arrays are order-sensitive')
+    } finally {
+      rmSync(cwdA, { recursive: true, force: true })
+      rmSync(cwdB, { recursive: true, force: true })
+    }
+  })
+
+  it('#5103: _canonicalStringify matches JSON.stringify for undefined props (empty overlay → {})', () => {
+    // Copilot review: the canonical serializer must drop object properties
+    // whose value is `undefined` (as JSON.stringify does) rather than
+    // emitting non-JSON `...:undefined` slots. The most important case is
+    // the "empty overlay" where all four fingerprintInput fields are
+    // undefined — it must canonicalise to `{}`, identical to the pre-#5103
+    // JSON.stringify output, so an overlay-free devcontainer.json keeps a
+    // stable, clean fingerprint.
+    const cwd = mkdtempSync(join(tmpdir(), 'chroxy-dc-fp-test-'))
+    mkdirSync(join(cwd, '.devcontainer'), { recursive: true })
+    writeFileSync(join(cwd, '.devcontainer', 'devcontainer.json'), '{}')
+    try {
+      const session = makeSession(cwd)
+      const emptyOverlay = {
+        mounts: undefined,
+        containerEnv: undefined,
+        forwardPorts: undefined,
+        postCreateCommand: undefined,
+      }
+      assert.equal(session._canonicalStringify(emptyOverlay), '{}',
+        'all-undefined overlay must canonicalise to {} like JSON.stringify')
+      // Partial overlay: undefined props dropped, defined props kept + sorted.
+      assert.equal(
+        session._canonicalStringify({ postCreateCommand: 'echo hi', mounts: undefined, containerEnv: { B: '2', A: '1' } }),
+        JSON.stringify({ containerEnv: { A: '1', B: '2' }, postCreateCommand: 'echo hi' }),
+        'undefined props dropped; defined object keys sorted recursively, matching JSON',
+      )
+      // Top-level undefined → empty string, exactly like JSON.stringify(undefined).
+      assert.equal(session._canonicalStringify(undefined), '')
+      // Array undefined element → null, exactly like JSON.stringify([undefined]).
+      assert.equal(session._canonicalStringify([1, undefined, 2]), '[1,null,2]')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+describe('DockerByokSession — Docker Compose support (#5024)', () => {
+  function composeBackendStub({ primaryId = 'COMPOSE_PRIMARY_abc', destroyCalls = [] } = {}) {
+    return {
+      createCalls: [],
+      destroyCalls,
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return {
+          containerId: primaryId,
+          containerCliPath: '/usr/local/bin/claude',
+          services: [{ name: opts.primaryService || 'app', status: 'running', primary: true }],
+        }
+      },
+      async destroyComposeEnvironment(opts) {
+        destroyCalls.push(opts)
+      },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+  }
+
+  it('constructor accepts composeFile + composeService', () => {
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile: execFileStub(),
+      _dockerBackend: composeBackendStub(),
+    })
+    assert.equal(session._composeFile, '/proj/docker-compose.yml')
+    assert.equal(session._composeService, 'web')
+    assert.equal(session._composeProject, null, 'project id deferred to start()')
+    assert.equal(session._pool, null)
+  })
+
+  it('start() brings up compose stack and attaches to primary service', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub({ primaryId: 'COMPOSE_PRIMARY_xyz' })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(backend.createCalls.length, 1)
+    const call = backend.createCalls[0]
+    assert.equal(call.composeFile, '/proj/docker-compose.yml')
+    assert.equal(call.primaryService, 'web')
+    assert.match(call.composeProject, /^chroxy-byok-[0-9a-f]+$/)
+    assert.equal(session._containerId, 'COMPOSE_PRIMARY_xyz')
+    assert.equal(session._containerReady, true)
+    await session.destroy()
+  })
+
+  it('destroy() runs docker compose down against the session project', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const destroyCalls = []
+    const backend = composeBackendStub({ destroyCalls })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    const projectId = session._composeProject
+    await session.destroy()
+    assert.equal(destroyCalls.length, 1)
+    assert.equal(destroyCalls[0].composeFile, '/proj/docker-compose.yml')
+    assert.equal(destroyCalls[0].composeProject, projectId)
+    assert.equal(_execFile.calls.filter(c => c.args[0] === 'rm').length, 0)
+  })
+
+  it('compose start failure tears down stack and emits session error', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        const err = new Error('compose primary not running')
+        err.code = 'compose_primary_missing'
+        throw err
+      },
+      async destroyComposeEnvironment(opts) { this.destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+    })
+    const events = []
+    session.on('error', e => events.push(e))
+    await session.start()
+    assert.equal(events.length, 1)
+    assert.match(events[0].message, /compose start failed/)
+    assert.equal(session._containerReady, false)
+  })
+
+  it('compose mode skips the pool even when CHROXY_DOCKER_BYOK_POOL_ENABLED is set', () => {
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile: execFileStub(),
+      _dockerBackend: composeBackendStub(),
+      _poolEnv: { CHROXY_DOCKER_BYOK_POOL_ENABLED: '1' },
+    })
+    assert.equal(session._pool, null)
+  })
+
+  // #5079 — ANTHROPIC_API_KEY forwarding into compose primary service
+  // via a host-side tmpfile + `docker --env-file`. The bare-image path
+  // already forwards via `docker run --env`; these tests pin the
+  // symmetric compose behaviour.
+
+  it('writes an --env-file tmpfile with ANTHROPIC_API_KEY at compose-up and unlinks on destroy (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const writes = []
+    const unlinks = []
+    const backend = composeBackendStub({ primaryId: 'COMPOSE_API_KEY' })
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: (path, content) => writes.push({ path, content }),
+      _unlinkEnvFile: (path) => unlinks.push(path),
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-tmpfile-secret' },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    // Exactly one tmpfile written, containing the key — never bare argv.
+    assert.equal(writes.length, 1, 'expected one env-file write at compose-up')
+    assert.match(writes[0].path, /chroxy-byok-.+\.env$/, 'tmpfile path should be session-scoped')
+    assert.equal(writes[0].content, 'ANTHROPIC_API_KEY=sk-ant-tmpfile-secret\n')
+    // The session tracks the path so destroy can clean it up.
+    assert.equal(session._composeEnvFile, writes[0].path)
+    // Backend received the file via the documented opt.
+    assert.equal(backend.createCalls[0].envFile, writes[0].path)
+    // No --env flag in argv — confirm the key never appears in any
+    // execFile call (info, etc.) on the host side.
+    const argvDump = JSON.stringify(_execFile.calls)
+    assert.equal(
+      argvDump.includes('sk-ant-tmpfile-secret'), false,
+      'ANTHROPIC_API_KEY must not appear in host argv',
+    )
+    await session.destroy()
+    // File is unlinked on destroy (best-effort, idempotent).
+    assert.deepEqual(unlinks, [writes[0].path], 'env-file should be unlinked on destroy')
+  })
+
+  it('skips the env-file when ANTHROPIC_API_KEY is absent (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const writes = []
+    const unlinks = []
+    const backend = composeBackendStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: (p, c) => writes.push({ p, c }),
+      _unlinkEnvFile: (p) => unlinks.push(p),
+      _envForApiKey: { /* no ANTHROPIC_API_KEY */ },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(writes.length, 0, 'no env-file should be written when ANTHROPIC_API_KEY is absent')
+    assert.equal(session._composeEnvFile, null)
+    assert.equal(backend.createCalls[0].envFile, null)
+    await session.destroy()
+    assert.equal(unlinks.length, 0, 'no env-file to unlink')
+  })
+
+  it('forwards --env-file on every _execAsContainerUser dispatch in compose mode (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const execCalls = []
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return { containerId: 'C', containerCliPath: '/x', services: [] }
+      },
+      async destroyComposeEnvironment() {},
+      async execInEnvironment(_containerId, opts) {
+        execCalls.push(opts)
+        return { stdout: '', stderr: '' }
+      },
+    }
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: () => {},
+      _unlinkEnvFile: () => {},
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-exec-secret' },
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    // Trigger a tool dispatch via the public helper.
+    await session._execAsContainerUser({ cmd: 'true' })
+    const dispatch = execCalls.at(-1)
+    assert.ok(dispatch.envFile, 'compose mode must pass envFile on dispatch')
+    assert.match(dispatch.envFile, /chroxy-byok-.+\.env$/)
+    // Key MUST NOT appear in the dispatch's env object (that would
+    // bypass the tmpfile and leak to argv via --env KEY=VAL).
+    assert.equal(dispatch.env, undefined, 'compose dispatch must not pass --env for the API key')
+    await session.destroy()
+  })
+
+  it('unlinks the env-file on compose start failure (#5079)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const writes = []
+    const unlinks = []
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        throw new Error('compose primary not running')
+      },
+      async destroyComposeEnvironment(opts) { this.destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _writeEnvFile: (p, c) => writes.push({ p, c }),
+      _unlinkEnvFile: (p) => unlinks.push(p),
+      _envForApiKey: { ANTHROPIC_API_KEY: 'sk-ant-fail-secret' },
+    })
+    session.on('error', () => {})
+    await session.start()
+    assert.equal(writes.length, 1, 'tmpfile written before compose up')
+    assert.equal(unlinks.length >= 1, true, 'tmpfile unlinked on start failure')
+    assert.equal(session._composeEnvFile, null, 'env-file path cleared on failure')
+  })
+
+  // #5081 — persist compose project IDs to disk so a daemon crash
+  // between `compose up` and `compose down` leaves an on-disk record the
+  // boot-time sweep can clean up.
+
+  function composeStateStoreStub() {
+    return {
+      records: [],
+      forgets: [],
+      record(entry) { this.records.push({ ...entry }) },
+      forget(projectId) { this.forgets.push(projectId) },
+      list() { return [...this.records] },
+    }
+  }
+
+  it('records the compose project id to the state store on start (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub()
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    assert.equal(store.records.length, 1, 'expected exactly one record() call on start')
+    const entry = store.records[0]
+    assert.equal(entry.projectId, session._composeProject)
+    assert.equal(entry.composeFile, '/proj/docker-compose.yml')
+    assert.equal(entry.cwd, tmpHome)
+    await session.destroy()
+  })
+
+  it('forgets the compose project id from the state store on destroy (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = composeBackendStub()
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      composeService: 'web',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    const projectId = session._composeProject
+    await session.destroy()
+    assert.deepEqual(store.forgets, [projectId])
+  })
+
+  it('does not record() when compose start fails (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        const err = new Error('compose primary not running')
+        err.code = 'compose_primary_missing'
+        throw err
+      },
+      async destroyComposeEnvironment(opts) { this.destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session.on('error', () => {})
+    await session.start()
+    assert.equal(store.records.length, 0, 'record() must not run when compose up fails')
+  })
+
+  it('keeps the project id on disk when destroyComposeEnvironment throws so the next boot sweep retries (#5081)', async () => {
+    const _execFile = execFileStub({ info: { stdout: 'ok' } })
+    const backend = {
+      createCalls: [],
+      destroyCalls: [],
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return { containerId: 'C', containerCliPath: '/x', services: [] }
+      },
+      async destroyComposeEnvironment() {
+        throw new Error('daemon gone')
+      },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+    const store = composeStateStoreStub()
+    const session = new DockerByokSession({
+      cwd: tmpHome,
+      composeFile: '/proj/docker-compose.yml',
+      _execFile,
+      _dockerBackend: backend,
+      _composeStateStore: store,
+    })
+    session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+    await session.start()
+    await session.destroy()
+    // forget() must NOT run when destroyComposeEnvironment throws: the
+    // on-disk paper trail has to survive so the next boot's sweep can
+    // retry the teardown.
+    assert.deepEqual(store.forgets, [])
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────
+// #5078 — devcontainer build / dockerFile / dockerComposeFile
+// ─────────────────────────────────────────────────────────────────────
+
+describe('DockerByokSession — devcontainer build / compose (#5078)', () => {
+  function makeDevcontainerCwd(content, { files = {} } = {}) {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-dc-5078-'))
+    mkdirSync(join(dir, '.devcontainer'), { recursive: true })
+    writeFileSync(join(dir, '.devcontainer', 'devcontainer.json'), JSON.stringify(content))
+    for (const [rel, body] of Object.entries(files)) {
+      writeFileSync(join(dir, rel), body)
+    }
+    return dir
+  }
+
+  function composeBackendStub({ primaryId = 'COMPOSE_5078', destroyCalls = [] } = {}) {
+    return {
+      createCalls: [],
+      destroyCalls,
+      async createComposeEnvironment(opts) {
+        this.createCalls.push(opts)
+        return {
+          containerId: primaryId,
+          containerCliPath: '/usr/local/bin/claude',
+          services: [{ name: opts.primaryService || 'app', status: 'running', primary: true }],
+        }
+      },
+      async destroyComposeEnvironment(opts) { destroyCalls.push(opts) },
+      async execInEnvironment() { return { stdout: '', stderr: '' } },
+    }
+  }
+
+  it('build object → docker build, resulting tag becomes the image', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile' } }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        build: { stdout: '' },
+        run: { stdout: 'CONTAINER_build\n' },
+        exec: { stdout: '' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        _execFile,
+        _dockerBackend: backendStub(),
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const buildCall = _execFile.calls.find(c => c.args[0] === 'build')
+      assert.ok(buildCall, 'docker build was not called')
+      const tagIdx = buildCall.args.indexOf('-t')
+      const tag = buildCall.args[tagIdx + 1]
+      assert.match(tag, /^chroxy-byok-build:[0-9a-f]{16}$/)
+      // The built tag must be the image docker run launches.
+      const runCall = _execFile.calls.find(c => c.args[0] === 'run')
+      const sleepIdx = runCall.args.indexOf('sleep')
+      assert.equal(runCall.args[sleepIdx - 1], tag)
+      assert.equal(session._image, tag)
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('legacy dockerFile string also drives docker build', async () => {
+    const cwd = makeDevcontainerCwd({ dockerFile: 'Dockerfile' }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, build: { stdout: '' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      assert.ok(_execFile.calls.some(c => c.args[0] === 'build'), 'docker build not called for dockerFile')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('build.target is threaded to docker build --target', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile', target: 'builder' } }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim AS builder\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, build: { stdout: '' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const buildCall = _execFile.calls.find(c => c.args[0] === 'build')
+      const tIdx = buildCall.args.indexOf('--target')
+      assert.ok(tIdx > 0, '--target not present')
+      assert.equal(buildCall.args[tIdx + 1], 'builder')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('build.args become discrete --build-arg KEY=VALUE argv tokens', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile', args: { NODE_VERSION: '22' } } }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, build: { stdout: '' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const buildCall = _execFile.calls.find(c => c.args[0] === 'build')
+      const baIdx = buildCall.args.indexOf('--build-arg')
+      assert.ok(baIdx > 0, '--build-arg not present')
+      assert.equal(buildCall.args[baIdx + 1], 'NODE_VERSION=22')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('build.context "." resolves to the devcontainer.json dir, not cwd', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile', context: '.' } }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, build: { stdout: '' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const buildCall = _execFile.calls.find(c => c.args[0] === 'build')
+      // Context is the last positional arg.
+      const context = buildCall.args[buildCall.args.length - 1]
+      assert.equal(context, join(cwd, '.devcontainer'))
+      // -f path is under the context (devcontainer dir), not cwd root.
+      const fIdx = buildCall.args.indexOf('-f')
+      assert.equal(buildCall.args[fIdx + 1], join(cwd, '.devcontainer', 'Dockerfile'))
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('build.context ".." resolves up from the devcontainer dir to project root', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile', context: '..' } }, {
+      'Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, build: { stdout: '' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const buildCall = _execFile.calls.find(c => c.args[0] === 'build')
+      const context = buildCall.args[buildCall.args.length - 1]
+      // `..` from `<cwd>/.devcontainer` lands back at cwd.
+      assert.equal(context, cwd)
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('build.context escaping the project dir is rejected (no build)', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile', context: '../../..' } })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      assert.ok(!_execFile.calls.some(c => c.args[0] === 'build'), 'build should be refused for escaping context')
+      // Falls back to the default image (no build happened).
+      assert.equal(session._image, 'node:22-slim')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('explicit image constructor opt wins over devcontainer build', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile' } }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' }, run: { stdout: 'C\n' }, exec: { stdout: '' }, rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, image: 'alpine:3.20', _execFile, _dockerBackend: backendStub() })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      assert.ok(!_execFile.calls.some(c => c.args[0] === 'build'), 'build must be skipped when explicit image is set')
+      assert.equal(session._image, 'alpine:3.20')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('docker build failure tears down and emits session error', async () => {
+    const cwd = makeDevcontainerCwd({ build: { dockerfile: 'Dockerfile' } }, {
+      '.devcontainer/Dockerfile': 'FROM node:22-slim\n',
+    })
+    try {
+      const _execFile = execFileStub({
+        info: { stdout: 'ok' },
+        build: { error: new Error('build boom'), stderr: 'no such stage' },
+        rm: { stdout: '' },
+      })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backendStub() })
+      const events = []
+      session.on('error', e => events.push(e))
+      await session.start()
+      assert.ok(events.some(e => /failed to start container|docker build failed/.test(e.message)),
+        `expected build failure error, got: ${JSON.stringify(events)}`)
+      assert.equal(session._containerReady, false)
+      assert.ok(!_execFile.calls.some(c => c.args[0] === 'run'), 'run must not happen after build failure')
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('dockerComposeFile (string) drives compose with service from devcontainer.json', async () => {
+    const cwd = makeDevcontainerCwd({
+      dockerComposeFile: 'docker-compose.yml',
+      service: 'web',
+    }, { '.devcontainer/docker-compose.yml': 'services:\n  web: { image: node:22 }\n' })
+    try {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = composeBackendStub({ primaryId: 'COMPOSE_dc' })
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backend })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      assert.equal(backend.createCalls.length, 1, 'compose stack not brought up')
+      const call = backend.createCalls[0]
+      // Compose file path resolves relative to the devcontainer.json dir.
+      assert.equal(call.composeFile, join(cwd, '.devcontainer', 'docker-compose.yml'))
+      assert.equal(call.primaryService, 'web')
+      assert.equal(session._containerId, 'COMPOSE_dc')
+      assert.equal(session._containerReady, true)
+      assert.equal(session._pool, null, 'pooling must be disabled in compose mode')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('dockerComposeFile (array) threads the full overlay set, each resolved relative to devcontainer dir, in order (#5124)', async () => {
+    const cwd = makeDevcontainerCwd({
+      dockerComposeFile: ['../base.yml', 'override.yml'],
+      service: 'app',
+    })
+    try {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = composeBackendStub()
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backend })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const call = backend.createCalls[0]
+      // ../base.yml from <cwd>/.devcontainer resolves to <cwd>/base.yml;
+      // override.yml resolves to <cwd>/.devcontainer/override.yml. Both are
+      // threaded in declared order (base first) for compose's later-wins
+      // overlay merge.
+      assert.deepEqual(call.composeFile, [
+        join(cwd, 'base.yml'),
+        join(cwd, '.devcontainer', 'override.yml'),
+      ])
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('dockerComposeFile (single-element array) resolves to a lone string for backward compat (#5124)', async () => {
+    const cwd = makeDevcontainerCwd({
+      dockerComposeFile: ['solo.yml'],
+      service: 'app',
+    })
+    try {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = composeBackendStub()
+      const session = new DockerByokSession({ cwd, useDevcontainer: true, _execFile, _dockerBackend: backend })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const call = backend.createCalls[0]
+      assert.equal(call.composeFile, join(cwd, '.devcontainer', 'solo.yml'))
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+
+  it('explicit composeFile constructor opt wins over devcontainer dockerComposeFile', async () => {
+    const cwd = makeDevcontainerCwd({ dockerComposeFile: 'dc-compose.yml', service: 'web' })
+    try {
+      const _execFile = execFileStub({ info: { stdout: 'ok' } })
+      const backend = composeBackendStub()
+      const session = new DockerByokSession({
+        cwd,
+        useDevcontainer: true,
+        composeFile: '/explicit/compose.yml',
+        composeService: 'explicit-svc',
+        _execFile,
+        _dockerBackend: backend,
+      })
+      session._client = { messages: { stream: () => ({ async *[Symbol.asyncIterator]() {} }) } }
+      await session.start()
+      const call = backend.createCalls[0]
+      assert.equal(call.composeFile, '/explicit/compose.yml')
+      assert.equal(call.primaryService, 'explicit-svc')
+      await session.destroy()
+    } finally {
+      rmSync(cwd, { recursive: true, force: true })
+    }
+  })
+})
+
+// Force a tick so any background EventEmitter cleanup completes
+// before the test runner exits.
+afterEach(async () => {
+  await new Promise((r) => setImmediate(r))
+})
+
+// Suppress an unused-import lint by referencing EventEmitter (kept
+// for forward-compat: future tests may need to assert event shape
+// without going through the full session).
+void EventEmitter

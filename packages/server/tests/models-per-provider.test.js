@@ -1,11 +1,18 @@
-import { describe, it } from 'node:test'
+import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync } from 'fs'
+import { tmpdir } from 'os'
+import { join } from 'path'
 // Importing providers.js triggers built-in provider registration, which
 // in turn calls registerProviderRegistry() on models.js so that
 // getRegistryForProvider('codex'|'gemini') can resolve to the correct
 // provider class in this test suite.
 import '../src/providers.js'
-import { createModelsRegistry, getRegistryForProvider } from '../src/models.js'
+import {
+  createModelsRegistry,
+  getRegistryForProvider,
+  _resetProviderRegistryCacheForTests,
+} from '../src/models.js'
 import { CodexSession } from '../src/codex-session.js'
 import { GeminiSession } from '../src/gemini-session.js'
 import { SdkSession } from '../src/sdk-session.js'
@@ -75,6 +82,8 @@ describe('provider static metadata hooks', () => {
     const allowed = new Set(SdkSession.getAllowedModels())
     assert.ok(allowed.has('opus'))
     assert.ok(allowed.has('claude-opus-4-7'))
+    assert.ok(allowed.has('fable'))
+    assert.ok(allowed.has('claude-fable-5'))
     assert.ok(!allowed.has('opus-4-6'))
     assert.ok(!allowed.has('claude-opus-4-6'))
   })
@@ -84,6 +93,8 @@ describe('provider static metadata hooks', () => {
     const allowed = new Set(CliSession.getAllowedModels())
     assert.ok(allowed.has('opus'))
     assert.ok(allowed.has('claude-opus-4-7'))
+    assert.ok(allowed.has('fable'))
+    assert.ok(allowed.has('claude-fable-5'))
     assert.ok(!allowed.has('opus-4-6'))
     assert.ok(!allowed.has('claude-opus-4-6'))
   })
@@ -91,12 +102,14 @@ describe('provider static metadata hooks', () => {
 
 describe('createModelsRegistry(providerHooks)', () => {
   it('honors provider-supplied fallback models for a non-Claude provider', () => {
+    // #3857: 400k is the OpenAI-documented Codex window for gpt-5 / gpt-5-codex
+    // across paid plans; was 272k pre-launch and never bumped.
     const fallback = Object.freeze([
-      Object.freeze({ id: 'gpt-5-codex', label: 'GPT-5 Codex', fullId: 'gpt-5-codex', contextWindow: 272_000 }),
+      Object.freeze({ id: 'gpt-5-codex', label: 'GPT-5 Codex', fullId: 'gpt-5-codex', contextWindow: 400_000 }),
     ])
     const r = createModelsRegistry({
       fallbackModels: fallback,
-      getModelMetadata: (id) => ({ id, label: id, fullId: id, contextWindow: 272_000 }),
+      getModelMetadata: (id) => ({ id, label: id, fullId: id, contextWindow: 400_000 }),
     })
     const models = r.getModels()
     assert.equal(models.length, 1)
@@ -125,10 +138,45 @@ describe('createModelsRegistry(providerHooks)', () => {
     assert.equal(converted[0].fullId, 'gpt-5')
   })
 
+  it('1M variant synthesis consults provider getModelMetadata().label (#4441)', () => {
+    // Forward-compat: if a non-Claude provider ever ships a >=1M-context
+    // model, the variant-synthesis branch in updateModels() must defer to
+    // the provider's metadata label instead of humanizeModelId — same
+    // rule that #4438 applied to the cache-load + fallback-merge paths.
+    const r = createModelsRegistry({
+      fallbackModels: [],
+      getModelMetadata: (id) => {
+        if (id === 'mega-model-9') return { id: 'mega-model-9', label: 'Mega Model 9', fullId: 'mega-model-9', contextWindow: 1_000_000 }
+        if (id === 'mega-model-9[1m]') return { id: 'mega-model-9[1m]', label: 'Mega Model 9 (1M)', fullId: 'mega-model-9[1m]', contextWindow: 1_000_000 }
+        return { id, label: id, fullId: id, contextWindow: 1_000_000 }
+      },
+    })
+    const converted = r.updateModels([
+      { value: 'mega-model-9', displayName: 'Mega Model 9', description: '' },
+    ])
+    const variant = converted.find(m => m.fullId === 'mega-model-9[1m]')
+    assert.ok(variant, 'synthesized 1M variant must be present')
+    assert.equal(variant.label, 'Mega Model 9 (1M)',
+      `expected provider-supplied 'Mega Model 9 (1M)' label, got '${variant.label}' — humanizeModelId would have produced 'Mega Model 9[1m]'`)
+  })
+
+  it('1M variant synthesis still uses humanizeModelId when provider metadata returns no label (Claude path)', () => {
+    // Default Claude registry has no getModelMetadata().label override for
+    // synthesized [1m] variants (the hook returns id/contextWindow only),
+    // so humanizeModelId remains the source of truth — unchanged behaviour.
+    const r = createModelsRegistry()
+    const converted = r.updateModels([
+      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+    ])
+    const variant = converted.find(m => m.fullId === 'claude-opus-4-7[1m]')
+    assert.ok(variant, 'synthesized 1M variant must be present')
+    assert.equal(variant.label, 'Opus 4.7 (1M)', 'Claude path label unchanged')
+  })
+
   it('backward compat: no args => Claude-style defaults (FALLBACK_MODELS, claude- stripping)', () => {
     const r = createModelsRegistry()
     const ids = r.getModels().map(m => m.id).sort()
-    assert.deepEqual(ids, ['haiku', 'opus', 'sonnet'])
+    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet'])
     const converted = r.updateModels([
       { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
     ])
@@ -186,5 +234,54 @@ describe('getRegistryForProvider(providerName)', () => {
     // Must return something functional — default to Claude for backward compat
     assert.ok(typeof r.getModels === 'function')
     assert.ok(r.getModels().length > 0)
+  })
+})
+
+describe('loadCache() label fill (#4434)', () => {
+  // #4434: loadCache() previously fell back to humanizeModelId() when a
+  // cached entry's `label` was empty, which mangles non-Claude ids
+  // ("gpt-5-codex" → "Gpt 5.codex"). After #4413 cache files live on
+  // disk and operators may hand-edit them, so the empty-label path is
+  // reachable in practice. The fix consults the provider's
+  // getModelMetadata(fullId)?.label before falling back.
+  let tmpConfigDir
+  let origConfigDir
+  beforeEach(() => {
+    tmpConfigDir = mkdtempSync(join(tmpdir(), 'chroxy-models-loadcache-'))
+    origConfigDir = process.env.CHROXY_CONFIG_DIR
+    process.env.CHROXY_CONFIG_DIR = tmpConfigDir
+    _resetProviderRegistryCacheForTests()
+  })
+  afterEach(() => {
+    _resetProviderRegistryCacheForTests()
+    if (origConfigDir === undefined) {
+      delete process.env.CHROXY_CONFIG_DIR
+    } else {
+      process.env.CHROXY_CONFIG_DIR = origConfigDir
+    }
+    try { rmSync(tmpConfigDir, { recursive: true, force: true }) } catch {}
+  })
+
+  it('uses provider getModelMetadata().label, not humanizeModelId, when cached label is empty', () => {
+    // Hand-rolled codex cache file with an empty label — simulates an
+    // operator editing the file or an older save before the label was
+    // persisted. The on-disk cache path matches what
+    // getProviderCachePath('codex') produces.
+    const cachePath = join(tmpConfigDir, 'models-cache.codex.json')
+    writeFileSync(cachePath, JSON.stringify({
+      models: [
+        { id: 'gpt-5-codex', fullId: 'gpt-5-codex', label: '', contextWindow: 400_000 },
+      ],
+      defaultModelId: null,
+      savedAt: Date.now(),
+    }))
+
+    // Rebuild the codex registry so loadCache() runs against our temp dir.
+    const r = getRegistryForProvider('codex')
+    const entry = r.getModels().find(m => m.fullId === 'gpt-5-codex')
+    assert.ok(entry, 'codex registry should expose the gpt-5-codex entry from cache')
+    // The provider's metadata label, NOT the humanizeModelId mangling.
+    assert.equal(entry.label, 'GPT-5 Codex',
+      `expected provider-supplied 'GPT-5 Codex' label, got '${entry.label}' — humanizeModelId would have produced 'Gpt 5.codex'`)
   })
 })

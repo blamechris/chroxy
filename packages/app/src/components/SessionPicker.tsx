@@ -11,7 +11,12 @@ import {
   Animated,
   LayoutChangeEvent,
 } from 'react-native';
-import { useConnectionStore, SessionInfo, SessionHealth } from '../store/connection';
+import { useConnectionStore } from '../store/connection';
+import type { SessionInfo, SessionHealth } from '../store/connection';
+// #5759 — shared with the dashboard so the "live permission prompt" rule can't
+// drift between clients (it operates on the shared ChatMessage).
+import { countLivePermissionPrompts } from '@chroxy/store-core';
+import { DEFAULT_PROVIDER } from '@chroxy/protocol';
 import { Icon } from './Icon';
 import { COLORS } from '../constants/colors';
 import { getProviderInfo } from '../constants/providers';
@@ -49,23 +54,47 @@ interface SessionPillProps {
   isActive: boolean;
   health: SessionHealth;
   notificationCount: number;
+  // #4422 — number of backgrounded shells the session is still waiting on.
+  // Projected from sessionStates[id]?.pendingBackgroundShells?.length so the
+  // pill can surface a "z" dot when the session is idle but parked on a
+  // long-running shell. SECONDARY to the busy pulse — the busy dot wins
+  // during an active turn.
+  pendingShellCount: number;
+  // #5750 — number of live, unanswered permission prompts the session is
+  // blocked on. Projected from its messages so a background tab surfaces a
+  // "needs your permission" dot (parity with the dashboard per-tab indicator).
+  pendingPermissionCount: number;
   onPress: () => void;
   onLongPress: () => void;
   onLayout: (e: LayoutChangeEvent) => void;
 }
 
-function SessionPill({ session, isActive, health, notificationCount, onPress, onLongPress, onLayout }: SessionPillProps) {
+function SessionPill({ session, isActive, health, notificationCount, pendingShellCount, pendingPermissionCount, onPress, onLongPress, onLayout }: SessionPillProps) {
   const isCrashed = health === 'crashed';
   const hasNotification = notificationCount > 0 && !isActive;
-  const showBusy = !isCrashed && session.isBusy;
-  const hasIndicators = isCrashed || showBusy || hasNotification;
+  // #5750 — a session blocked on a permission prompt is the most actionable
+  // (non-crashed) state: it can't progress until the user answers. Surface it
+  // on background tabs (on the active tab the prompt itself is already on
+  // screen). It takes precedence over the generic busy pulse — a session
+  // waiting on you isn't merely "processing".
+  const showPendingPermission = !isCrashed && !isActive && pendingPermissionCount > 0;
+  const showBusy = !isCrashed && !showPendingPermission && session.isBusy;
+  // #4422 — only surface the pending-shells dot when the session is idle
+  // (showBusy=false). During an active turn the busy pulse already conveys
+  // "work happening"; the pending-shells indicator is for the "idle but
+  // waiting on background work" gap the dashboard ActivityIndicator now
+  // surfaces (#4419). Skip on crashed too — a crashed session's red dot is
+  // the more urgent signal.
+  const showPendingShells = !isCrashed && !showBusy && !showPendingPermission && pendingShellCount > 0;
+  const hasIndicators = isCrashed || showPendingPermission || showBusy || hasNotification || showPendingShells;
   // Mobile parity with dashboard SessionBar chips (#3940): surface the
-  // provider's short label as a small badge on the pill so claude-tui,
-  // codex, gemini, docker-cli, etc. are distinguishable at-a-glance
-  // without long-pressing. Same gate as the long-press alert title from
-  // #3937 — skip the claude-sdk default and any session with no provider.
+  // provider's short label as a small badge on the pill so codex, gemini,
+  // claude-sdk, docker-cli, etc. are distinguishable at-a-glance without
+  // long-pressing. Same gate as the long-press alert title from #3937 —
+  // skip the current default provider (#5823) and any session with no
+  // provider.
   const providerInfo =
-    session.provider && session.provider !== 'claude-sdk'
+    session.provider && session.provider !== DEFAULT_PROVIDER
       ? getProviderInfo(session.provider)
       : null;
   return (
@@ -81,14 +110,16 @@ function SessionPill({ session, isActive, health, notificationCount, onPress, on
       onLayout={onLayout}
       activeOpacity={0.7}
       accessibilityRole="tab"
-      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}`}
+      accessibilityLabel={`Session ${session.name}${providerInfo ? `, ${providerInfo.short} provider` : ''}${session.worktree ? ', isolated worktree' : ''}${showPendingPermission ? ', waiting for your permission' : ''}${showPendingShells ? `, waiting on ${pendingShellCount} background ${pendingShellCount === 1 ? 'shell' : 'shells'}` : ''}`}
       accessibilityState={{ selected: isActive }}
-      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showBusy ? 'Session is currently processing' : undefined}
+      accessibilityHint={isCrashed ? 'Session has crashed and needs attention' : showPendingPermission ? 'Session is waiting for you to allow or deny a permission request' : showBusy ? 'Session is currently processing' : showPendingShells ? 'Session is idle but waiting on a backgrounded shell' : undefined}
     >
       {hasIndicators && (
         <View style={styles.indicators} importantForAccessibility="no-hide-descendants" accessibilityElementsHidden>
           {isCrashed && <View style={styles.crashDot} />}
+          {showPendingPermission && <View style={styles.permissionDot} />}
           {showBusy && <PulsingDot />}
+          {showPendingShells && <View style={styles.pendingShellsDot} />}
           {hasNotification && <NotificationBadge count={notificationCount} />}
         </View>
       )}
@@ -205,10 +236,10 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     }
 
     // Suffix the alert title with the provider's short label for any
-    // non-default provider (default is claude-sdk). Pre-#3937 this only
-    // covered claude-cli; now it covers claude-tui, codex, gemini, and
-    // any future provider getProviderInfo knows about.
-    const providerLabel = session.provider && session.provider !== 'claude-sdk'
+    // non-default provider (the default is DEFAULT_PROVIDER, #5823).
+    // Pre-#3937 this only covered claude-cli; now it covers every
+    // non-default provider getProviderInfo knows about.
+    const providerLabel = session.provider && session.provider !== DEFAULT_PROVIDER
       ? ` (${getProviderInfo(session.provider).short})`
       : '';
     Alert.alert(
@@ -264,6 +295,24 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
     return counts;
   }, [sessionNotifications]);
 
+  // #5750 — per-session live permission-prompt counts, for the "needs your
+  // permission" tab dot. Recomputes when any session's messages change (which
+  // is also when a prompt is answered or its expiry handler fires, clearing
+  // the dot). `Date.now()` is read at compute time; an unanswered prompt that
+  // simply times out clears on the next message change via the `expiresAt >
+  // now` check — matching the dashboard's behavior.
+  const pendingPermissionCounts = useMemo(() => {
+    const now = Date.now();
+    const counts = new Map<string, number>();
+    for (const id in sessionStates) {
+      const messages = sessionStates[id]?.messages;
+      if (!messages || messages.length === 0) continue;
+      const c = countLivePermissionPrompts(messages, now);
+      if (c > 0) counts.set(id, c);
+    }
+    return counts;
+  }, [sessionStates]);
+
   return (
     <View style={styles.container}>
       <ScrollView
@@ -282,6 +331,12 @@ export function SessionPicker({ onCreatePress }: SessionPickerProps) {
             isActive={session.sessionId === activeSessionId}
             health={sessionStates[session.sessionId]?.health || 'healthy'}
             notificationCount={notificationCounts.get(session.sessionId) || 0}
+            // #4422 — project the per-session pendingBackgroundShells count
+            // from sessionStates. `?? 0` covers both pre-#4307 servers (field
+            // is undefined) and sessions whose state slot hasn't been seeded
+            // yet (no entry in sessionStates).
+            pendingShellCount={sessionStates[session.sessionId]?.pendingBackgroundShells?.length ?? 0}
+            pendingPermissionCount={pendingPermissionCounts.get(session.sessionId) || 0}
             onPress={() => switchSession(session.sessionId)}
             onLongPress={() => handleLongPress(session)}
             onLayout={(e) => handlePillLayout(session.sessionId, e)}
@@ -421,11 +476,32 @@ const styles = StyleSheet.create({
     borderRadius: 3,
     backgroundColor: COLORS.accentRed,
   },
+  // #5750 — "needs your permission" dot. Amber (the warning/attention accent)
+  // so it reads as actionable, distinct from the blue busy pulse and the green
+  // pending-shells dot. Static (no pulse) — the urgency is "you must answer",
+  // not "work is happening".
+  permissionDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentOrange,
+  },
   busyDot: {
     width: 6,
     height: 6,
     borderRadius: 3,
     backgroundColor: COLORS.accentBlue,
+  },
+  // #4422 — pending-background-shell dot. Static (no pulse) and styled
+  // green to match the dashboard ActivityIndicator chip (#4419) — both
+  // surfaces say the same thing in the same colour: "idle, but parked on
+  // backgrounded work". Distinct from the blue busyDot (pulsing) so users
+  // can tell the two states apart at-a-glance.
+  pendingShellsDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: COLORS.accentGreen,
   },
   badge: {
     minWidth: 16,

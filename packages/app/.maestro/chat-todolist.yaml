@@ -1,0 +1,177 @@
+appId: com.blamechris.chroxy
+name: ChatView TodoWrite tool rendering
+---
+
+# #4195 — End-to-end coverage for TodoWrite tool rendering in the chat
+# flow. Post-#4201 ActivityEntry has its own per-entry expand state,
+# so tapping a TodoWrite row inside an expanded activity group reveals
+# the structured TodoList inline (header + per-item rows with status
+# markers + optional truncation marker). This flow exercises that
+# full path end-to-end.
+#
+# Trigger: 'show-todos' user input → mock-server.mjs emits a synthetic
+# tool_start (TodoWrite) + tool_result (canonical executor text). The
+# fixture seeding pattern is documented in CLAUDE.md → "Fixture Seeding
+# for Structured Renderers".
+#
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17),
+# iPhone 17 Pro Max (iOS 26.1), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Note: this flow is self-contained (no `runFlow: setup/...`) because
+# the existing setup/ flows target Expo Go (appId host.exp.Exponent),
+# whereas this needs the chroxy dev client (com.blamechris.chroxy).
+# When the other flows migrate to the dev client they can share a new
+# `setup/ensure-session-screen-dev.yaml`.
+
+# Launch via the dev client's deep link so we skip the
+# "Development Build / pick a dev server" screen and load the
+# chroxy bundle directly. `clearState: true` resets app data but NOT
+# the SecureStore Keychain entry that holds saved connections, so the
+# app may auto-connect to a previously-used server — the conditional
+# below handles both fresh and warm starts.
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet that shows on first launch of a dev build.
+# Two forms: (a) intro sheet with a "Continue" button, (b) main dev
+# menu (Reload/Go home/Toggle...) with an X close icon. Tapping the
+# top of the screen (outside the sheet) dismisses either by iOS
+# convention — works regardless of which form is up.
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip the onboarding carousel if it's showing (post-clearState the
+# `onboarding_complete` SecureStore flag is gone, so it always shows).
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands — extended timeout
+# because Metro may need to bundle on first launch.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form. If the
+# Keychain already had our mock connection (warm start from a prior
+# run), this block is skipped and we jump straight to Chat.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      # Expand manual entry form. Use testIDs (added to ConnectScreen
+      # in this PR) — Maestro's text matcher has regex quirks with the
+      # leading U+25B6 glyph on the toggle button, so testIDs are the
+      # stable selector.
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      # Hide keyboard before tapping Connect (keyboard can cover it)
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      # Wait for SessionScreen
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Make sure Chat tab is selected
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Find the input area and type the trigger phrase that makes the
+# mock server emit a TodoWrite tool_use + tool_result pair.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-todos"
+
+# Send the message — testID added in InputBar.tsx (the ↑ icon button
+# isn't text-matchable in Maestro on iOS).
+- tapOn:
+    id: "chat-send-button"
+
+# Dismiss the keyboard so the activity group's bounds line up with the
+# unscrolled screen — the keyboard pushes content up by ~50% and would
+# move the entry row out from under our point-tap.
+- hideKeyboard
+
+# Wait for the activity group to land. testID set on the outer View
+# in ActivityGroup.tsx (the View wraps the header + body).
+- extendedWaitUntil:
+    visible:
+      id: "activity-group"
+    timeout: 10000
+
+# Screenshot the collapsed activity group ("1 tool used — 1 TodoWrite")
+- takeScreenshot: chat-todolist-activity-group-collapsed
+
+# Expand the activity group by tapping its header. The outer
+# `activity-group` is a View — its testID is for assertion only; the
+# onPress handler is on the inner `activity-group-header` TouchableOpacity.
+- tapOn:
+    id: "activity-group-header"
+- waitForAnimationToEnd
+
+# Screenshot the collapsed-entry state (group expanded, entry not).
+- takeScreenshot: chat-todolist-entry-collapsed
+
+# Tap the TodoWrite entry to expand it → parseTodoList(message.toolResult)
+# runs and renders <TodoList /> inline. Maestro's iOS XCUITest tap-by-id
+# on a nested TouchableOpacity doesn't always propagate to React Native's
+# touch responder system, so tap the entry's collapsed-preview TEXT
+# ("Todo list (3 items): …" from the mock fixture) — the tap resolves to
+# that element's coordinates, which keeps it on the entry row on every
+# device. (The previous fixed point-tap at 50%,55% was calibrated for
+# iPhone 17 Pro Max and misses the row on iPhone 16 Pro.) We do NOT
+# double-tap with both id and point because if BOTH succeed they toggle
+# the state twice and collapse the entry — flaky.
+- tapOn:
+    text: ".*Todo list \\(3 items\\).*"
+- waitForAnimationToEnd
+
+# LayoutAnimation can defer the state→render commit on iOS; give it a
+# real window before asserting.
+- extendedWaitUntil:
+    visible:
+      id: "todo-list-header"
+    timeout: 5000
+
+# Assert the structured renderer is present. Each testID is set in
+# packages/app/src/components/chat/TodoList.tsx — if the parser missed
+# the canonical header (regression in TODO_LINE_RE) or ActivityEntry
+# parses the wrong field (regression on #4194's content→toolResult fix
+# re-introduced at the new call site), these would not render and the
+# assertions would fail.
+- assertVisible:
+    id: "todo-list-header"
+- assertVisible:
+    id: "todo-list-item-t1"
+- assertVisible:
+    id: "todo-list-item-t2"
+- assertVisible:
+    id: "todo-list-item-t3"
+
+# Screenshot the expanded TodoList — header, status markers (✓ ⋯ ○),
+# completed-strikethrough, color cues.
+- takeScreenshot: chat-todolist-expanded

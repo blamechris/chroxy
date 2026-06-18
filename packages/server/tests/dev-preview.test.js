@@ -356,4 +356,51 @@ describe('DevPreviewManager', () => {
       assert.equal(manager._tunnels.size, 0)
     })
   })
+
+  // #5731 — closePreview must NOT signal a clean stop when tunnel.stop() fails;
+  // the public tunnel (exposed port) may still be live, so it surfaces a
+  // dev_preview_stop_failed event instead of silently swallowing the error.
+  describe('closePreview stop-failure (#5731)', () => {
+    it('emits dev_preview_stop_failed AND dev_preview_stopped when stop() throws, and frees the slot', async () => {
+      const events = []
+      manager.on('dev_preview_stop_failed', (e) => events.push({ type: 'stop_failed', ...e }))
+      manager.on('dev_preview_stopped', (e) => events.push({ type: 'stopped', ...e }))
+      manager._tunnels.set('sess-1', new Map([
+        [3000, { stop: async () => { throw new Error('cloudflared kill failed') }, url: 'https://a.trycloudflare.com' }],
+      ]))
+
+      await manager.closePreview('sess-1', 3000)
+
+      const failed = events.find((e) => e.type === 'stop_failed')
+      assert.ok(failed, 'dev_preview_stop_failed must be emitted on a stop() failure')
+      assert.equal(failed.sessionId, 'sess-1')
+      assert.equal(failed.port, 3000)
+      assert.match(failed.error, /cloudflared kill failed/)
+      assert.ok(events.find((e) => e.type === 'stopped'), 'dev_preview_stopped still emitted so the UI updates')
+      assert.equal(manager._tunnels.has('sess-1'), false, 'tracking slot is freed even on stop failure')
+    })
+
+    it('emits only dev_preview_stopped (no stop_failed) on a clean stop', async () => {
+      const events = []
+      manager.on('dev_preview_stop_failed', (e) => events.push({ type: 'stop_failed', ...e }))
+      manager.on('dev_preview_stopped', (e) => events.push({ type: 'stopped', ...e }))
+      manager._tunnels.set('sess-1', new Map([
+        [3000, { stop: async () => {}, url: 'https://a.trycloudflare.com' }],
+      ]))
+
+      await manager.closePreview('sess-1', 3000)
+
+      assert.equal(events.filter((e) => e.type === 'stop_failed').length, 0, 'no stop_failed on a clean stop')
+      assert.equal(events.filter((e) => e.type === 'stopped').length, 1)
+      assert.equal(manager._tunnels.has('sess-1'), false)
+    })
+
+    it('is a no-op for an unknown tunnel', async () => {
+      const events = []
+      manager.on('dev_preview_stop_failed', () => events.push('failed'))
+      manager.on('dev_preview_stopped', () => events.push('stopped'))
+      await manager.closePreview('nope', 9999)
+      assert.equal(events.length, 0)
+    })
+  })
 })

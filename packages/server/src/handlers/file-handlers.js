@@ -8,71 +8,76 @@
 import { resolveSession } from '../handler-utils.js'
 
 function handleListDirectory(ws, client, msg, ctx) {
-  ctx.fileOps.listDirectory(ws, msg.path)
+  ctx.services.fileOps.listDirectory(ws, msg.path)
 }
 
 function handleBrowseFiles(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.browseFiles(ws, msg.path, entry?.cwd || null)
+  ctx.services.fileOps.browseFiles(ws, msg.path, entry?.cwd || null)
 }
 
 function handleListFiles(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.listFiles(ws, entry?.cwd || null, msg.query || null, sid)
+  ctx.services.fileOps.listFiles(ws, entry?.cwd || null, msg.query || null, sid)
 }
 
 function handleReadFile(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.readFile(ws, msg.path, entry?.cwd || null)
+  ctx.services.fileOps.readFile(ws, msg.path, entry?.cwd || null)
 }
 
 function handleWriteFile(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null)
+  ctx.services.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null)
 }
 
 function handleGetDiff(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.getDiff(ws, msg.base, entry?.cwd || null)
+  ctx.services.fileOps.getDiff(ws, msg.base, entry?.cwd || null)
 }
 
 function handleGitStatus(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.gitStatus(ws, entry?.cwd || null)
+  ctx.services.fileOps.gitStatus(ws, entry?.cwd || null)
 }
 
 function handleGitBranches(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.gitBranches(ws, entry?.cwd || null)
+  ctx.services.fileOps.gitBranches(ws, entry?.cwd || null)
 }
 
 function handleGitStage(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.gitStage(ws, msg.files, entry?.cwd || null)
+  ctx.services.fileOps.gitStage(ws, msg.files, entry?.cwd || null)
 }
 
 function handleGitUnstage(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.gitUnstage(ws, msg.files, entry?.cwd || null)
+  ctx.services.fileOps.gitUnstage(ws, msg.files, entry?.cwd || null)
 }
 
 function handleGitCommit(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.gitCommit(ws, msg.message, entry?.cwd || null)
+  ctx.services.fileOps.gitCommit(ws, msg.message, entry?.cwd || null)
 }
 
 function handleListSlashCommands(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  ctx.fileOps.listSlashCommands(ws, entry?.cwd || null, sid)
+  // #3856: pass the session's provider so listSlashCommands can merge in
+  // provider-specific built-ins (`/clear`, `/compact`, `/model`, etc.).
+  // Falls back to null in legacy single-cliSession mode — built-ins simply
+  // don't surface there (safe default; project/user .md skills still work).
+  const provider = entry?.provider || null
+  ctx.services.fileOps.listSlashCommands(ws, entry?.cwd || null, sid, provider)
 }
 
 function handleListAgents(ws, client, msg, ctx) {
   const sid = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
-  const opts = ctx.userAgentsDirs ? { userAgentsDirs: ctx.userAgentsDirs } : {}
-  ctx.fileOps.listAgents(ws, entry?.cwd || null, sid, opts)
+  const opts = ctx.runtime.userAgentsDirs ? { userAgentsDirs: ctx.runtime.userAgentsDirs } : {}
+  ctx.services.fileOps.listAgents(ws, entry?.cwd || null, sid, opts)
 }
 
 export const fileHandlers = {

@@ -38,10 +38,22 @@ describe('InputBar component', () => {
 
   test('defines InputBarProps interface with required props', () => {
     expect(inputBarSrc).toMatch(/export\s+interface\s+InputBarProps/)
-    expect(inputBarSrc).toMatch(/inputText:\s*string/)
+    // #5556 — InputBar owns its draft internally; `inputText` is now an
+    // optional seed prop and the draft is driven via the imperative ref.
+    expect(inputBarSrc).toMatch(/inputText\?:\s*string/)
     expect(inputBarSrc).toMatch(/onSend:\s*\(\)/)
     expect(inputBarSrc).toMatch(/onInterrupt:\s*\(\)/)
     expect(inputBarSrc).toMatch(/isStreaming:\s*boolean/)
+  })
+
+  test('exposes an imperative InputBarHandle (focus/getValue/setValue/clear) and is memoized (#5556)', () => {
+    expect(inputBarSrc).toMatch(/export\s+interface\s+InputBarHandle/)
+    expect(inputBarSrc).toMatch(/focus:\s*\(\)/)
+    expect(inputBarSrc).toMatch(/getValue:\s*\(\)/)
+    expect(inputBarSrc).toMatch(/setValue:\s*\(text:\s*string\)/)
+    expect(inputBarSrc).toMatch(/clear:\s*\(\)/)
+    expect(inputBarSrc).toMatch(/useImperativeHandle/)
+    expect(inputBarSrc).toMatch(/React\.memo\(/)
   })
 
   test('has send button with accessibilityRole and accessibilityLabel', () => {
@@ -107,13 +119,14 @@ describe('ChatView component', () => {
     expect(chatViewSrc).toMatch(/import\s+React,\s*\{.*useState.*useRef.*useEffect.*useMemo/)
   })
 
-  test('imports ScrollView, AccessibilityInfo from react-native', () => {
-    expect(chatViewSrc).toMatch(/import[\s\S]*ScrollView[\s\S]*from\s+['"]react-native['"]/)
+  test('imports FlatList, AccessibilityInfo from react-native (#5517 virtualized list)', () => {
+    // #5517: the transcript is now a virtualized FlatList, not a ScrollView.
+    expect(chatViewSrc).toMatch(/import[\s\S]*FlatList[\s\S]*from\s+['"]react-native['"]/)
     expect(chatViewSrc).toMatch(/import[\s\S]*AccessibilityInfo[\s\S]*from\s+['"]react-native['"]/)
   })
 
   test('imports ChatMessage type from store', () => {
-    expect(chatViewSrc).toMatch(/import\s*\{.*ChatMessage.*\}\s*from\s+['"]\.\.\/store\/connection['"]/)
+    expect(chatViewSrc).toMatch(/import\s+(?:type\s+)?\{.*ChatMessage.*\}\s*from\s+['"]\.\.\/store\/connection['"]/)
   })
 
   test('imports child components (MessageBubble, ActivityGroup, ToolDetailModal)', () => {
@@ -142,14 +155,19 @@ describe('ChatView component', () => {
   })
 
   test('shows empty state text when no messages', () => {
-    expect(chatViewSrc).toMatch(/messages\.length === 0/)
+    // #5517: empty state is rendered through FlatList's ListEmptyComponent
+    // rather than a `messages.length === 0` ternary in the render body.
+    expect(chatViewSrc).toMatch(/ListEmptyComponent/)
     expect(chatViewSrc).toMatch(/Connected\. Send a message to Claude!/)
     expect(chatViewSrc).toMatch(/Starting Claude Code\.\.\./)
   })
 
-  test('imports groupMessages from the shared store-core selector', () => {
-    expect(chatViewSrc).toMatch(/import\s*\{[^}]*groupMessages[^}]*\}\s*from\s*'@chroxy\/store-core'/)
-    expect(chatViewSrc).toMatch(/import\s*\{[^}]*applyStreamingOverlay[^}]*\}\s*from\s*'@chroxy\/store-core'/)
+  test('imports buildChatViewMessages from the shared store-core pipeline (#4806)', () => {
+    // Previously imported groupMessages + applyStreamingOverlay directly;
+    // now delegates to the shared buildChatViewMessages pure function
+    // (single source of truth for filter + group + overlay + tail-id +
+    // stalledPromptIds across dashboard + mobile).
+    expect(chatViewSrc).toMatch(/import\s*\{[^}]*buildChatViewMessages[^}]*\}\s*from\s*'@chroxy\/store-core'/)
   })
 
   test('listens for reduce motion accessibility setting', () => {

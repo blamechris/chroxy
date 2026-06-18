@@ -7,68 +7,85 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react'
 import { useShallow } from 'zustand/react/shallow'
 import {
-  DEFAULT_CONTEXT_WINDOW,
   deriveSessionVisualStatus,
-  groupMessages,
-  applyStreamingOverlay,
   formatPasteMarker,
+  formatTokensCompact,
   expandPasteMarkers,
+  resolveContextWindow,
+  providerSupportsMultiQuestion,
+  formatToolName,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
-import type { ChatMessage } from './store/connection'
-import type { ChatViewMessage } from './components/ChatView'
+import type { BaseSessionState } from '@chroxy/store-core'
 
-import { Sidebar, type RepoNode } from './components/Sidebar'
-import { CommandPalette } from './components/CommandPalette'
+import { Sidebar, type RepoNode, type ContextMenuTarget } from './components/Sidebar'
+import { resolveActivePrimaryClientId } from './components/ViewersIndicator'
+import { type ContextMenuItem } from './components/SessionContextMenu'
+import { buildSidebarContextMenuItems } from './sidebarContextMenuItems'
 import { useCommands, recordMruCommand, getMruCommands } from './store/commands'
 import { ChatView } from './components/ChatView'
 import { MultiTerminalView } from './components/MultiTerminalView'
 import { InputBar, type FileAttachment, type ImageAttachment } from './components/InputBar'
 import { useVoiceInput } from './hooks/useVoiceInput'
 import { toWireAttachments } from './utils/attachment-utils'
-import { processImageFiles, processBase64Image, filterImageFiles } from './utils/image-utils'
+import { derivePendingPermissionCounts, totalPendingPermissions, selectNextPendingSession } from './utils/pendingPermissions'
+import { processImageFiles, filterImageFiles } from './utils/image-utils'
 import { getAuthToken } from './utils/auth'
 import { SessionBar, type SessionTabData, type SessionStatus } from './components/SessionBar'
-import { StatusBar } from './components/StatusBar'
-import { ChatSettingsDropdown } from './components/ChatSettingsDropdown'
-import { SkillsPanel } from './components/SkillsPanel'
-import { PermissionPrompt } from './components/PermissionPrompt'
 import { formatTranscript } from './lib/transcript'
-import { QuestionPrompt } from './components/QuestionPrompt'
-import { ActivityIndicator } from './components/ActivityIndicator'
+import { ActivityIndicator, findInFlightToolUse } from './components/ActivityIndicator'
 import { CheckInChip } from './components/CheckInChip'
-import { ToolBubble } from './components/ToolBubble'
-import { ToolGroup } from './components/ToolGroup'
-import { PastedTextModal } from './components/PastedTextModal'
-import { EvaluatorRewriteBanner, EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
+import { EvaluatorClarifyPrompt } from './components/EvaluatorPrompts'
+import { SessionNotFoundChip } from './components/SessionNotFoundChip'
 import { PlanApproval } from './components/PlanApproval'
 import { ReconnectBanner } from './components/ReconnectBanner'
+import { ExposureWarningBanner } from './components/ExposureWarningBanner'
+import { BillingWarningBanner } from './components/BillingWarningBanner'
+import { ConnectionAnnouncer } from './components/ConnectionAnnouncer'
 import { StdinDisabledBanner } from './components/StdinDisabledBanner'
 import { WelcomeScreen } from './components/WelcomeScreen'
-import { CreateSessionModal } from './components/CreateSessionModal'
 import { NotificationBanners } from './components/NotificationBanners'
-import { Toast, type ToastItem } from './components/Toast'
+import { PendingPairRequests } from './components/PendingPairRequests'
+import { type ToastItem } from './components/Toast'
 import { FileBrowserPanel } from './components/FileBrowserPanel'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { FooterBar } from './components/FooterBar'
-import { QrModal } from './components/QrModal'
-import { SettingsPanel } from './components/SettingsPanel'
-import { ShortcutHelp, type ShortcutEntry } from './components/ShortcutHelp'
+import { type ShortcutEntry } from './components/ShortcutHelp'
 import { formatShortcutKeys, isMacPlatform } from './utils/platform'
-import { readClipboardImage } from './utils/clipboard-image'
+import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
+import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
+import { writeText as clipboardWriteText } from './utils/clipboard'
 import { useTauriEvents } from './hooks/useTauriEvents'
+import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
-import { startServer } from './hooks/useTauriIPC'
+import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
-import { SplitPane, type SplitDirection } from './components/SplitPane'
-import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, loadPersistedSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab } from './store/persistence'
+import { useInterventionPing } from './hooks/useInterventionPing'
+import { useShortcutDispatch } from './hooks/useShortcutDispatch'
+import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
+import { useTunnelReady } from './hooks/useTunnelReady'
+import { useQrModal } from './hooks/useQrModal'
+import { useSidebarOrdering } from './hooks/useSidebarOrdering'
+import { useControlRoomState } from './hooks/useControlRoomState'
+import { useMessageRenderer } from './hooks/useMessageRenderer'
+import { SplitPane } from './components/SplitPane'
+import { ViewSwitcher } from './components/ViewSwitcher'
+import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { persistSidebarWidth, loadPersistedSidebarWidth, persistSplitMode, persistShowConsoleTab, loadPersistedShowConsoleTab, persistInterventionPing, loadPersistedInterventionPing, loadPersistedSidebarPanelHeight, loadPersistedSidebarPanelView, loadPersistedSidebarPanelCollapsed } from './store/persistence'
+import { applyOrderById } from './utils/reorderById'
 import { DiffViewerPanel } from './components/DiffViewerPanel'
 import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
 import { StartupErrorScreen } from './components/StartupErrorScreen'
 import { ConsolePage } from './components/ConsolePage'
 import { EnvironmentPanel } from './components/EnvironmentPanel'
+import { SnapshotsPanel } from './components/SnapshotsPanel'
+import { PoolStatsPanel } from './components/PoolStatsPanel'
+import { type RepoInvestigateRequest, type RepoOpenSessionRequest } from './components/ControlRoomSection'
+import { ControlRoomView } from './components/ControlRoomView'
+import { AppModals } from './components/AppModals'
+import { AppHeader } from './components/AppHeader'
 
 /** Server-injected config from <meta name="chroxy-config"> tag */
 interface ChroxyConfig {
@@ -90,156 +107,80 @@ export function getChroxyConfig(): ChroxyConfig | undefined {
 }
 
 
-/** Format context usage as a compact string */
+/**
+ * Format context usage as a compact `<n> tokens` chip label.
+ *
+ * Delegates the number formatting to the canonical `formatTokensCompact`
+ * helper in `@chroxy/store-core` (#5094) so the chip label, the header
+ * meter, and the status-tooltip breakdown all share one casing/decimal
+ * rule and one (correct) 1M rollover. Keeps only the ` tokens` suffix and
+ * the "hide when empty" behaviour here.
+ */
 function formatContext(usage: { inputTokens: number; outputTokens: number } | null): string | undefined {
   if (!usage) return undefined
   const total = usage.inputTokens + usage.outputTokens
   if (total === 0) return undefined
-  if (total < 1000) return `${total} tokens`
-  return `${(total / 1000).toFixed(1)}k tokens`
-}
-
-/** Map store ChatMessage to ChatViewMessage */
-function toChatViewMessage(msg: ChatMessage): ChatViewMessage {
-  return {
-    id: msg.id,
-    type: msg.type === 'prompt' ? 'response' : msg.type,
-    content: msg.content,
-    timestamp: msg.timestamp,
-  }
-}
-
-type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments'
-
-/** Scrollable tab bar with arrow buttons when overflowing */
-function ViewSwitcher({
-  viewMode, setViewMode, splitMode, setSplitMode, persistSplitMode,
-  showConsoleTab, unreadSystemCount, checkpointsOpen, setCheckpointsOpen,
-}: {
-  viewMode: string
-  setViewMode: (m: ViewMode) => void
-  splitMode: SplitDirection | null
-  setSplitMode: (m: SplitDirection | null) => void
-  persistSplitMode: (m: SplitDirection | null) => void
-  showConsoleTab: boolean
-  unreadSystemCount: number
-  checkpointsOpen: boolean
-  setCheckpointsOpen: (fn: (prev: boolean) => boolean) => void
-}) {
-  const scrollRef = useRef<HTMLDivElement>(null)
-  const [canScrollLeft, setCanScrollLeft] = useState(false)
-  const [canScrollRight, setCanScrollRight] = useState(false)
-  const dragState = useRef<{ isDragging: boolean; startX: number; scrollLeft: number }>({
-    isDragging: false, startX: 0, scrollLeft: 0,
-  })
-
-  const updateArrows = useCallback(() => {
-    const el = scrollRef.current
-    if (!el) return
-    setCanScrollLeft(el.scrollLeft > 1)
-    setCanScrollRight(el.scrollLeft < el.scrollWidth - el.clientWidth - 1)
-  }, [])
-
-  useEffect(() => {
-    const el = scrollRef.current
-    if (!el) return
-    updateArrows()
-    let ro: ResizeObserver | undefined
-    if (typeof ResizeObserver !== 'undefined') {
-      ro = new ResizeObserver(updateArrows)
-      ro.observe(el)
-    }
-    el.addEventListener('scroll', updateArrows, { passive: true })
-    return () => { ro?.disconnect(); el.removeEventListener('scroll', updateArrows) }
-  }, [updateArrows, showConsoleTab, unreadSystemCount])
-
-  const scroll = useCallback((dir: number) => {
-    const el = scrollRef.current
-    if (!el) return
-    // Scroll by one tab width (use the first tab's width as reference)
-    const tabWidth = el.querySelector('.view-tab')?.getBoundingClientRect().width ?? 100
-    el.scrollBy({ left: dir * (tabWidth + 8), behavior: 'smooth' })
-  }, [])
-
-  // Drag-to-scroll handlers
-  const onPointerDown = useCallback((e: React.PointerEvent) => {
-    // Only drag on the container background, not on buttons or their children
-    if ((e.target as HTMLElement).closest('button')) return
-    const el = scrollRef.current
-    if (!el) return
-    dragState.current = { isDragging: true, startX: e.clientX, scrollLeft: el.scrollLeft }
-    el.setPointerCapture(e.pointerId)
-    el.style.cursor = 'grabbing'
-  }, [])
-
-  const onPointerMove = useCallback((e: React.PointerEvent) => {
-    if (!dragState.current.isDragging) return
-    const el = scrollRef.current
-    if (!el) return
-    const dx = e.clientX - dragState.current.startX
-    el.scrollLeft = dragState.current.scrollLeft - dx
-  }, [])
-
-  const onPointerUp = useCallback((e: React.PointerEvent) => {
-    if (!dragState.current.isDragging) return
-    dragState.current.isDragging = false
-    const el = scrollRef.current
-    if (!el) return
-    el.releasePointerCapture(e.pointerId)
-    el.style.cursor = ''
-  }, [])
-
-  return (
-    <div className="view-switch-wrapper">
-      {canScrollLeft && (
-        <button className="view-switch-arrow view-switch-arrow-left" onClick={() => scroll(-1)} type="button" aria-label="Scroll tabs left">‹</button>
-      )}
-      <div
-        className="view-switch"
-        ref={scrollRef}
-        onPointerDown={onPointerDown}
-        onPointerMove={onPointerMove}
-        onPointerUp={onPointerUp}
-        onPointerCancel={onPointerUp}
-      >
-        <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
-        <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
-        <button
-          className={`view-tab${splitMode ? ' active' : ''}`}
-          onClick={() => { const next: SplitDirection | null = splitMode ? null : 'horizontal'; setSplitMode(next); persistSplitMode(next) }}
-          type="button" title={`Split view (${formatShortcutKeys('Cmd+\\')})`}
-        >Split</button>
-        <button className={`view-tab${viewMode === 'files' ? ' active' : ''}`} onClick={() => setViewMode('files')} type="button">Files</button>
-        <button className={`view-tab${viewMode === 'system' ? ' active' : ''}`} onClick={() => { setViewMode('system'); setSplitMode(null); persistSplitMode(null) }} type="button">
-          System{unreadSystemCount > 0 && <span className="system-badge">{unreadSystemCount}</span>}
-        </button>
-        {showConsoleTab && (
-          <button className={`view-tab${viewMode === 'console' ? ' active' : ''}`} onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }} type="button">Console</button>
-        )}
-        <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
-        <div className="view-switch-spacer" />
-        <button className={`view-tab view-tab-right${checkpointsOpen ? ' active' : ''}`} onClick={() => setCheckpointsOpen(prev => !prev)} type="button" title="Toggle checkpoint timeline">Checkpoints</button>
-        <button className={`view-tab${viewMode === 'diff' ? ' active' : ''}`} onClick={() => setViewMode('diff')} type="button">Diff</button>
-      </div>
-      {canScrollRight && (
-        <button className="view-switch-arrow view-switch-arrow-right" onClick={() => scroll(1)} type="button" aria-label="Scroll tabs right">›</button>
-      )}
-    </div>
-  )
+  return `${formatTokensCompact(total)} tokens`
 }
 
 export function App() {
+  // #3852: customizable keyboard-shortcut registry. The same instance
+  // drives both the keydown matcher below and the cheat-sheet display
+  // — when a user rebinds Cmd+K in Settings, both surfaces update.
+  const shortcutRegistry = useShortcutRegistry()
   // Store selectors — subscribe to specific slices to avoid re-renders
   const connectionPhase = useConnectionStore(s => s.connectionPhase)
   const serverVersion = useConnectionStore(s => s.serverVersion)
   const sessionCwd = useConnectionStore(s => s.sessionCwd)
+  // #4029: FooterBar cwd was static — set once at auth_ok and never updated
+  // on tab switch. Subscribe to the active session's cwd from the sessions
+  // list so the footer tracks the selected tab. Falls back to sessionCwd
+  // (the initial auth_ok value) when no sessions list has landed yet,
+  // then to undefined.
+  const activeSessionCwd = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.cwd ?? null,
+  )
+  // #4603: active session's provider name (e.g. `'claude-sdk'`,
+  // `'claude-cli'`) so the StreamStallChip can prefix its headline
+  // with the provider short label for one-glance triage. Subscribed
+  // here so a tab switch updates the chip's variant on the next render
+  // without a full message-map rebuild.
+  const activeSessionProvider = useConnectionStore(s =>
+    s.sessions.find(sess => sess.sessionId === s.activeSessionId)?.provider ?? null,
+  )
+  // #5986 (epic #5982): the embedded user-shell terminal. The server advertises
+  // `userShell` in auth_ok.capabilities only when config.userShell.enabled is on
+  // AND the connecting client holds the primary token class, so gating the "New
+  // shell" affordance on it means paired devices / disabled hosts never see a
+  // dead button.
+  const userShellSupported = useConnectionStore(s => s.serverCapabilities?.userShell === true)
+  // #6006 — the operator panic button (Revoke token) is available only when the
+  // server has a rotating TokenManager (auth on) AND this client holds the
+  // primary token, both reflected in the `tokenRevoke` capability. Gating on it
+  // keeps paired / --no-auth clients from seeing a button they can't use.
+  const tokenRevokeSupported = useConnectionStore(s => s.serverCapabilities?.tokenRevoke === true)
+  // Providers backed by a real PTY get the live Output terminal. claude-tui
+  // mirrors its TUI PTY alongside the parsed Chat view; user-shell is
+  // terminal-ONLY — a raw $SHELL with no Claude chat/tools/permissions
+  // semantics, so its session renders the terminal and hides the Chat tab.
+  const isTui = activeSessionProvider === DEFAULT_PROVIDER
+  const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER
+  const isPtyProvider = isTui || isUserShell
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
   const sessions = useConnectionStore(s => s.sessions)
+  // #5665 — machine-wide monthly programmatic-credit meter (sidebar token view).
+  const monthlyBudget = useConnectionStore(s => s.monthlyBudget)
   const sessionStates = useConnectionStore(s => s.sessionStates)
   const activeSessionId = useConnectionStore(s => s.activeSessionId)
   const viewMode = useConnectionStore(s => s.viewMode)
+  // #5835 (PR2): live claude-tui PTY mirror — the Output tab is the authenticity
+  // surface only for claude-tui (the only provider with a real PTY).
+  const subscribeTerminalMirror = useConnectionStore(s => s.subscribeTerminalMirror)
+  const unsubscribeTerminalMirror = useConnectionStore(s => s.unsubscribeTerminalMirror)
   const availableModels = useConnectionStore(s => s.availableModels)
   const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
+  // #5184: header cost-badge display mode (Settings-driven, persisted).
+  const costBadgeMode = useConnectionStore(s => s.costBadgeMode)
   const defaultModelId = useConnectionStore(s => s.defaultModelId)
   const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const availableProviders = useConnectionStore(s => s.availableProviders)
@@ -248,19 +189,57 @@ export function App() {
   const connectionError = useConnectionStore(s => s.connectionError)
   const serverPhase = useConnectionStore(s => s.serverPhase)
   const tunnelProgress = useConnectionStore(s => s.tunnelProgress)
+  // #5356: exposure snapshot from auth_ok + per-connection dismissal flag.
+  const serverExposure = useConnectionStore(s => s.serverExposure)
+  const exposureBannerDismissed = useConnectionStore(s => s.exposureBannerDismissed)
+  const dismissExposureBanner = useConnectionStore(s => s.dismissExposureBanner)
+  // #5821: billing-canary banner state.
+  const billingCanary = useConnectionStore(s => s.billingCanary)
+  const billingBannerDismissed = useConnectionStore(s => s.billingBannerDismissed)
+  const dismissBillingBanner = useConnectionStore(s => s.dismissBillingBanner)
   const serverStartupLogs = useConnectionStore(s => s.serverStartupLogs)
   const connectionRetryCount = useConnectionStore(s => s.connectionRetryCount)
+  // #5556 — restart-countdown parity with mobile: feed the ETA/anchor/reason
+  // through to ReconnectBanner so it can render a live ~M:SS countdown.
+  const shutdownReason = useConnectionStore(s => s.shutdownReason)
+  const restartEtaMs = useConnectionStore(s => s.restartEtaMs)
+  const restartingSince = useConnectionStore(s => s.restartingSince)
   const filePickerFiles = useConnectionStore(s => s.filePickerFiles)
   const sessionNotifications = useConnectionStore(s => s.sessionNotifications)
+  // #5510 (epic #5509): pairing-approval primitive — host-surface pending queue.
+  const pendingPairRequests = useConnectionStore(s => s.pendingPairRequests)
+  const approvePairRequest = useConnectionStore(s => s.approvePairRequest)
+  const denyPairRequest = useConnectionStore(s => s.denyPairRequest)
   const inputSettings = useConnectionStore(s => s.inputSettings)
   const connectedClients = useConnectionStore(s => s.connectedClients)
+  // #5281 ①.3 — global primary (last-driver) fallback for the pre-session /
+  // 'default' case; per-session primary is read from sessionStates below.
+  const globalPrimaryClientId = useConnectionStore(s => s.primaryClientId)
+  // #5589 / #5281 — this client's explicit role for the active session, derived
+  // from the server's `session_role` broadcast. Drives the ViewersIndicator's
+  // observer state + take-over affordance.
+  const activeSessionRole = useConnectionStore(s => {
+    const id = s.activeSessionId
+    return id && s.sessionStates[id] ? s.sessionStates[id].sessionRole : null
+  })
+  const claimPrimary = useConnectionStore(s => s.claimPrimary)
   const pairingRefreshedCount = useConnectionStore(s => s.pairingRefreshedCount)
+  // #4497: server-advertised stream-stall window — threaded into the
+  // StreamStallChip render path so the headline humanises to e.g.
+  // "No response for 5 minutes — retry?" instead of a static phrase.
+  // Null for older servers (server PR #4483 / #4477); chip falls back
+  // to the static copy in that case.
+  const streamStallTimeoutMs = useConnectionStore(s => s.streamStallTimeoutMs)
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
 
-  // Voice input (Tauri only — no-op in browser)
-  const voiceInput = useVoiceInput()
+  // Voice input mode is persisted on inputSettings (#4785). Default is
+  // 'continuous' — click to start, click to stop, mic stays lit across
+  // silence gaps. Pre-#4785 behaviour ('auto-pause' on silence) available
+  // via the Voice input section of SettingsPanel.
+  const voiceInputMode = useConnectionStore(s => s.inputSettings.voiceInputMode)
+  const voiceInput = useVoiceInput({ mode: voiceInputMode })
 
   // Session-level state via useShallow — includes messages from sessionStates.
   // stream_end/result handlers force a new messages[] reference so useShallow
@@ -268,6 +247,9 @@ export function App() {
   const {
     messages: storeMessages,
     streamingMessageId,
+    // #5939 (epic #5935 ④): per-session send-while-busy queue, surfaced as a
+    // "Queued" badge on the matching optimistic bubble.
+    queuedMessages,
     activeModel,
     permissionMode,
     contextUsage,
@@ -281,6 +263,10 @@ export function App() {
     pendingCommunitySkills: activePendingCommunitySkills,
     pendingTrustGrants: activePendingTrustGrants,
     pendingEvaluatorClarify,
+    // #4653: surface chroxy-side interventions (currently only the
+    // multi-question AskUserQuestion deny shipped in #4648) in the
+    // FooterBar counter chip so users can tell when chroxy intervened.
+    interventions,
   } = useConnectionStore(useShallow(s => s.getActiveSessionState()))
 
   // #3205: stable Set for SkillsPanel mismatch indicator. useMemo
@@ -291,11 +277,99 @@ export function App() {
     [activeMismatched],
   )
 
+  // #5939 (epic #5935 ④): the ids of currently-queued send-while-busy
+  // follow-ups, as a stable Set so ChatView can render a "Queued" badge on the
+  // matching optimistic bubble. Only entries carrying a clientMessageId can be
+  // matched to a bubble (and cancelled); a server-confirmed entry with no local
+  // id is rare (another device) and simply renders without a badge here.
+  // (`onCancelQueued` is derived below, once the store action is bound.)
+  const queuedIds = useMemo(
+    () => new Set((queuedMessages || []).map(m => m.clientMessageId).filter((id): id is string => !!id)),
+    [queuedMessages],
+  )
+
+  // #5953 (epic #5951): label for the in-chat "Claude is working" indicator.
+  // Surfaces the current in-flight tool ("Running Bash…") using the same
+  // detection the ActivityIndicator uses; falls back to undefined so the
+  // indicator shows its generic default ("Claude is working…"). The walk is
+  // O(1) in practice (the unresolved tool is at the tail) and the label string
+  // is stable across response tokens (it only changes when the tool changes).
+  const workingLabel = useMemo(() => {
+    const inFlight = findInFlightToolUse(storeMessages)
+    return inFlight ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)}…` : undefined
+  }, [storeMessages])
+
+  // #4735 / #4731: the multi-question AskUserQuestion form is gated per
+  // session type. TUI / CLI sessions (`claude-tui` / `claude-cli`) keep
+  // the #4666 deferred notice because the permission-hook (#4648) denies
+  // multi-question tool_uses there and answers would misroute through
+  // `_pendingUserAnswer`. SDK / BYOK / Codex / Gemini sessions support
+  // per-question delivery natively (#4731) via the in-process
+  // `canUseTool` flow (`packages/server/src/sdk-session.js:30`), so the
+  // dashboard renders the interactive `MultiQuestionForm` for them and
+  // submits per-question answers (including multi-select arrays) on the
+  // widened wire. Reuses the `activeSessionProvider` selector declared
+  // above (#4603) so we don't re-derive the same value.
+  // #5795 — provider capability lives in @chroxy/store-core (single source of
+  // truth, keyed off the registered provider `type`), not a hand-rolled
+  // name check duplicated across the app + dashboard.
+  const allowMultiQuestionForm = useMemo(
+    () => providerSupportsMultiQuestion(activeSessionProvider),
+    [activeSessionProvider],
+  )
+
+  // #4685 — track resolved permissions from the store so the QuestionPrompt
+  // gate can flip off the moment the user clicks Allow on a pending
+  // AskUserQuestion permission_request. The store keeps a per-requestId
+  // map keyed by decision (`allow` | `deny` | `allowSession`); combined
+  // with the per-message `answered` flag this gives us the full
+  // "is there an unresolved-or-denied AskUserQuestion permission?" view.
+  //
+  // #4685 Copilot review: ONLY `allow` / `allowSession` un-gate the
+  // content. `deny` keeps the gate ON — issue #4685's expected behavior
+  // says "and shows the redacted/denied state if user clicks Deny". A
+  // permission denial means the user explicitly refused to see the
+  // question; revealing the model-supplied text and options post-deny
+  // defeats the whole point of the gate.
+  const resolvedPermissions = useConnectionStore(s => s.resolvedPermissions)
+
+  // #4685 — boolean: is there an unresolved-or-denied AskUserQuestion
+  // permission prompt in the active session's chat? When true, the
+  // QuestionPrompt for any `user_question`-derived `prompt` message MUST
+  // gate its content behind a placeholder so the model-supplied question
+  // text and options stay hidden. A permission prompt counts as
+  // "unresolved-or-denied" when EITHER (a) it has not been answered on
+  // this client (no `m.answered === 'allow' | 'allowSession'`) AND (b)
+  // no other client has allowed it (`resolvedPermissions[requestId]`
+  // not in {`allow`, `allowSession`}). `deny` on either signal keeps the
+  // gate ON — Copilot review (#4685) caught the pre-fix bug where deny
+  // un-gated the content, contradicting issue #4685's expected behavior.
+  // Multiple pending AskUserQuestion permissions in the same session are
+  // rare but any single un-allowed one is enough to gate every question
+  // render in that session — the bug is content leak before consent, not
+  // which specific question got which specific permission decision.
+  const hasPendingAskUserQuestionPermission = useMemo(() => {
+    for (const m of storeMessages) {
+      if (m.type !== 'prompt') continue
+      if (!m.requestId) continue
+      if (m.tool !== 'AskUserQuestion') continue
+      // Per-message `answered` is set by `handlePermissionResolved` on
+      // BOTH allow and deny — gate only flips off for allow variants.
+      if (m.answered === 'allow' || m.answered === 'allowSession') continue
+      // Cross-client decision via `resolvedPermissions[requestId]` —
+      // same allow-only rule.
+      const decision = resolvedPermissions?.[m.requestId]
+      if (decision === 'allow' || decision === 'allowSession') continue
+      return true
+    }
+    return false
+  }, [storeMessages, resolvedPermissions])
+
   // #3839: dropdown-gating flags derived from the active session's provider
   // capabilities. Hoisted out of the JSX so the lookups don't re-run on every
   // render of <App>, which fires on most WS messages.
   const dropdownFlags = useMemo(() => {
-    const activeProvider = sessions.find(s => s.sessionId === activeSessionId)?.provider
+    const activeProvider = activeSessionProvider
     const providerInfo = availableProviders.find(p => p.name === activeProvider)
     const caps = providerInfo?.capabilities
     // The store carries one `availableModels` slot tagged with the provider
@@ -308,10 +382,15 @@ export function App() {
       availableModelsProvider === activeProvider
     return {
       showModelPicker: caps?.modelSwitch !== false && modelsMatchProvider,
+      // #4464: render a non-interactive badge in the picker's slot when the
+      // active provider permanently lacks mid-session model switching (TUI).
+      // null on transient "models not matching provider" (provider just
+      // switched) so we don't flash a stale-label badge during reconnect.
+      readOnlyModel: caps?.modelSwitch === false ? activeModel : null,
       showPermissionMode: caps?.permissionModeSwitch !== false,
       showThinkingLevel: !!caps?.thinkingLevel,
     }
-  }, [sessions, activeSessionId, availableProviders, availableModelsProvider])
+  }, [activeSessionProvider, availableProviders, availableModelsProvider, activeModel])
 
   // Fire native notifications for permission requests when window is not focused
   const permissionPrompts = useMemo<PermissionPromptInfo[]>(() =>
@@ -328,20 +407,120 @@ export function App() {
     [storeMessages],
   )
   usePermissionNotification(permissionPrompts)
+  // #4891 — audible intervention ping enable/mute. Defaults on; persisted
+  // per-device in localStorage. Toggled via Settings → Dashboard.
+  const [interventionPingEnabled, setInterventionPingEnabled] = useState(() => {
+    return loadPersistedInterventionPing()
+  })
+  // #4891 — audible ping on incoming intervention (permission request /
+  // question / blocked-on-input). Reuses the same derived prompt list as the
+  // OS-notification hook so both surfaces fire on identical events. The hook
+  // dedupes by requestId and throttles bursts; `enabled` honors the operator
+  // mute toggle (Settings → Dashboard, persisted per-device).
+  useInterventionPing(permissionPrompts, { enabled: interventionPingEnabled })
+
+  // #3698 — derive the user-message history for the InputBar's terminal-
+  // style Up/Down navigation. Oldest-first (matches the natural arrival
+  // order of `messages`), and trims out empty bodies so a stray no-op
+  // user_input never recalls a blank string.
+  //
+  // `storeMessages` re-references on every streaming delta flush (the
+  // delta-batch path rebuilds the array even when no user_input was added),
+  // so a naive `[storeMessages]` dep would rebuild `userMessageHistory` on
+  // every assistant token and trip InputBar's array-identity reset, wiping
+  // the user's in-flight Up/Down cycle. We memoise on a stable fingerprint
+  // (count + last user_input id) so a fresh array is only produced when the
+  // actual user-message slice changes (new send, session switch, history
+  // replay on reconnect). Equal-content updates reuse the previous array
+  // reference, keeping InputBar's cycling state stable.
+  const userMessageHistoryFingerprint = useMemo(() => {
+    let count = 0
+    let lastId = ''
+    for (const m of storeMessages) {
+      if (m.type === 'user_input' && typeof m.content === 'string' && m.content.length > 0) {
+        count++
+        lastId = m.id
+      }
+    }
+    return `${count}\x1f${lastId}`
+  }, [storeMessages])
+  const userMessageHistory = useMemo(
+    () => storeMessages
+      .filter(m => m.type === 'user_input' && typeof m.content === 'string' && m.content.length > 0)
+      .map(m => m.content),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [userMessageHistoryFingerprint],
+  )
 
   const slashCommands = useConnectionStore(s => s.slashCommands)
 
   // Store actions (stable refs)
   const connect = useConnectionStore(s => s.connect)
+  const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
+  const sendCancelQueued = useConnectionStore(s => s.sendCancelQueued)
+  // #5939: stable cancel callback so the memoized message rows skip re-render.
+  const onCancelQueued = useCallback(
+    (id: string) => { sendCancelQueued(id) },
+    [sendCancelQueued],
+  )
+  // #5780 — nonce bumped on the explicit "jump to latest" user action. Those
+  // actions are: send (handleSend), approving a permission/plan, and answering
+  // an AskUserQuestion (#5786). Passed to every ChatView so it snaps to the
+  // bottom even when the user had scrolled up to read history — see ChatView's
+  // scrollToBottomSignal effect.
+  const [scrollToBottomSignal, setScrollToBottomSignal] = useState(0)
   const evaluateDraft = useConnectionStore(s => s.evaluateDraft)
   const sendPermissionResponse = useConnectionStore(s => s.sendPermissionResponse)
   const switchSession = useConnectionStore(s => s.switchSession)
+  // #4982 — banner rendered when the server rejects a stale sessionId.
+  // The message-handler clears activeSessionId on SESSION_NOT_FOUND so
+  // the next user send doesn't loop the same toast; this banner gives
+  // the operator a calm explanation while pointing at the sidebar.
+  const sessionNotFoundError = useConnectionStore(s => s.sessionNotFoundError)
+  const dismissSessionNotFoundError = useConnectionStore(s => s.dismissSessionNotFoundError)
   const destroySession = useConnectionStore(s => s.destroySession)
   const renameSession = useConnectionStore(s => s.renameSession)
   const createSession = useConnectionStore(s => s.createSession)
+  const revokeToken = useConnectionStore(s => s.revokeToken)
+  const confirmSessionClose = useConnectionStore(s => s.confirmSessionClose)
   const setViewMode = useConnectionStore(s => s.setViewMode)
+  // #5835 (PR2) / #5986: drive the live PTY mirror's opt-in. While the Output
+  // tab is shown for a PTY-backed session (claude-tui OR user-shell — see
+  // isPtyProvider), opt into terminal_output; opt out on leave / session switch
+  // / provider change. If the Output tab is somehow active on a session with no
+  // PTY mirror (e.g. after switching to a chat provider), fall back to chat —
+  // the tab is hidden there, so the user shouldn't be stranded on it.
+  useEffect(() => {
+    // #5986/#5997 — user-shell has no Chat view (the tab is hidden). Redirect
+    // the operator to the Output terminal ONLY from the now-hidden Chat tab
+    // (e.g. a persisted 'chat' viewMode carried over from a prior session). We
+    // deliberately do NOT force away from other tabs (Files / System / Diff /
+    // Envs are useful for a shell's cwd) — snapping back from every non-terminal
+    // view trapped the operator on the terminal (#5997).
+    if (isUserShell && viewMode === 'chat') {
+      setViewMode('terminal')
+      return
+    }
+    // Only force away from the Output tab once we KNOW the active session has no
+    // PTY mirror. During the initial-load / reconnect window the provider is
+    // still null/unknown — force-switching then would kick the operator out of a
+    // persisted Output view for a claude-tui session (Copilot #5838).
+    if (viewMode === 'terminal' && activeSessionProvider != null && !isPtyProvider) {
+      setViewMode('chat')
+      return
+    }
+    // Gate the opt-in on a live socket and depend on connectionPhase, so a
+    // reconnect (which clears the server-side terminalSessionIds set) re-runs
+    // this effect and re-subscribes — otherwise the mirror silently stops
+    // updating until the user toggles tabs (Copilot #5838). Both claude-tui and
+    // user-shell expose a live PTY mirror, so subscribe for either (#5986).
+    if (viewMode === 'terminal' && isPtyProvider && activeSessionId && connectionPhase === 'connected') {
+      subscribeTerminalMirror(activeSessionId)
+      return () => unsubscribeTerminalMirror(activeSessionId)
+    }
+  }, [viewMode, activeSessionId, activeSessionProvider, isUserShell, isPtyProvider, connectionPhase, subscribeTerminalMirror, unsubscribeTerminalMirror, setViewMode])
   const setModel = useConnectionStore(s => s.setModel)
   const setPermissionMode = useConnectionStore(s => s.setPermissionMode)
   const setThinkingLevel = useConnectionStore(s => s.setThinkingLevel)
@@ -375,6 +554,11 @@ export function App() {
   const dismissServerError = useConnectionStore(s => s.dismissServerError)
   const dismissInfoNotification = useConnectionStore(s => s.dismissInfoNotification)
   const dismissSessionNotification = useConnectionStore(s => s.dismissSessionNotification)
+  // #4890 — Slack-style notifications widget read/unread actions. Pulled
+  // as discrete selectors so a notifications-only state change doesn't
+  // re-render unrelated chrome.
+  const markSessionNotificationRead = useConnectionStore(s => s.markSessionNotificationRead)
+  const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
   const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
@@ -396,24 +580,73 @@ export function App() {
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
   const [pendingCwd, setPendingCwd] = useState<string | null>(null)
+  // #5553 — the open per-repo settings drawer target (path + name), or null.
+  const [repoPresetDrawer, setRepoPresetDrawer] = useState<{ path: string; name: string } | null>(null)
   const [isCreatingSession, setIsCreatingSession] = useState(false)
   const [sessionCreateError, setSessionCreateError] = useState<string | null>(null)
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([])
   const [imageAttachments, setImageAttachments] = useState<ImageAttachment[]>([])
-  const [qrModalOpen, setQrModalOpen] = useState(false)
-  const [qrSvg, setQrSvg] = useState<string | null>(null)
-  const [qrLoading, setQrLoading] = useState(false)
-  const [qrError, setQrError] = useState<string | null>(null)
-  const [settingsOpen, setSettingsOpen] = useState(() => {
-    const params = new URLSearchParams(window.location.search)
-    return params.get('settings') === '1'
-  })
-  const [shortcutHelpOpen, setShortcutHelpOpen] = useState(false)
   const [sidebarOpen, setSidebarOpen] = useState(true)
   const [sidebarWidth, setSidebarWidth] = useState(() => loadPersistedSidebarWidth() ?? 240)
   const [sidebarFilter, setSidebarFilter] = useState('')
-  const [splitMode, setSplitMode] = useState<SplitDirection | null>(() => loadPersistedSplitMode())
+  // #4045: sidebar right-click context menu state. `null` when closed.
+  const [sidebarContextMenu, setSidebarContextMenu] = useState<{
+    target: ContextMenuTarget
+    x: number
+    y: number
+  } | null>(null)
   const [checkpointsOpen, setCheckpointsOpen] = useState(false)
+  // #5560 — Control Room tab (#5204), converged Settings redirect (#5544), the
+  // legacy settings modal + shortcut-help flags, and split-view mode all live
+  // in `useControlRoomState` (split-view is co-located because openControlRoom
+  // clears it).
+  const {
+    controlRoomOpen,
+    controlRoomActive,
+    setControlRoomActive,
+    settingsRedirectNonce,
+    controlRoomInitialTab,
+    settingsOpen,
+    setSettingsOpen,
+    shortcutHelpOpen,
+    setShortcutHelpOpen,
+    splitMode,
+    setSplitMode,
+    openControlRoom,
+    openSettings,
+    closeControlRoom,
+  } = useControlRoomState()
+  // #5997 — split view is a chat|terminal pane pair; it makes no sense for a
+  // terminal-only user-shell session (the chat half renders empty). The Split
+  // button is hidden for user-shell in ViewSwitcher, but a split carried over
+  // from a prior chat session would persist — clear it when a user-shell
+  // session becomes active so the operator is never left with an empty pane.
+  useEffect(() => {
+    if (isUserShell && splitMode) {
+      setSplitMode(null)
+      persistSplitMode(null)
+    }
+  }, [isUserShell, splitMode, setSplitMode])
+  // #5206 — the session id awaiting close-confirmation, or null when no
+  // confirm is pending. Drives the ConfirmDialog rendered near the modals.
+  const [closeConfirmSessionId, setCloseConfirmSessionId] = useState<string | null>(null)
+  // #5202 — when an Investigate verdict launches a session, the reason note is
+  // stashed here at click time and seeded into the new session's composer once
+  // the server confirms the session (the create-confirm effect). A ref (not
+  // state) so it survives without re-renders and is read at the transition.
+  const pendingSeedPromptRef = useRef<string | null>(null)
+
+  // #5217 — single owner of the create-session picker open path. Every opener
+  // routes through this so none can diverge on the three things that must stay
+  // in lockstep: the pre-filled cwd, the Investigate seed ref (#5202 — only the
+  // Investigate opener passes a non-null seed; everyone else clears it so a
+  // stale reason can't leak into an unrelated session, #5214), and showing the
+  // modal. Stable identity ([] deps) so effects/handlers can depend on it freely.
+  const openCreateSession = useCallback(({ cwd = null, seed = null }: { cwd?: string | null; seed?: string | null } = {}) => {
+    pendingSeedPromptRef.current = seed || null
+    setPendingCwd(cwd)
+    setShowCreateSession(true)
+  }, [])
 
   // #3073: copy chat transcript to clipboard with brief "Copied" feedback.
   const [transcriptCopied, setTranscriptCopied] = useState(false)
@@ -421,24 +654,98 @@ export function App() {
   const handleCopyTranscript = useCallback(() => {
     const text = formatTranscript(storeMessages)
     if (!text) return
-    // navigator.clipboard is undefined in non-secure contexts (and some
-    // embedded webviews). Accessing .writeText on undefined would throw
-    // synchronously — bypass the .catch() and surface as a runtime error
-    // in the keyboard handler. Guard with the same pattern as the other
-    // dashboard copy paths.
-    if (!navigator.clipboard) return
-    void navigator.clipboard.writeText(text).then(() => {
+    // #4673: route through the clipboard helper so Tauri builds use the
+    // native plugin (navigator.clipboard.writeText silently no-ops in
+    // WKWebView). Only flash the "Copied!" check mark if the helper actually
+    // wrote — otherwise the indicator lies about an empty OS clipboard.
+    void clipboardWriteText(text).then((ok) => {
+      if (!ok) {
+        // #4629: when the helper reports failure (Tauri plugin rejected,
+        // navigator.clipboard missing in a non-secure context, etc.) the
+        // OS clipboard was NOT written. The original bug was that the
+        // dashboard swallowed this silently and the "Copied!" tooltip
+        // still flashed, so the user pasted the wrong content into the
+        // next app. PR #4676 stopped the misleading flash; this surfaces
+        // a visible toast so the user knows to retry instead of being
+        // left guessing why Cmd+V pasted stale data.
+        // #4870: tag as 'warning' (yellow) rather than the default
+        // 'error' (red). Per the #4148 convention, red is reserved
+        // for destructive failures like STREAM_ERROR / ABORT; a
+        // failed clipboard write is non-destructive — the user just
+        // needs to retry — so warning is the visually honest level.
+        useConnectionStore.getState().addServerError(
+          'Failed to copy transcript to clipboard. Please try again.',
+          undefined,
+          'warning',
+        )
+        return
+      }
       setTranscriptCopied(true)
       if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
       transcriptResetTimerRef.current = setTimeout(() => setTranscriptCopied(false), 1500)
-    }).catch(() => {
-      // Clipboard rejected (e.g. user denied permissions). Surface the
-      // failure quietly — the user can copy manually from the chat view.
     })
   }, [storeMessages])
   useEffect(() => () => {
     if (transcriptResetTimerRef.current) clearTimeout(transcriptResetTimerRef.current)
   }, [])
+
+  // #5547: copy a SPECIFIC session's transcript (the sidebar right-click
+  // action). Unlike handleCopyTranscript (which copies the ACTIVE session via
+  // `storeMessages`), this reads the target session's messages straight from
+  // the store so it works without switching sessions first. Routes through the
+  // same clipboard helper + warning-toast-on-failure path.
+  const handleCopySessionTranscript = useCallback((sessionId: string) => {
+    const ss = useConnectionStore.getState().sessionStates[sessionId]
+    const text = ss ? formatTranscript(ss.messages) : ''
+    if (!text) {
+      useConnectionStore.getState().addInfoNotification('No transcript to copy for this session yet.')
+      return
+    }
+    void clipboardWriteText(text).then((ok) => {
+      if (!ok) {
+        useConnectionStore.getState().addServerError(
+          'Failed to copy transcript to clipboard. Please try again.',
+          undefined,
+          'warning',
+        )
+        return
+      }
+      useConnectionStore.getState().addInfoNotification('Transcript copied to clipboard.')
+    })
+  }, [])
+
+  // #5547: cross-session /compact. Ask the server to summarize the session's
+  // persisted history, then open the create-session modal with the session's
+  // cwd prefilled and the brief seeded EDITABLE in the composer (never
+  // auto-sent — reuses the Investigate seed path). Progress + failures surface
+  // as info / error toasts; a per-session in-flight latch disables re-entry so
+  // a double right-click can't fire two model calls.
+  const summarizingSessionsRef = useRef<Set<string>>(new Set())
+  const handleSummarizeAndCreateSession = useCallback((sessionId: string) => {
+    if (summarizingSessionsRef.current.has(sessionId)) return
+    const store = useConnectionStore.getState()
+    const session = store.sessions.find(s => s.sessionId === sessionId)
+    const cwd = session?.cwd || null
+    summarizingSessionsRef.current.add(sessionId)
+    store.addInfoNotification('Summarizing session…')
+    void store.summarizeSession(sessionId)
+      .then(({ summary }) => {
+        // Open the create-session modal pre-filled, with the brief staged as
+        // the first (editable) composer message. Mirrors handleInvestigate.
+        openCreateSession({ cwd, seed: summary })
+      })
+      .catch((err: unknown) => {
+        useConnectionStore.getState().addServerError(
+          err instanceof Error ? err.message : 'Could not summarize this session.',
+          undefined,
+          'warning',
+        )
+      })
+      .finally(() => {
+        summarizingSessionsRef.current.delete(sessionId)
+      })
+  }, [openCreateSession])
+
   const [showConsoleTab, setShowConsoleTab] = useState(() => {
     return loadPersistedShowConsoleTab()
   })
@@ -450,15 +757,58 @@ export function App() {
   }, [activeSessionId])
 
   const handleSwitchSession = useCallback((sessionId: string) => {
+    // #5204 — clicking any session tab returns from the Control Room view.
+    // This must run even when the clicked session is already the active one
+    // (CR is overlaid on top of it), so it sits before the no-op early return.
+    setControlRoomActive(false)
     if (sessionId === activeSessionId) return
     setIsSwitchingSession(true)
     switchSession(sessionId)
   }, [switchSession, activeSessionId])
 
-  const handleCloseSession = useCallback((sessionId: string) => {
-    if (!window.confirm('Close this session? The Claude process will be terminated.')) return
-    destroySession(sessionId)
+  // The actual session teardown, shared by the confirm path and the
+  // no-confirm path (#5206).
+  const performCloseSession = useCallback((sessionId: string, force?: boolean) => {
+    // #3800: evict the per-session composer state (draft + collapsed-paste
+    // blocks + next-id counter) so the refs further down don't leak the
+    // pasted-text content for the lifetime of <App />. `handleSend` already
+    // evicts on send; this closes the parallel path on session teardown.
+    // The sessions-list reconciliation effect (#3977) is the belt-and-braces
+    // backstop for server-driven removals, but evicting synchronously here
+    // keeps the cleanup tied to the click.
+    evictSessionComposerState(sessionId)
+    // Only thread `force` when set, so the normal close path stays a single-arg
+    // call (no spurious `undefined` second argument).
+    if (force) destroySession(sessionId, true)
+    else destroySession(sessionId)
   }, [destroySession])
+
+  const handleCloseSession = useCallback((sessionId: string) => {
+    // #5710 — a busy/running session is rejected by the server's #5695 guard
+    // ("interrupt it first"). For a WEDGED session that never reports turn-end
+    // that's a dead end, so offer an explicit force-delete confirm here that
+    // sends `force: true`. `isBusy` is the client-visible proxy for the server's
+    // `isRunning`. window.confirm is synchronous and matches the auto-mode
+    // confirm pattern used elsewhere in the dashboard.
+    const session = sessions.find(s => s.sessionId === sessionId)
+    if (session?.isBusy) {
+      const ok = typeof window !== 'undefined' && typeof window.confirm === 'function'
+        ? window.confirm('This session is still running. Delete it anyway? The in-flight turn will be interrupted and any uncommitted work in its worktree may be lost.')
+        : true
+      if (!ok) return
+      performCloseSession(sessionId, true)
+      return
+    }
+    // #5206 — gate the teardown behind a styled confirm dialog when the
+    // setting is enabled (the default). When disabled, close immediately.
+    // The Control Room tab closes via its own non-session path and never
+    // reaches here, so it stays exempt from the confirmation.
+    if (confirmSessionClose) {
+      setCloseConfirmSessionId(sessionId)
+      return
+    }
+    performCloseSession(sessionId)
+  }, [sessions, confirmSessionClose, performCloseSession])
 
   // #3567 / #3602: dedicated restart handler for the StdinDisabledBanner.
   // Creates a replacement session FIRST and then destroys the broken one so
@@ -484,8 +834,92 @@ export function App() {
       permissionMode: session.permissionMode || undefined,
       worktree: session.worktree,
     })
+    // #3800: same per-session composer eviction as handleCloseSession. The
+    // restart path also tears down the old session via destroySession, so
+    // its draft / collapsed-paste entries would otherwise linger keyed by
+    // the now-defunct sessionId. The #3977 reconciliation effect would
+    // also catch this once `sessions[]` rebroadcasts without the old id,
+    // but evicting here keeps the cleanup tied to the click.
+    evictSessionComposerState(sessionId)
     destroySession(sessionId)
   }, [sessions, destroySession, createSession])
+
+  // #4045: sidebar right-click context menu open + dismiss handlers. The
+  // open path stashes the click target + viewport coordinates so the
+  // SessionContextMenu can render at the cursor. Dismiss clears state.
+  // #4372: move focus to the row before opening the menu. A right-click
+  // does not move focus by default, so without this the SessionContextMenu's
+  // `previouslyFocused` capture (PR #4369) lands on whatever the user last
+  // clicked (often the composer textarea) and Esc returns focus there
+  // instead of to the row.
+  const handleSidebarContextMenu = useCallback((target: ContextMenuTarget, event: React.MouseEvent) => {
+    if (event.currentTarget instanceof HTMLElement) {
+      event.currentTarget.focus()
+    }
+    setSidebarContextMenu({ target, x: event.clientX, y: event.clientY })
+  }, [])
+  const dismissSidebarContextMenu = useCallback(() => {
+    setSidebarContextMenu(null)
+  }, [])
+
+  // #4045/#4249: build the menu item list for the currently-targeted sidebar
+  // row. Branching by target.type and capability-gating ("Open in Finder"
+  // only under Tauri; resumable "Open in Finder" only when the conversation
+  // record carries a cwd) lives in buildSidebarContextMenuItems so the
+  // per-branch logic is unit-testable without rendering App.
+  const sidebarContextMenuItems = useMemo<ContextMenuItem[]>(() => {
+    if (!sidebarContextMenu) return []
+    return buildSidebarContextMenuItems({
+      target: sidebarContextMenu.target,
+      sessions,
+      conversationHistory,
+      isTauri: isTauri(),
+      createSession,
+      resumeConversation,
+      revealInFinder,
+      onRevealError: (message) => {
+        useConnectionStore.getState().addServerError(message)
+      },
+      copyToClipboard: (text) => {
+        // #4673: route through the clipboard helper so Tauri builds use the
+        // native plugin instead of navigator.clipboard (which silently
+        // no-ops in WKWebView).
+        // #4871: surface a visible warning toast on failure so the user
+        // knows the OS clipboard was NOT written (Tauri plugin rejected,
+        // navigator.clipboard missing in a non-secure context, etc.).
+        // Mirrors the #4857 / #4629 pattern applied to handleCopyTranscript
+        // above. Severity is 'warning' (not the default 'error') per #4870 —
+        // a failed clipboard write is non-destructive, the user just retries.
+        void clipboardWriteText(text).then((ok) => {
+          if (!ok) {
+            useConnectionStore.getState().addServerError(
+              'Failed to copy to clipboard. Please try again.',
+              undefined,
+              'warning',
+            )
+          }
+        })
+      },
+      openCreateSessionAt: (cwd) => {
+        // #5214/#5217 — context-menu opener; not an Investigate launch (seed
+        // cleared by the shared helper).
+        openCreateSession({ cwd })
+      },
+      copySessionTranscript: handleCopySessionTranscript,
+      summarizeAndCreateSession: handleSummarizeAndCreateSession,
+      confirmCloseSession: handleCloseSession,
+    })
+  }, [
+    sidebarContextMenu,
+    sessions,
+    conversationHistory,
+    createSession,
+    resumeConversation,
+    handleCloseSession,
+    openCreateSession,
+    handleCopySessionTranscript,
+    handleSummarizeAndCreateSession,
+  ])
 
   /**
    * Append processed image attachments to the composer's pending-image
@@ -500,181 +934,34 @@ export function App() {
     setImageAttachments(prev => [...prev, ...attachments])
   }, [])
 
-  useEffect(() => {
-    const handler = (e: KeyboardEvent) => {
-      // Prevent Backspace from triggering browser/webview "back" navigation
-      const target = e.target instanceof HTMLElement ? e.target : null
-      if (e.key === 'Backspace' && (!target || (!['INPUT', 'TEXTAREA'].includes(target.tagName) && !target.isContentEditable))) {
-        e.preventDefault()
-        return
-      }
-      // Ctrl+V on macOS in Tauri = paste image from clipboard (#3748).
-      // Cmd+V remains the native text paste (handled by the OS / textarea
-      // onPaste handler, untouched here). On non-Mac platforms Ctrl+V is
-      // the native text paste — we leave it alone there. On non-Tauri
-      // (web dashboard) there's no way to read the OS clipboard image
-      // reliably, so the shortcut only fires inside the Tauri webview.
-      if (
-        isTauri() &&
-        isMacPlatform() &&
-        e.ctrlKey &&
-        !e.metaKey &&
-        !e.altKey &&
-        !e.shiftKey &&
-        (e.key === 'v' || e.key === 'V')
-      ) {
-        e.preventDefault()
-        void (async () => {
-          try {
-            const image = await readClipboardImage()
-            if (!image) {
-              useConnectionStore.getState().addInfoNotification('No image on clipboard')
-              return
-            }
-            // Use processBase64Image (not processImageFiles) to skip the
-            // base64 → Blob → File → FileReader → base64 round-trip the
-            // File path would otherwise perform on a payload we already
-            // have in the canonical shape (#3796 review).
-            const { accepted, rejected } = await processBase64Image(image.base64, image.mediaType, image.name)
-            if (accepted) {
-              appendImageAttachments([accepted])
-            } else if (rejected) {
-              useConnectionStore.getState().addInfoNotification(rejected)
-            }
-          } catch (err) {
-            useConnectionStore.getState().addInfoNotification(
-              `Failed to read clipboard image: ${err instanceof Error ? err.message : String(err)}`,
-            )
-          }
-        })()
-        return
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
-        e.preventDefault()
-        setPaletteOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+P: toggle command palette (VSCode-style alias)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault()
-        setPaletteOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+D: toggle view mode (chat ↔ terminal)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
-        e.preventDefault()
-        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
-        return
-      }
-      // Cmd+N / Ctrl+N: open new session modal
-      if ((e.metaKey || e.ctrlKey) && e.key === 'n' && !e.shiftKey) {
-        e.preventDefault()
-        setShowCreateSession(true)
-        return
-      }
-      // Cmd+1-9: switch to tab by index
-      if ((e.metaKey || e.ctrlKey) && !e.shiftKey && e.key >= '1' && e.key <= '9') {
-        e.preventDefault()
-        const idx = parseInt(e.key, 10) - 1
-        const target = sessions[idx]
-        if (target) handleSwitchSession(target.sessionId)
-        return
-      }
-      // Cmd+Shift+[ / ]: prev/next tab
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && (e.key === '[' || e.key === ']')) {
-        e.preventDefault()
-        const currentIdx = sessions.findIndex(s => s.sessionId === activeSessionId)
-        if (currentIdx < 0) return
-        const nextIdx = e.key === '['
-          ? (currentIdx - 1 + sessions.length) % sessions.length
-          : (currentIdx + 1) % sessions.length
-        handleSwitchSession(sessions[nextIdx]!.sessionId)
-        return
-      }
-      // Cmd+W: close active tab (if more than 1 session) — Tauri only (#1378)
-      if (isTauri() && (e.metaKey || e.ctrlKey) && e.key === 'w' && !e.shiftKey) {
-        if (activeSessionId && sessions.length > 1) {
-          e.preventDefault()
-          handleCloseSession(activeSessionId)
-        }
-      }
-      if ((e.metaKey || e.ctrlKey) && e.key === 'b') {
-        e.preventDefault()
-        setSidebarOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+P: command palette (VSCode alias)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'p') {
-        e.preventDefault()
-        setPaletteOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+D: toggle chat/terminal view
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 'd') {
-        e.preventDefault()
-        setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
-        return
-      }
-      // Cmd+\: cycle split mode (none → horizontal → vertical → none)
-      if ((e.metaKey || e.ctrlKey) && e.key === '\\') {
-        e.preventDefault()
-        setSplitMode(prev => {
-          const next = prev === null ? 'horizontal' : prev === 'horizontal' ? 'vertical' : null
-          persistSplitMode(next)
-          return next
-        })
-        return
-      }
-      // Cmd+,: open settings
-      if ((e.metaKey || e.ctrlKey) && e.key === ',') {
-        e.preventDefault()
-        setSettingsOpen(prev => !prev)
-        return
-      }
-      // Cmd+Shift+T: copy chat transcript (#3073)
-      if ((e.metaKey || e.ctrlKey) && e.shiftKey && e.key.toLowerCase() === 't') {
-        e.preventDefault()
-        handleCopyTranscript()
-        return
-      }
-      // Cmd+.: interrupt active session
-      if ((e.metaKey || e.ctrlKey) && e.key === '.') {
-        e.preventDefault()
-        sendInterrupt()
-        return
-      }
-      // Shift+Tab: toggle plan mode
-      if (e.shiftKey && e.key === 'Tab' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const tag = (e.target as HTMLElement).tagName
-        if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return  // Allow native reverse-tab
-        e.preventDefault()
-        const state = useConnectionStore.getState()
-        const currentMode = state.permissionMode
-        if (currentMode === 'plan') {
-          // Switch back to previous mode (default to 'approve')
-          setPermissionMode(state.previousPermissionMode || 'approve')
-        } else {
-          // Switch to plan mode
-          setPermissionMode('plan')
-        }
-        return
-      }
-      // ?: toggle shortcut help (no modifiers, not in text input)
-      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        const tag = (e.target as HTMLElement).tagName
-        if (tag !== 'INPUT' && tag !== 'TEXTAREA' && !(e.target as HTMLElement).isContentEditable) {
-          const overlays = document.querySelectorAll('[data-modal-overlay]')
-          const onlyShortcutHelp = overlays.length === 1 && overlays[0]?.classList.contains('shortcut-help-overlay')
-          if (overlays.length === 0 || onlyShortcutHelp) {
-            e.preventDefault()
-            setShortcutHelpOpen(prev => !prev)
-          }
-        }
-      }
-    }
-    window.addEventListener('keydown', handler)
-    return () => window.removeEventListener('keydown', handler)
-  }, [sessions, activeSessionId, handleSwitchSession, handleCloseSession, viewMode, setViewMode, sendInterrupt, handleCopyTranscript])
+  // #4770: keydown dispatch (Backspace prevention + Tauri Ctrl+V image
+  // paste + registry-routed shortcuts) lives in useShortcutDispatch so
+  // App stays under the SRP threshold and the dispatch ladder is
+  // independently testable.
+  useShortcutDispatch({
+    shortcutRegistry,
+    sessions,
+    activeSessionId,
+    viewMode,
+    setViewMode,
+    setSplitMode,
+    // #5997 — gate the chat/terminal toggle + split shortcuts off for a
+    // terminal-only user-shell session (no chat surface to toggle/split).
+    terminalOnly: isUserShell,
+    setPaletteOpen,
+    setSidebarOpen,
+    setSettingsOpen,
+    // #5544 — Cmd+, redirects to the Control Room Settings tab.
+    openSettings,
+    setShowCreateSession,
+    setShortcutHelpOpen,
+    handleSwitchSession,
+    handleCloseSession,
+    handleCopyTranscript,
+    sendInterrupt,
+    setPermissionMode,
+    appendImageAttachments,
+  })
 
   const trackedCommands = useMemo(
     () => commands.map(cmd => ({
@@ -683,7 +970,9 @@ export function App() {
         recordMruCommand(cmd.id)
         // Override commands that need App-level state
         if (cmd.id === 'new-session') {
-          setShowCreateSession(true)
+          // #5217 — plain new session via the shared opener (resets cwd +
+          // clears any stashed Investigate seed).
+          openCreateSession()
         } else if (cmd.id === 'toggle-sidebar') {
           setSidebarOpen(prev => !prev)
         } else {
@@ -697,12 +986,16 @@ export function App() {
   // Auto-connect on mount — use page token (served by local server),
   // or fall back to the last active server from the registry.
   // Reads registry via getState() to avoid reactive deps (mount-only effect).
+  //
+  // NOTE: precedence here (local-first) is intentionally the inverse of
+  // retryConnection's (active-server-first). A fresh page load returns to the
+  // local "home" daemon; a manual Retry resumes whatever you were connected to.
+  // The two don't collide in practice — connectLocal nulls activeServerId.
   useEffect(() => {
     const token = getAuthToken()
     if (token) {
-      const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-      const wsUrl = `${proto}://${window.location.host}/ws`
-      connect(wsUrl, token)
+      // Served by a local daemon — connect to "this machine" (scope null).
+      useConnectionStore.getState().connectLocal()
       return
     }
     const { activeServerId: savedId, serverRegistry: registry, connectToServer: connectSrv } = useConnectionStore.getState()
@@ -718,6 +1011,26 @@ export function App() {
       setShowCreateSession(false)
       setIsCreatingSession(false)
       setSessionCreateError(null)
+      // #5202 — if this create was launched from an Investigate verdict, seed
+      // the freshly-created session's composer with the reason note and drop
+      // out of the Control Room so the operator lands in the new session. We
+      // write the per-session draft ref too so the draft-restore effect (which
+      // runs after this one on the same activeSessionId change) reads the seed
+      // rather than clobbering it with an empty draft.
+      // #5553: a server-provided repo-preset SEED (delivered on session_switched
+      // and stashed in the store keyed by sessionId) takes precedence — it's the
+      // repo's intentional first-message template. Falls back to the client-side
+      // Investigate/summarize seed (#5202/#5547). Either way the seed is staged
+      // EDITABLE (never auto-sent) via the same draft-ref path.
+      const takeSeed = useConnectionStore.getState().takePendingServerSeed
+      const serverSeed = typeof takeSeed === 'function' ? takeSeed(activeSessionId) : null
+      const seed = serverSeed || pendingSeedPromptRef.current
+      if (seed) {
+        inputDraftsRef.current.set(activeSessionId, seed)
+        setInputDraftValue(seed)
+        setControlRoomActive(false)
+        pendingSeedPromptRef.current = null
+      }
     }
   }, [activeSessionId, isCreatingSession])
 
@@ -732,52 +1045,27 @@ export function App() {
     }
   }, [serverErrors, isCreatingSession])
 
-  // Convert store messages to ChatViewMessage[], filtering out system events
-  // and collapsing contiguous tool_use/thinking runs into a single synthetic
-  // `tool_group` row (#3747). The full group payload is kept in
-  // `chatToolGroupPayloads` so renderMessage can look it up by synthetic id.
-  const chatFilteredMessages = useMemo(
-    () => storeMessages.filter(m => m.type !== 'system'),
-    [storeMessages],
-  )
-  const chatDisplayGroups = useMemo(() => {
-    const base = groupMessages(chatFilteredMessages)
-    return applyStreamingOverlay(base, chatFilteredMessages, streamingMessageId ?? null)
-  }, [chatFilteredMessages, streamingMessageId])
-  // Singleton activity groups (1 tool, no thinking) pass through as plain
-  // `tool_use` rows so the existing ToolBubble — with its full expandable
-  // result panel — stays reachable. Groups only collapse into one
-  // `tool_group` row when there is a run of 2+ messages worth collapsing
-  // (#3794 review).
-  const chatToolGroupPayloads = useMemo(() => {
-    const map = new Map<string, { messages: ChatMessage[]; isActive: boolean }>()
-    for (const g of chatDisplayGroups) {
-      if (g.type === 'activity' && g.messages.length >= 2) {
-        map.set(g.key, { messages: g.messages, isActive: g.isActive })
-      }
-    }
-    return map
-  }, [chatDisplayGroups])
-  const chatMessages = useMemo<ChatViewMessage[]>(
-    () =>
-      chatDisplayGroups.map((g) => {
-        if (g.type === 'single') return toChatViewMessage(g.message)
-        if (g.messages.length < 2) {
-          // Singleton — emit as the original tool_use / thinking row.
-          return toChatViewMessage(g.messages[0]!)
-        }
-        const last = g.messages[g.messages.length - 1]
-        return {
-          id: g.key,
-          type: 'tool_group',
-          content: '',
-          timestamp: last?.timestamp ?? 0,
-        }
-      }),
-    [chatDisplayGroups],
-  )
+  // #4770: chat-message pipeline (filter system events + group activity
+  // runs + apply streaming overlay + flatten to ChatViewMessage[]) is
+  // extracted to `useChatMessages` so the derivations are independently
+  // testable. The hook also exposes `storeMsgMap` (O(1) renderMessage
+  // lookup) and `stalledPromptIds` (#4615 — prompts invalidated by a
+  // subsequent ASK_USER_QUESTION_STALL) because both are pure
+  // storeMessages derivations that only the renderer consumes.
+  const {
+    chatMessages,
+    chatToolGroupPayloads,
+    chatTailMessageId,
+    storeMsgMap,
+    stalledPromptIds,
+  } = useChatMessages({
+    storeMessages,
+    streamingMessageId,
+  })
 
-  // System events for the System tab
+  // System events for the System tab — uses the same toChatViewMessage
+  // mapping the chat pipeline does so both surfaces present rows in the
+  // same shape.
   const systemMessages = useMemo(
     () => storeMessages.filter(m => m.type === 'system').map(toChatViewMessage),
     [storeMessages],
@@ -832,10 +1120,54 @@ export function App() {
     })
   }, [sessionStates, sessionActivityNow])
 
+  // #5560 — the three user-defined ordering overlays (SessionBar tab order
+  // #4831; sidebar repo + per-repo session orders #4832) plus their
+  // server-switch refresh effects (#4831 / #4940) live in `useSidebarOrdering`.
+  const {
+    tabOrder,
+    sidebarRepoOrder,
+    sidebarSessionOrder,
+    handleReorderTabs,
+    handleReorderRepos,
+    handleReorderSidebarSessions,
+  } = useSidebarOrdering()
+
   // Map sessions to SessionTabData[] with unified status indicators.
+  //
+  // #4831: apply the persisted `tabOrder` overlay. Sessions present in
+  // `tabOrder` render in that order; sessions added by the server since
+  // the last reorder (new tabs, restored conversations) fall through to
+  // the server's natural order at the end. Stale ids in `tabOrder` (server
+  // removed the session) are harmlessly ignored because we filter against
+  // the live `sessions` list.
+  // #5667 — which sessions have an unanswered, still-live permission prompt,
+  // across ALL sessions (not just the active one). Now that the server routes a
+  // prompt to its owning session, a background session's prompt no longer lands
+  // in the focused tab — without a per-tab indicator it would be invisible until
+  // the operator switched to that session. Shallow-equal Record so this only
+  // re-renders a tab when its pending state actually flips, not on every stream
+  // delta. The `expiresAt > now` check (inside the helper) clears the indicator
+  // on expiry/timeout, which set `options: undefined` but not `answered`.
+  const pendingPermissionCounts = useConnectionStore(
+    useShallow((s) => derivePendingPermissionCounts(s.sessionStates, Date.now())),
+  )
+
   const sessionTabs: SessionTabData[] = useMemo(
-    () => sessions.map(s => {
-      return {
+    () => {
+      const byId = new Map(sessions.map(s => [s.sessionId, s]))
+      const ordered: SessionInfo[] = []
+      const seen = new Set<string>()
+      for (const id of tabOrder) {
+        const s = byId.get(id)
+        if (s && !seen.has(id)) {
+          ordered.push(s)
+          seen.add(id)
+        }
+      }
+      for (const s of sessions) {
+        if (!seen.has(s.sessionId)) ordered.push(s)
+      }
+      return ordered.map(s => ({
         sessionId: s.sessionId,
         name: s.name,
         isBusy: s.isBusy,
@@ -846,12 +1178,53 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
-      }
-    }),
-    [sessions, activeSessionId, getSessionVisualStatus],
+        // #5667: flag tabs with an unanswered permission prompt so a
+        // background session's request is visible without switching to it.
+        // #5693: also carry the count so the tab can show `!2`.
+        pendingPermission: (pendingPermissionCounts[s.sessionId] ?? 0) > 0,
+        pendingPermissionCount: pendingPermissionCounts[s.sessionId] ?? 0,
+      }))
+    },
+    [sessions, activeSessionId, getSessionVisualStatus, tabOrder, pendingPermissionCounts],
   )
 
+  // #5693 (PR-3) — aggregate "N pending" badge + jump-to-next-waiting-session.
+  // Containment keeps each prompt in its own tab; this gives one place to see
+  // the total and one click to reach the next waiting session (cyclically, in
+  // visual tab order).
+  const pendingPermissionTotal = totalPendingPermissions(pendingPermissionCounts)
+  const handleJumpToPending = useCallback(() => {
+    const orderedIds = sessionTabs.map(t => t.sessionId)
+    const next = selectNextPendingSession(orderedIds, pendingPermissionCounts, activeSessionId)
+    if (next) handleSwitchSession(next)
+  }, [sessionTabs, pendingPermissionCounts, activeSessionId, handleSwitchSession])
+
   // Derive sidebar repo tree from sessions
+  // #4120: dedicated selector for the cumulativeUsage slice the sidebar
+  // reads, with shallow equality so this only updates when a value the
+  // sidebar consumes actually changes — NOT on every stream chunk.
+  // Without this slice the sidebarRepos useMemo below depended on the
+  // entire `sessionStates` object, which gets replaced on every WS
+  // event (every stream_delta, every tool_result), forcing the memo
+  // to recompute + allocate a fresh RepoNode[] hundreds of times per
+  // turn (#4119 review followup #4120).
+  const sidebarCumulativeUsage = useConnectionStore(
+    useShallow((s) => {
+      // for-in + index lookup avoids the per-call Object.entries()
+      // intermediate array allocation. This selector still runs on every
+      // store update (zustand fires the selector to compute the new
+      // value and compare against the previous); only the SHALLOW-EQUAL
+      // RESULT comparison short-circuits the React subscribers.
+      // Skipping the array allocation keeps the hot path tight (#4130
+      // review).
+      const out: Record<string, BaseSessionState['cumulativeUsage']> = {}
+      for (const id in s.sessionStates) {
+        out[id] = s.sessionStates[id]!.cumulativeUsage
+      }
+      return out
+    }),
+  )
+
   const sidebarRepos: RepoNode[] = useMemo(() => {
     const repoMap = new Map<string, RepoNode>()
 
@@ -873,6 +1246,15 @@ export function App() {
         status: getSessionVisualStatus(s),
         // #3567: surface latched stdin-disabled flag from session_list.
         stdinForwardingDisabled: s.stdinForwardingDisabled,
+        // #4073: surface per-session running cost. Prefer the live
+        // session-state copy (updated by `session_usage` events) and
+        // fall back to the session_list snapshot for sessions that
+        // haven't received a session_usage tick yet.
+        // #4120: read from the shallow-equal selector above instead of
+        // `sessionStates` directly so this memo only recomputes when
+        // a cumulativeUsage value actually changes — not on every
+        // stream chunk.
+        cumulativeUsage: sidebarCumulativeUsage[s.sessionId] ?? s.cumulativeUsage ?? null,
       })
     }
 
@@ -881,8 +1263,21 @@ export function App() {
       return []
     }
 
-    return [...repoMap.values()]
-  }, [sessions, getSessionVisualStatus])
+    // #4832 — apply user-defined ordering. Repo groups are reordered
+    // by saved cwd order (unknown ids dropped, new repos appended at
+    // tail). Sessions within each repo are reordered by the per-repo
+    // saved order. `applyOrderById` keeps unsaved sessions / repos at
+    // the end so newly-created entries don't shuffle the existing list.
+    const ordered = applyOrderById([...repoMap.values()], sidebarRepoOrder, r => r.path)
+    return ordered.map(repo => {
+      const savedSessionOrder = sidebarSessionOrder[repo.path]
+      if (!savedSessionOrder || savedSessionOrder.length === 0) return repo
+      return {
+        ...repo,
+        activeSessions: applyOrderById(repo.activeSessions, savedSessionOrder, s => s.sessionId),
+      }
+    })
+  }, [sessions, getSessionVisualStatus, sidebarCumulativeUsage, sidebarRepoOrder, sidebarSessionOrder])
 
   // Known CWDs for CreateSessionModal suggestions
   const knownCwds = useMemo(
@@ -923,6 +1318,12 @@ export function App() {
   // reconnect), so the toast survives the entire disconnect and stays
   // clickable once the socket recovers.
   const isSocketConnected = connectionPhase === 'connected'
+  // #4075: surface the active session's cost-threshold warning as a Toast
+  // when set and not yet dismissed. The server fires the event ONCE per
+  // session; renderer-side dismissal is per-session via `dismissedAt`.
+  const activeCostWarning = activeSessionId
+    ? sessionStates[activeSessionId]?.costThresholdWarning ?? null
+    : null
   const toastItems: ToastItem[] = useMemo(
     () => [
       ...serverErrors
@@ -930,7 +1331,11 @@ export function App() {
         .map(e => ({
           id: e.id,
           message: e.message,
-          level: 'error' as const,
+          // #4148: thread severity through. Default to 'error' for any
+          // ServerError that doesn't set the field — preserves the
+          // existing red-toast behavior for STREAM_ERROR / ABORT and
+          // every pre-#4148 call site of addServerError.
+          level: (e.severity === 'warning' ? 'warning' : 'error') as 'warning' | 'error',
           ...(e.action
             ? {
                 action: e.action,
@@ -938,14 +1343,33 @@ export function App() {
                 actionDisabledLabel: 'Reconnecting…',
               }
             : {}),
+          // #5039: optional partial-cost sub-line surfaced under the
+          // main toast message when PR #5037 folded any parent + Task
+          // subagent rounds onto the error envelope before the error
+          // fired. Undefined for every error path that didn't carry
+          // partials, so the existing message-only toast is unchanged.
+          ...(e.partialCostLine ? { subMessage: e.partialCostLine } : {}),
         })),
       ...infoNotifications
         .map(e => ({ id: e.id, message: e.message, level: 'info' as const })),
+      ...(activeCostWarning && activeCostWarning.dismissedAt == null
+        ? [{
+            id: `cost-threshold-${activeSessionId}`,
+            message: `Session has used $${activeCostWarning.costUsd.toFixed(2)}. (Threshold: $${activeCostWarning.thresholdUsd.toFixed(2)}).`,
+            level: 'info' as const,
+          }]
+        : []),
     ],
-    [serverErrors, infoNotifications, activeSessionId, isSocketConnected],
+    [serverErrors, infoNotifications, activeSessionId, isSocketConnected, activeCostWarning],
   )
 
-  // Per-session input draft persistence
+  // Per-session input draft persistence.
+  //
+  // Reconciliation invariant (#3977): every key in `inputDraftsRef`,
+  // `pastedTextBlocksRef`, and `pastedTextNextIdRef` MUST correspond to a
+  // sessionId present in `sessions[]`. Any per-session ref added below must
+  // be added to `evictSessionComposerState()` so the `sessions[]`
+  // reconciliation effect can clean it up on server-driven removal.
   const inputDraftsRef = useRef<Map<string, string>>(new Map())
   const [inputDraftValue, setInputDraftValue] = useState('')
   const handleDraftChange = useCallback((text: string) => {
@@ -963,6 +1387,57 @@ export function App() {
   const pastedTextNextIdRef = useRef<Map<string, number>>(new Map())
   const [pastedTextBlocks, setPastedTextBlocks] = useState<PastedTextBlock[]>([])
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null)
+
+  // #3800 / #3977: single eviction point for the three per-session composer
+  // refs above. Called from `handleCloseSession` / `handleRestartSession` /
+  // `handleSend` (synchronous user actions) AND from the sessions-list
+  // reconciliation effect below (server-driven removals such as another
+  // client closing the session, supervisor culling, cold restart, or
+  // multi-server switching). Defined as a non-memoised closure because the
+  // refs themselves are stable and the helper has no other deps — adding
+  // useCallback here would only buy a stable identity that no consumer
+  // currently requires.
+  const evictSessionComposerState = (sessionId: string) => {
+    inputDraftsRef.current.delete(sessionId)
+    pastedTextBlocksRef.current.delete(sessionId)
+    pastedTextNextIdRef.current.delete(sessionId)
+  }
+
+  // #3977: reconcile per-session composer refs against the live `sessions[]`
+  // list. PR #3973 closed the two user-initiated removal paths
+  // (`handleCloseSession`, `handleRestartSession`); this effect closes the
+  // larger surface where the server (or another client) removes a session
+  // from `session_list` without <App /> having any local hook to react —
+  // see store/message-handler.ts `case 'session_list'`. Any ref entry whose
+  // sessionId is no longer present in `sessions` was destroyed by that
+  // path; evict it so the maps don't grow unbounded over a long-lived
+  // dashboard process. The user-initiated handlers still call
+  // `evictSessionComposerState` directly so the cleanup is synchronous with
+  // the click — this effect is the belt-and-braces backstop, not the
+  // primary path.
+  //
+  // Deps: only `sessions` — `evictSessionComposerState` reads stable refs
+  // and is intentionally not memoised. Building the Set inside the effect
+  // (not in a useMemo) keeps the diff cheap; the loop runs once per
+  // sessions-array change, which is O(refs) and dominated by O(sessions)
+  // on a single Set build.
+  useEffect(() => {
+    const liveIds = new Set(sessions.map(s => s.sessionId))
+    for (const id of inputDraftsRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+    // pastedTextBlocksRef / pastedTextNextIdRef may hold ids without a
+    // matching draft entry (paste-without-typing), so they need their own
+    // pass. The helper is idempotent so re-evicting an id that was already
+    // removed above is a no-op.
+    for (const id of pastedTextBlocksRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+    for (const id of pastedTextNextIdRef.current.keys()) {
+      if (!liveIds.has(id)) evictSessionComposerState(id)
+    }
+  }, [sessions])
+
   // Restore draft + paste blocks when switching sessions
   useEffect(() => {
     if (activeSessionId) {
@@ -1020,13 +1495,17 @@ export function App() {
     const blockMap = new Map(blocks.map(b => [b.id, b.content]))
     const expanded = blockMap.size > 0 ? expandPasteMarkers(text, blockMap) : text
     sendInput(expanded, wire.length > 0 ? wire : undefined)
+    // #5780 — sending is an explicit "show me the latest" action: snap the
+    // chat to the bottom even if the user had scrolled up before typing.
+    setScrollToBottomSignal(n => n + 1)
     setFileAttachments([])
     setImageAttachments([])
-    // Clear draft + pasted-text blocks for the session that sent the message
+    // Clear draft + pasted-text blocks for the session that sent the message.
+    // Unlike the close / restart paths, the session itself is still alive —
+    // we're just resetting the composer after a successful send. The next
+    // paste or draft change for this sid will repopulate the maps.
     if (sid) {
-      inputDraftsRef.current.delete(sid)
-      pastedTextBlocksRef.current.delete(sid)
-      pastedTextNextIdRef.current.delete(sid)
+      evictSessionComposerState(sid)
     }
     setInputDraftValue('')
     setPastedTextBlocks([])
@@ -1038,18 +1517,75 @@ export function App() {
   }, [sendInterrupt])
 
   const handleNewSession = useCallback(() => {
-    setPendingCwd(null)
-    setShowCreateSession(true)
+    // #5217 — plain new session via the shared opener (no investigation seed).
+    openCreateSession()
+  }, [openCreateSession])
+
+  // #5986 (epic #5982) — create an embedded user-shell directly. Unlike a chat
+  // session this skips the provider-picker modal: user-shell is HIDDEN from the
+  // chat provider list and server-gated on the primary token + the userShell
+  // capability, so there are no per-session options to pick. The session lands
+  // terminal-only (see the isUserShell branch — forces the Output view, hides
+  // Chat). cwd falls back to the host default when no repo is selected.
+  const handleNewShell = useCallback(() => {
+    createSession({ name: 'Shell', cwd: defaultCwd ?? undefined, provider: USER_SHELL_PROVIDER })
+  }, [createSession, defaultCwd])
+
+  // #6006 — operator panic button. Revoke is destructive (it invalidates the
+  // current token with no grace, severs every live user-shell, and forces ALL
+  // connections — including this dashboard — to re-authenticate with the new
+  // token, obtained out-of-band). Confirm before firing.
+  const handleRevokeToken = useCallback(() => {
+    const ok = window.confirm(
+      'Revoke the API token now?\n\n' +
+      'This immediately invalidates the current token (no grace period), closes every embedded shell, ' +
+      'and signs out all connected devices — including this dashboard. You will need to re-pair with the ' +
+      'new token to reconnect.\n\nUse this only if the token may be compromised.',
+    )
+    if (ok) revokeToken()
+  }, [revokeToken])
+
+  // #5202 — open the create-session picker pre-filled for an Investigate
+  // action: cwd = the repo path, and the reason note seeded into the new
+  // session's composer once it's created. The user still picks
+  // model/provider/options in the modal before creating.
+  const handleInvestigate = useCallback((req: RepoInvestigateRequest) => {
+    openCreateSession({ cwd: req.cwd, seed: req.reason })
+  }, [openCreateSession])
+
+  // #5507 — open the create-session picker pre-filled for an "Open session"
+  // row action: cwd = the repo path. Same plumbing as Investigate minus the
+  // composer seeding (no reason note) — the modal suggests + dedupes the
+  // session name from the repo's basename, and the user picks
+  // model/provider/permission/worktree before creating.
+  const handleOpenSession = useCallback((req: RepoOpenSessionRequest) => {
+    openCreateSession({ cwd: req.cwd })
+  }, [openCreateSession])
+
+  // #5553 — the per-repo settings drawer (gear on a Control Room repo row). One
+  // drawer open at a time; the target repo path+name is stashed in state.
+  const handleConfigureRepo = useCallback((req: { path: string; name: string }) => {
+    setRepoPresetDrawer(req)
   }, [])
 
-  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean }) => {
+  // #4695 / #4942 — bridge the macOS menu bar items to App-state
+  // handlers. See the `useTauriMenuEvents` call below `handleShowQr`
+  // (further down in this file) for the actual wiring — we can't
+  // invoke it inline here because the View > Show QR item reuses
+  // `handleShowQr`, which depends on `fetchQrInto`, which is declared
+  // further down. The hook is a no-op outside Tauri (web dashboard).
+
+  const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean; skipPermissions?: boolean }) => {
     setSessionCreateError(null)
     setIsCreatingSession(true)
-    createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree })
+    createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree, skipPermissions: data.skipPermissions })
   }, [createSession])
 
   const handlePlanApprove = useCallback(() => {
     sendInput('approve')
+    // #5786 — approving a plan is an explicit "show me the latest" action: snap
+    // to the bottom so the follow-up response scrolls into view.
+    setScrollToBottomSignal(n => n + 1)
   }, [sendInput])
 
   const handlePlanFeedback = useCallback(() => {
@@ -1088,253 +1624,163 @@ export function App() {
     setImageAttachments(prev => prev.filter((_, i) => i !== index))
   }, [])
 
-  const fetchQrInto = useCallback(async (path: string) => {
-    setQrModalOpen(true)
-    setQrLoading(true)
-    setQrError(null)
-    setQrSvg(null)
-    const token = getAuthToken()
-    if (!token) {
-      setQrLoading(false)
-      setQrError('No auth token available')
-      return
-    }
-    try {
-      const res = await fetch(path, {
-        headers: { Authorization: `Bearer ${token}` },
-      })
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({ error: 'Request failed' }))
-        setQrError(body.error || `HTTP ${res.status}`)
-        setQrSvg(null)
-      } else {
-        const svg = await res.text()
-        setQrSvg(svg)
-        setQrError(null)
-      }
-    } catch (err) {
-      setQrError(err instanceof Error ? err.message : 'Failed to fetch QR code')
-      setQrSvg(null)
-    } finally {
-      setQrLoading(false)
-    }
-  }, [])
+  // #5560 — the QR-modal surface (linking-mode QR, per-session "Share" QR,
+  // typeable pairing code, Discord pairing-link delivery) lives in `useQrModal`.
+  // `handleShowQr` is consumed by the Tauri menu wiring directly below, so the
+  // hook is called here (not lower with the rest of the modal handlers).
+  const {
+    qrModalOpen,
+    setQrModalOpen,
+    qrSvg,
+    qrLoading,
+    qrError,
+    qrPairingCode,
+    qrShareMode,
+    handleShowQr,
+    handleShareSession,
+    handlePostPairLinkToDiscord,
+  } = useQrModal(activeSessionId, pairingRefreshedCount)
 
-  const handleShowQr = useCallback(() => fetchQrInto('/qr'), [fetchQrInto])
+  // #5560 — the macOS menu-bar wiring (#4695 / #4942) lives in
+  // `useTauriMenuWiring`. No-op outside Tauri.
+  useTauriMenuWiring({
+    onNewSession: handleNewSession,
+    onShowQr: handleShowQr,
+    openSettings,
+    setSidebarOpen,
+    setPermissionMode,
+  })
 
-  // #3070: per-session "Share this session" QR. Issues a token bound to the
-  // active session — the scanner can chat into it but cannot list/switch
-  // others. Distinct from the linking-mode QR above, which lets the paired
-  // device manage every session.
-  const [qrShareMode, setQrShareMode] = useState<'link' | 'share'>('link')
-  const handleShareSession = useCallback(() => {
-    if (!activeSessionId) return
-    setQrShareMode('share')
-    void fetchQrInto(`/qr/session/${encodeURIComponent(activeSessionId)}`)
-  }, [activeSessionId, fetchQrInto])
-  // Reset share-mode label whenever the modal reopens via the regular QR
-  // button so the title reflects the actual content.
-  useEffect(() => {
-    if (qrModalOpen && qrShareMode === 'share') return
-    if (!qrModalOpen) setQrShareMode('link')
-  }, [qrModalOpen, qrShareMode])
+  // #5786 — approving a permission/plan or answering an AskUserQuestion is, like
+  // sending, an explicit "show me the latest" action: snap the chat to the
+  // bottom so the follow-up response scrolls into view even if the user had
+  // scrolled up to read history. These wrappers forward to the underlying store
+  // actions unchanged (same args, same return) and bump the same nonce
+  // handleSend does — but AFTER the action runs and only when it was accepted
+  // (sendPermissionResponse / sendUserQuestionResponse return false when the
+  // socket isn't OPEN; review #5786). Bumping after the call lets the action's
+  // store updates land first, so ChatView's RAF scroll runs once the follow-up
+  // has rendered. A non-false result (incl. 'queued') still bumps — the message
+  // will send and produce a response.
+  const respondToPermission = useCallback<typeof sendPermissionResponse>((...args) => {
+    const result = sendPermissionResponse(...args)
+    if (result !== false) setScrollToBottomSignal(n => n + 1)
+    return result
+  }, [sendPermissionResponse])
 
-  // Auto-refresh QR when the server regenerates the pairing ID (#2916).
-  // Only refresh while the modal is open — guarding on qrSvg would reopen
-  // the modal after the user closes it if qrSvg was not cleared on close.
-  useEffect(() => {
-    if (pairingRefreshedCount === 0) return
-    if (!qrModalOpen) return
-    handleShowQr()
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [pairingRefreshedCount])
+  const respondToUserQuestion = useCallback<typeof sendUserQuestionResponse>((...args) => {
+    const result = sendUserQuestionResponse(...args)
+    if (result !== false) setScrollToBottomSignal(n => n + 1)
+    return result
+  }, [sendUserQuestionResponse])
 
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
-    sendPermissionResponse(requestId, 'allow')
+    respondToPermission(requestId, 'allow')
     markPromptAnsweredByRequestId(requestId, 'Allowed')
     dismissSessionNotification(notificationId)
-  }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
+  }, [respondToPermission, markPromptAnsweredByRequestId, dismissSessionNotification])
 
   const handleBannerDeny = useCallback((requestId: string, notificationId: string) => {
-    sendPermissionResponse(requestId, 'deny')
+    respondToPermission(requestId, 'deny')
     markPromptAnsweredByRequestId(requestId, 'Denied')
     dismissSessionNotification(notificationId)
-  }, [sendPermissionResponse, markPromptAnsweredByRequestId, dismissSessionNotification])
+  }, [respondToPermission, markPromptAnsweredByRequestId, dismissSessionNotification])
 
+  // Retry reconnects to the *active* server (remote registry entry or local),
+  // not unconditionally to local — see retryConnection / #5284.
   const handleRetry = useCallback(() => {
-    const token = getAuthToken()
-    if (!token) return
-    const proto = window.location.protocol === 'https:' ? 'wss' : 'ws'
-    const wsUrl = `${proto}://${window.location.host}/ws`
-    connect(wsUrl, token)
-  }, [connect])
+    retryConnection()
+  }, [retryConnection])
 
   const handleStartServer = useCallback(() => {
     startServer()
   }, [])
 
-  // Build id->message map for O(1) lookups in renderMessage
-  const storeMsgMap = useMemo(
-    () => new Map(storeMessages.map(m => [m.id, m])),
-    [storeMessages],
+  // #5791 — the active provider's advertised capabilities, so the renderer can
+  // gate the claude-tui single-multiSelect form on the server's
+  // `multiSelectReinject` bit (the CHROXY_TUI_MULTISELECT_REINJECT flag) rather
+  // than the provider name alone — the client must not offer a form the server
+  // would refuse.
+  const activeSessionCaps = useMemo(
+    () => availableProviders.find(p => p.name === activeSessionProvider)?.capabilities ?? null,
+    [availableProviders, activeSessionProvider],
   )
 
-  // Custom message renderer for permission prompts and tool bubbles
-  const renderMessage = useCallback((msg: ChatViewMessage) => {
-    // Tool-group synthetic row (#3747) — id is a group key, not a store id.
-    if (msg.type === 'tool_group') {
-      const payload = chatToolGroupPayloads.get(msg.id)
-      if (!payload) return null
-      return <ToolGroup messages={payload.messages} isActive={payload.isActive} />
-    }
-    const storeMsg = storeMsgMap.get(msg.id)
-    if (!storeMsg) return null
+  // #5560 — the custom chat-message renderer (permission prompts, question
+  // prompts, tool bubbles/groups, evaluator banner, stall / resume chips) is
+  // built by `useMessageRenderer`. Same deps array, same per-branch JSX.
+  const renderMessage = useMessageRenderer({
+    storeMsgMap,
+    chatToolGroupPayloads,
+    chatTailMessageId,
+    // #5786 — wrapped so approve/answer also snaps the chat to the bottom.
+    sendPermissionResponse: respondToPermission,
+    sendUserQuestionResponse: respondToUserQuestion,
+    markPromptAnswered,
+    storeMessages,
+    sendInput,
+    streamStallTimeoutMs,
+    allowMultiQuestionForm,
+    activeSessionProvider,
+    activeSessionCaps,
+    setViewMode,
+    stalledPromptIds,
+    hasPendingAskUserQuestionPermission,
+    sessions,
+  })
 
-    // Permission prompt
-    if (storeMsg.requestId && storeMsg.expiresAt && !storeMsg.answered) {
-      // #3619 wall-clock site (kept on `Date.now()` intentionally).
-      // `storeMsg.expiresAt` is computed at receipt as
-      // `Date.now() + msg.remainingMs` in `message-handler.ts`, so this
-      // subtraction is wall-clock-vs-wall-clock — both sides use the
-      // same clock, no mixing. Switching this site to `performance.now()`
-      // would subtract a process-local monotonic clock from a wall-clock
-      // anchor and produce garbage. Wall-clock jumps after receipt do
-      // change `Date.now()` and therefore affect each re-computation
-      // here — that is correct behavior for a wall-clock anchor.
-      // Whatever value falls out is what feeds `<PermissionPrompt>`'s
-      // local countdown anchor as its initial `remainingMs` prop.
-      const remainingMs = Math.max(0, storeMsg.expiresAt - Date.now())
-      return (
-        <PermissionPrompt
-          requestId={storeMsg.requestId}
-          tool={storeMsg.tool || 'Unknown'}
-          description={storeMsg.content}
-          remainingMs={remainingMs}
-          onRespond={(reqId, decision) => sendPermissionResponse(reqId, decision)}
-        />
-      )
-    }
+  // #4412: registry-driven cheat sheet. Recomputed on every render —
+  // not memoised, by design. The shortcut registry hook re-renders
+  // whenever a binding changes, so reading registry.list() inside
+  // the body picks up the new combos automatically. Memoising on
+  // [shortcutRegistry] would silently skip rebinds because the
+  // registry reference is stable. The work is cheap (constant-size
+  // arrays, simple map) so re-running it per render is fine.
+  // #5560 — the registry-driven cheat-sheet rows are built by the pure
+  // `buildShortcutEntries` helper. Still called on every render (not memoised)
+  // by design — see the helper's docblock (#4412).
+  const SHORTCUTS: ShortcutEntry[] = buildShortcutEntries(shortcutRegistry, isMacPlatform(), isMacPlatform())
 
-    // Question prompt (options or free-text fallback)
-    if (storeMsg.type === 'prompt' && storeMsg.options && !storeMsg.requestId) {
-      return (
-        <QuestionPrompt
-          question={storeMsg.content}
-          options={storeMsg.options}
-          answered={storeMsg.answered}
-          onSelect={(value) => {
-            sendUserQuestionResponse(value, storeMsg.toolUseId)
-            markPromptAnswered(storeMsg.id, value)
-          }}
-        />
-      )
-    }
+  // #5424: resolve the active model's context window once for the header
+  // meter, the footer meter, and the percent computation. `null` when the
+  // window is genuinely unknown (e.g. ollama deliberately reports none) —
+  // the 200k fallback only applies to claude-backed providers, where it's
+  // a real default rather than a fabricated number.
+  const activeContextWindow = useMemo(() => {
+    const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
+    return resolveContextWindow(modelInfo, activeSessionProvider)
+  }, [availableModels, activeModel, activeSessionProvider])
 
-    // Tool bubble
-    if (storeMsg.type === 'tool_use' && storeMsg.toolUseId) {
-      return (
-        <ToolBubble
-          toolName={storeMsg.tool || 'Tool'}
-          toolUseId={storeMsg.toolUseId}
-          input={storeMsg.toolInput}
-          result={storeMsg.toolResult}
-        />
-      )
-    }
-
-    // #3188: auto-evaluator rewrite banner. The system message is pushed
-    // by the dashboard's `evaluator_rewrite` handler and persisted in
-    // the per-session localStorage cache (`sessionMessagesKey` in
-    // packages/dashboard/src/store/persistence.ts). Reconnect/replay
-    // re-renders the banner from that cached metadata — no need to
-    // re-fire the transient wire event.
-    if (storeMsg.type === 'system' && storeMsg.evaluator?.kind === 'rewrite') {
-      return <EvaluatorRewriteBanner meta={storeMsg.evaluator} />
-    }
-
-    // Default rendering
-    return null
-  }, [storeMsgMap, chatToolGroupPayloads, sendPermissionResponse, sendUserQuestionResponse, markPromptAnswered])
-
-  const SHORTCUTS: ShortcutEntry[] = useMemo(() => {
-    // #2883: author entries with canonical `Cmd+...` labels and rewrite to
-    // `Ctrl+...` at render time on non-Mac platforms so the cheat-sheet
-    // matches the modifier the user can actually press.
-    const rawEntries: ShortcutEntry[] = [
-      { keys: '?', description: 'Show keyboard shortcuts', section: 'Global' },
-      { keys: 'Cmd+K', description: 'Command palette', section: 'Global' },
-      { keys: 'Cmd+Shift+P', description: 'Command palette (VSCode)', section: 'Global' },
-      { keys: 'Cmd+N', description: 'New session', section: 'Global' },
-      { keys: 'Cmd+B', description: 'Toggle sidebar', section: 'Global' },
-      { keys: 'Cmd+,', description: 'Settings', section: 'Global' },
-      { keys: 'Cmd+.', description: 'Interrupt session', section: 'Session' },
-      { keys: 'Cmd+Shift+D', description: 'Toggle chat / terminal', section: 'Session' },
-      { keys: 'Cmd+\\', description: 'Cycle split view', section: 'Session' },
-      { keys: 'Cmd+1-9', description: 'Switch to tab by number', section: 'Session' },
-      { keys: 'Cmd+Shift+[', description: 'Previous tab', section: 'Session' },
-      { keys: 'Cmd+Shift+]', description: 'Next tab', section: 'Session' },
-      { keys: 'Cmd+W', description: 'Close tab (desktop)', section: 'Session' },
-      { keys: 'Shift+Tab', description: 'Toggle plan mode', section: 'Session' },
-      { keys: 'Cmd+Y', description: 'Allow current permission prompt', section: 'Session' },
-      { keys: 'Cmd+Shift+Y', description: 'Allow current permission prompt for this session (rule-eligible tools)', section: 'Session' },
-      { keys: 'Cmd+Enter', description: 'Send message', section: 'Input' },
-      { keys: 'Escape', description: 'Close modal / cancel', section: 'Global' },
-    ]
-    // #3748 — Ctrl+V (image-paste) only works in the Tauri desktop on macOS,
-    // since on other platforms Ctrl+V is the native text-paste shortcut.
-    // Show the entry only where the shortcut is actually wired.
-    if (isTauri() && isMacPlatform()) {
-      rawEntries.push({
-        keys: 'Ctrl+V',
-        description: 'Paste image from clipboard (Cmd+V stays as text paste)',
-        section: 'Input',
-      })
-    }
-    return rawEntries.map(entry => ({ ...entry, keys: formatShortcutKeys(entry.keys) }))
-  }, [])
-
-  // Compute context window usage percentage from active model metadata
+  // Compute context window usage percentage from active model metadata.
+  // Null when the window is unknown (#5424) — the chips then fall back to
+  // the raw token-count text instead of a percentage/progress bar.
   const contextPercent = useMemo(() => {
     if (!contextUsage) return null
+    if (activeContextWindow == null) return null
     const total = contextUsage.inputTokens + contextUsage.outputTokens
     if (total === 0) return null
+    return (total / activeContextWindow) * 100
+  }, [contextUsage, activeContextWindow])
+
+  // #5184: human-readable model label for the `provider-model` cost-badge
+  // mode. Prefer the server-supplied `label`; fall back to the raw model id
+  // so a model missing from `availableModels` still shows something.
+  const activeModelLabel = useMemo(() => {
+    if (!activeModel) return undefined
     const modelInfo = availableModels.find(m => m.id === activeModel || m.fullId === activeModel)
-    const contextWindow = modelInfo?.contextWindow ?? DEFAULT_CONTEXT_WINDOW
-    return (total / contextWindow) * 100
-  }, [contextUsage, activeModel, availableModels])
+    return modelInfo?.label ?? activeModel
+  }, [activeModel, availableModels])
 
   const isConnected = connectionPhase === 'connected'
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
+  // #5698 — the reconnect ladder gave up; terminal state, manual reconnect only.
+  const isServerDown = connectionPhase === 'server_down'
   const isStartupError = connectionPhase === 'disconnected' && !!connectionError && sessions.length === 0
   const showWelcome = isConnected && sessions.length === 0
 
-  // Track whether a configured tunnel is fully ready (connection info available)
-  const [tunnelReady, setTunnelReady] = useState(true)
-  useEffect(() => {
-    if (!isConnected) { setTunnelReady(true); return }
-    let cancelled = false
-    let timer: ReturnType<typeof setTimeout> | null = null
-    async function checkTunnel() {
-      try {
-        const { getServerInfo } = await import('./hooks/useTauriIPC')
-        const info = await getServerInfo()
-        // Only track tunnel readiness if tunnel mode is configured
-        if (!info || info.tunnelMode === 'none') { setTunnelReady(true); return }
-      } catch {
-        // Not in Tauri — check /connect directly
-      }
-      try {
-        const { getAuthToken } = await import('./utils/auth')
-        const token = getAuthToken()
-        if (!token) return
-        const res = await fetch('/connect', { headers: { Authorization: `Bearer ${token}` } })
-        if (res.ok) { if (!cancelled) setTunnelReady(true); return }
-      } catch { /* ignore */ }
-      if (!cancelled) { setTunnelReady(false); timer = setTimeout(checkTunnel, 3000) }
-    }
-    checkTunnel()
-    return () => { cancelled = true; if (timer) clearTimeout(timer) }
-  }, [isConnected])
+  // Track whether a configured tunnel is fully ready (connection info
+  // available). Extracted to `useTunnelReady` (#5560).
+  const tunnelReady = useTunnelReady(isConnected)
 
   // Fetch conversation history when welcome screen is shown
   useEffect(() => {
@@ -1361,12 +1807,25 @@ export function App() {
 
   return (
     <div id="app" className={sidebarRepos.length > 0 ? 'with-sidebar' : ''}>
+      {/* #4873 — single page-level live region that announces only the
+          SETTLED connection phase after a debounce. Replaces the
+          per-status-dot role=status announcements that flooded SR
+          users during reconnect storms. */}
+      <ConnectionAnnouncer phase={connectionPhase} />
       {/* Reconnect banner */}
       <ReconnectBanner
-        visible={isReconnecting}
+        visible={isReconnecting || isServerDown}
         attempt={connectionRetryCount}
         maxAttempts={5}
-        message={connectionPhase === 'server_restarting' ? 'Server restarting...' : undefined}
+        message={
+          isServerDown
+            ? 'Server appears to be down'
+            : connectionPhase === 'server_restarting' ? 'Server restarting...' : undefined
+        }
+        terminal={isServerDown}
+        restartEtaMs={connectionPhase === 'server_restarting' ? restartEtaMs : null}
+        restartingSince={connectionPhase === 'server_restarting' ? restartingSince : null}
+        shutdownReason={connectionPhase === 'server_restarting' ? shutdownReason : null}
         onRetry={handleRetry}
         onStartServer={isTauri() ? handleStartServer : undefined}
       />
@@ -1391,78 +1850,79 @@ export function App() {
         ) : null}
       </div>
 
-      {/* Header */}
-      <header id="header">
-        <div className="header-left">
-          <span className="logo">Chroxy</span>
-          <span className="version-badge">v{serverVersion ?? __APP_VERSION__}</span>
-          <span className={`status-dot ${serverPhase === 'tunnel_warming' || serverPhase === 'tunnel_verifying' || (isConnected && !tunnelReady && serverPhase == null) ? 'connecting' : connectionPhase}`} />
-        </div>
-        <div className="header-center">
-          <ChatSettingsDropdown
-            availableModels={dropdownFlags.showModelPicker ? availableModels : []}
-            activeModel={activeModel}
-            defaultModelId={defaultModelId}
-            onModelChange={setModel}
-            availablePermissionModes={availablePermissionModes}
-            permissionMode={permissionMode}
-            onPermissionModeChange={setPermissionMode}
-            showPermissionMode={dropdownFlags.showPermissionMode}
-            showThinkingLevel={dropdownFlags.showThinkingLevel}
-            thinkingLevel={thinkingLevel}
-            onThinkingLevelChange={level => setThinkingLevel(level as 'default' | 'high' | 'max')}
-          />
-        </div>
-        <div className="header-right">
-          {/* #3209: Skills toggle, moved to header-right as an icon
-              button. Was previously a text button in header-center
-              where it competed for space with the model dropdown. */}
-          <button
-            type="button"
-            className="header-icon-btn"
-            data-testid="btn-toggle-skills-panel"
-            onClick={() => {
-              setSkillsPanelOpen(prev => {
-                const next = !prev
-                if (next) requestListSkills()
-                return next
-              })
-            }}
-            aria-label="Skills"
-            title="Skills"
-          >
-            &#129513;
-          </button>
-          {viewMode === 'chat' && storeMessages.length > 0 && (
-            <button
-              className="header-icon-btn"
-              onClick={handleCopyTranscript}
-              aria-label="Copy chat transcript"
-              data-testid="btn-copy-transcript"
-              title={transcriptCopied ? 'Copied!' : `Copy transcript (${formatShortcutKeys('Cmd+Shift+T')})`}
-              type="button"
-            >
-              {transcriptCopied ? '✓' : '⎘'}
-            </button>
-          )}
-          <button
-            className="header-icon-btn"
-            onClick={() => setSettingsOpen(true)}
-            aria-label="Settings"
-            title={`Settings (${formatShortcutKeys('Cmd+,')})`}
-            type="button"
-          >
-            &#9881;
-          </button>
-          <StatusBar
-            cost={sessionCost ?? undefined}
-            context={formatContext(contextUsage)}
-            isBusy={!isIdle}
-            agentCount={activeAgents.length}
-            provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
-          />
-        </div>
-      </header>
+      {/* Exposure warning banner (#5356) — server reported a non-loopback
+          bind and/or a public quick tunnel in auth_ok. Dismissible per
+          connection; no defaults are changed by this banner. */}
+      {serverExposure && !exposureBannerDismissed && (
+        <ExposureWarningBanner
+          lanBind={serverExposure.lanBind}
+          quickTunnel={serverExposure.quickTunnel}
+          onDismiss={dismissExposureBanner}
+        />
+      )}
+
+      {/* #5821 — billing-canary warnings (silent metered default; claude-tui
+          reclassification tripwire) during the 2026-06-15 credit window. */}
+      {billingCanary && billingCanary.warnings.length > 0 && (
+        <BillingWarningBanner
+          warnings={billingCanary.warnings}
+          dismissed={billingBannerDismissed}
+          onDismiss={dismissBillingBanner}
+        />
+      )}
+
+      {/* #5560 — the two-row header (#5200) is grouped into the presentational
+          <AppHeader>. App owns the state + the shared `formatContext`. */}
+      <AppHeader
+        serverVersion={serverVersion}
+        connectionPhase={connectionPhase}
+        serverPhase={serverPhase}
+        isConnected={isConnected}
+        tunnelReady={tunnelReady}
+        showModelPicker={dropdownFlags.showModelPicker}
+        availableModels={availableModels}
+        activeModel={activeModel}
+        defaultModelId={defaultModelId}
+        onModelChange={setModel}
+        readOnlyModel={dropdownFlags.readOnlyModel}
+        availablePermissionModes={availablePermissionModes}
+        permissionMode={permissionMode}
+        onPermissionModeChange={setPermissionMode}
+        showPermissionMode={dropdownFlags.showPermissionMode}
+        showThinkingLevel={dropdownFlags.showThinkingLevel}
+        thinkingLevel={thinkingLevel}
+        onThinkingLevelChange={(level) => setThinkingLevel(level as 'default' | 'high' | 'max')}
+        sessionNotifications={sessionNotifications}
+        onSwitchSession={handleSwitchSession}
+        onMarkNotificationRead={markSessionNotificationRead}
+        onMarkAllNotificationsRead={markAllSessionNotificationsRead}
+        onDismissNotification={dismissSessionNotification}
+        onNewSession={handleNewSession}
+        onNewShell={userShellSupported ? handleNewShell : undefined}
+        onRevokeToken={tokenRevokeSupported ? handleRevokeToken : undefined}
+        onToggleSkillsPanel={() => {
+          setSkillsPanelOpen(prev => {
+            const next = !prev
+            if (next) requestListSkills()
+            return next
+          })
+        }}
+        showCopyTranscript={viewMode === 'chat' && storeMessages.length > 0}
+        transcriptCopied={transcriptCopied}
+        onCopyTranscript={handleCopyTranscript}
+        onOpenSettings={openSettings}
+        cost={sessionCost ?? undefined}
+        context={formatContext(contextUsage)}
+        contextPercent={contextPercent}
+        inputTokens={contextUsage?.inputTokens}
+        outputTokens={contextUsage?.outputTokens}
+        contextWindow={activeModel ? activeContextWindow ?? undefined : undefined}
+        isBusy={!isIdle}
+        agentCount={activeAgents.length}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        modelLabel={activeModelLabel}
+        costBadgeMode={costBadgeMode}
+      />
 
       {/* Sidebar */}
       {sidebarRepos.length > 0 && (
@@ -1474,37 +1934,54 @@ export function App() {
           filter={sidebarFilter}
           serverStatus={isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
           tunnelUrl={null}
-          clientCount={connectedClients.length}
+          connectedClients={connectedClients}
+          activePrimaryClientId={resolveActivePrimaryClientId(activeSessionId, sessionStates, globalPrimaryClientId)}
+          activeSessionRole={activeSessionRole}
+          onTakeOverPrimary={() => { if (activeSessionId) claimPrimary(activeSessionId, { force: true }) }}
           onFilterChange={setSidebarFilter}
           onSessionClick={handleSwitchSession}
           onResumeSession={resumeConversation}
-          onNewSession={(cwd) => {
-            setPendingCwd(cwd || null)
-            setShowCreateSession(true)
-          }}
+          onOpenControlRoom={openControlRoom}
+          onNewSession={(cwd) => openCreateSession({ cwd: cwd || null })}
           onToggle={() => setSidebarOpen(prev => !prev)}
           onWidthChange={(w: number) => { setSidebarWidth(w); persistSidebarWidth(w) }}
-          onContextMenu={() => {
-            /* Context menus will be added in a follow-up */
-          }}
+          onContextMenu={handleSidebarContextMenu}
           searchResults={searchResults}
           searchLoading={searchLoading}
           searchQuery={searchQuery}
           searchConversations={searchConversations}
           clearSearchResults={clearSearchResults}
+          sessions={sessions}
+          monthlyBudget={monthlyBudget}
+          initialPanelHeight={loadPersistedSidebarPanelHeight() ?? 200}
+          initialPanelView={loadPersistedSidebarPanelView()}
+          initialPanelCollapsed={loadPersistedSidebarPanelCollapsed()}
+          onReorderRepos={handleReorderRepos}
+          onReorderSessions={handleReorderSidebarSessions}
         />
       )}
 
       {/* Main content wrapper (when sidebar present) */}
       <div className={sidebarRepos.length > 0 ? 'main-wrapper' : undefined}>
-        {/* Session bar */}
-        {sessionTabs.length > 0 && (
+        {/* Session bar. #5204 — also rendered when the Control Room tab is
+            open even if there are no sessions, so the pinned CR tab (and its
+            close) is always reachable. */}
+        {(sessionTabs.length > 0 || controlRoomOpen) && (
           <SessionBar
             sessions={sessionTabs}
             onSwitch={handleSwitchSession}
             onClose={handleCloseSession}
             onRename={renameSession}
             onNewSession={handleNewSession}
+            onReorder={handleReorderTabs}
+            controlRoom={{
+              open: controlRoomOpen,
+              active: controlRoomActive,
+              onActivate: openControlRoom,
+              onClose: closeControlRoom,
+            }}
+            pendingPermissionTotal={pendingPermissionTotal}
+            onJumpToPending={handleJumpToPending}
           />
         )}
 
@@ -1519,8 +1996,12 @@ export function App() {
           onRestart={handleRestartSession}
         />
 
-        {/* Startup error screen — shown when server failed to start (Tauri) */}
-        {isStartupError && (
+        {/* Startup error screen — shown when server failed to start (Tauri).
+            #5211 — suppressed while the Control Room tab is active so the two
+            don't double-render; the CR shows its own not-connected affordance
+            (disabled Refresh + hint) and the operator can close it to reach
+            this screen. */}
+        {isStartupError && !controlRoomActive && (
           <StartupErrorScreen
             error={connectionError}
             logs={serverStartupLogs}
@@ -1529,8 +2010,11 @@ export function App() {
           />
         )}
 
-        {/* Disconnected screen — shown when not connected with no error (e.g. server stopped) */}
-        {connectionPhase === 'disconnected' && !connectionError && !isConnected && sessions.length === 0 && (
+        {/* Disconnected screen — shown when not connected with no error (e.g.
+            server stopped). #5211 — suppressed while the Control Room tab is
+            active (mutually exclusive with the CR view, which renders its own
+            not-connected state). */}
+        {connectionPhase === 'disconnected' && !connectionError && !isConnected && sessions.length === 0 && !controlRoomActive && (
           <div className="startup-error-screen" data-testid="disconnected-screen">
             <div className="startup-error-content">
               <h2 className="startup-error-title">Disconnected</h2>
@@ -1558,8 +2042,45 @@ export function App() {
           </div>
         )}
 
+        {/* #5204 — Control Room top-level view. Session-independent: it
+            renders in place of the session UI / welcome screen while active,
+            and switching back to a session restores it untouched. Takes
+            precedence over the welcome screen so the operator can open the CR
+            even with zero sessions. */}
+        {/* #5211 — the CR owns the main area whenever active (any connection
+            phase). It renders its own empty/loading + not-connected states, so
+            it stays put across reconnects instead of blanking or
+            double-rendering with the disconnected/startup screens. */}
+        {controlRoomActive && (
+          <div className="main-content" data-testid="control-room-main">
+            <ControlRoomView
+              onInvestigate={handleInvestigate}
+              onOpenSession={handleOpenSession}
+              onConfigureRepo={handleConfigureRepo}
+              // #5544 — the Settings tab embeds the converged preference body.
+              // Closed→open via a Settings entry point mounts straight onto the
+              // Settings tab (`initialTab`); an entry-point click while the CR
+              // is already open bumps `settingsRedirectNonce` so the view jumps
+              // to Settings even from another tab.
+              initialTab={controlRoomInitialTab}
+              forceTab="settings"
+              forceTabNonce={settingsRedirectNonce}
+              showConsoleTab={showConsoleTab}
+              onToggleConsoleTab={(show) => {
+                setShowConsoleTab(show)
+                persistShowConsoleTab(show)
+              }}
+              interventionPingEnabled={interventionPingEnabled}
+              onToggleInterventionPing={(enabled) => {
+                setInterventionPingEnabled(enabled)
+                persistInterventionPing(enabled)
+              }}
+            />
+          </div>
+        )}
+
         {/* Welcome screen — shown when connected but no sessions */}
-        {showWelcome && (
+        {showWelcome && !controlRoomActive && (
           <WelcomeScreen
             onNewSession={handleNewSession}
             recentSessions={recentSessions}
@@ -1567,6 +2088,14 @@ export function App() {
             className="main-content"
           />
         )}
+
+        {/* #5510 (epic #5509): pairing-approval primitive — host-level
+            approve/deny banner for camera-less device pair requests. */}
+        <PendingPairRequests
+          requests={pendingPairRequests}
+          onApprove={approvePairRequest}
+          onDeny={denyPairRequest}
+        />
 
         {/* Cross-session notification banners */}
         {sessionNotifications.length > 0 && (
@@ -1579,8 +2108,9 @@ export function App() {
           />
         )}
 
-        {/* Normal session UI */}
-        {!showWelcome && (
+        {/* Normal session UI. #5204 — suppressed while the Control Room tab
+            is active (the CR view above takes the main content area). */}
+        {!showWelcome && !controlRoomActive && (
           <>
             {/* View switcher */}
             <ViewSwitcher
@@ -1589,6 +2119,8 @@ export function App() {
               splitMode={splitMode}
               setSplitMode={setSplitMode}
               persistSplitMode={persistSplitMode}
+              showChatTab={!isUserShell}
+              showTerminalTab={isPtyProvider}
               showConsoleTab={showConsoleTab}
               unreadSystemCount={unreadSystemCount}
               checkpointsOpen={checkpointsOpen}
@@ -1598,6 +2130,19 @@ export function App() {
             {/* Main content */}
             <div className={`main-content${checkpointsOpen ? ' with-checkpoint-panel' : ''}`}>
               <div className="main-content-primary">
+                {/* #4982 — banner for session_error{code:'SESSION_NOT_FOUND'}.
+                    Sits above whatever pane is showing (loading skeleton,
+                    chat view, empty state) so the operator sees it on the
+                    first frame after the lost-id rejection. Cleared by
+                    Dismiss OR by switchSession (the operator picked a new
+                    live id). */}
+                {sessionNotFoundError && (
+                  <SessionNotFoundChip
+                    message={sessionNotFoundError.message}
+                    attemptedSessionId={sessionNotFoundError.attemptedSessionId}
+                    onDismiss={dismissSessionNotFoundError}
+                  />
+                )}
                 {connectionPhase === 'connecting' ? (
                   <SessionLoadingSkeleton label="Connecting..." />
                 ) : isSwitchingSession ? (
@@ -1611,6 +2156,10 @@ export function App() {
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
+                        scrollToBottomSignal={scrollToBottomSignal}
+                        queuedIds={queuedIds}
+                        onCancelQueued={onCancelQueued}
+                        workingLabel={workingLabel}
                       />
                     }
                     second={
@@ -1626,33 +2175,80 @@ export function App() {
                   />
                 ) : (
                   <>
-                    {viewMode === 'chat' && (
+                    {/*
+                      #4305 — Chat and Output stay mounted; the inactive
+                      pane is hidden with display:none rather than
+                      unmounted. Previously each tab switch unmounted
+                      ChatView, which reset every ToolGroup/ToolBubble's
+                      local `expanded` state (and dropped scroll position)
+                      causing the visible "re-fold jump" the issue
+                      describes. Keeping both mounted preserves
+                      user-toggled expand state, the isTail-driven
+                      tail-expanded state, and the chat scroll position
+                      across tab switches. Mirrors the same pattern
+                      MultiTerminalView already uses to preserve per-
+                      session terminal state.
+                    */}
+                    <div
+                      data-testid="chat-pane"
+                      style={{
+                        display: viewMode === 'chat' ? 'contents' : 'none',
+                      }}
+                    >
                       <ChatView
                         messages={chatMessages}
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
                         renderMessage={renderMessage}
+                        hidden={viewMode !== 'chat'}
+                        scrollToBottomSignal={scrollToBottomSignal}
+                        queuedIds={queuedIds}
+                        onCancelQueued={onCancelQueued}
+                        workingLabel={workingLabel}
                       />
-                    )}
-                    {viewMode === 'terminal' && (
+                    </div>
+                    <div
+                      data-testid="terminal-pane"
+                      style={{
+                        display: viewMode === 'terminal' ? 'contents' : 'none',
+                      }}
+                    >
                       <MultiTerminalView
                         sessions={sessions}
                         activeSessionId={activeSessionId}
                         className="terminal-container"
                       />
-                    )}
+                    </div>
                   </>
                 )}
                 {viewMode === 'files' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <FileBrowserPanel />
                 )}
-                {viewMode === 'system' && connectionPhase !== 'connecting' && !isSwitchingSession && (
-                  <ChatView
-                    messages={systemMessages}
-                    isStreaming={false}
-                    isBusy={false}
-                    renderMessage={renderMessage}
-                  />
+                {/*
+                  #4397 — system tab uses the same display:none kept-alive
+                  pattern as the chat/output toggle above (#4305). Pre-fix,
+                  switching chat → system → chat unmounted the system
+                  ChatView and dropped its scroll position + any expand
+                  state on system-side tool groups. The wrapper is mounted
+                  whenever the connection is ready, so React preserves the
+                  ChatView instance (and its hooks-local scroll state)
+                  across tab switches in either direction.
+                */}
+                {connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <div
+                    data-testid="system-pane"
+                    style={{
+                      display: viewMode === 'system' ? 'contents' : 'none',
+                    }}
+                  >
+                    <ChatView
+                      messages={systemMessages}
+                      isStreaming={false}
+                      isBusy={false}
+                      renderMessage={renderMessage}
+                      hidden={viewMode !== 'system'}
+                    />
+                  </div>
                 )}
                 {viewMode === 'console' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <ConsolePage />
@@ -1660,6 +2256,14 @@ export function App() {
                 {viewMode === 'environments' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <EnvironmentPanel />
                 )}
+                {viewMode === 'snapshots' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <SnapshotsPanel />
+                )}
+                {viewMode === 'pool' && connectionPhase !== 'connecting' && !isSwitchingSession && (
+                  <PoolStatsPanel />
+                )}
+                {/* #5204 — the Control Room moved out of the per-session view
+                    area into a dedicated top-level tab (rendered above). */}
               </div>
               {checkpointsOpen && (
                 <div className="checkpoint-panel">
@@ -1738,6 +2342,14 @@ export function App() {
               pastedTextBlocks={pastedTextBlocks}
               onInspectPastedText={handleInspectPastedText}
               onRemovePastedText={handleRemovePastedText}
+              userMessageHistory={userMessageHistory}
+              // #4306 — only highlight when the active provider actually
+              // honours the magic thinking keyword. Reuses `showThinkingLevel`
+              // (capabilities.thinkingLevel) as the truth-source: if the
+              // dropdown is hidden because the provider can't take a thinking
+              // budget, the keyword wouldn't escalate either — so we must
+              // not visually imply otherwise.
+              highlightThinkingKeywords={dropdownFlags.showThinkingLevel}
             />
           </>
         )}
@@ -1750,106 +2362,131 @@ export function App() {
         serverPhase={serverPhase}
         tunnelProgress={tunnelProgress}
         serverVersion={serverVersion}
-        cwd={sessionCwd ?? undefined}
+        cwd={activeSessionCwd ?? sessionCwd ?? undefined}
         model={activeModel || undefined}
         cost={sessionCost ?? undefined}
         context={formatContext(contextUsage)}
         contextPercent={contextPercent}
+        inputTokens={contextUsage?.inputTokens}
+        outputTokens={contextUsage?.outputTokens}
         isBusy={!isIdle}
         agentCount={activeAgents.length}
         onShowQr={isConnected ? handleShowQr : undefined}
         onShareSession={isConnected && activeSessionId ? handleShareSession : undefined}
+        provider={sessions.find(s => s.sessionId === activeSessionId)?.provider}
+        // #5424: null when the window is genuinely unknown (e.g. ollama) —
+        // the model tooltip then omits the context-window sentence instead
+        // of claiming a fabricated 200k.
+        contextWindow={activeContextWindow ?? undefined}
+        // #3857: surface a clickable "/compact" suggestion past 80% so the
+        // user gets a remedy hint rather than just a red bar. Only enabled
+        // when there's an active session to route the input through — without
+        // that, the chip would have nowhere to send /compact to.
+        onCompact={isConnected && activeSessionId ? () => sendInput('/compact') : undefined}
+        // #4653: the active session's chroxy-side intervention ring. Empty
+        // by default — the chip hides itself when nothing has fired.
+        interventions={interventions}
+        // #4653: threaded so the panel collapses on session switch (the
+        // FooterBar instance is shared across sessions, so without this
+        // the open panel would persist with stale entries).
+        activeSessionId={activeSessionId}
       />
 
-      {/* Settings panel */}
-      <SettingsPanel
-        isOpen={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
+      {/* #5560 — the top-level overlay / modal stack is grouped into the
+          presentational <AppModals>. App still owns all the state; these are
+          leaf overlays separate from the main-content / terminal subtree. */}
+      <AppModals
+        settingsOpen={settingsOpen}
+        onSettingsClose={() => setSettingsOpen(false)}
         showConsoleTab={showConsoleTab}
-        onToggleConsoleTab={(show) => {
-          setShowConsoleTab(show)
-          persistShowConsoleTab(show)
-        }}
-      />
-
-      {/* Keyboard shortcut help */}
-      <ShortcutHelp isOpen={shortcutHelpOpen} onClose={() => setShortcutHelpOpen(false)} shortcuts={SHORTCUTS} />
-
-      {/* Pasted-text inspect modal (#3797) — read-only viewer for the
-          collapsed paste whose chip the user clicked. */}
-      {inspectedPastedTextId != null && (() => {
-        const block = pastedTextBlocks.find(b => b.id === inspectedPastedTextId)
-        if (!block) return null
-        return (
-          <PastedTextModal
-            id={block.id}
-            content={block.content}
-            onClose={() => setInspectedPastedTextId(null)}
-            onRemove={handleRemovePastedText}
-          />
-        )
-      })()}
-
-      {/* QR code modal — shared by linking-mode QR and per-session "Share" QR (#3070) */}
-      <QrModal
-        open={qrModalOpen}
-        onClose={() => setQrModalOpen(false)}
+        onToggleConsoleTab={(show) => { setShowConsoleTab(show); persistShowConsoleTab(show) }}
+        interventionPingEnabled={interventionPingEnabled}
+        onToggleInterventionPing={(enabled) => { setInterventionPingEnabled(enabled); persistInterventionPing(enabled) }}
+        shortcutHelpOpen={shortcutHelpOpen}
+        onShortcutHelpClose={() => setShortcutHelpOpen(false)}
+        shortcuts={SHORTCUTS}
+        inspectedPastedTextId={inspectedPastedTextId}
+        pastedTextBlocks={pastedTextBlocks}
+        onPastedTextClose={() => setInspectedPastedTextId(null)}
+        onRemovePastedText={handleRemovePastedText}
+        qrModalOpen={qrModalOpen}
+        onQrClose={() => setQrModalOpen(false)}
         qrSvg={qrSvg}
-        loading={qrLoading}
-        error={qrError ?? undefined}
-        title={qrShareMode === 'share' ? 'Share This Session' : 'Pair Mobile App'}
-        instructions={
-          qrShareMode === 'share'
-            ? 'Scan to chat into this session only — the scanner cannot list, switch, or destroy other sessions.'
-            : 'Scan with Chroxy app to pair your phone'
-        }
-      />
-
-      {/* #3209: SkillsPanel — popover for manual-skill toggles + #3205 metadata */}
-      {skillsPanelOpen && (
-        <SkillsPanel
-          skills={activeSkills}
-          canToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
-          mismatchedSkillNames={mismatchedSet}
-          onActivate={activateSkill}
-          onDeactivate={deactivateSkill}
-          onAcceptTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
-          pendingCommunitySkills={activePendingCommunitySkills}
-          onGrantTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
-          capabilities={{ skillTrustGrant: skillTrustGrantSupported }}
-          pendingTrustGrants={activePendingTrustGrants}
-          onClose={() => setSkillsPanelOpen(false)}
-        />
-      )}
-
-      {/* Modals */}
-      <CreateSessionModal
-        open={showCreateSession}
-        onClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null) }}
-        onCreate={handleCreateSession}
-        initialCwd={pendingCwd}
+        qrLoading={qrLoading}
+        qrError={qrError}
+        qrShareMode={qrShareMode}
+        qrPairingCode={qrPairingCode}
+        onPostPairLinkToDiscord={handlePostPairLinkToDiscord}
+        skillsPanelOpen={skillsPanelOpen}
+        skills={activeSkills}
+        skillsCanToggle={!!sessions.find(s => s.sessionId === activeSessionId)?.capabilities?.skillToggle}
+        mismatchedSkillNames={mismatchedSet}
+        onActivateSkill={activateSkill}
+        onDeactivateSkill={deactivateSkill}
+        onAcceptSkillTrust={skillTrustAcceptSupported ? acceptSkillTrust : undefined}
+        pendingCommunitySkills={activePendingCommunitySkills}
+        onGrantSkillTrust={skillTrustGrantSupported ? grantCommunitySkillTrust : undefined}
+        skillsPanelCapabilities={{ skillTrustGrant: skillTrustGrantSupported }}
+        pendingTrustGrants={activePendingTrustGrants}
+        onSkillsPanelClose={() => setSkillsPanelOpen(false)}
+        sidebarContextMenu={sidebarContextMenu}
+        sidebarContextMenuItems={sidebarContextMenuItems}
+        onDismissSidebarContextMenu={dismissSidebarContextMenu}
+        showCreateSession={showCreateSession}
+        onCreateSessionClose={() => { setShowCreateSession(false); setIsCreatingSession(false); setSessionCreateError(null); pendingSeedPromptRef.current = null }}
+        onCreateSession={handleCreateSession}
+        createSessionInitialCwd={pendingCwd}
         knownCwds={knownCwds}
-        existingNames={sessions.map(s => s.name)}
-        serverError={sessionCreateError ?? undefined}
-        isCreating={isCreatingSession}
-      />
-
-      {/* Toasts */}
-      <Toast items={toastItems} onDismiss={(id) => {
-        const item = toastItems.find(t => t.id === id)
-        if (!item) return
-        if (item.level === 'error') {
-          dismissServerError(id)
-        } else {
-          dismissInfoNotification(id)
-        }
-      }} />
-
-      {/* Command palette */}
-      <CommandPalette
+        existingSessionNames={sessions.map(s => s.name)}
+        sessionCreateError={sessionCreateError ?? undefined}
+        isCreatingSession={isCreatingSession}
+        repoPresetDrawer={repoPresetDrawer}
+        onRepoPresetDrawerClose={() => setRepoPresetDrawer(null)}
+        closeConfirmOpen={closeConfirmSessionId !== null}
+        closeConfirmMessage={(() => {
+          const name = sessions.find(s => s.sessionId === closeConfirmSessionId)?.name
+          return name
+            ? `Close "${name}"? The Claude process will be terminated.`
+            : 'Close this session? The Claude process will be terminated.'
+        })()}
+        onCloseConfirm={() => {
+          if (closeConfirmSessionId) performCloseSession(closeConfirmSessionId)
+          setCloseConfirmSessionId(null)
+        }}
+        onCloseConfirmCancel={() => setCloseConfirmSessionId(null)}
+        toastItems={toastItems}
+        onToastDismiss={(id) => {
+          // #4075: cost-threshold toast IDs are routed via the per-session
+          // dismissedAt latch; everything else falls through to the
+          // existing server-error / info-notification dismissal paths.
+          if (id.startsWith('cost-threshold-')) {
+            const sid = id.slice('cost-threshold-'.length)
+            const states = useConnectionStore.getState().sessionStates
+            const ss = states[sid]
+            if (ss?.costThresholdWarning) {
+              useConnectionStore.setState({
+                sessionStates: {
+                  ...states,
+                  [sid]: {
+                    ...ss,
+                    costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+                  },
+                },
+              })
+            }
+            return
+          }
+          const item = toastItems.find(t => t.id === id)
+          if (!item) return
+          if (item.level === 'error') {
+            dismissServerError(id)
+          } else {
+            dismissInfoNotification(id)
+          }
+        }}
         commands={trackedCommands}
-        isOpen={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
+        paletteOpen={paletteOpen}
+        onPaletteClose={() => setPaletteOpen(false)}
         mruList={paletteOpen ? getMruCommands() : undefined}
       />
     </div>

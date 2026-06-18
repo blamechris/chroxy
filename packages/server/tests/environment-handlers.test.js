@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { featureHandlers as environmentHandlers } from '../src/handlers/feature-handlers.js'
-import { waitFor } from './test-helpers.js'
+import { waitFor, nsCtx } from './test-helpers.js'
 
 /**
  * Mock WebSocket that records sent messages.
@@ -23,13 +23,13 @@ function createMockClient() {
 function createMockCtx({ environmentManager = null } = {}) {
   const sent = []
   const broadcasts = []
-  return {
+  return nsCtx({
     send: (_ws, msg) => sent.push(msg),
     broadcast: (msg) => broadcasts.push(msg),
     environmentManager,
     _sent: sent,
     _broadcasts: broadcasts,
-  }
+  })
 }
 
 /**

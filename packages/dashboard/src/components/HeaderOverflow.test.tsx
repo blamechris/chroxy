@@ -16,11 +16,34 @@ import { resolve } from 'path'
 const css = readFileSync(resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
-  it('#header is a 3-column grid (auto | 1fr | auto) so zones cannot overlap', () => {
+  it('#header is a flex column (two rows: .header-main + .header-meta) (#5200)', () => {
     const block = css.match(/#header\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/display:\s*flex/)
+    expect(block![0]).toMatch(/flex-direction:\s*column/)
+  })
+
+  it('.header-main is the 3-column main bar grid (auto | 1fr | auto) so zones cannot overlap (#5200)', () => {
+    const block = css.match(/\.header-main\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*grid/)
     expect(block![0]).toMatch(/grid-template-columns:\s*auto\s+minmax\(0,\s*1fr\)\s+auto/)
+  })
+
+  it('.header-meta is the full-width second row; the status bar fills it and space-betweens its own groups (#5200/#5203)', () => {
+    // #5203: the container no longer right-aligns its child (the old #5200
+    // `justify-content: flex-end`). The status bar now spans the full row
+    // (`.status-bar { width: 100% }`) and distributes its own left/right
+    // groups via `space-between`, so the container is a plain flex parent.
+    const block = css.match(/\.header-meta\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/display:\s*flex/)
+    expect(block![0]).not.toMatch(/justify-content:\s*flex-end/)
+    // the bar itself owns the full width + the space-between split
+    const barBlock = css.match(/\.header-meta \.status-bar\s*\{[^}]*\}/s)
+    expect(barBlock).toBeTruthy()
+    expect(barBlock![0]).toMatch(/width:\s*100%/)
+    expect(barBlock![0]).toMatch(/justify-content:\s*space-between/)
   })
 
   it('#header has overflow: visible (native selects render outside header bounds)', () => {
@@ -40,21 +63,45 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).not.toMatch(/flex-shrink:/)
   })
 
-  it('.header-right is a flex container — sizing pinned by the grid `auto` track', () => {
+  it('.header-right is a flex container that can shrink (min-width: 0) so the cluster never clips off-window (#5180/#5197)', () => {
     const block = css.match(/\.header-right\s*\{[^}]*\}/s)
     expect(block).toBeTruthy()
     expect(block![0]).toMatch(/display:\s*flex/)
-    expect(block![0]).not.toMatch(/flex-shrink:/)
+    // #5197: `min-width: max-content` (the #5180 fix) stopped sibling
+    // overlap but made the cluster overflow the WINDOW edge once the
+    // provider/model cost badge got long. `min-width: 0` lets the column
+    // yield; overlap is still prevented by per-child `flex-shrink: 0` (next
+    // test) while the squeeze is absorbed by the cost badge truncating.
+    // Strip CSS comments so explanatory prose doesn't trip the regex.
+    const decls = block![0].replace(/\/\*[\s\S]*?\*\//g, '')
+    expect(decls).toMatch(/min-width:\s*0/)
+    expect(decls).not.toMatch(/min-width:\s*max-content/)
   })
 
-  it('.header-right .status-bar (a flex item inside header-right) gets flex-shrink: 0 + nowrap', () => {
-    // status-bar IS a flex item here (header-right is display: flex), so
-    // flex-shrink: 0 is the right primitive — without it, the cost +
-    // token text could truncate to "718 toke...".
-    const block = css.match(/\.header-right \.status-bar\s*\{[^}]*\}/s)
-    expect(block).toBeTruthy()
+  it('every direct child of .header-right is flex-shrink: 0 so no control overlaps a sibling (#5180)', () => {
+    const block = css.match(/\.header-right > \*\s*\{[^}]*\}/s)
+    expect(block, '.header-right > * rule must exist').toBeTruthy()
     expect(block![0]).toMatch(/flex-shrink:\s*0/)
+  })
+
+  it('.header-meta .status-bar may shrink (#5200) so the cost badge truncates while the token meter stays fixed', () => {
+    // #5200: status-bar lives on its own row (.header-meta) now. It can still
+    // shrink (flex-shrink: 1 + min-width: 0) so the long provider/model cost
+    // badge ellipsis-truncates rather than the token count clipping if the
+    // window is ever narrower than the cluster.
+    const block = css.match(/\.header-meta \.status-bar\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/flex-shrink:\s*1/)
+    expect(block![0]).toMatch(/min-width:\s*0/)
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
+    // The squeeze is absorbed by the cost badge (truncates), NOT the token
+    // meter or provider tag (both fixed) — so "61 / 200.0k tokens" is never
+    // clipped.
+    const cost = css.match(/\.status-cost\s*\{[^}]*\}/s)
+    expect(cost![0]).toMatch(/text-overflow:\s*ellipsis/)
+    expect(cost![0]).toMatch(/flex-shrink:\s*1/)
+    const meter = css.match(/\.status-context-meter\s*\{[^}]*\}/s)
+    expect(meter![0]).toMatch(/flex-shrink:\s*0/)
   })
 
   it('.header-center has min-width: 0 and overflow: hidden so its column can shrink without spilling', () => {
@@ -85,7 +132,13 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(model).toBeTruthy()
     expect(permission).toBeTruthy()
     expect(thinking).toBeTruthy()
-    expect(model![0]).toMatch(/min-width:\s*180px/)
+    // #5197: a native <select> with `width: auto` does NOT grow to its
+    // label in WebKit — it collapses to min-width and truncates the rest
+    // ("Sonnet 4.6" → "Sonnet …"). The floor must fit the common model
+    // labels (160px shows "Sonnet 4.6"); the 240px cap still truncates
+    // pathologically long ids.
+    expect(model![0]).toMatch(/width:\s*auto/)
+    expect(model![0]).toMatch(/min-width:\s*160px/)
     expect(model![0]).toMatch(/max-width:\s*240px/)
     expect(permission![0]).toMatch(/min-width:\s*110px/)
     expect(permission![0]).toMatch(/max-width:\s*160px/)
@@ -117,14 +170,55 @@ describe('Header overflow prevention (#2297, #3705 follow-up)', () => {
     expect(block![0]).toMatch(/white-space:\s*nowrap/)
   })
 
+  // #4974 — Skills / Copy / Settings collapsed behind a single "⋯"
+  // overflow trigger so the right zone no longer overlaps the model
+  // selector at narrow widths. The trigger reuses `.header-icon-btn`
+  // (so the flex-shrink: 0 protection above still applies) but the
+  // popover gets its own surface so positioning + dismiss don't
+  // collide with the existing CSS for native selects.
+  it('.header-overflow wrapper does not shrink (#4974)', () => {
+    const block = css.match(/\.header-overflow\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/position:\s*relative/)
+    expect(block![0]).toMatch(/flex-shrink:\s*0/)
+  })
+
+  it('.header-overflow-menu is an absolutely-positioned popover anchored to the trigger (#4974)', () => {
+    const block = css.match(/\.header-overflow-menu\s*\{[^}]*\}/s)
+    expect(block).toBeTruthy()
+    expect(block![0]).toMatch(/position:\s*absolute/)
+    // Right-aligned so the menu hangs off the trigger toward the
+    // center of the header (instead of clipping past the right edge).
+    expect(block![0]).toMatch(/right:\s*0/)
+  })
+
   it('responsive breakpoint relaxes the dropdown min-width per-kind (#3705 + #3720)', () => {
     // Narrow viewports get smaller floors for each kind. Anchored to
     // the per-kind selectors introduced in #3720 — the previous shared
     // 100/140 floor was only valid when all three selects shared one rule.
     const block = css.match(/@media \(max-width: 600px\)\s*\{[\s\S]*?\n\}/)
     expect(block).toBeTruthy()
-    expect(block![0]).toMatch(/select\[data-kind="model"\]\s*\{\s*min-width:\s*120px;\s*max-width:\s*160px/)
+    // #5181: model floor relaxed to 80px at narrow widths so short ids
+    // aren't padded into a wide box; the 160px cap keeps long ids from
+    // pushing the right cluster off-screen on phones.
+    expect(block![0]).toMatch(/select\[data-kind="model"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*160px/)
     expect(block![0]).toMatch(/select\[data-kind="permission"\]\s*\{\s*min-width:\s*80px;\s*max-width:\s*110px/)
     expect(block![0]).toMatch(/select\[data-kind="thinking"\]\s*\{\s*min-width:\s*60px;\s*max-width:\s*80px/)
+  })
+
+  // #5179 (C1): the token meter stacks the fill bar beneath the label.
+  it('.status-context-meter--stacked is a column so the bar sits under the label (#5179)', () => {
+    const block = css.match(/\.status-context-meter--stacked\s*\{[^}]*\}/s)
+    expect(block, '.status-context-meter--stacked rule must exist').toBeTruthy()
+    expect(block![0]).toMatch(/flex-direction:\s*column/)
+    // align-items: stretch lets the bar span the label width and anchor
+    // to the same left edge instead of floating at a fixed inline width.
+    expect(block![0]).toMatch(/align-items:\s*stretch/)
+  })
+
+  it('the stacked meter bar spans the column width instead of the inline 50px floor (#5179)', () => {
+    const block = css.match(/\.status-context-meter--stacked \.status-context-bar\s*\{[^}]*\}/s)
+    expect(block, 'stacked bar override rule must exist').toBeTruthy()
+    expect(block![0]).toMatch(/width:\s*auto/)
   })
 })

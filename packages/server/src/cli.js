@@ -19,6 +19,12 @@ import { registerSessionCommands } from './cli/session-cmd.js'
 import { registerServiceCommand } from './cli/service-cmd.js'
 import { registerUpdateCommand } from './cli/update-cmd.js'
 import { registerStatusCommand } from './cli/status-cmd.js'
+import { registerPairCodeCommand } from './cli/pair-code-cmd.js'
+import { registerPairDiscordCommand } from './cli/pair-discord-cmd.js'
+import { registerWorktreeCommand } from './cli/worktree-gc-cmd.js'
+import { registerCredentialsCommand } from './cli/credentials-cmd.js'
+import { registerProvidersCommand } from './cli/providers-cmd.js'
+import { registerPagesCommands } from './cli/pages-cmd.js'
 
 const require = createRequire(import.meta.url)
 const { version } = require('../package.json')
@@ -40,5 +46,11 @@ registerSessionCommands(program)
 registerServiceCommand(program)
 registerUpdateCommand(program)
 registerStatusCommand(program)
+registerPairCodeCommand(program)
+registerPairDiscordCommand(program)
+registerWorktreeCommand(program)
+registerCredentialsCommand(program)
+registerProvidersCommand(program)
+registerPagesCommands(program)
 
 program.parse()

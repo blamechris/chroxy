@@ -10,16 +10,44 @@ import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { resolveModelId } from './models.js'
 import {
-  loadActiveSkillsLayered,
   formatSkillsForPrompt,
-  groupSkillsByInjectionMode,
-  findRepoSkillsDir,
-  DEFAULT_SKILLS_DIR,
   SKILLS_PROMPT_HEADER,
 } from './skills-loader.js'
-import { SkillsTrustStore } from './skills-trust.js'
+import { SkillsManager } from './skills-manager.js'
+import { BackgroundShellTracker } from './background-shell-tracker.js'
+import { isOperatorTimeoutInRange } from './duration.js'
+import { createLogger } from './logger.js'
+import { ActivityRegistry } from './activity-registry.js'
+
+const log = createLogger('base-session')
 
 const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
+
+// #3805: opt-in Chroxy context paragraph. Prepended to `_buildSystemPrompt()`
+// output when `chroxyContextHint` is true so the model knows it's running
+// inside Chroxy's remote-terminal front-end and can adjust its output for
+// mobile clients (narrower code blocks, no wide ASCII diagrams). Kept short
+// (~50 words) to minimise token overhead on every turn.
+export const CHROXY_CONTEXT_HINT_TEXT =
+  'You are running inside Chroxy, a remote-control front-end that bridges this session to a mobile phone over a Cloudflare tunnel. ' +
+  'The user may be on a small screen. Prefer concise, copyable answers; keep code blocks narrow (<80 cols); ' +
+  'avoid ASCII diagrams and wide tables; chunk long output so it scrolls smoothly on mobile.'
+
+// #4660: per-session user-authored preamble, prepended to `_buildSystemPrompt()`
+// output every turn so the user can pre-load context once instead of retyping
+// it in every message. Cap at 4000 chars so a hand-edited state file or a
+// malicious client can't bloat the system prompt without bound — comfortably
+// fits a dense paragraph or two of style/stack notes while keeping the per-
+// turn token overhead predictable.
+export const SESSION_PREAMBLE_MAX_LENGTH = 4000
+
+// #5936 (epic #5935): explicit overflow cap for the shared outgoing-message
+// queue (`_outgoingQueue`). Replaces the SDK's hard-coded mid-turn cap of 3
+// (#5711) with one bounded, surfaced limit shared by SDK + CLI. A send-while-
+// busy message past this cap is discarded with a visible `error` event
+// (`code: 'queue_full'`) — never a silent drop. Generous enough for a realistic
+// burst of owner follow-ups while still bounding memory if a client wedges.
+export const OUTGOING_QUEUE_MAX = 10
 
 // #3884 / #3749 / #3899: default SOFT inactivity warning (ms). Activity-based
 // — every provider event (SDK iterator message, CLI stdout JSONL line)
@@ -52,22 +80,76 @@ export const DEFAULT_RESULT_TIMEOUT_MS = 30 * 60 * 1000
 // CHROXY_HARD_TIMEOUT_MS.
 export const DEFAULT_HARD_TIMEOUT_MS = 2 * 60 * 60 * 1000
 
-// Default per-provider injection mode (#3200). Subprocess providers without
-// a system-prompt flag (Codex, Gemini) prepend skills to the first user
-// message; Claude (SDK or CLI) appends to the system prompt. Maps the
-// session's provider id to the channel that the existing skills text
-// pipeline already uses, so a skill without `injection:` keeps its
-// behaviour from v1.
-const DEFAULT_INJECTION_BY_PROVIDER = {
-  'claude-sdk': 'append',
-  'claude-cli': 'append',
-  'docker-sdk': 'append',
-  'docker-cli': 'append',
-  'docker': 'append',
-  'codex': 'prepend',
-  'gemini': 'prepend',
+// #4467: stream-stall recovery timeout (ms). Resets on ANY stream event from
+// the child (stdout line, stream_delta, tool_start, etc.). When no event has
+// arrived for this long while busy, emit a recoverable error (code:
+// `stream_stall`) and clear busy state so the user can retry. Distinct from
+// the soft inactivity warning — the warning is passive (just a chip); this
+// is active recovery.
+//
+// Default 5 minutes: a stalled HTTPS connection to the Anthropic API
+// (half-open TCP, mobile NAT idle, Cloudflare timeout) typically would have
+// recovered by then if it was going to; longer-than-5min legitimate gaps
+// between events are rare (interactive tools poll faster than that).
+//
+// Operators with workloads that have long compile-then-edit gaps can raise
+// via config.streamStallTimeoutMs or CHROXY_STREAM_STALL_TIMEOUT_MS, or set
+// to 0 to disable.
+export const DEFAULT_STREAM_STALL_TIMEOUT_MS = 5 * 60 * 1000
+
+// #5376: the background-shell sweep/quiesce machinery moved to
+// background-shell-tracker.js. Re-exported here so existing importers
+// (session-timeout-manager, tests) keep their import path. See that module for
+// the #5177 / #5247 / #5265 rationale on each window.
+export {
+  BACKGROUND_SHELL_SWEEP_MS,
+  BACKGROUND_SHELL_QUIESCE_MS,
+  BACKGROUND_SHELL_HARD_QUIESCE_MS,
+} from './background-shell-tracker.js'
+
+// #5367: canonical list of the opts BaseSession's constructor accepts, in the
+// exact order they appear in the destructure below. Single source of truth for
+// `buildBaseSessionOpts()` — the picker each subclass uses to forward opts down
+// without hand-maintaining a parallel destructure (the "middle-layer trap" that
+// re-shipped three times: #3224 / #3231 / #4790). The CI lint
+// (lint-session-opt-forwarding.mjs) ASSERTS this array equals the set parsed
+// from the constructor destructure, so the two can never drift apart.
+export const BASE_SESSION_OPT_KEYS = [
+  'cwd',
+  'model',
+  'permissionMode',
+  'skillsDir',
+  'repoSkillsDir',
+  'maxSkillBytes',
+  'maxTotalSkillBytes',
+  'provider',
+  'activeManualSkills',
+  'providerSkillAllowlist',
+  'trustStore',
+  'trustMismatchMode',
+  'promptEvaluator',
+  'promptEvaluatorSkipPattern',
+  'chroxyContextHint',
+  'sessionPreamble',
+  'resultTimeoutMs',
+  'hardTimeoutMs',
+  'streamStallTimeoutMs',
+  'backgroundShellHardQuiesceMs',
+]
+
+// #5367: pick the BaseSession opts out of a subclass's full opts bag and merge
+// per-subclass `overrides` on top (overrides win — e.g. provider/model
+// defaults). Uses `if (k in fullOpts)` rather than `??` so an explicitly-passed
+// falsy value (notably `backgroundShellHardQuiesceMs: 0`, which disables
+// hard-reaping) is preserved, and absent keys are omitted entirely (so
+// BaseSession's own `|| default` fallbacks still apply).
+export function buildBaseSessionOpts(fullOpts = {}, overrides = {}) {
+  const out = {}
+  for (const k of BASE_SESSION_OPT_KEYS) {
+    if (k in fullOpts) out[k] = fullOpts[k]
+  }
+  return { ...out, ...overrides }
 }
-const FALLBACK_INJECTION_MODE = 'append'
 
 // #3639: validate a constructor-supplied promptEvaluatorSkipPattern. Only
 // real regex sources survive — anything else (non-string, malformed
@@ -85,6 +167,23 @@ function _coerceSkipPatternOpt(source) {
   }
 }
 
+// #4660: validate a constructor-supplied sessionPreamble. Only strings are
+// accepted; anything else (undefined, null, number, object) yields the
+// empty-string default so _buildSystemPrompt() stays byte-identical to
+// pre-#4660. Trim whitespace + cap to SESSION_PREAMBLE_MAX_LENGTH so a
+// hand-edited state file can't smuggle in unbounded text past the wire-
+// level cap enforced by ws-schemas. Empty-after-trim falls back to '' so
+// the OFF semantics (no injection) line up with `chroxyContextHint: false`.
+function _coerceSessionPreambleOpt(value) {
+  if (typeof value !== 'string') return ''
+  const trimmed = value.trim()
+  if (trimmed.length === 0) return ''
+  if (trimmed.length > SESSION_PREAMBLE_MAX_LENGTH) {
+    return trimmed.slice(0, SESSION_PREAMBLE_MAX_LENGTH)
+  }
+  return trimmed
+}
+
 export class BaseSession extends EventEmitter {
   /**
    * Custom event names emitted by this provider class that should be proxied
@@ -98,6 +197,44 @@ export class BaseSession extends EventEmitter {
    */
   static get customEvents() {
     return []
+  }
+
+  /**
+   * #5984 (epic #5982): is this session class the claude-tui PTY mirror — the
+   * ONLY session type that is a legitimate target for server-initiated
+   * PTY-write paths (the mailbox live-interrupt wakeup) and the Control Room's
+   * `isTui` flag? Defaults to false; ClaudeTuiSession overrides to true.
+   *
+   * This replaces the previous `typeof session.writeTerminalInput === 'function'`
+   * duck-typing at those sites. The user-shell session (#5983) will ALSO expose
+   * `writeTerminalInput` (to receive `terminal_input`), so duck-typing would
+   * mis-detect it as claude-tui and let the weaker ingest-secret holder inject
+   * an executed line into a root shell (swarm-audit finding C2). A positive
+   * class discriminator fails safe: anything not explicitly claude-tui — incl.
+   * a future user-shell — is excluded by construction.
+   *
+   * @returns {boolean}
+   */
+  static get isClaudeTui() {
+    return false
+  }
+
+  /**
+   * #5985b (epic #5982): is this session class the general-purpose user shell
+   * (spawns the operator's `$SHELL` — arbitrary code execution on the dev
+   * machine)? Defaults to false; UserShellSession (#5983) overrides to true.
+   *
+   * The WS create + terminal_* (input / resize / subscribe) gates use this to
+   * require the PRIMARY token class for a shell — a much stricter bar than the
+   * session-scoped viewer/primary-claim checks that suffice for the claude-tui
+   * mirror (swarm-audit findings C1/C4). Read off the instance via
+   * `session.constructor?.isUserShell`. False by construction for every existing
+   * session type, so these gates are inert until the provider lands (#5983).
+   *
+   * @returns {boolean}
+   */
+  static get isUserShell() {
+    return false
   }
 
   constructor({
@@ -115,6 +252,17 @@ export class BaseSession extends EventEmitter {
     trustMismatchMode,
     promptEvaluator,
     promptEvaluatorSkipPattern,
+    // #3805: opt-in flag — when true, _buildSystemPrompt prepends a
+    // short paragraph telling the model it's running inside Chroxy so
+    // it can adjust output for mobile clients (narrower code blocks,
+    // no wide ASCII diagrams). Default false — existing users see no
+    // observable change.
+    chroxyContextHint,
+    // #4660: user-authored preamble prepended to `_buildSystemPrompt()`
+    // output every turn. String, trimmed + capped to
+    // SESSION_PREAMBLE_MAX_LENGTH on construction. Empty string (or any
+    // non-string input) is the byte-identical-to-pre-#4660 default.
+    sessionPreamble,
     // #3749 / #3884 / #3899: configurable SOFT-warning timeout (the
     // inactivity safety net). Subclasses arm this timer; when it fires
     // they emit an `inactivity_warning` event so the client can render
@@ -132,6 +280,14 @@ export class BaseSession extends EventEmitter {
     // 2h. Override via ~/.chroxy/config.json#hardTimeoutMs or
     // CHROXY_HARD_TIMEOUT_MS.
     hardTimeoutMs,
+    // #4467: stream-stall recovery timeout. See DEFAULT_STREAM_STALL_TIMEOUT_MS.
+    streamStallTimeoutMs,
+    // #5288: HARD-quiesce window (ms) for background shells. A finished-but-
+    // never-polled shell is reaped after this much continuous output silence
+    // so it stops pinning the session "running". Defaults to
+    // BACKGROUND_SHELL_HARD_QUIESCE_MS (4h); 0 disables hard-reaping (revert
+    // to #5247 advisory-only). Forwarded from config via SessionManager.
+    backgroundShellHardQuiesceMs,
   } = {}) {
     super()
     this.cwd = cwd || process.cwd()
@@ -163,9 +319,77 @@ export class BaseSession extends EventEmitter {
     // does the same validation but reports the rejection so the operator
     // sees a session_error in the dashboard instead of a silent default.
     this.promptEvaluatorSkipPattern = _coerceSkipPatternOpt(promptEvaluatorSkipPattern)
+    // #3805: per-session Chroxy context hint flag. Coerced to a strict
+    // boolean so `undefined` (omitted by clients on older protocol
+    // versions) yields the safe `false` default and JSON.stringify
+    // produces `true`/`false` (not `1`/`null`) on the wire.
+    this.chroxyContextHint = !!chroxyContextHint
+    // #4660: per-session preamble. String-typed: anything else (undefined,
+    // null, number, object) falls back to the empty-string default so the
+    // _buildSystemPrompt() output stays byte-identical to pre-#4660. Trim
+    // + cap so a hand-edited state file or a malformed restore can't
+    // smuggle in unbounded text. The runtime setter (setSessionPreamble)
+    // does the same coercion and reports rejection on type mismatch.
+    this.sessionPreamble = _coerceSessionPreambleOpt(sessionPreamble)
 
     this._isBusy = false
     this._processReady = false
+    // #5375: user-initiated stop vs crash. Set by interrupt() (markIntentionalStop),
+    // captured-and-cleared by the provider's close/error handler
+    // (_consumeIntentionalStop) so a clean stop is not reported as an error.
+    // Hoisted here from the three providers (#4602/#4881) — see _consumeIntentionalStop
+    // and _clearIntentionalStop below. The capture and the safety-net clear are kept
+    // as SEPARATE helpers on purpose: SDK relies on a catch-block consume plus a
+    // `finally` safety-net clear (the interrupt-races-result case), and collapsing
+    // them would reopen that race.
+    this._intentionalStop = false
+    // #4307/#5177/#5247/#5265: pending background-shell tracking + the reaping
+    // sweep live in BackgroundShellTracker (#5376). BaseSession composes one and
+    // delegates the public surface (trackBackgroundShell / clearBackgroundShell /
+    // getPendingBackgroundShells / _destroyPendingBackgroundShells) plus the
+    // test-facing tunables (`_backgroundShell*` get/set shims below) to it;
+    // `isRunning` consults its pending count. Events flow from the session via the
+    // injected emit. #5288: `backgroundShellHardQuiesceMs` is config-driven; the
+    // tracker honours an explicit 0 (disable). See background-shell-tracker.js for
+    // the transient-by-design (#4417) and quiescence-window (#4417/#5247/#5265)
+    // rationale.
+    this._backgroundShellTracker = new BackgroundShellTracker({
+      emit: (event, payload) => this.emit(event, payload),
+      hardQuiesceMs: backgroundShellHardQuiesceMs,
+    })
+    // #4307: ephemeral map of recent `Bash` tool_uses dispatched with
+    // `run_in_background: true`, keyed by toolUseId. Used to recover the
+    // command string when the matching tool_result lands carrying the
+    // shellId — the command string is informational (surfaced in the
+    // dashboard "waiting on …" chip). Cleared on `_clearMessageState`
+    // because once a turn ends, any tool_use blocks that did not see a
+    // result this turn are stranded; the agent's next turn re-emits a
+    // fresh `tool_use` if it cares to wait again.
+    this._pendingBackgroundCommands = new Map()
+    // #4628: in-flight tool_start tracking. Each entry is the toolUseId
+    // of a tool_start the session has emitted but for which no matching
+    // tool_result has fired yet. On `result` (turn end), `_emitResult`
+    // sweeps any remaining entries and emits synthetic tool_results so
+    // the dashboard's activeTools chip clears. Without this, claude TUI
+    // sessions that drop a PostToolUse hook (rare but observed — one
+    // Bash out of 35 per the #4628 forensic) leave the chip ticking
+    // forever AND persist the orphan to session-state.json. Companion
+    // path: SessionMessageHistory.sweepUnresolvedToolStarts (#4617/#4619)
+    // catches stragglers at restore-time as a backstop.
+    this._inFlightToolStarts = new Map()
+    // #5160: per-session activity registry (Control Room). A thin unifying
+    // layer that maps the signals BaseSession already emits (tool_start /
+    // tool_result / agent_spawned / agent_completed / background_work_changed
+    // / permission_request / user_question / permission_resolved) into the
+    // `ActivityEntry` wire shape and re-emits `activity_delta` /
+    // `activity_snapshot` for the WS layer. NOT a parallel tracker — it
+    // listens to this session's own events (wired in _setupActivityRegistry)
+    // so it can never drift from the canonical signal source.
+    this._activity = new ActivityRegistry({
+      sessionId: '',
+      emit: (event, payload) => this.emit(event, payload),
+    })
+    this._setupActivityRegistry()
     this._messageCounter = 0
     // Boot-unique prefix mixed into every emitted messageId (#3700).
     // The dashboard caches up to 100 messages per session in localStorage
@@ -181,6 +405,19 @@ export class BaseSession extends EventEmitter {
     this._messageIdPrefix = randomBytes(3).toString('hex')
     this._currentMessageId = null
     this._destroying = false
+    // #5936 (epic #5935): server-authoritative outgoing-message queue. Holds a
+    // follow-up message the OWNER sent while the session was still mid-turn
+    // (busy) and flushes it FIFO on the turn-complete `result` event — the
+    // single canonical "no more response is coming" signal (where `_isBusy`
+    // clears via `_clearMessageState`). Replaces the SDK's ad-hoc `_pendingInput`
+    // (cap 3) and the CLI's mid-turn reject, giving both providers one
+    // consistent queue → flush-on-complete behaviour. Each entry is
+    // `{ prompt, attachments, sendOptions }`; `sendOptions.clientMessageId`
+    // (when supplied) lets clients reconcile their optimistic queued bubble.
+    // Cross-device arbitration is enforced ABOVE this layer (input-handlers'
+    // input_conflict gate) — by the time a send reaches the queue it is the
+    // owner's own follow-up, never a way around primary-client arbitration.
+    this._outgoingQueue = []
     this._activeAgents = new Map()
     this._resultTimeout = null
     // #3899: parallel hard-cap setTimeout handle. Armed alongside
@@ -188,13 +425,23 @@ export class BaseSession extends EventEmitter {
     // Fires `_handleHardTimeout` when silence reaches `_hardTimeoutMs`
     // even if the user never engages with the soft check-in prompt.
     this._hardTimeout = null
+    // #4467: stream-stall recovery timer. See _streamStallTimeoutMs and
+    // CliSession._handleStreamStall for the active-recovery path.
+    this._streamStallTimeout = null
     // #3749 / #3884 / #3899: effective SOFT-warning timeout in ms.
     // Defaults to 30 minutes; overrides come from
     // SessionManager(resultTimeoutMs:…) which itself reads
     // ~/.chroxy/config.json#resultTimeoutMs or
     // CHROXY_RESULT_TIMEOUT_MS.
+    //
+    // #4509: `isOperatorTimeoutInRange` mirrors the ceiling check #4503
+    // added to `ws-history.js sendPostAuthInfo`. BaseSession is the final
+    // destination — it arms the actual setTimeout against this value — so
+    // even when an over-ceiling number sneaks past SessionManager (e.g. a
+    // provider that hand-builds providerOpts) we still clamp it here so the
+    // inactivity-warning path can't effectively never fire.
     this._resultTimeoutMs =
-      Number.isFinite(resultTimeoutMs) && resultTimeoutMs > 0
+      isOperatorTimeoutInRange(resultTimeoutMs, { name: 'resultTimeoutMs', log })
         ? resultTimeoutMs
         : DEFAULT_RESULT_TIMEOUT_MS
     // #3899: effective HARD-cap timeout in ms. Defaults to 2 hours.
@@ -202,9 +449,16 @@ export class BaseSession extends EventEmitter {
     // / CHROXY_HARD_TIMEOUT_MS. Operators wanting tight kill-on-stuck
     // semantics can drop this; the soft warning fires first regardless.
     this._hardTimeoutMs =
-      Number.isFinite(hardTimeoutMs) && hardTimeoutMs > 0
+      isOperatorTimeoutInRange(hardTimeoutMs, { name: 'hardTimeoutMs', log })
         ? hardTimeoutMs
         : DEFAULT_HARD_TIMEOUT_MS
+    // #4467: stream-stall recovery timer. 0 disables the active recovery
+    // path (the soft warning + hard cap still apply). Non-finite, negative,
+    // or above the 24h ceiling falls back to the default.
+    this._streamStallTimeoutMs =
+      isOperatorTimeoutInRange(streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
+        ? streamStallTimeoutMs
+        : DEFAULT_STREAM_STALL_TIMEOUT_MS
 
     // Provider id (registry key from providers.js — `claude-sdk`, `codex`,
     // etc.). Stored so frontmatter `providers:` filtering (#3198) and
@@ -214,61 +468,35 @@ export class BaseSession extends EventEmitter {
     // list are filtered OUT, skills without one still apply).
     this._provider = provider || null
 
-    // Per-session manually-activated skill names (#3199). Skills declared
-    // `activation: manual` are off by default and only load when their
-    // name is in this Set. #3209 adds the WS toggle path
-    // (activateSkill/deactivateSkill) that mutates this Set + reloads.
-    this._activeManualSkills = activeManualSkills instanceof Set
-      ? new Set(activeManualSkills)
-      : (Array.isArray(activeManualSkills) ? new Set(activeManualSkills) : new Set())
+    // #2957/#3199/#3204/#3248: the shared-skills system — the manual-activation
+    // set, the immutable load-time inputs (dirs, byte caps, provider allowlist),
+    // the trust store, the parse cache, and the loader-built caches — lives in
+    // SkillsManager (#5376). BaseSession composes one and exposes compat getters
+    // (`_skills`, `_skillsDir`, `_activeManualSkills`, `_trustStore`,
+    // `_providerSkillAllowlist`, …) so existing consumers, the prompt builders,
+    // and the #5367 opt sentinel keep their surface; activateSkill /
+    // deactivateSkill / _loadSkills delegate to it. `_provider` (above) is kept
+    // on the session for non-skills use and also passed through here.
+    this._skillsManager = new SkillsManager({
+      cwd: this.cwd,
+      provider,
+      activeManualSkills,
+      skillsDir,
+      repoSkillsDir,
+      maxSkillBytes,
+      maxTotalSkillBytes,
+      providerSkillAllowlist,
+      trustStore,
+      trustMismatchMode,
+      emit: (...args) => this.emit(...args),
+    })
 
-    // Cache the immutable load-time inputs so the runtime toggle path
-    // (#3209) can rebuild layerOpts without re-parsing constructor args.
-    // These are set once at construction and never mutate.
-    this._skillsDir = skillsDir || DEFAULT_SKILLS_DIR
-    this._repoSkillsDir = repoSkillsDir !== undefined
-      ? repoSkillsDir
-      : findRepoSkillsDir(this.cwd)
-    this._maxSkillBytes = Number.isFinite(maxSkillBytes) ? maxSkillBytes : null
-    this._maxTotalSkillBytes = Number.isFinite(maxTotalSkillBytes) ? maxTotalSkillBytes : null
-    this._providerSkillAllowlist = providerSkillAllowlist != null
-      && typeof providerSkillAllowlist === 'object'
-      && !Array.isArray(providerSkillAllowlist)
-      ? providerSkillAllowlist
-      : null
-
-    // Trust store (#3204). Two activation paths:
-    //   - `trustStore: <SkillsTrustStore-like>` — caller-supplied store
-    //     (tests pin a temp file path here so the real
-    //     ~/.chroxy/skills-trust.json is never touched).
-    //   - `trustMismatchMode: 'warn' | 'block'` — opt into the default
-    //     store at ~/.chroxy/skills-trust.json with the chosen mode.
-    //     SessionManager always passes one of these strings through;
-    //     direct BaseSession construction without it (existing tests,
-    //     ad-hoc instantiation) keeps the legacy no-op behaviour.
-    let resolvedTrustStore = null
-    if (trustStore) {
-      resolvedTrustStore = trustStore
-    } else if (trustMismatchMode === 'warn' || trustMismatchMode === 'block') {
-      resolvedTrustStore = new SkillsTrustStore({ mode: trustMismatchMode })
-    }
-    this._trustStore = resolvedTrustStore
-
-    // #3248: per-session parse cache. Map keyed by realpath; values
-    // hold `{ mtimeMs, size, body, frontmatter, finalBody, description }`
-    // so subsequent _loadSkills() calls (every activate/deactivate
-    // toggle) skip readFileSync / parseFrontmatter for files whose
-    // mtimeMs is unchanged. The loader writes through to this Map —
-    // invalidation is automatic when the on-disk mtimeMs moves.
-    this._skillsParseCache = new Map()
-
-    // Skills are scanned at construction. #3209 adds a runtime reload
-    // path for manual activation toggles. Mismatch events are
-    // collected during the synchronous loader call and re-emitted on
-    // `process.nextTick` because SessionManager wires event listeners
-    // AFTER the constructor returns — a synchronous emit here would
-    // land on an empty listener set.
-    const { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents } = this._loadSkills({ collectTrustEvents: true })
+    // Skills are scanned at construction. #3209 adds a runtime reload path for
+    // manual activation toggles. The construction load deliberately RETURNS its
+    // mismatch / community-trust events so they re-emit on `process.nextTick`:
+    // SessionManager wires event listeners AFTER the constructor returns, so a
+    // synchronous emit here would land on an empty listener set.
+    const { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents } = this._skillsManager.loadSkills({ collectTrustEvents: true })
     if (pendingTrustEvents.length > 0 || pendingCommunityTrustEvents.length > 0) {
       process.nextTick(() => {
         for (const ev of pendingTrustEvents) {
@@ -282,95 +510,17 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * Build the layered-loader options + run the loader, populating the
-   * skill caches (`_skills`, `_skillsByMode`, `_skillsText`,
-   * `_prependSkillsText`). Used by both the constructor and the
-   * runtime activate/deactivate toggle (#3209) so the loader-side
-   * state stays the single source of truth.
+   * #5376: delegate to SkillsManager. Kept as a session method because
+   * settings-handlers.js calls `session._loadSkills()` to rebuild after a
+   * trust grant. Returns the pending trust / community-trust events for the
+   * caller to emit (the construction path emits them on `process.nextTick`).
    *
    * @param {{ collectTrustEvents?: boolean }} [opts]
    * @returns {{ trustEvents: Array<object>, communityTrustEvents: Array<object> }}
-   *   `trustEvents` — pending skill_changed events (mismatch) when collectTrustEvents=true.
-   *   `communityTrustEvents` — pending skill_trust_request events for untrusted community skills.
    * @private
    */
-  _loadSkills({ collectTrustEvents = false } = {}) {
-    const layerOpts = {
-      globalDir: this._skillsDir,
-      repoDir: this._repoSkillsDir,
-      provider: this._provider,
-      activeManualSkills: this._activeManualSkills,
-      defaultInjectionMode: DEFAULT_INJECTION_BY_PROVIDER[this._provider] || FALLBACK_INJECTION_MODE,
-      // #3253: include inactive manual skills in the unified scan so
-      // `activateSkill` can validate names against `_manualSkillNames`
-      // without paying for a second validation-only scan. The active
-      // subset is partitioned out below before populating the
-      // prompt-context caches — inactive entries never reach the
-      // model. Cost: a few metadata-only entries; bodies are not
-      // loaded for inactive manual skills (skills-loader.js:646).
-      includeInactive: true,
-    }
-    if (this._maxSkillBytes !== null) layerOpts.maxSkillBytes = this._maxSkillBytes
-    if (this._maxTotalSkillBytes !== null) layerOpts.maxTotalSkillBytes = this._maxTotalSkillBytes
-    if (this._providerSkillAllowlist) layerOpts.providerSkillAllowlist = this._providerSkillAllowlist
-    // #3248: hand the per-session parse cache to the loader. Cache
-    // hits skip readFileSync + parseFrontmatter; misses populate.
-    if (this._skillsParseCache instanceof Map) layerOpts.parseCache = this._skillsParseCache
-
-    const pendingTrustEvents = []
-    const pendingCommunityTrustEvents = []
-    if (this._trustStore) {
-      layerOpts.trustStore = this._trustStore
-      if (collectTrustEvents) {
-        layerOpts.onTrustMismatch = (info) => { pendingTrustEvents.push(info) }
-      }
-      // Hash recording happens via `trustStore.inspect()` inside the
-      // loader regardless of whether `onTrustMismatch` is wired — the
-      // callback is just the mismatch-event delivery channel. On
-      // runtime reload (collectTrustEvents=false) we deliberately
-      // omit the callback so a user-initiated toggle does NOT
-      // re-emit `skill_changed` events that already fired at session
-      // construction.
-
-      // #3297: community trust checker — allows the loader to gate
-      // community skills pending a first-activation grant.
-      if (typeof this._trustStore.isCommunityTrusted === 'function') {
-        layerOpts.communityTrustChecker = this._trustStore.isCommunityTrusted.bind(this._trustStore)
-      }
-      // Always collect community trust pending events (fired on both
-      // construction and runtime reload so re-entry from other sessions
-      // sees the prompt after a grant clears an earlier block).
-      layerOpts.onCommunityTrustPending = (info) => { pendingCommunityTrustEvents.push(info) }
-    }
-
-    const all = loadActiveSkillsLayered(layerOpts)
-    if (this._trustStore && typeof this._trustStore.flush === 'function') {
-      try { this._trustStore.flush() } catch { /* ignore */ }
-    }
-
-    // #3253: partition the unified scan into the active subset (used
-    // for prompt injection) and a Set of all manual-skill names (used
-    // by activateSkill to validate without re-scanning). Inactive
-    // entries carry `active: false` from the loader; auto skills
-    // don't carry the field at all and are always active.
-    const manualNames = new Set()
-    const active = []
-    for (const s of all) {
-      const activation = typeof s.metadata?.activation === 'string'
-        ? s.metadata.activation.trim().toLowerCase()
-        : null
-      if (activation === 'manual') manualNames.add(s.name)
-      if (s.active !== false) active.push(s)
-    }
-    this._skills = active
-    this._manualSkillNames = manualNames
-
-    const grouped = groupSkillsByInjectionMode(this._skills)
-    this._skillsByMode = grouped
-    this._skillsText = formatSkillsForPrompt(grouped.append)
-    this._prependSkillsText = formatSkillsForPrompt(grouped.prepend)
-
-    return { trustEvents: pendingTrustEvents, communityTrustEvents: pendingCommunityTrustEvents }
+  _loadSkills(opts = {}) {
+    return this._skillsManager.loadSkills(opts)
   }
 
   /**
@@ -411,54 +561,438 @@ export class BaseSession extends EventEmitter {
    * @returns {boolean}
    */
   activateSkill(skillName) {
-    if (typeof skillName !== 'string' || skillName === '') return false
-    if (this._activeManualSkills.has(skillName)) return false
-
-    // #3253: speculatively add and reload — the unified `_loadSkills`
-    // scan populates both the prompt-context caches AND the
-    // `_manualSkillNames` validation set, so we can reuse one scan
-    // for validation + reload rather than running a separate
-    // validation-only scan first. On the rare failure path (typo /
-    // auto-skill name) we run a rollback scan to restore the active
-    // set; the common success path stays at one layered scan.
-    this._activeManualSkills.add(skillName)
-    const { communityTrustEvents } = this._loadSkills()
-    if (!this._manualSkillNames.has(skillName)) {
-      this._activeManualSkills.delete(skillName)
-      this._loadSkills()
-      return false
-    }
-    for (const ev of communityTrustEvents) {
-      this.emit('skill_trust_request', ev)
-    }
-    return true
+    return this._skillsManager.activateSkill(skillName)
   }
 
   /**
-   * Deactivate a manual skill at runtime (#3209). Returns true when
-   * the active set actually changed; false otherwise. The
-   * `_listManualSkillNames` validation isn't strictly needed here
-   * (deactivating a name that isn't currently active is already a
-   * no-op via the `has()` check), but mirroring `activateSkill`
-   * keeps the contract symmetric.
+   * Deactivate a manual skill at runtime (#3209). Returns true when the active
+   * set actually changed; false otherwise. #5376: delegates to SkillsManager.
    *
    * @param {string} skillName
    * @returns {boolean}
    */
   deactivateSkill(skillName) {
-    if (typeof skillName !== 'string' || skillName === '') return false
-    if (!this._activeManualSkills.has(skillName)) return false
-    this._activeManualSkills.delete(skillName)
-    const { communityTrustEvents } = this._loadSkills()
-    for (const ev of communityTrustEvents) {
-      this.emit('skill_trust_request', ev)
+    return this._skillsManager.deactivateSkill(skillName)
+  }
+
+  /**
+   * #4307: a session is "running" — i.e. NOT idle, NOT subject to
+   * `SessionTimeoutManager` reaping — when EITHER:
+   *   - `_isBusy` is true (the model is mid-turn), OR
+   *   - the pending-background-shells map is non-empty (the agent
+   *     dispatched a `run_in_background` Bash and is waiting on it).
+   *
+   * The second clause is the #4307 fix: previously a session that
+   * kicked off a long-running background shell and returned looked
+   * indistinguishable from a finished session — `_isBusy` had cleared
+   * at turn-end. Now it stays "running" until the agent acknowledges
+   * the shell (via a `BashOutput` call) or the session is destroyed.
+   *
+   * #5247: the map size counts shells the mtime sweep has marked
+   * `quiesced` too. The sweep is ADVISORY — it clears the dashboard
+   * banner (see `getPendingBackgroundShells`) but must NOT flip liveness,
+   * because mtime quiescence can't tell "finished" from "idle but alive"
+   * (a dev server that logs once then waits for connections). Letting it
+   * flip `isRunning` reaped live processes and let `SessionTimeoutManager`
+   * time the session out as idle — re-opening #4307. Liveness authority is
+   * therefore BashOutput / destroy only, exactly as #4307 intended; the
+   * sweep just affects what the banner shows.
+   */
+  get isRunning() {
+    if (this._isBusy) return true
+    return this._backgroundShellTracker.size > 0
+  }
+
+  /**
+   * #4307: read-only snapshot of pending background shells.
+   * #5376: delegates to BackgroundShellTracker.
+   */
+  getPendingBackgroundShells() {
+    return this._backgroundShellTracker.getPendingBackgroundShells()
+  }
+
+  /**
+   * #4307: record a new pending background shell. Idempotent on shellId.
+   * #5376: delegates to BackgroundShellTracker. Called by SdkSession /
+   * ClaudeTuiSession as a session method.
+   *
+   * @param {{ shellId: string, command?: string, outputPath?: string }} opts
+   * @returns {boolean} true if a new entry was added
+   */
+  trackBackgroundShell(opts = {}) {
+    return this._backgroundShellTracker.trackBackgroundShell(opts)
+  }
+
+  /**
+   * #4307: clear a pending background shell by id. Returns true when an entry
+   * actually existed. #5376: delegates to BackgroundShellTracker.
+   *
+   * @param {string} shellId
+   * @returns {boolean}
+   */
+  clearBackgroundShell(shellId) {
+    return this._backgroundShellTracker.clearBackgroundShell(shellId)
+  }
+
+  /**
+   * #5936: current depth of the outgoing-message queue. Read-only snapshot for
+   * tests + any caller that wants to reflect queued state without reaching into
+   * `_outgoingQueue` directly.
+   *
+   * @returns {number}
+   */
+  get outgoingQueueLength() {
+    return this._outgoingQueue.length
+  }
+
+  /**
+   * #5936: accept a send-while-busy follow-up into the shared outgoing queue.
+   * Called by a provider's `sendMessage` when `_isBusy` (the model is mid-turn)
+   * INSTEAD of dropping the message (old SDK) or rejecting with an error (old
+   * CLI). The message is held and flushed FIFO on the next `result` via
+   * `dequeueNextOutgoing()`.
+   *
+   * Overflow is surfaced, never silent: past `OUTGOING_QUEUE_MAX` the message is
+   * discarded with an `error` event (`code: 'queue_full'`) so the client can
+   * tell the user, rather than the queue growing unbounded.
+   *
+   * Emits `message_queued` (transient; mirrored to clients via the normalizer)
+   * on success so both clients can render the queued bubble.
+   *
+   * @param {{ prompt: any, attachments?: any, sendOptions?: object }} item
+   * @returns {boolean} true if the message was queued, false on overflow.
+   */
+  enqueueOutgoingMessage({ prompt, attachments, sendOptions } = {}) {
+    if (this._outgoingQueue.length >= OUTGOING_QUEUE_MAX) {
+      this.emit('error', {
+        code: 'queue_full',
+        message: `Outgoing message queue full (max ${OUTGOING_QUEUE_MAX}) — message discarded`,
+        recoverable: true,
+      })
+      return false
     }
+    const opts = sendOptions || {}
+    this._outgoingQueue.push({ prompt, attachments, sendOptions: opts })
+    this.emit('message_queued', {
+      clientMessageId: typeof opts.clientMessageId === 'string' ? opts.clientMessageId : undefined,
+      text: typeof prompt === 'string' ? prompt : '',
+      queueLength: this._outgoingQueue.length,
+    })
+    ;(this._log || log).info(`Queued follow-up message (${this._outgoingQueue.length} pending)`)
     return true
   }
 
-  get isRunning() {
-    return this._isBusy
+  /**
+   * #5936: flush the head of the outgoing queue. Called on the turn-complete
+   * `result` path (`_clearMessageState` for CLI, the post-turn `finally` for
+   * SDK). Shifts exactly ONE item and re-dispatches it via `sendMessage` on a
+   * `process.nextTick` — that send re-sets `_isBusy`, so the NEXT `result`
+   * drains the following item, preserving FIFO order one-turn-at-a-time without
+   * re-entrancy (synchronous `result` listeners finish first).
+   *
+   * Emits `message_dequeued` with `reason: 'flush'` so clients transition the
+   * bubble from queued → sent.
+   *
+   * @returns {object|null} the dequeued item, or null when nothing to flush.
+   */
+  dequeueNextOutgoing() {
+    if (this._destroying || this._outgoingQueue.length === 0) return null
+    const item = this._outgoingQueue.shift()
+    const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
+      ? item.sendOptions.clientMessageId
+      : undefined
+    // queueLength is captured now (post-shift) but the event + re-dispatch are
+    // deferred to the next tick together, so message_dequeued(flush) — which a
+    // client reads as "this queued message is being sent" — only fires when we
+    // are ACTUALLY about to send (a destroy() landing in this window suppresses
+    // both). Deferring also guarantees the event lands AFTER the turn's
+    // synchronous `result` broadcast on every turn-end path (the natural-result
+    // path emits `result` then drains; the abnormal paths drain via
+    // _emitInterruptedTurnResult then emit `result`), so a client never sees the
+    // dequeue ahead of the result that triggered it.
+    const remaining = this._outgoingQueue.length
+    process.nextTick(() => {
+      if (this._destroying) return
+      this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'flush' })
+      ;(this._log || log).info(`Dequeuing follow-up message (${remaining} remaining)`)
+      this.sendMessage(item.prompt, item.attachments, item.sendOptions)
+    })
+    return item
   }
+
+  /**
+   * #5936: drop every queued outgoing message. Called by `interrupt()` so a
+   * deliberate Stop cancels the owner's pending follow-ups rather than letting
+   * them auto-fire after the turn the user just halted — the canonical interrupt
+   * policy for the queue (cancel, not flush; see issue #5936). Emits one
+   * `message_dequeued` per cleared item with `reason: 'interrupted'` so clients
+   * remove each queued bubble. `emit` defaults true; destroy() passes false to
+   * tear the queue down silently (no listeners care once the session is gone).
+   *
+   * @param {{ emit?: boolean }} [opts]
+   * @returns {number} how many messages were cleared.
+   */
+  clearOutgoingQueue({ emit = true } = {}) {
+    if (this._outgoingQueue.length === 0) return 0
+    const cleared = this._outgoingQueue.splice(0)
+    if (emit) {
+      // Report a DESCENDING queueLength as each item is removed (cleared.length
+      // - 1, - 2, … 0) so the field keeps its documented "count remaining AFTER
+      // this item left" meaning — matching dequeueNextOutgoing. The array is
+      // already spliced empty, so derive the count from the index rather than
+      // reading `_outgoingQueue.length` (which would report 0 for every item).
+      cleared.forEach((item, i) => {
+        const clientMessageId = typeof item.sendOptions?.clientMessageId === 'string'
+          ? item.sendOptions.clientMessageId
+          : undefined
+        this.emit('message_dequeued', {
+          clientMessageId,
+          queueLength: cleared.length - i - 1,
+          reason: 'interrupted',
+        })
+      })
+      ;(this._log || log).info(`Cleared ${cleared.length} queued follow-up message(s) (interrupted)`)
+    }
+    return cleared.length
+  }
+
+  /**
+   * #5943: cancel ONE queued outgoing message by its `clientMessageId`, leaving
+   * the rest of the queue intact. Called by the `cancel_queued` handler so the
+   * owner can drop a single send-while-busy follow-up they no longer want,
+   * WITHOUT the whole-queue cancellation an `interrupt` performs. Emits
+   * `message_dequeued` with `reason: 'cancelled'` (the per-item analogue of
+   * `clearOutgoingQueue`'s `'interrupted'`) so every client removes just that
+   * queued bubble. `queueLength` carries the count remaining AFTER removal,
+   * matching the documented meaning on the other dequeue paths.
+   *
+   * A no-op (returns false, no event) when the id is missing, empty, or matches
+   * nothing — an entry queued without a `clientMessageId` cannot be targeted
+   * (only the owner's optimistic copy carries one), and a stale/duplicate cancel
+   * for an already-flushed item must not emit a spurious dequeue.
+   *
+   * Authority is enforced upstream, NOT here: the `cancel_queued` handler
+   * resolves the caller to THIS session via the standard binding gate before
+   * calling in, and the queue is per-session, so reaching this method already
+   * means the caller owns the session. Keep that the ownership boundary if the
+   * queue is ever refactored to a cross-session structure.
+   *
+   * @param {string} clientMessageId
+   * @returns {boolean} true if an entry was found and removed.
+   */
+  cancelQueuedMessage(clientMessageId) {
+    if (this._destroying || typeof clientMessageId !== 'string' || clientMessageId.length === 0) {
+      return false
+    }
+    const idx = this._outgoingQueue.findIndex(
+      (item) => item.sendOptions?.clientMessageId === clientMessageId,
+    )
+    if (idx === -1) return false
+    this._outgoingQueue.splice(idx, 1)
+    const remaining = this._outgoingQueue.length
+    this.emit('message_dequeued', { clientMessageId, queueLength: remaining, reason: 'cancelled' })
+    ;(this._log || log).info(`Cancelled queued follow-up message ${clientMessageId} (${remaining} remaining)`)
+    return true
+  }
+
+  /**
+   * #5160: wire the activity registry to this session's own lifecycle
+   * events. The registry is a pure consumer — it only maps already-emitted
+   * signals into `ActivityEntry` records, so listening here keeps it a thin
+   * unifying layer rather than a parallel tracker. Listeners are attached on
+   * the session itself (an EventEmitter) so every provider that routes
+   * through these canonical events feeds the registry for free.
+   *
+   * @private
+   */
+  _setupActivityRegistry() {
+    this.on('tool_start', (d) => this._activity.onToolStart(d))
+    this.on('tool_result', (d) => this._activity.onToolResult(d))
+    this.on('agent_spawned', (d) => this._activity.onAgentSpawned(d))
+    this.on('agent_completed', (d) => this._activity.onAgentCompleted(d))
+    this.on('agent_event', (d) => this._activity.onAgentEvent(d))
+    this.on('background_work_changed', (d) => this._activity.onBackgroundWorkChanged(d))
+    this.on('permission_request', (d) => this._activity.onPermissionRequest(d))
+    this.on('user_question', (d) => this._activity.onUserQuestion(d))
+    this.on('permission_resolved', (d) => this._activity.onPermissionResolved(d))
+    this.on('permission_expired', (d) => this._activity.onPermissionExpired(d))
+  }
+
+  /**
+   * #5160: clear the activity registry before any listener teardown. Every
+   * provider's `destroy()` routes through `removeAllListeners()` (directly,
+   * or via super.destroy() chaining — cli/jsonl/gemini/codex call it; sdk/tui
+   * also clear the registry explicitly via `_destroyPendingBackgroundShells`).
+   * Overriding here is the single chokepoint that guarantees a destroyed
+   * session emits `ended` deltas for any still-open node (so live subscribers
+   * see the tree drain) and leaves no stale entries — without having to touch
+   * each subclass's bespoke destroy(). Clearing BEFORE super removes the
+   * listeners means the `activity_delta` emits still reach the wired
+   * forwarder. Idempotent: a second call (or a session that already cleared
+   * via `_destroyPendingBackgroundShells`) sees an empty registry and no-ops.
+   */
+  removeAllListeners(eventName) {
+    // Only the full teardown variant (no event name) clears the registry —
+    // a targeted removeAllListeners('foo') must not drain the activity tree.
+    // Note: `super.removeAllListeners(undefined)` is NOT equivalent to the
+    // no-arg call — EventEmitter treats `undefined` as the event named
+    // `undefined` and removes nothing. So branch on arity and forward each
+    // shape with the right argument count.
+    if (eventName === undefined) {
+      this._activity.clear()
+      // #5177: stop the background-shell sweep on full teardown too. Most
+      // providers (cli/jsonl/gemini/codex) destroy via removeAllListeners()
+      // and never call _destroyPendingBackgroundShells, so this is the
+      // chokepoint that guarantees no provider leaks the recurring timer.
+      this._stopBackgroundShellSweep()
+      return super.removeAllListeners()
+    }
+    return super.removeAllListeners(eventName)
+  }
+
+  /**
+   * #5160: keep the activity registry's session id in sync. Subclasses that
+   * learn their canonical session id late (SDK sessions, on `init`) call this
+   * so emitted `activity_*` messages carry the right id.
+   * @param {string} sessionId
+   */
+  setActivitySessionId(sessionId) {
+    this._activity.setSessionId(sessionId)
+  }
+
+  /**
+   * #5160: full current activity tree as an `activity_snapshot` message.
+   * Served to a fresh subscriber (snapshot-on-subscribe) and on resync.
+   * @returns {object} the `activity_snapshot` wire message
+   */
+  getActivitySnapshot() {
+    return this._activity.getSnapshotMessage()
+  }
+
+  /**
+   * #5269 (Control Room Phase 2a): cancel a single in-flight activity node by
+   * its `activityId` (an `activity_snapshot`/`activity_delta` entry id).
+   *
+   * Default (base) behavior: not supported. Only providers that expose a
+   * per-task control surface override this — today that is the Agent-SDK path
+   * (`SdkSession`, which maps an `agent` node to the SDK's `query.stopTask`).
+   * Background shells and individual tool calls are NOT individually
+   * cancellable (chroxy does not own the OS process; see activity-registry.js),
+   * and CLI/TUI providers have no per-subagent control surface — they fall
+   * through to this default. Whole-turn interruption stays on the existing
+   * `interrupt()` path, unchanged.
+   *
+   * @param {string} _activityId
+   * @returns {Promise<{ ok: boolean, reason?: string, error?: string }>}
+   */
+  async cancelActivity(_activityId) {
+    return { ok: false, reason: 'not-supported' }
+  }
+
+  /**
+   * #5376: the following are thin delegators to BackgroundShellTracker. They
+   * stay on BaseSession because `background-shells.test.js` drives them as
+   * session methods (and `removeAllListeners` stops the sweep via
+   * `_stopBackgroundShellSweep`). The sweep / quiescence logic and the
+   * test-injected tunables (`_backgroundShell*` get/set shims below) live on the
+   * tracker — see background-shell-tracker.js for the #5177/#5247/#5265 rationale.
+   * @private
+   */
+  _emitBackgroundWorkChanged() {
+    return this._backgroundShellTracker._emitBackgroundWorkChanged()
+  }
+
+  /** @private #5376: delegates to BackgroundShellTracker. */
+  _ensureBackgroundShellSweep() {
+    return this._backgroundShellTracker._ensureBackgroundShellSweep()
+  }
+
+  /** @private #5376: delegates to BackgroundShellTracker. */
+  _stopBackgroundShellSweep() {
+    return this._backgroundShellTracker._stopBackgroundShellSweep()
+  }
+
+  /** @private #5376: delegates to BackgroundShellTracker. */
+  _sweepQuiescedBackgroundShells() {
+    return this._backgroundShellTracker._sweepQuiescedBackgroundShells()
+  }
+
+  /** @private #5376: delegates to BackgroundShellTracker. */
+  _isBackgroundShellHardQuiesced(entry) {
+    return this._backgroundShellTracker._isBackgroundShellHardQuiesced(entry)
+  }
+
+  /** @private #5376: delegates to BackgroundShellTracker. */
+  _isBackgroundShellQuiesced(entry) {
+    return this._backgroundShellTracker._isBackgroundShellQuiesced(entry)
+  }
+
+  /**
+   * #4307: clear the pending map on session destroy. Pulled into a
+   * helper so subclasses can call it from their own `destroy()` after
+   * the existing teardown — keeping the map alive past destroy would
+   * leak memory and confuse late session-list snapshots.
+   *
+   * @private
+   */
+  _destroyPendingBackgroundShells() {
+    // #5376: the tracker stops its sweep and clears the pending map (#5177 — so
+    // no tick fires against a half-torn-down session). The session-level
+    // companions are torn down here:
+    this._backgroundShellTracker.destroy()
+    this._pendingBackgroundCommands.clear()
+    // #5160: tear down the activity registry alongside the other transient
+    // per-session work maps. Ends every remaining node (the session is gone,
+    // so nothing is still in flight) and empties the registry — no leak, and
+    // a late session-list snapshot can't surface a destroyed session's tree.
+    this._activity.clear()
+  }
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5376: compat accessors. The skills + background-shell state moved into
+  // SkillsManager / BackgroundShellTracker, but existing consumers (the prompt
+  // builders, settings-handlers, the #5367 opt sentinel) and the unchanged
+  // background-shells.test.js / base-session.test.js suites read (and a couple
+  // write) these as session fields. Each reads through to the collaborator's
+  // identically-named field so there is a single source of truth — the
+  // collaborator. Setters exist only where a test assigns: `_skillsText`
+  // (base-session.test.js prompt-builder cases) and `_providerSkillAllowlist`
+  // (settings-handlers.test.js allowlist override). Mutating-collection reads
+  // (`_pendingBackgroundShells`, `_activeManualSkills`) return the live
+  // reference, so `.set`/`.add`/`.delete` operate on the collaborator's state.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Background-shell tracker
+  get _pendingBackgroundShells() { return this._backgroundShellTracker._pendingBackgroundShells }
+  get _backgroundShellSweepTimer() { return this._backgroundShellTracker._backgroundShellSweepTimer }
+  set _backgroundShellSweepTimer(v) { this._backgroundShellTracker._backgroundShellSweepTimer = v }
+  get _backgroundShellSweepMs() { return this._backgroundShellTracker._backgroundShellSweepMs }
+  set _backgroundShellSweepMs(v) { this._backgroundShellTracker._backgroundShellSweepMs = v }
+  get _backgroundShellQuiesceMs() { return this._backgroundShellTracker._backgroundShellQuiesceMs }
+  set _backgroundShellQuiesceMs(v) { this._backgroundShellTracker._backgroundShellQuiesceMs = v }
+  get _backgroundShellQuiesceCheck() { return this._backgroundShellTracker._backgroundShellQuiesceCheck }
+  set _backgroundShellQuiesceCheck(v) { this._backgroundShellTracker._backgroundShellQuiesceCheck = v }
+  get _backgroundShellHardQuiesceMs() { return this._backgroundShellTracker._backgroundShellHardQuiesceMs }
+  set _backgroundShellHardQuiesceMs(v) { this._backgroundShellTracker._backgroundShellHardQuiesceMs = v }
+  get _backgroundShellHardQuiesceCheck() { return this._backgroundShellTracker._backgroundShellHardQuiesceCheck }
+  set _backgroundShellHardQuiesceCheck(v) { this._backgroundShellTracker._backgroundShellHardQuiesceCheck = v }
+
+  // Skills manager
+  get _skills() { return this._skillsManager._skills }
+  get _skillsByMode() { return this._skillsManager._skillsByMode }
+  get _skillsText() { return this._skillsManager._skillsText }
+  set _skillsText(v) { this._skillsManager._skillsText = v }
+  get _prependSkillsText() { return this._skillsManager._prependSkillsText }
+  get _activeManualSkills() { return this._skillsManager._activeManualSkills }
+  get _manualSkillNames() { return this._skillsManager._manualSkillNames }
+  get _skillsDir() { return this._skillsManager._skillsDir }
+  get _repoSkillsDir() { return this._skillsManager._repoSkillsDir }
+  get _trustStore() { return this._skillsManager._trustStore }
+  get _skillsParseCache() { return this._skillsManager._skillsParseCache }
+  get _maxSkillBytes() { return this._skillsManager._maxSkillBytes }
+  get _maxTotalSkillBytes() { return this._skillsManager._maxTotalSkillBytes }
+  get _providerSkillAllowlist() { return this._skillsManager._providerSkillAllowlist }
+  set _providerSkillAllowlist(v) { this._skillsManager._providerSkillAllowlist = v }
 
   /** Current thinking level. Override in subclasses that support it. */
   get thinkingLevel() { return undefined }
@@ -468,9 +1002,41 @@ export class BaseSession extends EventEmitter {
   }
 
   /**
-   * Change the model. Subclasses that need to restart (CliSession) should
-   * override and call super.setModel() for the guard + resolve, then act.
-   * Returns true if the model actually changed (subclass should act).
+   * #5375: arm the user-initiated-stop flag. Called by each provider's
+   * interrupt() so the subsequent process close/error is treated as a clean
+   * stop rather than a crash.
+   */
+  markIntentionalStop() {
+    this._intentionalStop = true
+  }
+
+  /**
+   * #5375: capture-and-clear the user-initiated-stop flag in one step. The
+   * provider's close/error handler calls this at the top to decide the
+   * stopped-vs-error branch, disarming the flag so the next natural exit is
+   * not misread. Returns whether the flag was armed.
+   */
+  _consumeIntentionalStop() {
+    const was = this._intentionalStop
+    this._intentionalStop = false
+    return was
+  }
+
+  /**
+   * #5375: plain disarm, for destroy()/finally safety-nets where we only need
+   * to clear the flag without reading it. Kept separate from
+   * _consumeIntentionalStop so SDK's catch-then-finally clear (the
+   * interrupt-races-result race, #4881) stays a two-step sequence.
+   */
+  _clearIntentionalStop() {
+    this._intentionalStop = false
+  }
+
+  /**
+   * Change the model. Centralizes the busy/no-op guard + resolve; subclasses
+   * that need a provider-specific reaction (CliSession respawn, SdkSession log)
+   * override the `_onModelChanged` hook instead of the whole setter (#5374).
+   * Returns true if the model actually changed.
    */
   setModel(model) {
     if (this._isBusy) {
@@ -481,12 +1047,23 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.model = newModel
+    this._onModelChanged(this.model)
     return true
   }
 
   /**
-   * Change the permission mode. Subclasses that need to restart (CliSession)
-   * should override and call super.setPermissionMode() for validation.
+   * #5374: protected hook fired by setModel() AFTER the busy/no-op guard +
+   * alias resolution (resolveModelId) and the field update, only when the model
+   * actually changed. Default no-op; subclasses override with their
+   * provider-specific action (and their own logging).
+   */
+  _onModelChanged(_model) {}
+
+  /**
+   * Change the permission mode. Centralizes validation + the busy/no-op guard;
+   * subclasses override the `_onPermissionModeChanged` hook for their
+   * provider-specific action (CliSession respawn, SdkSession drain, TUI sidecar
+   * write) instead of the whole setter (#5374).
    * Returns true if the mode actually changed.
    */
   setPermissionMode(mode) {
@@ -505,8 +1082,18 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.permissionMode = mode
+    this._onPermissionModeChanged(mode)
     return true
   }
+
+  /**
+   * #5374: protected hook fired by setPermissionMode() AFTER validation + the
+   * field is set, only when the mode actually changed. Default no-op;
+   * subclasses override with their provider-specific action (and their own
+   * logging). JsonlSubprocessSession deliberately overrides the whole setter
+   * to a no-op (it suppresses the field update too), so it does not use this.
+   */
+  _onPermissionModeChanged(_mode) {}
 
   /**
    * Toggle the per-session promptEvaluator flag (#3185). Returns `true`
@@ -531,6 +1118,58 @@ export class BaseSession extends EventEmitter {
       return false
     }
     this.promptEvaluator = value
+    return true
+  }
+
+  /**
+   * Toggle the per-session Chroxy context hint (#3805). Mirrors the
+   * `setPromptEvaluator` contract: strict-boolean validation, idempotent
+   * (returns `false` on a no-op set), and safe to flip mid-turn because
+   * the flag is only consulted at the start of the next prompt assembly
+   * via `_buildSystemPrompt()`.
+   *
+   * Default is OFF — when enabled, the Chroxy context paragraph is
+   * prepended to the system prompt so the model can adjust output for
+   * the mobile-screen client (narrower code blocks, no wide ASCII
+   * diagrams). Off by default because some users explicitly want the
+   * full desktop response style.
+   *
+   * @param {boolean} value
+   * @returns {boolean}
+   */
+  setChroxyContextHint(value) {
+    if (typeof value !== 'boolean') {
+      return false
+    }
+    if (value === this.chroxyContextHint) {
+      return false
+    }
+    this.chroxyContextHint = value
+    return true
+  }
+
+  /**
+   * Set the per-session preamble (#4660). Accepts a string (trimmed and
+   * capped to SESSION_PREAMBLE_MAX_LENGTH) or empty string (clears).
+   * Returns `true` when the stored value changes, `false` for either
+   * invalid input (non-string) or an idempotent no-op — same contract as
+   * `setChroxyContextHint`.
+   *
+   * Safe to call mid-turn: the preamble is only consulted at the start
+   * of the next prompt assembly via `_buildSystemPrompt()`.
+   *
+   * @param {string} value
+   * @returns {boolean}
+   */
+  setSessionPreamble(value) {
+    if (typeof value !== 'string') {
+      return false
+    }
+    const next = _coerceSessionPreambleOpt(value)
+    if (next === this.sessionPreamble) {
+      return false
+    }
+    this.sessionPreamble = next
     return true
   }
 
@@ -670,7 +1309,21 @@ export class BaseSession extends EventEmitter {
    * @returns {string}
    */
   _buildSystemPrompt() {
-    return typeof this._skillsText === 'string' ? this._skillsText : ''
+    const skillsText = typeof this._skillsText === 'string' ? this._skillsText : ''
+    // Order (#4660 + #3805): user preamble → chroxy hint → skills text.
+    // The user-authored preamble rides at the FRONT so it takes precedence
+    // over the canned chroxy hint and the skills bucket — those are
+    // chroxy-controlled context, the preamble is the user's voice.
+    //
+    // When BOTH the preamble is empty AND the chroxy hint is OFF, the
+    // return value is byte-identical to pre-#3805 (skillsText only) so
+    // existing users see no observable behaviour change. Each layer is
+    // joined by `\n\n` so the model sees clean paragraph breaks.
+    const parts = []
+    if (this.sessionPreamble) parts.push(this.sessionPreamble)
+    if (this.chroxyContextHint) parts.push(CHROXY_CONTEXT_HINT_TEXT)
+    if (skillsText) parts.push(skillsText)
+    return parts.length === 0 ? '' : parts.join('\n\n')
   }
 
   /**
@@ -731,9 +1384,102 @@ export class BaseSession extends EventEmitter {
     return `${SKILLS_PROMPT_HEADER}${parts.join('\n\n---\n\n')}`
   }
 
+  /**
+   * #4628: track that a tool_start event was emitted. Pair with
+   * `_trackToolResult(toolUseId)` once the matching tool_result fires.
+   * Idempotent on duplicate ids (overwrites tool/startedAt). Safe to
+   * call before/after the actual emit — the tracking is decoupled.
+   */
+  _trackToolStart(toolUseId, tool) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
+    this._inFlightToolStarts.set(toolUseId, {
+      tool: typeof tool === 'string' && tool.length > 0 ? tool : 'unknown',
+      startedAt: Date.now(),
+    })
+  }
+
+  /**
+   * #4628: mark a tool_start resolved (matching tool_result fired).
+   * Idempotent — calling for an unknown id is a no-op.
+   */
+  _trackToolResult(toolUseId) {
+    if (typeof toolUseId !== 'string' || toolUseId.length === 0) return
+    this._inFlightToolStarts.delete(toolUseId)
+  }
+
+  /**
+   * #4628: sweep any tool_starts that never got their matching
+   * tool_result and emit synthetic tool_result events for each.
+   * Companion to SessionMessageHistory.sweepUnresolvedToolStarts (#4619)
+   * — that one runs at restore-time on persisted history; this one runs
+   * at turn-end on live in-memory tracking so the orphan never gets
+   * persisted in the first place.
+   *
+   * The synthetic tool_result carries the same shape as a real one (the
+   * dashboard's `handleToolResult.applyToActiveTools` only matches on
+   * `toolUseId`). Extra fields (`synthetic`, `interrupted`, `reason`)
+   * are diagnostic hints — the wire schema strips them on parse but
+   * they stay grep-able on disk in the persisted history.
+   *
+   * @param {string} reason — short identifier for the sweep cause
+   * @returns {number} count of sweeps emitted
+   */
+  _sweepUnresolvedToolStarts(reason = 'stream_completed_without_result') {
+    if (this._inFlightToolStarts.size === 0) return 0
+    const count = this._inFlightToolStarts.size
+    for (const [toolUseId, entry] of this._inFlightToolStarts) {
+      this.emit('tool_result', {
+        toolUseId,
+        result: `Tool ${entry.tool} did not emit a result before the turn ended (reason: ${reason}). Chroxy synthesized this result to clear the stale activeTools entry.`,
+        truncated: false,
+        synthetic: true,
+        interrupted: true,
+        isError: true,
+        reason,
+      })
+    }
+    this._inFlightToolStarts.clear()
+    return count
+  }
+
+  /**
+   * #4628: emit `result` after sweeping any in-flight tool_starts. All
+   * provider sessions should route through this rather than calling
+   * `this.emit('result', ...)` directly, so orphan tool_starts get
+   * paired with a synthetic tool_result BEFORE the result fires (and
+   * BEFORE state is persisted, since session-message-history listens
+   * for both events).
+   *
+   * @param {object} payload — the result event payload ({cost, duration, usage, sessionId})
+   * @param {string} [sweepReason] — optional override for the sweep reason
+   */
+  _emitResult(payload, sweepReason = 'stream_completed_without_result') {
+    this._sweepUnresolvedToolStarts(sweepReason)
+    this.emit('result', payload)
+  }
+
   _clearMessageState() {
     this._isBusy = false
     this._currentMessageId = null
+
+    // #4307: clear the ephemeral tool_use→command lookup. NOT the
+    // pending-shells map — those entries survive turn-end intentionally
+    // (the whole point of #4307: a session waiting on background work
+    // is distinct from an idle session). The commands map is only used
+    // to recover the command text for the next tool_result of the SAME
+    // turn — once the turn ends, any unmatched entries are stranded
+    // and a fresh tool_use would re-populate.
+    this._pendingBackgroundCommands.clear()
+    // #4628: sweep any orphan tool_starts that didn't get their
+    // matching tool_result this turn. Most providers route through
+    // _emitResult which sweeps before broadcasting result; this is the
+    // belt-and-braces for paths that call _clearMessageState directly
+    // (e.g. SDK stream-stall recovery clears state BEFORE emitting the
+    // synthetic result). Sweeping here ensures the orphan is paired
+    // with a synthetic tool_result rather than silently dropped — so
+    // the dashboard's activeTools clears whether result fires next or
+    // never fires at all.
+    this._sweepUnresolvedToolStarts('message_state_cleared')
 
     // Emit completions for any tracked agents so the app clears badges
     if (this._activeAgents.size > 0) {
@@ -742,6 +1488,15 @@ export class BaseSession extends EventEmitter {
       }
       this._activeAgents.clear()
     }
+
+    // #5160: turn-end reconciliation for the activity registry. Ends any
+    // tool/agent/blocked node still marked running/blocked (orphans the
+    // model abandoned at turn end), mirroring _sweepUnresolvedToolStarts.
+    // Runs AFTER the agent_completed fan-out above so those completions
+    // terminate their nodes first; reset() is the belt-and-braces sweep for
+    // anything the canonical signals didn't clear. Shell nodes survive
+    // turn-end (#4307) and clear via background_work_changed.
+    this._activity.reset()
 
     if (this._resultTimeout) {
       clearTimeout(this._resultTimeout)
@@ -754,6 +1509,11 @@ export class BaseSession extends EventEmitter {
     if (this._hardTimeout) {
       clearTimeout(this._hardTimeout)
       this._hardTimeout = null
+    }
+    // #4467: clear the stream-stall recovery timer too.
+    if (this._streamStallTimeout) {
+      clearTimeout(this._streamStallTimeout)
+      this._streamStallTimeout = null
     }
   }
 }

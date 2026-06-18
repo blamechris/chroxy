@@ -29,6 +29,14 @@ export interface PermissionPromptProps {
   description: string
   remainingMs: number
   onRespond: (requestId: string, decision: PermissionDecision) => void
+  /**
+   * #5667 — human label for the session that asked (e.g. "ltl · CLI"),
+   * derived by the renderer from the message's `originSessionId`. Rendered as
+   * a badge so an operator running multiple agents can tell which one is
+   * requesting before approving. Omitted when only one session exists (no
+   * ambiguity to disambiguate).
+   */
+  sessionLabel?: string
 }
 
 function formatCountdown(ms: number): string {
@@ -38,7 +46,7 @@ function formatCountdown(ms: number): string {
   return `${mins}:${secs < 10 ? '0' : ''}${secs}`
 }
 
-export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond }: PermissionPromptProps) {
+export function PermissionPrompt({ requestId, tool, description, remainingMs, onRespond, sessionLabel }: PermissionPromptProps) {
   const [remaining, setRemaining] = useState(remainingMs)
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null)
   // #3619: anchor on monotonic `performance.now()` so an NTP sync /
@@ -62,6 +70,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   // no resolution is recorded yet. Selecting by requestId keeps this a
   // primitive subscription — useShallow / stable refs not needed.
   const answered = useConnectionStore((s) => s.resolvedPermissions?.[requestId] ?? null)
+
+  // #5699 — only allow answering while connected. The store's
+  // sendPermissionResponse refuses to send (or optimistically resolve) a
+  // permission answer when the socket is down, because the server expires the
+  // request on disconnect and a queued answer is silently lost. Disable the
+  // buttons so the operator gets visible feedback instead of a dead click.
+  const connected = useConnectionStore((s) => s.connectionPhase === 'connected')
 
   // #3072: gate the "Allow for Session" affordance on whether the active
   // session's provider supports session-scoped permission rules. Without
@@ -105,7 +120,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     // #2852: submittingRef short-circuits duplicate invocations from
     // double-click or keyboard auto-repeat before React re-renders with the
     // store's answered state.
-    if (submittingRef.current || answered || remaining <= 0) return
+    // #5699: also bail when disconnected — this is the single choke point for
+    // BOTH the buttons and the keyboard shortcuts (Cmd+Y / Cmd+Shift+Y / Escape).
+    // sendPermissionResponse refuses to send/resolve while the socket is down, so
+    // if we latched `submitting` here the prompt would wedge permanently
+    // (`submitting` only resets when `answered` flips, which never happens). Bail
+    // before the latch so the prompt stays actionable once reconnected.
+    if (submittingRef.current || answered || remaining <= 0 || !connected) return
     submittingRef.current = true
     setSubmitting(true)
     // 'allowSession' is only meaningful when both the tool is rule-eligible
@@ -119,7 +140,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       decision === 'allowSession' && !allowSessionOk ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
     onRespond(requestId, effective)
-  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules])
+  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected])
 
   // Keyboard shortcuts:
   //   Cmd/Ctrl+Y         -> allow
@@ -167,8 +188,26 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   if (dismissed) return null
 
   return (
-    <div className={`permission-prompt${answered ? ' answered' : ''}`} data-testid="permission-prompt">
-      <div className="perm-desc">
+    // #5731 (a11y): a permission request is a time-critical decision that
+    // auto-DENIES on timeout, but the bare div announced nothing to a
+    // screen-reader user reading the dashboard. Mark it as an assertive
+    // alertdialog with an accessible name + description so it's spoken the moment
+    // it appears (the OS-notification fallback only fires when the window is
+    // unfocused, leaving the in-focus SR case uncovered).
+    <div
+      className={`permission-prompt${answered ? ' answered' : ''}`}
+      data-testid="permission-prompt"
+      role="alertdialog"
+      aria-live="assertive"
+      aria-label={`Permission request${sessionLabel ? ` from ${sessionLabel}` : ''}`}
+      aria-describedby={`perm-desc-${requestId}`}
+    >
+      {sessionLabel && (
+        <div className="perm-session" data-testid="perm-session" title={`Requested by ${sessionLabel}`}>
+          {sessionLabel}
+        </div>
+      )}
+      <div className="perm-desc" id={`perm-desc-${requestId}`}>
         <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
       </div>
 
@@ -176,6 +215,13 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
         <div
           className={`perm-countdown${isUrgent ? ' urgent' : ''}${isExpired ? ' expired' : ''}`}
           data-testid="perm-countdown"
+          // #5731 (a11y): the countdown ticks every second INSIDE the assertive
+          // alertdialog container. Without muting it, the live region would
+          // re-announce the changing time every second (worse than silence — the
+          // #4873 reconnect-storm spam class). aria-live="off" excludes the tick
+          // from announcements while the container still announces the request
+          // ONCE on appearance. The visual urgent/expired styling is unaffected.
+          aria-live="off"
         >
           {isExpired ? 'Timed out' : formatCountdown(remaining)}
         </div>
@@ -190,7 +236,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
               type="button"
               aria-label={`Allow ${tool}`}
               title={`Allow (${allowHint})`}
-              disabled={submitting}
+              disabled={submitting || !connected}
             >
               Allow
             </button>
@@ -202,7 +248,7 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
                 aria-label={`Allow ${tool} for this session`}
                 data-testid="btn-allow-session"
                 title={`Allow for Session (${allowSessionHint})`}
-                disabled={submitting}
+                disabled={submitting || !connected}
               >
                 Allow for Session
               </button>
@@ -212,11 +258,18 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
               onClick={() => respond('deny')}
               type="button"
               aria-label={`Deny ${tool}`}
-              disabled={submitting}
+              disabled={submitting || !connected}
             >
               Deny
             </button>
           </div>
+          {!connected && (
+            // #5699 — explain why the buttons are disabled so a disconnected tap
+            // isn't a silent no-op. The prompt stays actionable once reconnected.
+            <div className="perm-disconnected-hint" data-testid="perm-disconnected-hint" role="status">
+              Disconnected — reconnect to answer.
+            </div>
+          )}
           <div className="perm-shortcut-hints" data-testid="perm-shortcut-hints" aria-hidden="true">
             <span className="perm-shortcut">
               <kbd className="perm-kbd">{allowHint}</kbd>

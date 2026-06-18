@@ -19,9 +19,12 @@ import {
   handlePlanStarted,
   handlePlanReady,
   handleInactivityWarning,
+  handleMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleDevPreview,
   handleDevPreviewStopped,
   handleAuthOk,
+  parseConnectedClients,
   handleAuthFail,
   handleKeyExchangeOk,
   handleServerMode,
@@ -30,10 +33,12 @@ import {
   handleCheckpointRestored,
   handleError,
   handleSessionError,
+  handleSessionStopped,
   handleLogEntry,
   handleClientJoined,
   handleClientLeft,
   handlePrimaryChanged,
+  handleSessionRole,
   handleClientFocusChanged,
   handleConversationId,
   handleConversationsList,
@@ -45,6 +50,10 @@ import {
   handlePermissionTimeout,
   handlePermissionRulesUpdated,
   handleSessionList,
+  buildSessionListPatches,
+  cumulativeUsageEquals,
+  chunkSubscribeSessionIds,
+  SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionContext,
   handleSessionTimeout,
   handleSessionRestoreFailed,
@@ -57,6 +66,8 @@ import {
   handleSlashCommands,
   handleAgentList,
   handleProviderList,
+  handleAuthBootstrap,
+  handleTunnelUrlChanged,
   handleFileList,
   handleDiffResult,
   handleGitStatusResult,
@@ -65,16 +76,20 @@ import {
   handleGitCommitResult,
   handleAgentSpawned,
   handleAgentCompleted,
+  handleAgentEvent,
+  handleBackgroundWorkChanged,
   handleEnvironmentList,
   handleEnvironmentError,
   handleAvailableModels,
   handleMcpServers,
   handleCostUpdate,
+  handleSessionUsage,
   handleResultUsage,
   handleServerError,
   handleServerShutdown,
   handleServerStatusLegacy,
   handleWebTaskUpsert,
+  applyWebTaskUpsert,
   handleWebTaskError,
   handleWebTaskList,
   handleWebFeatureStatus,
@@ -84,18 +99,33 @@ import {
   handleMessage,
   handleToolStart,
   handleToolResult,
+  handleToolInputDelta,
+  MAX_TOOL_INPUT_PARTIAL_LEN,
   handleStreamStart,
+  sharedStreamDelta,
   handleStreamEnd,
+  // #5454 — remaining both-sides duplicates
+  handleRawOutput,
+  handleTokenRotated,
+  handlePairFail,
+  PAIR_FAIL_MESSAGES,
+  handleSessionCostThresholdCrossed,
+  handleNotificationPrefs,
+  resolvePermissionStreamSplit,
 } from './index'
+import type { StreamDeltaContext, PendingDelta } from './index'
 import { nextMessageId } from '../utils'
 import type {
+  ActiveTool,
   AgentInfo,
   ChatMessage,
   Checkpoint,
   ConnectedClient,
   ConversationSummary,
+  CumulativeUsage,
   DevPreview,
   ModelInfo,
+  PendingBackgroundShell,
   SessionInfo,
 } from '../types'
 
@@ -190,6 +220,50 @@ describe('handleAvailablePermissionModes', () => {
 
   it('returns empty array when no modes are valid', () => {
     expect(handleAvailablePermissionModes({ modes: [null, 42, 'str'] })).toEqual([])
+  })
+
+  // #4019: description passes through when present + string-typed; non-strings
+  // get dropped so the typed shape downstream consumers see stays clean.
+  it('preserves the optional description field when present', () => {
+    const msg = {
+      modes: [
+        { id: 'default', label: 'Default', description: 'Prompt for each tool call' },
+        { id: 'auto', label: 'Auto Approve', description: 'Skip all prompts' },
+      ],
+    }
+    expect(handleAvailablePermissionModes(msg)).toEqual([
+      { id: 'default', label: 'Default', description: 'Prompt for each tool call' },
+      { id: 'auto', label: 'Auto Approve', description: 'Skip all prompts' },
+    ])
+  })
+
+  it('omits description when missing — preserves back-compat with old servers', () => {
+    // Pre-#4018 servers didn't ship the field at all. Result must not
+    // synthesise an empty string.
+    const result = handleAvailablePermissionModes({
+      modes: [{ id: 'default', label: 'Default' }],
+    })
+    expect(result).toEqual([{ id: 'default', label: 'Default' }])
+    expect(result?.[0]).not.toHaveProperty('description')
+  })
+
+  it('drops non-string descriptions at the type boundary', () => {
+    const msg = {
+      modes: [
+        { id: 'a', label: 'A', description: 42 },          // number
+        { id: 'b', label: 'B', description: { x: 1 } },    // object
+        { id: 'c', label: 'C', description: null },        // null
+      ],
+    }
+    const result = handleAvailablePermissionModes(msg)
+    // All three should pass the validity gate (have id + label) but their
+    // description gets stripped because it's not a string.
+    expect(result).toEqual([
+      { id: 'a', label: 'A' },
+      { id: 'b', label: 'B' },
+      { id: 'c', label: 'C' },
+    ])
+    expect(result?.[0]).not.toHaveProperty('description')
   })
 })
 
@@ -298,8 +372,67 @@ describe('handleConfirmPermissionMode', () => {
 // handleClaudeReady
 // ---------------------------------------------------------------------------
 describe('handleClaudeReady', () => {
-  it('returns claudeReady: true', () => {
-    expect(handleClaudeReady()).toEqual({ claudeReady: true })
+  it('returns claudeReady: true and clears stoppedAt/stoppedCode (#4879)', () => {
+    // #4879 — clearing the stopped marker on claude_ready is what makes
+    // the quiet "Session stopped." inline strip auto-dismiss when the
+    // server restarts the child after the operator's next input. Both
+    // new fields collapse to null end-to-end for sessions that were
+    // never stopped, so the patch is safe to broadcast unconditionally.
+    expect(handleClaudeReady()).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+    })
+  })
+
+  // #5431 — enriched ready: a present `backgroundTasks` array (even empty)
+  // is an authoritative transcript snapshot for BOTH new fields; absence
+  // leaves stored state untouched (pre-#5431 servers / no transcript).
+  it('projects transcript backgroundTasks + scheduledWakeup when present (#5431)', () => {
+    const task = { toolUseId: 'toolu_01', kind: 'bash', description: 'Wait for CI checks', startedAt: 1781068000000 }
+    expect(handleClaudeReady({
+      type: 'claude_ready',
+      backgroundTasks: [task],
+      scheduledWakeup: { at: 1781068600000, reason: 'watching CI' },
+    })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+      transcriptBackgroundTasks: [task],
+      scheduledWakeup: { at: 1781068600000, reason: 'watching CI' },
+    })
+  })
+
+  it('clears both fields on an explicit empty snapshot (#5431)', () => {
+    expect(handleClaudeReady({ type: 'claude_ready', backgroundTasks: [] })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+      transcriptBackgroundTasks: [],
+      scheduledWakeup: null,
+    })
+  })
+
+  it('leaves the fields absent on a plain ready (#5431 wire-compat)', () => {
+    expect(handleClaudeReady({ type: 'claude_ready' })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+    })
+  })
+
+  it('drops malformed task entries instead of throwing (#5431)', () => {
+    expect(handleClaudeReady({
+      type: 'claude_ready',
+      backgroundTasks: [null, 'junk', { toolUseId: 42 }, { toolUseId: 'toolu_02', kind: 'monitor', description: 'tail log', startedAt: 5 }],
+      scheduledWakeup: { at: 'soon' },
+    })).toEqual({
+      claudeReady: true,
+      stoppedAt: null,
+      stoppedCode: null,
+      transcriptBackgroundTasks: [{ toolUseId: 'toolu_02', kind: 'monitor', description: 'tail log', startedAt: 5 }],
+      scheduledWakeup: null,
+    })
   })
 })
 
@@ -307,8 +440,16 @@ describe('handleClaudeReady', () => {
 // handleAgentIdle / handleAgentBusy
 // ---------------------------------------------------------------------------
 describe('handleAgentIdle', () => {
-  it('returns isIdle: true and clears streamingMessageId', () => {
-    expect(handleAgentIdle()).toEqual({ isIdle: true, streamingMessageId: null })
+  it('returns isIdle: true and clears streamingMessageId + activeTools', () => {
+    // #4308 — agent_idle is a guaranteed turn boundary, so it's also the
+    // safety-net clear for activeTools. Any still-tracked in-flight tools
+    // (missed result, server crash mid-turn) are dropped so the activity
+    // indicator can't get stuck on a phantom "Running X".
+    expect(handleAgentIdle()).toEqual({
+      isIdle: true,
+      streamingMessageId: null,
+      activeTools: [],
+    })
   })
 })
 
@@ -767,6 +908,153 @@ describe('handleError', () => {
     expect(handleError({}).requestId).toBeNull()
     expect(handleError({ requestId: 42 }).requestId).toBeNull()
   })
+
+  // #4178: surface `fatal` on the typed return so dashboard + app share a
+  // single parsed shape rather than each reaching into `msg.fatal` with
+  // its own ad-hoc type guard. Default unset (undefined) is treated as
+  // fatal by consumers — pin that contract here.
+  it('extracts fatal when boolean false', () => {
+    expect(handleError({ code: 'MAX_TOOL_ROUNDS_REACHED', fatal: false }).fatal).toBe(false)
+  })
+
+  it('extracts fatal when boolean true', () => {
+    expect(handleError({ code: 'STREAM_ERROR', fatal: true }).fatal).toBe(true)
+  })
+
+  it('leaves fatal undefined when missing', () => {
+    expect(handleError({ code: 'WHATEVER' }).fatal).toBeUndefined()
+  })
+
+  it('leaves fatal undefined when non-boolean (string "false" must NOT degrade to false)', () => {
+    // A typo (msg.fatal: 'false') was the regression risk #4178 calls
+    // out. The parser must reject non-boolean and leave fatal=undefined,
+    // which downstream treats as fatal — surfacing the bug as a red
+    // toast instead of silently downgrading to a warning.
+    expect(handleError({ fatal: 'false' as unknown as boolean }).fatal).toBeUndefined()
+    expect(handleError({ fatal: 0 as unknown as boolean }).fatal).toBeUndefined()
+    expect(handleError({ fatal: null as unknown as boolean }).fatal).toBeUndefined()
+  })
+
+  // #5039 — partial-cost passthrough. PR #5037 added optional usage + cost
+  // fields to the server's error envelope when the failed turn folded any
+  // parent + Task subagent rounds before the error fired. The dashboard
+  // toast and mobile alert use the parsed snapshot to render a "this turn
+  // cost $X" sub-line; the parser is the single source of truth for the
+  // strict-finite gate that decides whether the snapshot is usable.
+  describe('partialCost (#5039 — PR #5037 wire passthrough)', () => {
+    it('parses cost + usage into the partialCost slot when both present', () => {
+      const result = handleError({
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.0875,
+        usage: {
+          input_tokens: 1200,
+          output_tokens: 3400,
+          cache_read_input_tokens: 500,
+          cache_creation_input_tokens: 100,
+        },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.0875,
+        inputTokens: 1200,
+        outputTokens: 3400,
+        cacheReadTokens: 500,
+        cacheCreationTokens: 100,
+      })
+    })
+
+    it('keeps partialCost when usage is missing (subscription-billed provider)', () => {
+      // Subscription-billed providers can produce a cost without a usage
+      // breakdown — keep the cost surfaced so the user still sees the
+      // failed-turn spend even when the token counters are unavailable.
+      const result = handleError({
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.05,
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.05,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('falls back to null when cost is missing (pre-#5037 wire shape)', () => {
+      // Pre-PR #5037 servers don't carry partials; the parser must
+      // surface null so consumers can branch on presence without
+      // re-implementing the gate.
+      expect(handleError({ code: 'STREAM_ERROR', message: 'x' }).partialCost).toBeNull()
+    })
+
+    it('rejects NaN / Infinity / negative / non-number cost (matches _trackUsage gate)', () => {
+      // Server-side _trackUsage (#5038) only accumulates Number.isFinite
+      // costs — mirror that gate here so a provider bug can't poison
+      // the partial-cost display either.
+      expect(handleError({ cost: NaN }).partialCost).toBeNull()
+      expect(handleError({ cost: Infinity }).partialCost).toBeNull()
+      expect(handleError({ cost: -0.01 }).partialCost).toBeNull()
+      expect(handleError({ cost: '0.05' as unknown as number }).partialCost).toBeNull()
+      expect(handleError({ cost: null as unknown as number }).partialCost).toBeNull()
+    })
+
+    it('zeroes individual non-finite token fields without losing other counters', () => {
+      // Best-effort token parse: a single bad counter (NaN, negative,
+      // non-number) drops just that field — the rest of the breakdown
+      // still surfaces. Without this, a provider that emits one bogus
+      // counter would null the whole partial snapshot.
+      const result = handleError({
+        cost: 0.02,
+        usage: {
+          input_tokens: 1000,
+          output_tokens: NaN,
+          cache_read_input_tokens: -5,
+          cache_creation_input_tokens: 'x',
+        },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.02,
+        inputTokens: 1000,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('treats non-object usage as empty (zero tokens, cost still surfaced)', () => {
+      // A wire-side typo (`usage: 'oops'`) must not poison the cost
+      // surface — fall back to zero counters and still render the cost.
+      const result = handleError({
+        cost: 0.03,
+        usage: 'oops' as unknown as Record<string, number>,
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0.03,
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+      })
+    })
+
+    it('accepts cost: 0 (free / cache-only turn) and surfaces the snapshot', () => {
+      // A 100%-cached turn can still fold a non-zero usage breakdown
+      // without billing — the user benefits from seeing those tokens
+      // even if the cost is $0.
+      const result = handleError({
+        cost: 0,
+        usage: { input_tokens: 50, output_tokens: 0, cache_read_input_tokens: 1000 },
+      })
+      expect(result.partialCost).toEqual({
+        costUsd: 0,
+        inputTokens: 50,
+        outputTokens: 0,
+        cacheReadTokens: 1000,
+        cacheCreationTokens: 0,
+      })
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -861,6 +1149,73 @@ describe('handleSessionError', () => {
     )
     expect(result.message).toBe('Not authorized')
     expect(result.boundSessionName).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionStopped (#4879)
+// ---------------------------------------------------------------------------
+describe('handleSessionStopped', () => {
+  const fixedNow = () => 1_700_000_000_000
+
+  it('builds a patch targeting the explicit sessionId with the stopped marker + code', () => {
+    const result = handleSessionStopped(
+      { sessionId: 'sess-1', code: 143 },
+      'active-1',
+      fixedNow,
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: { stoppedAt: 1_700_000_000_000, stoppedCode: 143 },
+    })
+  })
+
+  it('falls back to active session when sessionId is missing', () => {
+    const result = handleSessionStopped({ code: 0 }, 'active-1', fixedNow)
+    expect(result.sessionId).toBe('active-1')
+    expect(result.patch).toEqual({ stoppedAt: 1_700_000_000_000, stoppedCode: 0 })
+  })
+
+  it('preserves code 0 explicitly (clean SIGINT exit is a meaningful signal)', () => {
+    const result = handleSessionStopped({ sessionId: 's', code: 0 }, null, fixedNow)
+    expect(result.patch.stoppedCode).toBe(0)
+  })
+
+  it('returns stoppedCode: null when code is missing on the wire', () => {
+    const result = handleSessionStopped({ sessionId: 's' }, null, fixedNow)
+    expect(result.patch.stoppedCode).toBeNull()
+    expect(result.patch.stoppedAt).toBe(1_700_000_000_000)
+  })
+
+  it('returns stoppedCode: null when code is non-integer (defensive)', () => {
+    // ServerSessionStoppedSchema enforces integer at the protocol layer
+    // (`z.number().int()`), but the handler is also called from
+    // untrusted/test paths — collapse anything non-integer to null
+    // rather than poisoning stoppedCode with a string, NaN, Infinity,
+    // or a fractional value (which would render "exit 1.5" in the UI).
+    expect(handleSessionStopped({ code: 'not a number' }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: null }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: NaN }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: Infinity }, null, fixedNow).patch.stoppedCode).toBeNull()
+    // Fractional values get the same treatment — the schema is `int()`,
+    // not `finite()`, so a buggy producer sending 1.5 must NOT render.
+    expect(handleSessionStopped({ code: 1.5 }, null, fixedNow).patch.stoppedCode).toBeNull()
+    expect(handleSessionStopped({ code: -0.1 }, null, fixedNow).patch.stoppedCode).toBeNull()
+  })
+
+  it('returns sessionId: null when no sessionId on msg AND no active session (broadcast guard semantics handled by caller)', () => {
+    const result = handleSessionStopped({ code: 0 }, null, fixedNow)
+    expect(result.sessionId).toBeNull()
+  })
+
+  it('defaults `now` to Date.now when not injected', () => {
+    const before = Date.now()
+    const result = handleSessionStopped({ sessionId: 's' }, null)
+    const after = Date.now()
+    const stoppedAt = result.patch.stoppedAt as number
+    expect(typeof stoppedAt).toBe('number')
+    expect(stoppedAt).toBeGreaterThanOrEqual(before)
+    expect(stoppedAt).toBeLessThanOrEqual(after)
   })
 })
 
@@ -1097,6 +1452,20 @@ describe('handleAuthOk', () => {
       latestVersion: '0.6.13',
       serverCommit: 'abc123',
       protocolVersion: 2,
+      resultTimeoutMs: 45 * 60 * 1000,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+      encryption: 'required',
+      sessionToken: 'tok-abc',
+      clientId: 'client-1',
+      webFeatures: { available: true, remote: false, teleport: true },
+      capabilities: { notificationPrefs: true, somethingElse: false },
+      serverPublicKey: 'srv-pub-key',
+      serverKeySig: 'srv-key-sig',
+      // #5555 — folded static permission-mode enum.
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'auto', label: 'Auto' },
+      ],
     })
     expect(result).toEqual({
       serverMode: 'cli',
@@ -1106,14 +1475,40 @@ describe('handleAuthOk', () => {
       latestVersion: '0.6.13',
       serverCommit: 'abc123',
       protocolVersion: 2,
+      resultTimeoutMs: 45 * 60 * 1000,
+      streamStallTimeoutMs: 5 * 60 * 1000,
+      encryption: 'required',
+      sessionToken: 'tok-abc',
+      myClientId: 'client-1',
+      webFeatures: { available: true, remote: false, teleport: true },
+      serverCapabilities: { notificationPrefs: true, somethingElse: false },
+      serverPublicKey: 'srv-pub-key',
+      serverKeySig: 'srv-key-sig',
+      availablePermissionModes: [
+        { id: 'approve', label: 'Approve' },
+        { id: 'auto', label: 'Auto' },
+      ],
     })
   })
 
-  it('accepts terminal as serverMode', () => {
-    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBe('terminal')
+  // #5555 (eager key exchange) — serverPublicKey carries the server's
+  // ephemeral X25519 key on the eager path; null means "fall back to the
+  // discrete key_exchange handshake".
+  it('extracts serverPublicKey when the server honoured the eager path', () => {
+    expect(handleAuthOk({ serverPublicKey: 'abc123' }).serverPublicKey).toBe('abc123')
+  })
+
+  it('returns null serverPublicKey when absent, empty, or non-string (discrete fallback)', () => {
+    expect(handleAuthOk({}).serverPublicKey).toBeNull()
+    expect(handleAuthOk({ serverPublicKey: '' }).serverPublicKey).toBeNull()
+    expect(handleAuthOk({ serverPublicKey: 42 }).serverPublicKey).toBeNull()
+    expect(handleAuthOk({ serverPublicKey: null }).serverPublicKey).toBeNull()
   })
 
   it('rejects unknown serverMode values', () => {
+    // #4810: 'terminal' was previously accepted but the wire protocol only
+    // emits 'cli'; the unreachable branch is now treated as unknown.
+    expect(handleAuthOk({ serverMode: 'terminal' }).serverMode).toBeNull()
     expect(handleAuthOk({ serverMode: 'bogus' }).serverMode).toBeNull()
     expect(handleAuthOk({ serverMode: 42 }).serverMode).toBeNull()
     expect(handleAuthOk({}).serverMode).toBeNull()
@@ -1155,7 +1550,163 @@ describe('handleAuthOk', () => {
     expect(handleAuthOk({ protocolVersion: 5 }).protocolVersion).toBe(5)
   })
 
-  it('returns all-null payload for an empty message', () => {
+  // #3760 — resultTimeoutMs guard (positive finite number, else null).
+  describe('resultTimeoutMs', () => {
+    it('passes through positive finite numbers', () => {
+      expect(handleAuthOk({ resultTimeoutMs: 1 }).resultTimeoutMs).toBe(1)
+      expect(handleAuthOk({ resultTimeoutMs: 45 * 60 * 1000 }).resultTimeoutMs).toBe(45 * 60 * 1000)
+    })
+
+    it('rejects 0, negative, non-finite, or non-number values', () => {
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '20m', null, undefined, {}]) {
+        expect(handleAuthOk({ resultTimeoutMs: bad }).resultTimeoutMs).toBeNull()
+      }
+    })
+
+    it('returns null when the field is omitted', () => {
+      expect(handleAuthOk({}).resultTimeoutMs).toBeNull()
+    })
+  })
+
+  // #4497 / #4477 — streamStallTimeoutMs guard. 0 is the protocol's "disabled"
+  // sentinel so it must be treated the same as absent (chip falls back to the
+  // generic phrase). This was the latent #4766 bug on mobile.
+  describe('streamStallTimeoutMs', () => {
+    it('passes through positive finite numbers', () => {
+      expect(handleAuthOk({ streamStallTimeoutMs: 5 * 60 * 1000 }).streamStallTimeoutMs).toBe(
+        5 * 60 * 1000,
+      )
+    })
+
+    it('rejects 0, negative, non-finite, or non-number values', () => {
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '5m', null, undefined, []]) {
+        expect(handleAuthOk({ streamStallTimeoutMs: bad }).streamStallTimeoutMs).toBeNull()
+      }
+    })
+
+    it('returns null when the field is omitted', () => {
+      expect(handleAuthOk({}).streamStallTimeoutMs).toBeNull()
+    })
+  })
+
+  describe('encryption', () => {
+    it('passes through string values verbatim', () => {
+      expect(handleAuthOk({ encryption: 'required' }).encryption).toBe('required')
+      expect(handleAuthOk({ encryption: 'optional' }).encryption).toBe('optional')
+    })
+
+    it('returns null for missing or non-string values', () => {
+      expect(handleAuthOk({}).encryption).toBeNull()
+      expect(handleAuthOk({ encryption: true }).encryption).toBeNull()
+      expect(handleAuthOk({ encryption: 42 }).encryption).toBeNull()
+    })
+  })
+
+  describe('sessionToken', () => {
+    it('extracts string sessionToken (pairing flow)', () => {
+      expect(handleAuthOk({ sessionToken: 'tok-xyz' }).sessionToken).toBe('tok-xyz')
+    })
+
+    it('returns null when missing or non-string', () => {
+      expect(handleAuthOk({}).sessionToken).toBeNull()
+      expect(handleAuthOk({ sessionToken: 42 }).sessionToken).toBeNull()
+    })
+  })
+
+  describe('myClientId', () => {
+    it('extracts clientId as myClientId', () => {
+      expect(handleAuthOk({ clientId: 'client-1' }).myClientId).toBe('client-1')
+    })
+
+    it('returns null when missing or non-string', () => {
+      expect(handleAuthOk({}).myClientId).toBeNull()
+      expect(handleAuthOk({ clientId: 42 }).myClientId).toBeNull()
+    })
+  })
+
+  describe('webFeatures', () => {
+    it('coerces wire flags to hard booleans', () => {
+      const wf = handleAuthOk({
+        webFeatures: { available: 1, remote: 'yes', teleport: 0 },
+      }).webFeatures
+      expect(wf).toEqual({ available: true, remote: true, teleport: false })
+    })
+
+    it('defaults to all-false when the field is missing', () => {
+      expect(handleAuthOk({}).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+    })
+
+    it('defaults to all-false when the field is non-object or an array', () => {
+      expect(handleAuthOk({ webFeatures: null }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+      expect(handleAuthOk({ webFeatures: [] }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+      expect(handleAuthOk({ webFeatures: 'true' }).webFeatures).toEqual({
+        available: false,
+        remote: false,
+        teleport: false,
+      })
+    })
+
+    it('does not share the default object across calls (mutation safety)', () => {
+      const a = handleAuthOk({}).webFeatures
+      a.available = true
+      const b = handleAuthOk({}).webFeatures
+      expect(b.available).toBe(false)
+    })
+  })
+
+  describe('serverCapabilities', () => {
+    it('only stores strict-true values (fail-closed)', () => {
+      const caps = handleAuthOk({
+        capabilities: {
+          notificationPrefs: true,
+          taggedOnly: 'true',
+          falsy: false,
+          numeric: 1,
+        },
+      }).serverCapabilities
+      expect(caps).toEqual({
+        notificationPrefs: true,
+        taggedOnly: false,
+        falsy: false,
+        numeric: false,
+      })
+    })
+
+    it('returns empty object when missing or malformed', () => {
+      expect(handleAuthOk({}).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: null }).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: [] }).serverCapabilities).toEqual({})
+      expect(handleAuthOk({ capabilities: 'cap' }).serverCapabilities).toEqual({})
+    })
+
+    // Defence-in-depth (#4781 Copilot review): server-supplied keys are
+    // untrusted; refuse `__proto__`/`constructor`/`prototype` so a malformed
+    // payload can't mutate Object.prototype. JSON.parse'd payloads with
+    // these keys become own properties enumerable by Object.entries.
+    it('refuses prototype-pollution keys (__proto__, constructor, prototype)', () => {
+      const polluted = JSON.parse(
+        '{"__proto__": true, "constructor": true, "prototype": true, "ok": true}',
+      )
+      const caps = handleAuthOk({ capabilities: polluted }).serverCapabilities
+      expect(caps).toEqual({ ok: true })
+      // Object.prototype must be unchanged after parsing the payload.
+      expect(({} as Record<string, unknown>).polluted).toBeUndefined()
+    })
+  })
+
+  it('returns the hardened defaults payload for an empty message', () => {
     expect(handleAuthOk({})).toEqual({
       serverMode: null,
       sessionCwd: null,
@@ -1164,7 +1715,110 @@ describe('handleAuthOk', () => {
       latestVersion: null,
       serverCommit: null,
       protocolVersion: null,
+      resultTimeoutMs: null,
+      streamStallTimeoutMs: null,
+      encryption: null,
+      sessionToken: null,
+      myClientId: null,
+      webFeatures: { available: false, remote: false, teleport: false },
+      serverCapabilities: {},
+      serverPublicKey: null,
+      serverKeySig: null,
+      availablePermissionModes: null,
     })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// parseConnectedClients (#4766)
+// ---------------------------------------------------------------------------
+describe('parseConnectedClients', () => {
+  it('parses a well-formed roster and marks self via myClientId', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'client-1', deviceName: 'Dashboard', deviceType: 'desktop', platform: 'macos' },
+        { clientId: 'client-2', deviceName: 'Phone', deviceType: 'phone', platform: 'ios' },
+      ],
+      'client-1',
+    )
+    expect(result).toEqual([
+      {
+        clientId: 'client-1',
+        deviceName: 'Dashboard',
+        deviceType: 'desktop',
+        platform: 'macos',
+        isSelf: true,
+      },
+      {
+        clientId: 'client-2',
+        deviceName: 'Phone',
+        deviceType: 'phone',
+        platform: 'ios',
+        isSelf: false,
+      },
+    ])
+  })
+
+  it('marks no entries as self when myClientId is null', () => {
+    const result = parseConnectedClients(
+      [{ clientId: 'a', deviceType: 'phone', platform: 'ios' }],
+      null,
+    )
+    expect(result[0].isSelf).toBe(false)
+  })
+
+  it('returns [] when rawClients is not an array', () => {
+    expect(parseConnectedClients(undefined, 'c1')).toEqual([])
+    expect(parseConnectedClients(null, 'c1')).toEqual([])
+    expect(parseConnectedClients('clients', 'c1')).toEqual([])
+    expect(parseConnectedClients({ clientId: 'oops' }, 'c1')).toEqual([])
+  })
+
+  it('drops entries missing a string clientId', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'good', deviceType: 'desktop', platform: 'macos' },
+        { clientId: 42, deviceType: 'desktop' },
+        { deviceType: 'desktop' },
+        null,
+        'not-an-object',
+      ],
+      'good',
+    )
+    expect(result).toHaveLength(1)
+    expect(result[0].clientId).toBe('good')
+  })
+
+  it('falls back deviceType to "unknown" for malformed/unknown values', () => {
+    const result = parseConnectedClients(
+      [
+        { clientId: 'a', deviceType: 'space-station' },
+        { clientId: 'b', deviceType: 42 },
+        { clientId: 'c' },
+      ],
+      null,
+    )
+    expect(result.map((c) => c.deviceType)).toEqual(['unknown', 'unknown', 'unknown'])
+  })
+
+  it('falls back deviceName=null and platform="unknown" when missing/non-string', () => {
+    const result = parseConnectedClients(
+      [{ clientId: 'a' }, { clientId: 'b', deviceName: 42, platform: false }],
+      null,
+    )
+    expect(result[0].deviceName).toBeNull()
+    expect(result[0].platform).toBe('unknown')
+    expect(result[1].deviceName).toBeNull()
+    expect(result[1].platform).toBe('unknown')
+  })
+
+  it('accepts every valid deviceType variant', () => {
+    const variants = ['phone', 'tablet', 'desktop', 'unknown'] as const
+    const result = parseConnectedClients(
+      variants.map((dt, i) => ({ clientId: `c${i}`, deviceType: dt })),
+      null,
+    )
+    expect(result.map((c) => c.deviceType)).toEqual([...variants])
   })
 })
 
@@ -1198,18 +1852,31 @@ describe('handleKeyExchangeOk', () => {
   it('extracts publicKey string', () => {
     expect(handleKeyExchangeOk({ publicKey: 'base64key==' })).toEqual({
       publicKey: 'base64key==',
+      serverKeySig: null,
     })
   })
 
   it('returns null publicKey when missing', () => {
-    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null })
+    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null, serverKeySig: null })
   })
 
   it('returns null publicKey for non-string values', () => {
     // Matches inline guard: `if (!msg.publicKey || typeof msg.publicKey !== 'string')`
-    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null })
-    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null })
-    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null })
+    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null, serverKeySig: null })
+    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null, serverKeySig: null })
+    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null, serverKeySig: null })
+  })
+
+  it('#5536 — extracts the serverKeySig when present', () => {
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: 'sig==' })).toEqual({
+      publicKey: 'pk==',
+      serverKeySig: 'sig==',
+    })
+  })
+
+  it('#5536 — null serverKeySig for missing / empty / non-string', () => {
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: '' }).serverKeySig).toBe(null)
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: 42 }).serverKeySig).toBe(null)
   })
 })
 
@@ -1221,11 +1888,10 @@ describe('handleServerMode', () => {
     expect(handleServerMode({ mode: 'cli' })).toEqual({ mode: 'cli' })
   })
 
-  it('extracts terminal mode', () => {
-    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: 'terminal' })
-  })
-
   it('returns null for unknown mode (caller surfaces an alert)', () => {
+    // #4810: 'terminal' was previously accepted but is now treated as unknown
+    // since the wire protocol only emits 'cli'.
+    expect(handleServerMode({ mode: 'terminal' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 'bogus' })).toEqual({ mode: null })
     expect(handleServerMode({ mode: 42 })).toEqual({ mode: null })
     expect(handleServerMode({})).toEqual({ mode: null })
@@ -1301,6 +1967,12 @@ describe('handleLogEntry', () => {
     expect(handleLogEntry({ level: 'info' }).entry.level).toBe('info')
     expect(handleLogEntry({ level: 'warn' }).entry.level).toBe('warn')
     expect(handleLogEntry({ level: 'error' }).entry.level).toBe('error')
+  })
+
+  it('preserves the always-on audit level (#6001), not coercing it to info', () => {
+    // The server's shell-audit trail is emitted at level 'audit'; the dashboard
+    // must keep it first-class (filterable / distinctly badged), not flatten it.
+    expect(handleLogEntry({ level: 'audit' }).entry.level).toBe('audit')
   })
 
   it('defaults missing message to empty string', () => {
@@ -1410,6 +2082,66 @@ describe('handlePrimaryChanged', () => {
     expect(
       handlePrimaryChanged({ sessionId: 'default', clientId: 'c' }),
     ).toEqual({ sessionId: 'default', primaryClientId: 'c' })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionRole (#5589 / #5281)
+// ---------------------------------------------------------------------------
+describe('handleSessionRole', () => {
+  it('derives primary when the primary is THIS client', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 'me' }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: 'me', role: 'primary' })
+  })
+
+  it('derives observer when another client is primary', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 'other' }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: 'other', role: 'observer' })
+  })
+
+  it('derives unclaimed when primaryClientId is null (nobody-until-claim)', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: null }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: null, role: 'unclaimed' })
+  })
+
+  it('derives unclaimed when primaryClientId is missing', () => {
+    expect(handleSessionRole({ sessionId: 's1' }, 'me')).toEqual({
+      sessionId: 's1',
+      primaryClientId: null,
+      role: 'unclaimed',
+    })
+  })
+
+  it('treats a known primary as observer when own id is unknown (pre-auth race)', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 'other' }, null),
+    ).toEqual({ sessionId: 's1', primaryClientId: 'other', role: 'observer' })
+  })
+
+  it('stays unclaimed when own id is unknown and the slot is empty', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: null }, null),
+    ).toEqual({ sessionId: 's1', primaryClientId: null, role: 'unclaimed' })
+  })
+
+  it('returns null sessionId when missing or non-string', () => {
+    expect(handleSessionRole({ primaryClientId: 'me' }, 'me')).toEqual({
+      sessionId: null,
+      primaryClientId: 'me',
+      role: 'primary',
+    })
+    expect(
+      handleSessionRole({ sessionId: 42, primaryClientId: 'me' }, 'me'),
+    ).toEqual({ sessionId: null, primaryClientId: 'me', role: 'primary' })
+  })
+
+  it('returns null primaryClientId when non-string', () => {
+    expect(
+      handleSessionRole({ sessionId: 's1', primaryClientId: 42 }, 'me'),
+    ).toEqual({ sessionId: 's1', primaryClientId: null, role: 'unclaimed' })
   })
 })
 
@@ -1533,6 +2265,295 @@ describe('handleSessionList', () => {
 })
 
 // ---------------------------------------------------------------------------
+// cumulativeUsageEquals
+// ---------------------------------------------------------------------------
+describe('cumulativeUsageEquals', () => {
+  const base: CumulativeUsage = {
+    inputTokens: 100,
+    outputTokens: 50,
+    cacheReadTokens: 10,
+    cacheCreationTokens: 5,
+    costUsd: 0.12,
+    turnsBilled: 3,
+  }
+
+  it('returns true when both snapshots match across all six fields', () => {
+    expect(cumulativeUsageEquals(base, { ...base })).toBe(true)
+  })
+
+  it('returns false when any single field differs', () => {
+    expect(cumulativeUsageEquals(base, { ...base, inputTokens: 101 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, outputTokens: 51 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, cacheReadTokens: 11 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, cacheCreationTokens: 6 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, costUsd: 0.13 })).toBe(false)
+    expect(cumulativeUsageEquals(base, { ...base, turnsBilled: 4 })).toBe(false)
+  })
+
+  it('returns false when either side is null or undefined', () => {
+    // Preserves the prior inline `current && ...` guard — null `current`
+    // falls through and the candidate snapshot is applied as a no-op write.
+    expect(cumulativeUsageEquals(null, base)).toBe(false)
+    expect(cumulativeUsageEquals(base, null)).toBe(false)
+    expect(cumulativeUsageEquals(null, null)).toBe(false)
+    expect(cumulativeUsageEquals(undefined, base)).toBe(false)
+    expect(cumulativeUsageEquals(base, undefined)).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// buildSessionListPatches (#4767)
+// ---------------------------------------------------------------------------
+describe('buildSessionListPatches', () => {
+  const makeSession = (
+    sessionId: string,
+    overrides: Partial<SessionInfo> = {},
+  ): SessionInfo => ({
+    sessionId,
+    name: sessionId,
+    cwd: '/tmp',
+    type: 'cli',
+    hasTerminal: false,
+    model: null,
+    permissionMode: null,
+    isBusy: false,
+    createdAt: 1000,
+    conversationId: null,
+    ...overrides,
+  })
+
+  it('returns null when handleSessionList rejects the message', () => {
+    expect(buildSessionListPatches({}, [], null)).toBeNull()
+    expect(buildSessionListPatches({ sessions: 'nope' }, [], null)).toBeNull()
+  })
+
+  it('exposes the parsed sessionList by reference', () => {
+    const sessions = [makeSession('s1')]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out).not.toBeNull()
+    expect(out!.sessionList).toBe(sessions)
+  })
+
+  it('computes removedIds for sessions that dropped out of the snapshot', () => {
+    const sessions = [makeSession('s2'), makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s1', 's2', 's3', 's4'], null)
+    expect(out!.removedIds).toEqual(['s1', 's4'])
+  })
+
+  it('preserves prevSessionStateIds order in removedIds (matches both prior inline loops)', () => {
+    const sessions = [makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s1', 's2', 's3', 's4'], null)
+    expect(out!.removedIds).toEqual(['s1', 's2', 's4'])
+  })
+
+  it('returns empty removedIds when nothing was removed', () => {
+    const sessions = [makeSession('s1'), makeSession('s2')]
+    const out = buildSessionListPatches({ sessions }, ['s1'], null)
+    expect(out!.removedIds).toEqual([])
+  })
+
+  it('lists new sessions not present in prevSessionStateIds in snapshot order', () => {
+    const sessions = [makeSession('s1'), makeSession('s2'), makeSession('s3')]
+    const out = buildSessionListPatches({ sessions }, ['s2'], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's3'])
+  })
+
+  it('handles fully fresh state (empty prev, all sessions new)', () => {
+    const sessions = [makeSession('s1'), makeSession('s2')]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's2'])
+    expect(out!.removedIds).toEqual([])
+  })
+
+  it('skips malformed entries without sessionId (fail-soft)', () => {
+    // Behaviour-preserving: the prior inline loops dereference s.sessionId
+    // directly. Skipping silently here keeps the helper defensive against
+    // hypothetical future server bugs that the prior code would have
+    // crashed on.
+    const sessions = [
+      makeSession('s1'),
+      null as unknown as SessionInfo,
+      { foo: 'bar' } as unknown as SessionInfo,
+      makeSession('s2'),
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.newSessionIds).toEqual(['s1', 's2'])
+    expect(out!.backgroundShellBuilders.size).toBe(2)
+  })
+
+  it('emits conversationIdPatches for every session with a truthy conversationId', () => {
+    const sessions = [
+      makeSession('s1', { conversationId: 'conv-1' }),
+      makeSession('s2', { conversationId: null }),
+      makeSession('s3', { conversationId: 'conv-3' }),
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.conversationIdPatches.get('s1')).toBe('conv-1')
+    expect(out!.conversationIdPatches.has('s2')).toBe(false)
+    expect(out!.conversationIdPatches.get('s3')).toBe('conv-3')
+  })
+
+  it('emits cumulativeUsagePatches for every session with a defined cumulativeUsage snapshot', () => {
+    const usage: CumulativeUsage = {
+      inputTokens: 1,
+      outputTokens: 2,
+      cacheReadTokens: 3,
+      cacheCreationTokens: 4,
+      costUsd: 0.5,
+      turnsBilled: 6,
+    }
+    const sessions = [
+      makeSession('s1', { cumulativeUsage: usage }),
+      makeSession('s2'), // no cumulativeUsage field
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.cumulativeUsagePatches.get('s1')).toBe(usage)
+    expect(out!.cumulativeUsagePatches.has('s2')).toBe(false)
+  })
+
+  it('emits backgroundShellBuilders for every session (default empty pending list)', () => {
+    const sessions = [
+      makeSession('s1', {
+        pendingBackgroundShells: [
+          { shellId: 'sh1', command: 'sleep 1', startedAt: 1000 },
+        ],
+      }),
+      makeSession('s2'), // omitted field → empty list
+    ]
+    const out = buildSessionListPatches({ sessions }, [], null)
+    expect(out!.backgroundShellBuilders.size).toBe(2)
+    const s1Builder = out!.backgroundShellBuilders.get('s1')!
+    expect(s1Builder.sessionId).toBe('s1')
+    const s1Applied = s1Builder.applyTo([])
+    expect(s1Applied).toEqual([
+      { shellId: 'sh1', command: 'sleep 1', startedAt: 1000 },
+    ])
+    const s2Builder = out!.backgroundShellBuilders.get('s2')!
+    // Empty pending list → applyTo on empty current returns existing
+    // empty array (reference-equality short-circuit).
+    const empty: PendingBackgroundShell[] = []
+    expect(s2Builder.applyTo(empty)).toBe(empty)
+  })
+
+  it('chunks non-active session ids into subscribeChunks of SESSION_LIST_SUBSCRIBE_CHUNK_SIZE', () => {
+    // Active id is excluded; remaining ids are sliced into batches.
+    const total = SESSION_LIST_SUBSCRIBE_CHUNK_SIZE + 5 // active + (chunk_size + 4) non-active
+    const sessions = Array.from({ length: total }, (_, i) =>
+      makeSession(`s${i + 1}`),
+    )
+    const out = buildSessionListPatches({ sessions }, [], 's1')
+    expect(out!.subscribeChunks).toHaveLength(2)
+    expect(out!.subscribeChunks[0]).toHaveLength(SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)
+    expect(out!.subscribeChunks[1]).toHaveLength(4)
+    // Active id must not appear in any chunk.
+    const flat = out!.subscribeChunks.flat()
+    expect(flat).not.toContain('s1')
+  })
+
+  it('returns empty subscribeChunks when no non-active ids remain', () => {
+    const sessions = [makeSession('s1')]
+    const out = buildSessionListPatches({ sessions }, [], 's1')
+    expect(out!.subscribeChunks).toEqual([])
+  })
+
+  it('returns empty subscribeChunks when sessionList is empty (auto-resume path)', () => {
+    const out = buildSessionListPatches({ sessions: [] }, ['s1', 's2'], 's1')
+    expect(out!.sessionList).toEqual([])
+    expect(out!.removedIds).toEqual(['s1', 's2'])
+    expect(out!.subscribeChunks).toEqual([])
+  })
+
+  it('respects custom subscribeChunkSize, falls back to default on invalid input', () => {
+    const sessions = Array.from({ length: 7 }, (_, i) => makeSession(`s${i + 1}`))
+    const out = buildSessionListPatches({ sessions }, [], 's1', 3)
+    // 6 non-active ids / chunk_size 3 → 2 full chunks
+    expect(out!.subscribeChunks.map((c) => c.length)).toEqual([3, 3])
+    // Invalid sizes fall back to the constant default (would all fit in one chunk here).
+    const out2 = buildSessionListPatches({ sessions }, [], 's1', 0)
+    expect(out2!.subscribeChunks).toHaveLength(1)
+    expect(out2!.subscribeChunks[0]).toHaveLength(6)
+  })
+
+  it('chunkSubscribeSessionIds: filters out active id and chunks by size', () => {
+    const sessions = Array.from({ length: 7 }, (_, i) =>
+      makeSession(`s${i + 1}`),
+    )
+    expect(chunkSubscribeSessionIds(sessions, 's1', 3).map((c) => c.length)).toEqual([3, 3])
+    // No active filter when activeSessionId is null.
+    expect(chunkSubscribeSessionIds(sessions, null, 3).map((c) => c.length)).toEqual([3, 3, 1])
+    // Empty when only the active id is present.
+    expect(chunkSubscribeSessionIds([makeSession('s1')], 's1')).toEqual([])
+    // Skips malformed entries fail-soft.
+    const malformed = [
+      makeSession('s1'),
+      null as unknown as SessionInfo,
+      makeSession('s2'),
+    ]
+    expect(chunkSubscribeSessionIds(malformed, 's1')).toEqual([['s2']])
+  })
+
+  it('chunkSubscribeSessionIds: clamps chunk size to SESSION_LIST_SUBSCRIBE_CHUNK_SIZE', () => {
+    // 25 non-active sessions; caller requests chunk of 100 → clamped to 20
+    // so the server's SubscribeSessionsSchema.max(20) never sees a bigger chunk.
+    const sessions = Array.from({ length: 26 }, (_, i) => makeSession(`s${i + 1}`))
+    const chunks = chunkSubscribeSessionIds(sessions, 's1', 100)
+    expect(chunks.map((c) => c.length)).toEqual([SESSION_LIST_SUBSCRIBE_CHUNK_SIZE, 5])
+    // Exact match: requesting the cap explicitly behaves the same as the default.
+    expect(chunkSubscribeSessionIds(sessions, 's1', SESSION_LIST_SUBSCRIBE_CHUNK_SIZE)).toEqual(
+      chunkSubscribeSessionIds(sessions, 's1'),
+    )
+  })
+
+  it('chunkSubscribeSessionIds: coerces non-integer chunk sizes via Math.floor', () => {
+    // 7 non-active ids; chunk 2.5 → floor(2.5) = 2 → ceil(7/2) = 4 chunks
+    const sessions = Array.from({ length: 8 }, (_, i) => makeSession(`s${i + 1}`))
+    const chunks = chunkSubscribeSessionIds(sessions, 's1', 2.5)
+    expect(chunks.map((c) => c.length)).toEqual([2, 2, 2, 1])
+    // No element duplicated and no element skipped.
+    expect(chunks.flat()).toEqual(['s2', 's3', 's4', 's5', 's6', 's7', 's8'])
+  })
+
+  it('chunkSubscribeSessionIds: rejects invalid chunk sizes (≤0, NaN, ∞, sub-1 floats)', () => {
+    const sessions = Array.from({ length: 6 }, (_, i) => makeSession(`s${i + 1}`))
+    // 0, negative, NaN, Infinity all fall back to the default constant.
+    for (const bad of [0, -1, NaN, Infinity, -Infinity]) {
+      const chunks = chunkSubscribeSessionIds(sessions, 's1', bad)
+      expect(chunks).toHaveLength(1)
+      expect(chunks[0]).toHaveLength(5) // 6 sessions - 1 active = 5 ids
+    }
+    // 0.5 → floor → 0 → fallback to default.
+    const subOne = chunkSubscribeSessionIds(sessions, 's1', 0.5)
+    expect(subOne).toHaveLength(1)
+    expect(subOne[0]).toHaveLength(5)
+  })
+
+  it('includes the active session in cumulativeUsage / conversationId / backgroundShell maps', () => {
+    // The subscribeChunks filter excludes the active id, but the patch
+    // maps must include it — both clients update the active session's
+    // sessionStates entry the same way as any other.
+    const sessions = [
+      makeSession('s1', {
+        conversationId: 'conv-1',
+        cumulativeUsage: {
+          inputTokens: 1,
+          outputTokens: 2,
+          cacheReadTokens: 0,
+          cacheCreationTokens: 0,
+          costUsd: 0,
+          turnsBilled: 1,
+        },
+      }),
+    ]
+    const out = buildSessionListPatches({ sessions }, ['s1'], 's1')
+    expect(out!.conversationIdPatches.get('s1')).toBe('conv-1')
+    expect(out!.cumulativeUsagePatches.has('s1')).toBe(true)
+    expect(out!.backgroundShellBuilders.has('s1')).toBe(true)
+    // s1 is active → excluded from subscribe chunks.
+    expect(out!.subscribeChunks).toEqual([])
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleConversationsList
 // ---------------------------------------------------------------------------
 describe('handleConversationsList', () => {
@@ -1586,6 +2607,7 @@ describe('handleHistoryReplayStart', () => {
       receivingHistoryReplay: true,
       fullHistory: false,
       sessionId: null,
+      latestSeq: null,
     })
   })
 
@@ -1612,6 +2634,7 @@ describe('handleHistoryReplayStart', () => {
       receivingHistoryReplay: true,
       fullHistory: true,
       sessionId: 'sess-1',
+      latestSeq: null,
     })
   })
 
@@ -1647,6 +2670,19 @@ describe('handleHistoryReplayStart', () => {
         'active-1',
       ).sessionId,
     ).toBe('active-1')
+  })
+
+  // #5555.3 — latestSeq cursor advancement.
+  it('parses a finite numeric latestSeq', () => {
+    expect(handleHistoryReplayStart({ latestSeq: 42 }, null).latestSeq).toBe(42)
+    expect(handleHistoryReplayStart({ latestSeq: 0 }, null).latestSeq).toBe(0)
+  })
+
+  it('returns null latestSeq when absent or non-finite (older server / bad value)', () => {
+    expect(handleHistoryReplayStart({}, null).latestSeq).toBeNull()
+    expect(handleHistoryReplayStart({ latestSeq: NaN }, null).latestSeq).toBeNull()
+    expect(handleHistoryReplayStart({ latestSeq: '5' }, null).latestSeq).toBeNull()
+    expect(handleHistoryReplayStart({ latestSeq: Infinity }, null).latestSeq).toBeNull()
   })
 })
 
@@ -2564,6 +3600,94 @@ describe('handleProviderList', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleAuthBootstrap (#5555)
+// ---------------------------------------------------------------------------
+describe('handleAuthBootstrap', () => {
+  it('extracts all three lists + sessionId', () => {
+    const providers = [{ name: 'anthropic' }]
+    const slashCommands = [{ name: 'clear', source: 'builtin' }]
+    const agents = [{ name: 'reviewer', source: 'project' }]
+    expect(
+      handleAuthBootstrap({ type: 'auth_bootstrap', providers, slashCommands, agents, sessionId: 'sess-1' }),
+    ).toEqual({ providers, slashCommands, agents, sessionId: 'sess-1', tunnelUrl: null })
+  })
+
+  it('defaults each missing list to [] and sessionId to null', () => {
+    expect(handleAuthBootstrap({ type: 'auth_bootstrap' })).toEqual({
+      providers: [],
+      slashCommands: [],
+      agents: [],
+      sessionId: null,
+      tunnelUrl: null,
+    })
+  })
+
+  it('coerces non-array lists to [] independently (partial-compute tolerance)', () => {
+    expect(
+      handleAuthBootstrap({ providers: [{ name: 'x' }], slashCommands: 'oops', agents: null }),
+    ).toEqual({ providers: [{ name: 'x' }], slashCommands: [], agents: [], sessionId: null, tunnelUrl: null })
+  })
+
+  it('treats empty/non-string sessionId as null', () => {
+    expect(handleAuthBootstrap({ sessionId: '' }).sessionId).toBeNull()
+    expect(handleAuthBootstrap({ sessionId: 42 as unknown as string }).sessionId).toBeNull()
+  })
+
+  it('#5555 (sub-item 7): extracts a wss tunnelUrl, else null', () => {
+    expect(handleAuthBootstrap({ tunnelUrl: 'wss://abc.trycloudflare.com' }).tunnelUrl).toBe(
+      'wss://abc.trycloudflare.com',
+    )
+    expect(handleAuthBootstrap({ tunnelUrl: '' }).tunnelUrl).toBeNull()
+    expect(handleAuthBootstrap({ tunnelUrl: 42 as unknown as string }).tunnelUrl).toBeNull()
+    expect(handleAuthBootstrap({}).tunnelUrl).toBeNull()
+    // Rejects a non-wss scheme — the parser only ever yields a secure endpoint.
+    expect(handleAuthBootstrap({ tunnelUrl: 'ws://evil.example' }).tunnelUrl).toBeNull()
+    expect(handleAuthBootstrap({ tunnelUrl: 'http://nope' }).tunnelUrl).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleTunnelUrlChanged (#5555 sub-item 7)
+// ---------------------------------------------------------------------------
+describe('handleTunnelUrlChanged', () => {
+  it('extracts url + previousUrl when both present', () => {
+    expect(
+      handleTunnelUrlChanged({
+        type: 'tunnel_url_changed',
+        url: 'wss://new.trycloudflare.com',
+        previousUrl: 'wss://old.trycloudflare.com',
+      }),
+    ).toEqual({ url: 'wss://new.trycloudflare.com', previousUrl: 'wss://old.trycloudflare.com' })
+  })
+
+  it('previousUrl defaults to null when missing or non-string', () => {
+    expect(handleTunnelUrlChanged({ url: 'wss://new.example' })).toEqual({
+      url: 'wss://new.example',
+      previousUrl: null,
+    })
+    expect(
+      handleTunnelUrlChanged({ url: 'wss://new.example', previousUrl: 42 as unknown as string })!.previousUrl,
+    ).toBeNull()
+  })
+
+  it('returns null when url is missing or non-string (caller skips the apply)', () => {
+    expect(handleTunnelUrlChanged({ type: 'tunnel_url_changed' })).toBeNull()
+    expect(handleTunnelUrlChanged({ url: '' })).toBeNull()
+    expect(handleTunnelUrlChanged({ url: 99 as unknown as string })).toBeNull()
+  })
+
+  it('rejects a non-wss url and drops a non-wss previousUrl', () => {
+    // A bogus scheme on `url` means the whole push is skipped.
+    expect(handleTunnelUrlChanged({ url: 'ws://evil.example' })).toBeNull()
+    expect(handleTunnelUrlChanged({ url: 'http://nope' })).toBeNull()
+    // A valid wss `url` with a non-wss `previousUrl` keeps the url, drops prev.
+    expect(
+      handleTunnelUrlChanged({ url: 'wss://new.example', previousUrl: 'ws://old.example' }),
+    ).toEqual({ url: 'wss://new.example', previousUrl: null })
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleWriteFileResult
 // ---------------------------------------------------------------------------
 describe('handleWriteFileResult', () => {
@@ -3135,6 +4259,244 @@ describe('handleAgentCompleted', () => {
 })
 
 // ---------------------------------------------------------------------------
+// #5016 — handleAgentEvent (Task subagent nested progress)
+// ---------------------------------------------------------------------------
+describe('handleAgentEvent (#5016)', () => {
+  const mkTaskBubble = (toolUseId: string): ChatMessage => ({
+    id: 'm-' + toolUseId,
+    type: 'tool_use',
+    content: '',
+    tool: 'Task',
+    toolUseId,
+    timestamp: 1000,
+  })
+
+  it('appends a child event to the parent Task tool_use bubble', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-1')]
+    const builder = handleAgentEvent(
+      {
+        sessionId: 'sess-1',
+        parentToolUseId: 'tu-task-1',
+        eventType: 'tool_start',
+        payload: { toolUseId: 'tu-child-1', tool: 'Read', input: { file_path: '/a' } },
+      },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    const next = builder.applyTo(existing)
+    expect(next).not.toBe(existing)
+    expect(next[0]?.childAgentEvents).toEqual([
+      { type: 'tool_start', payload: { toolUseId: 'tu-child-1', tool: 'Read', input: { file_path: '/a' } } },
+    ])
+  })
+
+  it('accumulates multiple child events in order on the same bubble', () => {
+    let messages: ChatMessage[] = [mkTaskBubble('tu-task-2')]
+    const events: { eventType: string; payload: Record<string, unknown> }[] = [
+      { eventType: 'tool_start', payload: { toolUseId: 'c1', tool: 'Read' } },
+      { eventType: 'tool_input_delta', payload: { toolUseId: 'c1', partialJson: '{"x":' } },
+      { eventType: 'tool_result', payload: { toolUseId: 'c1', result: 'hello' } },
+    ]
+    for (const ev of events) {
+      const builder = handleAgentEvent(
+        { parentToolUseId: 'tu-task-2', ...ev },
+        'active-1',
+      )
+      messages = builder.applyTo(messages)
+    }
+    expect(messages[0]?.childAgentEvents).toHaveLength(3)
+    expect(messages[0]?.childAgentEvents?.map((e) => e.type)).toEqual([
+      'tool_start',
+      'tool_input_delta',
+      'tool_result',
+    ])
+  })
+
+  it('returns the same array reference when parentToolUseId is missing', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-3')]
+    const builder = handleAgentEvent(
+      { eventType: 'tool_start', payload: {} },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('returns the same array reference when eventType is missing/empty', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-4')]
+    const builder = handleAgentEvent(
+      { parentToolUseId: 'tu-task-4', payload: {} },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('returns the same array reference when no matching parent bubble exists', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-5')]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-NOT-PRESENT',
+        eventType: 'tool_start',
+        payload: { toolUseId: 'c1' },
+      },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toBe(existing)
+  })
+
+  it('ignores bubbles whose type is not tool_use even when toolUseId matches', () => {
+    const existing: ChatMessage[] = [
+      // A `response` bubble that happens to carry the same id —
+      // shouldn't be mutated.
+      {
+        id: 'm-decoy',
+        type: 'response',
+        content: 'parent text',
+        toolUseId: 'tu-task-6',
+        timestamp: 100,
+      },
+      mkTaskBubble('tu-task-6'),
+    ]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-6',
+        eventType: 'stream_delta',
+        payload: { delta: 'hi' },
+      },
+      'active-1',
+    )
+    const next = builder.applyTo(existing)
+    // Only the tool_use bubble is patched.
+    expect(next[0]).toBe(existing[0])
+    expect(next[1]?.childAgentEvents).toHaveLength(1)
+  })
+
+  it('normalises non-object payload to {}', () => {
+    const existing: ChatMessage[] = [mkTaskBubble('tu-task-7')]
+    const builder = handleAgentEvent(
+      {
+        parentToolUseId: 'tu-task-7',
+        eventType: 'stream_delta',
+        payload: null,
+      },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)[0]?.childAgentEvents?.[0]?.payload).toEqual({})
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleAgentEvent(
+      { parentToolUseId: 'x', eventType: 'tool_start', payload: {} },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #4307 — handleBackgroundWorkChanged
+// ---------------------------------------------------------------------------
+describe('handleBackgroundWorkChanged (#4307)', () => {
+  it('replaces the pending list with the server snapshot', () => {
+    const existing: PendingBackgroundShell[] = [
+      { shellId: 'old', command: 'sleep 1', startedAt: 100 },
+    ]
+    const builder = handleBackgroundWorkChanged(
+      {
+        sessionId: 'sess-1',
+        pending: [
+          { shellId: 'new', command: 'sleep 60', startedAt: 200 },
+        ],
+      },
+      'active-1',
+    )
+    expect(builder.sessionId).toBe('sess-1')
+    expect(builder.applyTo(existing)).toEqual([
+      { shellId: 'new', command: 'sleep 60', startedAt: 200 },
+    ])
+  })
+
+  it('returns the same array reference when the snapshot matches the current list', () => {
+    const existing: PendingBackgroundShell[] = [
+      { shellId: 'a', command: 'cmd-a', startedAt: 100 },
+      { shellId: 'b', command: 'cmd-b', startedAt: 200 },
+    ]
+    const builder = handleBackgroundWorkChanged(
+      {
+        pending: [
+          { shellId: 'a', command: 'cmd-a', startedAt: 100 },
+          { shellId: 'b', command: 'cmd-b', startedAt: 200 },
+        ],
+      },
+      'active-1',
+    )
+    const result = builder.applyTo(existing)
+    expect(result).toBe(existing)
+  })
+
+  it('returns an empty list when pending is empty (the "clear" path)', () => {
+    const existing: PendingBackgroundShell[] = [
+      { shellId: 'a', command: 'cmd-a', startedAt: 100 },
+    ]
+    const builder = handleBackgroundWorkChanged(
+      { pending: [] },
+      'active-1',
+    )
+    expect(builder.applyTo(existing)).toEqual([])
+  })
+
+  it('treats missing pending field as empty list (defensive fail-soft)', () => {
+    const builder = handleBackgroundWorkChanged({}, 'active-1')
+    expect(builder.applyTo([])).toEqual([])
+  })
+
+  it('drops entries missing shellId without rejecting the whole snapshot', () => {
+    const builder = handleBackgroundWorkChanged(
+      {
+        pending: [
+          { shellId: 'good', command: 'cmd', startedAt: 100 },
+          { command: 'no id', startedAt: 100 },
+          { shellId: '', command: 'empty', startedAt: 100 },
+        ],
+      },
+      'active-1',
+    )
+    const out = builder.applyTo([])
+    expect(out).toHaveLength(1)
+    expect(out[0]?.shellId).toBe('good')
+  })
+
+  it('defaults missing command to empty string', () => {
+    const builder = handleBackgroundWorkChanged(
+      { pending: [{ shellId: 'a', startedAt: 100 }] },
+      'active-1',
+    )
+    expect(builder.applyTo([])[0]?.command).toBe('')
+  })
+
+  it('defaults missing startedAt to current time', () => {
+    const before = Date.now()
+    const builder = handleBackgroundWorkChanged(
+      { pending: [{ shellId: 'a', command: 'cmd' }] },
+      'active-1',
+    )
+    const out = builder.applyTo([])
+    const after = Date.now()
+    expect(out[0]?.startedAt).toBeGreaterThanOrEqual(before)
+    expect(out[0]?.startedAt).toBeLessThanOrEqual(after)
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleBackgroundWorkChanged({ pending: [] }, 'active-1')
+    expect(builder.sessionId).toBe('active-1')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    const builder = handleBackgroundWorkChanged({ pending: [] }, null)
+    expect(builder.sessionId).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleEnvironmentList
 // ---------------------------------------------------------------------------
 describe('handleEnvironmentList', () => {
@@ -3519,6 +4881,137 @@ describe('handleCostUpdate', () => {
 })
 
 // ---------------------------------------------------------------------------
+// handleSessionUsage
+// ---------------------------------------------------------------------------
+describe('handleSessionUsage', () => {
+  it('passes a fully-populated cumulativeUsage through', () => {
+    const result = handleSessionUsage(
+      {
+        sessionId: 'sess-1',
+        cumulativeUsage: {
+          inputTokens: 1234,
+          outputTokens: 567,
+          cacheReadTokens: 8000,
+          cacheCreationTokens: 200,
+          costUsd: 0.0345,
+          turnsBilled: 3,
+        },
+      },
+      'active-1',
+    )
+    expect(result).toEqual({
+      sessionId: 'sess-1',
+      patch: {
+        cumulativeUsage: {
+          inputTokens: 1234,
+          outputTokens: 567,
+          cacheReadTokens: 8000,
+          cacheCreationTokens: 200,
+          costUsd: 0.0345,
+          turnsBilled: 3,
+        },
+      },
+    })
+  })
+
+  it('coerces missing fields to 0 (always emits a complete block)', () => {
+    const result = handleSessionUsage({ cumulativeUsage: {} }, 'active-1')
+    expect(result.patch).toEqual({
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+  })
+
+  it('coerces non-finite fields to 0 (NaN, Infinity, strings, null all become 0)', () => {
+    // A corrupted payload must not poison the store with `$NaN` or
+    // `$Infinity` values the renderer would format literally.
+    const result = handleSessionUsage(
+      {
+        cumulativeUsage: {
+          inputTokens: NaN,
+          outputTokens: Infinity,
+          cacheReadTokens: -Infinity,
+          cacheCreationTokens: '500',
+          costUsd: null,
+          turnsBilled: undefined,
+        },
+      },
+      'active-1',
+    )
+    expect(result.patch).toEqual({
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+  })
+
+  it('emits an all-zero block when cumulativeUsage is missing entirely', () => {
+    // Defensive: if the server somehow emits the event without a payload,
+    // the renderer still sees a well-formed zero block (not undefined).
+    const result = handleSessionUsage({ sessionId: 'sess-1' }, null)
+    expect(result.patch).toEqual({
+      cumulativeUsage: {
+        inputTokens: 0,
+        outputTokens: 0,
+        cacheReadTokens: 0,
+        cacheCreationTokens: 0,
+        costUsd: 0,
+        turnsBilled: 0,
+      },
+    })
+  })
+
+  it('uses sessionId from message when present', () => {
+    expect(
+      handleSessionUsage(
+        { sessionId: 'sess-9', cumulativeUsage: { costUsd: 0.5 } },
+        'active-1',
+      ).sessionId,
+    ).toBe('sess-9')
+  })
+
+  it('falls back to active session when sessionId missing', () => {
+    expect(
+      handleSessionUsage({ cumulativeUsage: { costUsd: 0.5 } }, 'active-1').sessionId,
+    ).toBe('active-1')
+  })
+
+  it('returns null sessionId when neither is available', () => {
+    expect(handleSessionUsage({}, null).sessionId).toBeNull()
+  })
+
+  it('preserves whitespace-padded sessionId verbatim (no trim, no fallback)', () => {
+    // Mirrors handleCostUpdate semantics — a non-empty whitespace-padded
+    // string is truthy, so the downstream sessionStates lookup misses
+    // rather than silently routing the usage update to the active session.
+    const result = handleSessionUsage(
+      { sessionId: '  sess-1  ', cumulativeUsage: { costUsd: 0.5 } },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('  sess-1  ')
+  })
+
+  it('falls back to activeSessionId when sessionId is empty string', () => {
+    const result = handleSessionUsage(
+      { sessionId: '', cumulativeUsage: { costUsd: 0.5 } },
+      'active-1',
+    )
+    expect(result.sessionId).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
 // handleServerError
 // ---------------------------------------------------------------------------
 describe('handleServerError', () => {
@@ -3803,6 +5296,39 @@ describe('handleWebTaskUpsert', () => {
       error: null,
     }
     expect(handleWebTaskUpsert({ task })).toEqual({ task })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// applyWebTaskUpsert (#5556 slice 4)
+// ---------------------------------------------------------------------------
+describe('applyWebTaskUpsert', () => {
+  const t = (taskId: string, status: string) =>
+    ({ taskId, status }) as unknown as Parameters<typeof applyWebTaskUpsert>[0][number]
+
+  it('appends a new task to the end of the list', () => {
+    const result = applyWebTaskUpsert([t('a', 'running')], t('b', 'running'))
+    expect(result).toEqual([
+      { taskId: 'a', status: 'running' },
+      { taskId: 'b', status: 'running' },
+    ])
+  })
+
+  it('replaces an existing task with the same taskId, re-appending it at the end', () => {
+    const result = applyWebTaskUpsert(
+      [t('a', 'running'), t('b', 'running')],
+      t('a', 'completed'),
+    )
+    expect(result).toEqual([
+      { taskId: 'b', status: 'running' },
+      { taskId: 'a', status: 'completed' },
+    ])
+  })
+
+  it('does not mutate the input list', () => {
+    const existing = [t('a', 'running')]
+    applyWebTaskUpsert(existing, t('a', 'completed'))
+    expect(existing).toEqual([{ taskId: 'a', status: 'running' }])
   })
 })
 
@@ -4114,6 +5640,58 @@ describe('handleUserQuestion', () => {
     expect(typeof out!.chatMessage.timestamp).toBe('number')
   })
 
+  // #4613 — mirrors the #4607 fix for handleToolStart. The server's history
+  // ring buffer stamps `timestamp: Date.now()` at append time and forwards it
+  // on every replay (session-message-history.js:208-216). When the dashboard
+  // rebuilds the `prompt` ChatMessage during history_replay (the question
+  // event is part of the replayed ring buffer), it must honour that wire
+  // timestamp instead of stamping a new Date.now(). Without this, a question
+  // prompt that originally fired at 10:00 shows as "just now" if you tab
+  // away and back. Lower-impact than #4607 (affects bubble display only, not
+  // the timer pill), but still a correctness bug.
+  it('honours wire `timestamp` field on the user_question payload (#4613)', () => {
+    const wireTimestamp = 1_700_000_000_000
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Pick a colour' }],
+        timestamp: wireTimestamp,
+      },
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.timestamp).toBe(wireTimestamp)
+  })
+
+  it('falls back to Date.now() when wire `timestamp` is missing (live user_question, #4613)', () => {
+    const before = Date.now()
+    const out = handleUserQuestion(
+      { questions: [{ question: 'Pick a colour' }] },
+      'sess-active',
+    )
+    const after = Date.now()
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.timestamp).toBeGreaterThanOrEqual(before)
+    expect(out!.chatMessage.timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('ignores non-finite wire `timestamp` and falls back to Date.now() (#4613)', () => {
+    // Defensive: a malformed wire payload (NaN, Infinity, string-coerced)
+    // must not poison the displayed bubble timestamp with NaN-driven
+    // arithmetic downstream.
+    const before = Date.now()
+    const out = handleUserQuestion(
+      {
+        questions: [{ question: 'Pick a colour' }],
+        timestamp: Number.NaN,
+      },
+      'sess-active',
+    )
+    const after = Date.now()
+    expect(out).not.toBeNull()
+    expect(out!.chatMessage.timestamp).toBeGreaterThanOrEqual(before)
+    expect(out!.chatMessage.timestamp).toBeLessThanOrEqual(after)
+  })
+
   it('uses msg.sessionId when present', () => {
     const out = handleUserQuestion(
       { questions: [{ question: 'Q?' }], sessionId: 'sess-9' },
@@ -4344,6 +5922,99 @@ describe('handleUserQuestion', () => {
     )
     expect(out3!.sessionId).toBe('sess-active')
   })
+
+  // #4604 Chunk B — multi-question forms. Previously handleUserQuestion
+  // dropped every question past q[0]; the server-side driver had no way
+  // to know what the user wanted to pick for q2/q3 and defaulted them
+  // to option 1 (or stalled the form entirely). Now the full N-question
+  // payload rides on `chatMessage.questions`.
+  describe('multi-question form support (#4604 Chunk B)', () => {
+    it('populates chatMessage.questions with every normalized question', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [
+            { question: 'Q1?', options: [{ label: 'a' }, { label: 'b' }] },
+            { question: 'Q2?', multiSelect: true, options: [{ label: 'p' }, { label: 'q' }] },
+            { question: 'Q3?', options: [{ label: 'x' }] },
+          ],
+          toolUseId: 'tu-multi',
+        },
+        null,
+      )
+      expect(out).not.toBeNull()
+      expect(out!.chatMessage.questions).toBeDefined()
+      expect(out!.chatMessage.questions!.length).toBe(3)
+      expect(out!.chatMessage.questions![0].question).toBe('Q1?')
+      expect(out!.chatMessage.questions![1].question).toBe('Q2?')
+      expect(out!.chatMessage.questions![2].question).toBe('Q3?')
+      // Single-select questions get the Other sentinel appended; the
+      // multi-select question does NOT (the checkbox UI doesn't compose
+      // with a free-text escape hatch).
+      expect(out!.chatMessage.questions![0].options).toEqual([
+        { label: 'a', value: 'a' },
+        { label: 'b', value: 'b' },
+        { label: 'Other', value: '__chroxy_other__' },
+      ])
+      expect(out!.chatMessage.questions![1].options).toEqual([
+        { label: 'p', value: 'p' },
+        { label: 'q', value: 'q' },
+      ])
+      expect(out!.chatMessage.questions![1].multiSelect).toBe(true)
+      expect(out!.chatMessage.questions![2].options).toEqual([
+        { label: 'x', value: 'x' },
+        { label: 'Other', value: '__chroxy_other__' },
+      ])
+    })
+
+    it('legacy top-level options + content mirror questions[0] (back-compat with single-q renderers)', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [
+            { question: 'First', options: [{ label: 'a' }, { label: 'b' }] },
+            { question: 'Second', options: [{ label: 'x' }] },
+          ],
+        },
+        null,
+      )
+      // questions[0] is the same as the legacy top-level fields so
+      // pre-Chunk-B renderers that only read `content` + `options`
+      // keep rendering the first question identically.
+      expect(out!.chatMessage.content).toBe(out!.chatMessage.questions![0].question)
+      expect(out!.chatMessage.options).toEqual(out!.chatMessage.questions![0].options)
+    })
+
+    it('single-question form still populates chatMessage.questions (N=1 case)', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [{ question: 'Just one', options: [{ label: 'a' }] }],
+        },
+        null,
+      )
+      // Even single-question prompts populate `questions` — renderers
+      // detect multi-question by `questions.length > 1` so the N=1 case
+      // must still be present (renderers can iterate uniformly).
+      expect(out!.chatMessage.questions).toBeDefined()
+      expect(out!.chatMessage.questions!.length).toBe(1)
+      expect(out!.chatMessage.questions![0].question).toBe('Just one')
+    })
+
+    it('skips malformed entries past q[0] without poisoning the rest of the form', () => {
+      const out = handleUserQuestion(
+        {
+          questions: [
+            { question: 'Q1?', options: [{ label: 'a' }] },
+            { notAQuestion: true },           // malformed — skipped
+            'plain-string',                    // malformed — skipped
+            null,                              // malformed — skipped
+            { question: 'Q5?', options: [{ label: 'p' }] },
+          ],
+        },
+        null,
+      )
+      expect(out!.chatMessage.questions!.length).toBe(2)
+      expect(out!.chatMessage.questions!.map((q) => q.question)).toEqual(['Q1?', 'Q5?'])
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -4463,6 +6134,322 @@ describe('handleMessage', () => {
     if (out2.shouldDispatch) {
       expect(out2.chatMessage.type).toBe('error')
     }
+  })
+
+  // #4476: server PR #4475 emits `error{code: 'stream_stall'}` when the CLI
+  // child has been silent for the configured stall window (default 5min).
+  // The discriminator field flows through event-normalizer.js (#4467) and
+  // lands here as a top-level `message` with `messageType: 'error'` and a
+  // populated `code`. The dashboard chip needs that `code` on the
+  // ChatMessage so it can render the distinct 'Stream stalled — retry?'
+  // affordance instead of the generic red error bubble.
+  it('preserves the structured error code on the ChatMessage (#4476)', () => {
+    const out = handleMessage(
+      {
+        messageType: 'error',
+        content: 'Stream stalled — no response for 5 minutes',
+        code: 'stream_stall',
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.type).toBe('error')
+      expect(out.chatMessage.code).toBe('stream_stall')
+    }
+  })
+
+  it('leaves chatMessage.code undefined when the wire message omits code', () => {
+    // Existing generic errors (no structured code) must continue to render
+    // as the plain red bubble — the chip variant only kicks in when the
+    // server explicitly tags the error.
+    const out = handleMessage(
+      {
+        messageType: 'error',
+        content: 'something exploded',
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.code).toBeUndefined()
+    }
+  })
+
+  it('coerces a non-string code to undefined rather than passing junk through', () => {
+    // Defense in depth — the protocol schema already constrains `code` to
+    // a string at the wire boundary, but the runtime type of `msg` is
+    // `Record<string, unknown>` and a malformed payload could land here
+    // with `code: 42`. Drop it instead of storing the wrong type on
+    // ChatMessage.
+    const out = handleMessage(
+      {
+        messageType: 'error',
+        content: 'something exploded',
+        code: 42,
+        timestamp: 100,
+      },
+      'sess-active',
+      false,
+      [],
+    )
+    expect(out.shouldDispatch).toBe(true)
+    if (out.shouldDispatch) {
+      expect(out.chatMessage.code).toBeUndefined()
+    }
+  })
+
+  // #4947: server PR #4944 emits `error{code:'resume_unknown',
+  // attemptedResumeId, message}` when the claude CLI rejects a `--resume
+  // <id>` because the conversation id is unknown locally. The dashboard
+  // ResumeUnknownChip surfaces `attemptedResumeId` as subtext so operators
+  // can correlate against the persisted state file. Without preserving the
+  // field on the ChatMessage here, the chip would degrade to "headline
+  // only" and the (Optional) acceptance-criterion subtext would never
+  // render in practice.
+  describe('attemptedResumeId preservation (#4947)', () => {
+    it('preserves a string attemptedResumeId on the ChatMessage', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'Previous Claude conversation could not be resumed',
+          code: 'resume_unknown',
+          attemptedResumeId: 'abc123-def456-7890',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.code).toBe('resume_unknown')
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123-def456-7890')
+      }
+    })
+
+    it('leaves attemptedResumeId undefined when the wire field is missing', () => {
+      // Pre-#4944 servers and every non-resume_unknown error envelope omit
+      // the field entirely. ChatMessage simply stays undefined and the
+      // chip's hasId guard hides the subtext slot.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'something else',
+          code: 'stream_stall',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('coerces a non-string attemptedResumeId to undefined (defense in depth)', () => {
+      // Same hardening as `code: 42` above. A malformed producer must not
+      // populate the chat-message field with garbage that the chip will
+      // then render verbatim.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: 42,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('coerces an empty-string attemptedResumeId to undefined', () => {
+      // Empty string is treated as missing — the chip's render guard
+      // already treats whitespace-only as absent, but normalising at the
+      // store boundary means downstream consumers (mobile app, future
+      // log/console viewers) see the same shape: present or absent, never
+      // present-but-empty.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    // PR #4967 Copilot review hardening: gating + trim + 256-char cap.
+    it('drops attemptedResumeId when messageType is not error (out-of-contract gating)', () => {
+      // Documented as set only on `type === 'error'`; a buggy producer
+      // attaching it to e.g. a `response` envelope must not pollute the
+      // store with out-of-contract data.
+      const out = handleMessage(
+        {
+          messageType: 'response',
+          content: 'hello',
+          code: 'resume_unknown',
+          attemptedResumeId: 'abc123',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('drops attemptedResumeId when code is not resume_unknown (out-of-contract gating)', () => {
+      // Only the resume-unknown error path documents this field; other
+      // error codes attaching it (drift or producer bug) shouldn't make
+      // it into the store.
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'stream_stall',
+          attemptedResumeId: 'abc123',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('trims whitespace from attemptedResumeId before storing', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '  abc123  ',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123')
+      }
+    })
+
+    it('drops attemptedResumeId when only whitespace', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: '   \t  ',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBeUndefined()
+      }
+    })
+
+    it('truncates attemptedResumeId to 256 chars (matches wire schema cap)', () => {
+      const oversized = 'a'.repeat(500)
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown',
+          attemptedResumeId: oversized,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
+      }
+    })
+
+    // #5006: server PR #5004 introduced the terminal-escalation code
+    // `resume_unknown_exhausted` emitted when the post-fallback retry ALSO
+    // matches the unknown-resume pattern. event-normalizer.js already
+    // forwards `attemptedResumeId` for the new code; the store-core gate
+    // must mirror that or the field is silently stripped before reaching
+    // the dashboard / mobile chip. These tests pin the widened gate.
+    it('#5006 — preserves attemptedResumeId on resume_unknown_exhausted (terminal escalation)', () => {
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content:
+            'Auto-recovery exhausted: Claude CLI rejected the resumed conversation id and a fresh-start retry also failed.',
+          code: 'resume_unknown_exhausted',
+          attemptedResumeId: 'abc123-def456-7890',
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.code).toBe('resume_unknown_exhausted')
+        expect(out.chatMessage.attemptedResumeId).toBe('abc123-def456-7890')
+      }
+    })
+
+    it('#5006 — trims and truncates attemptedResumeId on resume_unknown_exhausted (same hardening as resume_unknown)', () => {
+      const oversized = '   ' + 'a'.repeat(500) + '   '
+      const out = handleMessage(
+        {
+          messageType: 'error',
+          content: 'x',
+          code: 'resume_unknown_exhausted',
+          attemptedResumeId: oversized,
+          timestamp: 100,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.shouldDispatch).toBe(true)
+      if (out.shouldDispatch) {
+        expect(out.chatMessage.attemptedResumeId).toBe('a'.repeat(256))
+      }
+    })
   })
 
   it('skips user_input outside replay (live echo handled elsewhere)', () => {
@@ -4939,6 +6926,201 @@ describe('handleToolStart', () => {
     )
     expect(out.sessionId).toBe('sess-active')
   })
+
+  // #4308 — activeTools tracking
+  describe('activeTools (#4308)', () => {
+    it('emits an ActiveTool entry with tool name, toolUseId, input, startedAt', () => {
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          input: { cmd: 'ls' },
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool).not.toBeNull()
+      expect(out.activeTool!.toolUseId).toBe('tu-1')
+      expect(out.activeTool!.tool).toBe('Bash')
+      expect(out.activeTool!.input).toEqual({ cmd: 'ls' })
+      expect(typeof out.activeTool!.startedAt).toBe('number')
+      expect(out.activeTool!.startedAt).toBeGreaterThan(0)
+    })
+
+    it('omits serverName when not present on the wire', () => {
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool!.serverName).toBeUndefined()
+    })
+
+    it('forwards serverName for MCP tools', () => {
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'mcp__chrome_devtools__take_snapshot',
+          toolUseId: 'tu-1',
+          serverName: 'chrome_devtools',
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool!.serverName).toBe('chrome_devtools')
+    })
+
+    it('returns null activeTool when toolUseId is missing', () => {
+      // Without a stable toolUseId we cannot dedup or remove on tool_result,
+      // so skip the push rather than orphan an entry.
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash' },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool).toBeNull()
+    })
+
+    it('returns null activeTool during replay dedup', () => {
+      const cached: ChatMessage[] = [
+        { id: 'srv-tool-1', type: 'tool_use', content: '', timestamp: 1 },
+      ]
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        true,
+        cached,
+      )
+      expect(out.shouldDispatch).toBe(false)
+      expect(out.activeTool).toBeNull()
+    })
+
+    // #4607 — the server's history ring buffer stamps `timestamp: Date.now()`
+    // at append time and forwards it on every replay
+    // (session-message-history.js:208-216). When the dashboard rebuilds the
+    // tool_use ChatMessage during history_replay (e.g. because fullHistory
+    // wiped the messages array so the cached-id dedup misses), it must
+    // honour that wire timestamp instead of stamping a new Date.now(). Both
+    // `chatMessage.timestamp` AND the derived `activeTool.startedAt` must
+    // carry it through, otherwise the "Running <tool> · Ns" pill restarts
+    // at ~1s on tab-switch for any session whose activeTools was previously
+    // empty (toolUseId-dedup in applyToActiveTools only protects the case
+    // where the same id is already tracked).
+    it('honours wire `timestamp` field on the tool_start payload (#4607)', () => {
+      const wireTimestamp = 1_700_000_000_000
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          timestamp: wireTimestamp,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.chatMessage!.timestamp).toBe(wireTimestamp)
+      expect(out.activeTool!.startedAt).toBe(wireTimestamp)
+    })
+
+    it('falls back to Date.now() when wire `timestamp` is missing (live tool_start, #4607)', () => {
+      const before = Date.now()
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const after = Date.now()
+      expect(out.chatMessage!.timestamp).toBeGreaterThanOrEqual(before)
+      expect(out.chatMessage!.timestamp).toBeLessThanOrEqual(after)
+      expect(out.activeTool!.startedAt).toBe(out.chatMessage!.timestamp)
+    })
+
+    it('ignores non-finite wire `timestamp` and falls back to Date.now() (#4607)', () => {
+      // Defensive: a malformed wire payload (NaN, Infinity, string-coerced)
+      // must not poison the elapsed-time clock with NaN-driven arithmetic.
+      const before = Date.now()
+      const out = handleToolStart(
+        {
+          messageId: 'srv-tool-1',
+          tool: 'Bash',
+          toolUseId: 'tu-1',
+          timestamp: Number.NaN,
+        },
+        'sess-active',
+        false,
+        [],
+      )
+      const after = Date.now()
+      expect(out.chatMessage!.timestamp).toBeGreaterThanOrEqual(before)
+      expect(out.chatMessage!.timestamp).toBeLessThanOrEqual(after)
+    })
+
+    it('applyToActiveTools pushes the new entry onto the array', () => {
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const next = out.applyToActiveTools([])
+      expect(next).toHaveLength(1)
+      expect(next[0]!.toolUseId).toBe('tu-1')
+      expect(next[0]!.tool).toBe('Bash')
+    })
+
+    it('applyToActiveTools dedupes by toolUseId (same reference on duplicate)', () => {
+      const existing: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+      ]
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const next = out.applyToActiveTools(existing)
+      expect(next).toBe(existing)
+    })
+
+    it('applyToActiveTools is a no-op when activeTool is null (no toolUseId)', () => {
+      const existing: ActiveTool[] = [
+        { toolUseId: 'tu-0', tool: 'Read', startedAt: 1 },
+      ]
+      const out = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash' }, // no toolUseId
+        'sess-active',
+        false,
+        [],
+      )
+      expect(out.activeTool).toBeNull()
+      expect(out.applyToActiveTools(existing)).toBe(existing)
+    })
+
+    it('supports parallel in-flight tools (multiple distinct toolUseIds)', () => {
+      const out1 = handleToolStart(
+        { messageId: 'srv-tool-1', tool: 'Bash', toolUseId: 'tu-1' },
+        'sess-active',
+        false,
+        [],
+      )
+      const out2 = handleToolStart(
+        { messageId: 'srv-tool-2', tool: 'Read', toolUseId: 'tu-2' },
+        'sess-active',
+        false,
+        [],
+      )
+      const step1 = out1.applyToActiveTools([])
+      const step2 = out2.applyToActiveTools(step1)
+      expect(step2.map((t) => t.toolUseId)).toEqual(['tu-1', 'tu-2'])
+    })
+  })
 })
 
 // ---------------------------------------------------------------------------
@@ -5134,6 +7316,387 @@ describe('handleToolResult', () => {
       )
       const updated = out!.applyTo(baseMessages)
       expect(updated[1]!.toolResultImages).toEqual(images)
+    })
+  })
+
+  // #4308 — activeTools removal
+  describe('applyToActiveTools (#4308)', () => {
+    it('removes the entry whose toolUseId matches', () => {
+      const out = handleToolResult({ toolUseId: 'tu-1', result: 'ok' }, 'sess-active')
+      const before: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+        { toolUseId: 'tu-2', tool: 'Read', startedAt: 2 },
+      ]
+      const after = out!.applyToActiveTools(before)
+      expect(after).toHaveLength(1)
+      expect(after[0]!.toolUseId).toBe('tu-2')
+    })
+
+    it('returns same array reference when toolUseId is not present (no-op)', () => {
+      const out = handleToolResult({ toolUseId: 'tu-missing', result: 'ok' }, 'sess-active')
+      const before: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+      ]
+      const after = out!.applyToActiveTools(before)
+      expect(after).toBe(before)
+    })
+
+    it('removes only the matching entry when multiple in-flight tools exist', () => {
+      const out = handleToolResult({ toolUseId: 'tu-2', result: 'ok' }, 'sess-active')
+      const before: ActiveTool[] = [
+        { toolUseId: 'tu-1', tool: 'Bash', startedAt: 1 },
+        { toolUseId: 'tu-2', tool: 'Read', startedAt: 2 },
+        { toolUseId: 'tu-3', tool: 'WebFetch', startedAt: 3 },
+      ]
+      const after = out!.applyToActiveTools(before)
+      expect(after.map((t) => t.toolUseId)).toEqual(['tu-1', 'tu-3'])
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleToolInputDelta (#4081)
+// ---------------------------------------------------------------------------
+describe('handleToolInputDelta', () => {
+  it('returns null when toolUseId is missing', () => {
+    const out = handleToolInputDelta({ partialJson: '{"a":1}' }, 'sess-active')
+    expect(out).toBeNull()
+  })
+
+  it('returns null when toolUseId is non-string', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 42, partialJson: '{"a":1}' },
+      'sess-active',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('returns null when partialJson is missing', () => {
+    const out = handleToolInputDelta({ toolUseId: 'tu-1' }, 'sess-active')
+    expect(out).toBeNull()
+  })
+
+  it('returns null when partialJson is non-string', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: 123 },
+      'sess-active',
+    )
+    expect(out).toBeNull()
+  })
+
+  it('accepts empty-string partialJson (SDK can emit empty chunks)', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '' },
+      'sess-active',
+    )
+    expect(out).not.toBeNull()
+    expect(out!.partialJson).toBe('')
+  })
+
+  it('resolves sessionId from message when present', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '{', sessionId: 'sess-1' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-1')
+  })
+
+  it('falls back to active sessionId when not on message', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '{' },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  it('coerces non-string sessionId to activeSessionId fallback', () => {
+    const out = handleToolInputDelta(
+      { toolUseId: 'tu-1', partialJson: '{', sessionId: 42 },
+      'sess-active',
+    )
+    expect(out!.sessionId).toBe('sess-active')
+  })
+
+  describe('applyTo()', () => {
+    const baseMessages: ChatMessage[] = [
+      { id: 'msg-1', type: 'response', content: 'hello', timestamp: 1 },
+      {
+        id: 'msg-2',
+        type: 'tool_use',
+        content: 'Bash',
+        toolUseId: 'tu-1',
+        timestamp: 2,
+      },
+      { id: 'msg-3', type: 'response', content: 'after', timestamp: 3 },
+    ]
+
+    it('appends partialJson to undefined toolInputPartial on first delta', () => {
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: '{"command":"' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated).not.toBe(baseMessages)
+      expect(updated[1]!.toolInputPartial).toBe('{"command":"')
+    })
+
+    it('concatenates 3 sequential partials into the full buffer', () => {
+      // Canonical case from the issue: Bash `command` assembled across
+      // 3 input_json_delta chunks. After all 3 deltas the buffer must
+      // equal their string concatenation in arrival order.
+      const chunks = ['{"command":"', 'rm -rf /tmp/', 'foo"}']
+      let messages = baseMessages
+      for (const partialJson of chunks) {
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson },
+          'sess-active',
+        )
+        messages = out!.applyTo(messages)
+      }
+      expect(messages[1]!.toolInputPartial).toBe('{"command":"rm -rf /tmp/foo"}')
+    })
+
+    it('returns same array reference when no matching tool_use is found (no-op)', () => {
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-missing', partialJson: '{' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated).toBe(baseMessages)
+    })
+
+    it('does not match a non-tool_use message even if its toolUseId field equals', () => {
+      const messages: ChatMessage[] = [
+        {
+          id: 'm-1',
+          type: 'response',
+          content: 'x',
+          toolUseId: 'tu-1',
+          timestamp: 1,
+        },
+      ]
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: '{' },
+        'sess-active',
+      )
+      expect(out!.applyTo(messages)).toBe(messages)
+    })
+
+    it('does not disturb other messages in the array', () => {
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: '{' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(baseMessages)
+      expect(updated[0]).toBe(baseMessages[0])
+      expect(updated[2]).toBe(baseMessages[2])
+    })
+
+    it('only touches the matching tool_use when multiple tool_use entries exist', () => {
+      const messages: ChatMessage[] = [
+        { id: 'm-1', type: 'tool_use', content: 'A', toolUseId: 'tu-a', timestamp: 1 },
+        { id: 'm-2', type: 'tool_use', content: 'B', toolUseId: 'tu-b', timestamp: 2 },
+      ]
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-b', partialJson: '{"x":1}' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(messages)
+      expect(updated[0]).toBe(messages[0])
+      expect(updated[0]!.toolInputPartial).toBeUndefined()
+      expect(updated[1]!.toolInputPartial).toBe('{"x":1}')
+    })
+
+    it('preserves existing toolInputPartial when applyTo runs after prior deltas', () => {
+      const seeded: ChatMessage[] = [
+        {
+          id: 'msg-2',
+          type: 'tool_use',
+          content: 'Bash',
+          toolUseId: 'tu-1',
+          toolInputPartial: '{"command":"ls',
+          timestamp: 2,
+        },
+      ]
+      const out = handleToolInputDelta(
+        { toolUseId: 'tu-1', partialJson: ' -la"}' },
+        'sess-active',
+      )
+      const updated = out!.applyTo(seeded)
+      expect(updated[0]!.toolInputPartial).toBe('{"command":"ls -la"}')
+    })
+
+    // Cap defends against adversarial / runaway tool input that would
+    // otherwise grow client `messages` state without bound. The cap value
+    // (1 MiB) is exported as `MAX_TOOL_INPUT_PARTIAL_LEN`. When the buffer
+    // would exceed the cap, further chunks are dropped and the bubble's
+    // `toolInputPartialTruncated` boolean is set to `true` exactly once
+    // (#4263) so the UI can show the user input was cut off — subsequent
+    // deltas after truncation are dropped silently. See issues #4241
+    // and #4263.
+    describe('toolInputPartial length cap (#4241, #4263)', () => {
+      it('exposes MAX_TOOL_INPUT_PARTIAL_LEN equal to 1 MiB', () => {
+        expect(MAX_TOOL_INPUT_PARTIAL_LEN).toBe(1024 * 1024)
+      })
+
+      it('does not truncate when concatenated length stays below the cap', () => {
+        const chunk = 'a'.repeat(1024)
+        const seeded: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            toolInputPartial: 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN - 2048),
+            timestamp: 2,
+          },
+        ]
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson: chunk },
+          'sess-active',
+        )
+        const updated = out!.applyTo(seeded)
+        expect(updated[0]!.toolInputPartial!.length).toBe(
+          MAX_TOOL_INPUT_PARTIAL_LEN - 1024,
+        )
+        expect(updated[0]!.toolInputPartial!.endsWith('[truncated]')).toBe(false)
+        expect(updated[0]!.toolInputPartialTruncated).toBeUndefined()
+      })
+
+      it('caps the buffer and sets toolInputPartialTruncated when a chunk pushes past the cap', () => {
+        const existing = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN - 10)
+        const seeded: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            toolInputPartial: existing,
+            timestamp: 2,
+          },
+        ]
+        // Adding 100 'b's would land at len = cap + 90.
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson: 'b'.repeat(100) },
+          'sess-active',
+        )
+        const updated = out!.applyTo(seeded)
+        const buf = updated[0]!.toolInputPartial!
+        // #4263: buffer is the cap-bounded slice (existing 'a' run + first
+        // 10 'b's) — NO in-band suffix marker, and length equals the cap.
+        expect(buf.length).toBe(MAX_TOOL_INPUT_PARTIAL_LEN)
+        expect(buf.endsWith('...[truncated]')).toBe(false)
+        expect(buf).toBe(existing + 'b'.repeat(10))
+        expect(updated[0]!.toolInputPartialTruncated).toBe(true)
+      })
+
+      it('truncates exactly at the cap when the boundary is hit precisely', () => {
+        const existing = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN - 5)
+        const seeded: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            toolInputPartial: existing,
+            timestamp: 2,
+          },
+        ]
+        // Adding exactly 6 'b's pushes one byte past the cap.
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson: 'b'.repeat(6) },
+          'sess-active',
+        )
+        const updated = out!.applyTo(seeded)
+        const buf = updated[0]!.toolInputPartial!
+        // 5 'b's keep buffer at the cap; the 6th would overflow.
+        expect(buf).toBe(existing + 'b'.repeat(5))
+        expect(buf.length).toBe(MAX_TOOL_INPUT_PARTIAL_LEN)
+        expect(updated[0]!.toolInputPartialTruncated).toBe(true)
+      })
+
+      it('drops further deltas idempotently once toolInputPartialTruncated is set', () => {
+        // After truncation, the flag is set. A following delta must not
+        // accumulate further bytes (idempotent terminal state).
+        const cappedBuf = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN)
+        const seeded: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            toolInputPartial: cappedBuf,
+            toolInputPartialTruncated: true,
+            timestamp: 2,
+          },
+        ]
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson: 'more data' },
+          'sess-active',
+        )
+        const updated = out!.applyTo(seeded)
+        // applyTo returns the same reference (no clone) on no-op.
+        expect(updated).toBe(seeded)
+        expect(updated[0]!.toolInputPartial).toBe(cappedBuf)
+        expect(updated[0]!.toolInputPartialTruncated).toBe(true)
+      })
+
+      // #4263 backwards compatibility: a client may rehydrate state
+      // written by a pre-#4263 client where the legacy in-band
+      // `...[truncated]` suffix is the only terminal-state signal (no
+      // boolean). The handler must still treat that buffer as terminal
+      // and drop further deltas.
+      it('drops further deltas when the legacy suffix marker is present without the boolean (backwards compat)', () => {
+        const legacyMarker = '...[truncated]'
+        const cappedBuf = 'a'.repeat(MAX_TOOL_INPUT_PARTIAL_LEN) + legacyMarker
+        const seeded: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            toolInputPartial: cappedBuf,
+            // NB: no toolInputPartialTruncated — this is the pre-#4263 shape.
+            timestamp: 2,
+          },
+        ]
+        const out = handleToolInputDelta(
+          { toolUseId: 'tu-1', partialJson: 'more data' },
+          'sess-active',
+        )
+        const updated = out!.applyTo(seeded)
+        expect(updated).toBe(seeded)
+        expect(updated[0]!.toolInputPartial).toBe(cappedBuf)
+      })
+
+      it('caps cumulative growth across many small chunks (5 MiB of input)', () => {
+        // Realistic adversarial pattern: server emits many small chunks
+        // that together would push past the cap. Verify the buffer never
+        // grows beyond cap, regardless of arrival pattern, and the
+        // truncation boolean is set exactly once.
+        const chunk = 'x'.repeat(64 * 1024) // 64 KiB chunks
+        const numChunks = 80 // ~5 MiB total
+        let messages: ChatMessage[] = [
+          {
+            id: 'msg-2',
+            type: 'tool_use',
+            content: 'Bash',
+            toolUseId: 'tu-1',
+            timestamp: 2,
+          },
+        ]
+        for (let i = 0; i < numChunks; i++) {
+          const out = handleToolInputDelta(
+            { toolUseId: 'tu-1', partialJson: chunk },
+            'sess-active',
+          )
+          messages = out!.applyTo(messages)
+        }
+        const buf = messages[0]!.toolInputPartial!
+        expect(buf.length).toBeLessThanOrEqual(MAX_TOOL_INPUT_PARTIAL_LEN)
+        expect(buf.endsWith('...[truncated]')).toBe(false)
+        expect(messages[0]!.toolInputPartialTruncated).toBe(true)
+      })
     })
   })
 })
@@ -5476,5 +8039,720 @@ describe('handleResultUsage', () => {
     expect(
       handleResultUsage({ sessionId: null }, 'active-1').sessionId,
     ).toBe('active-1')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleMultiQuestionIntervention (#4653)
+// ---------------------------------------------------------------------------
+describe('handleMultiQuestionIntervention', () => {
+  it('appends a new intervention entry when toolUseId is unseen', () => {
+    const builder = handleMultiQuestionIntervention(
+      {
+        sessionId: 'sess-1',
+        toolUseId: 'toolu_1',
+        questionCount: 3,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      },
+      'active-1',
+    )
+    expect(builder).not.toBeNull()
+    expect(builder!.sessionId).toBe('sess-1')
+    const { interventions } = builder!.applyTo([])
+    expect(interventions).toHaveLength(1)
+    expect(interventions[0]).toEqual({
+      kind: 'multi_question',
+      toolUseId: 'toolu_1',
+      count: 3,
+      timestamp: 1700000000000,
+    })
+  })
+
+  it('falls back to active session when message has no sessionId', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_2', questionCount: 2 },
+      'active-1',
+    )
+    expect(builder!.sessionId).toBe('active-1')
+  })
+
+  it('dedups repeats by toolUseId — returns the array unchanged so React skips a re-render', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_dup', count: 4, timestamp: 100 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_dup', questionCount: 4, timestamp: 200 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    // Same reference — referential equality preserved for the React diff.
+    expect(interventions).toBe(existing)
+  })
+
+  it('appends second distinct intervention to existing list', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_a', count: 2, timestamp: 100 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_b', questionCount: 5, timestamp: 200 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    expect(interventions).toHaveLength(2)
+    expect(interventions[1].toolUseId).toBe('toolu_b')
+    expect(interventions[1].count).toBe(5)
+  })
+
+  it('defaults timestamp to Date.now() when payload omits it', () => {
+    const before = Date.now()
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_now', questionCount: 2 },
+      'active-1',
+    )
+    const after = Date.now()
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].timestamp).toBeGreaterThanOrEqual(before)
+    expect(interventions[0].timestamp).toBeLessThanOrEqual(after)
+  })
+
+  it('floors fractional questionCount (defence-in-depth against malformed payloads)', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_frac', questionCount: 3.7 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo([])
+    // 3.7 floors to 3 — still >= 2, so it's accepted with the floored value.
+    expect(interventions[0].count).toBe(3)
+  })
+
+  it('returns null when toolUseId is missing or non-string', () => {
+    expect(
+      handleMultiQuestionIntervention({ questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: '', questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 123, questionCount: 2 }, 'active-1'),
+    ).toBeNull()
+  })
+
+  it('returns null when questionCount is missing, non-finite, or < 2 (mirrors wire schema)', () => {
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a' }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: NaN }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention(
+        { toolUseId: 'a', questionCount: Number.POSITIVE_INFINITY },
+        'active-1',
+      ),
+    ).toBeNull()
+    // < 2 — the permission-hook never denies single-q forms, so a 0/1
+    // count is a malformed payload and would render a misleading
+    // "0 questions" or "1 question" in the UI.
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: -1 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 0 }, 'active-1'),
+    ).toBeNull()
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 1 }, 'active-1'),
+    ).toBeNull()
+    // 1.9 floors to 1 — also rejected (defence against fractional payloads
+    // that would sneak past a naive `>= 2` check).
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 1.9 }, 'active-1'),
+    ).toBeNull()
+    // Boundary: exactly 2 is the smallest valid count.
+    expect(
+      handleMultiQuestionIntervention({ toolUseId: 'a', questionCount: 2 }, 'active-1'),
+    ).not.toBeNull()
+  })
+
+  it('accepts timestamp === 0 (epoch is valid per protocol — clock-skewed dev environments)', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_epoch', questionCount: 2, timestamp: 0 },
+      'a',
+    )
+    expect(builder).not.toBeNull()
+    const { interventions } = builder!.applyTo([])
+    expect(interventions[0].timestamp).toBe(0)
+  })
+
+  it('ring-caps the array at MAX_SESSION_INTERVENTIONS (drops oldest entries)', async () => {
+    const { MAX_SESSION_INTERVENTIONS } = await import('../utils')
+    // Pre-fill exactly to the cap with synthetic entries
+    const existing = Array.from({ length: MAX_SESSION_INTERVENTIONS }, (_, i) => ({
+      kind: 'multi_question' as const,
+      toolUseId: `toolu_${i}`,
+      count: 2,
+      timestamp: i,
+    }))
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_new', questionCount: 7, timestamp: 9999 },
+      'active-1',
+    )
+    const { interventions } = builder!.applyTo(existing)
+    expect(interventions).toHaveLength(MAX_SESSION_INTERVENTIONS)
+    // Oldest dropped, newest at the end.
+    expect(interventions[0].toolUseId).toBe('toolu_1')
+    expect(interventions[interventions.length - 1].toolUseId).toBe('toolu_new')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// applyInterventionBuilder (#4653)
+// ---------------------------------------------------------------------------
+describe('applyInterventionBuilder', () => {
+  it('reports isFirst=true when this is the first intervention in an empty session', () => {
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_first', questionCount: 2 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, [])
+    expect(interventions).toHaveLength(1)
+    expect(isFirst).toBe(true)
+  })
+
+  it('reports isFirst=false on subsequent distinct interventions', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_prev', count: 2, timestamp: 1 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_next', questionCount: 3 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
+    expect(interventions).toHaveLength(2)
+    expect(isFirst).toBe(false)
+  })
+
+  it('reports isFirst=false when a duplicate skips the append (no inline-notice on stuck-model re-emit)', () => {
+    const existing = [
+      { kind: 'multi_question' as const, toolUseId: 'toolu_dup', count: 2, timestamp: 1 },
+    ]
+    const builder = handleMultiQuestionIntervention(
+      { toolUseId: 'toolu_dup', questionCount: 2 },
+      'a',
+    )!
+    const { interventions, isFirst } = applyInterventionBuilder(builder, existing)
+    expect(interventions).toBe(existing)
+    expect(isFirst).toBe(false)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// sharedStreamDelta (#4981) — platform-neutral hot-path logic
+//
+// These exercise the logic that previously lived (duplicated) inside the
+// dashboard `handleStreamDelta` and the app `case 'stream_delta'`: the
+// single-hop defensive remap, the post-tool continuation split (#4889) with
+// the #4999/#5014 mid-sentence gate, and the #4975 mid-word peel. A minimal
+// in-memory harness models a single-session store; the platform-divergent
+// hooks (terminal write, #4297 reorder, flat fallback) are no-ops here and
+// covered by the dashboard/app wrapper integration suites.
+// ---------------------------------------------------------------------------
+
+describe('sharedStreamDelta (#4981)', () => {
+  function makeHarness(sessionId: string) {
+    // Single session-state messages array + streamingMessageId.
+    let messages: ChatMessage[] = []
+    let streamingMessageId: string | null = null
+    const pendingDeltas = new Map<string, PendingDelta>()
+    const deltaIdRemaps = new Map<string, string>()
+    const postPermissionSplits = new Set<string>()
+    const replayingSessions = new Set<string>()
+
+    const ctx: StreamDeltaContext = {
+      activeSessionId: sessionId,
+      pendingDeltas,
+      deltaIdRemaps,
+      postPermissionSplits,
+      replayingSessions,
+      getSessionMessages: (id) => (id === sessionId ? messages : null),
+      getFlatMessages: () => [],
+      appendTerminalDelta: () => {},
+      reorderEmptyResponseSlot: () => {},
+      appendResponseSlot: (targetId, slot, opts) => {
+        if (targetId !== sessionId) return
+        if (opts?.onlyIfAbsent && messages.some((m) => m.id === slot.id)) return
+        streamingMessageId = slot.id
+        messages = [...messages, slot]
+      },
+      peelSlotContent: (targetId, id, count) => {
+        if (targetId !== sessionId) return
+        messages = messages.map((m) =>
+          m.id === id && m.type === 'response'
+            ? { ...m, content: m.content.slice(0, m.content.length - count) }
+            : m,
+        )
+      },
+      scheduleFlush: () => {},
+    }
+
+    // Emulate the 100ms flush: append each buffered delta onto its matching
+    // response slot's flushed content (the matched-id path of the real
+    // flushPendingDeltas).
+    function flush() {
+      for (const [id, { delta }] of pendingDeltas) {
+        messages = messages.map((m) =>
+          m.id === id && m.type === 'response'
+            ? { ...m, content: m.content + delta }
+            : m,
+        )
+      }
+      pendingDeltas.clear()
+    }
+
+    function send(msg: Record<string, unknown>) {
+      sharedStreamDelta({ sessionId, ...msg }, ctx)
+    }
+
+    function seedResponse(id: string, content = '') {
+      streamingMessageId = id
+      messages = [...messages, { id, type: 'response', content, timestamp: 1 }]
+    }
+    function seedTool(id: string) {
+      messages = [...messages, { id, type: 'tool_use', content: 'x', timestamp: 1 }]
+    }
+
+    return {
+      send,
+      flush,
+      seedResponse,
+      seedTool,
+      get messages() { return messages },
+      get streamingMessageId() { return streamingMessageId },
+      pendingDeltas,
+      deltaIdRemaps,
+      postPermissionSplits,
+      replayingSessions,
+    }
+  }
+
+  it('buffers the delta onto the same slot when no tool follows', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello ')
+    h.send({ messageId: 'resp-1', delta: 'world' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Hello world')
+  })
+
+  it('post-tool continuation split (#4889): sentence-terminated prior slot → fresh -cont- bubble', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Let me check chroxy before filing.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Filing now.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(2)
+    expect(responses[0]!.content).toBe('Let me check chroxy before filing.')
+    expect(responses[1]!.content).toBe('Filing now.')
+    expect(responses[1]!.id).toMatch(/^resp-1-cont-/)
+    // Single-hop remap recorded against the ORIGINAL incoming id.
+    expect(h.deltaIdRemaps.get('resp-1')).toBe(responses[1]!.id)
+  })
+
+  it('single-hop remap: a second post-tool delta reuses the existing remap (no chain)', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'First sentence.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
+    h.flush()
+    const firstCont = h.deltaIdRemaps.get('resp-1')!
+    h.seedTool('toolu_b')
+    h.send({ messageId: 'resp-1', delta: 'Third sentence.' })
+    h.flush()
+    const secondCont = h.deltaIdRemaps.get('resp-1')!
+    // The map still keys on the original id (single entry, overwritten).
+    expect(h.deltaIdRemaps.size).toBe(1)
+    expect(secondCont).not.toBe(firstCont)
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses.map((r) => r.content)).toEqual([
+      'First sentence.',
+      'Second sentence.',
+      'Third sentence.',
+    ])
+  })
+
+  it('mid-sentence gate (#4999): non-terminated prior slot → delta coalesces into same bubble', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Let me check the')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: ' issue list' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    // No split — one bubble.
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Let me check the issue list')
+    expect(h.deltaIdRemaps.has('resp-1')).toBe(false)
+  })
+
+  it('mid-sentence gate (#5014): CJK fullwidth terminator counts as sentence-complete → split', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', '调查问题。')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: '现在提交。' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(2)
+    expect(responses[1]!.id).toMatch(/^resp-1-cont-/)
+  })
+
+  it('mid-word inside a sentence (#4975/#4999): prior ends mid-word → gate coalesces into ONE bubble', () => {
+    const h = makeHarness('s1')
+    // Prior content ends with a word char (`...PR #3.Del` → last char `l`),
+    // so the #4999 mid-sentence gate routes the post-tool delta back to the
+    // existing slot. The word "Delegating" reassembles in a single bubble and
+    // the #4975 peel never needs to fire.
+    h.seedResponse('resp-1', 'Starting on PR #3.Del')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'egating the review.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Starting on PR #3.Delegating the review.')
+    expect(responses[0]!.content).toContain('Delegating')
+  })
+
+  it('mid-word inside a sentence with still-buffered prior (delta not yet flushed) also coalesces', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Starting on PR #3.')
+    // Buffer "Del" without flushing — counts as content for the split decision.
+    h.send({ messageId: 'resp-1', delta: 'Del' })
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'egating the review.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Starting on PR #3.Delegating the review.')
+  })
+
+  it('replay guard: no continuation split while the session is replaying', () => {
+    const h = makeHarness('s1')
+    h.replayingSessions.add('s1')
+    h.seedResponse('resp-1', 'First sentence.')
+    h.seedTool('toolu_a')
+    h.send({ messageId: 'resp-1', delta: 'Second sentence.' })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    // Replayed history is reassembled server-side — the delta coalesces onto
+    // the existing slot instead of splitting into a fresh -cont- bubble.
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('First sentence.Second sentence.')
+    expect(h.deltaIdRemaps.has('resp-1')).toBe(false)
+  })
+
+  it('defensive remap: delta whose slot is a tool_use routes to a -response slot', () => {
+    const h = makeHarness('s1')
+    // A tool_use occupies the incoming id (server reused messageId).
+    h.seedTool('resp-collide')
+    h.send({ messageId: 'resp-collide', delta: 'hi' })
+    h.flush()
+    const suffixed = h.messages.find((m) => m.id === 'resp-collide-response')
+    expect(suffixed).toBeDefined()
+    expect(suffixed!.type).toBe('response')
+    expect(suffixed!.content).toBe('hi')
+    expect(h.deltaIdRemaps.get('resp-collide')).toBe('resp-collide-response')
+  })
+
+  // -------------------------------------------------------------------------
+  // #5130 — malformed-payload hardening. ServerStreamDeltaSchema declares
+  // `messageId` and `delta` as required `z.string()`, so these arms only fire
+  // for payloads that bypassed Zod parse. Valid payloads (covered by every
+  // test above) are unaffected.
+  // -------------------------------------------------------------------------
+
+  it('#5130: non-string messageId early-returns without poisoning any collection', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    // messageId is a number — must not become a Map/Set key.
+    h.send({ messageId: 123 as unknown as string, delta: 'world' })
+    h.flush()
+    // No buffering happened, content untouched.
+    expect(h.pendingDeltas.size).toBe(0)
+    expect(h.deltaIdRemaps.size).toBe(0)
+    expect(h.postPermissionSplits.size).toBe(0)
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    expect(responses[0]!.content).toBe('Hello')
+    // No non-string key leaked into pendingDeltas.
+    for (const key of h.pendingDeltas.keys()) {
+      expect(typeof key).toBe('string')
+    }
+  })
+
+  it('#5130: missing messageId early-returns', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    h.send({ delta: 'world' })
+    h.flush()
+    expect(h.pendingDeltas.size).toBe(0)
+    expect(h.deltaIdRemaps.size).toBe(0)
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses[0]!.content).toBe('Hello')
+  })
+
+  it('#5130: missing delta does NOT append the literal "undefined"', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    h.send({ messageId: 'resp-1' }) // delta absent
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses).toHaveLength(1)
+    // The literal "undefined" must NOT have been concatenated.
+    expect(responses[0]!.content).toBe('Hello')
+    expect(responses[0]!.content).not.toContain('undefined')
+    expect(h.pendingDeltas.size).toBe(0)
+  })
+
+  it('#5130: non-string delta does NOT append (early-return, nothing buffered)', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello')
+    h.send({ messageId: 'resp-1', delta: { foo: 'bar' } as unknown as string })
+    h.flush()
+    const responses = h.messages.filter((m) => m.type === 'response')
+    expect(responses[0]!.content).toBe('Hello')
+    expect(responses[0]!.content).not.toContain('[object Object]')
+    expect(h.pendingDeltas.size).toBe(0)
+  })
+
+  it('#5130: non-string sessionId falls back to the active session (no Map-key coercion)', () => {
+    const h = makeHarness('s1')
+    h.seedResponse('resp-1', 'Hello ')
+    // Call the handler directly to override the harness's spread sessionId with
+    // a non-string value. The captured sessionId should fall back to the
+    // active session ('s1'), and the delta should buffer + flush normally.
+    sharedStreamDelta(
+      { messageId: 'resp-1', delta: 'world', sessionId: 42 as unknown as string },
+      {
+        activeSessionId: 's1',
+        pendingDeltas: h.pendingDeltas,
+        deltaIdRemaps: h.deltaIdRemaps,
+        postPermissionSplits: h.postPermissionSplits,
+        replayingSessions: h.replayingSessions,
+        getSessionMessages: (id) => (id === 's1' ? h.messages : null),
+        getFlatMessages: () => [],
+        appendTerminalDelta: () => {},
+        reorderEmptyResponseSlot: () => {},
+        appendResponseSlot: () => {},
+        peelSlotContent: () => {},
+        scheduleFlush: () => {},
+      },
+    )
+    // The buffered entry's sessionId must be the active-session fallback, not 42.
+    const buffered = h.pendingDeltas.get('resp-1')
+    expect(buffered).toBeDefined()
+    expect(buffered!.sessionId).toBe('s1')
+    expect(buffered!.delta).toBe('world')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleRawOutput (#5454)
+// ---------------------------------------------------------------------------
+describe('handleRawOutput', () => {
+  it('extracts the data field verbatim', () => {
+    expect(handleRawOutput({ data: 'hello\x1b[0m' }).data).toBe('hello\x1b[0m')
+  })
+
+  it('falls back to the empty string for missing or non-string data', () => {
+    // The declared `{ data: string }` type is honest: a malformed payload
+    // appends nothing rather than letting `undefined` flow into the
+    // dashboard's `stripAnsi(data)` (which throws on non-strings). The
+    // server's raw payload is always a PTY string, so this is unreachable
+    // from a well-behaved producer.
+    expect(handleRawOutput({}).data).toBe('')
+    expect(handleRawOutput({ data: 42 }).data).toBe('')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleTokenRotated (#5454)
+// ---------------------------------------------------------------------------
+describe('handleTokenRotated', () => {
+  it('returns the token when it is a string', () => {
+    expect(handleTokenRotated({ token: 'tok-1' }).token).toBe('tok-1')
+  })
+
+  it('passes the empty string through verbatim (call sites gate on truthiness)', () => {
+    expect(handleTokenRotated({ token: '' }).token).toBe('')
+  })
+
+  it('returns null for missing or non-string tokens', () => {
+    expect(handleTokenRotated({}).token).toBeNull()
+    expect(handleTokenRotated({ token: 42 }).token).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handlePairFail (#5454)
+// ---------------------------------------------------------------------------
+describe('handlePairFail', () => {
+  it('maps known reasons to the friendly QR-flow copy', () => {
+    for (const reason of Object.keys(PAIR_FAIL_MESSAGES)) {
+      const result = handlePairFail({ reason }, 'pairing_failed')
+      expect(result.reason).toBe(reason)
+      expect(result.alertMessage).toBe(PAIR_FAIL_MESSAGES[reason])
+    }
+  })
+
+  it('falls back to the generic template for unknown reasons', () => {
+    const result = handlePairFail({ reason: 'weird_reason' }, 'pairing_failed')
+    expect(result.reason).toBe('weird_reason')
+    expect(result.alertMessage).toBe('Pairing failed: weird_reason')
+  })
+
+  it('uses the injected fallback for missing, empty, and non-string reasons', () => {
+    expect(handlePairFail({}, 'pairing_failed').reason).toBe('pairing_failed')
+    expect(handlePairFail({ reason: '' }, 'unknown').reason).toBe('unknown')
+    expect(handlePairFail({ reason: 42 }, 'unknown').reason).toBe('unknown')
+    expect(handlePairFail({}, 'unknown').alertMessage).toBe('Pairing failed: unknown')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleSessionCostThresholdCrossed (#5454)
+// ---------------------------------------------------------------------------
+describe('handleSessionCostThresholdCrossed', () => {
+  it('builds the costThresholdWarning patch for the explicit session', () => {
+    const result = handleSessionCostThresholdCrossed({
+      sessionId: 'sess-1',
+      costUsd: 5.25,
+      thresholdUsd: 5,
+    })
+    expect(result.sessionId).toBe('sess-1')
+    expect(result.patch).toEqual({
+      costThresholdWarning: { costUsd: 5.25, thresholdUsd: 5, dismissedAt: null },
+    })
+  })
+
+  it('does NOT fall back to any active session — explicit sessionId only', () => {
+    expect(handleSessionCostThresholdCrossed({ costUsd: 1, thresholdUsd: 1 }).sessionId).toBeNull()
+    expect(handleSessionCostThresholdCrossed({ sessionId: 42 }).sessionId).toBeNull()
+  })
+
+  it('defaults non-finite / missing / non-number amounts to 0', () => {
+    const result = handleSessionCostThresholdCrossed({
+      sessionId: 's',
+      costUsd: Number.NaN,
+      thresholdUsd: '5',
+    })
+    expect(result.patch.costThresholdWarning.costUsd).toBe(0)
+    expect(result.patch.costThresholdWarning.thresholdUsd).toBe(0)
+    expect(
+      handleSessionCostThresholdCrossed({ sessionId: 's', costUsd: Infinity })
+        .patch.costThresholdWarning.costUsd,
+    ).toBe(0)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// handleNotificationPrefs (#5454)
+// ---------------------------------------------------------------------------
+describe('handleNotificationPrefs', () => {
+  const validMsg = {
+    type: 'notification_prefs',
+    prefs: {
+      categories: { permission: true, activity_error: false },
+      devices: {},
+      quietHours: null,
+    },
+  }
+
+  it('parses a valid snapshot into the stored shape', () => {
+    const { notificationPrefs, issues } = handleNotificationPrefs(validMsg)
+    expect(issues).toBeNull()
+    expect(notificationPrefs).toEqual({
+      categories: { permission: true, activity_error: false },
+      devices: {},
+      quietHours: null,
+    })
+    // bypassCategories must be OMITTED (not undefined-valued) when absent
+    expect(Object.prototype.hasOwnProperty.call(notificationPrefs, 'bypassCategories')).toBe(false)
+  })
+
+  it('forwards bypassCategories and quietHours when present (#4544)', () => {
+    const { notificationPrefs } = handleNotificationPrefs({
+      type: 'notification_prefs',
+      prefs: {
+        categories: { permission: true },
+        devices: {
+          'device-1': { quietHours: { start: '22:00', end: '07:00', timezone: 'Australia/Melbourne' } },
+        },
+        quietHours: { start: '23:00', end: '06:00', timezone: 'Australia/Melbourne' },
+        bypassCategories: ['permission'],
+      },
+    })
+    expect(notificationPrefs).not.toBeNull()
+    expect(notificationPrefs!.bypassCategories).toEqual(['permission'])
+    expect(notificationPrefs!.quietHours).toEqual({
+      start: '23:00',
+      end: '06:00',
+      timezone: 'Australia/Melbourne',
+    })
+    expect(notificationPrefs!.devices['device-1']!.quietHours).toEqual({
+      start: '22:00',
+      end: '07:00',
+      timezone: 'Australia/Melbourne',
+    })
+  })
+
+  it('returns issues (and null prefs) when validation fails', () => {
+    const { notificationPrefs, issues } = handleNotificationPrefs({
+      type: 'notification_prefs',
+      prefs: { categories: { permission: 'yes' }, devices: {}, quietHours: null },
+    })
+    expect(notificationPrefs).toBeNull()
+    expect(Array.isArray(issues)).toBe(true)
+    expect((issues as unknown[]).length).toBeGreaterThan(0)
+  })
+
+  it('rejects a quiet-hours window missing its timezone (#4544)', () => {
+    const { notificationPrefs } = handleNotificationPrefs({
+      type: 'notification_prefs',
+      prefs: {
+        categories: {},
+        devices: {},
+        quietHours: { start: '22:00', end: '07:00' },
+      },
+    })
+    expect(notificationPrefs).toBeNull()
+  })
+})
+
+// ---------------------------------------------------------------------------
+// resolvePermissionStreamSplit (#554 / #5454)
+// ---------------------------------------------------------------------------
+describe('resolvePermissionStreamSplit', () => {
+  it('returns null when there is no current stream', () => {
+    expect(resolvePermissionStreamSplit(null, new Map())).toBeNull()
+  })
+
+  it('returns null for the "pending" placeholder id', () => {
+    expect(resolvePermissionStreamSplit('pending', new Map())).toBeNull()
+  })
+
+  it('returns the current stream id verbatim when no remap matches', () => {
+    expect(resolvePermissionStreamSplit('msg-1', new Map([['orig-9', 'other']]))).toEqual({
+      serverStreamId: 'msg-1',
+    })
+  })
+
+  it('reverse-maps a remapped client id back to the server-origin id', () => {
+    const remaps = new Map([
+      ['orig-1', 'client-1'],
+      ['orig-2', 'client-2'],
+    ])
+    expect(resolvePermissionStreamSplit('client-2', remaps)).toEqual({
+      serverStreamId: 'orig-2',
+    })
   })
 })

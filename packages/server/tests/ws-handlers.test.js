@@ -206,6 +206,59 @@ describe('WS handler: destroy_session', () => {
     ws.close()
   })
 
+  it('rejects destroying a session while it is running', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Busy', cwd: '/tmp', isRunning: true },
+    ])
+    manager.destroySession = createSpy(() => {})
+    manager.destroySessionLocked = createSpy(() => Promise.resolve())
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2' })
+
+    const error = await waitForMessage(messages, 'session_error')
+    assert.ok(error.message.includes('running'), 'Error should mention the session is running')
+    assert.equal(manager.destroySession.callCount, 0, 'destroySession should NOT be called')
+    assert.equal(manager.destroySessionLocked.callCount, 0, 'destroySessionLocked should NOT be called')
+
+    ws.close()
+  })
+
+  it('force-destroys a running session when force:true bypasses the guard (#5710)', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'First', cwd: '/tmp' },
+      { id: 'sess-2', name: 'Wedged', cwd: '/tmp', isRunning: true },
+    ])
+    manager.destroySession = createSpy(() => {})
+    manager.destroySessionLocked = createSpy(() => Promise.resolve())
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    // force:true must bypass the #5695 isRunning guard so a wedged session can
+    // still be deleted (the schema now carries `force` after the dist rebuild).
+    send(ws, { type: 'destroy_session', sessionId: 'sess-2', force: true })
+
+    const destroyed = await waitForMessage(messages, 'session_destroyed')
+    assert.equal(destroyed.sessionId, 'sess-2', 'the wedged session is destroyed')
+    assert.equal(manager.destroySessionLocked.callCount, 1, 'destroySessionLocked SHOULD be called despite isRunning')
+
+    ws.close()
+  })
+
   it('awaits destroySessionLocked when present', async () => {
     const { manager, sessionsMap } = createMockSessionManager([
       { id: 'sess-1', name: 'First', cwd: '/tmp' },
@@ -331,7 +384,7 @@ describe('WS handler: resume_budget', () => {
   let server
   afterEach(() => { if (server) { server.close(); server = null } })
 
-  it('resumes a paused budget and broadcasts', async () => {
+  it('resumes a paused budget, broadcasts, and acks with wasPaused:true', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Default', cwd: '/tmp' },
     ])
@@ -351,11 +404,15 @@ describe('WS handler: resume_budget', () => {
     const resumed = await waitForMessage(messages, 'budget_resumed')
     assert.ok(resumed, 'Should receive budget_resumed')
     assert.equal(manager.resumeBudget.callCount, 1)
+    // #5752: the requesting client also gets a dedicated ack.
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.wasPaused, true)
 
     ws.close()
   })
 
-  it('does nothing when budget is not paused', async () => {
+  it('acks with wasPaused:false without broadcasting when budget is not paused', async () => {
     const { manager } = createMockSessionManager([
       { id: 'sess-1', name: 'Default', cwd: '/tmp' },
     ])
@@ -372,11 +429,39 @@ describe('WS handler: resume_budget', () => {
     messages.length = 0
     send(ws, { type: 'resume_budget' })
 
-    // Wait a bit to ensure no message is sent
-    await new Promise(r => setTimeout(r, 200))
+    // #5752: even when not paused, the client gets a dedicated ack so the resume
+    // control is never silently dead — deterministic instead of a sleep+poll.
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.wasPaused, false)
+    // But NO un-pause and NO budget_resumed (which would inject a false note).
     const resumed = messages.find(m => m.type === 'budget_resumed')
     assert.equal(resumed, undefined, 'Should NOT receive budget_resumed when not paused')
     assert.equal(manager.resumeBudget.callCount, 0)
+
+    ws.close()
+  })
+
+  it('echoes a within-cap requestId for correlation', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-1', name: 'Default', cwd: '/tmp' },
+    ])
+    manager.isBudgetPaused = () => false
+    manager.resumeBudget = createSpy()
+
+    server = new WsServer({
+      port: 0, apiToken: 'test-token', authRequired: false,
+      sessionManager: manager,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port)
+
+    messages.length = 0
+    send(ws, { type: 'resume_budget', requestId: 'req-42' })
+
+    const ack = await waitForMessage(messages, 'budget_resume_ack')
+    assert.ok(ack, 'Should receive budget_resume_ack')
+    assert.equal(ack.requestId, 'req-42')
 
     ws.close()
   })

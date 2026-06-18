@@ -13,6 +13,9 @@ import {
 } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir, homedir } from 'node:os'
+import { nsCtx } from './test-helpers.js'
+import { createClientSender } from '../src/ws-client-sender.js'
+import { createKeyPair, deriveSharedKey, decrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
 import {
   validateAttachments,
   resolveFileRefAttachments,
@@ -27,10 +30,41 @@ import {
   ALLOWED_IMAGE_TYPES,
   broadcastFocusChanged,
   resolveSession,
+  resolveSessionOrError,
+  requireSessionMethod,
+  sendSessionError,
   sendError,
   buildSessionTokenMismatchPayload,
   SESSION_TOKEN_MISMATCH_DEFAULT_MESSAGE,
+  isSessionViewer,
+  terminalMirrorRecipient,
 } from '../src/handler-utils.js'
+
+// audit P1-2: the live-terminal mirror recipient predicate. The delivery filter
+// (ws-forwarding) and the coalescer gate (ws-server) must use this same function
+// so the gate can never diverge from who actually receives terminal_output.
+describe('terminalMirrorRecipient', () => {
+  const viewerOpted = { activeSessionId: 's1', subscribedSessionIds: new Set(), terminalSessionIds: new Set(['s1']) }
+  const subscribedOpted = { activeSessionId: null, subscribedSessionIds: new Set(['s1']), terminalSessionIds: new Set(['s1']) }
+  const viewerNotOpted = { activeSessionId: 's1', subscribedSessionIds: new Set(), terminalSessionIds: new Set() }
+  const optedNotViewing = { activeSessionId: 's2', subscribedSessionIds: new Set(), terminalSessionIds: new Set(['s1']) }
+  const noTerminalSet = { activeSessionId: 's1', subscribedSessionIds: new Set() }
+
+  it('is true only when opted into the terminal AND viewing the session', () => {
+    assert.equal(terminalMirrorRecipient(viewerOpted, 's1'), true)
+    assert.equal(terminalMirrorRecipient(subscribedOpted, 's1'), true)
+    assert.equal(terminalMirrorRecipient(viewerNotOpted, 's1'), false, 'viewing but not opted in')
+    assert.equal(terminalMirrorRecipient(optedNotViewing, 's1'), false, 'opted in but viewing a different session')
+    assert.equal(terminalMirrorRecipient(noTerminalSet, 's1'), false, 'no terminalSessionIds set at all')
+  })
+
+  it('equals (opted-in AND isSessionViewer) — the contract the gate and filter share', () => {
+    for (const client of [viewerOpted, subscribedOpted, viewerNotOpted, optedNotViewing]) {
+      const expected = Boolean(client.terminalSessionIds && client.terminalSessionIds.has('s1')) && isSessionViewer(client, 's1')
+      assert.equal(terminalMirrorRecipient(client, 's1'), expected)
+    }
+  })
+})
 
 // -- Temp directory setup --
 let testDir
@@ -916,13 +950,13 @@ describe('handler-utils constants', () => {
 // ============================================================
 
 describe('broadcastFocusChanged', () => {
-  it('calls ctx.broadcast with correct message shape', () => {
+  it('calls ctx.transport.broadcast with correct message shape', () => {
     let capturedMsg = null
-    const ctx = {
+    const ctx = nsCtx({
       broadcast(msg) {
         capturedMsg = msg
       }
-    }
+    })
     const client = { id: 'client-1' }
     broadcastFocusChanged(client, 'session-42', ctx)
 
@@ -934,9 +968,9 @@ describe('broadcastFocusChanged', () => {
 
   it('filter excludes the sending client', () => {
     let capturedFilter = null
-    const ctx = {
+    const ctx = nsCtx({
       broadcast(_msg, filter) { capturedFilter = filter }
-    }
+    })
     broadcastFocusChanged({ id: 'client-A' }, 'sess', ctx)
 
     assert.ok(capturedFilter({ id: 'client-B' }), 'other client should pass filter')
@@ -1063,37 +1097,126 @@ describe('sendError', () => {
     // And global Object.prototype must remain unpolluted.
     assert.strictEqual({}.polluted, undefined)
   })
+
+  // #5632: sendError now accepts an optional handler `ctx` and, when present,
+  // routes the error through `ctx.transport.send` (→ WsServer._send → the
+  // per-client encrypting sender) instead of the raw `ws.send`. This makes a
+  // post-handshake error frame ENCRYPTED so the client's plaintext guard
+  // (connection.ts) doesn't reject it as a downgrade. A forged plaintext
+  // `error` post-encryption is then correctly rejected client-side.
+  describe('encryption-aware routing (#5632)', () => {
+    it('routes through ctx.transport.send when a ctx is supplied', () => {
+      const sent = []
+      const ws = { readyState: 1, send: () => { throw new Error('raw ws.send must not be used when ctx is present') } }
+      const ctx = { transport: { send: (targetWs, payload) => sent.push({ targetWs, payload }) } }
+
+      sendError(ws, 'req-1', 'INVALID_MODEL', 'nope', undefined, ctx)
+
+      assert.strictEqual(sent.length, 1)
+      assert.strictEqual(sent[0].targetWs, ws)
+      assert.strictEqual(sent[0].payload.type, 'error')
+      assert.strictEqual(sent[0].payload.code, 'INVALID_MODEL')
+      assert.strictEqual(sent[0].payload.message, 'nope')
+    })
+
+    it('falls back to raw ws.send when no ctx is supplied (pre-auth call sites)', () => {
+      const sent = []
+      const ws = { readyState: 1, send: (data) => sent.push(JSON.parse(data)) }
+      sendError(ws, 'req-2', 'FORBIDDEN', 'pre-auth')
+      assert.strictEqual(sent.length, 1)
+      assert.strictEqual(sent[0].type, 'error')
+      assert.strictEqual(sent[0].code, 'FORBIDDEN')
+    })
+
+    it('still merges data fields through the ctx.transport path', () => {
+      const sent = []
+      const ws = { readyState: 1, send: () => {} }
+      const ctx = { transport: { send: (_ws, payload) => sent.push(payload) } }
+      sendError(ws, 'req-3', 'INVALID_AUTHOR', 'wrong', { actualAuthor: 'alice' }, ctx)
+      assert.strictEqual(sent[0].actualAuthor, 'alice')
+      assert.strictEqual(sent[0].type, 'error')
+    })
+
+    // End-to-end through the real WsServer send pipeline shape: ctx.transport.send
+    // is `(ws, msg) => server._send(ws, msg)` and _send looks the client up by ws
+    // and hands off to the per-client encrypting sender. We reconstruct that path
+    // here with the real createClientSender to prove the wire frame is `encrypted`
+    // when the client's encryptionState is set, and a plaintext `error` when it is
+    // not — matching the client guard's expectation either side of the handshake.
+    it('produces an ENCRYPTED frame when the client encryptionState is established', () => {
+      const serverKp = createKeyPair()
+      const clientKp = createKeyPair()
+      const serverShared = deriveSharedKey(clientKp.publicKey, serverKp.secretKey)
+      const clientShared = deriveSharedKey(serverKp.publicKey, clientKp.secretKey)
+
+      const sent = []
+      const ws = { readyState: 1, send: (data) => sent.push(data) }
+      const client = { _seq: 0, encryptionState: { sharedKey: serverShared, sendNonce: 0, recvNonce: 0 } }
+      const clientSend = createClientSender({ error: () => {}, warn: () => {} })
+      // Mirror WsServer._send: (ws, msg) => clientSend(ws, client, msg)
+      const ctx = { transport: { send: (targetWs, payload) => clientSend(targetWs, client, payload) } }
+
+      sendError(ws, 'req-enc', 'INVALID_MODEL', 'gpt-9000', undefined, ctx)
+
+      assert.strictEqual(sent.length, 1)
+      const envelope = JSON.parse(sent[0])
+      // Wire frame is an `encrypted` envelope, NOT a plaintext { type: 'error' }.
+      assert.strictEqual(envelope.type, 'encrypted')
+      assert.strictEqual(typeof envelope.d, 'string')
+      assert.strictEqual(typeof envelope.n, 'number')
+      // The client can decrypt it back to the original error frame.
+      const plain = decrypt(envelope, clientShared, 0, DIRECTION_SERVER)
+      assert.strictEqual(plain.type, 'error')
+      assert.strictEqual(plain.code, 'INVALID_MODEL')
+      assert.strictEqual(plain.message, 'gpt-9000')
+    })
+
+    it('produces a PLAINTEXT error frame when the client has no encryptionState (pre-handshake)', () => {
+      const sent = []
+      const ws = { readyState: 1, send: (data) => sent.push(data) }
+      const client = { _seq: 0 } // no encryptionState
+      const clientSend = createClientSender({ error: () => {}, warn: () => {} })
+      const ctx = { transport: { send: (targetWs, payload) => clientSend(targetWs, client, payload) } }
+
+      sendError(ws, 'req-plain', 'FORBIDDEN', 'no auth yet', undefined, ctx)
+
+      assert.strictEqual(sent.length, 1)
+      const frame = JSON.parse(sent[0])
+      assert.strictEqual(frame.type, 'error')
+      assert.strictEqual(frame.code, 'FORBIDDEN')
+    })
+  })
 })
 
 describe('resolveSession', () => {
   it('returns session by msg.sessionId', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, {})
     assert.deepStrictEqual(result, session)
   })
 
   it('falls back to client.activeSessionId', () => {
     const session = { id: 'sess-2', name: 'fallback' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-2' ? session : null }
       }
-    }
+    })
     const result = resolveSession(ctx, {}, { activeSessionId: 'sess-2' })
     assert.deepStrictEqual(result, session)
   })
 
   it('prefers msg.sessionId over client.activeSessionId', () => {
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return { id, picked: true } }
       }
-    }
+    })
     const result = resolveSession(
       ctx,
       { sessionId: 'from-msg' },
@@ -1103,11 +1226,11 @@ describe('resolveSession', () => {
   })
 
   it('returns null when session not found', () => {
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession() { return undefined }
       }
-    }
+    })
     const result = resolveSession(ctx, { sessionId: 'nonexistent' }, {})
     assert.strictEqual(result, null)
   })
@@ -1118,22 +1241,22 @@ describe('resolveSession', () => {
   })
 
   it('returns null when client is null', () => {
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession() { return undefined }
       }
-    }
+    })
     const result = resolveSession(ctx, {}, null)
     assert.strictEqual(result, null)
   })
 
   it('returns null when client is bound to a different session', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const client = { activeSessionId: 'sess-1', boundSessionId: 'sess-other' }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.strictEqual(result, null)
@@ -1141,11 +1264,11 @@ describe('resolveSession', () => {
 
   it('returns session when client is bound to the same session', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const client = { activeSessionId: 'sess-1', boundSessionId: 'sess-1' }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.deepStrictEqual(result, session)
@@ -1153,11 +1276,11 @@ describe('resolveSession', () => {
 
   it('returns session when client has no bound session', () => {
     const session = { id: 'sess-1', name: 'test' }
-    const ctx = {
+    const ctx = nsCtx({
       sessionManager: {
         getSession(id) { return id === 'sess-1' ? session : null }
       }
-    }
+    })
     const client = { activeSessionId: 'sess-1', boundSessionId: null }
     const result = resolveSession(ctx, { sessionId: 'sess-1' }, client)
     assert.deepStrictEqual(result, session)
@@ -1227,5 +1350,217 @@ describe('buildSessionTokenMismatchPayload', () => {
     const payload = buildSessionTokenMismatchPayload({ boundSessionId: '' })
     assert.equal(payload.boundSessionId, null)
     assert.equal(payload.boundSessionName, null)
+  })
+})
+
+// ============================================================
+// sendSessionError — issue #4773
+// ============================================================
+//
+// Thin wrapper around ctx.transport.send that emits the canonical `session_error`
+// envelope used across handlers. Centralising the shape here means the
+// 50+ inline `ctx.transport.send(ws, { type: 'session_error', message })` sites can
+// collapse to a one-liner and any future schema tweak (adding `code`,
+// `recoverable`, etc.) happens in one place.
+
+describe('sendSessionError (#4773)', () => {
+  it('routes the session_error envelope through ctx.transport.send', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    sendSessionError(ws, ctx, 'No active session')
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].ws, ws)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'No active session')
+  })
+
+  it('does nothing when ws is null or undefined', () => {
+    const ctx = nsCtx({ send: () => assert.fail('should not be called') })
+    assert.doesNotThrow(() => sendSessionError(null, ctx, 'oops'))
+    assert.doesNotThrow(() => sendSessionError(undefined, ctx, 'oops'))
+  })
+
+  it('does nothing when ctx is missing send', () => {
+    const ws = { readyState: 1, send: () => {} }
+    assert.doesNotThrow(() => sendSessionError(ws, null, 'oops'))
+    assert.doesNotThrow(() => sendSessionError(ws, {}, 'oops'))
+  })
+})
+
+// ============================================================
+// resolveSessionOrError — issue #4773
+// ============================================================
+//
+// Wraps resolveSession so the 13 hot sites that do:
+//   const entry = resolveSession(ctx, msg, client)
+//   if (!entry) {
+//     ctx.transport.send(ws, { type: 'session_error', message: 'No active session' })
+//     return
+//   }
+// collapse to:
+//   const entry = resolveSessionOrError(ws, ctx, msg, client)
+//   if (!entry) return
+//
+// Returning `null` on miss (after emitting the error) keeps the caller
+// idiom dead-simple and identical to the manual pattern it replaces.
+
+describe('resolveSessionOrError (#4773)', () => {
+  it('returns the session entry on hit and emits nothing', () => {
+    const session = { id: 'sess-1', name: 'test' }
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: (id) => (id === 'sess-1' ? session : null) },
+    })
+    const result = resolveSessionOrError(ws, ctx, { sessionId: 'sess-1' }, {})
+    assert.deepStrictEqual(result, session)
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('returns null on miss and emits a session_error', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: () => null },
+    })
+    const result = resolveSessionOrError(ws, ctx, { sessionId: 'nope' }, {})
+    assert.strictEqual(result, null)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'No active session')
+  })
+
+  it('falls back to client.activeSessionId when msg lacks sessionId', () => {
+    const session = { id: 'sess-2', name: 'fallback' }
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: (id) => (id === 'sess-2' ? session : null) },
+    })
+    const result = resolveSessionOrError(ws, ctx, {}, { activeSessionId: 'sess-2' })
+    assert.deepStrictEqual(result, session)
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('emits the canonical "No active session" message even when sessionManager is missing', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    const result = resolveSessionOrError(ws, ctx, { sessionId: 'any' }, {})
+    assert.strictEqual(result, null)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'No active session')
+  })
+
+  it('returns null when a bound client requests a different session', () => {
+    // Binding violation: do not leak that the session exists.
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({
+      send: (ws_, msg) => sent.push({ ws: ws_, msg }),
+      sessionManager: { getSession: () => ({ id: 'sess-1' }) },
+    })
+    const result = resolveSessionOrError(
+      ws,
+      ctx,
+      { sessionId: 'sess-1' },
+      { boundSessionId: 'sess-other' }
+    )
+    assert.strictEqual(result, null)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+  })
+})
+
+// ============================================================
+// requireSessionMethod — issue #4773
+// ============================================================
+//
+// Wraps the "capability gate" pattern (6 occurrences across handlers):
+//   if (typeof entry.session.setX !== 'function') {
+//     ctx.transport.send(ws, { type: 'session_error', message: 'This provider does
+//       not support X' })
+//     return
+//   }
+// → if (!requireSessionMethod(ws, ctx, entry, 'setX',
+//      'This provider does not support X')) return
+
+describe('requireSessionMethod (#4773)', () => {
+  it('returns true and emits nothing when the method exists', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    const entry = { session: { setX() {} } }
+    const ok = requireSessionMethod(ws, ctx, entry, 'setX', 'unsupported')
+    assert.strictEqual(ok, true)
+    assert.strictEqual(sent.length, 0)
+  })
+
+  it('returns false and emits a session_error when the method is missing', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    const entry = { session: {} }
+    const ok = requireSessionMethod(
+      ws, ctx, entry, 'setX', 'This provider does not support X'
+    )
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].msg.type, 'session_error')
+    assert.strictEqual(sent[0].msg.message, 'This provider does not support X')
+  })
+
+  it('returns false when entry is null', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    const ok = requireSessionMethod(ws, ctx, null, 'setX', 'nope')
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].msg.message, 'nope')
+  })
+
+  it('returns false when entry.session is missing', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    const ok = requireSessionMethod(ws, ctx, {}, 'setX', 'nope')
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+  })
+
+  it('returns false when the property exists but is not a function', () => {
+    const sent = []
+    const ws = { readyState: 1, send: () => {} }
+    const ctx = nsCtx({ send: (ws_, msg) => sent.push({ ws: ws_, msg }) })
+    const entry = { session: { setX: 'not-a-function' } }
+    const ok = requireSessionMethod(ws, ctx, entry, 'setX', 'nope')
+    assert.strictEqual(ok, false)
+    assert.strictEqual(sent.length, 1)
+  })
+})
+
+describe('sendError fail-safe send guard (#5702 8a)', () => {
+  it('does not throw when ctx.transport.send throws (torn-down socket)', () => {
+    const ws = { readyState: 1 }
+    const ctx = { transport: { send: () => { throw new Error('socket gone') } } }
+    // A throw here would escape an error-reporting path (often a catch block).
+    assert.doesNotThrow(() => sendError(ws, 'r1', 'BOOM', 'msg', undefined, ctx))
+  })
+
+  it('does not throw when the raw ws.send throws (no ctx / pre-auth)', () => {
+    const ws = { readyState: 1, send: () => { throw new Error('socket gone') } }
+    assert.doesNotThrow(() => sendError(ws, 'r2', 'BOOM', 'msg'))
+  })
+
+  it('still sends normally on the happy path', () => {
+    const sent = []
+    const ws = { readyState: 1, send: (raw) => sent.push(JSON.parse(raw)) }
+    sendError(ws, 'r3', 'CODE', 'message')
+    assert.strictEqual(sent.length, 1)
+    assert.strictEqual(sent[0].code, 'CODE')
   })
 })

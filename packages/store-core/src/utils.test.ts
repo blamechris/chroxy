@@ -19,18 +19,38 @@ describe('createEmptyBaseSessionState', () => {
       lastResultCost: null,
       lastResultDuration: null,
       sessionCost: null,
+      cumulativeUsage: null,
+      costThresholdWarning: null,
       isIdle: true,
       lastClientActivityAt: null,
       health: 'healthy',
+      // #4879: quiet "Stop confirmed" marker — null until session_stopped lands
+      stoppedAt: null,
+      stoppedCode: null,
       activeAgents: [],
+      activeTools: [],
+      // #4307: empty array on init — populated by background_work_changed
+      // events and/or session_list snapshot seed.
+      pendingBackgroundShells: [],
+      // #5431: transcript-derived outstanding work — empty/null until an
+      // enriched claude_ready arrives.
+      transcriptBackgroundTasks: [],
+      scheduledWakeup: null,
       isPlanPending: false,
       planAllowedPrompts: [],
       primaryClientId: null,
+      sessionRole: null,
       conversationId: null,
       sessionContext: null,
       mcpServers: [],
       devPreviews: [],
       inactivityWarning: null,
+      // #4653: chroxy-side intervention ring — empty array on init,
+      // populated by multi_question_intervention events.
+      interventions: [],
+      // #5937: outgoing-message queue — empty array on init, populated by
+      // message_queued / optimistic enqueue.
+      queuedMessages: [],
     })
   })
 
@@ -41,9 +61,14 @@ describe('createEmptyBaseSessionState', () => {
     expect(a).not.toBe(b)
     expect(a.messages).not.toBe(b.messages)
     expect(a.activeAgents).not.toBe(b.activeAgents)
+    expect(a.activeTools).not.toBe(b.activeTools)
+    expect(a.pendingBackgroundShells).not.toBe(b.pendingBackgroundShells)
     expect(a.planAllowedPrompts).not.toBe(b.planAllowedPrompts)
     expect(a.mcpServers).not.toBe(b.mcpServers)
     expect(a.devPreviews).not.toBe(b.devPreviews)
+    // #4653: interventions ring is per-session — each fresh state must
+    // get its own array so a deny on session A doesn't bleed into session B.
+    expect(a.interventions).not.toBe(b.interventions)
   })
 
   it('satisfies the BaseSessionState type', () => {

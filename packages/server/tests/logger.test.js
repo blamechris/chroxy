@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, readFileSync, existsSync, chmodSync, statSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { createLogger, initFileLogging, closeFileLogging, setLogListener, redactSensitive } from '../src/logger.js'
+import { createLogger, initFileLogging, closeFileLogging, setLogListener, redactSensitive, redactSensitivePreservingEscapes } from '../src/logger.js'
 
 describe('createLogger backward compatibility', () => {
   it('returns object with info, warn, error methods', () => {
@@ -163,6 +163,23 @@ describe('log levels', () => {
     assert.ok(content.includes('info-msg'))
     assert.ok(content.includes('warn-msg'))
     assert.ok(content.includes('error-msg'))
+  })
+
+  // #6001 — audit() bypasses the level gate so a security trail survives a
+  // quiet LOG_LEVEL. At the strictest non-silent level (error), an audit line
+  // is still written and tagged [AUDIT], while a plain info line is suppressed.
+  it('at level error, audit() is still written (always-on) but info is not', () => {
+    initFileLogging({ logDir, level: 'error' })
+    const log = createLogger('shell-audit')
+    log.info('info-suppressed')
+    log.audit('audit-kept')
+    closeFileLogging()
+
+    const content = readFileSync(join(logDir, 'chroxy.log'), 'utf8')
+    assert.ok(!content.includes('info-suppressed'), 'info is suppressed at error level')
+    assert.ok(content.includes('audit-kept'), 'audit survives the level gate')
+    assert.ok(content.includes('[AUDIT]'), 'audit line is tagged [AUDIT]')
+    assert.ok(content.includes('[shell-audit]'), 'component tag preserved')
   })
 })
 
@@ -696,5 +713,172 @@ describe('withSession', () => {
 
     assert.equal(entries.length, 1)
     assert.equal(entries[0].sessionId, undefined)
+  })
+})
+
+describe('loggerForSession (#4792)', () => {
+  afterEach(() => {
+    setLogListener(null)
+  })
+
+  it('is exported as a function', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    assert.equal(typeof loggerForSession, 'function')
+  })
+
+  it('returns a logger pre-bound to a session id', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = loggerForSession('claude-tui-session', 'sess-abc')
+    log.info('hello')
+    log.warn('careful')
+    log.error('boom')
+
+    assert.equal(entries.length, 3)
+    for (const e of entries) {
+      assert.equal(e.sessionId, 'sess-abc', 'every entry must carry the bound session id')
+      assert.equal(e.component, 'claude-tui-session')
+    }
+  })
+
+  it('exposes the standard logger surface (debug/info/warn/error/log/withSession)', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const log = loggerForSession('ws', 'sess-1')
+    assert.equal(typeof log.debug, 'function')
+    assert.equal(typeof log.info, 'function')
+    assert.equal(typeof log.warn, 'function')
+    assert.equal(typeof log.error, 'function')
+    assert.equal(typeof log.log, 'function')
+    assert.equal(typeof log.withSession, 'function')
+  })
+
+  it('is equivalent to createLogger(component).withSession(sessionId)', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const direct = []
+    const factory = []
+
+    setLogListener((entry) => direct.push(entry))
+    createLogger('eq').withSession('sess-eq').info('direct line')
+
+    setLogListener(null)
+    setLogListener((entry) => factory.push(entry))
+    loggerForSession('eq', 'sess-eq').info('factory line')
+
+    assert.equal(direct[0].component, factory[0].component)
+    assert.equal(direct[0].sessionId, factory[0].sessionId)
+    assert.equal(direct[0].level, factory[0].level)
+  })
+
+  it('further .withSession(...) rebinds the session id', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    const entries = []
+    setLogListener((entry) => entries.push(entry))
+
+    const log = loggerForSession('ws', 'sess-a').withSession('sess-b')
+    log.info('rebound')
+
+    assert.equal(entries.length, 1)
+    assert.equal(entries[0].sessionId, 'sess-b',
+      'an explicit follow-up withSession should override the factory-bound id')
+  })
+
+  it('throws if sessionId is missing — the factory exists to prevent unscoped session logs', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    assert.throws(
+      () => loggerForSession('component-name'),
+      /sessionId/,
+      'calling loggerForSession without a sessionId defeats the point — must throw',
+    )
+    assert.throws(
+      () => loggerForSession('component-name', ''),
+      /sessionId/,
+      'empty string sessionId must also throw',
+    )
+    assert.throws(
+      () => loggerForSession('component-name', null),
+      /sessionId/,
+      'null sessionId must also throw',
+    )
+  })
+
+  it('throws if component is missing', async () => {
+    const { loggerForSession } = await import('../src/logger.js')
+    assert.throws(
+      () => loggerForSession(undefined, 'sess-1'),
+      /component/,
+      'calling loggerForSession without a component must throw',
+    )
+    assert.throws(
+      () => loggerForSession('', 'sess-1'),
+      /component/,
+      'empty string component must also throw',
+    )
+  })
+})
+
+describe('redactSensitive — JWT (#5358)', () => {
+  it('redacts a bare JWT printed without a Bearer/key marker', () => {
+    const jwt = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dQw4w9WgXcQabcdefghij'
+    const out = redactSensitive(`token expired: ${jwt} please re-login`)
+    assert.ok(!out.includes(jwt), 'JWT must be redacted')
+    assert.ok(out.includes('[REDACTED]'))
+  })
+
+  it('does NOT redact an ordinary dotted version/identifier', () => {
+    const s = 'upgraded to v1.2.3 and module a.b.c loaded'
+    assert.equal(redactSensitive(s), s, 'short dotted strings are not JWTs')
+  })
+})
+
+describe('redactSensitivePreservingEscapes — ANSI-split tokens (#5358)', () => {
+  it('redacts a token split mid-run by an escape sequence, preserving the escape bytes', () => {
+    // sk-ant-api03-<50 A's>, but with a CSI escape injected mid-token.
+    const head = 'sk-ant-api03-' + 'A'.repeat(20)
+    const tail = 'A'.repeat(30)
+    const input = `key ${head}\x1b[1m${tail} done`
+    const out = redactSensitivePreservingEscapes(input)
+    // The contiguous token never appears (it was split, but detection strips the escape)
+    assert.ok(!out.includes(head + tail), 'reassembled token must not survive')
+    assert.ok(!out.includes('sk-ant-api03-AAAA'), 'token head redacted')
+    assert.ok(out.includes('\x1b[1m'), 'the escape sequence is preserved for diagnostics')
+  })
+
+  it('is a no-op on text with no sensitive tokens (escapes untouched)', () => {
+    const s = 'plain output \x1b[0m with \x1b[31m colors and a uuid 550e8400-e29b-41d4-a716-446655440000'
+    assert.equal(redactSensitivePreservingEscapes(s), s, 'no token → unchanged, including the UUID')
+  })
+
+  it('also catches a contiguous token (so it is safe to use alone)', () => {
+    const token = 'sk-ant-api03-' + 'B'.repeat(50)
+    const out = redactSensitivePreservingEscapes(`oops ${token} leaked`)
+    assert.ok(!out.includes(token), 'contiguous token redacted too')
+  })
+
+  it('redacts an ANSI-split JWT', () => {
+    const jwt1 = 'eyJhbGciOiJIUzI1NiJ9'
+    const jwt2 = 'eyJzdWIiOiJhYmMifQ'
+    const jwt3 = 'sig0123456789abcd'
+    const out = redactSensitivePreservingEscapes(`${jwt1}.${jwt2}\x1b[0m.${jwt3}`)
+    assert.ok(!out.includes(`${jwt1}.${jwt2}`), 'split JWT redacted')
+    assert.ok(out.includes('\x1b[0m'), 'escape preserved')
+  })
+})
+
+describe('redactSensitivePreservingEscapes — marker-prefixed split tokens (#5358 Copilot)', () => {
+  it('does NOT leak the tail of a `key=<split sk-ant>` token', () => {
+    const head = 'sk-ant-api03-' + 'A'.repeat(20)
+    const tail = 'B'.repeat(30)
+    const out = redactSensitivePreservingEscapes(`token=${head}\x1b[1m${tail} end`)
+    assert.ok(!out.includes('BBBB'), 'the tail after the escape must not leak')
+    assert.ok(!out.includes('sk-ant-api03-AAAA'), 'the head is redacted')
+    assert.ok(out.includes('\x1b[1m'), 'escape preserved')
+  })
+
+  it('does NOT leak the tail of a `Bearer <split jwt>`', () => {
+    const out = redactSensitivePreservingEscapes('Bearer eyJhbGciOiJIUzI1NiJ9\x1b[0meyJzdWIiOiJhYmMifQ.sigABCDEFGH end')
+    assert.ok(!out.includes('eyJzdWIiOiJhYmMifQ'), 'the jwt tail after the escape must not leak')
+    assert.ok(out.includes('\x1b[0m'), 'escape preserved')
   })
 })

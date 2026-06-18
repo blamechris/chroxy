@@ -49,6 +49,11 @@
  * @param {string}   opts.image           - Docker image tag (already resolved to a default before this call)
  * @param {string}   opts.memoryLimit     - Docker memory limit string (e.g. "2g")
  * @param {string}   opts.cpuLimit        - Docker CPU limit string (e.g. "2")
+ * @param {Object}   [opts.resources]     - Structured K8s resource requests/limits (#3195):
+ *   `{ cpu, memory, cpuLimit, memoryLimit }` (all optional K8s quantity strings; `cpu`/`memory`
+ *   map to `requests`, `cpuLimit`/`memoryLimit` to `limits`). Honoured only by K8sBackend —
+ *   Docker and other backends silently ignore this field. When unset, K8sBackend falls back to
+ *   the legacy `opts.cpuLimit`/`opts.memoryLimit`, then to its configured defaults.
  * @param {string}   opts.containerUser   - Non-root username to create inside the container
  * @param {Object.<string,string>} [opts.containerEnv]  - Extra environment variables to inject (already sanitized)
  * @param {number[]|string[]} [opts.forwardPorts] - Ports to expose from the container
@@ -58,6 +63,26 @@
  *   Honoured only by K8sBackend — Docker and other backends silently ignore this field.
  *   When absent, K8sBackend omits the field from the Pod spec and the K8s cluster default applies
  *   (typically `IfNotPresent` for tagged images, `Always` for `latest`).
+ * @param {Object} [opts.workspacePVC] - PersistentVolumeClaim-based workspace strategy for
+ *   multi-node K8s clusters where `hostPath` cannot reach the operator's source tree (#3385).
+ *   Honoured only by K8sBackend — Docker and other backends silently ignore this field.
+ *   Mutually exclusive with `opts.cwd` on K8sBackend (passing both throws so the operator picks
+ *   exactly one strategy — see `K8sBackend.validateWorkspacePVC`).
+ * @param {string}  opts.workspacePVC.claimName   - Name of a pre-provisioned PVC in the
+ *   target namespace. Required when `workspacePVC` is set; must be a non-empty string.
+ * @param {string}  [opts.workspacePVC.mountPath] - Pod-side mount path (default: `/workspace`).
+ * @param {boolean} [opts.workspacePVC.readOnly]  - Mount the PVC read-only (default: false).
+ * @param {string|Object} [opts.gitRepo] - git-clone workspace strategy (#3193). Honoured only by
+ *   K8sBackend — Docker and other backends silently ignore this field. A bare URL string is shorthand
+ *   for `{ url }`. K8sBackend provisions an `emptyDir` workspace populated by a `git clone` init
+ *   container. Mutually exclusive with `opts.cwd` and `opts.workspacePVC` (passing more than one
+ *   throws — see the `validateGitRepo` helper in k8s.js). `emptyDir` is ephemeral; PVC-backed
+ *   persistence for the git-clone strategy is the follow-up (#3385).
+ * @param {string}  opts.gitRepo.url        - Repo URL to clone (required; must not start with "-").
+ * @param {string}  [opts.gitRepo.branch]   - Branch/tag checked out at clone time.
+ * @param {string}  [opts.gitRepo.commit]   - Exact commit SHA pinned via a follow-up checkout step.
+ * @param {number}  [opts.gitRepo.depth]    - Positive integer for a shallow clone.
+ * @param {string}  [opts.gitRepo.mountPath] - Pod-side workspace mount path (default: `/workspace`).
  * @returns {Promise<{ containerId: string, containerCliPath: string }>}
  *   containerId — the full container ID string returned by the runtime
  *   containerCliPath — absolute path inside the container where the CLI binary was installed

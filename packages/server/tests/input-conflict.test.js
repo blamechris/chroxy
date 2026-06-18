@@ -1,7 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { handleSessionMessage, handleCliMessage } from '../src/ws-message-handlers.js'
-import { createSpy, createMockSession, createMockSessionManager } from './test-helpers.js'
+import { createSpy, createMockSession, createMockSessionManager, nsCtx } from './test-helpers.js'
 
 /**
  * Tests for cross-device input conflict resolution (#1119).
@@ -13,15 +13,30 @@ function createMockCtx(sessionManager, opts = {}) {
   const broadcastSpy = createSpy()
   const sendSpy = createSpy()
   const updatePrimarySpy = createSpy()
-  return {
+  // #5563: the input_conflict gate reads `ctx.transport.getPrimary(sid)` now
+  // (not a `primaryClients` Map field). Back getPrimary/isPrimary by the
+  // optional `primaryClients` seed Map so existing conflict tests keep working.
+  const { primaryClients, ...rest } = opts
+  const primaryMap = primaryClients instanceof Map ? primaryClients : new Map()
+  return nsCtx({
     sessionManager,
     broadcast: broadcastSpy,
     send: sendSpy,
     updatePrimary: updatePrimarySpy,
+    getPrimary: (sid) => primaryMap.get(sid),
+    isPrimary: (sid, cid) => primaryMap.get(sid) === cid,
+    claimPrimary: createSpy((sid, cid, o = {}) => {
+      const current = primaryMap.get(sid)
+      if (current === cid) return { changed: false, primaryClientId: current }
+      if (current && !o.force) return { changed: false, rejected: true, primaryClientId: current }
+      primaryMap.set(sid, cid)
+      return { changed: true, primaryClientId: cid }
+    }),
+    clearPrimary: createSpy((sid) => { primaryMap.delete(sid) }),
     checkpointManager: { createCheckpoint: async () => {} },
-    ...opts,
+    ...rest,
     _spies: { broadcast: broadcastSpy, send: sendSpy, updatePrimary: updatePrimarySpy },
-  }
+  })
 }
 
 describe('cross-device input echo (#1119)', () => {
@@ -96,6 +111,33 @@ describe('cross-device input echo (#1119)', () => {
 
       // Should NOT broadcast user_input
       assert.equal(ctx._spies.broadcast.callCount, 0)
+    })
+
+    it('#5281: echoes the session id and rejected clientMessageId so the dashboard can clean up', async () => {
+      ws = {}
+      const clientB = { id: 'client-B', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'conflicting input', sessionId: 'sess-1', clientMessageId: 'user-123' }
+      await handleSessionMessage(ws, clientB, msg, ctx)
+
+      const errorMsg = ctx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(errorMsg)
+      assert.equal(errorMsg[1].category, 'input_conflict')
+      assert.equal(errorMsg[1].sessionId, 'sess-1')
+      assert.equal(errorMsg[1].clientMessageId, 'user-123')
+    })
+
+    it('#5281: does not echo a malformed clientMessageId', async () => {
+      ws = {}
+      const clientB = { id: 'client-B', activeSessionId: 'sess-1' }
+      const msg = { type: 'input', data: 'conflicting input', sessionId: 'sess-1', clientMessageId: 'bad id with spaces!' }
+      await handleSessionMessage(ws, clientB, msg, ctx)
+
+      const errorMsg = ctx._spies.send.calls.find(c => c[1]?.type === 'session_error')
+      assert.ok(errorMsg)
+      assert.equal(errorMsg[1].category, 'input_conflict')
+      // Session id still echoed; the malformed id is dropped rather than reflected.
+      assert.equal(errorMsg[1].sessionId, 'sess-1')
+      assert.equal(errorMsg[1].clientMessageId, undefined)
     })
 
     it('allows input from the same client even when busy', async () => {

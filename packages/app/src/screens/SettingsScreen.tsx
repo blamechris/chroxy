@@ -1,14 +1,11 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   ScrollView,
   Switch,
   TouchableOpacity,
-  StyleSheet,
   Alert,
-  Modal,
-  Pressable,
   Platform,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -21,13 +18,19 @@ import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
 import type { PermissionRule } from '../store/types';
 import type { RootStackParamList } from '../App';
-import { getSpeechLang, setSpeechLang } from '../hooks/useSpeechRecognition';
 import {
   isBiometricAvailable,
   getBiometricEnabled,
   setBiometricEnabled,
-  authenticate,
 } from '../hooks/useBiometricLock';
+import { styles } from '../components/settings/styles';
+import {
+  NOTIFICATION_CATEGORY_ORDER,
+  WS_CLOSED_MESSAGE,
+} from '../components/settings/constants';
+import { NotificationPrefsSection } from '../components/settings/NotificationPrefsSection';
+import { VoiceInputSection } from '../components/settings/VoiceInputSection';
+import { SecuritySection } from '../components/settings/SecuritySection';
 
 const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 
@@ -35,39 +38,17 @@ const APP_VERSION = Constants.expoConfig?.version ?? 'unknown';
 // returning a new [] on every render (which causes infinite re-render loops).
 const EMPTY_RULES: PermissionRule[] = [];
 
-const SPEECH_LANGUAGES = [
-  { tag: 'en-US', label: 'English (US)' },
-  { tag: 'en-GB', label: 'English (UK)' },
-  { tag: 'es-ES', label: 'Spanish (Spain)' },
-  { tag: 'es-MX', label: 'Spanish (Mexico)' },
-  { tag: 'fr-FR', label: 'French' },
-  { tag: 'de-DE', label: 'German' },
-  { tag: 'it-IT', label: 'Italian' },
-  { tag: 'pt-BR', label: 'Portuguese (Brazil)' },
-  { tag: 'pt-PT', label: 'Portuguese (Portugal)' },
-  { tag: 'nl-NL', label: 'Dutch' },
-  { tag: 'ja-JP', label: 'Japanese' },
-  { tag: 'ko-KR', label: 'Korean' },
-  { tag: 'zh-CN', label: 'Chinese (Simplified)' },
-  { tag: 'zh-TW', label: 'Chinese (Traditional)' },
-  { tag: 'ru-RU', label: 'Russian' },
-  { tag: 'ar-SA', label: 'Arabic' },
-];
-
 export function SettingsScreen() {
   const insets = useSafeAreaInsets();
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const [speechLang, setSpeechLangState] = useState<string>('en-US');
-  const [showLangPicker, setShowLangPicker] = useState(false);
   const [biometricAvail, setBiometricAvail] = useState(false);
   const [biometricOn, setBiometricOn] = useState(false);
+  // #4559: surfaces "server disconnected" when a notification-prefs Switch
+  // tap fires while the WS is closed. Cleared on a subsequent successful
+  // write (post-reconnect) so a stale banner can't persist after recovery.
+  const [notifWsClosedError, setNotifWsClosedError] = useState<string | null>(null);
 
   useEffect(() => {
-    getSpeechLang()
-      .then(setSpeechLangState)
-      .catch(() => {
-        // Ignore — falls back to default 'en-US'
-      });
     isBiometricAvailable().then((avail) => {
       setBiometricAvail(avail);
       // Auto-disable if biometrics became unavailable (e.g., enrollment removed)
@@ -82,14 +63,6 @@ export function SettingsScreen() {
     });
     getBiometricEnabled().then(setBiometricOn);
   }, []);
-
-  const handleSelectLang = async (tag: string) => {
-    setSpeechLangState(tag);
-    await setSpeechLang(tag);
-    setShowLangPicker(false);
-  };
-
-  const currentLangLabel = SPEECH_LANGUAGES.find((l) => l.tag === speechLang)?.label ?? speechLang;
 
   const {
     inputSettings,
@@ -115,6 +88,119 @@ export function SettingsScreen() {
   const dismissSessionNotification = useConnectionStore((s) => s.dismissSessionNotification);
   const dismissServerError = useConnectionStore((s) => s.dismissServerError);
   const totalActiveNotifications = sessionNotifications.length + serverErrors.length;
+
+  // #4542: per-category notification preferences. Snapshot arrives via the
+  // WS `notification_prefs` message; we request it on mount and toggle a
+  // single category at a time via `notification_prefs_set` (server shallow-
+  // merges so untouched categories are preserved).
+  const notificationPrefs = useConnectionStore((s) => s.notificationPrefs);
+  const refreshNotificationPrefs = useConnectionStore((s) => s.refreshNotificationPrefs);
+  const setNotificationPrefsCategory = useConnectionStore((s) => s.setNotificationPrefsCategory);
+  // #4543: per-device override. `pushToken` is the registered Expo token
+  // for THIS device, used as the key into `notificationPrefs.devices`. Null
+  // when push registration hasn't completed (simulator, permission denied,
+  // pre-`register_push_token`); the per-device toggle row is suppressed in
+  // that state so we never ship a `devices[null]` patch.
+  const pushToken = useConnectionStore((s) => s.pushToken);
+  const setNotificationPrefsDevice = useConnectionStore((s) => s.setNotificationPrefsDevice);
+  // #4564: drop an entire per-device entry — the per-row "Clear" button in
+  // the known-devices list calls this to drain orphans from the prefs
+  // file (token refresh / app reinstall / browser-id wipe).
+  const deleteNotificationPrefsDevice = useConnectionStore((s) => s.deleteNotificationPrefsDevice);
+  // #4544: quiet-hours editor actions. The window is global; per-device
+  // overrides are owned by a future iteration. `bypassCategories` is the
+  // list of categories that fire even during quiet hours.
+  const setNotificationPrefsQuietHours = useConnectionStore((s) => s.setNotificationPrefsQuietHours);
+  const setNotificationPrefsBypassCategories = useConnectionStore((s) => s.setNotificationPrefsBypassCategories);
+  // #4560: capability gate for the Notifications sections. Pre-#4541 servers
+  // have no `notification_prefs_get` handler — without this gate the
+  // category list + quiet-hours editor sat on "Loading preferences…" forever
+  // waiting for a snapshot that would never arrive. Empty map = fail-closed
+  // so an older server (or a still-connecting one) surfaces the explicit
+  // "not supported" message instead of dead UI. Declared above the refresh
+  // useEffect so it can be referenced from both the dep array and the
+  // early-return guard.
+  const notificationPrefsSupported = useConnectionLifecycleStore(
+    (s) => !!s.serverCapabilities?.notificationPrefs,
+  );
+
+  useEffect(() => {
+    // #4559: ignore the boolean return on initial refresh — a closed
+    // socket on mount is the common case (mobile re-opens the app while
+    // the tunnel is still recovering). The inline banner only fires for
+    // user-initiated writes; the snapshot will arrive once the connection
+    // settles.
+    //
+    // #4560: skip the refresh entirely when the server doesn't advertise
+    // the `notificationPrefs` capability. Pre-#4541 servers have no handler
+    // for `notification_prefs_get`, so the request would either get
+    // rejected as an `unknown_message` error or silently dropped — either
+    // way no snapshot lands and the loading hint sits forever. Skipping
+    // the WS write also keeps the gated render decisions self-consistent.
+    if (!notificationPrefsSupported) return;
+    refreshNotificationPrefs();
+  }, [notificationPrefsSupported, refreshNotificationPrefs]);
+
+  // #4559: thin wrappers around the four notification-prefs setters. Each
+  // delegates to the store action (which returns `true` when sent, `false`
+  // when the WS is closed) and updates the inline banner accordingly.
+  // Sharing the wrappers keeps the success → clear / failure → set
+  // behaviour uniform so we can't forget to clear on a later success.
+  const handleSetCategory = useCallback((cat: string, value: boolean) => {
+    const sent = setNotificationPrefsCategory(cat, value);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsCategory]);
+
+  const handleSetDevice = useCallback((deviceKey: string, cat: string, value: boolean) => {
+    const sent = setNotificationPrefsDevice(deviceKey, cat, value);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsDevice]);
+
+  // #4564: per-row "Clear" handler. Same WS-closed banner contract as the
+  // other notification-prefs setters so a botched clear isn't silent.
+  //
+  // #4588: clearing the row matching `pushToken` (the operator's own
+  // device) silently wipes whatever per-category mutes / quiet-hours
+  // overrides they had set up; the next push will fire under global
+  // defaults with no other warning. Prompt with a destructive Clear
+  // button only for that row — orphan rows (key !== pushToken) flow
+  // straight through so the orphan-cleanup affordance stays one-tap.
+  const handleClearDevice = useCallback((deviceKey: string) => {
+    const dispatch = () => {
+      const sent = deleteNotificationPrefsDevice(deviceKey);
+      setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+    };
+    if (deviceKey === pushToken) {
+      Alert.alert(
+        'Clear this device?',
+        'Notifications on this device will fall back to global defaults.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Clear', style: 'destructive', onPress: dispatch },
+        ],
+      );
+      return;
+    }
+    dispatch();
+  }, [deleteNotificationPrefsDevice, pushToken]);
+
+  const handleSetQuietHours = useCallback((win: { start: string; end: string; timezone: string } | null) => {
+    const sent = setNotificationPrefsQuietHours(win);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsQuietHours]);
+
+  const handleSetBypassCategories = useCallback((cats: string[]) => {
+    const sent = setNotificationPrefsBypassCategories(cats);
+    setNotifWsClosedError(sent ? null : WS_CLOSED_MESSAGE);
+  }, [setNotificationPrefsBypassCategories]);
+
+  const orderedNotificationCategories = useMemo(() => {
+    if (!notificationPrefs) return [];
+    const cats = notificationPrefs.categories;
+    const known = NOTIFICATION_CATEGORY_ORDER.filter((k) => k in cats);
+    const unknown = Object.keys(cats).filter((k) => !NOTIFICATION_CATEGORY_ORDER.includes(k));
+    return [...known, ...unknown];
+  }, [notificationPrefs]);
 
   const serverVersion = useConnectionLifecycleStore((s) => s.serverVersion);
   const latestVersion = useConnectionLifecycleStore((s) => s.latestVersion);
@@ -302,40 +388,11 @@ export function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
-      {/* SECURITY — show when hardware available, or when preference is
-           still enabled (so user can disable it even if biometrics were revoked) */}
-      {(biometricAvail || biometricOn) && (
-        <>
-          <Text style={styles.sectionHeader}>SECURITY</Text>
-          <View style={styles.section}>
-            <View style={styles.row}>
-              <Text style={styles.rowLabel}>Biometric Lock</Text>
-              <Switch
-                value={biometricOn}
-                disabled={!biometricAvail && !biometricOn}
-                onValueChange={async (value) => {
-                  if (value) {
-                    // Verify biometric before enabling
-                    const ok = await authenticate();
-                    if (!ok) return;
-                  }
-                  setBiometricOn(value);
-                  await setBiometricEnabled(value);
-                }}
-                trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
-              />
-            </View>
-            <View style={styles.separator} />
-            <View style={styles.row}>
-              <Text style={[styles.rowLabel, styles.rowHint]}>
-                {biometricAvail
-                  ? 'Require Face ID / Touch ID when returning to the app'
-                  : 'Biometric hardware unavailable — toggle off to disable lock'}
-              </Text>
-            </View>
-          </View>
-        </>
-      )}
+      <SecuritySection
+        biometricAvail={biometricAvail}
+        biometricOn={biometricOn}
+        onBiometricChange={setBiometricOn}
+      />
 
       {/* NOTIFICATIONS */}
       <Text style={styles.sectionHeader}>NOTIFICATIONS</Text>
@@ -371,6 +428,19 @@ export function SettingsScreen() {
           <Text style={styles.rowValue}>View all</Text>
         </TouchableOpacity>
       </View>
+
+      <NotificationPrefsSection
+        notifWsClosedError={notifWsClosedError}
+        notificationPrefsSupported={notificationPrefsSupported}
+        notificationPrefs={notificationPrefs}
+        pushToken={pushToken}
+        orderedNotificationCategories={orderedNotificationCategories}
+        handleSetCategory={handleSetCategory}
+        handleSetDevice={handleSetDevice}
+        handleSetQuietHours={handleSetQuietHours}
+        handleSetBypassCategories={handleSetBypassCategories}
+        handleClearDevice={handleClearDevice}
+      />
 
       {/* PORTABILITY */}
       {conversationId != null && (
@@ -410,32 +480,11 @@ export function SettingsScreen() {
         </>
       )}
 
-      {/* INPUT */}
-      <Text style={styles.sectionHeader}>INPUT</Text>
-      <View style={styles.section}>
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Chat: Enter to Send</Text>
-          <Switch
-            value={inputSettings.chatEnterToSend}
-            onValueChange={(value) => updateInputSettings({ chatEnterToSend: value })}
-            trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
-          />
-        </View>
-        <View style={styles.separator} />
-        <View style={styles.row}>
-          <Text style={styles.rowLabel}>Terminal: Enter to Send</Text>
-          <Switch
-            value={inputSettings.terminalEnterToSend}
-            onValueChange={(value) => updateInputSettings({ terminalEnterToSend: value })}
-            trackColor={{ false: COLORS.backgroundCard, true: COLORS.accentBlue }}
-          />
-        </View>
-        <View style={styles.separator} />
-        <TouchableOpacity style={styles.row} onPress={() => setShowLangPicker(true)}>
-          <Text style={styles.rowLabel}>Speech Language</Text>
-          <Text style={styles.rowValue}>{currentLangLabel}</Text>
-        </TouchableOpacity>
-      </View>
+      <VoiceInputSection
+        insets={insets}
+        inputSettings={inputSettings}
+        updateInputSettings={updateInputSettings}
+      />
 
       {/* ABOUT */}
       <Text style={styles.sectionHeader}>ABOUT</Text>
@@ -547,201 +596,6 @@ export function SettingsScreen() {
           <Text style={styles.rowValue}>Reset onboarding</Text>
         </TouchableOpacity>
       </View>
-
-      {/* Speech language picker */}
-      <Modal visible={showLangPicker} transparent animationType="slide" onRequestClose={() => setShowLangPicker(false)}>
-        <Pressable style={styles.sheetOverlay} onPress={() => setShowLangPicker(false)}>
-          <Pressable style={[styles.sheetContent, { paddingBottom: Math.max(insets.bottom, 8) }]} onPress={(e) => e.stopPropagation()}>
-            <Text style={styles.sheetTitle}>Speech Language</Text>
-            <ScrollView style={styles.sheetList} bounces={false}>
-              {SPEECH_LANGUAGES.map((lang) => (
-                <TouchableOpacity
-                  key={lang.tag}
-                  style={[styles.sheetOption, lang.tag === speechLang && styles.sheetOptionActive]}
-                  onPress={() => handleSelectLang(lang.tag)}
-                >
-                  <Text style={[styles.sheetOptionText, lang.tag === speechLang && styles.sheetOptionTextActive]}>
-                    {lang.label}
-                  </Text>
-                  <Text style={styles.sheetOptionTag}>{lang.tag}</Text>
-                </TouchableOpacity>
-              ))}
-            </ScrollView>
-            <TouchableOpacity style={[styles.sheetOption, styles.sheetCancel]} onPress={() => setShowLangPicker(false)}>
-              <Text style={[styles.sheetOptionText, styles.sheetCancelText]}>Cancel</Text>
-            </TouchableOpacity>
-          </Pressable>
-        </Pressable>
-      </Modal>
     </ScrollView>
   );
 }
-
-const styles = StyleSheet.create({
-  container: {
-    flex: 1,
-    backgroundColor: COLORS.backgroundPrimary,
-  },
-  sectionHeader: {
-    color: COLORS.textMuted,
-    fontSize: 12,
-    fontWeight: '600',
-    letterSpacing: 0.5,
-    marginTop: 24,
-    marginBottom: 6,
-    marginHorizontal: 16,
-  },
-  section: {
-    backgroundColor: COLORS.backgroundSecondary,
-    borderRadius: 10,
-    marginHorizontal: 16,
-    overflow: 'hidden',
-  },
-  row: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    minHeight: 44,
-  },
-  separator: {
-    height: StyleSheet.hairlineWidth,
-    backgroundColor: COLORS.backgroundCard,
-    marginLeft: 16,
-  },
-  rowLabel: {
-    color: COLORS.textPrimary,
-    fontSize: 15,
-  },
-  rowValue: {
-    color: COLORS.textMuted,
-    fontSize: 15,
-  },
-  rowValueSmall: {
-    fontSize: 13,
-    maxWidth: 200,
-  },
-  rowHint: {
-    color: COLORS.textMuted,
-    fontSize: 13,
-    flex: 1,
-  },
-  destructiveText: {
-    color: COLORS.accentRed,
-    fontSize: 15,
-  },
-  actionText: {
-    color: COLORS.accentBlue,
-    fontSize: 15,
-  },
-  versionRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-  },
-  updateBadge: {
-    backgroundColor: COLORS.accentOrangeSubtle,
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
-  },
-  updateBadgeText: {
-    color: COLORS.accentOrange,
-    fontSize: 11,
-    fontWeight: '600',
-  },
-  sheetOverlay: {
-    flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.5)',
-    justifyContent: 'flex-end',
-  },
-  sheetContent: {
-    backgroundColor: COLORS.backgroundSecondary,
-    borderTopLeftRadius: 16,
-    borderTopRightRadius: 16,
-    paddingTop: 8,
-    maxHeight: '60%',
-  },
-  sheetTitle: {
-    color: COLORS.textPrimary,
-    fontSize: 16,
-    fontWeight: '600',
-    textAlign: 'center',
-    paddingVertical: 12,
-  },
-  sheetList: {
-    flexShrink: 1,
-  },
-  sheetOption: {
-    paddingVertical: 14,
-    paddingHorizontal: 20,
-    minHeight: 48,
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-  },
-  sheetOptionActive: {
-    backgroundColor: COLORS.accentBlueLight,
-  },
-  sheetOptionText: {
-    color: COLORS.textPrimary,
-    fontSize: 16,
-  },
-  sheetOptionTextActive: {
-    color: COLORS.accentBlue,
-    fontWeight: '600',
-  },
-  sheetOptionTag: {
-    color: COLORS.textMuted,
-    fontSize: 13,
-  },
-  sheetCancel: {
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderTopColor: COLORS.borderPrimary,
-    marginTop: 4,
-    justifyContent: 'center',
-  },
-  sheetCancelText: {
-    color: COLORS.accentRed,
-    textAlign: 'center',
-  },
-  rulesContainer: {
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  ruleChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
-    borderWidth: 1,
-  },
-  ruleChipAllow: {
-    backgroundColor: COLORS.accentGreenLight,
-    borderColor: COLORS.accentGreenBorder,
-  },
-  ruleChipDeny: {
-    backgroundColor: COLORS.accentRedSubtle,
-    borderColor: COLORS.accentRedBorder,
-  },
-  ruleChipText: {
-    fontSize: 13,
-    fontWeight: '500',
-  },
-  ruleChipTextAllow: {
-    color: COLORS.accentGreen,
-  },
-  ruleChipTextDeny: {
-    color: COLORS.accentRed,
-  },
-  ruleChipRemove: {
-    fontSize: 15,
-    fontWeight: '600',
-    marginLeft: 2,
-  },
-});

@@ -1,4 +1,4 @@
-import React, { forwardRef, useMemo, useRef, useEffect } from 'react';
+import React, { forwardRef, useMemo, useRef, useEffect, useState, useImperativeHandle, useCallback } from 'react';
 import { View, Text, TextInput, TouchableOpacity, ScrollView, Image, StyleSheet, Platform, Animated, Alert } from 'react-native';
 import { ICON_RETURN, ICON_PARAGRAPH } from '../constants/icons';
 import { Icon } from './Icon';
@@ -15,9 +15,43 @@ export interface PastedTextBlockChip {
   content: string;
 }
 
+/**
+ * Imperative handle exposed via the InputBar ref (#5556 — input/stream
+ * decoupling). InputBar owns the composer draft internally so that streaming
+ * message re-renders in SessionScreen no longer re-render the TextInput on
+ * every delta. SessionScreen reads/writes the draft through this handle for
+ * the send path, voice-transcript merge, seed prompts (`@agent `), and
+ * pasted-text marker stripping.
+ *
+ * `setValue` updates the internal draft WITHOUT firing `onChangeText`, so
+ * programmatic writes (paste collapse, voice merge, marker strip) don't
+ * recursively re-trigger the diff/paste-detection path. User keystrokes fire
+ * `onChangeText(next, prev)` as before.
+ */
+export interface InputBarHandle {
+  /** Focus the underlying TextInput. */
+  focus: () => void;
+  /** Read the current draft value. */
+  getValue: () => string;
+  /** Replace the draft programmatically (does NOT fire onChangeText). */
+  setValue: (text: string) => void;
+  /** Clear the draft (equivalent to setValue('')). */
+  clear: () => void;
+}
+
 export interface InputBarProps {
-  inputText: string;
-  onChangeText: (text: string) => void;
+  /**
+   * Optional seed value. InputBar owns its draft internally; this prop only
+   * supplies an initial value on mount. To change the draft after mount, use
+   * the imperative ref (`setValue`/`clear`). Kept for back-compat and tests.
+   */
+  inputText?: string;
+  /**
+   * Fired on every user keystroke with the new value and the previous value.
+   * The `prevText` arg lets the parent run paste-diff detection (#3797)
+   * without holding the draft in its own render-scope state.
+   */
+  onChangeText: (text: string, prevText: string) => void;
   onSend: () => void;
   onInterrupt: () => void;
   onKeyPress: (key: string) => void;
@@ -49,7 +83,7 @@ export interface InputBarProps {
 
 // -- Component --
 
-export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
+export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(function InputBar({
   inputText,
   onChangeText,
   onSend,
@@ -79,6 +113,44 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
 
+  // #5556 — InputBar owns the composer draft internally so that streaming
+  // re-renders in SessionScreen don't re-render the TextInput on every delta.
+  // `inputText` is consumed once as an initial seed; subsequent changes flow
+  // through user keystrokes (onChangeText) or the imperative ref.
+  const [value, setValue] = useState(inputText ?? '');
+  const textInputRef = useRef<TextInput>(null);
+
+  // Keep a live ref to the current value so the imperative handle's getValue()
+  // and the programmatic setValue() always read the freshest draft without
+  // depending on a stale closure.
+  const valueRef = useRef(value);
+  valueRef.current = value;
+
+  useImperativeHandle(ref, () => ({
+    focus: () => textInputRef.current?.focus(),
+    getValue: () => valueRef.current,
+    setValue: (text: string) => {
+      // Programmatic write — does NOT fire onChangeText, so paste detection /
+      // voice merge / marker strip don't recurse back into the parent diff.
+      valueRef.current = text;
+      setValue(text);
+    },
+    clear: () => {
+      valueRef.current = '';
+      setValue('');
+    },
+  }), []);
+
+  // User keystrokes: update the internal draft and notify the parent with both
+  // the new and previous values so it can run paste-diff detection (#3797)
+  // without holding the draft itself.
+  const handleChangeText = useCallback((next: string) => {
+    const prev = valueRef.current;
+    valueRef.current = next;
+    setValue(next);
+    onChangeText(next, prev);
+  }, [onChangeText]);
+
   // Pulsing animation for recording state
   const pulseAnim = useRef(new Animated.Value(1)).current;
   useEffect(() => {
@@ -101,12 +173,12 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
 
   // Filter slash commands based on current input (only when typing `/` at the start)
   const filteredCommands = useMemo(() => {
-    if (viewMode !== 'chat' || !inputText.startsWith('/') || slashCommands.length === 0) return [];
-    const query = inputText.slice(1).toLowerCase();
+    if (viewMode !== 'chat' || !value.startsWith('/') || slashCommands.length === 0) return [];
+    const query = value.slice(1).toLowerCase();
     // Show all commands if user just typed `/`
     if (!query) return slashCommands;
     return slashCommands.filter((cmd) => cmd.name.toLowerCase().includes(query));
-  }, [inputText, slashCommands, viewMode]);
+  }, [value, slashCommands, viewMode]);
 
   const showDropdown = filteredCommands.length > 0;
 
@@ -122,7 +194,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             <TouchableOpacity
               key={cmd.name}
               style={styles.dropdownItem}
-              onPress={() => onChangeText(`/${cmd.name} `)}
+              onPress={() => handleChangeText(`/${cmd.name} `)}
               accessibilityRole="button"
               accessibilityLabel={`Slash command ${cmd.name}`}
             >
@@ -250,12 +322,12 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           <Text style={styles.enterModeText}>{enterToSend ? ICON_RETURN : ICON_PARAGRAPH}</Text>
         </TouchableOpacity>
         <TextInput
-          ref={ref}
+          ref={textInputRef}
           style={[styles.input, !enterToSend && styles.inputMultiline, disabled && styles.inputDisabled]}
           placeholder={disabled ? (disabledPlaceholder || 'Reconnecting...') : !claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
           placeholderTextColor={COLORS.textDim}
-          value={inputText}
-          onChangeText={onChangeText}
+          value={value}
+          onChangeText={handleChangeText}
           // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
           // When enterToSend is false, multiline is true so onSubmitEditing never fires.
           onSubmitEditing={enterToSend && !isStreaming && !disabled ? onSend : undefined}
@@ -265,6 +337,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
           autoCorrect={viewMode === 'chat'}
           editable={!disabled}
           accessibilityState={a11yDisabled}
+          testID="chat-message-input"
         />
         {showCameraButton && (
           <TouchableOpacity
@@ -333,6 +406,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
             accessibilityRole="button"
             accessibilityLabel="Send message"
             accessibilityState={a11yDisabled}
+            testID="chat-send-button"
           >
             <Icon name="arrowUp" size={20} color={COLORS.textPrimary} />
           </TouchableOpacity>
@@ -340,7 +414,7 @@ export const InputBar = forwardRef<TextInput, InputBarProps>(function InputBar({
       </View>
     </View>
   );
-});
+}));
 
 // -- Styles --
 

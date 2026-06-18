@@ -636,8 +636,11 @@ describe('permission/question routing to originating session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
 
-    // Simulate permission request from Session A (populates _permissionSessionMap)
-    server._permissionSessionMap.set('perm-routing-1', 'sess-a')
+    // Simulate permission request from Session A (populates _permissionSessionMap
+    // AND auto-subscribes connected clients to sess-a, mirroring the production
+    // dispatch path so the #4798 subscription guard sees the client as a
+    // legitimate recipient even after they switch_session away).
+    server._registerPermissionRoute('perm-routing-1', 'sess-a')
 
     // Switch client to Session B
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
@@ -671,14 +674,19 @@ describe('permission/question routing to originating session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
 
-    // Simulate question from Session A (populates _questionSessionMap)
-    server._questionSessionMap.set('q-routing-1', 'sess-a')
+    // Simulate question from Session A (populates _questionSessionMap AND
+    // auto-subscribes connected clients to sess-a, mirroring the production
+    // dispatch path so the #4788 subscription guard sees the client as a
+    // legitimate recipient even after they switch_session away).
+    server._registerQuestionRoute('q-routing-1', 'sess-a')
 
     // Switch client to Session B
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
     await waitForMessage(messages, 'session_switched', 2000)
 
-    // Respond to the question — should route to Session A
+    // Respond to the question — should route to Session A even though the
+    // client's active session is now sess-b (subscribedSessionIds still
+    // contains sess-a from the auto-subscribe at dispatch).
     send(ws, { type: 'user_question_response', toolUseId: 'q-routing-1', answer: 'yes' })
     await waitFor(() => sessionAGotQuestion, { label: 'sessionA question routed' })
 
@@ -774,7 +782,13 @@ describe('permission/question routing to originating session', () => {
     ws.close()
   })
 
-  it('falls back to activeSessionId for unknown question toolUseId', async () => {
+  it('drops a stale/unknown question toolUseId instead of routing to activeSessionId (#5753)', async () => {
+    // #5753 — a toolUseId is registered for every question at dispatch and
+    // pruned on answer / session-destroy, so a toolUseId that arrives NOT in
+    // the routing map means its question is already gone. Falling back to the
+    // active session (the old behavior) mis-delivered that stale answer to
+    // whatever DIFFERENT question the active session was now waiting on (a
+    // deny meant for one tool landing on another). It must be dropped.
     const { manager, sessionsMap } = createTwoSessionManager()
 
     let sessionBGotQuestion = false
@@ -790,16 +804,72 @@ describe('permission/question routing to originating session', () => {
     const port = await startServerAndGetPort(server)
     const { ws, messages } = await createClient(port, true)
 
-    // Switch to Session B
+    // Switch to Session B (now the active session).
     send(ws, { type: 'switch_session', sessionId: 'sess-b' })
     await waitForMessage(messages, 'session_switched', 2000)
 
-    // Send question response with unknown toolUseId — no entry in routing map
-    // Should fall back to activeSessionId (sess-b)
+    // A late answer carrying a toolUseId that is NOT in the routing map.
     send(ws, { type: 'user_question_response', toolUseId: 'unknown-tool-use-id', answer: 'yes' })
-    await waitFor(() => sessionBGotQuestion, { label: 'sessionB fallback question' })
+    // A dropped answer has no ack. Instead of racing a fixed delay, send a
+    // follow-up request with a deterministic response and wait for IT — WS
+    // messages are processed in order, so once the second answer round-trips
+    // the (dropped) first one is guaranteed to have been processed too.
+    send(ws, { type: 'switch_session', sessionId: 'sess-a' })
+    await waitForMessage(messages, 'session_switched', 2000)
 
-    assert.equal(sessionBGotQuestion, true, 'Should fall back to activeSessionId when toolUseId not in routing map')
+    assert.equal(sessionBGotQuestion, false,
+      'a stale/unknown toolUseId must be dropped, not routed to the active session')
+
+    ws.close()
+  })
+
+  // #4798 (P0 symmetry with #4788): integration regression for the
+  // cross-session permission hijack vector. An unbound client active on
+  // session B must NOT be able to approve/deny a permission belonging to
+  // session A by replaying a leaked requestId. The map entry is populated
+  // by a bare `.set()` (NOT via _registerPermissionRoute) to simulate the
+  // attacker-replay scenario where the attacker client never received the
+  // legitimate dispatch event.
+  it('rejects unbound client permission_response when not subscribed to the originSessionId (#4798)', async () => {
+    const { manager, sessionsMap } = createTwoSessionManager()
+
+    let sessionAGotPermission = false
+    let sessionBGotPermission = false
+    sessionsMap.get('sess-a').session.respondToPermission = () => { sessionAGotPermission = true }
+    sessionsMap.get('sess-b').session.respondToPermission = () => { sessionBGotPermission = true }
+
+    server = new WsServer({
+      port: 0,
+      apiToken: TOKEN,
+      sessionManager: manager,
+      defaultSessionId: 'sess-a',
+      authRequired: false,
+    })
+    const port = await startServerAndGetPort(server)
+    const { ws, messages } = await createClient(port, true)
+
+    // Switch the client to session B (attacker tab is viewing B, not A).
+    send(ws, { type: 'switch_session', sessionId: 'sess-b' })
+    await waitForMessage(messages, 'session_switched', 2000)
+
+    // Simulate a leaked requestId for session A. NOTE: we use the raw
+    // Map.set() — NOT _registerPermissionRoute() — to model the attacker
+    // scenario where the attacker client never received the dispatch and
+    // is replaying a requestId it learned through a side channel.
+    server._permissionSessionMap.set('perm-hijack-1', 'sess-a')
+
+    // Attacker submits a decision for session A. Must be dropped because
+    // the unbound client is neither active on nor subscribed to sess-a.
+    send(ws, { type: 'permission_response', requestId: 'perm-hijack-1', decision: 'allow' })
+
+    // Give the server a moment to process — there's no positive ack so
+    // we sample the side effects after a short delay.
+    await new Promise((r) => setTimeout(r, 100))
+
+    assert.equal(sessionAGotPermission, false, 'Session A must NOT receive the hijacked decision')
+    assert.equal(sessionBGotPermission, false, 'Session B must not receive it either (no cross-routing)')
+    assert.equal(server._permissionSessionMap.get('perm-hijack-1'), 'sess-a',
+      'mapping preserved so the legitimate client can still respond')
 
     ws.close()
   })
@@ -1873,5 +1943,77 @@ describe('audit trail for auto-deny resolution paths (#3057)', () => {
       'session_created listener must be removed on close()')
     assert.equal(manager.listenerCount('session_destroyed'), 0,
       'session_destroyed listener must be removed on close()')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5731 T7 — destroying a session drains its parked HTTP-hook permission
+// ---------------------------------------------------------------------------
+
+describe('WsServer drains pending permissions on session_destroyed (#5731 T7)', () => {
+  let server
+
+  afterEach(() => {
+    if (server) {
+      server.close()
+      server = null
+    }
+  })
+
+  it('auto-denies a destroyed session\'s parked HTTP permission and leaves other sessions alone', async () => {
+    const { manager } = createMockSessionManager([
+      { id: 'sess-doomed', name: 'Doomed', cwd: '/tmp' },
+    ])
+    server = new WsServer({
+      port: 0,
+      apiToken: 'test-token',
+      sessionManager: manager,
+      authRequired: false,
+    })
+    await startServerAndGetPort(server)
+
+    // Seed a parked HTTP-hook permission for the doomed session. The resolve
+    // closure mimics the real handler's cleanup (clears the timer + removes
+    // both map entries) so the test faithfully exercises the production path.
+    let doomedDecision = null
+    // unref() so a failed assertion before the drain clears this can't hold the
+    // event loop open for the full 5 minutes (mirrors the long-fuse timers in
+    // cli-session.test.js).
+    const timer = setTimeout(() => {}, 300_000)
+    timer.unref?.()
+    server._pendingPermissions.set('req-doomed', {
+      resolve: (decision) => {
+        doomedDecision = decision
+        clearTimeout(timer)
+        server._pendingPermissions.delete('req-doomed')
+        server._permissionSessionMap.delete('req-doomed')
+      },
+      timer,
+    })
+    server._permissionSessionMap.set('req-doomed', 'sess-doomed')
+
+    // A permission belonging to a DIFFERENT session must survive the destroy.
+    let otherDecision = null
+    server._pendingPermissions.set('req-other', {
+      resolve: (decision) => { otherDecision = decision },
+      timer: null,
+    })
+    server._permissionSessionMap.set('req-other', 'sess-other')
+
+    // Destroy the session — the WsServer destroy handler must drain its parked
+    // permission instead of leaving the hook's POST /permission wedged for the
+    // full 5-minute auto-deny timeout.
+    manager.emit('session_destroyed', { sessionId: 'sess-doomed' })
+
+    assert.equal(doomedDecision, 'deny',
+      'the destroyed session\'s parked permission is auto-denied')
+    assert.equal(server._pendingPermissions.has('req-doomed'), false,
+      'drained entry removed from _pendingPermissions')
+    assert.equal(server._permissionSessionMap.has('req-doomed'), false,
+      'drained entry removed from _permissionSessionMap')
+    assert.equal(otherDecision, null,
+      'a different session\'s pending permission is untouched')
+    assert.equal(server._pendingPermissions.has('req-other'), true,
+      'the other session\'s permission survives the destroy')
   })
 })

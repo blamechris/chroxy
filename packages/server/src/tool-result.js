@@ -75,5 +75,13 @@ export function emitToolResults(content, emitter, maxSize = MAX_TOOL_RESULT_SIZE
     }
 
     emitter.emit('tool_result', event)
+    // #4628: drop the in-flight tracker entry so _emitResult's sweep
+    // (BaseSession) doesn't double-emit a synthetic for an already-
+    // resolved tool. Only the BaseSession-derived emitter exposes
+    // _trackToolResult; ignore for any other emitter shape (e.g. tests
+    // that pass a bare EventEmitter).
+    if (typeof emitter._trackToolResult === 'function') {
+      emitter._trackToolResult(block.tool_use_id)
+    }
   }
 }

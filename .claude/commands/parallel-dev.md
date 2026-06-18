@@ -19,10 +19,10 @@ Orchestrate parallel autonomous dev sessions — dispatch multiple agents into i
 ```bash
 REPO=$(gh repo view --json nameWithOwner -q .nameWithOwner)
 
-# Branch prefix for autonomous session branches — matches existing conventions (feat/, fix/, refactor/, test/)
+# Branch prefix for autonomous session branches
 BRANCH_PREFIX="feat/"
 
-# Default concurrency — balance between speed and resource usage. 3 for most repos, 2 for heavy builds.
+# Default concurrency — balance between speed and resource usage
 PARALLEL=3
 ```
 
@@ -272,7 +272,6 @@ npm install
 Generate a branch name from the issue title:
 
 SLUG=$(printf '%s' "<issue title>" | tr '[:upper:]' '[:lower:]' | sed -E 's/[^a-z0-9]+/-/g; s/^-+|-+$//g' | cut -c1-40)
-# Branch naming convention: feat/<number>-<slug>
 BRANCH="feat/<issue_number>-${SLUG}"
 git checkout -b "${BRANCH}"
 
@@ -280,9 +279,9 @@ git checkout -b "${BRANCH}"
 
 Write tests that describe the desired behavior. Tests MUST fail before implementation.
 
-# Test file conventions: server uses Node built-in test runner, app uses Jest
-# Server: cd packages/server && npm test
-# App: cd packages/app && npx jest
+For server: `cd packages/server && npm test`
+For app: `cd packages/app && npx jest`
+For dashboard: `cd packages/server && npm run dashboard:test`
 
 Run tests to confirm they fail.
 
@@ -294,9 +293,8 @@ Write minimum implementation. Don't over-engineer.
 
 With green tests: remove duplication, improve naming, simplify logic, follow project conventions.
 
-# Lint/typecheck commands
-# App: cd packages/app && npx tsc --noEmit
-# Dashboard: cd packages/dashboard && npm run typecheck
+App: `cd packages/app && npx tsc --noEmit`
+Dashboard: `cd packages/server && npm run dashboard:typecheck`
 
 ### Commit and PR
 
@@ -313,9 +311,9 @@ Refs #<issue_number>
 EOF
 )"
 
-# Commit scope conventions: server, app, desktop, tunnel, ws, cli, ci, docs, dashboard
-
 Infer type from issue labels: bug→fix, enhancement→feat, test→test, refactor→refactor.
+
+Commit scopes: `server`, `app`, `desktop`, `tunnel`, `ws`, `cli`, `ci`, `docs`, `dashboard`
 
 git push -u origin ${BRANCH}
 
@@ -395,4 +393,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 13. **Comment on skips** — Every skipped issue gets a GitHub comment explaining why.
 14. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before each /full-review run.
 15. **Compose existing skills** — /full-review is called as-is. Don't reinvent its logic.
-<!-- skill-templates: parallel-dev 6a1a98b 2026-04-26 -->
+<!-- skill-templates: parallel-dev ebdb14e 2026-06-02 -->

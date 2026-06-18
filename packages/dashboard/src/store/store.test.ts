@@ -14,6 +14,13 @@ import {
   loadSessionMessages,
   clearPersistedState,
   _resetForTesting,
+  // #4303 — sidebar panel slot persistence
+  persistSidebarPanelHeight,
+  loadPersistedSidebarPanelHeight,
+  persistSidebarPanelView,
+  loadPersistedSidebarPanelView,
+  persistSidebarPanelCollapsed,
+  loadPersistedSidebarPanelCollapsed,
 } from './persistence';
 import {
   createKeyPair,
@@ -149,6 +156,52 @@ describe('persistence', () => {
     expect(state.viewMode).toBeNull();
     expect(state.activeSessionId).toBeNull();
     expect(state.terminalBuffer).toBeNull();
+  });
+
+  // #4303 — pluggable sidebar panel slot
+  describe('sidebar panel slot persistence (#4303)', () => {
+    it('persistSidebarPanelHeight and loadPersistedSidebarPanelHeight round-trip', () => {
+      persistSidebarPanelHeight(240);
+      expect(loadPersistedSidebarPanelHeight()).toBe(240);
+    });
+
+    it('loadPersistedSidebarPanelHeight returns null when unset', () => {
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+    });
+
+    it('loadPersistedSidebarPanelHeight returns null for non-positive values', () => {
+      localStorage.setItem('chroxy_persist_sidebar_panel_height', '0');
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+      localStorage.setItem('chroxy_persist_sidebar_panel_height', '-50');
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+    });
+
+    it('loadPersistedSidebarPanelHeight returns null for non-numeric values', () => {
+      localStorage.setItem('chroxy_persist_sidebar_panel_height', 'banana');
+      expect(loadPersistedSidebarPanelHeight()).toBeNull();
+    });
+
+    it('persistSidebarPanelView and loadPersistedSidebarPanelView round-trip', () => {
+      persistSidebarPanelView('tokens');
+      expect(loadPersistedSidebarPanelView()).toBe('tokens');
+    });
+
+    it('persistSidebarPanelView(null) removes the key', () => {
+      persistSidebarPanelView('tokens');
+      persistSidebarPanelView(null);
+      expect(loadPersistedSidebarPanelView()).toBeNull();
+    });
+
+    it('persistSidebarPanelCollapsed round-trips true/false', () => {
+      persistSidebarPanelCollapsed(true);
+      expect(loadPersistedSidebarPanelCollapsed()).toBe(true);
+      persistSidebarPanelCollapsed(false);
+      expect(loadPersistedSidebarPanelCollapsed()).toBe(false);
+    });
+
+    it('loadPersistedSidebarPanelCollapsed defaults to false when unset (panel starts expanded)', () => {
+      expect(loadPersistedSidebarPanelCollapsed()).toBe(false);
+    });
   });
 });
 
@@ -303,6 +356,300 @@ describe('useConnectionStore', () => {
     expect(state.viewMode).toBe('chat');
   });
 
+  it('#5277: sendCancelActivity marks the node cancelling and sends when the socket is open', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket, activeSessionId: 's1', cancellingActivityIds: new Set() });
+
+    const result = useConnectionStore.getState().sendCancelActivity('act-1');
+
+    expect(result).toBe('sent');
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('cancel_activity');
+    expect(payload.activityId).toBe('act-1');
+    expect(typeof payload.requestId).toBe('string');
+    // Keyed by `${sessionId}:${activityId}` so one session's cancel can't affect
+    // another's identically-ided node.
+    expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(true);
+  });
+
+  it('#5277: sendCancelActivity does NOT mark cancelling when offline (cancel is not queueable)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, activeSessionId: 's1', cancellingActivityIds: new Set() });
+
+    useConnectionStore.getState().sendCancelActivity('act-1');
+
+    // Offline send is dropped (not in QUEUE_TTLS); the node must NOT be stranded "Cancelling…".
+    expect(useConnectionStore.getState().cancellingActivityIds.has('s1:act-1')).toBe(false);
+  });
+
+  // #5939 (epic #5935 ④): send-while-busy queues (optimistic badge) instead of
+  // faking a new turn; per-item cancel sends cancel_queued + optimistically
+  // clears the local entry.
+  describe('#5939 queued send-while-busy', () => {
+    it('queues a send while the turn is in progress: optimistic bubble + pending queue entry, no new-turn fake', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: 'm-live', messages: [], queuedMessages: [] } },
+      });
+
+      useConnectionStore.getState().sendInput('follow-up');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // The live turn keeps its own streaming id — we did NOT reset it to 'pending'.
+      expect(ss.streamingMessageId).toBe('m-live');
+      // No optimistic thinking indicator for a queued follow-up.
+      expect(ss.messages.some(m => m.type === 'thinking')).toBe(false);
+      // The user bubble is shown, and its id is recorded in the queue model as pending.
+      const bubble = ss.messages.find(m => m.type === 'user_input');
+      expect(bubble?.content).toBe('follow-up');
+      expect(ss.queuedMessages).toHaveLength(1);
+      expect(ss.queuedMessages[0]!.status).toBe('pending');
+      expect(ss.queuedMessages[0]!.clientMessageId).toBe(bubble!.id);
+      // The input still goes over the wire (the server queues it authoritatively).
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload.type).toBe('input');
+      expect(payload.clientMessageId).toBe(bubble!.id);
+    });
+
+    it('preserves the in-progress turn thinking indicator when queueing a follow-up', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      // streamingMessageId 'pending' = sent, awaiting stream_start; the thinking
+      // bubble for that live turn is present and must survive a queued follow-up.
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            streamingMessageId: 'pending',
+            messages: [
+              { id: 'uin-0', type: 'user_input', content: 'first', timestamp: 1 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+            ],
+            queuedMessages: [],
+          },
+        },
+      });
+
+      useConnectionStore.getState().sendInput('second');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // The live turn's thinking indicator is NOT stripped...
+      expect(ss.messages.some(m => m.id === 'thinking')).toBe(true);
+      // ...and the queued bubble lands at the tail (queued behind the live turn).
+      expect(ss.messages[ss.messages.length - 1]!.content).toBe('second');
+      expect(ss.queuedMessages).toHaveLength(1);
+    });
+
+    it('#5952: queues when the server says busy (isIdle false) even if streamingMessageId is still null', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      // The pre-stream window: the server reported the turn busy (isIdle:false)
+      // but no stream_start has set streamingMessageId yet. The InputBar shows
+      // its busy UI here (isBusy = !isIdle), so a send must QUEUE — not fake a
+      // fresh turn — matching the input affordance.
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), isIdle: false, streamingMessageId: null, messages: [], queuedMessages: [] } },
+      });
+
+      useConnectionStore.getState().sendInput('follow-up');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.queuedMessages).toHaveLength(1);
+      expect(ss.queuedMessages[0]!.status).toBe('pending');
+      // Did NOT fake a new turn.
+      expect(ss.messages.some(m => m.type === 'thinking')).toBe(false);
+      expect(ss.streamingMessageId).toBeNull();
+    });
+
+    it('does NOT queue when idle: normal optimistic turn (thinking + pending stream)', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), streamingMessageId: null, messages: [], queuedMessages: [] } },
+      });
+
+      useConnectionStore.getState().sendInput('first');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.streamingMessageId).toBe('pending');
+      expect(ss.messages.some(m => m.type === 'thinking')).toBe(true);
+      expect(ss.queuedMessages).toHaveLength(0);
+    });
+
+    it('sendCancelQueued sends cancel_queued and optimistically removes the local entry', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            queuedMessages: [
+              { clientMessageId: 'uin-1', text: 'a', queuedAt: 1, status: 'confirmed' },
+              { clientMessageId: 'uin-2', text: 'b', queuedAt: 2, status: 'confirmed' },
+            ],
+          },
+        },
+      });
+
+      const result = useConnectionStore.getState().sendCancelQueued('uin-1');
+
+      expect(result).toBe('sent');
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload).toEqual({ type: 'cancel_queued', clientMessageId: 'uin-1', sessionId: 's1' });
+      // Optimistic local removal — only uin-2 remains.
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      expect(ss.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-2']);
+    });
+
+    it('sendCancelQueued with an explicit sessionId clears THAT session, not the active one', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's-active',
+        sessionStates: {
+          's-active': { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-a', text: 'a', queuedAt: 1, status: 'confirmed' }] },
+          's-other': { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-b', text: 'b', queuedAt: 1, status: 'confirmed' }] },
+        },
+      });
+
+      useConnectionStore.getState().sendCancelQueued('uin-b', 's-other');
+
+      const states = useConnectionStore.getState().sessionStates;
+      // The target session's entry is removed; the ACTIVE session is untouched.
+      expect(states['s-other']!.queuedMessages).toHaveLength(0);
+      expect(states['s-active']!.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-a']);
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload.sessionId).toBe('s-other');
+    });
+
+    it('sendCancelQueued is a no-op offline (not queueable — races the flush)', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      useConnectionStore.setState({
+        socket: null,
+        activeSessionId: 's1',
+        sessionStates: { s1: { ...createEmptySessionState(), queuedMessages: [{ clientMessageId: 'uin-1', text: 'a', queuedAt: 1, status: 'confirmed' }] } },
+      });
+
+      const result = useConnectionStore.getState().sendCancelQueued('uin-1');
+
+      expect(result).toBe(false);
+      // Local entry untouched — no optimistic removal without a real send.
+      expect(useConnectionStore.getState().sessionStates.s1!.queuedMessages).toHaveLength(1);
+    });
+  });
+
+  it('#5710: destroySession sends force:true only when forced', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket });
+
+    // Normal delete — no force field on the wire.
+    useConnectionStore.getState().destroySession('s1');
+    const normal = JSON.parse(send.mock.calls[0]![0] as string);
+    expect(normal).toEqual({ type: 'destroy_session', sessionId: 's1' });
+    expect(normal.force).toBeUndefined();
+
+    // Forced delete (a wedged running session) — carries force:true to bypass
+    // the server's #5695 busy guard.
+    useConnectionStore.getState().destroySession('s2', true);
+    const forced = JSON.parse(send.mock.calls[1]![0] as string);
+    expect(forced).toEqual({ type: 'destroy_session', sessionId: 's2', force: true });
+  });
+
+  it('#5500: sendRepoMemoryReindex marks the repo pending, clears its stale result, and sends', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({
+      socket: openSocket,
+      reindexingRepoPaths: new Set(),
+      reindexResults: { '/p/chroxy': { counts: null, error: 'old failure', at: 1 } },
+    });
+
+    const result = useConnectionStore.getState().sendRepoMemoryReindex('/p/chroxy');
+
+    expect(result).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('integration_action');
+    expect(payload.action).toBe('repo_memory_reindex');
+    expect(payload.repoPath).toBe('/p/chroxy');
+    expect(typeof payload.requestId).toBe('string');
+    expect(useConnectionStore.getState().reindexingRepoPaths.has('/p/chroxy')).toBe(true);
+    // A fresh request invalidates the previous inline result for the repo.
+    expect(useConnectionStore.getState().reindexResults['/p/chroxy']).toBeUndefined();
+  });
+
+  it('#5500: sendRepoMemoryReindex is a no-op offline (not queueable — would strand the row pending)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, reindexingRepoPaths: new Set(), reindexResults: {} });
+
+    const result = useConnectionStore.getState().sendRepoMemoryReindex('/p/chroxy');
+
+    expect(result).toBe(false);
+    expect(useConnectionStore.getState().reindexingRepoPaths.has('/p/chroxy')).toBe(false);
+  });
+
+  it('#5502: sendRepoRelayRerun marks the repo pending, clears its stale result, and sends the runId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({
+      socket: openSocket,
+      relayRerunningRepoPaths: new Set(),
+      relayRerunResults: { '/p/chroxy': { error: 'old failure', at: 1 } },
+    });
+
+    const result = useConnectionStore.getState().sendRepoRelayRerun('/p/chroxy', 9001);
+
+    expect(result).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('integration_action');
+    expect(payload.action).toBe('repo_relay_rerun');
+    expect(payload.repoPath).toBe('/p/chroxy');
+    expect(payload.runId).toBe(9001);
+    expect(typeof payload.requestId).toBe('string');
+    expect(useConnectionStore.getState().relayRerunningRepoPaths.has('/p/chroxy')).toBe(true);
+    // A fresh request invalidates the previous inline result for the repo.
+    expect(useConnectionStore.getState().relayRerunResults['/p/chroxy']).toBeUndefined();
+  });
+
+  it('#5502: sendRepoRelayRerun is a no-op offline and rejects a non-integer runId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, relayRerunningRepoPaths: new Set(), relayRerunResults: {} });
+    expect(useConnectionStore.getState().sendRepoRelayRerun('/p/chroxy', 9001)).toBe(false);
+    expect(useConnectionStore.getState().relayRerunningRepoPaths.has('/p/chroxy')).toBe(false);
+
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket });
+    expect(useConnectionStore.getState().sendRepoRelayRerun('/p/chroxy', 1.5)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();
@@ -315,6 +662,7 @@ describe('useConnectionStore', () => {
     // Message actions
     expect(typeof state.sendInput).toBe('function');
     expect(typeof state.sendInterrupt).toBe('function');
+    expect(typeof state.sendCancelActivity).toBe('function');
     expect(typeof state.sendPermissionResponse).toBe('function');
     expect(typeof state.sendUserQuestionResponse).toBe('function');
 
@@ -334,6 +682,69 @@ describe('useConnectionStore', () => {
 
     // Plan mode
     expect(typeof state.clearPlanState).toBe('function');
+  });
+
+  // #5184: header cost-badge display mode — default, setter, persistence.
+  describe('costBadgeMode (#5184)', () => {
+    it('defaults to cost (#5203)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      expect(useConnectionStore.getState().costBadgeMode).toBe('cost');
+    });
+
+    it('setCostBadgeMode updates state and persists to localStorage', async () => {
+      const { useConnectionStore } = await import('./connection');
+      useConnectionStore.getState().setCostBadgeMode('tokens');
+      expect(useConnectionStore.getState().costBadgeMode).toBe('tokens');
+      expect(localStorage.getItem('chroxy_cost_badge_mode')).toBe('tokens');
+      // Restore so later tests in this file see the default again.
+      useConnectionStore.getState().setCostBadgeMode('provider-model');
+    });
+
+    it('swallows a localStorage write failure (private mode / quota)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota exceeded');
+      });
+      try {
+        expect(() => useConnectionStore.getState().setCostBadgeMode('cost')).not.toThrow();
+        // State still updates even when the write fails.
+        expect(useConnectionStore.getState().costBadgeMode).toBe('cost');
+      } finally {
+        spy.mockRestore();
+        useConnectionStore.getState().setCostBadgeMode('provider-model');
+      }
+    });
+  });
+
+  describe('confirmSessionClose (#5206)', () => {
+    it('defaults to enabled (true)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      expect(useConnectionStore.getState().confirmSessionClose).toBe(true);
+    });
+
+    it('setConfirmSessionClose updates state and persists to localStorage', async () => {
+      const { useConnectionStore } = await import('./connection');
+      useConnectionStore.getState().setConfirmSessionClose(false);
+      expect(useConnectionStore.getState().confirmSessionClose).toBe(false);
+      expect(localStorage.getItem('chroxy_confirm_session_close')).toBe('false');
+      useConnectionStore.getState().setConfirmSessionClose(true);
+      expect(useConnectionStore.getState().confirmSessionClose).toBe(true);
+      expect(localStorage.getItem('chroxy_confirm_session_close')).toBe('true');
+    });
+
+    it('swallows a localStorage write failure (private mode / quota)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const spy = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
+        throw new Error('quota exceeded');
+      });
+      try {
+        expect(() => useConnectionStore.getState().setConfirmSessionClose(false)).not.toThrow();
+        expect(useConnectionStore.getState().confirmSessionClose).toBe(false);
+      } finally {
+        spy.mockRestore();
+        useConnectionStore.getState().setConfirmSessionClose(true);
+      }
+    });
   });
 
   it('switchSession updates activeSessionId even without cached state', async () => {
@@ -416,6 +827,99 @@ describe('useConnectionStore', () => {
     expect(terminalBuffer).toContain('ls');
     expect(terminalBuffer).toContain('file.txt');
   });
+
+  // #5835 Phase 2: live-PTY mirror resize actions.
+  it('setTerminalSize records the authoritative size on an existing session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: { 'sess-1': createEmptySessionState() } });
+    useConnectionStore.getState().setTerminalSize('sess-1', 160, 48);
+    expect(useConnectionStore.getState().sessionStates['sess-1']!.terminalSize).toEqual({ cols: 160, rows: 48 });
+    useConnectionStore.setState({ sessionStates: {} });
+  });
+
+  it('setTerminalSize is a no-op for an unknown session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: {} });
+    useConnectionStore.getState().setTerminalSize('ghost', 100, 40);
+    expect(useConnectionStore.getState().sessionStates['ghost']).toBeUndefined();
+  });
+
+  it('setTerminalSize does not produce a new sessionStates object on an unchanged size', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessionStates: { 'sess-1': createEmptySessionState() } });
+    useConnectionStore.getState().setTerminalSize('sess-1', 120, 30);
+    const after1 = useConnectionStore.getState().sessionStates;
+    // Same size again — must skip set() entirely (no new ref, no subscriber churn)
+    useConnectionStore.getState().setTerminalSize('sess-1', 120, 30);
+    expect(useConnectionStore.getState().sessionStates).toBe(after1);
+    // An unknown session also must not churn state
+    useConnectionStore.getState().setTerminalSize('ghost', 80, 24);
+    expect(useConnectionStore.getState().sessionStates).toBe(after1);
+    useConnectionStore.setState({ sessionStates: {} });
+  });
+
+  it('requestTerminalResize sends terminal_resize over an open socket', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().requestTerminalResize('sess-1', 120, 36);
+    expect(sent).toHaveLength(1);
+    const parsed = JSON.parse(sent[0]!);
+    expect(parsed).toMatchObject({ type: 'terminal_resize', sessionId: 'sess-1', cols: 120, rows: 36 });
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('requestTerminalResize is a no-op for non-positive dimensions', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().requestTerminalResize('sess-1', 0, 40);
+    expect(sent).toHaveLength(0);
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('sendTerminalInput sends terminal_input over an open socket; empty data is a no-op', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+    useConnectionStore.getState().sendTerminalInput('sess-1', '\x03');
+    expect(sent).toHaveLength(1);
+    expect(JSON.parse(sent[0]!)).toMatchObject({ type: 'terminal_input', sessionId: 'sess-1', data: '\x03' });
+    useConnectionStore.getState().sendTerminalInput('sess-1', '');
+    expect(sent).toHaveLength(1);
+    useConnectionStore.setState({ socket: null });
+  });
+
+  it('sendTerminalInput chunks a large paste into sub-cap frames without splitting surrogate pairs', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    const mockSocket = { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: mockSocket });
+
+    const MAX = 65536;
+    // 150k chars → 3 frames; put an emoji (surrogate pair) exactly straddling the
+    // first 64k boundary so the surrogate-safe split is exercised.
+    const big = 'a'.repeat(MAX - 1) + '😀' + 'b'.repeat(90000);
+    useConnectionStore.getState().sendTerminalInput('sess-1', big);
+
+    expect(sent.length).toBeGreaterThan(1);
+    let reassembled = '';
+    for (const raw of sent) {
+      const m = JSON.parse(raw);
+      expect(m.type).toBe('terminal_input');
+      expect(m.sessionId).toBe('sess-1');
+      expect(m.data.length).toBeLessThanOrEqual(MAX);
+      // No chunk ends on a lone high surrogate (would mean a split pair).
+      const last = m.data.charCodeAt(m.data.length - 1);
+      expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+      reassembled += m.data;
+    }
+    expect(reassembled).toBe(big); // lossless
+    useConnectionStore.setState({ socket: null });
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -454,6 +958,38 @@ describe('message handler', () => {
     const parsed = JSON.parse(sent[0]!);
     expect(parsed.type).toBe('test');
     expect(parsed.data).toBe('hello');
+  });
+
+  it('sendCancelActivity sends cancel_activity with the explicit sessionId (#5272)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    useConnectionStore.setState({
+      socket: { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket,
+      activeSessionId: 'active-sess',
+    });
+
+    const result = useConnectionStore.getState().sendCancelActivity('tu-1', 'drill-sess');
+    expect(result).toBe('sent');
+    expect(sent).toHaveLength(1);
+    const parsed = JSON.parse(sent[0]!);
+    expect(parsed.type).toBe('cancel_activity');
+    expect(parsed.activityId).toBe('tu-1');
+    // Explicit sessionId wins over the active session.
+    expect(parsed.sessionId).toBe('drill-sess');
+  });
+
+  it('sendCancelActivity falls back to the active session when no sessionId is given (#5272)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const sent: string[] = [];
+    useConnectionStore.setState({
+      socket: { send: (d: string) => sent.push(d), readyState: 1 } as unknown as WebSocket,
+      activeSessionId: 'active-sess',
+    });
+
+    useConnectionStore.getState().sendCancelActivity('tu-9');
+    const parsed = JSON.parse(sent[0]!);
+    expect(parsed.activityId).toBe('tu-9');
+    expect(parsed.sessionId).toBe('active-sess');
   });
 
   it('session_error surfaces non-crash errors via addServerError', async () => {
@@ -1080,6 +1616,30 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     expect(useConnectionStore.getState().resolvedPermissions['req-a']).toBe('deny');
   });
 
+  it('#5699: sendPermissionResponse refuses (no enqueue, no optimistic resolve) when disconnected', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { _testQueueInternals } = await import('./message-handler');
+    _testQueueInternals.clear();
+    // No socket (or a non-OPEN socket) — the disconnected case.
+    useConnectionStore.setState({ socket: null, resolvedPermissions: {} });
+
+    const result = useConnectionStore.getState().sendPermissionResponse('req-x', 'allow');
+
+    // Must NOT optimistically mark the prompt answered — that's the silent-loss
+    // bug (#5699): the UI would show "answered" for a request the server never got.
+    expect(result).toBe(false);
+    expect(useConnectionStore.getState().resolvedPermissions['req-x']).toBeUndefined();
+    // And must NOT queue the answer — a permission request expires server-side,
+    // so a queued answer would be replayed against a dead request.
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
+
+    // A CLOSED socket (readyState !== OPEN) is treated the same as no socket.
+    useConnectionStore.setState({ socket: { readyState: 3, send: () => {} } as unknown as WebSocket });
+    expect(useConnectionStore.getState().sendPermissionResponse('req-y', 'deny')).toBe(false);
+    expect(useConnectionStore.getState().resolvedPermissions['req-y']).toBeUndefined();
+    expect(_testQueueInternals.getQueue()).toHaveLength(0);
+  });
+
   it('sendPermissionResponse with allowSession sends wire "allow" + set_permission_rules', async () => {
     const { useConnectionStore } = await import('./connection');
     const { createEmptySessionState } = await import('./utils');
@@ -1190,8 +1750,13 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     // user already answered, so the late expiry is a no-op (#2833).
     const promptMsg = state.sessionStates.s1!.messages[0]!;
     expect(promptMsg.content).toBe(originalContent);
-    // Banner is still cleaned up so nothing dangles in the UI.
-    expect(state.sessionNotifications.find((n) => n.requestId === 'req-resolved')).toBeUndefined();
+    // #5008 — the notification row is preserved as durable widget history,
+    // but stamped read so the banner stack drops it. Pre-#5008 we
+    // hard-removed the row, which silently drained every resolved/expired
+    // alert from the NotificationsWidget.
+    const banner = state.sessionNotifications.find((n) => n.requestId === 'req-resolved');
+    expect(banner).toBeDefined();
+    expect(banner!.readAt).toBeTypeOf('number');
 
     _testMessageHandler.clearContext();
   });
@@ -1267,6 +1832,680 @@ describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
     for (const tool of ['Bash', 'WebFetch', 'WebSearch', 'Task', 'SomethingNew']) {
       expect(isRuleEligibleTool(tool)).toBe(false);
     }
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #4296 — Output tab visibility for AskUserQuestion answers
+// ---------------------------------------------------------------------------
+// The Output tab is synthesized from a narrow set of sources (user-prompt
+// echo via appendTerminalData + chat-text deltas). Pre-#4296, picking an
+// option in QuestionPrompt sent the answer over the wire but left NO trace
+// in the Output tab — the question JSON appeared, then immediately the next
+// tool fired with no record of what the user picked. Fix: echo the resolved
+// answer to the terminal buffer in cyan so the Output tab shows a visible
+// "User answered: <label>" line in the chronological stream.
+describe('sendUserQuestionResponse Output-tab echo (#4296)', () => {
+  it('echoes "User answered: <answer>" to the terminal buffer in cyan when the wire send succeeds', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('All three', 'toolu_abc');
+
+    // Wire payload still goes out unchanged
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'All three',
+      toolUseId: 'toolu_abc',
+    });
+
+    // Raw buffer carries the cyan-tinted echo so xterm.js renders it
+    const { terminalBuffer, terminalRawBuffer } = useConnectionStore.getState();
+    expect(terminalRawBuffer).toContain('\x1b[36m');
+    expect(terminalRawBuffer).toContain('> User answered: All three');
+    expect(terminalRawBuffer).toContain('\x1b[0m');
+    // Stripped buffer (for plain-text consumers) carries the message without ANSI
+    expect(terminalBuffer).toContain('User answered: All three');
+    expect(terminalBuffer).not.toContain('\x1b[');
+  });
+
+  it('echoes freeform "Other" custom-text answers identically', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('something else entirely', 'toolu_xyz');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: something else entirely');
+  });
+
+  it('still echoes when the wire send is queued (socket not open)', async () => {
+    // Queued path: when the socket is not OPEN, the response is enqueued for
+    // replay on reconnect. The Output-tab echo must still fire so the user
+    // sees their answer locally even before the server roundtrips it back.
+    const { useConnectionStore } = await import('./connection');
+
+    useConnectionStore.setState({
+      socket: null,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const result = useConnectionStore.getState().sendUserQuestionResponse('queued answer', 'toolu_q');
+    expect(result).toBe('queued');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: queued answer');
+  });
+
+  it('does not echo when the answer string is empty (defensive)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('', 'toolu_empty');
+
+    const { terminalRawBuffer } = useConnectionStore.getState();
+    // No echo for an empty answer — the wire send still happens (server
+    // schema may accept it) but we don't render an "answered:" line for
+    // nothing.
+    expect(terminalRawBuffer).not.toContain('User answered:');
+  });
+
+  // #4735 — answerSummary flattens BOTH native string[] values AND the
+  // legacy JSON-stringified array envelope (pre-#4735 wire). Without
+  // this, a mixed-version replay where an old dashboard had stashed a
+  // JSON-stringified answer in local storage would leak `["App","Tests"]`
+  // syntax through the terminal echo and the `answer` summary field.
+  it('flattens legacy JSON-stringified array envelopes in the answer summary (#4735 back-compat)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const legacyAnswersMap = {
+      'Which targets?': JSON.stringify(['App', 'Tests']),
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(legacyAnswersMap, 'toolu_legacy');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    // Wire `answers` field passes the legacy JSON-string shape through
+    // unchanged (server back-compat for old encoders).
+    expect(payload.answers).toEqual(legacyAnswersMap);
+    // Summary string flattens BOTH the legacy JSON-string envelope and
+    // any native string[] values for the readable `answer` field.
+    expect(payload.answer).toBe(
+      'Which targets?: App, Tests | Confirm?: Yes',
+    );
+    // Terminal echo carries the flattened summary, NOT the JSON syntax.
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: Which targets?: App, Tests | Confirm?: Yes');
+    expect(terminalBuffer).not.toContain('["App"');
+  });
+
+  // #4735 — multi-question multi-select wire format. The widened wire
+  // (UserQuestionResponseSchema) accepts `string | string[]` per question.
+  // The store should forward the answers map shape verbatim AND populate
+  // the `answer` summary field with a comma-joined flattening of any
+  // array values so older servers reading only `answer` still see a
+  // human-readable line.
+  it('forwards multi-question Record<string, string | string[]> verbatim and flattens arrays in the answer summary (#4735)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    const answersMap = {
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(answersMap, 'toolu_multi');
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as { type: string; answer: string; answers: Record<string, unknown>; toolUseId: string };
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu_multi');
+    // answers field passes the map through unchanged — arrays stay arrays.
+    expect(payload.answers).toEqual({
+      'Which release strategy?': 'Patch',
+      'Which targets?': ['App', 'Tests'],
+      'Confirm?': 'Yes',
+    });
+    expect(Array.isArray(payload.answers['Which targets?'])).toBe(true);
+    // Summary string flattens arrays as comma-joined labels so the
+    // string-only `answer` field stays readable on older servers.
+    expect(payload.answer).toBe(
+      'Which release strategy?: Patch | Which targets?: App, Tests | Confirm?: Yes',
+    );
+  });
+
+  it('emits {answer:<otherLabel>, freeformText} when called with the Other / freeform shape (#4651)', async () => {
+    // #4651 — single-question "Other" path. The dashboard sends both:
+    // - `answer` = the Other option's label, so the server can resolve
+    //   it to a 1-indexed digit (claude TUI hotkey) and write the digit
+    //   FIRST to swap the menu into text-input mode.
+    // - `freeformText` = the typed text, which the server writes after
+    //   the prompt-swap settles + Enter to submit.
+    // The Output-tab echo surfaces the typed text (not the literal
+    // "Other" label) to match the user's mental model of what they sent.
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'my custom answer' },
+      'toolu_other_freeform',
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'my custom answer',
+      toolUseId: 'toolu_other_freeform',
+    });
+    // No `answers` field — that's reserved for multi-question forms.
+    expect(sent[0]).not.toHaveProperty('answers');
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    expect(terminalBuffer).toContain('User answered: my custom answer');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #4901 — migration to shared `isFreeformAnswer` predicate from store-core.
+// ---------------------------------------------------------------------------
+// Pin behaviour after replacing the inline 5-condition shape detector in
+// `sendUserQuestionResponse` with the shared `isFreeformAnswer` typed-guard
+// from `@chroxy/store-core/freeform-answer` (mobile counterpart migrated in
+// #4875 / PR #4900). The migration MUST be a behaviour-neutral refactor:
+// the wire payload, the `appendTerminalData` echo, the `runningSince`
+// optimistic bump, and the negative-misroute defence (the original Copilot
+// review concern in #4753) all stay identical. These tests mirror the
+// mobile #4755 block in `packages/app/src/__tests__/store/connection.test.ts`.
+describe('sendUserQuestionResponse Other / freeform shape (#4901 shared-guard migration)', () => {
+  it('preserves a model-supplied custom Other label on the wire', async () => {
+    // Defends against a future regression where we forget to thread
+    // `otherLabel` through and instead hard-code the literal "Other"
+    // string — the server's digit-lookup would then resolve to the wrong
+    // hotkey for any custom-label Other option. Mirrors the mobile
+    // counterpart at app/__tests__/store/connection.test.ts (#4755).
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Something else', freeformText: 'typed' },
+      'toolu-custom-other',
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toMatchObject({
+      type: 'user_question_response',
+      answer: 'Something else',
+      freeformText: 'typed',
+      toolUseId: 'toolu-custom-other',
+    });
+  });
+
+  it('omits toolUseId from the wire payload when not provided', async () => {
+    // Mirrors the mobile counterpart (#4755). Zero-options free-text
+    // AskUserQuestions historically lack a tool pairing.
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'no-tooluse case' },
+    );
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Other',
+      freeformText: 'no-tooluse case',
+    });
+    expect(sent[0]).not.toHaveProperty('toolUseId');
+  });
+
+  // The Copilot review concern from #4753: a multi-question Record whose
+  // keys happen to literally be `otherLabel` and `freeformText` must NOT
+  // misroute through the freeform branch. The shared guard enforces the
+  // tightest possible shape (exactly two keys AND both string values), so
+  // any non-string value (string[] for a multi-select, etc.) falls
+  // through to the multi-question Record path with `answers` populated
+  // and the freeform `freeformText` field absent.
+  it('does NOT misroute a multi-question Record whose keys happen to be otherLabel + freeformText with non-string values', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    // A model-phrased multi-question form whose question keys happen to
+    // literally be `otherLabel` and `freeformText` AND whose answers are
+    // arrays (multi-select). The shared guard rejects this (array values
+    // fail the `typeof === 'string'` check), so it must serialize as a
+    // multi-question Record on the wire.
+    const adversarial = {
+      otherLabel: ['Patch', 'Minor'],
+      freeformText: ['App', 'Tests'],
+    };
+    useConnectionStore.getState().sendUserQuestionResponse(
+      adversarial as unknown as Record<string, string | string[]>,
+      'toolu-adversarial',
+    );
+
+    expect(sent).toHaveLength(1);
+    const payload = sent[0] as Record<string, unknown>;
+    expect(payload.type).toBe('user_question_response');
+    expect(payload.toolUseId).toBe('toolu-adversarial');
+    // Multi-question path: `answers` carries the verbatim map.
+    expect(payload.answers).toEqual(adversarial);
+    // Freeform-only field MUST be absent — proof we did not misroute.
+    expect(payload).not.toHaveProperty('freeformText');
+  });
+
+  // The acceptance criteria says no behavioural change to the
+  // `appendTerminalData` echo path. This pin defends against an accidental
+  // narrowing or branch reordering during the migration that would skip
+  // the terminal echo for freeform answers (the cyan "User answered:" line
+  // landed in #4296 and gates on `answerSummary` being non-empty).
+  it('still echoes the freeform text into the terminal buffer (#4296 / #4901 acceptance)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const mockSocket = {
+      readyState: 1,
+      send: () => { /* swallow */ },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse(
+      { otherLabel: 'Other', freeformText: 'typed answer for echo pin' },
+      'toolu-echo',
+    );
+
+    const { terminalBuffer } = useConnectionStore.getState();
+    // ANSI is stripped by the dashboard's terminal-buffer pipeline
+    // (cyan/yellow distinction lives in the rawBuffer / terminal renderer).
+    // The acceptance criteria pin here is just that the cyan-prefixed echo
+    // line still fires for freeform answers under the shared guard — i.e.
+    // the post-detection branch that calls `appendTerminalData` is taken.
+    expect(terminalBuffer).toContain('User answered: typed answer for echo pin');
+    // The "> " prefix is part of the echo template — if it disappears it
+    // means the echo path was bypassed and only the formatQuestionAnswerSummary
+    // fallback wrote into the buffer.
+    expect(terminalBuffer).toContain('> User answered:');
+  });
+
+  // Mirrors mobile #4755 third test: legacy string answers must keep the
+  // back-compat wire shape — `freeformText` MUST be absent so older
+  // servers cannot misclassify a plain option tap as an Other / freeform
+  // send (Zod schema strict-mode would also reject extras here).
+  it('keeps the legacy {answer:<string>, toolUseId} shape for plain string answers and OMITS freeformText', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const sent: Record<string, unknown>[] = [];
+    const mockSocket = {
+      readyState: 1,
+      send: (data: string) => { sent.push(JSON.parse(data)); },
+    };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu-string');
+
+    expect(sent).toHaveLength(1);
+    expect(sent[0]).toEqual({
+      type: 'user_question_response',
+      answer: 'Option A',
+      toolUseId: 'toolu-string',
+    });
+    expect(sent[0]).not.toHaveProperty('freeformText');
+    expect(sent[0]).not.toHaveProperty('answers');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// #4312 — optimistic busy-state bump on answer send
+// ---------------------------------------------------------------------------
+// sendInput (the regular chat path) implicitly puts the dashboard into a
+// "running" visual state via the input-bump path; sendUserQuestionResponse
+// historically skipped this, so the per-session activity dot + ActivityIndicator
+// stayed idle in the gap between answer-send and the next server-emitted
+// stream/tool event. The fix mirrors sendInput by flipping isIdle:false and
+// stamping lastClientActivityAt on the active session before the wire send.
+describe('sendUserQuestionResponse optimistic activity bump (#4312)', () => {
+  it('flips active session to running (isIdle:false) and bumps lastClientActivityAt', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const mockSocket = {
+      readyState: 1,
+      send: () => { /* swallow */ },
+    };
+
+    const beforeNow = Date.now();
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          isIdle: true,
+          lastClientActivityAt: null,
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'toolu_abc');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.isIdle).toBe(false);
+    expect(ss.lastClientActivityAt).not.toBeNull();
+    expect(ss.lastClientActivityAt!).toBeGreaterThanOrEqual(beforeNow);
+
+    // Clean up so unrelated tests don't see stale active session state.
+    useConnectionStore.setState({
+      activeSessionId: null,
+      sessionStates: {},
+    });
+  });
+});
+
+// #4465: when the user answers a TUI AskUserQuestion, claude TUI may or may
+// not emit PostToolUse for it (v0.9.12 — empirical: the prompt resolves but
+// the hook never fires for some question shapes). Without server-side
+// tool_result the dashboard's activeTools entry sits forever, so the footer
+// pill keeps ticking `Running AskUserQuestion · Nm Ns` indefinitely.
+//
+// Fix: when the user answers via the QuestionPrompt UI, optimistically drop
+// the matching activeTools entry. If the server later does fire tool_result,
+// sharedToolResult is idempotent on missing entries. If it doesn't (#4465's
+// stall case), the pill clears anyway.
+describe('sendUserQuestionResponse clears in-flight tool slot (#4465)', () => {
+  it('drops the matching activeTools entry when called with toolUseId', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-1', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+            // Sibling in-flight tool that must NOT be cleared.
+            { toolUseId: 'tu-bash-1', tool: 'Bash', input: { command: 'ls' }, startedAt: 150 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('Option A', 'tu-ask-1');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools.map(t => t.toolUseId)).toEqual(['tu-bash-1']);
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('is a no-op on activeTools when called without toolUseId (free-text fallback)', async () => {
+    // Some legacy callsites send the answer without a toolUseId (free-text
+    // question prompts where the dashboard can't pair to a specific tool).
+    // Those must NOT clear any in-flight tool — the server stays
+    // authoritative.
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-1', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('A');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools).toHaveLength(1)
+    expect(ss.activeTools[0]!.toolUseId).toBe('tu-ask-1')
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  // Regression for agent-review critical finding (#4499): the
+  // ActivityIndicator messages-walk fallback re-surfaces the AskUserQuestion
+  // tool_use the moment activeTools empties. Optimistically clearing
+  // activeTools alone is insufficient — we must ALSO patch the tool_use
+  // ChatMessage in messages[] so findInFlightToolUse no longer treats it
+  // as in-flight.
+  it('patches the tool_use ChatMessage in messages[] so the walk fallback no longer surfaces it (#4499)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { findInFlightToolUse } = await import('../components/ActivityIndicator');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-walk', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+          // tool_use ChatMessage pushed by handleToolStart — same id as the
+          // toolUseId per claude-tui-session.js:1115. toolResult undefined
+          // because PostToolUse never fired (the #4465 scenario).
+          messages: [
+            { id: 'tu-ask-walk', type: 'tool_use', tool: 'AskUserQuestion', content: '', timestamp: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    // Sanity: before the answer, the walk fallback finds the in-flight tool.
+    const before = findInFlightToolUse(
+      useConnectionStore.getState().sessionStates.s1!.messages,
+    );
+    expect(before).not.toBeNull();
+    expect(before!.tool).toBe('AskUserQuestion');
+
+    useConnectionStore.getState().sendUserQuestionResponse('A', 'tu-ask-walk');
+
+    const after = useConnectionStore.getState().sessionStates.s1!;
+    expect(after.activeTools).toEqual([]);
+    // The walk fallback no longer surfaces the AskUserQuestion because the
+    // tool_use now carries a synthetic toolResult.
+    const post = findInFlightToolUse(after.messages);
+    expect(post).toBeNull();
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('leaves an already-resolved tool_use intact (no double-patch)', async () => {
+    // Defense: if the server's tool_result already landed for the AskUserQuestion
+    // and patched toolResult on the message, the answer-send must NOT overwrite
+    // the real result with our sentinel.
+    const { useConnectionStore } = await import('./connection');
+    const mockSocket = { readyState: 1, send: () => {} };
+
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [],
+          messages: [
+            { id: 'tu-already-resolved', type: 'tool_use', tool: 'AskUserQuestion', content: '', toolResult: 'server answer', timestamp: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('A', 'tu-already-resolved');
+
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    const m = ss.messages.find(x => x.id === 'tu-already-resolved');
+    expect(m?.toolResult).toBe('server answer');
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
+  });
+
+  it('a subsequent server-emitted tool_result for the same toolUseId is a no-op (idempotent)', async () => {
+    // After the optimistic clear, if claude TUI does eventually emit
+    // PostToolUse, the resulting tool_result hits sharedToolResult which
+    // looks up by toolUseId and finds nothing — no double-clear, no
+    // re-append. Verifies the cross-PR contract isn't broken.
+    const { useConnectionStore } = await import('./connection');
+    const { handleMessage } = await import('./message-handler');
+
+    const mockSocket = { readyState: 1, send: () => {} };
+    useConnectionStore.setState({
+      socket: mockSocket as unknown as WebSocket,
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          activeTools: [
+            { toolUseId: 'tu-ask-2', tool: 'AskUserQuestion', input: {}, startedAt: 100 },
+          ],
+        },
+      },
+      terminalBuffer: '',
+      terminalRawBuffer: '',
+    });
+
+    useConnectionStore.getState().sendUserQuestionResponse('B', 'tu-ask-2');
+    // Late tool_result arrives.
+    handleMessage(
+      { type: 'tool_result', toolUseId: 'tu-ask-2', result: 'B', sessionId: 's1' },
+      { url: 'wss://t' } as any,
+    );
+    const ss = useConnectionStore.getState().sessionStates.s1!;
+    expect(ss.activeTools).toEqual([]);
+
+    useConnectionStore.setState({ activeSessionId: null, sessionStates: {} });
   });
 });
 

@@ -28,8 +28,9 @@
 #app.with-sidebar {
   display: grid;
   grid-template-columns: auto 1fr;
-  /* Rows: reconnect-banner, tunnel-warming-banner, header, content (sidebar+main), footer-bar. */
-  grid-template-rows: auto auto auto 1fr auto;
+  /* Rows: reconnect-banner, tunnel-warming-banner, exposure-warning-banner,
+     header, content (sidebar+main), footer-bar. */
+  grid-template-rows: auto auto auto auto 1fr auto;
 }
 
 #app.with-sidebar > .reconnect-banner {
@@ -38,26 +39,33 @@
 }
 
 /* Tunnel-warming banner must span full width above the header. Without explicit
-   grid placement it auto-places into row 4 col 1 (under the sidebar only),
-   producing an asymmetric strip that pushes the sidebar/chat columns out of
-   alignment when the banner expands from max-height: 0 to 2rem. */
+   grid placement it auto-places into the content row col 1 (under the sidebar
+   only), producing an asymmetric strip that pushes the sidebar/chat columns out
+   of alignment when the banner expands from max-height: 0 to 2rem. */
 #app.with-sidebar > .tunnel-warming-banner {
   grid-row: 2;
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > header {
+/* Exposure warning banner (#5356) — same full-width treatment; the row
+   collapses to 0 when the banner isn't rendered. */
+#app.with-sidebar > .exposure-warning-banner {
   grid-row: 3;
   grid-column: 1 / -1;
 }
 
-#app.with-sidebar > .sidebar {
+#app.with-sidebar > header {
   grid-row: 4;
+  grid-column: 1 / -1;
+}
+
+#app.with-sidebar > .sidebar {
+  grid-row: 5;
   grid-column: 1;
 }
 
 #app.with-sidebar > .main-wrapper {
-  grid-row: 4;
+  grid-row: 5;
   grid-column: 2;
   display: flex;
   flex-direction: column;
@@ -65,25 +73,28 @@
   min-width: 0;
 }
 
-/* Explicit row 5 placement so future in-flow children don't accidentally
+/* Explicit last-row placement so future in-flow children don't accidentally
    shift the footer's auto-placement target (Copilot review #3177). */
 #app.with-sidebar > .footer-bar {
-  grid-row: 5;
+  grid-row: 6;
   grid-column: 1 / -1;
 }
 
 /* ---- Header ---- */
-/* Header is a 3-column grid (auto | 1fr | auto). Switching from flex
-   space-between fixed a class of overlap bugs: with flex, header-center
-   could spill into header-right's space (overflow: visible was needed for
-   native select dropdowns), causing Skills to underlap the gear button and
-   long model names to underlap the status dot. Grid gives each zone its
-   own cell with explicit gap; only the center column flexes. */
+/* #5200: the header is two stacked rows — #header is the flex-column wrapper;
+   row 1 (.header-main) is the 3-column main bar (selectors), row 2
+   (.header-meta) holds the cost/token cluster below it — so the main bar is
+   never crowded.
+   History: .header-main's 3-column grid (auto | 1fr | auto) replaced an
+   earlier flex space-between layout that let header-center spill into
+   header-right's space (overflow: visible is needed for native select
+   dropdowns), causing Skills to underlap the gear button and long model
+   names to underlap the status dot. The grid gives each zone its own cell
+   with explicit gap; only the center column flexes. */
 #header {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  align-items: center;
-  gap: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
   padding: 10px 16px;
   background: var(--bg-header);
   border-bottom: 1px solid var(--border-primary);
@@ -91,6 +102,28 @@
   overflow: visible;
   position: relative;
   z-index: 10;
+}
+
+/* #5200: row 1 — the 3-column main bar (logo/status | model+permission
+   selects | bell + ⋯). With the cost/token cluster gone to row 2, the
+   center column has room for every selector again (the permission select
+   was being pushed past overflow:hidden before). */
+.header-main {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+}
+
+/* #5200/#5203: row 2 — the status bar on its own line with the full header
+   width to itself so it never collides with the selectors. The bar fills the
+   row (`.status-bar { width: 100% }`) and distributes its own left/right groups
+   via `space-between`, so this container just lays it out as a single flex
+   child with no extra justification. */
+.header-meta {
+  display: flex;
+  align-items: center;
+  min-width: 0;
 }
 
 .header-left {
@@ -135,8 +168,24 @@
    permission and thinking selects too, where it visually crowded the
    right zone (icons + cost) for no reason — those selects' longest
    labels are "Accept Edits" and "Default" respectively. */
+/* #5181: responsive model dropdown. The previous hard `min-width: 180px`
+   was a forcing function that surfaced two bugs: short ids ("Auto")
+   looked cramped/floating inside an over-wide box, and the `max-width`
+   alone didn't stop very long ids from pushing the right-zone cluster
+   under the sidebar at narrow widths. Switch to content-aware sizing:
+   `width: auto` lets the select size to its label, a small `min-width`
+   floor keeps short labels legible without padding them into a wide
+   empty box, and the `max-width` cap (combined with the select's own
+   `text-overflow: ellipsis`) truncates long ids in place instead of
+   overflowing the grid column onto its neighbours. */
 .header-center select[data-kind="model"] {
-  min-width: 180px;
+  width: auto;
+  /* #5197: a native <select> with `width: auto` does NOT grow to its label
+     in WebKit — it collapses to `min-width` and ellipsis-truncates the rest
+     (the "Sonnet 4.6" → "Sonnet …" bug). The floor must therefore fit the
+     common model labels; 160px shows "Sonnet 4.6" / "Opus 4.8" in full while
+     the 240px cap still truncates pathologically long ids. */
+  min-width: 160px;
   max-width: 240px;
 }
 .header-center select[data-kind="permission"] {
@@ -151,6 +200,30 @@
 .header-center select:focus {
   outline: none;
   border-color: var(--accent-blue);
+}
+
+/* #4464: read-only model badge for TUI sessions (claude TUI declares
+   modelSwitch: false). Mirrors the model <select>'s size + chrome so the
+   pill sits cleanly in the same slot; the muted text/border + cursor:default
+   communicates "not interactive" — no click handlers, no focus ring. */
+.chat-settings-readonly-badge {
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: var(--text-base);
+  cursor: default;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  flex-shrink: 1;
+  /* #5181 + #5197: mirror the model <select>'s sizing so the read-only TUI
+     pill sits cleanly in the same slot — 160px floor (fits "Sonnet 4.6")
+     with the same 240px truncation cap. */
+  min-width: 160px;
+  max-width: 240px;
+  display: inline-block;
 }
 
 /* (#3185 prompt-evaluator-toggle CSS removed — toggle moved from the
@@ -288,22 +361,67 @@
   display: flex;
   gap: 8px;
   align-items: center;
+  /* #5180: the right cluster (bell, ⋯ overflow, cost badge, tokens) is
+     content-pinned by the grid's `auto` track. Each child must keep its
+     own width so they sit side-by-side instead of collapsing on top of
+     one another — the occlusion symptom was a child shrinking to zero
+     and the next one painting over it. `min-width: max-content` stops
+     the column from being squeezed narrower than its children need, and
+     the per-child `flex-shrink: 0` below guarantees no individual control
+     gets clipped. The center column's `minmax(0, 1fr)` absorbs the
+     remaining space, so it (not the right cluster) is what yields when
+     the window narrows.
+     #5197: but `max-content` made the cluster overflow the WINDOW edge once
+     the provider/model cost badge got long — so allow the column to shrink
+     (`min-width: 0`) and push the yield down into the cost badge, which
+     truncates, while the small fixed controls below keep `flex-shrink: 0`. */
   min-width: 0;
-  /* As a grid item, this column is sized by `grid-template-columns: ... auto`
-     on #header — it pins to content width automatically. No flex-shrink
-     needed (would be a no-op anyway since this isn't a flex item). The
-     `min-width: 0` here lets the inner flex distribute children correctly
-     without forcing a horizontal scroll. */
 }
 
-/* Status bar lives inside header-right (cost + tokens). It must NOT shrink
-   below its content — token count truncating to "718 toke..." was the
-   visible symptom. The 3-column grid above already protects the right
-   zone from the center, so the status bar is free to take whatever width
-   its content needs. */
-.header-right .status-bar {
+/* #5180: every direct control in the right cluster keeps its intrinsic
+   width — none may shrink and overlap a sibling. */
+.header-right > * {
   flex-shrink: 0;
+}
+
+/* #5200/#5203: the status bar lives on its own row (.header-meta) and spans
+   the FULL header width, space-betweening two groups — identity (type badge +
+   model) on the left, metrics (configurable cost badge + token meter) on the
+   right. */
+.header-meta .status-bar {
+  width: 100%;
+  justify-content: space-between;
+  flex-shrink: 1;
+  min-width: 0;
   white-space: nowrap;
+}
+
+/* #5203: left/right groups inside the status bar. */
+.status-bar-group {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+}
+
+.status-bar-left {
+  /* identity can truncate (model name) before the metrics group does */
+  flex-shrink: 1;
+  overflow: hidden;
+}
+
+.status-bar-right {
+  flex-shrink: 0;
+}
+
+/* #5203: the model name in the left identity group. */
+.status-model {
+  font-family: var(--font-mono);
+  color: var(--text-secondary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
 }
 
 .logo {
@@ -333,6 +451,7 @@
 .status-dot.connecting { background: var(--status-connecting); }
 .status-dot.reconnecting { background: var(--status-restarting); }
 .status-dot.server_restarting { background: var(--status-restarting); }
+.status-dot.server_down { background: var(--accent-red); } /* #5698 — terminal */
 
 /* ---- Sidebar ---- */
 .sidebar {
@@ -409,6 +528,29 @@
 .sidebar-filter-input:focus {
   outline: none;
   border-color: var(--accent-blue);
+}
+
+/* #5183 — Projects/explorer header with the daemon Running indicator. */
+.sidebar-projects-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  flex-shrink: 0;
+}
+
+.sidebar-projects-title {
+  font-weight: 600;
+}
+
+.sidebar-projects-status-label {
+  margin-left: auto;
+  text-transform: none;
+  letter-spacing: normal;
 }
 
 .sidebar-tree {
@@ -586,6 +728,105 @@
   color: var(--text-primary);
 }
 
+/* #4372 — visible focus ring on sidebar treeitem rows. The App's
+ * `handleSidebarContextMenu` focuses the right-clicked row before opening
+ * the SessionContextMenu so unmount focus-restoration lands back on it;
+ * the user needs a visible indicator that the row is the focused element
+ * once the menu dismisses (matches the dashboard's standard 2px outline
+ * pattern used by buttons, tabs, and CheckpointTimeline rows).
+ *
+ * `.sidebar-repo` is the outer treeitem wrapper (also the onContextMenu
+ * binding target); `.sidebar-session-item` / `.sidebar-resumable-item` are
+ * the leaf treeitems. The bare wrapper has no border-radius normally, so
+ * we keep the outline rectangular for consistency. */
+.sidebar-repo:focus-visible,
+.sidebar-session-item:focus-visible,
+.sidebar-resumable-item:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: -2px;
+}
+
+/* #4832 — drag-to-reorder visual feedback.
+ *
+ *   .dragging       — applied to the row currently being dragged. Fades it
+ *                     so the user can see the cursor's drop-target row
+ *                     behind it.
+ *   .drop-before    — applied to the row the cursor is hovering when
+ *                     positioned above the row's midpoint. Renders a 2px
+ *                     accent line along the row's TOP edge.
+ *   .drop-after     — same but for BELOW the midpoint, line at the BOTTOM.
+ *
+ * The lines are absolutely-positioned ::before/::after pseudos that span
+ * the row's full width. The parent rule needs `position: relative` for
+ * the absolute pseudos to anchor correctly.
+ */
+.sidebar-repo,
+.sidebar-session-item {
+  position: relative;
+}
+.sidebar-repo.dragging,
+.sidebar-session-item.dragging {
+  opacity: 0.45;
+}
+.sidebar-repo.drop-before::before,
+.sidebar-session-item.drop-before::before,
+.sidebar-repo.drop-after::after,
+.sidebar-session-item.drop-after::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  right: 0;
+  height: 2px;
+  background: var(--accent-blue, #4a9eff);
+  pointer-events: none;
+  border-radius: 1px;
+}
+.sidebar-repo.drop-before::before,
+.sidebar-session-item.drop-before::before {
+  top: 0;
+}
+.sidebar-repo.drop-after::after,
+.sidebar-session-item.drop-after::after {
+  bottom: 0;
+}
+
+/* SessionContextMenu (#4045) — right-click context menu overlay for sidebar
+ * items. Positioned fixed at the click coordinates; the component itself
+ * handles outside-click / Escape / blur dismissal. */
+.session-context-menu {
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: var(--bg-secondary, var(--bg-card));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: 4px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 180px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.session-context-menu-item {
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.session-context-menu-item:hover {
+  background: var(--bg-tertiary);
+}
+
+.session-context-menu-item.destructive {
+  color: var(--danger-fg, #f87171);
+}
+
+.session-context-menu-item.separator-above {
+  border-top: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  margin-top: 4px;
+  padding-top: 8px;
+}
+
 .sidebar-session-dot {
   width: 6px;
   height: 6px;
@@ -648,6 +889,24 @@
   cursor: help;
 }
 
+/* #4073: per-session cumulative cost badge in the sidebar row. Sits at
+   the end of the row alongside other badges. Muted text so it doesn't
+   compete with the session name; cursor:help signals the native-title
+   hover breakdown. */
+.sidebar-cost-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  line-height: 13px;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--bg-muted, color-mix(in srgb, var(--text-secondary) 10%, transparent));
+  color: var(--text-secondary);
+  border: 1px solid var(--border-primary);
+  cursor: help;
+}
+
 .sidebar-footer {
   display: flex;
   align-items: center;
@@ -658,6 +917,536 @@
   color: var(--text-muted);
   flex-shrink: 0;
   flex-wrap: wrap;
+}
+
+/* #4303 — pluggable sidebar panel slot */
+.sidebar-panel-slot {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.sidebar-panel-slot-resize-handle {
+  height: 4px;
+  cursor: row-resize;
+  background: transparent;
+  flex-shrink: 0;
+}
+
+.sidebar-panel-slot-resize-handle:hover,
+.sidebar-panel-slot-resize-handle:focus,
+.sidebar-panel-slot-resize-handle:active {
+  background: var(--accent, var(--text-secondary));
+  outline: none;
+}
+
+.sidebar-panel-slot-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 0 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.sidebar-panel-slot-tabs {
+  display: flex;
+  gap: 8px;
+  flex: 1;
+  min-width: 0;
+}
+
+.sidebar-panel-slot-tab {
+  background: transparent;
+  border: none;
+  padding: 4px 6px;
+  color: var(--text-muted);
+  font-size: 11px;
+  cursor: pointer;
+  border-radius: 3px;
+}
+
+.sidebar-panel-slot-tab:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-panel-slot-tab.selected {
+  color: var(--text-primary);
+  background: var(--bg-muted, color-mix(in srgb, var(--text-secondary) 10%, transparent));
+}
+
+/* #5200: launcher buttons in the slot header (e.g. "Control Room") — an
+   action that opens a wide view in the main content area rather than
+   rendering in the narrow slot. Accented so it reads as an action, not a
+   passive view tab. */
+.sidebar-panel-slot-launchers {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+}
+
+.sidebar-panel-slot-launcher {
+  background: transparent;
+  border: 1px solid var(--border-primary, color-mix(in srgb, var(--text-secondary) 22%, transparent));
+  padding: 3px 8px;
+  color: var(--accent-blue);
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  border-radius: 4px;
+  white-space: nowrap;
+}
+
+.sidebar-panel-slot-launcher:hover {
+  background: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+}
+
+.sidebar-panel-slot-collapsed-metric {
+  font-size: 11px;
+  color: var(--text-secondary);
+  padding: 0 6px;
+}
+
+.sidebar-panel-slot-collapse-toggle {
+  background: transparent;
+  border: none;
+  color: var(--text-muted);
+  cursor: pointer;
+  padding: 2px 4px;
+  font-size: 11px;
+}
+
+.sidebar-panel-slot-collapse-toggle:hover {
+  color: var(--text-primary);
+}
+
+.sidebar-panel-slot-body {
+  overflow-y: auto;
+  padding: 8px;
+  font-size: 12px;
+}
+
+.sidebar-token-view {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.sidebar-token-view-aggregate {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.sidebar-token-view-aggregate-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+}
+
+/* #5665 — monthly programmatic-credit meter. */
+.sidebar-token-view-credit-meter {
+  margin-top: 6px;
+  padding-top: 6px;
+  border-top: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.08));
+}
+
+.sidebar-token-view-credit-bar {
+  margin-top: 4px;
+  height: 4px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.10);
+  overflow: hidden;
+}
+
+.sidebar-token-view-credit-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: var(--accent-purple, #8b7fd6);
+  transition: width 0.3s ease;
+}
+
+.sidebar-token-view-credit-meter-warning .sidebar-token-view-credit-bar-fill {
+  background: var(--accent-orange, #e0a458);
+}
+
+.sidebar-token-view-credit-meter-exceeded .sidebar-token-view-credit-bar-fill {
+  background: var(--accent-red, #d6685f);
+}
+
+.sidebar-token-view-credit-meter-exceeded .sidebar-token-view-value-secondary {
+  color: var(--accent-red, #d6685f);
+}
+
+.sidebar-token-view-label {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.sidebar-token-view-value {
+  color: var(--text-primary);
+  font-weight: 600;
+}
+
+.sidebar-token-view-value-secondary {
+  color: var(--text-secondary);
+}
+
+.sidebar-token-view-section-header {
+  color: var(--text-muted);
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 4px;
+}
+
+.sidebar-token-view-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+}
+
+.sidebar-token-view-provider-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-token-view-provider-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  font-size: 12px;
+}
+
+/* #4362: untracked-provider trigger is now a button (tap-to-disclose). */
+.sidebar-token-view-provider-untracked {
+  color: var(--text-muted);
+  cursor: help;
+  background: none;
+  border: 0;
+  padding: 0;
+  font: inherit;
+  line-height: inherit;
+}
+
+/* #4362: cost-info trigger is a button (tap-to-disclose). Style it to look
+ * like the prior inline marker so the affordance isn't visually noisy. */
+.sidebar-token-view-info {
+  color: var(--text-muted);
+  cursor: help;
+  font-size: 10px;
+  margin-left: 2px;
+  background: none;
+  border: 0;
+  padding: 0;
+  line-height: inherit;
+}
+
+.sidebar-token-view-info:focus-visible,
+.sidebar-token-view-provider-untracked:focus-visible {
+  outline: 1px dotted var(--text-muted);
+  outline-offset: 2px;
+}
+
+/* #4362: inline popover container — anchors the popover near the trigger
+ * without a portal. The popover itself wraps onto its own line so it
+ * doesn't disrupt the row layout. */
+.sidebar-token-view-disclosure {
+  position: relative;
+  display: inline;
+}
+
+.sidebar-token-view-popover {
+  display: block;
+  margin-top: 4px;
+  padding: 6px 8px;
+  border-radius: 4px;
+  background: var(--bg-panel, var(--bg-secondary, #1f2128));
+  color: var(--text-primary);
+  font-size: 11px;
+  line-height: 1.4;
+  font-weight: normal;
+  box-shadow: 0 2px 6px rgba(0, 0, 0, 0.25);
+  max-width: 240px;
+  white-space: normal;
+}
+
+.sidebar-token-view-provider-cost {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+/* #4303 per-session breakdown. Rows are buttons when click-to-activate is
+ * wired (parity with the sidebar tree), so reset button chrome to match the
+ * provider-row layout. */
+.sidebar-token-view-session-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.sidebar-token-view-session-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  gap: 8px;
+  width: 100%;
+  font-size: 12px;
+  background: none;
+  border: 0;
+  padding: 2px 4px;
+  margin: 0;
+  border-radius: 4px;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+/* Only the <button> variant (rendered when click-to-activate is wired) is
+ * interactive — the static <li> variant must NOT show a pointer cursor or a
+ * hover affordance, or it advertises a click that does nothing. */
+button.sidebar-token-view-session-row {
+  cursor: pointer;
+}
+
+button.sidebar-token-view-session-row:hover {
+  background: var(--bg-hover, rgba(255, 255, 255, 0.06));
+}
+
+.sidebar-token-view-session-row.active {
+  background: var(--bg-selected, rgba(255, 255, 255, 0.1));
+  font-weight: 600;
+}
+
+.sidebar-token-view-session-row:focus-visible {
+  outline: 1px dotted var(--text-muted);
+  outline-offset: 2px;
+}
+
+.sidebar-token-view-session-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+}
+
+.sidebar-token-view-session-tokens {
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+/* #5163 (epic #5159) — Control Room panel: live read-only activity tree. */
+.control-room-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  overflow-y: auto;
+  height: 100%;
+}
+
+.control-room-empty {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
+  padding: 4px 2px;
+}
+
+.control-room-entry-list,
+.control-room-entry-list-inner {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.control-room-entry-row {
+  display: flex;
+  flex-direction: column;
+}
+
+/* #5272: the toggle button + an optional Cancel button share one line. The
+   toggle flexes to fill; the cancel button stays at its intrinsic width. */
+.control-room-entry-rowline {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.control-room-entry {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 3px 6px;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  color: var(--text-primary);
+  font-size: 12px;
+  text-align: left;
+  cursor: pointer;
+}
+
+/* #5272: per-subagent cancel. Understated until hover so it doesn't compete
+   with the activity content, then takes the danger accent. */
+.control-room-cancel-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border-subtle, var(--border, #444));
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.control-room-cancel-btn:hover,
+.control-room-cancel-btn:focus-visible {
+  background: var(--danger-bg, rgba(220, 38, 38, 0.12));
+  border-color: var(--danger, #dc2626);
+  color: var(--danger, #dc2626);
+}
+
+.control-room-entry:hover,
+.control-room-entry:focus-visible {
+  background: var(--bg-tertiary);
+}
+
+.control-room-entry-icon {
+  flex-shrink: 0;
+  width: 12px;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.control-room-entry-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.control-room-entry-elapsed {
+  flex-shrink: 0;
+  color: var(--text-muted);
+  font-variant-numeric: tabular-nums;
+  font-size: 11px;
+}
+
+.control-room-status-badge {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  padding: 1px 6px;
+  border-radius: 999px;
+  border: 1px solid transparent;
+}
+
+.control-room-status-badge.status-running {
+  color: var(--accent-blue);
+  background: var(--accent-blue-light);
+  border-color: var(--accent-blue-border);
+}
+
+.control-room-status-badge.status-done {
+  color: var(--accent-green);
+  background: var(--accent-green-light);
+  border-color: var(--accent-green-border);
+}
+
+.control-room-status-badge.status-failed {
+  color: var(--accent-red);
+  background: var(--accent-red-light);
+  border-color: var(--accent-red-border);
+}
+
+.control-room-status-badge.status-blocked {
+  color: var(--accent-orange);
+  background: var(--accent-orange-medium);
+  border-color: var(--accent-orange-border-strong);
+}
+
+/* Blocked-on-input entries are visually prominent and tie into the
+   intervention surface (#4891): a steady amber accent + left rule so the
+   operator's eye lands on "this needs you". A subtle pulse draws attention
+   without the motion being distracting; respects reduced-motion below. */
+.control-room-entry-blocked {
+  background: var(--accent-orange-light);
+  border-color: var(--accent-orange-border);
+  border-left: 3px solid var(--accent-orange);
+  animation: control-room-blocked-pulse 2s ease-in-out infinite;
+}
+
+.control-room-entry-blocked:hover,
+.control-room-entry-blocked:focus-visible {
+  background: var(--accent-orange-subtle);
+}
+
+@keyframes control-room-blocked-pulse {
+  0%, 100% { border-left-color: var(--accent-orange); }
+  50% { border-left-color: var(--accent-orange-border-strong); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .control-room-entry-blocked {
+    animation: none;
+  }
+}
+
+.control-room-entry-output {
+  margin: 2px 6px 4px 18px;
+  padding: 4px 8px;
+  background: var(--bg-tertiary);
+  border-radius: 4px;
+  font-size: 11px;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.control-room-output-row {
+  display: flex;
+  gap: 8px;
+}
+
+.control-room-output-key {
+  color: var(--text-muted);
+  flex-shrink: 0;
+  min-width: 48px;
+}
+
+.control-room-output-val {
+  color: var(--text-secondary);
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.control-room-output-ref {
+  font-family: var(--font-mono, monospace);
+}
+
+.control-room-output-empty {
+  color: var(--text-muted);
+  font-style: italic;
 }
 
 .sidebar-status-dot {
@@ -688,6 +1477,157 @@
 
 .sidebar-client-count {
   margin-left: auto;
+}
+
+/* #5281 ①.3 — shared-session presence indicator (sidebar footer) */
+.viewers-indicator {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+}
+
+.viewers-trigger {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 2px 6px;
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  background: var(--bg-secondary, transparent);
+  color: var(--text-secondary);
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.viewers-trigger:hover {
+  background: var(--bg-hover, var(--border-primary));
+  color: var(--text-primary);
+}
+
+.viewers-trigger-glyph {
+  font-size: 11px;
+}
+
+.viewers-trigger-count {
+  font-variant-numeric: tabular-nums;
+  font-weight: 600;
+}
+
+.viewers-popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  right: 0;
+  z-index: 50;
+  width: 240px;
+  padding: 10px;
+  background: var(--bg-elevated, var(--bg-secondary));
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  box-shadow: 0 6px 24px rgba(0, 0, 0, 0.3);
+  color: var(--text-primary);
+}
+
+.viewers-popover-header strong {
+  font-size: 12px;
+}
+
+.viewers-popover-sub {
+  margin: 4px 0 8px;
+  font-size: 11px;
+  color: var(--text-muted);
+  line-height: 1.4;
+}
+
+.viewers-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  /* Cap a large roster so the popover can't grow unbounded. */
+  max-height: 220px;
+  overflow-y: auto;
+}
+
+.viewers-client-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+}
+
+.viewers-client-glyph {
+  flex-shrink: 0;
+}
+
+.viewers-client-name {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viewers-tag {
+  flex-shrink: 0;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+}
+
+.viewers-tag-self {
+  background: var(--border-primary);
+  color: var(--text-secondary);
+}
+
+.viewers-tag-primary {
+  background: var(--accent-muted, var(--border-primary));
+  color: var(--accent, var(--text-primary));
+}
+
+/* #5589 / #5281 — observer-role surface on the shared-session presence chip. */
+.viewers-observing-badge {
+  margin-left: 6px;
+  padding: 1px 6px;
+  border-radius: 8px;
+  font-size: 10px;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--accent-muted, var(--border-primary));
+  color: var(--accent, var(--text-primary));
+}
+
+.viewers-observing-footer {
+  border-top: 1px solid var(--border-primary);
+  padding: 8px 10px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.viewers-observing-note {
+  margin: 0;
+  font-size: 11px;
+  color: var(--text-secondary);
+}
+
+.viewers-takeover-button {
+  align-self: flex-start;
+  padding: 4px 10px;
+  border: 1px solid var(--accent, var(--border-primary));
+  border-radius: 6px;
+  background: transparent;
+  color: var(--accent, var(--text-primary));
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.viewers-takeover-button:hover {
+  background: var(--accent-muted, var(--border-primary));
 }
 
 /* ---- Session Bar ---- */
@@ -746,6 +1686,52 @@
 .session-tab:focus-visible {
   outline: 2px solid var(--border-focus);
   outline-offset: -2px;
+}
+
+/* #4831 — drag affordances for the SessionBar tab strip.
+ * `cursor: grab` only when the drag handler is wired (parent passes
+ * `[draggable="true"]`). Lifted state (keyboard reorder) and drag-over
+ * state visually telegraph what's happening without animating layout. */
+.session-tab[draggable="true"] {
+  cursor: grab;
+}
+.session-tab[draggable="true"]:active {
+  cursor: grabbing;
+}
+.session-tab.dragging {
+  opacity: 0.55;
+  /* Slight scale to lift the tab visually — purely cosmetic, GPU-cheap. */
+  transform: scale(0.97);
+}
+.session-tab.drag-over {
+  /* A left-edge accent indicates the drop slot. Insert-before semantics:
+   * a drop on this tab pushes it right and the dragged tab takes its place. */
+  box-shadow: inset 2px 0 0 0 var(--accent-blue);
+}
+.session-tab.lifted {
+  /* Mirror the dragging affordance for the keyboard reorder path. */
+  outline: 2px dashed var(--accent-blue);
+  outline-offset: -2px;
+}
+
+/* #5204 — the pinned, session-independent Control Room tab. Distinct
+ * blue-accented styling so it reads as a different kind of tab from the
+ * session pills, and a left margin/divider separating it from sessions. */
+.control-room-tab {
+  border-color: color-mix(in srgb, var(--accent-blue) 35%, transparent);
+  color: var(--text-secondary);
+  margin-right: 4px;
+  padding-right: 8px;
+}
+.control-room-tab.active {
+  background: var(--bg-card);
+  color: var(--text-primary);
+  border-color: var(--accent-blue);
+}
+.control-room-tab-icon {
+  pointer-events: none;
+  color: var(--accent-blue);
+  font-size: var(--text-sm);
 }
 
 .tab-name {
@@ -832,6 +1818,57 @@
   letter-spacing: 0.4px;
 }
 
+/* #5667 — per-tab "permission waiting" indicator. */
+.tab-pending-permission {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* #5693: grow past a circle when a count (`!2`) is shown. */
+  min-width: 14px;
+  height: 14px;
+  padding: 0 3px;
+  box-sizing: border-box;
+  border-radius: 7px;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 1;
+  background: var(--bg-permission, color-mix(in srgb, var(--accent-purple) 22%, transparent));
+  color: var(--accent-purple);
+  border: 1px solid var(--border-permission, color-mix(in srgb, var(--accent-purple) 45%, transparent));
+  cursor: help;
+}
+
+/* #5693 (PR-3) — aggregate "N pending" badge in the session bar. Clickable;
+   jumps to the next waiting session. */
+.session-bar-pending-total {
+  flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  margin-left: 6px;
+  padding: 2px 8px;
+  border-radius: 11px;
+  font-size: 11px;
+  font-weight: 700;
+  line-height: 1;
+  white-space: nowrap;
+  background: var(--bg-permission, color-mix(in srgb, var(--accent-purple) 22%, transparent));
+  color: var(--accent-purple);
+  border: 1px solid var(--border-permission, color-mix(in srgb, var(--accent-purple) 45%, transparent));
+  cursor: pointer;
+  transition: background 0.15s;
+}
+
+.session-bar-pending-total:hover {
+  background: color-mix(in srgb, var(--accent-purple) 32%, transparent);
+}
+
+.session-bar-pending-total:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 1px;
+}
+
 .tab-close {
   background: none;
   border: none;
@@ -845,8 +1882,20 @@
   transition: opacity 0.15s;
 }
 
-.session-tab:hover .tab-close {
+/* #5205 — reveal the × on hover OR keyboard focus anywhere within the tab
+ * (the tab div itself is focusable via tabIndex=0, so :focus-within fires when
+ * a keyboard user lands on the tab, not only once they reach the × button).
+ * Keeps the close affordance discoverable for both mouse and keyboard. */
+.session-tab:hover .tab-close,
+.session-tab:focus-within .tab-close {
   opacity: 1;
+}
+
+/* #5205 — subtle "expand slightly" affordance on hover/focus so the tab grows
+ * to make room for the revealed ×, matching the requested feel. */
+.session-tab:hover,
+.session-tab:focus-within {
+  padding-right: 14px;
 }
 
 .tab-close:hover {
@@ -1255,6 +2304,12 @@
   display: flex;
   flex-direction: column;
   gap: 12px;
+  /* #4652: keep wheel/touchpad scroll inside the chat panel even when
+     an AskUserQuestion form is open. Without `contain`, reaching the
+     top/bottom of the chat lets the scroll bubble up to the outer page
+     (or the form's own inputs absorb the wheel before the chat does),
+     which felt like scrolling was "stuck" while a prompt was visible. */
+  overscroll-behavior: contain;
 }
 
 /* ---- Message rows with sender icons ---- */
@@ -1284,6 +2339,14 @@
 
 .msg {
   max-width: 85%;
+  /* #4757: flex/grid child needs min-width: 0 so a long <pre> or wide
+     inline-code line can't push the bubble past its 85% cap. Without
+     this, intrinsic content width wins and the bubble overflows the
+     chat panel (visible bleed past the right edge on v0.9.32). The
+     same applies inside `.msg-row` where `max-width: unset` removes
+     the bubble's own cap and the parent row's 88% cap is the only
+     wall — without min-width: 0 the bubble blew past it. */
+  min-width: 0;
   padding: 10px 14px;
   border-radius: 12px;
   font-size: var(--text-md);
@@ -1321,6 +2384,56 @@
   font-size: var(--text-base);
 }
 
+/* #4476: stream-stall chip — replaces the generic red error bubble for
+   recoverable stalls (server PR #4475 error{code: 'stream_stall'}).
+   Amber palette communicates "recoverable" vs the red "broken" bubble;
+   inline Retry button surfaces the most common follow-up so the user
+   doesn't have to retype their last message. Uses --warning-fg /
+   --warning-bg-subtle (the canonical chroxy warning surface, theme.css
+   line ~99) so the chip themes correctly across light/dark mode and
+   doesn't introduce a new ad-hoc palette. */
+.stream-stall-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 12px;
+  padding: 6px 12px;
+  border-radius: 16px;
+  background: var(--warning-bg-subtle);
+  color: var(--warning-fg);
+  border: 1px solid var(--warning-fg);
+  align-self: center;
+  font-size: var(--text-base);
+}
+.stream-stall-chip-text {
+  white-space: nowrap;
+}
+.stream-stall-chip-retry,
+.stream-stall-chip-view-logs {
+  background: transparent;
+  border: 1px solid currentColor;
+  color: inherit;
+  border-radius: 12px;
+  padding: 2px 10px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+.stream-stall-chip-retry:hover,
+.stream-stall-chip-retry:focus,
+.stream-stall-chip-view-logs:hover,
+.stream-stall-chip-view-logs:focus {
+  background: var(--warning-fg);
+  color: var(--bg-primary);
+  outline: none;
+}
+
+/* #4603: secondary affordance — visually de-emphasised vs Retry so the
+   primary recovery path (resending the user input) stays the obvious
+   target while still surfacing a triage shortcut for operators. */
+.stream-stall-chip-view-logs {
+  opacity: 0.85;
+  font-weight: normal;
+}
+
 .msg.thinking {
   background: transparent;
   align-self: flex-start;
@@ -1347,6 +2460,56 @@
   opacity: 0.6;
   margin-top: 4px;
   line-height: 1;
+}
+
+/* #5939 (epic #5935 ④): a send-while-busy follow-up is held in the server's
+   outgoing queue and flushes on turn-complete. The bubble is dimmed and dashed
+   to read as "not sent yet", with a small "Queued" pill + cancel control. */
+.msg.queued {
+  opacity: 0.72;
+  border: 1px dashed var(--accent-blue);
+}
+
+.msg-queued {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 4px;
+  font-size: 0.7rem;
+  line-height: 1;
+}
+
+.msg-queued-label {
+  display: inline-flex;
+  align-items: center;
+  padding: 2px 6px;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent-blue) 22%, transparent);
+  color: var(--accent-blue);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+
+.msg-queued-cancel {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 0.7rem;
+  line-height: 1;
+  cursor: pointer;
+}
+
+.msg-queued-cancel:hover {
+  background: color-mix(in srgb, var(--text-muted) 18%, transparent);
+  color: var(--text-primary);
 }
 
 .scroll-to-bottom {
@@ -1377,6 +2540,14 @@
   background: var(--bg-code-block);
   border-radius: 6px;
   padding: 10px 12px;
+  /* #4757: cap width at the bubble and scroll the long line INSIDE the
+     <pre>. Previously `overflow-x: auto` was set but no max-width, so a
+     200+ char single line still expanded the <pre>'s intrinsic width
+     past the bubble — the scrollbar never engaged because nothing was
+     actually clipped. `100%` against the min-width:0 bubble means the
+     <pre> takes the bubble's available width and the long line scrolls
+     horizontally inside it. */
+  max-width: 100%;
   overflow-x: auto;
   margin: 6px 0;
   font-size: var(--text-base);
@@ -1387,6 +2558,13 @@
   color: #c8d0e0;
   background: none;
   padding: 0;
+  /* #4757: explicitly keep code inside <pre> on its original lines —
+     the `.msg code` rule below applies break-word for inline spans, and
+     we must NOT inherit that into fenced blocks where line breaks are
+     load-bearing (directory trees, ASCII tables, code formatting). */
+  white-space: pre;
+  word-break: normal;
+  overflow-wrap: normal;
 }
 
 .msg code {
@@ -1396,6 +2574,14 @@
   border-radius: 4px;
   font-size: 0.9em;
   color: #c8d0e0;
+  /* #4757: inline <code> in a paragraph must be able to wrap mid-token
+     when the surrounding text + code exceeds the bubble width.
+     `overflow-wrap: anywhere` is the modern, well-supported answer;
+     `word-break: break-word` adds Safari < 15 coverage. The `.msg pre
+     code` rule above re-asserts `normal` so fenced blocks aren't
+     affected. */
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .msg strong { color: var(--text-heading); }
@@ -1515,18 +2701,35 @@
   color: var(--text-muted);
   align-self: flex-start;
   max-width: 85%;
-  cursor: pointer;
 }
 
-.tool-group:focus-visible {
-  outline: 2px solid var(--border-focus);
-  outline-offset: 2px;
-}
-
+/*
+ * #4282: the header is now the real toggle <button>. Reset the default
+ * UA button styles (background/border/padding/font/color) so it visually
+ * matches the previous .tool-group-header <div> shape, and inherit type
+ * from the surrounding .tool-group so summary + chevron read identically.
+ * Cursor moves here from .tool-group because only the header is
+ * interactive now — the entry rows manage their own cursor in
+ * .tool-group-entry-row.
+ */
 .tool-group-header {
   display: flex;
   align-items: center;
   gap: 6px;
+  width: 100%;
+  background: transparent;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.tool-group-header:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
 }
 
 .tool-group-pulse {
@@ -1536,6 +2739,21 @@
   background: var(--accent-blue);
   opacity: 0.8;
   flex-shrink: 0;
+}
+
+/* #4308 — in-flight tool pulse on individual ToolBubble headers. Shares
+   the same visual language as `.tool-group-pulse` so a running solo
+   tool reads the same as a running tool group. */
+.tool-bubble-pulse {
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--accent-blue);
+  opacity: 0.8;
+  margin-right: 6px;
+  flex-shrink: 0;
+  vertical-align: middle;
 }
 
 .tool-group-summary {
@@ -1564,10 +2782,84 @@
 
 .tool-group-entry {
   display: flex;
-  align-items: center;
+  flex-direction: column;
   gap: 6px;
   padding: 4px 2px;
   border-radius: 4px;
+}
+
+/*
+ * #4281: cursor + hover + focus belong on the interactive ROW only.
+ * Putting them on the outer .tool-group-entry made the detail panel feel
+ * clickable too — and clicks on the panel bubbled into a collapse.
+ */
+.tool-group-entry-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  border-radius: 4px;
+}
+
+.tool-group-entry-row:hover {
+  background: color-mix(in srgb, var(--border-primary) 25%, transparent);
+}
+
+.tool-group-entry-row:focus-visible {
+  outline: 2px solid var(--accent-blue);
+  outline-offset: 2px;
+}
+
+.tool-group-entry-toggle {
+  margin-left: auto;
+  color: var(--text-muted);
+  font-size: 10px;
+  flex-shrink: 0;
+}
+
+.tool-group-entry--thinking .tool-group-entry-toggle {
+  display: none;
+}
+
+.tool-group-entry-detail {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 6px 4px 4px 4px;
+  border-top: 1px dashed color-mix(in srgb, var(--border-primary) 50%, transparent);
+}
+
+.tool-group-entry-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.tool-group-entry-detail-label {
+  color: var(--text-muted);
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  font-weight: 600;
+}
+
+.tool-group-entry-detail-content {
+  margin: 0;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 11px;
+  background: color-mix(in srgb, var(--border-primary) 25%, transparent);
+  padding: 6px 8px;
+  border-radius: 4px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  /*
+   * #4283: outer .tool-group-list caps at 220px; the inner scroller has to
+   * sit comfortably under that so the outer wins first instead of nesting
+   * scrollbars (which clips the bottom of the panel awkwardly).
+   */
+  max-height: 180px;
+  overflow: auto;
 }
 
 .tool-group-entry + .tool-group-entry {
@@ -1619,6 +2911,23 @@
   padding: 12px 14px;
   align-self: flex-start;
   max-width: 85%;
+}
+
+/* #5667 — session-origin badge so multi-agent operators see which session asks. */
+.perm-session {
+  display: inline-block;
+  font-size: var(--text-xs, 11px);
+  font-weight: 600;
+  color: var(--accent-purple);
+  background: rgba(255, 255, 255, 0.06);
+  border: 1px solid var(--border-permission);
+  border-radius: 6px;
+  padding: 1px 7px;
+  margin-bottom: 6px;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .perm-desc {
@@ -1689,6 +2998,14 @@
   margin-top: 4px;
   font-size: var(--text-xs, 11px);
   color: var(--text-muted);
+  line-height: 1.2;
+}
+
+/* #5699 — disconnected hint under the (disabled) answer buttons. */
+.perm-disconnected-hint {
+  margin-top: 6px;
+  font-size: var(--text-xs, 11px);
+  color: var(--accent-orange);
   line-height: 1.2;
 }
 
@@ -1775,6 +3092,113 @@
   opacity: 1;
 }
 
+/* #4666: deferred-notice variant shown when the TUI emits a multi-question
+   AskUserQuestion. The permission-hook denies the combined form (#4648);
+   chroxy waits for Claude to re-emit one question at a time, and this
+   placeholder explains the gap so the user doesn't try to interact. Muted
+   tone — visually distinct from the active question-prompt card. */
+.question-prompt--deferred {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.question-prompt--deferred .question-text {
+  margin-bottom: 0;
+  color: var(--text-muted);
+}
+
+/* #4685: pending-permission placeholder shown when an AskUserQuestion
+   permission_request is still unresolved on this session. The full
+   question payload (text, options, multi-question form, deferred notice,
+   free-text input) is suppressed until the user clicks Allow on the
+   matching permission prompt — pre-fix the content rendered the moment
+   the wire `user_question` event arrived, leaking model-supplied text
+   before consent. Mirrors the deferred-notice variant's muted tone so
+   the gap reads as "waiting" rather than "broken". */
+.question-prompt--pending-permission {
+  color: var(--text-muted);
+  font-style: italic;
+}
+
+.question-prompt--pending-permission .question-text {
+  margin-bottom: 0;
+  color: var(--text-muted);
+}
+
+/* #4634: multi-question AskUserQuestion form (#4604 Chunk B / #4620).
+   The component renders these class names but they previously had no
+   CSS rules — Submit fell back to the native browser button (gray-on-
+   dark, unreadable) and questions had no visual separation.
+
+   #4652: cap height to the viewport and let the form scroll internally
+   when it would otherwise grow taller than the chat pane. Without this
+   cap a large multi-question form pushed messages off-screen and
+   trapped wheel events because the chat-messages container had no room
+   to scroll past the form. */
+.question-prompt--multi {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 60vh;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.question-prompt-multi-row {
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.question-prompt-multi-row:last-of-type {
+  border-bottom: none;
+  padding-bottom: 0;
+}
+
+.question-multi-submit {
+  align-self: flex-start;
+  padding: 8px 24px;
+  border-radius: 6px;
+  border: 1px solid var(--accent-purple);
+  background: var(--accent-purple);
+  color: #fff;
+  font-size: var(--text-base);
+  font-weight: 500;
+  cursor: pointer;
+  margin-top: 8px;
+}
+
+.question-multi-submit:hover:not(:disabled) {
+  opacity: 0.85;
+}
+
+.question-multi-submit:disabled {
+  opacity: 0.4;
+  cursor: not-allowed;
+}
+
+.question-multi-submit:focus-visible {
+  outline: 2px solid var(--accent-purple);
+  outline-offset: 2px;
+}
+
+/* Soften the native radio/checkbox dot — pure white reads as foreign
+   inside the purple-outlined option pills on the dark theme. */
+.question-option input[type="radio"],
+.question-option input[type="checkbox"] {
+  accent-color: var(--accent-purple);
+}
+
+/* Multi-question form options wrap an input + span inside a label. The
+   default inline layout jammed the radio/checkbox dot against the text
+   with no gap. Use flex + gap on the radio/checkbox variants only so the
+   single-select QuestionPrompt path (no input element) is untouched. */
+.question-option--radio,
+.question-option--checkbox {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+}
+
 .question-freetext {
   display: flex;
   gap: 8px;
@@ -1854,6 +3278,58 @@
   color: var(--text-secondary);
   font-style: italic;
   padding: 4px 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+/* #4312 — post-answer collapsed summary. Mirrors the tool-group-header
+   vocabulary (chevron + summary row) so the collapse affordance reads
+   consistently with the rest of the chat list. */
+.question-answered-summary {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: none;
+  padding: 6px 0;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  font-family: inherit;
+  text-align: left;
+  width: 100%;
+}
+
+.question-answered-summary:hover {
+  color: var(--text-primary);
+}
+
+.question-answered-summary:focus-visible {
+  outline: 2px solid var(--border-focus);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+
+.question-answered-summary--expanded {
+  margin-bottom: 4px;
+}
+
+.question-answered-marker {
+  color: var(--accent-green, var(--accent-purple));
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.question-answered-label {
+  flex: 1;
+  font-weight: 500;
+}
+
+.question-answered-chevron {
+  color: var(--text-muted);
+  font-size: 12px;
+  flex-shrink: 0;
 }
 
 .perm-countdown {
@@ -1934,6 +3410,15 @@
   flex: 1;
 }
 
+/* #5556 — restart-mode context line ("Graceful restart" / "Recovering from
+   crash"). Muted secondary label that rides alongside the message without
+   competing for the flex stretch. */
+.reconnect-detail {
+  flex-shrink: 0;
+  opacity: 0.75;
+  font-size: var(--text-sm);
+}
+
 .btn-retry {
   background: var(--accent-orange);
   color: var(--bg-secondary);
@@ -1980,6 +3465,41 @@
 }
 
 .stdin-disabled-banner-message {
+  flex: 1;
+}
+
+/* ---- Exposure Warning Banner (#5356) ----
+   Dismissible warning when the server reports a non-loopback bind and/or a
+   public quick tunnel in its auth_ok exposure snapshot. Visual language
+   mirrors the stdin-disabled banner (orange caution band). */
+.exposure-warning-banner {
+  background: #3b2010;
+  color: var(--accent-orange);
+  padding: 8px 12px;
+  font-size: var(--text-base);
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  border-bottom: 1px solid color-mix(in srgb, var(--accent-orange) 30%, transparent);
+}
+
+.exposure-warning-icon {
+  flex-shrink: 0;
+  font-weight: 700;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-orange);
+  color: var(--bg-secondary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 12px;
+  line-height: 1;
+}
+
+.exposure-warning-message {
   flex: 1;
 }
 
@@ -2252,11 +3772,336 @@
   opacity: 0.85;
 }
 
+/* #5510 (epic #5509): pairing-approval primitive — host approval banner. */
+.pair-requests {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  flex-shrink: 0;
+}
+
+.pair-request-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  font-size: var(--text-sm);
+  background: #0e1f2a;
+  border-left: 3px solid var(--accent-blue);
+  gap: 12px;
+}
+
+.pair-request-content {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+}
+
+.pair-request-title {
+  font-weight: 600;
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.pair-request-device {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.pair-request-compare {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+  flex-shrink: 0;
+}
+
+.pair-request-code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--accent-blue);
+  flex-shrink: 0;
+}
+
+.pair-request-actions {
+  display: flex;
+  gap: 6px;
+  flex-shrink: 0;
+}
+
+.pair-request-btn {
+  border: none;
+  border-radius: 4px;
+  padding: 4px 12px;
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+}
+
+.pair-request-btn--approve {
+  background: var(--accent-green, #3a3);
+  color: #fff;
+}
+
+.pair-request-btn--deny {
+  background: var(--accent-red, #c44);
+  color: #fff;
+}
+
+.pair-request-btn:hover {
+  opacity: 0.85;
+}
+
 .notification-banner-overflow {
   text-align: center;
   font-size: var(--text-xs);
   color: var(--text-secondary);
   padding: 2px 0;
+}
+
+/* ---- Intervention notifications widget (#4890) ---------------------------
+   Slack-style inbox in the header-right zone. Bell trigger with unread badge,
+   click-to-open dropdown listing every notification (read + unread). The
+   transient banners (above) still surface unread alerts inline above main
+   content; the widget owns durable history + per-row acknowledge. */
+.notifications-widget {
+  position: relative;
+  display: inline-flex;
+}
+
+.notifications-widget-trigger {
+  position: relative;
+}
+
+.notifications-widget-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: var(--text-base);
+  line-height: 1;
+  /* #5009 — bell glyph is inline SVG; inherit currentColor from the
+     header button so light/dark themes both render correctly. */
+  color: currentColor;
+}
+
+.notifications-widget-badge {
+  position: absolute;
+  top: -2px;
+  right: -2px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 8px;
+  background: var(--accent-red, #c44);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  pointer-events: none;
+  box-sizing: border-box;
+}
+
+.notifications-widget-panel {
+  position: absolute;
+  top: calc(100% + 4px);
+  right: 0;
+  width: 360px;
+  max-height: 480px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.35);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  z-index: 100;
+}
+
+.notifications-widget-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-primary);
+  flex-shrink: 0;
+}
+
+.notifications-widget-title {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notifications-widget-mark-all {
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: var(--text-xs);
+  font-weight: 600;
+  cursor: pointer;
+  padding: 2px 4px;
+}
+
+.notifications-widget-mark-all:hover {
+  text-decoration: underline;
+}
+
+.notifications-widget-empty {
+  padding: 24px 12px;
+  text-align: center;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+}
+
+.notifications-widget-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.notifications-widget-item {
+  display: flex;
+  align-items: stretch;
+  gap: 4px;
+  padding: 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.notifications-widget-item:last-child {
+  border-bottom: none;
+}
+
+.notifications-widget-item--unread {
+  background: var(--bg-tertiary);
+}
+
+.notifications-widget-item--unread .notifications-widget-item-type,
+.notifications-widget-item--unread .notifications-widget-item-session,
+.notifications-widget-item--unread .notifications-widget-item-message {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notifications-widget-item--read .notifications-widget-item-type,
+.notifications-widget-item--read .notifications-widget-item-session,
+.notifications-widget-item--read .notifications-widget-item-message {
+  color: var(--text-secondary);
+  opacity: 0.75;
+}
+
+.notifications-widget-item-body {
+  flex: 1;
+  background: none;
+  border: none;
+  text-align: left;
+  padding: 8px 12px;
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  align-items: baseline;
+  gap: 6px;
+  cursor: pointer;
+  font-size: var(--text-sm);
+  color: inherit;
+  overflow: hidden;
+}
+
+.notifications-widget-item-body:hover,
+.notifications-widget-item-body:focus-visible {
+  /* #5009 — `--bg-quaternary` wasn't defined in any theme; the previous
+     `rgba(255,255,255,0.04)` fallback was a dark-theme-only white tint
+     that washed out in light themes. `--bg-tertiary` is an existing
+     theme token so the hover swatch tracks both light and dark.
+     :focus-visible is paired so keyboard-only nav surfaces the same
+     emphasis as mouse hover. */
+  background: var(--bg-tertiary);
+}
+
+.notifications-widget-item-body:focus-visible {
+  /* Explicit focus ring on top of the hover swatch so keyboard users
+     can see exactly which row holds the cursor as they arrow through. */
+  outline: 2px solid var(--accent-blue);
+  outline-offset: -2px;
+}
+
+.notifications-widget-item-type {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  opacity: 0.7;
+  flex-shrink: 0;
+}
+
+.notifications-widget-item--unread.notifications-widget-item--permission
+  .notifications-widget-item-type {
+  color: var(--accent-orange);
+  opacity: 1;
+}
+
+.notifications-widget-item--unread.notifications-widget-item--error
+  .notifications-widget-item-type {
+  color: var(--accent-red, #e55);
+  opacity: 1;
+}
+
+.notifications-widget-item-session {
+  color: var(--accent-blue);
+  font-size: var(--text-sm);
+}
+
+.notifications-widget-item-message {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: var(--text-sm);
+}
+
+.notifications-widget-item-time {
+  font-size: var(--text-xs);
+  color: var(--text-secondary);
+  flex-shrink: 0;
+}
+
+.notifications-widget-item-actions {
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  padding: 4px;
+  flex-shrink: 0;
+}
+
+.notifications-widget-item-mark-read,
+.notifications-widget-item-dismiss {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: var(--text-sm);
+  line-height: 1;
+  /* #5009 — center the inline SVG glyph in the action button so the
+     mark-read and dismiss affordances align on the baseline regardless
+     of glyph height. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.notifications-widget-item-mark-read:hover,
+.notifications-widget-item-dismiss:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
 }
 
 /* ---- Slash Command Picker (#1281) ---- */
@@ -2312,6 +4157,14 @@
   padding: 1px 6px;
   border-radius: 4px;
   flex-shrink: 0;
+}
+
+/* #3856 — distinct chrome for provider-baked commands so the eye reads it
+   as "this comes from your CLI, you can't replace it" vs. user/project. */
+.slash-picker-badge-builtin {
+  color: var(--accent, var(--text-link, #4f8cff));
+  border: 1px solid currentColor;
+  background: transparent;
 }
 
 .slash-picker-empty {
@@ -2523,6 +4376,78 @@
   resize: none;
   max-height: 150px;
   line-height: 1.4;
+}
+
+/* ---- Thinking-keyword overlay (#4306) ----
+ * The wrap sits in the flex slot where the textarea used to live and
+ * stacks the overlay (absolute) under the textarea (relative). Both
+ * children share identical box metrics — font, padding, border, line-
+ * height, white-space — so character cells align pixel-perfect.
+ *
+ * Only `.has-overlay` flips the textarea to transparent text; without
+ * the overlay, the wrap is transparent and the textarea renders normally,
+ * preserving the visual baseline for sessions/providers that don't gate
+ * the highlight on. */
+.input-bar-textarea-wrap {
+  position: relative;
+  flex: 1;
+  display: flex;
+  min-width: 0;
+}
+
+.input-bar-textarea-wrap > textarea {
+  flex: 1;
+  position: relative;
+  z-index: 1;
+  background: transparent;
+}
+
+.input-bar-textarea-wrap.has-overlay > textarea {
+  /* Safari ignores `color: transparent` for the textarea text but respects
+   * -webkit-text-fill-color. Set both for cross-browser parity. The caret
+   * follows `caret-color`, which we restore so the user still sees where
+   * they're typing. */
+  color: transparent;
+  -webkit-text-fill-color: transparent;
+  caret-color: var(--text-primary);
+}
+
+.input-bar-textarea-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 0;
+  /* Mirror the textarea's box metrics so each character lands in the
+   * same x/y. Any drift between these values and `.input-bar textarea`
+   * will shift the highlight relative to the user's typed text. */
+  padding: 10px 14px;
+  border: 1px solid transparent;
+  border-radius: 10px;
+  font-size: var(--text-md);
+  font-family: inherit;
+  line-height: 1.4;
+  /* Reproduce textarea wrapping behaviour: pre-wrap preserves whitespace
+   * (including the leading spaces a user types) and wraps on the same
+   * soft-wrap rules the textarea uses. */
+  white-space: pre-wrap;
+  word-wrap: break-word;
+  word-break: break-word;
+  overflow: hidden;
+  color: var(--text-primary);
+}
+
+.input-bar-textarea-overlay .thinking-keyword {
+  /* Accent colour + soft tinted background. Critically we do NOT change
+   * the font-weight, font-style, or text-transform because any of those
+   * would alter the glyph advance widths and the overlay would drift one
+   * keyword width out of sync with the textarea's caret/selection. The
+   * native CLI gets its "ALL CAPS" look from a monospace context where
+   * widths are uniform; in our proportional textarea we use colour +
+   * background tint to convey the same signal without breaking
+   * alignment. */
+  color: var(--accent-blue);
+  background-color: color-mix(in srgb, var(--accent-blue) 14%, transparent);
+  border-radius: 3px;
 }
 
 .input-bar textarea:focus {
@@ -2764,6 +4689,32 @@
   outline-offset: 2px;
 }
 
+/* #5668 — voice recognition/helper failure, surfaced instead of a silent
+   mic-off. Mirrors the evaluator error treatment (red accent). */
+.voice-error {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  /* `.input-bar` is a flex-wrap container, so claim a full-width row of our
+     own (same pattern as `.attachment-chips`) instead of sharing the row
+     with the textarea/actions on wider viewports. */
+  width: 100%;
+  margin: 4px 0;
+  padding: 6px 10px;
+  border: 1px solid var(--accent-red);
+  border-radius: 6px;
+  font-size: 12px;
+  color: var(--text-error);
+}
+.voice-error-icon {
+  color: var(--accent-red);
+  flex-shrink: 0;
+}
+.voice-error-text {
+  flex: 1;
+  min-width: 0;
+}
+
 .thinking-indicator {
   display: flex;
   align-items: center;
@@ -2797,6 +4748,8 @@
   border-radius: 3px;
   padding: 1px 6px;
   cursor: help;
+  /* #5197: the SDK/provider tag stays fixed; only the cost text truncates. */
+  flex-shrink: 0;
 }
 .status-provider[data-provider="sdk"] {
   color: var(--accent-orange);
@@ -2814,13 +4767,97 @@
 .status-cost {
   color: var(--accent-green);
   font-family: var(--font-mono);
-  min-width: 60px;
+  /* #5197: the cost badge (esp. provider/model mode, e.g.
+     "Claude Code (SDK) · Sonnet 4.6") is the flexible element of the right
+     cluster — it truncates with an ellipsis when space is tight so the token
+     count and usage bar stay on-screen. */
+  min-width: 0;
+  flex-shrink: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .status-context {
   color: var(--text-muted);
   font-family: var(--font-mono);
   min-width: 50px;
+}
+
+/*
+ * #5065: header context-window meter — `used / total tokens` label +
+ * fill bar. Sized smaller than the footer's variant (50px bar vs 60px)
+ * so the header status line stays compact; shares the same colour
+ * thresholds + over-budget pulse so the two surfaces flip from green →
+ * yellow → red in lockstep.
+ */
+.status-context-meter {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  /* #5197: the token count + usage bar never shrink — only the cost badge
+     does — so "61 / 200.0k tokens" is never clipped. */
+  flex-shrink: 0;
+}
+
+/* #5179: stacked variant — label on top, fill bar beneath it, both
+   left-aligned to the same edge. `align-items: stretch` lets the bar
+   span the full label width so the bar visually anchors to the number
+   it describes instead of floating at a fixed 50px to its left. */
+.status-context-meter--stacked {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 3px;
+}
+
+.status-context-bar {
+  display: inline-block;
+  width: 50px;
+  height: 6px;
+  background: var(--bg-tertiary, #1a1a2e);
+  border-radius: 3px;
+  overflow: hidden;
+  flex-shrink: 0;
+}
+
+/* In the stacked layout the bar spans the label width (set by the
+   column's stretch) rather than the inline 50px floor. */
+.status-context-meter--stacked .status-context-bar {
+  display: block;
+  width: auto;
+}
+
+.status-context-fill {
+  display: block;
+  height: 100%;
+  background: var(--accent-green, #48bb78);
+  border-radius: 3px;
+  transition: width 0.3s ease;
+}
+
+.status-context-bar.medium .status-context-fill {
+  background: var(--accent-yellow, #ecc94b);
+}
+
+.status-context-bar.high .status-context-fill {
+  background: var(--accent-red, #e53e3e);
+}
+
+.status-context-bar.over-budget .status-context-fill {
+  background: var(--accent-red-dark, #c53030);
+  animation: statusContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+@keyframes statusContextOverBudgetPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
+.status-context-label {
+  font-size: 11px;
+  white-space: nowrap;
 }
 
 .busy-indicator {
@@ -2872,6 +4909,7 @@
 .footer-status-dot.connected { background: var(--accent-green); }
 .footer-status-dot.connecting, .footer-status-dot.reconnecting { background: var(--accent-orange); }
 .footer-status-dot.server_restarting { background: var(--accent-orange); }
+.footer-status-dot.server_down { background: var(--accent-red); } /* #5698 — terminal */
 .footer-status-dot.disconnected { background: var(--text-muted); }
 
 .footer-status-label {
@@ -2929,12 +4967,162 @@
   background: var(--accent-red, #e53e3e);
 }
 
+/*
+ * #3857: distinct "over-budget" visual so the user can tell "exactly at 100%"
+ * apart from "30% over the registered window". Adds a subtle pulse on the
+ * fill so the bar reads as "this is actively wrong" rather than "this is the
+ * limit". Pulsing only triggers past 100% to avoid alarm fatigue at the
+ * common 95%+ case where the meter is correct.
+ */
+.footer-context-bar.over-budget .footer-context-fill {
+  background: var(--accent-red-dark, #c53030);
+  animation: footerContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+@keyframes footerContextOverBudgetPulse {
+  0%, 100% { opacity: 1; }
+  50%      { opacity: 0.55; }
+}
+
 .footer-context-label {
   font-size: 11px;
 }
 
+/*
+ * #3857: "/compact" suggestion chip — surfaces at >=80% context usage to give
+ * the user a one-click remedy instead of just a red bar with no signal. Styled
+ * to match the .footer-qr-btn aesthetic so it reads as a footer-bar control
+ * rather than a notification.
+ */
+.footer-compact-suggest {
+  appearance: none;
+  background: var(--bg-tertiary, #1a1a2e);
+  color: var(--accent-yellow, #ecc94b);
+  border: 1px solid var(--accent-yellow, #ecc94b);
+  border-radius: 4px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  line-height: 1;
+  padding: 3px 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, color 0.15s ease;
+}
+
+.footer-compact-suggest:hover {
+  background: var(--accent-yellow, #ecc94b);
+  color: var(--bg-tertiary, #1a1a2e);
+}
+
+.footer-compact-suggest.over-budget {
+  color: var(--accent-red, #e53e3e);
+  border-color: var(--accent-red, #e53e3e);
+  animation: footerContextOverBudgetPulse 2s ease-in-out infinite;
+}
+
+.footer-compact-suggest.over-budget:hover {
+  background: var(--accent-red, #e53e3e);
+  color: #fff;
+  animation: none;
+}
+
+/*
+ * Respect prefers-reduced-motion (#3857) — the pulse is a redundant cue
+ * (the .over-budget class also recolors and the label still shows the
+ * over-budget percent), so disabling it doesn't lose information for users
+ * who opt out of motion.
+ */
+@media (prefers-reduced-motion: reduce) {
+  .footer-context-bar.over-budget .footer-context-fill,
+  .footer-compact-suggest.over-budget {
+    animation: none;
+  }
+}
+
 .footer-agents {
   color: var(--text-secondary);
+}
+
+/* #4653 — chroxy-side intervention counter chip + expandable panel. */
+.footer-interventions {
+  background: var(--accent-amber-light, rgba(255, 193, 7, 0.12));
+  color: var(--accent-amber, #b45309);
+  border: 1px solid var(--accent-amber, #b45309);
+  padding: 1px 8px;
+  border-radius: 10px;
+  font-size: 11px;
+  font-weight: 600;
+  cursor: pointer;
+  user-select: none;
+}
+
+.footer-interventions:hover,
+.footer-interventions.open {
+  background: var(--accent-amber, #b45309);
+  color: var(--text-on-accent, #fff);
+}
+
+.footer-interventions-panel {
+  position: absolute;
+  bottom: 32px;
+  right: 8px;
+  width: min(360px, calc(100vw - 16px));
+  max-height: 50vh;
+  overflow-y: auto;
+  background: var(--bg-secondary, #1e1e1e);
+  border: 1px solid var(--border-primary, #333);
+  border-radius: 6px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.5);
+  z-index: 50;
+  font-size: 12px;
+}
+
+.footer-interventions-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-primary, #333);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.footer-interventions-close {
+  background: transparent;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-size: 18px;
+  line-height: 1;
+  padding: 0 4px;
+}
+
+.footer-interventions-close:hover {
+  color: var(--text-primary);
+}
+
+.footer-interventions-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+
+.footer-interventions-item {
+  padding: 8px 12px;
+  border-bottom: 1px solid var(--border-primary, #2a2a2a);
+}
+
+.footer-interventions-item:last-child {
+  border-bottom: none;
+}
+
+.footer-interventions-reason {
+  color: var(--text-primary);
+}
+
+.footer-interventions-meta {
+  color: var(--text-secondary);
+  font-size: 10px;
+  margin-top: 2px;
 }
 
 .footer-busy {
@@ -2961,6 +5149,33 @@
   gap: 4px;
   padding: 12px 14px;
   align-self: flex-start;
+}
+
+/* #5953 (epic #5951): in-chat "Claude is working" indicator at the streaming
+   tail — the animated dots plus a label surfacing the current activity, so a
+   live turn reads as actively working rather than a static/hung view. The
+   nested `.thinking-dots` drops its own padding so the row aligns tightly. */
+.working-indicator {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  align-self: flex-start;
+  padding: 4px 14px 8px;
+}
+
+.working-indicator .thinking-dots {
+  padding: 0;
+  /* `.thinking-dots` sets `align-self: flex-start` for its standalone use; in
+     the indicator row that top-aligns the dots against the label, so override
+     it back to the parent's center alignment. */
+  align-self: center;
+}
+
+.working-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  font-style: italic;
+  line-height: 1;
 }
 
 .thinking-dot {
@@ -2999,7 +5214,18 @@
   animation: slideUp 0.2s ease-out;
 }
 
-.toast-msg { flex: 1; }
+.toast-msg { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+
+/* #5039: small secondary line under the main toast message, surfaced
+ * for the PR #5037 error-path partial-cost ("This turn cost $X").
+ * Slightly dimmer + smaller than the main message so it reads as a
+ * sub-line, not a peer. Kept inside `.toast-msg` so the flex layout
+ * (action button + close button alignment) stays untouched. */
+.toast-submsg {
+  font-size: 12px;
+  opacity: 0.85;
+  line-height: 1.3;
+}
 
 .toast-close {
   background: none;
@@ -3043,6 +5269,10 @@
 
 .toast-error { background: #dc2626; }
 .toast-info { background: #2563eb; }
+/* #4148: non-destructive warning toast (MAX_TOOL_ROUNDS_REACHED and any
+   future fatal:false server signal). Amber matches the dashboard's
+   established warning hue. */
+.toast-warning { background: #b45309; }
 
 /* ---- Modal ---- */
 .modal-overlay {
@@ -3117,10 +5347,15 @@
   border-top: 1px solid var(--border-primary);
 }
 
+/* #5606: lay Advanced fields out like the Provider row above — label + control
+   on one row, help text as full-width secondary text below the control.
+   flex-wrap + a full-width .form-hint (below) lets the hint break to its own
+   line instead of being squeezed into a tall narrow far-right column. */
 .advanced-section .form-field {
   display: flex;
   align-items: center;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   margin-bottom: 8px;
 }
 
@@ -3132,13 +5367,24 @@
 
 .advanced-section select {
   flex: 1;
+  min-width: 0;
 }
 
-.advanced-section .form-field--checkbox {
+/* #5774: checkbox + radio rows stack their controls vertically (one per line)
+   rather than competing as wrapping flex items on the row — otherwise the
+   row's flex-wrap squeezes each label down to its min-content width and the
+   text breaks one word per line. */
+.advanced-section .form-field--checkbox,
+.advanced-section .form-field[role='radiogroup'] {
   display: flex;
   flex-direction: column;
+  /* #5774: override the wrapping inherited from `.advanced-section .form-field`
+     above — once these are column stacks, leaving flex-wrap: wrap lets the
+     controls break into adjacent columns under a constrained height. Force a
+     single vertical stack. */
+  flex-wrap: nowrap;
   align-items: flex-start;
-  gap: 2px;
+  gap: 4px;
 }
 
 .advanced-section .checkbox-label {
@@ -3146,6 +5392,9 @@
   align-items: center;
   gap: 6px;
   min-width: unset;
+  /* #5774: keep the control glued to the start of its label and let the label
+     text flow on natural lines instead of wrapping per word. */
+  align-self: stretch;
   cursor: pointer;
   color: var(--text-secondary);
   font-size: var(--text-sm);
@@ -3153,12 +5402,54 @@
 
 .advanced-section .checkbox-label input[type='checkbox'] {
   cursor: pointer;
+  flex-shrink: 0;
+}
+
+/* #4244: tri-state radio group for skip-permissions. Stacks vertically with
+   the existing form-field rhythm; label color/font match checkbox-label so
+   the modal looks consistent. */
+.advanced-section .radio-label {
+  display: flex;
+  /* #5774: align the radio to the top of multi-line label text rather than
+     vertically centering, and stretch the row full-width so the label text
+     wraps naturally instead of one word per line. */
+  align-items: flex-start;
+  align-self: stretch;
+  gap: 6px;
+  min-width: unset;
+  cursor: pointer;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+}
+
+.advanced-section .radio-label input[type='radio'] {
+  cursor: pointer;
+  flex-shrink: 0;
+  /* Nudge the radio onto the first text line's baseline. */
+  margin-top: 2px;
+}
+
+.advanced-section .form-field-label {
+  display: block;
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  margin-bottom: 2px;
 }
 
 .form-hint {
   font-size: 11px;
   color: var(--text-muted);
   margin-left: 22px;
+}
+
+/* #5606: in the Advanced section's wrapping form rows the hint must break to a
+   full-width line under the control (label + control share the first row).
+   Without flex-basis:100% the hint becomes a third flex child and collapses
+   into a tall sliver on the far right. Drop the global 22px indent so it lines
+   up with the label, matching the Provider billing note's full-width layout. */
+.advanced-section .form-field > .form-hint {
+  flex-basis: 100%;
+  margin-left: 0;
 }
 
 .provider-select {
@@ -3186,11 +5477,88 @@
   letter-spacing: 0.02em;
 }
 
+/* #5026: distinct chrome for the "Containerized" badge so docker-* providers
+   read as sandboxed at a glance. Borrows the accent-blue palette already
+   used for primary affordances elsewhere in the modal. */
+.capability-badge[data-capability="containerized"] {
+  background: var(--accent-blue-subtle, rgba(96, 165, 250, 0.15));
+  border-color: var(--accent-blue, #60a5fa);
+  color: var(--accent-blue, #60a5fa);
+  font-weight: 600;
+}
+
+/* #5026: hint shown under the capability badges when a containerized
+   provider is selected. Lower-emphasis than the warning-toned fix-hint
+   but matches its block geometry so the modal still rhythms cleanly. */
+.provider-container-hint {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--bg-session-bar, var(--bg-tertiary));
+  border-left: 3px solid var(--accent-blue, #60a5fa);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.provider-container-hint-label {
+  font-weight: 600;
+  color: var(--accent-blue, #60a5fa);
+}
+
+.provider-container-hint-body {
+  color: var(--text-secondary);
+}
+
 .provider-billing-hint {
   width: 100%;
   font-size: 11px;
   color: var(--text-secondary);
   margin-top: -4px;
+}
+
+/* #4340: fix-hint panel for unready providers. Replaces the pre-#4340
+   inline `<option>` hint (which truncated on narrow viewports and
+   couldn't render code formatting). Warning-toned so it stands apart
+   from the neutral billing-hint above. */
+.provider-fix-hint {
+  display: block;
+  margin-top: 6px;
+  padding: 8px 10px;
+  border-radius: 6px;
+  background: var(--warning-bg-subtle, #fbbf2422);
+  border-left: 3px solid var(--warning-fg, #fbbf24);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
+.provider-fix-hint-label {
+  font-weight: 600;
+  color: var(--warning-fg, #fbbf24);
+}
+
+.provider-fix-hint-body {
+  color: var(--text-primary);
+}
+
+.provider-fix-hint-body code {
+  background: var(--bg-session-bar, var(--bg-tertiary));
+  border: 1px solid var(--border-primary);
+  border-radius: 3px;
+  padding: 0 4px;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  font-size: 0.92em;
+  color: var(--text-primary);
+}
+
+.provider-fix-hint-detail {
+  display: block;
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 11px;
+  font-style: italic;
 }
 
 .provider-select label {
@@ -3249,6 +5617,28 @@
 }
 
 .btn-modal-create:hover { background: #3a8eef; }
+
+/* #5206 — destructive confirm button (e.g. "Close session"). Same shape as
+ * .btn-modal-create but red, signalling the action is irreversible. */
+.btn-modal-danger {
+  padding: 6px 16px;
+  border-radius: 6px;
+  border: none;
+  background: var(--accent-red);
+  color: #fff;
+  font-size: var(--text-base);
+  cursor: pointer;
+  font-weight: 500;
+}
+.btn-modal-danger:hover { filter: brightness(1.1); }
+
+/* #5206 — ConfirmDialog body text. */
+.confirm-dialog-message {
+  margin: 0 0 14px;
+  color: var(--text-secondary);
+  font-size: var(--text-base);
+  line-height: 1.5;
+}
 
 .form-error {
   color: var(--accent-red);
@@ -3379,6 +5769,22 @@
   opacity: 0.6;
 }
 
+/* #5835 Phase 3: read-only badge shown over the mirror when this client is an
+   observer (another device holds primary) — keystrokes won't reach the PTY. */
+.terminal-readonly-badge {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  pointer-events: none;
+  padding: 3px 8px;
+  border-radius: var(--radius-sm, 4px);
+  background: rgba(0, 0, 0, 0.6);
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+}
+
 /* ---- Command Palette ---- */
 .command-palette {
   position: fixed;
@@ -3483,9 +5889,18 @@
   }
   /* Narrow-viewport floors: relaxed across all kinds (#3705) so the grid's
      center column can shrink without overflow. Per-kind ratios preserved. */
-  .header-center select[data-kind="model"] { min-width: 120px; max-width: 160px; }
+  .header-center select[data-kind="model"] { min-width: 80px; max-width: 160px; }
   .header-center select[data-kind="permission"] { min-width: 80px; max-width: 110px; }
   .header-center select[data-kind="thinking"] { min-width: 60px; max-width: 80px; }
+  /* #4464: match the model <select>'s narrow-viewport floors. Without
+     this rule the read-only badge keeps the 180–240px desktop floor and
+     overflows the header center column on phone widths. */
+  .header-center .chat-settings-readonly-badge {
+    min-width: 80px;
+    max-width: 160px;
+    font-size: var(--text-sm);
+    padding: 3px 6px;
+  }
   .header-center { gap: 4px; }
   .header-right { gap: 4px; }
   .status-bar { gap: 6px; padding: 4px 6px; }
@@ -4024,6 +6439,69 @@
   font-size: 13px;
 }
 
+/* #5512 — typeable short pairing code shown beside the linking-mode QR. */
+.qr-modal-code {
+  margin: 14px 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 4px;
+}
+
+.qr-modal-code-label {
+  color: var(--text-dim);
+  font-size: 12px;
+}
+
+.qr-modal-code-value {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 4px;
+  color: var(--accent-blue);
+  user-select: all;
+}
+
+/* #5513 — host-triggered Discord pairing-link delivery */
+.qr-modal-discord {
+  margin: 14px 0 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+
+.qr-modal-discord-btn {
+  background: var(--surface-raised, #2b2d31);
+  color: var(--text-primary);
+  border: 1px solid var(--border, #3a3c41);
+  border-radius: 6px;
+  padding: 6px 12px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.qr-modal-discord-btn:hover:not(:disabled) {
+  border-color: var(--accent-blue);
+}
+
+.qr-modal-discord-btn:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.qr-modal-discord-ok {
+  color: var(--text-dim);
+  font-size: 12px;
+  text-align: center;
+}
+
+.qr-modal-discord-err {
+  color: var(--accent-red, #e74c3c);
+  font-size: 12px;
+  text-align: center;
+}
+
 .footer-qr-btn {
   background: none;
   border: none;
@@ -4065,6 +6543,72 @@
 .header-icon-btn:focus-visible {
   outline: 2px solid var(--accent-blue);
   outline-offset: 2px;
+}
+
+/* #4695 / #5062 — the prominent "New Session" chrome button used to
+   live here as `.chrome-new-session-btn`. It has been folded into the
+   header overflow (⋯) menu as a regular menu item so the header-right
+   zone no longer crowds the permissions/model dropdowns. Cmd+N and
+   the macOS "File > New Session" menu item continue to fire
+   `handleNewSession`; the discoverable chrome entry is now inside the
+   overflow menu. */
+
+/* --- Header overflow menu (#4974, #5062) ---
+   Skills / Copy / Settings + New Session collapsed behind a single
+   "⋯" trigger so the right zone stays clean and doesn't overlap the
+   model selector in the center column. The trigger reuses
+   `.header-icon-btn` for chrome parity (hover bg, focus ring, no
+   shrink), and the popover mirrors the existing `.session-context-menu`
+   look — same surface, border, shadow — so the dashboard reads as one
+   component family. */
+.header-overflow {
+  position: relative;
+  flex-shrink: 0;
+}
+
+.header-overflow-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 1000;
+  list-style: none;
+  margin: 0;
+  padding: 4px 0;
+  background: var(--bg-secondary, var(--bg-card));
+  border: 1px solid var(--border-color, rgba(255, 255, 255, 0.08));
+  border-radius: 6px;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  min-width: 200px;
+  font-size: var(--text-sm);
+  color: var(--text-primary);
+}
+
+.header-overflow-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 6px 12px;
+  cursor: pointer;
+  user-select: none;
+  white-space: nowrap;
+}
+
+.header-overflow-menu-item:hover,
+.header-overflow-menu-item:focus-visible {
+  background: var(--bg-tertiary);
+  outline: none;
+}
+
+.header-overflow-menu-icon {
+  display: inline-block;
+  width: 18px;
+  text-align: center;
+  font-size: 14px;
+  color: var(--text-muted);
+}
+
+.header-overflow-menu-label {
+  flex: 1;
 }
 
 /* --- Settings panel --- */
@@ -4164,6 +6708,30 @@
   border-color: var(--accent-blue);
 }
 
+/* Multi-line text input (#4660 per-session preamble — first occupant).
+   Mirrors `.settings-field select` rather than introducing a new shape
+   so existing focus/disabled patterns flow through. `resize: vertical`
+   so users can grow the box for long preambles without growing horizontally
+   (which would break the settings-panel column layout). */
+.settings-textarea {
+  width: 100%;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+  font-family: inherit;
+  line-height: 1.4;
+  resize: vertical;
+  box-sizing: border-box;
+}
+
+.settings-textarea:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
 /* Checkbox-shaped settings-field — the label wraps both the checkbox and
    the option text on a single line; the hint sits below at full width.
    The base .settings-field label rule turns labels into block-level
@@ -4187,6 +6755,113 @@
 .settings-field-checkbox .settings-hint {
   margin-top: 4px;
   margin-bottom: 0;
+}
+
+/* #4563: per-device "Mute on this device" row inside each notification
+   category <li>. The row is logically subordinate to the global per-category
+   toggle (which lives on the same <li>), so it needs visible hierarchy:
+   indent to the right of the parent checkbox, plus muted color/smaller font
+   so users don't read it as a sibling toggle. Mirrors the mobile-app
+   `deviceOverrideRow` (paddingLeft: 32) for cross-surface parity. */
+.notification-prefs-device-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 4px;
+  padding-left: 24px;
+}
+
+.notification-prefs-device-row input[type='checkbox'] {
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+  margin: 0;
+}
+
+.notification-prefs-device-row label {
+  font-size: 12px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+/* #4564: known-devices list (drain-orphans surface). A subordinate
+   fieldset under the per-category toggles — borrows the same compact
+   font as `.notification-prefs-device-row` so the two read as part of
+   one section. The list itself is flat (no indent) because each row is
+   already a top-level device, not a child of another control. */
+.notification-prefs-devices {
+  margin-top: 16px;
+  padding: 12px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+}
+
+.notification-prefs-devices legend {
+  padding: 0 6px;
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.notification-prefs-devices-list {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.notification-prefs-device-entry {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 8px 10px;
+  border-radius: 4px;
+  background: var(--bg-input);
+}
+
+.notification-prefs-device-label {
+  font-size: 12px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.notification-prefs-device-label code {
+  font-family: var(--font-mono, monospace);
+  font-size: 11px;
+  color: var(--text-muted);
+}
+
+.notification-prefs-device-self-tag {
+  margin-left: 4px;
+  font-size: 11px;
+  color: var(--accent-blue);
+}
+
+/* #4587: per-device metadata badges (platform + last-seen). Subdued
+   styling so the token + Clear button still read as primary content;
+   the meta is just an aid for telling orphans apart. */
+.notification-prefs-device-meta {
+  font-size: 11px;
+  color: var(--text-muted, #888);
+}
+
+.notification-prefs-device-clear {
+  flex-shrink: 0;
+  padding: 4px 10px;
+  font-size: 12px;
+  border-radius: 4px;
+  border: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  cursor: pointer;
+}
+
+.notification-prefs-device-clear:hover {
+  background: var(--bg-hover, var(--bg-input));
+  border-color: var(--accent-blue);
 }
 
 /* #3404 audit F1: per-provider auth/billing status panel */
@@ -4334,6 +7009,53 @@
   font-size: 12px;
   color: var(--text-muted);
   font-style: italic;
+}
+
+/* #5294 — summon hotkey: text field + Save/Clear on one row. */
+.summon-hotkey-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.summon-hotkey-row input {
+  flex: 1 1 auto;
+  min-width: 0;
+  padding: 8px 10px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 14px;
+}
+
+.summon-hotkey-row input::placeholder {
+  color: var(--text-disabled);
+}
+
+.summon-hotkey-row input:focus {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+.summon-hotkey-row button {
+  flex: 0 0 auto;
+  padding: 8px 12px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.summon-hotkey-row button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.summon-hotkey-row button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
 }
 
 .tunnel-restart-btn {
@@ -5175,6 +7897,18 @@
   color: var(--text-dim);
 }
 
+/* #5512 — header action cluster ("Have a code?" + add). */
+.server-picker-header-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.server-have-code-btn {
+  font-size: 11px;
+  padding: 3px 8px;
+}
+
 .server-btn {
   padding: 4px 10px;
   border: 1px solid var(--border-primary);
@@ -5219,6 +7953,59 @@
   text-align: center;
   font-size: 12px;
   color: var(--text-dim);
+}
+
+/* #5281 ③ — LAN discovery section */
+.server-discover {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+}
+
+.server-discover-btn {
+  align-self: flex-start;
+}
+
+.server-discover-empty {
+  padding: 4px 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+
+/* #5607: stack the discovered-server row vertically so the pairing actions
+   below the server info get the full sidebar width. The previous horizontal
+   layout (info | actions) pushed the action row past the sidebar edge, clipping
+   "Add with token…" with no way to reach it. */
+.server-discover-item {
+  width: 100%;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+  padding: 6px 8px;
+  border: 1px dashed var(--border-primary);
+  border-radius: 6px;
+  background: transparent;
+  text-align: left;
+}
+
+/* #5511 — per-daemon actions: primary "Request to pair" + token-entry fallback.
+   #5607 — wrap so both buttons stay reachable when the sidebar is too narrow to
+   fit them side by side. */
+.server-discover-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  align-items: center;
+}
+
+.server-discover-pair {
+  white-space: nowrap;
+}
+
+.server-discover-add-btn {
+  white-space: nowrap;
 }
 
 .server-item {
@@ -5289,6 +8076,7 @@
 .server-dot.connected { background: var(--accent-green); }
 .server-dot.connecting { background: var(--accent-yellow); animation: pulse 1.5s ease-in-out infinite; }
 .server-dot.restarting { background: var(--accent-orange, var(--accent-yellow)); }
+.server-dot.down { background: var(--accent-red); } /* #5698 — terminal */
 .server-dot.disconnected { background: var(--text-dim); opacity: 0.5; }
 
 .server-remove-btn {
@@ -5349,10 +8137,55 @@
   margin-top: -4px;
 }
 
+/* #5281 ③ PR 2 — pairing-mode hint replacing the token field */
+.server-form-hint {
+  color: var(--text-muted);
+  font-size: 11px;
+  padding: 2px 0;
+}
+
 .server-add-actions {
   display: flex;
   gap: 6px;
   justify-content: flex-end;
+}
+
+/* #5510 (epic #5509): pairing-approval primitive — requester panel. */
+.server-pair-request {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  padding: 10px 12px;
+  background: var(--bg-tertiary);
+  border-left: 3px solid var(--accent-blue);
+  border-radius: 4px;
+}
+
+.server-pair-request-host {
+  font-weight: 600;
+  font-size: var(--text-sm);
+}
+
+.server-pair-request-status {
+  color: var(--text-secondary);
+  font-size: var(--text-xs);
+}
+
+.server-pair-request-status--error {
+  color: var(--accent-red, #e55);
+}
+
+.server-pair-request-compare {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.server-pair-request-code {
+  font-family: var(--font-mono, monospace);
+  font-size: var(--text-lg);
+  font-weight: 700;
+  letter-spacing: 3px;
+  color: var(--accent-blue);
 }
 
 /* ---- Console Page ---- */
@@ -5538,6 +8371,8 @@
 .log-filter-warn.active { color: #f0ad4e; border-color: #f0ad4e; }
 .log-filter-error.active { color: #e74c3c; border-color: #e74c3c; }
 .log-filter-debug.active { color: #7f8c8d; border-color: #7f8c8d; }
+/* #6001 — the always-on security-audit level (shell-audit), distinct from warn's orange */
+.log-filter-audit.active { color: #17a2b8; border-color: #17a2b8; }
 
 .log-actions {
   display: flex;
@@ -5606,6 +8441,7 @@
 .log-level-tag-warn { color: #f0ad4e; }
 .log-level-tag-error { color: #e74c3c; }
 .log-level-tag-debug { color: #7f8c8d; }
+.log-level-tag-audit { color: #17a2b8; font-weight: 600; }
 
 .log-component {
   color: var(--accent, #6c63ff);
@@ -6153,6 +8989,85 @@
 .activity-indicator--orange { color: var(--accent-orange-500); border-color: color-mix(in srgb, var(--accent-orange-500) 50%, transparent); }
 .activity-indicator--red    { color: var(--accent-red-500);    border-color: color-mix(in srgb, var(--accent-red-500) 55%, transparent); }
 
+/* #4421 — disclosure button + popover for the pending-background-shells list.
+   When more than one shell is parked we surface a "+N more" badge inside the
+   activity chip; clicking it opens a popover listing every shell with its
+   command + elapsed time. The chip is `position: relative` so the popover
+   can anchor to it via absolute positioning without escaping the InputBar
+   layout flow. */
+.activity-indicator { position: relative; }
+
+.activity-indicator__disclosure {
+  appearance: none;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  border-radius: 8px;
+  padding: 1px 6px;
+  font-size: var(--text-2xs, 10px);
+  line-height: 1.4;
+  color: inherit;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+
+.activity-indicator__disclosure:hover,
+.activity-indicator__disclosure:focus-visible {
+  background: color-mix(in srgb, currentColor 22%, transparent);
+  outline: none;
+}
+
+.activity-indicator__popover {
+  position: absolute;
+  bottom: calc(100% + 6px);
+  left: 0;
+  z-index: 20;
+  min-width: 240px;
+  max-width: min(420px, 90vw);
+  padding: 6px;
+  border-radius: 8px;
+  background: var(--bg-elevated, rgba(20, 20, 20, 0.96));
+  border: 1px solid color-mix(in srgb, currentColor 30%, transparent);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.32);
+  color: var(--text-default, #e6e6e6);
+}
+
+.activity-indicator__popover-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.activity-indicator__popover-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 4px 6px;
+  border-radius: 4px;
+  font-size: var(--text-xs);
+}
+
+.activity-indicator__popover-item:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.activity-indicator__popover-command {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, monospace);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.activity-indicator__popover-elapsed {
+  flex: 0 0 auto;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
 /* #3899 — CheckInChip: surfaces an inactivity_warning with a one-click
    prefab follow-up. Same chip shape as activity-indicator so the two
    stack naturally above the InputBar. Amber palette to signal "quiet,
@@ -6216,4 +9131,1033 @@
   clip: rect(0, 0, 0, 0);
   white-space: nowrap;
   border: 0;
+}
+
+/* ── #3852 Customizable keyboard-shortcut Settings section ───── */
+
+.settings-section-header {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.settings-link-button {
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  cursor: pointer;
+  font-size: var(--text-sm);
+  padding: 0;
+}
+
+.settings-link-button:hover {
+  text-decoration: underline;
+}
+
+.settings-secondary-button {
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-size: var(--text-sm);
+  cursor: pointer;
+}
+
+.settings-secondary-button:hover:not(:disabled) {
+  background: var(--bg-secondary);
+}
+
+.settings-secondary-button:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.settings-error {
+  background: rgba(220, 40, 40, 0.12);
+  border: 1px solid rgba(220, 40, 40, 0.6);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 6px 10px;
+  font-size: var(--text-sm);
+  margin-bottom: 10px;
+}
+
+.shortcuts-group {
+  margin-top: 12px;
+}
+
+.shortcuts-group-title {
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  margin: 0 0 4px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.shortcuts-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.shortcuts-section-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 6px 0;
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.shortcuts-section-row:last-child {
+  border-bottom: none;
+}
+
+.shortcuts-section-row-description {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  color: var(--text-primary);
+  font-size: var(--text-sm);
+}
+
+.shortcuts-section-row-default {
+  color: var(--text-secondary);
+  font-size: 11px;
+}
+
+.shortcuts-section-row-controls {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.shortcuts-section-row-binding {
+  display: inline-block;
+  background: var(--bg-tertiary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  padding: 2px 6px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--text-primary);
+  min-width: 60px;
+  text-align: center;
+}
+
+.keybind-capture {
+  background: var(--bg-tertiary);
+  border: 1px dashed var(--accent-blue);
+  color: var(--text-primary);
+  border-radius: 4px;
+  padding: 2px 8px;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  cursor: pointer;
+  min-width: 200px;
+  text-align: center;
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+   Control Room — Host/Repo Status section (#5175, epic #5170)
+   The wide host/fleet survey table. Uses the dashboard theme tokens so it
+   tracks the active theme; the verdict tags / chip dots / high-count emphasis
+   map onto the ok/warn/bad (green/amber/red) accents.
+   ─────────────────────────────────────────────────────────────────────────── */
+.cr-section {
+  padding: 24px 28px 64px;
+  max-width: 1100px;
+  margin: 0 auto;
+  width: 100%;
+  overflow-y: auto;
+  color: var(--text-secondary);
+}
+
+/* #5253 — Control Room sub-tab bar (Project status / Self-hosted runners). */
+.cr-view {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+.cr-tabs {
+  display: flex;
+  gap: 4px;
+  padding: 10px 28px 0;
+  max-width: 1100px;
+  width: 100%;
+  margin: 0 auto;
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.cr-tab {
+  background: transparent;
+  border: 1px solid transparent;
+  border-bottom: none;
+  border-radius: 8px 8px 0 0;
+  color: var(--text-muted);
+  padding: 8px 16px;
+  font-size: 13px;
+  font-weight: 600;
+  cursor: pointer;
+  margin-bottom: -1px;
+}
+
+.cr-tab:hover {
+  color: var(--text-primary);
+}
+
+.cr-tab-active {
+  color: var(--text-primary);
+  background: var(--bg-card);
+  border-color: var(--border-secondary);
+  border-bottom: 1px solid var(--bg-card);
+}
+
+/* #5544 — Control Room Settings tab. Embeds the same `SettingsContent` body
+   the slide-out modal renders, so the modal's `.settings-section` /
+   `.settings-field` typography carries over unchanged. The wrapper just owns
+   the scroll + a centred, comfortable reading width (the survey tables run
+   full-bleed; a long preferences form reads better constrained). #5530's
+   read-only repo-config surface will sit in its own section here later,
+   visually distinct from these user options. */
+.cr-settings-tab {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.cr-settings-tab .settings-body {
+  max-width: 720px;
+  margin: 0 auto;
+  padding: 20px 28px 40px;
+}
+
+/* #5253 — runner table: per-project group header row + the GitHub deep link. */
+.runner-repo-row td {
+  padding-top: 16px;
+  border-bottom: 1px solid var(--border-secondary);
+}
+
+.runner-repo-name {
+  font-size: 14px;
+  color: var(--text-primary);
+}
+
+.runner-settings-link {
+  margin-left: 12px;
+}
+
+.cr-eyebrow {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 12px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  color: var(--accent-purple);
+}
+
+.cr-titlerow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 10px 0 6px;
+}
+
+.cr-title {
+  font-size: 26px;
+  letter-spacing: -0.02em;
+  margin: 0;
+  color: var(--text-primary);
+}
+
+.cr-refresh {
+  background: var(--bg-card);
+  border: 1px solid var(--border-secondary);
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 8px 16px;
+  font-size: 13px;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.cr-refresh:hover:not(:disabled) {
+  border-color: var(--border-subtle);
+}
+
+.cr-refresh:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.cr-sub {
+  color: var(--text-muted);
+  margin: 4px 0 0;
+  font-size: 14px;
+}
+
+.cr-generated {
+  color: var(--text-dim);
+  font-size: 12.5px;
+  margin: 6px 0 0;
+}
+
+.cr-mono {
+  font-family: var(--font-mono);
+  font-size: 11px;
+}
+
+.cr-dim {
+  color: var(--text-dim);
+}
+
+.cr-ok {
+  color: var(--accent-green);
+}
+
+.cr-bad {
+  color: var(--accent-red);
+  font-weight: 700;
+}
+
+/* #5501 — Integrations table: amber drift highlight (version pin behind the
+   latest release). */
+.cr-warn {
+  color: var(--accent-orange);
+}
+
+/* #5501 — Integrations table: grouped column-family header cells (the
+   "repo-memory" / "repo-relay" spanning row above the per-column row). */
+.cr-th-group {
+  text-align: center;
+  color: var(--text-muted);
+  border-bottom: none;
+}
+
+.cr-empty {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 14px;
+  padding: 32px;
+  margin: 24px 0;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.cr-empty .cr-refresh {
+  margin-top: 12px;
+}
+
+/* Summary chips */
+.cr-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin: 18px 0;
+}
+
+.cr-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 999px;
+  padding: 7px 13px;
+  font-size: 13px;
+  color: var(--text-muted);
+}
+
+.cr-chip b {
+  color: var(--text-primary);
+}
+
+.cr-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+
+.cr-dot-ok {
+  background: var(--accent-green);
+}
+
+.cr-dot-warn {
+  background: var(--accent-orange);
+}
+
+.cr-dot-bad {
+  background: var(--accent-red);
+}
+
+/* ---------------------------------------------------------------------------
+ * #5554 — Skills inventory tab cards (SkillsInventorySection).
+ * Card-per-tier layout (Global + one per repo overlay), each listing expandable
+ * skill rows. Reuses the cr-tag / cr-chip / cr-mono / cr-dim primitives.
+ * ------------------------------------------------------------------------- */
+.cr-skill-card {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 12px;
+  padding: 16px 18px;
+  margin: 14px 0;
+}
+
+.cr-skill-card-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-bottom: 4px;
+}
+
+.cr-skill-card-title {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--text-primary);
+  margin: 0;
+}
+
+.cr-skill-list {
+  list-style: none;
+  margin: 10px 0 0;
+  padding: 0;
+}
+
+.cr-skill {
+  border-top: 1px solid var(--border-primary);
+  padding: 10px 0;
+}
+
+.cr-skill:first-child {
+  border-top: none;
+}
+
+.cr-skill-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  background: none;
+  border: none;
+  padding: 0;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  font: inherit;
+}
+
+.cr-skill-head:disabled {
+  cursor: default;
+}
+
+.cr-skill-name {
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.cr-skill-meta {
+  margin-left: auto;
+  font-size: 12px;
+}
+
+.cr-skill-sub {
+  font-size: 12px;
+  margin-top: 4px;
+}
+
+.cr-skill-desc {
+  margin: 8px 0 2px;
+  font-size: 13px;
+  color: var(--text-muted);
+  white-space: pre-wrap;
+}
+
+/* Live agent dot next to a repo name */
+.cr-live-dot {
+  display: inline-block;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent-green);
+  margin-left: 7px;
+  vertical-align: middle;
+}
+
+.cr-live-dot-inline {
+  margin: 0 2px;
+}
+
+/* Callout box with left accent border */
+.cr-callout {
+  background: var(--accent-blue-light);
+  border: 1px solid var(--accent-blue-border);
+  border-left: 3px solid var(--accent-blue);
+  border-radius: 12px;
+  padding: 14px 16px;
+  margin: 16px 0;
+  color: var(--text-muted);
+  font-size: 13.5px;
+  line-height: 1.55;
+}
+
+.cr-callout b {
+  color: var(--accent-blue);
+}
+
+/* #5216 — repo-table view controls (filter chips + sort + visible count) */
+.cr-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px 12px;
+  margin: 16px 0 0;
+}
+
+.cr-filters {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.cr-filter {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border-radius: 999px;
+  padding: 4px 12px;
+  font-size: 12.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.cr-filter:hover {
+  border-color: var(--accent-blue);
+  color: var(--text-primary);
+}
+
+.cr-filter-on {
+  background: var(--accent-blue);
+  border-color: var(--accent-blue);
+  color: #fff;
+}
+
+.cr-filter-clear {
+  appearance: none;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12.5px;
+  text-decoration: underline;
+  padding: 4px 6px;
+}
+
+.cr-filter-clear:hover {
+  color: var(--text-primary);
+}
+
+.cr-sort-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.cr-sort {
+  appearance: auto;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border-radius: 8px;
+  padding: 4px 8px;
+  font-size: 12.5px;
+}
+
+.cr-visible-count {
+  margin-left: auto;
+  font-size: 12.5px;
+}
+
+.cr-link-btn {
+  appearance: none;
+  border: none;
+  background: transparent;
+  color: var(--accent-blue);
+  cursor: pointer;
+  text-decoration: underline;
+  font: inherit;
+  padding: 0;
+}
+
+/* Table */
+.cr-table-wrap {
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 16px;
+  padding: 8px 6px;
+  margin: 18px 0;
+  overflow-x: auto;
+}
+
+/* Section sub-heading inside a panel that stacks more than one table (the
+   Mailbox tab: Registrations + Recent deliveries). Smaller than .cr-title and
+   tucked just above its table. */
+.cr-subtitle {
+  font-size: 14px;
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  margin: 0 0 8px 4px;
+  color: var(--text-primary);
+}
+
+.cr-table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+
+.cr-table th,
+.cr-table td {
+  text-align: left;
+  padding: 9px 12px;
+  vertical-align: top;
+}
+
+.cr-table th {
+  font-family: var(--font-mono);
+  font-weight: 600;
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.cr-table tr:not(.cr-act):not(:last-child) td {
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.cr-act td {
+  padding-top: 0;
+  padding-bottom: 12px;
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.cr-arrow {
+  color: var(--accent-purple);
+}
+
+/* #5176 — per-repo activity drill-down inside the Control Room table. The repo
+   name cell becomes a disclosure toggle; expanding reveals the active session's
+   live activity tree (folded in from the retired v1 sidebar panel). */
+.cr-drill-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: none;
+  border: none;
+  padding: 0;
+  margin: 0;
+  cursor: pointer;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+}
+
+.cr-drill-toggle:hover .cr-drill-chevron,
+.cr-drill-toggle:focus-visible .cr-drill-chevron {
+  color: var(--accent-purple);
+}
+
+.cr-drill-chevron {
+  font-size: 9px;
+  color: var(--text-muted);
+  width: 10px;
+  flex: 0 0 auto;
+}
+
+.cr-activity-row td {
+  padding-top: 0;
+  padding-bottom: 12px;
+}
+
+.cr-activity-drill {
+  border-left: 2px solid var(--accent-purple);
+  padding-left: 10px;
+  margin-left: 4px;
+}
+
+.cr-activity-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+  margin-bottom: 4px;
+}
+
+/* #5272: whole-turn interrupt for the drill-down's session. */
+.cr-interrupt-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  background: transparent;
+  border: 1px solid var(--border-subtle, var(--border, #444));
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+
+.cr-interrupt-btn:hover,
+.cr-interrupt-btn:focus-visible {
+  background: var(--danger-bg, rgba(220, 38, 38, 0.12));
+  border-color: var(--danger, #dc2626);
+  color: var(--danger, #dc2626);
+}
+
+.cr-num {
+  text-align: center;
+}
+
+.cr-onboarding,
+.cr-tree,
+.cr-last {
+  white-space: nowrap;
+}
+
+/* #5201: the text-heavy columns ellipsis-truncate (full value on hover via the
+   cell's title attr) so a long branch / onboarding string shrinks the column
+   instead of forcing the whole table wider than the viewport and clipping the
+   right-hand columns off-edge. The .cr-table-wrap still scrolls horizontally
+   as a fallback when even the truncated table doesn't fit. */
+.cr-branch,
+.cr-onboarding {
+  max-width: 220px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* #5216 — branch name + ahead/behind badge on one row. The branch truncates
+   (min-width:0 lets a flex child shrink so the ellipsis kicks in); the badge
+   never shrinks so the counts stay readable. */
+.cr-branchrow {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.cr-branchrow .cr-branch {
+  min-width: 0;
+  flex: 0 1 auto;
+}
+
+.cr-aheadbehind {
+  display: inline-flex;
+  gap: 5px;
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.cr-ahead {
+  color: var(--accent-green, #2ea043);
+}
+
+.cr-behind {
+  color: var(--accent-amber, #d29922);
+}
+
+/* #5216 — CI/review rollup beneath the open-PR count. */
+.cr-prchecks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 5px;
+  justify-content: flex-end;
+  margin-top: 3px;
+  font-family: var(--font-mono);
+  font-size: 10.5px;
+  font-weight: 700;
+}
+
+.cr-pr-fail {
+  color: var(--accent-red, #cf222e);
+}
+
+.cr-pr-pending {
+  color: var(--text-muted);
+}
+
+.cr-pr-changes {
+  color: var(--accent-amber, #d29922);
+}
+
+.cr-pr-approved {
+  color: var(--accent-green, #2ea043);
+}
+
+/* #5216 — per-row safe actions (View PRs / Copy path). */
+.cr-actions {
+  white-space: nowrap;
+}
+
+.cr-action {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--border-primary);
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  border-radius: 6px;
+  padding: 3px 8px;
+  margin-right: 4px;
+  font-size: 11.5px;
+  font-weight: 600;
+  line-height: 1.4;
+  text-decoration: none;
+  display: inline-block;
+  transition: background 0.12s ease, color 0.12s ease, border-color 0.12s ease;
+}
+
+.cr-action:hover {
+  border-color: var(--accent-blue);
+  color: var(--text-primary);
+}
+
+/* Verdict tags */
+.cr-tag {
+  display: inline-block;
+  font-family: var(--font-mono);
+  font-weight: 700;
+  font-size: 11px;
+  padding: 5px 8px;
+  border-radius: 6px;
+  border: 1px solid var(--border-primary);
+  white-space: nowrap;
+}
+
+.cr-tag-ok {
+  background: var(--accent-green-light);
+  border-color: var(--accent-green-border);
+  color: var(--accent-green);
+}
+
+.cr-tag-warn {
+  background: var(--accent-orange-subtle);
+  border-color: var(--accent-orange-border);
+  color: var(--accent-orange);
+}
+
+.cr-tag-bad {
+  background: var(--accent-red-subtle);
+  border-color: var(--accent-red-border);
+  color: var(--accent-red);
+}
+
+/* #5608 — the "Investigate" row action (a real .cr-action button now, replacing
+ * the pre-#5608 clickable verdict badge). Tinted amber to match the
+ * investigate/warn verdict accent so the contextual action reads at a glance,
+ * while sharing .cr-action's geometry with the other row actions. */
+.cr-action-investigate {
+  border-color: var(--accent-orange-border);
+  color: var(--accent-orange);
+}
+.cr-action-investigate:hover {
+  border-color: var(--accent-orange);
+  color: var(--accent-orange);
+  background: var(--accent-orange-subtle);
+}
+
+
+/* #5553 — per-repo session preset disclosure (create-session modal) + drawer. */
+.cr-action-gear {
+  padding: 3px 7px;
+  font-size: 13px;
+}
+
+.repo-preset-disclosure {
+  margin: 6px 0 2px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+}
+
+.repo-preset-summary {
+  appearance: none;
+  cursor: pointer;
+  width: 100%;
+  text-align: left;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  padding: 6px 9px;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.repo-preset-summary:hover { color: var(--text-primary); }
+
+.repo-preset-detail {
+  padding: 6px 9px 9px;
+  border-top: 1px solid var(--border-primary);
+}
+
+.repo-preset-field { margin-bottom: 8px; }
+
+.repo-preset-label {
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin-bottom: 3px;
+}
+
+.repo-preset-text {
+  margin: 0;
+  padding: 6px 8px;
+  background: var(--bg-primary);
+  border: 1px solid var(--border-primary);
+  border-radius: 4px;
+  font-size: 11.5px;
+  white-space: pre-wrap;
+  word-break: break-word;
+  max-height: 180px;
+  overflow: auto;
+}
+
+/* Drawer (right-side panel). */
+.repo-preset-drawer {
+  position: fixed;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: min(480px, 92vw);
+  z-index: 1000;
+  background: var(--bg-primary);
+  border-left: 1px solid var(--border-primary);
+  box-shadow: -8px 0 24px rgba(0, 0, 0, 0.25);
+  display: flex;
+  flex-direction: column;
+  overflow-y: auto;
+  padding: 16px;
+}
+
+.repo-preset-drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.repo-preset-drawer-title { margin: 0; font-size: 16px; }
+
+.repo-preset-drawer-path {
+  font-size: 11px;
+  color: var(--text-muted);
+  word-break: break-all;
+}
+
+.repo-preset-drawer-close {
+  appearance: none;
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 16px;
+}
+
+.repo-preset-section h4 { margin: 8px 0; font-size: 13px; }
+
+.repo-preset-trust {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  font-size: 12px;
+  color: var(--text-muted);
+  margin-bottom: 8px;
+}
+
+.repo-preset-pending-note {
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 8px;
+}
+
+.repo-preset-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 12px;
+  margin: 8px 0;
+}
+
+.repo-preset-field-label {
+  display: block;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  margin: 10px 0 4px;
+}
+
+.repo-preset-textarea {
+  width: 100%;
+  resize: vertical;
+  font-family: var(--font-mono, monospace);
+  font-size: 12px;
+  padding: 8px;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.repo-preset-actions {
+  display: flex;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.repo-preset-save,
+.repo-preset-clear,
+.repo-preset-approve,
+.repo-preset-revoke {
+  appearance: none;
+  cursor: pointer;
+  border: 1px solid var(--border-primary);
+  border-radius: 6px;
+  padding: 5px 12px;
+  font-size: 12px;
+  font-weight: 600;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+}
+
+.repo-preset-save { background: var(--accent, #3b82f6); color: #fff; border-color: transparent; }
+
+.repo-preset-note {
+  font-size: 11px;
+  color: var(--text-muted);
+  margin-top: 10px;
 }

@@ -14,6 +14,12 @@ pub struct DesktopSettings {
     pub node_path: Option<String>,
     #[serde(default = "default_tunnel_mode")]
     pub tunnel_mode: String,
+    /// #5356 — when false (the default), the embedded server binds loopback
+    /// (`127.0.0.1`) so the control socket is reachable only from this machine.
+    /// Set true to bind all interfaces (`0.0.0.0`) for the "scan QR from my
+    /// phone on the same wifi" LAN flow — explicit opt-in, not the default.
+    #[serde(default)]
+    pub expose_on_lan: bool,
     #[serde(default)]
     pub last_window_x: Option<f64>,
     #[serde(default)]
@@ -22,6 +28,13 @@ pub struct DesktopSettings {
     pub last_window_width: Option<f64>,
     #[serde(default)]
     pub last_window_height: Option<f64>,
+    /// Global "summon" hotkey accelerator (Tauri syntax, e.g.
+    /// "CmdOrCtrl+Shift+K"). #5281 ② — opt-in: `None` (the default) registers
+    /// NO global shortcut, so chroxy never silently steals a chord from another
+    /// app. The always-available "Show Chroxy" tray item is the baseline
+    /// summon; this is for users who want a system-wide one.
+    #[serde(default)]
+    pub summon_hotkey: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -38,11 +51,13 @@ impl Default for DesktopSettings {
             auto_start_server: true,
             show_notifications: true,
             tunnel_mode: "none".to_string(),
+            expose_on_lan: false,
             node_path: None,
             last_window_x: None,
             last_window_y: None,
             last_window_width: None,
             last_window_height: None,
+            summon_hotkey: None,
         }
     }
 }
@@ -84,6 +99,16 @@ impl DesktopSettings {
         crate::platform::write_restricted(&path, &json)?;
 
         Ok(())
+    }
+
+    /// The summon accelerator to actually register, or `None` to register no
+    /// global shortcut. Treats unset / blank / whitespace-only as "no hotkey"
+    /// so a user can disable it by clearing the field without removing the key.
+    pub fn effective_summon_hotkey(&self) -> Option<String> {
+        match self.summon_hotkey.as_deref() {
+            Some(s) if !s.trim().is_empty() => Some(s.trim().to_string()),
+            _ => None,
+        }
     }
 
     /// Parse settings from a JSON string. Test-only helper.
@@ -142,6 +167,23 @@ mod tests {
     }
 
     #[test]
+    fn expose_on_lan_defaults_to_false() {
+        // #5356 — loopback by default: the embedded server must NOT bind all
+        // interfaces unless the user explicitly opts into LAN exposure.
+        assert!(!DesktopSettings::default().expose_on_lan);
+        assert!(!DesktopSettings::from_json("{}").unwrap().expose_on_lan);
+    }
+
+    #[test]
+    fn expose_on_lan_round_trips() {
+        let mut settings = DesktopSettings::default();
+        settings.expose_on_lan = true;
+        let json = settings.to_json().unwrap();
+        let restored = DesktopSettings::from_json(&json).unwrap();
+        assert!(restored.expose_on_lan);
+    }
+
+    #[test]
     fn round_trip_serialize_deserialize() {
         let mut settings = DesktopSettings::default();
         settings.tunnel_mode = "quick".to_string();
@@ -151,6 +193,42 @@ mod tests {
         let restored = DesktopSettings::from_json(&json).unwrap();
         assert!(!restored.auto_start_server);
         assert_eq!(restored.tunnel_mode, "quick");
+    }
+
+    #[test]
+    fn summon_hotkey_defaults_to_none() {
+        let settings = DesktopSettings::default();
+        assert!(settings.summon_hotkey.is_none());
+        // No hotkey unless the user opts in.
+        assert!(settings.effective_summon_hotkey().is_none());
+    }
+
+    #[test]
+    fn summon_hotkey_round_trips() {
+        let mut settings = DesktopSettings::default();
+        settings.summon_hotkey = Some("CmdOrCtrl+Shift+K".to_string());
+        let json = settings.to_json().unwrap();
+        let restored = DesktopSettings::from_json(&json).unwrap();
+        assert_eq!(restored.summon_hotkey.as_deref(), Some("CmdOrCtrl+Shift+K"));
+        assert_eq!(restored.effective_summon_hotkey().as_deref(), Some("CmdOrCtrl+Shift+K"));
+    }
+
+    #[test]
+    fn effective_summon_hotkey_trims_and_treats_blank_as_disabled() {
+        let mut settings = DesktopSettings::default();
+        settings.summon_hotkey = Some("  ".to_string());
+        assert!(settings.effective_summon_hotkey().is_none());
+        settings.summon_hotkey = Some("  CmdOrCtrl+Shift+K  ".to_string());
+        assert_eq!(settings.effective_summon_hotkey().as_deref(), Some("CmdOrCtrl+Shift+K"));
+        settings.summon_hotkey = Some(String::new());
+        assert!(settings.effective_summon_hotkey().is_none());
+    }
+
+    #[test]
+    fn parse_omits_summon_hotkey_uses_none() {
+        // Older settings files won't have the field — must deserialize to None.
+        let settings = DesktopSettings::from_json("{}").unwrap();
+        assert!(settings.summon_hotkey.is_none());
     }
 
     #[test]

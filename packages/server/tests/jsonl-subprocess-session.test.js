@@ -4,6 +4,7 @@ import { writeFileSync, unlinkSync, existsSync, chmodSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { JsonlSubprocessSession } from '../src/jsonl-subprocess-session.js'
+import { addLogListener, removeLogListener } from '../src/logger.js'
 import { waitFor } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
@@ -190,6 +191,34 @@ describe('JsonlSubprocessSession (base)', () => {
       assert.equal(s2._resultTimeoutMs, 30 * 60 * 1000)
       assert.equal(s3._resultTimeoutMs, 30 * 60 * 1000)
     })
+
+    // #4790: same middle-layer trap as #3755 / #3225 / #3805 / #4660 / #3899 —
+    // SessionManager (PR #4745) wires per-provider streamStallTimeoutMs into
+    // providerOpts but JsonlSubprocessSession dropped the key from its
+    // destructure list, so Codex/Gemini sessions silently fell back to the
+    // BaseSession default. Pin the forwarding at every layer.
+    it('forwards streamStallTimeoutMs to BaseSession (#4790)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', streamStallTimeoutMs: 900_000 })
+      assert.equal(s._streamStallTimeoutMs, 900_000,
+        'JsonlSubprocessSession must forward streamStallTimeoutMs so Codex/Gemini honour the per-provider override')
+    })
+
+    it('forwards streamStallTimeoutMs: 0 (explicit disable) to BaseSession (#4790)', () => {
+      // BaseSession honours 0 (allowZero: true) as "disable active recovery".
+      // The middle layer must preserve this — an operator opting out per
+      // provider must not silently re-enable the default 5min timer.
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp', streamStallTimeoutMs: 0 })
+      assert.equal(s._streamStallTimeoutMs, 0)
+    })
+
+    it('defaults _streamStallTimeoutMs to 5 min when omitted (#4790)', () => {
+      const P = makeTestProviderClass()
+      const s = new P({ cwd: '/tmp' })
+      assert.equal(s._streamStallTimeoutMs, 5 * 60 * 1000,
+        'inherits BaseSession default when streamStallTimeoutMs is not provided')
+    })
   })
 
   describe('start()', () => {
@@ -369,6 +398,101 @@ describe('JsonlSubprocessSession (base)', () => {
       await waitFor(() => starts.length >= 1, { label: 'stream_start' })
 
       assert.match(starts[0].messageId, /^quux-msg-/)
+    })
+
+    it('attaches a user error listener to stdout AND stderr (so a stream error is handled, not uncaught) (#5324)', async () => {
+      // A shim that stays alive long enough for us to inspect its stdio streams.
+      writeFileSync(shimPath, '#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 3000)\n')
+      chmodSync(shimPath, 0o755)
+
+      const P = makeTestProviderClass({ providerName: 'fake' })
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+      s.on('error', () => {})
+      s.sendMessage('hi') // not awaited — spawns then polls for the (sleeping) child
+      await waitFor(() => s._process != null, { label: '_process spawned' })
+
+      // A user 'error' listener on each pipe is what keeps a real stream error
+      // (EPIPE on a dying child, a read fault) from reaching the process as an
+      // unhandled 'error' and crashing the whole daemon. (We assert the listener
+      // is wired rather than synthetically emitting: node attaches its own
+      // internal stream-error handler that re-throws a *manually* emitted error
+      // regardless, so a manual emit can't faithfully model a real I/O error.)
+      assert.ok(s._process.stdout.listenerCount('error') >= 1, 'stdout has a user error listener')
+      assert.ok(s._process.stderr.listenerCount('error') >= 1, 'stderr has a user error listener')
+
+      await s.destroy()
+    })
+
+    it('logs (does not crash on) a stderr stream error via the wired listener (#5324)', async () => {
+      // Verify the listener BODY: invoke it directly with a fake error and
+      // assert it logs rather than throwing. This exercises the handler without
+      // fighting node's internal manual-emit re-throw on a real pipe.
+      const warns = []
+      const logSpy = (e) => {
+        if (e.component === 'jsonl-subprocess-session' && e.level === 'warn') warns.push(e.message)
+      }
+      addLogListener(logSpy)
+      try {
+        writeFileSync(shimPath, '#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 3000)\n')
+        chmodSync(shimPath, 0o755)
+        const P = makeTestProviderClass({ providerName: 'fake' })
+        const s = new P({ cwd: '/tmp' })
+        s._processReady = true
+        s.on('error', () => {})
+        s.sendMessage('hi')
+        await waitFor(() => s._process != null, { label: '_process spawned' })
+
+        // Pull the user listener (the last one registered — ours) and call it.
+        const listeners = s._process.stderr.listeners('error')
+        const mine = listeners[listeners.length - 1]
+        assert.doesNotThrow(() => mine(new Error('boom-err')), 'listener swallows the error')
+        assert.ok(warns.some((m) => /stderr stream error.*boom-err/.test(m)), 'stderr error logged')
+
+        await s.destroy()
+      } finally {
+        removeLogListener(logSpy)
+      }
+    })
+
+    it('reverts _skillsPrepended on a post-spawn proc error so the next send re-injects (#5382)', async () => {
+      // #3225 deferral covers the SYNCHRONOUS spawn throw and the success flip.
+      // This covers the third path: a `proc.on('error')` that arrives AFTER the
+      // argv was committed (the flag already flipped true). The shared base
+      // handler must revert _skillsPrepended to false so a retry re-injects the
+      // skills bucket — a dropped revert would silently skip skills injection on
+      // the next turn. The revert lives in JsonlSubprocessSession (the base), so
+      // exercising it here covers every subclass (Codex/Gemini) that inherits it
+      // unchanged.
+      writeFileSync(shimPath, '#!/usr/bin/env node\nsetTimeout(() => process.exit(0), 3000)\n')
+      chmodSync(shimPath, 0o755)
+      const P = makeTestProviderClass({ providerName: 'fake' })
+      const s = new P({ cwd: '/tmp' })
+      s._processReady = true
+
+      const errors = []
+      s.on('error', (e) => errors.push(e))
+      s.sendMessage('hi') // not awaited — spawns then polls the sleeping child
+      // Wait until the argv is committed and the flag has flipped true.
+      await waitFor(() => s._process != null && s._skillsPrepended === true, {
+        label: 'spawned + skills prepended', timeoutMs: 3000,
+      })
+
+      // Capture the real child BEFORE emitting: the base 'error' handler nulls
+      // s._process, so destroy() could no longer SIGTERM the still-sleeping shim
+      // and would leak a live child (and keep the runner open) for up to 3s
+      // (#5391 review). We kill our captured reference explicitly below.
+      const child = s._process
+      // The ChildProcess already has the base handler as an 'error' listener, so
+      // the emit is delivered (no re-throw) and the revert runs.
+      child.emit('error', new Error('post-spawn boom'))
+
+      assert.equal(s._skillsPrepended, false, 'flag reverts so the next send re-injects skills')
+      assert.equal(s._isBusy, false, 'busy cleared so a retry is allowed')
+      assert.ok(errors.some((e) => /post-spawn boom/.test(e.message)), 'surfaces the error to the session')
+
+      try { child.kill('SIGKILL') } catch { /* already gone */ }
+      await s.destroy()
     })
 
     it('non-zero exit emits an error that includes displayLabel and exit code', async () => {

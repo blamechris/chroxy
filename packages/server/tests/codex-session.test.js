@@ -6,9 +6,16 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { CodexSession, buildCodexArgs } from '../src/codex-session.js'
+import { CodexSession, buildCodexArgs, resolveCodexSandbox, CODEX_SANDBOX_MODES, CODEX_DEFAULT_SANDBOX, CODEX_CONTEXT_WINDOW_HEADROOM, CODEX_CONTEXT_WINDOW_RATCHET_CAP, _maybeRatchetContextWindow } from '../src/codex-session.js'
 import { SkillsTrustStore } from '../src/skills-trust.js'
+import { getRegistryForProvider } from '../src/models.js'
 import { waitFor } from './test-helpers.js'
+// Importing providers.js triggers built-in provider registration so
+// getRegistryForProvider('codex') can wire to CodexSession's static hooks
+// when this suite runs in isolation. Without this the registry falls back
+// to the default Claude registry and the learn-loop ratchet tests below
+// would silently no-op.
+import '../src/providers.js'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -256,6 +263,28 @@ describe('CodexSession', () => {
     it('defaults _resultTimeoutMs to 30 min when omitted (#3755 / #3884)', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       assert.equal(session._resultTimeoutMs, 30 * 60 * 1000)
+    })
+
+    // #4790: Leaf constructor must forward streamStallTimeoutMs through every
+    // layer (CodexSession → JsonlSubprocessSession → BaseSession). PR #4745
+    // wired per-provider overrides through SessionManager — Codex was the
+    // motivating case — but each middle layer dropped the key from its
+    // destructure list. The existing CapturingProvider-based test in
+    // session-manager.test.js missed this because CapturingProvider has no
+    // middle layer.
+    it('forwards streamStallTimeoutMs to BaseSession (#4790)', () => {
+      const session = new CodexSession({ cwd: '/tmp', streamStallTimeoutMs: 900_000 })
+      assert.equal(session._streamStallTimeoutMs, 900_000)
+    })
+
+    it('defaults _streamStallTimeoutMs to 5 min when omitted (#4790)', () => {
+      const session = new CodexSession({ cwd: '/tmp' })
+      assert.equal(session._streamStallTimeoutMs, 5 * 60 * 1000)
+    })
+
+    it('forwards streamStallTimeoutMs: 0 (explicit disable) to BaseSession (#4790)', () => {
+      const session = new CodexSession({ cwd: '/tmp', streamStallTimeoutMs: 0 })
+      assert.equal(session._streamStallTimeoutMs, 0)
     })
 
     // -------------------------------------------------------------------
@@ -973,6 +1002,205 @@ describe('CodexSession', () => {
         assert.ok(!args.includes('resume'))
       })
     })
+
+    // #3847: CHROXY_CODEX_SANDBOX env var lets operators override the default
+    // sandbox mode without source edits. The per-session selector under #3837
+    // remains the proper fix; this is a stopgap for multi-tenant / shared-dev
+    // hosts where the operator wants Codex to start more restrictive.
+    describe('CHROXY_CODEX_SANDBOX env override (#3847)', () => {
+      let savedEnv
+      beforeEach(() => { savedEnv = process.env.CHROXY_CODEX_SANDBOX })
+      afterEach(() => {
+        if (savedEnv === undefined) delete process.env.CHROXY_CODEX_SANDBOX
+        else process.env.CHROXY_CODEX_SANDBOX = savedEnv
+      })
+
+      it('exports the canonical sandbox mode list', () => {
+        // Source of truth for what we accept — keeps tests honest if a mode is
+        // added or removed without re-validating the env contract.
+        assert.ok(Array.isArray(CODEX_SANDBOX_MODES))
+        assert.ok(CODEX_SANDBOX_MODES.includes('read-only'))
+        assert.ok(CODEX_SANDBOX_MODES.includes('workspace-write'))
+        assert.ok(CODEX_SANDBOX_MODES.includes('danger-full-access'))
+      })
+
+      it('exports the documented default (workspace-write)', () => {
+        assert.equal(CODEX_DEFAULT_SANDBOX, 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() falls back to workspace-write when env is unset', () => {
+        delete process.env.CHROXY_CODEX_SANDBOX
+        assert.equal(resolveCodexSandbox(), 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() falls back to workspace-write when env is empty', () => {
+        process.env.CHROXY_CODEX_SANDBOX = ''
+        assert.equal(resolveCodexSandbox(), 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() honours read-only', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        assert.equal(resolveCodexSandbox(), 'read-only')
+      })
+
+      it('resolveCodexSandbox() honours workspace-write', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'workspace-write'
+        assert.equal(resolveCodexSandbox(), 'workspace-write')
+      })
+
+      it('resolveCodexSandbox() honours danger-full-access', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+        assert.equal(resolveCodexSandbox(), 'danger-full-access')
+      })
+
+      it('resolveCodexSandbox() trims surrounding whitespace', () => {
+        // Common foot-gun when copy-pasting from shell exports / docker-compose.
+        process.env.CHROXY_CODEX_SANDBOX = '  read-only  '
+        assert.equal(resolveCodexSandbox(), 'read-only')
+      })
+
+      it('resolveCodexSandbox() rejects unknown values and falls back to default', () => {
+        // Per the proposal in #3847 — log a warning and fall back, do not throw.
+        // Throwing would refuse to start the whole server, which is the wrong
+        // failure mode for a stopgap env knob.
+        process.env.CHROXY_CODEX_SANDBOX = 'gimme-root'
+        const warnings = []
+        const origWarn = console.warn
+        console.warn = (msg) => warnings.push(String(msg))
+        try {
+          assert.equal(resolveCodexSandbox(), 'workspace-write')
+        } finally {
+          console.warn = origWarn
+        }
+        assert.ok(
+          warnings.some((m) => m.includes('CHROXY_CODEX_SANDBOX')),
+          `expected a warning mentioning CHROXY_CODEX_SANDBOX, got: ${JSON.stringify(warnings)}`,
+        )
+      })
+
+      it('resolveCodexSandbox() is case-sensitive (refuses Read-Only)', () => {
+        // Codex CLI itself is case-sensitive on these flag values; do not
+        // silently coerce or we mask a typo that would have failed loudly.
+        process.env.CHROXY_CODEX_SANDBOX = 'Read-Only'
+        const origWarn = console.warn
+        console.warn = () => {}
+        try {
+          assert.equal(resolveCodexSandbox(), 'workspace-write')
+        } finally {
+          console.warn = origWarn
+        }
+      })
+
+      // #3981: resolveCodexSandbox() runs on every sendMessage(). Without
+      // a per-value warn cache, a single typo in an operator's environment
+      // would spam console.warn for every turn for the lifetime of the
+      // server. Pin the once-per-distinct-value behavior so log volume is
+      // bounded but typo discoverability is preserved.
+      describe('warn-once on invalid values (#3981)', () => {
+        it('warns exactly once when the same invalid value is resolved repeatedly', () => {
+          process.env.CHROXY_CODEX_SANDBOX = 'bogus-once'
+          const warnings = []
+          const origWarn = console.warn
+          console.warn = (msg) => warnings.push(String(msg))
+          try {
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+          } finally {
+            console.warn = origWarn
+          }
+          const matched = warnings.filter((m) => m.includes('bogus-once'))
+          assert.equal(
+            matched.length,
+            1,
+            `expected exactly one warning for 'bogus-once', got ${matched.length}: ${JSON.stringify(warnings)}`,
+          )
+        })
+
+        it('warns again when a different invalid value is supplied (typo correction)', () => {
+          const warnings = []
+          const origWarn = console.warn
+          console.warn = (msg) => warnings.push(String(msg))
+          try {
+            process.env.CHROXY_CODEX_SANDBOX = 'bogus-typo-a'
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            process.env.CHROXY_CODEX_SANDBOX = 'bogus-typo-b'
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+            assert.equal(resolveCodexSandbox(), 'workspace-write')
+          } finally {
+            console.warn = origWarn
+          }
+          const a = warnings.filter((m) => m.includes('bogus-typo-a'))
+          const b = warnings.filter((m) => m.includes('bogus-typo-b'))
+          assert.equal(a.length, 1, `expected one warn for typo-a, got: ${JSON.stringify(warnings)}`)
+          assert.equal(b.length, 1, `expected one warn for typo-b, got: ${JSON.stringify(warnings)}`)
+        })
+      })
+
+      it('buildCodexArgs() emits --sandbox read-only when env is set (first-turn form)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        const args = buildCodexArgs('hi', null)
+        const idx = args.indexOf('--sandbox')
+        assert.ok(idx >= 0, '--sandbox flag must be present')
+        assert.equal(args[idx + 1], 'read-only')
+      })
+
+      it('buildCodexArgs() emits --sandbox read-only when env is set (resume form)', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        const args = buildCodexArgs('continue', null, 'thread-abc')
+        const idx = args.indexOf('--sandbox')
+        assert.ok(idx >= 0, '--sandbox flag must be present on resume too')
+        assert.equal(args[idx + 1], 'read-only')
+        // Invariant from #3865/#3837: --sandbox must still come BEFORE resume.
+        const resumeIdx = args.indexOf('resume')
+        assert.ok(idx < resumeIdx, '--sandbox must precede resume subcommand')
+      })
+
+      it('buildCodexArgs() emits --sandbox danger-full-access when env requests it', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'danger-full-access'
+        const args = buildCodexArgs('hi', null)
+        const idx = args.indexOf('--sandbox')
+        assert.equal(args[idx + 1], 'danger-full-access')
+      })
+
+      it('buildCodexArgs() still defaults to workspace-write when env is unset', () => {
+        // Back-compat: the #3846 stopgap must keep working for operators who
+        // do not set the env var.
+        delete process.env.CHROXY_CODEX_SANDBOX
+        const args = buildCodexArgs('hi', null)
+        const idx = args.indexOf('--sandbox')
+        assert.equal(args[idx + 1], 'workspace-write')
+      })
+
+      it('buildCodexArgs() falls back to workspace-write on an invalid env value', () => {
+        process.env.CHROXY_CODEX_SANDBOX = 'no-such-mode'
+        const origWarn = console.warn
+        console.warn = () => {}
+        try {
+          const args = buildCodexArgs('hi', null)
+          const idx = args.indexOf('--sandbox')
+          assert.equal(args[idx + 1], 'workspace-write')
+        } finally {
+          console.warn = origWarn
+        }
+      })
+
+      it('buildCodexArgs() reads the env var at call time, not module-load time', () => {
+        // Critical for tests, hot-reload, and the rare operator who changes the
+        // env in-process. If we cached at module init, this test would fail
+        // because the env wasn't set when the module first loaded.
+        delete process.env.CHROXY_CODEX_SANDBOX
+        const before = buildCodexArgs('hi', null)
+        const beforeIdx = before.indexOf('--sandbox')
+        assert.equal(before[beforeIdx + 1], 'workspace-write')
+
+        process.env.CHROXY_CODEX_SANDBOX = 'read-only'
+        const after = buildCodexArgs('hi', null)
+        const afterIdx = after.indexOf('--sandbox')
+        assert.equal(after[afterIdx + 1], 'read-only')
+      })
+    })
   })
 
   // -------------------------------------------------------------------
@@ -1370,5 +1598,154 @@ describe('CodexSession', () => {
       assert.equal(toolResults[0].toolUseId, 'tc-99')
       assert.equal(toolResults[0].result, 'file.txt')
     })
+  })
+
+  // -------------------------------------------------------------------
+  // #3857 — Codex context-window registry + learn-loop
+  // -------------------------------------------------------------------
+  //
+  // The static MODEL_INFO table was last bumped pre-launch and shipped 272k
+  // for both gpt-5 and gpt-5-codex even though OpenAI publishes 400k for
+  // Codex on every paid plan. The first fix is the static bump; the second
+  // is a runtime learn-loop that catches future drift the same way
+  // sdk-session.js corrects Claude windows from `SDKResultSuccess.modelUsage`.
+  describe('#3857 context-window source-of-truth', () => {
+    it('gpt-5-codex ships the current OpenAI-documented 400k window', () => {
+      const meta = CodexSession.getModelMetadata('gpt-5-codex')
+      assert.ok(meta)
+      assert.equal(meta.contextWindow, 400_000,
+        'gpt-5-codex should ship the 400k Codex window OpenAI publishes for all paid plans')
+    })
+
+    it('gpt-5 ships the current OpenAI-documented 400k window', () => {
+      const meta = CodexSession.getModelMetadata('gpt-5')
+      assert.ok(meta)
+      assert.equal(meta.contextWindow, 400_000,
+        'gpt-5 should ship the 400k window — was 272k pre-launch (#3857)')
+    })
+
+    it('every shipped fallback model carries a positive contextWindow', () => {
+      for (const m of CodexSession.getFallbackModels()) {
+        assert.ok(typeof m.contextWindow === 'number' && m.contextWindow > 0,
+          `${m.fullId} should have a numeric contextWindow > 0`)
+      }
+    })
+  })
+
+  describe('#3857 learn-loop — _maybeRatchetContextWindow()', () => {
+    // #4413: the ratchet now persists to disk via the codex-scoped cache
+    // file (`~/.chroxy/models-cache.codex.json`). Without an isolated
+    // CHROXY_CONFIG_DIR these tests would write to the operator's real
+    // chroxy state directory and contaminate it with the test cap value
+    // (see memory: feedback_test_state_contamination.md). Each test gets
+    // its own temp dir, and the registry cache is purged so the next
+    // `getRegistryForProvider('codex')` rebuilds against that dir.
+    let _ratchetTmpDir
+    let _ratchetOrigConfigDir
+    beforeEach(() => {
+      _ratchetTmpDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-ratchet-block-'))
+      _ratchetOrigConfigDir = process.env.CHROXY_CONFIG_DIR
+      process.env.CHROXY_CONFIG_DIR = _ratchetTmpDir
+      const r = getRegistryForProvider('codex')
+      r.resetModels()
+    })
+    afterEach(() => {
+      if (_ratchetOrigConfigDir === undefined) {
+        delete process.env.CHROXY_CONFIG_DIR
+      } else {
+        process.env.CHROXY_CONFIG_DIR = _ratchetOrigConfigDir
+      }
+      try { rmSync(_ratchetTmpDir, { recursive: true, force: true }) } catch {}
+    })
+
+    it('no-op when input_tokens is at or below the registered window', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+      // 400k window — a 100k turn should not trigger.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 100_000)
+      assert.equal(changed, false)
+      assert.equal(emitted.length, 0)
+    })
+
+    it('ratchets up when input_tokens exceeds the registered window', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+      // 500k input on a 400k registered window → bump to >= 500k * 1.1 = 550k.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 500_000)
+      assert.equal(changed, true)
+
+      const r = getRegistryForProvider('codex')
+      const m = r.getModels().find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m)
+      assert.ok(m.contextWindow >= 500_000 * CODEX_CONTEXT_WINDOW_HEADROOM,
+        `expected ratcheted window >= ${500_000 * CODEX_CONTEXT_WINDOW_HEADROOM}, got ${m.contextWindow}`)
+      // Round-to-1k cleanliness check — meter should not display "550127".
+      assert.equal(m.contextWindow % 1000, 0,
+        `expected ratcheted window rounded up to nearest 1k, got ${m.contextWindow}`)
+    })
+
+    it('emits models_updated with the updated registry when ratcheted', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 500_000)
+      const evt = emitted.find(x => x.e === 'models_updated')
+      assert.ok(evt, 'should emit models_updated so dashboards refresh')
+      assert.ok(Array.isArray(evt.d.models))
+      const m = evt.d.models.find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m && m.contextWindow >= 500_000 * CODEX_CONTEXT_WINDOW_HEADROOM)
+    })
+
+    it('only ratchets up — never shrinks the registered window', () => {
+      const r = getRegistryForProvider('codex')
+      // Ratchet up first.
+      const fakeSession = { model: 'gpt-5-codex', emit: () => {} }
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 800_000)
+      const after = r.getModels().find(x => x.fullId === 'gpt-5-codex').contextWindow
+      assert.ok(after > 400_000, 'sanity: ratchet should have raised the window')
+
+      // Now a small turn comes in. Must NOT ratchet down.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 50_000)
+      assert.equal(changed, false)
+      const stable = r.getModels().find(x => x.fullId === 'gpt-5-codex').contextWindow
+      assert.equal(stable, after,
+        'a small follow-up turn must not shrink the ratcheted window')
+    })
+
+    it('no-op for an unknown model id', () => {
+      const emitted = []
+      const fakeSession = { model: 'gpt-99-future', emit: (e, d) => emitted.push({ e, d }) }
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-99-future', 999_999_999)
+      assert.equal(changed, false, 'unknown models should be a silent no-op, not a throw')
+      assert.equal(emitted.length, 0)
+    })
+
+    // The cap exists to make a single corrupt turn unable to balloon the
+    // registry to an absurd number — a JSONL parse glitch or future Codex
+    // CLI bug must not blow up the meter math downstream. 2M is well above
+    // today's largest published windows, so anything above suggests bad data.
+    it('caps the ratchet target at CODEX_CONTEXT_WINDOW_RATCHET_CAP', () => {
+      const fakeSession = { model: 'gpt-5-codex', emit: () => {} }
+      // A wildly high observed value — e.g. CLI bug or overflow
+      _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', 10_000_000)
+      const r = getRegistryForProvider('codex')
+      const m = r.getModels().find(x => x.fullId === 'gpt-5-codex')
+      assert.ok(m)
+      assert.ok(m.contextWindow <= CODEX_CONTEXT_WINDOW_RATCHET_CAP,
+        `expected ratchet capped at ${CODEX_CONTEXT_WINDOW_RATCHET_CAP}, got ${m.contextWindow}`)
+    })
+
+    // Defensive guards: a corrupt usage payload (NaN, Infinity, negative)
+    // must not feed the ratchet math. NaN * 1.1 = NaN; Infinity * 1.1 =
+    // Infinity → unbounded growth (or NaN propagation through the
+    // registry → meter showing NaN%). Silent no-op is the right failure.
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0]) {
+      it(`no-op when input_tokens is invalid (${bad})`, () => {
+        const emitted = []
+        const fakeSession = { model: 'gpt-5-codex', emit: (e, d) => emitted.push({ e, d }) }
+        const changed = _maybeRatchetContextWindow(fakeSession, 'gpt-5-codex', bad)
+        assert.equal(changed, false)
+        assert.equal(emitted.length, 0)
+      })
+    }
   })
 })

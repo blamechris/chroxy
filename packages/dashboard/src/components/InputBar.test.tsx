@@ -2,7 +2,8 @@
  * InputBar tests (#1162)
  */
 import { describe, it, expect, vi, afterEach } from 'vitest'
-import { render, screen, fireEvent, cleanup, waitFor } from '@testing-library/react'
+import { render, screen, fireEvent, cleanup, waitFor, act } from '@testing-library/react'
+import { useState } from 'react'
 import { InputBar } from './InputBar'
 import type { EvaluatorResultPayload } from '../store/types'
 
@@ -348,6 +349,246 @@ describe('InputBar', () => {
       // in document order — i.e., Send is earlier in the tree, Stop later.
       const pos = sendBtn.compareDocumentPosition(stopBtn)
       expect(pos & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    })
+  })
+
+  // #3903 — symmetric edge case of the #3850 fix. send() will dispatch on
+  // attachments-only (no text), and the non-busy path already pins this
+  // (see "allows sending with attachments and empty text"). But the busy-
+  // state Send-visibility gate was still `value.trim()` only, so users
+  // who dragged a file in while a turn was in flight saw only Stop —
+  // there was no way to queue the attachment-only follow-up without
+  // typing a character first, or waiting for the current turn to end.
+  // The fix is to use a `canSubmit` predicate that matches what send()
+  // actually does: text OR file attachments OR images OR pasted-text
+  // blocks. (Images/pasted-text are dispatched by App.tsx's handleSend
+  // which reads them from outside InputBar — see App.tsx:1008.)
+  describe('attachment-only follow-up while busy (#3903)', () => {
+    it('shows Send when busy with file attachments and empty text', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          attachments={[{ path: 'src/App.tsx', name: 'App.tsx' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when streaming with file attachments and empty text', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isStreaming
+          attachments={[{ path: 'src/index.ts', name: 'index.ts' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('clicking Send while busy with attachment-only queues the follow-up', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          isBusy
+          attachments={[{ path: 'src/App.tsx', name: 'App.tsx' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('send-button'))
+      expect(onSend).toHaveBeenCalledWith('', [{ path: 'src/App.tsx', name: 'App.tsx' }])
+    })
+
+    it('shows Send when busy with only image attachments', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          imageAttachments={[{ data: 'abc', mediaType: 'image/png', name: 'a.png' }]}
+          onRemoveImage={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when busy with only pasted-text blocks', () => {
+      // #3984 — fixture must include the formatted marker so the block is
+      // actually dispatchable. Without it, expandPasteMarkers would emit an
+      // empty string and onSend('') would fire, dropping the paste content.
+      const block = { id: 1, content: 'a'.repeat(2000) }
+      const marker = `[Pasted text #${block.id} +${block.content.length} chars]`
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[block]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('still hides Send when busy and composer is completely empty (no text, no attachments)', () => {
+      render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} isBusy />)
+      expect(screen.queryByTestId('send-button')).not.toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('Send button while busy with attachment-only uses "Send follow-up" aria-label', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          attachments={[{ path: 'src/App.tsx', name: 'App.tsx' }]}
+          onRemoveAttachment={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toHaveAttribute('aria-label', 'Send follow-up')
+    })
+  })
+
+  // #3984 — Copilot follow-up to #3972: `pastedTextBlocks.length > 0` alone
+  // was making canSubmit true even when the textarea had no marker referencing
+  // those blocks. App.tsx's send path only expands markers present in `text`
+  // (expandPasteMarkers), so Send would fire onSend('') and silently drop the
+  // pasted content. The fix is to require at least one referenced marker in
+  // `value` before treating pasted blocks as dispatchable content.
+  describe('paste marker desync — Send must require a referenced marker in text (#3984)', () => {
+    it('hides Send when busy with pasted blocks but no marker in textarea (non-dispatchable)', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue=""
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[{ id: 1, content: 'a'.repeat(2000) }]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      // No marker in text → expandPasteMarkers would produce '' → Send must
+      // stay hidden so we never dispatch onSend('') and drop the paste.
+      expect(screen.queryByTestId('send-button')).not.toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when busy with pasted blocks AND the formatted marker is in textarea', () => {
+      const block = { id: 1, content: 'a'.repeat(2000) }
+      const marker = `[Pasted text #${block.id} +${block.content.length} chars]`
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[block]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+      expect(screen.getByTestId('interrupt-button')).toBeInTheDocument()
+    })
+
+    it('shows Send when busy with 2 blocks but only 1 marker referenced (the orphan is the user\'s problem; dispatch is non-empty)', () => {
+      const blocks = [
+        { id: 1, content: 'a'.repeat(2000) },
+        { id: 2, content: 'b'.repeat(2000) },
+      ]
+      // Only block #1's marker is in the text — block #2 is orphaned but
+      // dispatch will still contain block #1's expanded content, so Send is
+      // safe to enable.
+      const marker = `[Pasted text #1 +${blocks[0]!.content.length} chars]`
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={blocks}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+    })
+
+    it('does not crash when text contains a marker for a nonexistent block id (behaves like text-only)', () => {
+      // Stale marker (block was evicted but the marker is still in the text).
+      // App.tsx's expandPasteMarkers passes unknown markers through unchanged,
+      // so this is just text content from the user's perspective — Send must
+      // still surface because text.trim() is non-empty.
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          isBusy
+          controlledValue="[Pasted text #99 +500 chars]"
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      // hasText is true (the marker string itself is text content), so Send
+      // should be visible regardless of the dangling marker.
+      expect(screen.getByTestId('send-button')).toBeInTheDocument()
+    })
+
+    it('non-busy: Send button disabled when pasted blocks exist but no marker in text', () => {
+      // Mirrors the busy-state behavior in the non-busy path. The Send button
+      // is always rendered when not busy, but canSubmit gates the actual
+      // send() invocation — clicking with no dispatchable content is a no-op.
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          controlledValue=""
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[{ id: 1, content: 'a'.repeat(2000) }]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      // Send button is present (non-busy always renders it) but clicking it
+      // must NOT dispatch onSend, because the paste block has no marker and
+      // text.trim() is empty.
+      fireEvent.click(screen.getByTestId('send-button'))
+      expect(onSend).not.toHaveBeenCalled()
+    })
+
+    it('non-busy: clicking Send with a referenced marker dispatches normally', () => {
+      const block = { id: 1, content: 'a'.repeat(2000) }
+      const marker = `[Pasted text #${block.id} +${block.content.length} chars]`
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          controlledValue={marker}
+          onValueChange={vi.fn()}
+          pastedTextBlocks={[block]}
+          onRemovePastedText={vi.fn()}
+        />,
+      )
+      fireEvent.click(screen.getByTestId('send-button'))
+      // App.tsx expands the marker before sending; InputBar just forwards the
+      // marker-bearing text verbatim.
+      expect(onSend).toHaveBeenCalledWith(marker)
     })
   })
 
@@ -744,6 +985,109 @@ describe('InputBar slash command picker (#1281)', () => {
     const textarea = screen.getByRole('textbox')
     fireEvent.change(textarea, { target: { value: '/' } })
     expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+  })
+
+  // #4342 — when the filtered command list is empty (e.g. "/no-such-command"),
+  // the picker was swallowing Enter: the keydown handler always preventDefault'd
+  // and returned, without selecting a command and without falling through to
+  // the standard send path. The user got stuck — Enter did nothing, and the
+  // only way out was clicking Send with the mouse or hitting Escape. The fix:
+  // when the filter yields zero matches, close the picker and let the regular
+  // Enter handling decide (sendOnEnter / modifier / newline).
+  describe('Enter on empty filter must not be swallowed (#4342)', () => {
+    it('plain Enter on empty-filter list does NOT call selectCommand and closes picker', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      // Picker is open with "No commands found" state
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      // Text was not replaced with "/commit " (or any other selected command).
+      // The default `sendOnEnter=false` means plain Enter is a newline, not a
+      // send — so the only requirement is that nothing got swallowed.
+      expect(textarea.value).toBe('/unknown')
+      // Picker is closed so the user can keep typing without further swallows.
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('Cmd+Enter on empty-filter list sends the typed text and closes picker', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter', metaKey: true })
+      expect(onSend).toHaveBeenCalledWith('/unknown')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('plain Enter on empty-filter list with sendOnEnter sends the typed text and closes picker', () => {
+      const onSend = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+          sendOnEnter
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      expect(onSend).toHaveBeenCalledWith('/unknown')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('happy path: Enter with matching filter still picks the command (regression guard)', () => {
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/com' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Enter' })
+      // Picker selected the matching command rather than sending the text
+      expect(textarea.value).toBe('/commit ')
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+    })
+
+    it('Escape on empty-filter list still closes the picker without sending', () => {
+      const onSend = vi.fn()
+      const onInterrupt = vi.fn()
+      render(
+        <InputBar
+          onSend={onSend}
+          onInterrupt={onInterrupt}
+          slashCommands={mockCommands}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      fireEvent.change(textarea, { target: { value: '/unknown' } })
+      expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+      fireEvent.keyDown(textarea, { key: 'Escape' })
+      expect(screen.queryByTestId('slash-picker')).not.toBeInTheDocument()
+      expect(onSend).not.toHaveBeenCalled()
+      // Escape inside the slash picker is consumed by the picker handler — it
+      // closes the picker and returns early, so onInterrupt must NOT fire.
+      expect(onInterrupt).not.toHaveBeenCalled()
+    })
   })
 })
 
@@ -1473,5 +1817,962 @@ describe('InputBar large-text paste (#3797)', () => {
 
     expect(screen.getByTestId('pasted-text-chip-1')).toBeInTheDocument()
     expect(screen.getByTestId('pasted-text-chip-2')).toBeInTheDocument()
+  })
+})
+
+// #3698 — terminal-style Up/Down history. Empty/edge-of-textarea Up recalls
+// the previous user message; Down walks forward; Down past the newest restores
+// the stashed in-progress draft. Up/Down elsewhere in a multi-line draft is
+// normal cursor movement (untouched).
+describe('InputBar history navigation (#3698)', () => {
+  // Helper — RTL/jsdom's fireEvent.keyDown forwards currentTarget.selectionStart/End,
+  // so positioning the caret via setSelectionRange before dispatching the event
+  // is the only setup needed.
+  function setCaret(textarea: HTMLTextAreaElement, start: number, end = start) {
+    textarea.setSelectionRange(start, end)
+  }
+
+  it('Up in empty input fills with the most-recent user message', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        userMessageHistory={['oldest', 'middle', 'newest']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+  })
+
+  it('Up twice walks back two entries', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    // Stable history array reference — the component resets cycling when the
+    // array identity changes (mirrors per-session reset in App.tsx), so the
+    // sequence test must reuse the same array across rerenders.
+    const history = ['oldest', 'middle', 'newest']
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={value}
+        onValueChange={onValueChange}
+        userMessageHistory={history}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={value}
+        onValueChange={onValueChange}
+        userMessageHistory={history}
+      />,
+    )
+    // Caret lands at end of recalled text — second Up still triggers history.
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('middle')
+  })
+
+  it('Down moves forward toward newer entries', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['oldest', 'middle', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // newest
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // middle
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' }) // back to newest
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+  })
+
+  it('Down past the newest restores the in-progress draft', () => {
+    let value = 'draft-in-progress'
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['older', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Start cycling from the end of the draft (Down trigger position).
+    // First press Up from end of draft — empty/edge gating treats `value.length`
+    // as a valid Up-from-end position too (mirrors the symmetric Down rule).
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    // Down past newest restores the original draft text.
+    expect(onValueChange).toHaveBeenLastCalledWith('draft-in-progress')
+  })
+
+  it('Escape while cycling restores the draft and does not call onInterrupt', () => {
+    let value = 'my-draft'
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const onInterrupt = vi.fn()
+    const history = ['oldest', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt,
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(onValueChange).toHaveBeenLastCalledWith('my-draft')
+    expect(onInterrupt).not.toHaveBeenCalled()
+  })
+
+  it('Escape when not cycling still calls onInterrupt (no regression)', () => {
+    const onInterrupt = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+        userMessageHistory={['something']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.keyDown(textarea, { key: 'Escape' })
+    expect(onInterrupt).toHaveBeenCalled()
+  })
+
+  it('sending a message resets the cycling state', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    let history = ['oldest', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // newest
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // oldest
+    expect(onValueChange).toHaveBeenLastCalledWith('oldest')
+    // Simulate send: history grows + draft clears (mimics App's send round-trip).
+    value = ''
+    history = ['oldest', 'newest', 'just-sent']
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // After reset, Up should land on the most-recent entry — `just-sent` —
+    // not continue from where we left off in the previous cycle.
+    expect(onValueChange).toHaveBeenLastCalledWith('just-sent')
+  })
+
+  it('Up on line 2+ of a multi-line draft does not recall history (cursor moves)', () => {
+    const onValueChange = vi.fn()
+    const onInterrupt = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={onInterrupt}
+        controlledValue={'line1\nline2'}
+        onValueChange={onValueChange}
+        userMessageHistory={['should-not-fire']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Caret on line 2, middle — position is "line1\n" length (6) + some chars.
+    setCaret(textarea, 8)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // History recall would emit 'should-not-fire'; with caret mid-text we
+    // must NOT touch the value.
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Up on line 1 (caret at position 0) recalls history even with multi-line draft text', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={'line1\nline2'}
+        onValueChange={onValueChange}
+        userMessageHistory={['recalled']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Cursor at absolute position 0 (line 1, col 0) — Up should recall.
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('recalled')
+  })
+
+  it('Up with a selection (not collapsed) does not recall history', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={'hello'}
+        onValueChange={onValueChange}
+        userMessageHistory={['recalled']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0, 3)   // selection: chars 0..3
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Up does nothing when history is empty', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={onValueChange}
+        userMessageHistory={[]}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Up at the oldest entry stays on the oldest (does not wrap or crash)', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['only-entry']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('only-entry')
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // Already at oldest — nothing changes.
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('Down when not cycling is a no-op (does not touch value)', () => {
+    const onValueChange = vi.fn()
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="draft"
+        onValueChange={onValueChange}
+        userMessageHistory={['something']}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 5)
+    fireEvent.keyDown(textarea, { key: 'ArrowDown' })
+    expect(onValueChange).not.toHaveBeenCalled()
+  })
+
+  it('typing while cycling resets the cycling state (so the next Up starts at newest)', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const history = ['oldest', 'middle', 'newest']
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // newest
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // middle
+    expect(onValueChange).toHaveBeenLastCalledWith('middle')
+    rerender(<InputBar {...props()} />)
+    // User edits the recalled text — fire change with a value different from
+    // the currently-rendered controlledValue ('middle') so React's controlled-
+    // input wrapper actually dispatches onChange.
+    fireEvent.change(textarea, { target: { value: 'middle-edited' } })
+    expect(value).toBe('middle-edited')
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    // Up again should NOT continue cycling from 'oldest' — it should start
+    // fresh from the most-recent entry.
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    expect(onValueChange).toHaveBeenLastCalledWith('newest')
+  })
+
+  it('does not interfere with the slash command picker (Up navigates the picker)', () => {
+    // Uncontrolled mode (no controlledValue/onValueChange) — matches how the
+    // existing slash-picker tests open the palette. The history feature only
+    // needs to NOT fire while the picker handles Up, which is independent of
+    // controlled-vs-uncontrolled mode (history navigation passes through
+    // `setValue` either way).
+    const onSend = vi.fn()
+    render(
+      <InputBar
+        onSend={onSend}
+        onInterrupt={vi.fn()}
+        userMessageHistory={['should-not-fire']}
+        slashCommands={[
+          { name: 'commit', description: 'commit', source: 'project' },
+          { name: 'review', description: 'review', source: 'project' },
+        ]}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Open the picker by typing "/" at the start of the input.
+    fireEvent.change(textarea, { target: { value: '/' } })
+    expect(screen.getByTestId('slash-picker')).toBeInTheDocument()
+    setCaret(textarea, 1)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // Picker consumed the Up — textarea text remains "/" (history would have
+    // overwritten it with 'should-not-fire').
+    expect(textarea.value).toBe('/')
+  })
+
+  it('does not interfere with the file picker (Up navigates the picker)', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        userMessageHistory={['should-not-fire']}
+        filePickerFiles={[
+          { path: 'src/index.ts', type: 'file', size: 1 },
+          { path: 'src/App.tsx', type: 'file', size: 1 },
+        ]}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.change(textarea, { target: { value: '@' } })
+    expect(screen.getByRole('listbox')).toBeInTheDocument()
+    setCaret(textarea, 1)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // File picker consumed the Up — textarea text remains "@" (history
+    // would have overwritten it with 'should-not-fire').
+    expect(textarea.value).toBe('@')
+  })
+
+  it('switching userMessageHistory reference (e.g. session switch) resets cycling', () => {
+    let value = ''
+    const onValueChange = vi.fn((v: string) => { value = v })
+    const sessionA = ['a-old', 'a-new']
+    const sessionB = ['b-old', 'b-new']
+    let history = sessionA
+    const props = () => ({
+      onSend: vi.fn(),
+      onInterrupt: vi.fn(),
+      controlledValue: value,
+      onValueChange,
+      userMessageHistory: history,
+    })
+    const { rerender } = render(<InputBar {...props()} />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // 'a-new'
+    rerender(<InputBar {...props()} />)
+    setCaret(textarea, value.length)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })   // 'a-old'
+    // Switch session — different history array, draft also blanks.
+    history = sessionB
+    value = ''
+    rerender(<InputBar {...props()} />)
+    onValueChange.mockClear()
+    setCaret(textarea, 0)
+    fireEvent.keyDown(textarea, { key: 'ArrowUp' })
+    // After reset, Up should land on most-recent of the new history.
+    expect(onValueChange).toHaveBeenLastCalledWith('b-new')
+  })
+})
+
+// #4306 — thinking-keyword highlight overlay. The overlay is gated on a
+// `highlightThinkingKeywords` prop driven by the active provider's
+// `capabilities.thinkingLevel` flag, so providers that can't honour the
+// keyword (CLI `-p`, codex, gemini) get no highlight — otherwise we'd
+// imply an escalation that isn't happening server-side.
+describe('InputBar — thinking-keyword highlight overlay (#4306)', () => {
+  it('does NOT render the overlay when highlightThinkingKeywords is omitted (default)', () => {
+    render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} />)
+    expect(screen.queryByTestId('thinking-keyword-overlay')).not.toBeInTheDocument()
+  })
+
+  it('does NOT render the overlay when highlightThinkingKeywords is false', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="please ultrathink this"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords={false}
+      />,
+    )
+    // Even with a matching keyword in the value, the overlay stays absent
+    // — this is the "do not lie to the user" gate for non-escalating
+    // providers.
+    expect(screen.queryByTestId('thinking-keyword-overlay')).not.toBeInTheDocument()
+    expect(screen.queryAllByTestId('thinking-keyword')).toHaveLength(0)
+  })
+
+  it('renders the overlay when highlightThinkingKeywords is true', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    // Overlay container is present even when empty — necessary so the
+    // mirror div is mounted before the first keystroke fires onChange.
+    expect(screen.getByTestId('thinking-keyword-overlay')).toBeInTheDocument()
+    // …but with no keywords typed yet, there are no matched spans.
+    expect(screen.queryAllByTestId('thinking-keyword')).toHaveLength(0)
+  })
+
+  it('wraps a matched keyword in a highlight span', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="please ultrathink the architecture"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const spans = screen.getAllByTestId('thinking-keyword')
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.textContent).toBe('ultrathink')
+  })
+
+  it('wraps multiple keywords in the same input', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="first ultrathink then think harder"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const spans = screen.getAllByTestId('thinking-keyword')
+    expect(spans).toHaveLength(2)
+    expect(spans.map(s => s.textContent)).toEqual(['ultrathink', 'think harder'])
+  })
+
+  it('does NOT wrap substrings inside other words (word boundary)', () => {
+    // `unthinkingly` contains `think` as a substring but not at a word
+    // boundary — the overlay must agree with the server-side detection
+    // (which is the gating contract for #4306) and NOT highlight here.
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="I unthinkingly committed this"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    expect(screen.queryAllByTestId('thinking-keyword')).toHaveLength(0)
+  })
+
+  it('preserves the user`s original casing inside the highlight span', () => {
+    // The overlay carries the user's literal characters — case-folded
+    // matching only governs WHETHER something is a keyword, never what
+    // is displayed. This matters because the textarea (behind the
+    // overlay) still has the original characters and the overlay must
+    // align with them character-for-character.
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ULTRATHINK now"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const spans = screen.getAllByTestId('thinking-keyword')
+    expect(spans).toHaveLength(1)
+    expect(spans[0]!.textContent).toBe('ULTRATHINK')
+  })
+
+  it('marks the overlay aria-hidden so the textarea is the only accessible input', () => {
+    render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ultrathink"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const overlay = screen.getByTestId('thinking-keyword-overlay')
+    expect(overlay.getAttribute('aria-hidden')).toBe('true')
+  })
+
+  // #4403 — guard against the inline-arrow regression: the overlay scroll-sync
+  // handler used to be allocated fresh on every render, churning a function
+  // per keystroke while the overlay is enabled. Wrapping it in useCallback
+  // keeps the same reference across re-renders, so the textarea's onScroll
+  // prop must be referentially stable as long as the overlay stays on.
+  it('keeps the textarea onScroll handler referentially stable across re-renders (#4403)', () => {
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ultrathink the architecture"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // React stores the props for a DOM node on a `__reactProps$<id>` key. We
+    // can't predict the suffix so look it up by prefix — the alternative is
+    // wiring a test-only spy into the component, which we'd rather avoid.
+    const propsKey = Object.keys(textarea).find(k => k.startsWith('__reactProps'))
+    expect(propsKey).toBeDefined()
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const firstOnScroll = (textarea as any)[propsKey!].onScroll
+    expect(typeof firstOnScroll).toBe('function')
+
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="ultrathink the architecture again"
+        onValueChange={vi.fn()}
+        highlightThinkingKeywords
+      />,
+    )
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const secondOnScroll = (textarea as any)[propsKey!].onScroll
+    expect(secondOnScroll).toBe(firstOnScroll)
+  })
+})
+
+// #5610 — push-to-talk (hold Space to dictate).
+describe('InputBar push-to-talk (#5610)', () => {
+  // Controlled wrapper so we can read the textarea value back after the
+  // component's setValue() flows through React. Mirrors how App.tsx drives
+  // InputBar (controlledValue + onValueChange for per-session drafts).
+  function makeVoice(overrides: Partial<{
+    isRecording: boolean
+    isAvailable: boolean
+    transcript: string
+    error: string | null
+    start: () => void
+    stop: () => void
+  }> = {}) {
+    return {
+      isRecording: false,
+      isAvailable: true,
+      transcript: '',
+      error: null,
+      start: vi.fn(),
+      stop: vi.fn(),
+      ...overrides,
+    }
+  }
+
+  function ControlledBar(props: { voiceInput: ReturnType<typeof makeVoice>; initial?: string }) {
+    const [value, setValue] = useState(props.initial ?? '')
+    return (
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={value}
+        onValueChange={setValue}
+        voiceInput={props.voiceInput}
+      />
+    )
+  }
+
+  afterEach(() => {
+    vi.useRealTimers()
+  })
+
+  it('a quick tap of Space types a normal space and does NOT start recording', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="hi" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Caret at end.
+    textarea.setSelectionRange(2, 2)
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    // Released well before the 300ms threshold.
+    act(() => { vi.advanceTimersByTime(100) })
+    fireEvent.keyUp(textarea, { key: ' ' })
+
+    expect(voice.start).not.toHaveBeenCalled()
+    expect(textarea.value).toBe('hi ')
+  })
+
+  it('holding Space past the threshold starts recording', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="hi" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    textarea.setSelectionRange(2, 2)
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+
+    expect(voice.start).toHaveBeenCalledTimes(1)
+    // The held Space must not have flooded the field.
+    expect(textarea.value).toBe('hi')
+  })
+
+  it('does not flood the field with spaces while recording (key-repeat suppressed)', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    // Browser key-repeat fires more keydowns while the key stays held.
+    fireEvent.keyDown(textarea, { key: ' ' })
+    fireEvent.keyDown(textarea, { key: ' ' })
+    fireEvent.keyDown(textarea, { key: ' ' })
+
+    expect(voice.start).toHaveBeenCalledTimes(1)
+    expect(textarea.value).toBe('')
+  })
+
+  it('pressing another key during the arm window cancels PTT and re-inserts the space', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    // User starts typing before the threshold — they meant a real space + char.
+    act(() => { vi.advanceTimersByTime(100) })
+    fireEvent.keyDown(textarea, { key: 'a' })
+    // Let any (cancelled) timer elapse.
+    act(() => { vi.advanceTimersByTime(300) })
+
+    expect(voice.start).not.toHaveBeenCalled()
+    // The suppressed space was re-inserted; the 'a' itself is delivered by the
+    // browser's native input (jsdom doesn't synthesise it from keyDown), so we
+    // only assert the space came back.
+    expect(textarea.value).toBe(' ')
+  })
+
+  it('releasing Space while recording stops capture', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    expect(voice.start).toHaveBeenCalledTimes(1)
+
+    fireEvent.keyUp(textarea, { key: ' ' })
+    expect(voice.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('inserts the transcript at the caret anchor captured when the hold began', () => {
+    vi.useFakeTimers()
+    // Drive the real lifecycle: start() flips isRecording true, and only then
+    // does a transcript arrive. The anchor is the caret at the arming keydown,
+    // so the transcript must splice there rather than append at the end.
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue="foobar"
+        onValueChange={() => {}}
+        voiceInput={makeVoice()}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    // Caret in the middle: "foo|bar".
+    textarea.setSelectionRange(3, 3)
+
+    const voiceRecording = makeVoice({ isRecording: true, transcript: 'hello world' })
+    // Hold past the threshold (still on the non-recording voiceInput) to set
+    // the anchor at index 3, then re-render as the hook would once recording
+    // is live and the first transcript chunk has streamed in.
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+
+    let captured = 'foobar'
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue={captured}
+        onValueChange={v => { captured = v }}
+        voiceInput={voiceRecording}
+      />,
+    )
+
+    // The transcript is spliced *in place* at the anchor (index 3): the prefix
+    // "foo" and the suffix "bar" both survive, with the transcript in between.
+    expect(captured).toBe('foo hello world bar')
+  })
+
+  it('cleans up the open mic when the input loses focus mid-recording', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    expect(voice.start).toHaveBeenCalledTimes(1)
+
+    fireEvent.blur(textarea)
+    expect(voice.stop).toHaveBeenCalledTimes(1)
+  })
+
+  it('stops the mic on unmount mid-recording using the latest stop (not a stale closure)', () => {
+    vi.useFakeTimers()
+    // The engine — and therefore the memoised stop — is selected after mount,
+    // so the unmount cleanup must call the *current* stop, not the one captured
+    // on the first render. Re-render with a fresh stop before unmounting and
+    // assert that one is invoked.
+    const firstStop = vi.fn()
+    const start = vi.fn()
+    const { rerender, unmount } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: null, start, stop: firstStop }}
+      />,
+    )
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    expect(start).toHaveBeenCalledTimes(1)
+
+    // Engine selected → a new memoised stop replaces the original.
+    const latestStop = vi.fn()
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: true, isAvailable: true, transcript: '', error: null, start, stop: latestStop }}
+      />,
+    )
+
+    unmount()
+    expect(firstStop).not.toHaveBeenCalled()
+    expect(latestStop).toHaveBeenCalledTimes(1)
+  })
+
+  // #5668 — a voice failure must be surfaced, not flipped off silently.
+  it('renders voiceInput.error as an accessible alert', () => {
+    const { rerender } = render(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: null, start: vi.fn(), stop: vi.fn() }}
+      />,
+    )
+    // No error → nothing rendered.
+    expect(screen.queryByTestId('voice-error')).toBeNull()
+
+    // Error set (e.g. mic permission denied) → surfaced as a role="alert".
+    rerender(
+      <InputBar
+        onSend={vi.fn()}
+        onInterrupt={vi.fn()}
+        controlledValue=""
+        onValueChange={() => {}}
+        voiceInput={{ isRecording: false, isAvailable: true, transcript: '', error: 'Microphone access was denied.', start: vi.fn(), stop: vi.fn() }}
+      />,
+    )
+    const alert = screen.getByTestId('voice-error')
+    expect(alert).toHaveAttribute('role', 'alert')
+    expect(alert).toHaveTextContent('Microphone access was denied.')
+  })
+
+  it('does not arm PTT when voice is unavailable (Space types normally)', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice({ isAvailable: false })
+    render(<ControlledBar voiceInput={voice} initial="hi" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+    textarea.setSelectionRange(2, 2)
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+
+    expect(voice.start).not.toHaveBeenCalled()
+    // preventDefault was never called, so the native space falls through —
+    // jsdom doesn't synthesise the character from keyDown, but the important
+    // contract is that we didn't suppress it or start recording.
+  })
+
+  it('Space with a modifier does not arm PTT', () => {
+    vi.useFakeTimers()
+    const voice = makeVoice()
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ', ctrlKey: true })
+    act(() => { vi.advanceTimersByTime(300) })
+
+    expect(voice.start).not.toHaveBeenCalled()
+  })
+
+  // #5666 — fast typing must never hit the suppress-then-reinsert path that
+  // races overlapping keystrokes and reorders characters around spaces.
+  describe('typing-cadence guard (#5666)', () => {
+    it('a Space typed right after another key takes the native path (no arm, no programmatic splice)', () => {
+      vi.useFakeTimers()
+      const nowSpy = vi.spyOn(performance, 'now')
+      const voice = makeVoice()
+      const onValueChange = vi.fn()
+      render(
+        <InputBar
+          onSend={vi.fn()}
+          onInterrupt={vi.fn()}
+          controlledValue="hello"
+          onValueChange={onValueChange}
+          voiceInput={voice}
+        />,
+      )
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      textarea.setSelectionRange(5, 5)
+
+      // A letter at t=1000, then Space 100ms later — well inside the 250ms
+      // typing window, so the user is clearly typing words, not holding to talk.
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: 'o' })
+      nowSpy.mockReturnValue(1100)
+      fireEvent.keyDown(textarea, { key: ' ' })
+      act(() => { vi.advanceTimersByTime(300) })
+
+      // Never armed → never started recording.
+      expect(voice.start).not.toHaveBeenCalled()
+      // Native path → we never programmatically spliced a space (which is what
+      // raced the fast keystrokes in #5625). onValueChange is only called by the
+      // deferred re-insert, so it must not have fired.
+      expect(onValueChange).not.toHaveBeenCalled()
+      nowSpy.mockRestore()
+    })
+
+    it('a navigation key (Arrow) right before a Space hold does NOT block PTT (caret-anchored dictation)', () => {
+      vi.useFakeTimers()
+      const nowSpy = vi.spyOn(performance, 'now')
+      const voice = makeVoice()
+      render(<ControlledBar voiceInput={voice} initial="hello world" />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      textarea.setSelectionRange(11, 11)
+
+      // Arrow the caret into place, then immediately (0ms later) hold Space to
+      // dictate at that caret. Arrow is not text typing, so it must not poison
+      // the cadence guard — PTT must still arm.
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: 'ArrowLeft' })
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: ' ' })
+      act(() => { vi.advanceTimersByTime(300) })
+
+      expect(voice.start).toHaveBeenCalledTimes(1)
+      nowSpy.mockRestore()
+    })
+
+    it('a deliberate Space hold after a typing pause still arms PTT', () => {
+      vi.useFakeTimers()
+      const nowSpy = vi.spyOn(performance, 'now')
+      const voice = makeVoice()
+      render(<ControlledBar voiceInput={voice} initial="hi" />)
+      const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+      textarea.setSelectionRange(2, 2)
+
+      // Last key at t=1000; the Space comes 400ms later — past the guard, so a
+      // hold is a genuine push-to-talk gesture and must still arm.
+      nowSpy.mockReturnValue(1000)
+      fireEvent.keyDown(textarea, { key: 'i' })
+      nowSpy.mockReturnValue(1400)
+      fireEvent.keyDown(textarea, { key: ' ' })
+      act(() => { vi.advanceTimersByTime(300) })
+
+      expect(voice.start).toHaveBeenCalledTimes(1)
+      expect(textarea.value).toBe('hi')
+      nowSpy.mockRestore()
+    })
+  })
+
+  // #5668 — a Space hold landing on top of an already-running (button-started)
+  // recording must not arm PTT: arming would let the later release stop a
+  // recording PTT never started, and re-enter start() (wiping the transcript).
+  it('does not arm PTT when a recording is already in progress, and release does not stop it (#5668)', () => {
+    vi.useFakeTimers()
+    const start = vi.fn()
+    const stop = vi.fn()
+    const voice = makeVoice({ isRecording: true, start, stop })
+    render(<ControlledBar voiceInput={voice} initial="" />)
+    const textarea = screen.getByRole('textbox') as HTMLTextAreaElement
+
+    fireEvent.keyDown(textarea, { key: ' ' })
+    act(() => { vi.advanceTimersByTime(300) })
+    fireEvent.keyUp(textarea, { key: ' ' })
+
+    // PTT never armed → never re-invoked start() and never stopped the button
+    // recording on release.
+    expect(start).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
   })
 })

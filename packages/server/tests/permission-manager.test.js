@@ -26,6 +26,54 @@ describe('PermissionManager', () => {
 
   // -- Permission requests --
 
+  // #5121: requestIds must be globally unique across sessions so the
+  // parent-level subagent routing table (byok-session.js) can never alias
+  // a parent's own pending requestId against a child's. Each manager mints
+  // a per-instance nonce; the id is opaque to all consumers.
+  describe('requestId global uniqueness (#5121)', () => {
+    it('two managers do not mint the same requestId even with identical counters', () => {
+      const a = createManager()
+      const b = createManager()
+      try {
+        const aEvents = []
+        const bEvents = []
+        a.on('permission_request', (d) => aEvents.push(d))
+        b.on('permission_request', (d) => bEvents.push(d))
+
+        // Same tool/input/counter position in each manager — only the
+        // per-instance nonce keeps the ids apart.
+        a.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+        b.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+
+        assert.ok(aEvents[0].requestId)
+        assert.ok(bEvents[0].requestId)
+        assert.notEqual(aEvents[0].requestId, bEvents[0].requestId)
+        assert.match(aEvents[0].requestId, /^perm-/)
+        assert.match(bEvents[0].requestId, /^perm-/)
+      } finally {
+        a.destroy()
+        b.destroy()
+      }
+    })
+
+    it('a single manager mints distinct requestIds with a stable nonce', () => {
+      const events = []
+      pm.on('permission_request', (d) => events.push(d))
+
+      pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      pm.handlePermission('Bash', { command: 'pwd' }, null, 'approve')
+
+      assert.notEqual(events[0].requestId, events[1].requestId)
+      // Both ids share this manager's nonce, proving the nonce is
+      // per-instance, not per-request. Extract it by stripping the `perm-`
+      // prefix and the trailing `-<counter>-<ms>` rather than indexing a
+      // fixed segment, so the assertion stays valid if the nonce format
+      // changes (it remains opaque to consumers either way).
+      const nonceOf = (id) => id.replace(/^perm-/, '').replace(/-\d+-\d+$/, '')
+      assert.equal(nonceOf(events[0].requestId), nonceOf(events[1].requestId))
+    })
+  })
+
   describe('handlePermission', () => {
     it('emits permission_request and creates entry in pending map', () => {
       const events = []
@@ -340,6 +388,55 @@ describe('PermissionManager', () => {
       // Defensive — switching to auto with an idle session must not throw.
       assert.doesNotThrow(() => pm.autoAllowPending())
     })
+
+    it('autoAllowPending() denies pending MCP trust prompts to avoid silent persist (#4462)', async () => {
+      // A pending requestMcpTrust prompt persists trust forever on
+      // allow via byok-mcp-fleet's recordTrust path. Auto-mode bypass
+      // is "approve everything for THIS turn" semantics — granting
+      // forever-trust via a panic-button click changes the security
+      // contract. autoAllowPending must resolve mcp_spawn entries as
+      // deny so the trust store stays untouched.
+      const trustPromise = pm.requestMcpTrust({
+        name: 'evilmcp',
+        command: '/usr/bin/curl',
+        args: ['http://evil.example.com'],
+        envKeys: [],
+      })
+      assert.equal(pm._pendingPermissions.size, 1)
+
+      const resolvedEvents = []
+      pm.on('permission_resolved', (e) => resolvedEvents.push(e))
+
+      pm.autoAllowPending()
+
+      const allowed = await trustPromise
+      assert.equal(allowed, false, 'auto-mode bypass must NOT grant MCP trust')
+      assert.equal(pm._pendingPermissions.size, 0)
+      assert.equal(resolvedEvents.length, 1)
+      assert.equal(resolvedEvents[0].decision, 'deny')
+      assert.match(resolvedEvents[0].reason, /mcp_trust/)
+    })
+
+    it('autoAllowPending() handles mixed pending: allows tool prompts, denies MCP trust (#4462)', async () => {
+      // Mixed-pending scenario: a Bash prompt and an MCP trust prompt
+      // are both open when auto fires. Bash gets the allow (panic-button
+      // semantics), MCP trust gets the deny (no forever-trust via bypass).
+      const bashPromise = pm.handlePermission('Bash', { command: 'ls' }, null, 'approve')
+      const trustPromise = pm.requestMcpTrust({
+        name: 'mcp1',
+        command: 'node',
+        args: ['mcp.js'],
+        envKeys: [],
+      })
+      assert.equal(pm._pendingPermissions.size, 2)
+
+      pm.autoAllowPending()
+
+      const [bashRes, trusted] = await Promise.all([bashPromise, trustPromise])
+      assert.equal(bashRes.behavior, 'allow', 'tool prompt must auto-allow')
+      assert.equal(trusted, false, 'MCP trust prompt must auto-deny')
+      assert.equal(pm._pendingPermissions.size, 0)
+    })
   })
 
   // -- AskUserQuestion handling --
@@ -398,6 +495,35 @@ describe('PermissionManager', () => {
       pm.respondToQuestion('stale answer')
     })
 
+    // #3988: symmetry follow-up to #3975. The user-response handler at
+    // handlers/input-handlers.js:451 already deletes from questionSessionMap before
+    // calling respondToQuestion, so the unified-pipeline cleanup is
+    // redundant on this path — but every other question-variant emit
+    // (aborted/timeout/cleared) carries toolUseId, and future internal
+    // paths shouldn't have to remember "every emit needs toolUseId
+    // EXCEPT this one." Defensive consistency.
+    it('emits permission_resolved with toolUseId + reason:answered on respondToQuestion (#3988)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      const userQuestionEvents = []
+      pm.on('user_question', (data) => userQuestionEvents.push(data))
+      const promise = pm._handleAskUserQuestion({ questions: [{ question: 'go?' }] }, null)
+      assert.equal(userQuestionEvents.length, 1)
+      const toolUseId = userQuestionEvents[0].toolUseId
+      assert.ok(toolUseId, 'precondition: user_question must carry toolUseId')
+
+      pm.respondToQuestion('yes')
+      await promise
+
+      const questionEmits = events.filter(e => !e.requestId)
+      assert.equal(questionEmits.length, 1,
+        'respondToQuestion must emit exactly one question-variant permission_resolved')
+      assert.equal(questionEmits[0].toolUseId, toolUseId,
+        'toolUseId must be propagated for symmetry with the other question-variant emits')
+      assert.equal(questionEmits[0].reason, 'answered')
+    })
+
     it('supports per-question answersMap', async () => {
       const questions = [
         { question: 'Color?', options: [{ label: 'Red' }] },
@@ -418,6 +544,64 @@ describe('PermissionManager', () => {
       const result = await promise
       assert.deepEqual(result.updatedInput.answers, { 'Color?': 'Red' })
       assert.ok(!('Unknown?' in result.updatedInput.answers))
+    })
+
+    // #4621 wire shape + #4731 SDK normalization. answersMap values may
+    // arrive as string[] (native multi-select from updated dashboards).
+    // PermissionManager normalizes arrays to the SDK's canonical
+    // comma-separated string shape (see normalizeAnswerValue and
+    // sdk-multi-question-shapes.test.js for the full coverage) because
+    // the SDK's `AskUserQuestionOutput.answers` is typed
+    // `{ [questionText]: string }`. Single-select strings pass through.
+    it('normalizes string[] answersMap values to comma-separated strings for the SDK (#4621 + #4731)', async () => {
+      const questions = [
+        { question: 'Areas?', multiSelect: true, options: [{ label: 'App' }, { label: 'Tests' }] },
+        { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
+      ]
+      const promise = pm._handleAskUserQuestion({ questions }, null)
+
+      pm.respondToQuestion('summary', {
+        'Areas?': ['App', 'Tests'],
+        'Strategy?': 'Minor',
+      })
+      const result = await promise
+      assert.deepEqual(result.updatedInput.answers, {
+        'Areas?': 'App, Tests',
+        'Strategy?': 'Minor',
+      })
+      assert.equal(typeof result.updatedInput.answers['Areas?'], 'string',
+        'multi-select array must be coerced to comma-separated string per SDK contract')
+    })
+
+    // #4621 / #4735 / #4731 — mixed single-select + multi-select shape.
+    // Single-select strings pass through unchanged; multi-select arrays
+    // are normalized to comma-separated strings per the SDK contract
+    // (see normalizeAnswerValue + the test above). #4735 added the
+    // mixed-shape coverage; #4731 corrected the assertion to match the
+    // SDK's `{ [questionText]: string }` output type.
+    it('normalizes mixed string + string[] answers per the SDK contract (#4621 / #4731 / #4735)', async () => {
+      const questions = [
+        { question: 'Strategy?', options: [{ label: 'Patch' }, { label: 'Minor' }] },
+        { question: 'Targets?', multiSelect: true, options: [
+          { label: 'App' }, { label: 'Docs' },
+        ] },
+        { question: 'Confirm?', options: [{ label: 'Yes' }, { label: 'No' }] },
+      ]
+      const promise = pm._handleAskUserQuestion({ questions }, null)
+
+      pm.respondToQuestion('summary', {
+        'Strategy?': 'Patch',
+        'Targets?': ['App', 'Docs'],
+        'Confirm?': 'Yes',
+      })
+      const result = await promise
+      assert.deepEqual(result.updatedInput.answers, {
+        'Strategy?': 'Patch',
+        'Targets?': 'App, Docs',
+        'Confirm?': 'Yes',
+      })
+      assert.equal(typeof result.updatedInput.answers['Targets?'], 'string',
+        'multi-select array must be coerced to comma-separated string per SDK contract')
     })
   })
 
@@ -476,6 +660,35 @@ describe('PermissionManager', () => {
       pm._questionTimer = setTimeout(() => {}, 999999)
       pm.clearAll()
       assert.equal(pm._questionTimer, null)
+    })
+
+    // #3975: clearAll must include `toolUseId` on the question-variant
+    // permission_resolved emit so the unified pipeline (EventNormalizer)
+    // can prune the questionSessionMap entry. Pre-fix the emit was
+    // `{ reason: 'cleared' }` with no `toolUseId`, the sdk-session re-emit
+    // gate dropped it, and the routing map leaked one entry per
+    // message-completion-while-question-pending event.
+    it('emits permission_resolved with toolUseId + reason:cleared for the pending question (#3975)', async () => {
+      const events = []
+      pm.on('permission_resolved', (data) => events.push(data))
+
+      // Spin up an AskUserQuestion so PermissionManager captures a toolUseId.
+      const userQuestionEvents = []
+      pm.on('user_question', (data) => userQuestionEvents.push(data))
+      const promise = pm._handleAskUserQuestion({ questions: [{ question: 'go?' }] }, null)
+      assert.equal(userQuestionEvents.length, 1)
+      const toolUseId = userQuestionEvents[0].toolUseId
+      assert.ok(toolUseId, 'precondition: user_question must carry toolUseId')
+
+      pm.clearAll()
+      await promise
+
+      const questionEmits = events.filter(e => !e.requestId)
+      assert.equal(questionEmits.length, 1,
+        'clearAll must emit exactly one question-variant permission_resolved')
+      assert.equal(questionEmits[0].toolUseId, toolUseId,
+        'toolUseId must be propagated so questionSessionMap can be pruned')
+      assert.equal(questionEmits[0].reason, 'cleared')
     })
   })
 
@@ -784,6 +997,46 @@ describe('PermissionManager', () => {
 
       custom.handlePermission('Bash', {}, null, 'approve')
       assert.equal(events[0].remainingMs, 60_000)
+      custom.destroy()
+    })
+  })
+
+  describe('requestMcpTrust (#4457)', () => {
+    it('emits permission_request with tool=mcp_spawn and server detail', () => {
+      const events = []
+      pm.on('permission_request', (e) => events.push(e))
+      pm.requestMcpTrust({ name: 'github', command: 'node', args: ['gh.js'], envKeys: ['GITHUB_TOKEN'] })
+      assert.equal(events.length, 1)
+      assert.equal(events[0].tool, 'mcp_spawn')
+      assert.equal(events[0].input.mcpServer.name, 'github')
+      assert.equal(events[0].input.mcpServer.command, 'node')
+      assert.deepEqual(events[0].input.mcpServer.args, ['gh.js'])
+      assert.deepEqual(events[0].input.mcpServer.envKeys, ['GITHUB_TOKEN'])
+      assert.match(events[0].description, /Spawn MCP server "github"/)
+    })
+
+    it('resolves to true when respondToPermission says allow', async () => {
+      const events = []
+      pm.on('permission_request', (e) => events.push(e))
+      const promise = pm.requestMcpTrust({ name: 'x', command: 'true' })
+      pm.respondToPermission(events[0].requestId, 'allow')
+      assert.equal(await promise, true)
+    })
+
+    it('resolves to false on deny', async () => {
+      const events = []
+      pm.on('permission_request', (e) => events.push(e))
+      const promise = pm.requestMcpTrust({ name: 'x', command: 'true' })
+      pm.respondToPermission(events[0].requestId, 'deny')
+      assert.equal(await promise, false)
+    })
+
+    it('auto-denies on timeout (fail-closed)', async () => {
+      const custom = createManager({ timeoutMs: 80 })
+      const events = []
+      custom.on('permission_request', (e) => events.push(e))
+      const promise = custom.requestMcpTrust({ name: 'x', command: 'true' })
+      assert.equal(await promise, false)
       custom.destroy()
     })
   })

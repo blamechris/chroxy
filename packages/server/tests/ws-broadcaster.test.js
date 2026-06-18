@@ -1,6 +1,8 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { WsBroadcaster } from '../src/ws-broadcaster.js'
+import { WsClientManager } from '../src/ws-client-manager.js'
+import { metrics } from '../src/metrics.js'
 
 /** Create a fake WebSocket with configurable readyState and bufferedAmount */
 function createFakeWs({ readyState = 1, bufferedAmount = 0 } = {}) {
@@ -146,6 +148,29 @@ describe('WsBroadcaster', () => {
       assert.equal(sent.length, 1)
       assert.equal(sent[0].ws, ws2)
     })
+
+    it('a throwing filter does not abort delivery to later clients (audit 3b)', () => {
+      // A filter that throws on one client must skip ONLY that client — the
+      // legacy loop unwound the whole iteration, silently dropping the
+      // broadcast for every later client.
+      const ws1 = createFakeWs()
+      const wsBad = createFakeWs()
+      const ws3 = createFakeWs()
+      clients.set(ws1, createFakeClient({ id: 'c1' }))
+      clients.set(wsBad, createFakeClient({ id: 'bad' }))
+      clients.set(ws3, createFakeClient({ id: 'c3' }))
+
+      assert.doesNotThrow(() => {
+        broadcaster._broadcast({ type: 'x' }, (client) => {
+          if (client.id === 'bad') throw new Error('boom')
+          return true
+        })
+      })
+
+      // c1 and c3 both received it; only the throwing client was skipped.
+      const ids = sent.map((e) => clients.get(e.ws).id).sort()
+      assert.deepEqual(ids, ['c1', 'c3'])
+    })
   })
 
   describe('_broadcastToSession()', () => {
@@ -197,6 +222,122 @@ describe('WsBroadcaster', () => {
       assert.equal(sent.length, 1)
       assert.equal(sent[0].ws, ws2)
     })
+
+    it('does not throw when a client is missing subscribedSessionIds (#4799)', () => {
+      // Defensive: a client could lack `subscribedSessionIds` (legacy fixture,
+      // future refactor, code bug). The default filter must not throw —
+      // otherwise the broadcast loop aborts mid-iteration and other clients
+      // miss the message.
+      const wsBroken = createFakeWs()
+      const wsOk = createFakeWs()
+      const brokenClient = createFakeClient({ id: 'broken', activeSessionId: 'other' })
+      brokenClient.subscribedSessionIds = undefined
+      clients.set(wsBroken, brokenClient)
+      clients.set(wsOk, createFakeClient({ id: 'ok', activeSessionId: 'sess-1' }))
+
+      assert.doesNotThrow(() => {
+        broadcaster._broadcastToSession('sess-1', { type: 'data' })
+      })
+
+      // The healthy client on the matching activeSessionId still receives it.
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].ws, wsOk)
+    })
+
+    it('still delivers to a client whose activeSessionId matches even with no subscribedSessionIds (#4799)', () => {
+      const ws = createFakeWs()
+      const client = createFakeClient({ id: 'c1', activeSessionId: 'sess-1' })
+      client.subscribedSessionIds = undefined
+      clients.set(ws, client)
+
+      broadcaster._broadcastToSession('sess-1', { type: 'data' })
+
+      assert.equal(sent.length, 1)
+      assert.equal(sent[0].ws, ws)
+    })
+  })
+
+  // #5516/#5562: subscriber count drives the normalizer's fixed delta
+  // micro-batch window (8ms when a session has exactly one viewer, 16ms
+  // otherwise). The adaptive throttle is client-side (store-core EWMA).
+  describe('_countSessionSubscribers()', () => {
+    it('counts activeSessionId matches and explicit subscribers', () => {
+      clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), createFakeClient({ id: 'c2', activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }))
+      clients.set(createFakeWs(), createFakeClient({ id: 'c3', activeSessionId: 'other' }))
+      assert.equal(broadcaster._countSessionSubscribers('sess-1'), 2)
+      assert.equal(broadcaster._countSessionSubscribers('other'), 2) // c2 active + c3 active
+    })
+
+    it('returns 1 for a single-viewer session', () => {
+      clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'solo' }))
+      assert.equal(broadcaster._countSessionSubscribers('solo'), 1)
+    })
+
+    it('returns 0 when nobody is watching', () => {
+      clients.set(createFakeWs(), createFakeClient({ id: 'c1', activeSessionId: 'other' }))
+      assert.equal(broadcaster._countSessionSubscribers('ghost'), 0)
+    })
+
+    it('excludes unauthenticated and non-OPEN clients', () => {
+      clients.set(createFakeWs({ readyState: 1 }), createFakeClient({ id: 'c1', activeSessionId: 'sess-1', authenticated: false }))
+      clients.set(createFakeWs({ readyState: 3 }), createFakeClient({ id: 'c2', activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs({ readyState: 1 }), createFakeClient({ id: 'c3', activeSessionId: 'sess-1' }))
+      assert.equal(broadcaster._countSessionSubscribers('sess-1'), 1)
+    })
+
+    it('does not throw when a client lacks subscribedSessionIds (#4799 parity)', () => {
+      const c = createFakeClient({ id: 'c1', activeSessionId: 'other' })
+      c.subscribedSessionIds = undefined
+      clients.set(createFakeWs(), c)
+      assert.equal(broadcaster._countSessionSubscribers('sess-1'), 0)
+    })
+  })
+
+  // #5578: does any subscriber sit on a deflate-negotiated (tunnel/cellular)
+  // socket? Drives the deflate-aware delta-coalescing window. Mirrors the
+  // _countSessionSubscribers recipient filter; short-circuits on first match.
+  // These exercise the full-scan FALLBACK path (no clientManager wired).
+  describe('_hasDeflateSubscriber() — full-scan fallback', () => {
+    function lan(id, opts) { return createFakeClient({ id, ...opts }) } // usesDeflate undefined → falsey
+    function tunnel(id, opts) { const c = createFakeClient({ id, ...opts }); c.usesDeflate = true; return c }
+
+    it('false when every subscriber is on a LAN socket', () => {
+      clients.set(createFakeWs(), lan('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), lan('c2', { activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+
+    it('true when at least one subscriber is on a deflate socket (mixed)', () => {
+      clients.set(createFakeWs(), lan('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), tunnel('c2', { activeSessionId: 'sess-1' }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), true)
+    })
+
+    it('true when every subscriber is on a deflate socket', () => {
+      clients.set(createFakeWs(), tunnel('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), tunnel('c2', { activeSessionId: 'other', subscribedSessionIds: new Set(['sess-1']) }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), true)
+    })
+
+    it('ignores a deflate client subscribed to a DIFFERENT session', () => {
+      clients.set(createFakeWs(), lan('c1', { activeSessionId: 'sess-1' }))
+      clients.set(createFakeWs(), tunnel('c2', { activeSessionId: 'sess-2' }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+
+    it('excludes unauthenticated and non-OPEN deflate clients', () => {
+      clients.set(createFakeWs({ readyState: 1 }), tunnel('c1', { activeSessionId: 'sess-1', authenticated: false }))
+      clients.set(createFakeWs({ readyState: 3 }), tunnel('c2', { activeSessionId: 'sess-1' }))
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
+
+    it('does not throw when a client lacks subscribedSessionIds (#4799 parity)', () => {
+      const c = tunnel('c1', { activeSessionId: 'other' })
+      c.subscribedSessionIds = undefined
+      clients.set(createFakeWs(), c)
+      assert.equal(broadcaster._hasDeflateSubscriber('sess-1'), false)
+    })
   })
 
   describe('_broadcastClientJoined()', () => {
@@ -236,6 +377,59 @@ describe('WsBroadcaster', () => {
       assert.equal(sent[0].message.client.deviceName, null)
       assert.equal(sent[0].message.client.deviceType, 'unknown')
       assert.equal(sent[0].message.client.platform, 'unknown')
+    })
+  })
+
+  describe('_broadcastClientLeft()', () => {
+    it('sends client_left to all except the departing client', () => {
+      const wsGone = createFakeWs()
+      const wsOther1 = createFakeWs()
+      const wsOther2 = createFakeWs()
+      const departing = createFakeClient({ id: 'gone' })
+      clients.set(wsGone, departing)
+      clients.set(wsOther1, createFakeClient({ id: 'c1' }))
+      clients.set(wsOther2, createFakeClient({ id: 'c2' }))
+
+      broadcaster._broadcastClientLeft(departing)
+
+      assert.equal(sent.length, 2)
+      for (const entry of sent) {
+        assert.notEqual(clients.get(entry.ws).id, 'gone')
+        assert.equal(entry.message.type, 'client_left')
+        assert.equal(entry.message.clientId, 'gone')
+      }
+    })
+
+    it('skips unauthenticated and non-OPEN peers', () => {
+      const wsGone = createFakeWs()
+      const wsUnauth = createFakeWs()
+      const wsClosed = createFakeWs({ readyState: 3 })
+      const wsOk = createFakeWs()
+      const departing = createFakeClient({ id: 'gone' })
+      clients.set(wsGone, departing)
+      clients.set(wsUnauth, createFakeClient({ id: 'u', authenticated: false }))
+      clients.set(wsClosed, createFakeClient({ id: 'closed' }))
+      clients.set(wsOk, createFakeClient({ id: 'ok' }))
+
+      broadcaster._broadcastClientLeft(departing)
+
+      assert.equal(sent.length, 1)
+      assert.equal(clients.get(sent[0].ws).id, 'ok')
+    })
+
+    it('routes through backpressure (drops + counter) like other broadcasts', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const wsGone = createFakeWs()
+      const wsBack = createFakeWs({ bufferedAmount: 200 })
+      const departing = createFakeClient({ id: 'gone' })
+      const backClient = createFakeClient({ id: 'back' })
+      clients.set(wsGone, departing)
+      clients.set(wsBack, backClient)
+
+      broadcaster._broadcastClientLeft(departing)
+
+      assert.equal(sent.length, 0)
+      assert.equal(backClient._backpressureDrops, 1)
     })
   })
 
@@ -352,6 +546,406 @@ describe('WsBroadcaster', () => {
 
       assert.equal(sent.length, 0)
       assert.equal(client1._backpressureDrops, 1)
+    })
+  })
+
+  describe('backpressure metrics (#4772)', () => {
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('increments backpressure.drops when _broadcast drops a message', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      clients.set(ws1, createFakeClient({ id: 'c1' }))
+
+      broadcaster._broadcast({ type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+    })
+
+    it('increments backpressure.disconnects when _broadcast closes after maxDrops', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100, backpressureMaxDrops: 3 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1' })
+      client1._backpressureDrops = 2
+      clients.set(ws1, client1)
+
+      broadcaster._broadcast({ type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+      assert.equal(metrics.get('backpressure.disconnects'), 1)
+      assert.equal(ws1.closed, true)
+    })
+
+    it('increments backpressure.drops when _broadcastToSession drops a message', () => {
+      // Latent bug fixed by #4772: session-scoped broadcasts previously
+      // bypassed metrics entirely, so backpressure on per-session traffic
+      // (where most data flows) never showed up in observability.
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      clients.set(ws1, createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
+
+      broadcaster._broadcastToSession('sess-1', { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+    })
+
+    it('increments backpressure.disconnects when _broadcastToSession closes after maxDrops', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100, backpressureMaxDrops: 3 })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1', activeSessionId: 'sess-1' })
+      client1._backpressureDrops = 2
+      clients.set(ws1, client1)
+
+      broadcaster._broadcastToSession('sess-1', { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 1)
+      assert.equal(metrics.get('backpressure.disconnects'), 1)
+      assert.equal(ws1.closed, true)
+    })
+
+    it('increments backpressure.drops when _broadcastClientJoined drops a message', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const wsNew = createFakeWs()
+      const wsOther = createFakeWs({ bufferedAmount: 200 })
+      const newClient = createFakeClient({ id: 'new' })
+      clients.set(wsNew, newClient)
+      clients.set(wsOther, createFakeClient({ id: 'c1' }))
+
+      broadcaster._broadcastClientJoined(newClient, wsNew)
+
+      assert.equal(sent.length, 0, 'backpressured peer receives nothing')
+      assert.equal(metrics.get('backpressure.drops'), 1)
+    })
+
+    it('does not increment metrics on successful sends', () => {
+      const ws1 = createFakeWs()
+      clients.set(ws1, createFakeClient({ id: 'c1', activeSessionId: 'sess-1' }))
+
+      broadcaster.broadcast({ type: 'test' })
+      broadcaster._broadcastToSession('sess-1', { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.drops'), 0)
+      assert.equal(metrics.get('backpressure.disconnects'), 0)
+    })
+  })
+
+  describe('backpressure eviction dedupe (#4834)', () => {
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('closes the client EXACTLY ONCE across N broadcasts after maxDrops', () => {
+      // Once a slow client crosses maxDrops, ws.close() is called. ws.close()
+      // is async — subsequent broadcasts in the same synchronous chain still
+      // see bufferedAmount > threshold and would otherwise re-fire close +
+      // re-increment backpressure.disconnects. Dedupe via sticky _evicted.
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      // Make close() count invocations
+      let closeCount = 0
+      const originalClose = ws1.close
+      ws1.close = (code, reason) => { closeCount++; originalClose.call(ws1, code, reason) }
+      const client1 = createFakeClient({ id: 'c1' })
+      clients.set(ws1, client1)
+
+      // 10 broadcasts. First 3 drop and trigger close. Remaining 7 should
+      // NOT re-call close or re-increment backpressure.disconnects.
+      for (let i = 0; i < 10; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(closeCount, 1, 'ws.close called exactly once')
+      assert.equal(metrics.get('backpressure.disconnects'), 1, 'disconnect metric incremented exactly once')
+    })
+
+    it('sets sticky client._evicted flag on first eviction', () => {
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+      const ws1 = createFakeWs({ bufferedAmount: 200 })
+      const client1 = createFakeClient({ id: 'c1' })
+      clients.set(ws1, client1)
+
+      // Trigger maxDrops worth of broadcasts
+      for (let i = 0; i < 5; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(client1._evicted, true, 'client marked evicted')
+    })
+
+    it('eviction dedupe is per-client (a separate client object still evicts)', () => {
+      const threshold = 100
+      const maxDrops = 3
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: threshold, backpressureMaxDrops: maxDrops })
+
+      const wsA = createFakeWs({ bufferedAmount: 200 })
+      const clientA = createFakeClient({ id: 'cA' })
+      const wsB = createFakeWs({ bufferedAmount: 200 })
+      const clientB = createFakeClient({ id: 'cB' })
+      clients.set(wsA, clientA)
+      clients.set(wsB, clientB)
+
+      for (let i = 0; i < 10; i++) {
+        broadcaster._broadcast({ type: 'test', i })
+      }
+
+      assert.equal(wsA.closed, true, 'client A closed')
+      assert.equal(wsB.closed, true, 'client B closed')
+      assert.equal(metrics.get('backpressure.disconnects'), 2, 'one disconnect per client')
+    })
+  })
+
+  // #5563: when wired with a WsClientManager, session-scoped broadcasts +
+  // subscriber counts take the reverse-index fast path. These tests verify the
+  // index path delivers to EXACTLY the recipient set the full-scan filter would
+  // (parity), and that the per-member conditions (authenticated, readyState,
+  // backpressure) still apply per index member.
+  describe('reverse-index fast path (#5563)', () => {
+    let manager
+    let sentIdx
+    let idxBroadcaster
+
+    /** Register an authenticated client with its ws back-ref (like ws-server addClient). */
+    function reg(id, { activeSessionId = null, subscribe = [], authenticated = true, readyState = 1, usesDeflate = false } = {}) {
+      const ws = createFakeWs({ readyState })
+      // Start with activeSessionId null (like a fresh client) so the helper
+      // performs a real transition and updates the index — passing it directly
+      // to createFakeClient would make setActiveSession a no-op (prev === new).
+      const client = createFakeClient({ id, authenticated })
+      client._ws = ws
+      client.usesDeflate = usesDeflate
+      manager.addClient(ws, client)
+      if (activeSessionId) manager.setActiveSession(client, activeSessionId)
+      for (const sid of subscribe) manager.subscribe(client, sid)
+      return { ws, client }
+    }
+
+    beforeEach(() => {
+      manager = new WsClientManager()
+      sentIdx = []
+      idxBroadcaster = new WsBroadcaster({
+        clients: manager.clients,
+        clientManager: manager,
+        sendFn: (ws, msg) => sentIdx.push({ ws, message: msg }),
+      })
+    })
+
+    it('delivers to active + subscribed clients via the index', () => {
+      const a = reg('a', { activeSessionId: 'sess-1' })
+      reg('b', { activeSessionId: 'sess-2' })
+      const c = reg('c', { activeSessionId: 'other', subscribe: ['sess-1'] })
+
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' })
+
+      const recipients = sentIdx.map(e => e.ws).sort()
+      assert.deepEqual(recipients.length, 2)
+      assert.ok(recipients.includes(a.ws))
+      assert.ok(recipients.includes(c.ws))
+    })
+
+    it('tags the message with sessionId on the index path', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'data', value: 42 })
+      assert.equal(sentIdx.length, 1)
+      assert.deepEqual(sentIdx[0].message, { type: 'data', value: 42, sessionId: 'sess-1' })
+    })
+
+    it('skips unauthenticated index members', () => {
+      reg('a', { activeSessionId: 'sess-1', authenticated: false })
+      reg('b', { activeSessionId: 'sess-1' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' })
+      assert.equal(sentIdx.length, 1)
+      assert.equal(manager.clients.get(sentIdx[0].ws).id, 'b')
+    })
+
+    it('skips non-OPEN index members', () => {
+      reg('closed', { activeSessionId: 'sess-1', readyState: 3 })
+      reg('open', { activeSessionId: 'sess-1' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' })
+      assert.equal(sentIdx.length, 1)
+      assert.equal(manager.clients.get(sentIdx[0].ws).id, 'open')
+    })
+
+    it('a custom filter falls back to the full scan (reaches clients outside the index)', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      // `outsider` is active on a DIFFERENT session, so it is NOT in sess-1's
+      // index. A custom filter targeting it must still deliver — proving the
+      // filter path scans every client and bypasses the index entirely.
+      const outsider = reg('outsider', { activeSessionId: 'sess-2' })
+      idxBroadcaster._broadcastToSession('sess-1', { type: 'm' }, (client) => client.id === 'outsider')
+      assert.equal(sentIdx.length, 1)
+      assert.equal(sentIdx[0].ws, outsider.ws)
+    })
+
+    it('_countSessionSubscribers counts from the index (active + subscribed)', () => {
+      reg('a', { activeSessionId: 'sess-1' })
+      reg('b', { activeSessionId: 'other', subscribe: ['sess-1'] })
+      reg('c', { activeSessionId: 'other' })
+      assert.equal(idxBroadcaster._countSessionSubscribers('sess-1'), 2)
+      assert.equal(idxBroadcaster._countSessionSubscribers('other'), 2)
+      assert.equal(idxBroadcaster._countSessionSubscribers('ghost'), 0)
+    })
+
+    it('_countSessionSubscribers excludes unauthenticated + non-OPEN members', () => {
+      reg('a', { activeSessionId: 'sess-1', authenticated: false })
+      reg('b', { activeSessionId: 'sess-1', readyState: 3 })
+      reg('c', { activeSessionId: 'sess-1' })
+      assert.equal(idxBroadcaster._countSessionSubscribers('sess-1'), 1)
+    })
+
+    it('returns 1 for a single-viewer session (the hot-path motivation)', () => {
+      reg('solo', { activeSessionId: 'solo-sess' })
+      assert.equal(idxBroadcaster._countSessionSubscribers('solo-sess'), 1)
+    })
+
+    // #5578: deflate-subscriber detection over the same reverse index.
+    it('_hasDeflateSubscriber resolves from the index (all-LAN / mixed / all-tunnel)', () => {
+      // all-LAN
+      reg('a', { activeSessionId: 'lan-sess' })
+      reg('b', { activeSessionId: 'other', subscribe: ['lan-sess'] })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('lan-sess'), false)
+      // mixed: one tunnel peer among LAN
+      reg('c', { activeSessionId: 'mixed-sess' })
+      reg('d', { activeSessionId: 'mixed-sess', usesDeflate: true })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('mixed-sess'), true)
+      // all-tunnel
+      reg('e', { activeSessionId: 'tun-sess', usesDeflate: true })
+      reg('f', { activeSessionId: 'other2', subscribe: ['tun-sess'], usesDeflate: true })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('tun-sess'), true)
+      // unknown session
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('ghost'), false)
+    })
+
+    it('_hasDeflateSubscriber excludes unauthenticated + non-OPEN deflate members', () => {
+      reg('a', { activeSessionId: 'sess-1', usesDeflate: true, authenticated: false })
+      reg('b', { activeSessionId: 'sess-1', usesDeflate: true, readyState: 3 })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), false)
+      // A healthy deflate member flips it true.
+      reg('c', { activeSessionId: 'sess-1', usesDeflate: true })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), true)
+    })
+
+    it('_hasDeflateSubscriber re-resolves when a deflate subscriber joins/leaves', () => {
+      const lanViewer = reg('lan', { activeSessionId: 'sess-1' })
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), false)
+      // A phone on cellular subscribes → now true.
+      const phone = reg('phone', { usesDeflate: true })
+      manager.subscribe(phone.client, 'sess-1')
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), true)
+      // The phone unsubscribes → back to all-LAN.
+      manager.unsubscribe(phone.client, 'sess-1')
+      assert.equal(idxBroadcaster._hasDeflateSubscriber('sess-1'), false)
+      // Sanity: the LAN viewer is still indexed.
+      assert.equal(idxBroadcaster._countSessionSubscribers('sess-1'), 1)
+      assert.ok(lanViewer)
+    })
+
+    // The decisive test: over a randomized op sequence, the index broadcaster's
+    // recipient set must equal a full-scan oracle broadcaster's recipient set,
+    // for every session, at every step.
+    it('parity: index recipients === full-scan recipients across randomized ops', () => {
+      let seed = 0x5563beef
+      const rand = () => {
+        seed |= 0; seed = (seed + 0x6D2B79F5) | 0
+        let t = Math.imul(seed ^ (seed >>> 15), 1 | seed)
+        t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+        return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+      }
+      const pick = (arr) => arr[Math.floor(rand() * arr.length)]
+
+      const sessions = ['s1', 's2', 's3']
+      const wsById = new Map()
+      const register = (id) => {
+        const ws = createFakeWs({ readyState: 1 })
+        const client = createFakeClient({ id })
+        client._ws = ws
+        manager.addClient(ws, client)
+        wsById.set(id, ws)
+        return client
+      }
+      for (let i = 0; i < 4; i++) register('c' + i)
+
+      // Oracle: a broadcaster WITHOUT a clientManager → full-scan path over the
+      // SAME clients Map.
+      const sentOracle = []
+      const oracleBroadcaster = new WsBroadcaster({
+        clients: manager.clients,
+        sendFn: (ws, msg) => sentOracle.push(ws),
+      })
+
+      const live = () => [...manager.clients.values()]
+
+      for (let step = 0; step < 1500; step++) {
+        const clients = live()
+        const op = Math.floor(rand() * 6)
+        if (op === 0 && clients.length) manager.subscribe(pick(clients), pick(sessions))
+        else if (op === 1 && clients.length) manager.unsubscribe(pick(clients), pick(sessions))
+        else if (op === 2 && clients.length) manager.setActiveSession(pick(clients), pick(sessions))
+        else if (op === 3 && clients.length) manager.setActiveSession(pick(clients), null)
+        else if (op === 4 && clients.length > 1) {
+          const v = pick(clients)
+          manager.removeClient(wsById.get(v.id))
+          wsById.delete(v.id)
+        } else if (op === 5) register('n' + step)
+
+        // Compare recipient sets for every session.
+        for (const sid of sessions) {
+          sentIdx.length = 0
+          sentOracle.length = 0
+          idxBroadcaster._broadcastToSession(sid, { type: 'm' })
+          oracleBroadcaster._broadcastToSession(sid, { type: 'm' })
+          const idxWs = sentIdx.map(e => manager.clients.get(e.ws).id).sort()
+          const oracleWs = sentOracle.map(ws => manager.clients.get(ws).id).sort()
+          assert.deepStrictEqual(idxWs, oracleWs, `recipient drift at step ${step} for ${sid}`)
+          // Counts must also agree.
+          assert.strictEqual(
+            idxBroadcaster._countSessionSubscribers(sid),
+            oracleBroadcaster._countSessionSubscribers(sid),
+            `count drift at step ${step} for ${sid}`,
+          )
+        }
+        manager.verifyIndexIntegrity()
+      }
+    })
+  })
+
+  describe('_broadcastClientJoined() backpressure', () => {
+    it('skips peers in backpressure and increments their drop counter', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100 })
+      const wsNew = createFakeWs()
+      const wsBackpressured = createFakeWs({ bufferedAmount: 200 })
+      const wsHealthy = createFakeWs()
+      const newClient = createFakeClient({ id: 'new' })
+      const backClient = createFakeClient({ id: 'back' })
+      clients.set(wsNew, newClient)
+      clients.set(wsBackpressured, backClient)
+      clients.set(wsHealthy, createFakeClient({ id: 'healthy' }))
+
+      broadcaster._broadcastClientJoined(newClient, wsNew)
+
+      assert.equal(sent.length, 1, 'only healthy peer receives the message')
+      assert.equal(sent[0].ws, wsHealthy)
+      assert.equal(backClient._backpressureDrops, 1)
+    })
+
+    it('closes peer after maxDrops while delivering to healthy peers', () => {
+      broadcaster = new WsBroadcaster({ clients, sendFn, backpressureThreshold: 100, backpressureMaxDrops: 3 })
+      const wsNew = createFakeWs()
+      const wsBackpressured = createFakeWs({ bufferedAmount: 200 })
+      const backClient = createFakeClient({ id: 'back' })
+      backClient._backpressureDrops = 2
+      clients.set(wsNew, createFakeClient({ id: 'new' }))
+      clients.set(wsBackpressured, backClient)
+
+      broadcaster._broadcastClientJoined(clients.get(wsNew), wsNew)
+
+      assert.equal(wsBackpressured.closed, true)
+      assert.equal(wsBackpressured.closeCode, 4008)
     })
   })
 })

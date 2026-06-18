@@ -3,32 +3,56 @@
  *
  * Handles: create_checkpoint, list_checkpoints, restore_checkpoint, delete_checkpoint
  */
+import { realpathSync } from 'fs'
+import { sendSessionError, broadcastFocusChanged } from '../handler-utils.js'
+import { createLogger } from '../logger.js'
+
+const log = createLogger('ws')
+
+/**
+ * Normalize a cwd for collision comparison so two sessions on the SAME physical
+ * directory reached via different strings (trailing slash, symlink, an explicit
+ * path vs the equivalent default) still compare equal. realpathSync resolves
+ * symlinks and drops trailing slashes; if the path doesn't exist (or perms),
+ * fall back to a trailing-slash-stripped form so '/repo' and '/repo/' still
+ * match. Without this the #5731 T8 shared-cwd guard would miss a real collision.
+ * @param {*} p
+ * @returns {*}
+ */
+function normalizeCwd(p) {
+  if (typeof p !== 'string' || !p) return p
+  try {
+    return realpathSync(p)
+  } catch {
+    return p.replace(/\/+$/, '') || p
+  }
+}
 
 async function handleCreateCheckpoint(ws, client, msg, ctx) {
   const sid = client.activeSessionId
-  if (!sid || !ctx.sessionManager) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+  if (!sid || !ctx.sessions.sessionManager) {
+    sendSessionError(ws, ctx, 'No active session')
     return
   }
-  const entry = ctx.sessionManager.getSession(sid)
+  const entry = ctx.sessions.sessionManager.getSession(sid)
   if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: `Session not found: ${sid}` })
+    sendSessionError(ws, ctx, `Session not found: ${sid}`)
     return
   }
   if (!entry.session.resumeSessionId) {
-    ctx.send(ws, { type: 'session_error', message: 'Cannot create checkpoint before first message' })
+    sendSessionError(ws, ctx, 'Cannot create checkpoint before first message')
     return
   }
   try {
-    const checkpoint = await ctx.checkpointManager.createCheckpoint({
+    const checkpoint = await ctx.services.checkpointManager.createCheckpoint({
       sessionId: sid,
       resumeSessionId: entry.session.resumeSessionId,
       cwd: entry.cwd,
       name: typeof msg.name === 'string' ? msg.name.slice(0, 100) : undefined,
       description: typeof msg.description === 'string' ? msg.description.slice(0, 500) : undefined,
-      messageCount: ctx.sessionManager.getHistoryCount(sid),
+      messageCount: ctx.sessions.sessionManager.getHistoryCount(sid),
     })
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'checkpoint_created',
       sessionId: sid,
       checkpoint: {
@@ -41,53 +65,122 @@ async function handleCreateCheckpoint(ws, client, msg, ctx) {
       },
     })
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to create checkpoint: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to create checkpoint: ${err.message}`)
   }
 }
 
 function handleListCheckpoints(ws, client, msg, ctx) {
   const sid = client.activeSessionId
   if (!sid) {
-    ctx.send(ws, { type: 'checkpoint_list', sessionId: null, checkpoints: [] })
+    ctx.transport.send(ws, { type: 'checkpoint_list', sessionId: null, checkpoints: [] })
     return
   }
-  const checkpoints = ctx.checkpointManager.listCheckpoints(sid)
-  ctx.send(ws, { type: 'checkpoint_list', sessionId: sid, checkpoints })
+  const checkpoints = ctx.services.checkpointManager.listCheckpoints(sid)
+  ctx.transport.send(ws, { type: 'checkpoint_list', sessionId: sid, checkpoints })
 }
 
 async function handleRestoreCheckpoint(ws, client, msg, ctx) {
   const sid = client.activeSessionId
-  if (!sid || !ctx.sessionManager) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+  if (!sid || !ctx.sessions.sessionManager) {
+    sendSessionError(ws, ctx, 'No active session')
     return
   }
   if (typeof msg.checkpointId !== 'string') {
-    ctx.send(ws, { type: 'session_error', message: 'Missing checkpointId' })
+    sendSessionError(ws, ctx, 'Missing checkpointId')
     return
   }
-  const currentEntry = ctx.sessionManager.getSession(sid)
+  const currentEntry = ctx.sessions.sessionManager.getSession(sid)
   if (currentEntry?.session?.isRunning) {
-    ctx.send(ws, { type: 'session_error', message: 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.' })
+    sendSessionError(ws, ctx, 'Cannot restore checkpoint while session is busy. Wait for the current task to finish or interrupt first.')
     return
+  }
+  // #5731 T8 (confirms deferred #5700): restoring hard-resets the working tree
+  // at the checkpoint's cwd. If ANOTHER non-destroying session shares that cwd
+  // (the default for non-worktree sessions) and is mid-turn, the reset yanks
+  // files out from under its active work. Refuse and name it — mirroring the
+  // current-session busy guard above and the destroy-while-busy guard. Idle
+  // co-located sessions aren't blocked (recoverable, and blocking the common
+  // "two tabs on one repo" case would be more surprising than helpful);
+  // worktree-isolated sessions each have a distinct cwd and never collide.
+  // listSessions() already excludes sessions mid-destroy. Both accessors are
+  // feature-detected so a partial/legacy manager can't crash the restore path,
+  // and the whole scan is wrapped so an unexpected accessor failure (throw or a
+  // non-array return) fails OPEN — the guard is defense-in-depth, so on its own
+  // error we fall through to the normal restore (the pre-#5731 behaviour) rather
+  // than crashing the WS message handler.
+  try {
+    const checkpointMgr = ctx.services.checkpointManager
+    const sessionMgr = ctx.sessions.sessionManager
+    if (typeof checkpointMgr.getCheckpoint === 'function' && typeof sessionMgr.listSessions === 'function') {
+      const cp = checkpointMgr.getCheckpoint(sid, msg.checkpointId)
+      const liveSessions = sessionMgr.listSessions()
+      if (cp?.cwd && Array.isArray(liveSessions)) {
+        const targetCwd = normalizeCwd(cp.cwd)
+        const busyShare = liveSessions.find(
+          (s) => s && s.sessionId !== sid && s.isBusy && normalizeCwd(s.cwd) === targetCwd,
+        )
+        if (busyShare) {
+          sendSessionError(ws, ctx, `Cannot restore checkpoint: another session ("${busyShare.name}") is busy in the same working directory and would lose its in-progress changes. Wait for it to finish or interrupt it first.`)
+          return
+        }
+      }
+    }
+  } catch (err) {
+    log.warn(`Shared-cwd restore guard skipped (accessor error, failing open): ${err?.message || err}`)
   }
   try {
-    const checkpoint = await ctx.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
-    const newSessionId = await ctx.sessionManager.createSession({
+    const checkpoint = await ctx.services.checkpointManager.restoreCheckpoint(sid, msg.checkpointId)
+    const newSessionId = await ctx.sessions.sessionManager.createSession({
       resumeSessionId: checkpoint.resumeSessionId,
       cwd: checkpoint.cwd,
       name: `Rewind: ${checkpoint.name}`,
     })
-    client.activeSessionId = newSessionId
-    const newEntry = ctx.sessionManager.getSession(newSessionId)
-    ctx.send(ws, {
+    // #5563: index-maintaining helper. Checkpoint restore moves the active
+    // session WITHOUT subscribing, so the index must follow activeSessionId.
+    ctx.transport.setActiveSession(client, newSessionId)
+    const newEntry = ctx.sessions.sessionManager.getSession(newSessionId)
+    ctx.transport.send(ws, {
       type: 'checkpoint_restored',
       checkpointId: checkpoint.id,
       newSessionId,
       name: newEntry?.name || `Rewind: ${checkpoint.name}`,
     })
-    ctx.broadcastSessionList()
+    // The initiator's active session moved to the rewound session above; announce
+    // it to presence/Control-Room observers (the loop below does the same for the
+    // other re-homed clients).
+    broadcastFocusChanged(client, newSessionId, ctx)
+    // #5700: re-home OTHER clients that were actively viewing the original
+    // session onto the rewound session — mirroring the destroy path's
+    // client-iteration (session-handlers.js). Without this the initiator
+    // switches to the rewound session while every other subscriber keeps showing
+    // the original session's pre-rewind history (two clients, two histories, no
+    // reconciliation until a manual re-subscribe). The original session is NOT
+    // destroyed; its active viewers simply follow the rewind.
+    for (const [otherWs, c] of ctx.transport.clients) {
+      if (c === client) continue // initiator already re-homed above
+      if (!c.authenticated || c.activeSessionId !== sid) continue
+      // A pairing-bound client is cryptographically scoped to its bound session.
+      // Unlike the destroy path (where the session is gone, so re-homing is
+      // forced), restore leaves the original session intact — so a bound client
+      // must stay on it, never be auto-switched to the rewound session (mirrors
+      // the switch_session boundSessionId enforcement). #5700 review.
+      if (c.boundSessionId) continue
+      ctx.transport.setActiveSession(c, newSessionId)
+      ctx.transport.send(otherWs, {
+        type: 'session_switched',
+        sessionId: newSessionId,
+        name: newEntry?.name || `Rewind: ${checkpoint.name}`,
+        cwd: newEntry?.cwd,
+        conversationId: newEntry?.session?.resumeSessionId || null,
+      })
+      ctx.transport.sendSessionInfo(otherWs, newSessionId)
+      // #5555.3 — forced re-home after a rewind: authoritative full rebuild.
+      ctx.transport.replayHistory(otherWs, newSessionId, { forceFull: true })
+      broadcastFocusChanged(c, newSessionId, ctx)
+    }
+    ctx.transport.broadcastSessionList()
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to restore checkpoint: ${err.message}` })
+    sendSessionError(ws, ctx, `Failed to restore checkpoint: ${err.message}`)
   }
 }
 
@@ -95,9 +188,9 @@ function handleDeleteCheckpoint(ws, client, msg, ctx) {
   const sid = client.activeSessionId
   if (!sid) return
   if (typeof msg.checkpointId === 'string') {
-    ctx.checkpointManager.deleteCheckpoint(sid, msg.checkpointId)
-    const checkpoints = ctx.checkpointManager.listCheckpoints(sid)
-    ctx.send(ws, { type: 'checkpoint_list', sessionId: sid, checkpoints })
+    ctx.services.checkpointManager.deleteCheckpoint(sid, msg.checkpointId)
+    const checkpoints = ctx.services.checkpointManager.listCheckpoints(sid)
+    ctx.transport.send(ws, { type: 'checkpoint_list', sessionId: sid, checkpoints })
   }
 }
 

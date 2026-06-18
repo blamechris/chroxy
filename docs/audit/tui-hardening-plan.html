@@ -1,0 +1,336 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chroxy — claude-tui Hardening Plan (decomposed)</title>
+<style>
+  :root{--bg:#0f1115;--panel:#171a21;--line:#2a2f3a;--txt:#e6e9ef;--dim:#9aa3b2;--accent:#6ea8fe;
+    --crit:#f85149;--maj:#d29922;--min:#3fb950;--go:#3fb950;--hold:#d29922;--skip:#6e7681;
+    --mono:ui-monospace,SFMono-Regular,Menlo,monospace;}
+  *{box-sizing:border-box;}
+  body{margin:0;background:var(--bg);color:var(--txt);font:15px/1.55 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;}
+  .wrap{max-width:1100px;margin:0 auto;padding:26px 22px 90px;}
+  h1{font-size:25px;margin:0 0 4px;}
+  h2{font-size:18px;margin:30px 0 4px;padding-top:14px;border-top:1px solid var(--line);}
+  h2 .tag{font:12px var(--mono);color:var(--dim);margin-left:8px;font-weight:400;}
+  p.lead{color:var(--dim);margin:2px 0 14px;}
+  code,kbd{font-family:var(--mono);font-size:.88em;background:#222732;padding:1px 5px;border-radius:4px;}
+  a{color:var(--accent);}
+  .meta{display:flex;gap:16px;flex-wrap:wrap;color:var(--dim);font:13px var(--mono);margin:6px 0 16px;}
+  .bar{position:sticky;top:0;z-index:5;background:rgba(15,17,21,.93);backdrop-filter:blur(6px);border:1px solid var(--line);border-radius:10px;padding:10px 14px;margin:0 0 10px;display:flex;align-items:center;gap:16px;flex-wrap:wrap;}
+  .bar b{font:13px var(--mono);}
+  .tally span{font:13px var(--mono);margin-right:12px;}
+  button{background:var(--accent);color:#0b0d11;border:0;border-radius:7px;padding:8px 14px;font-weight:600;cursor:pointer;}
+  button.ghost{background:transparent;color:var(--accent);border:1px solid var(--accent);}
+  .card{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:0;margin:10px 0;overflow:hidden;}
+  .card.crit{border-left:3px solid var(--crit);}
+  .card.maj{border-left:3px solid var(--maj);}
+  .card.min{border-left:3px solid var(--min);}
+  .chead{display:flex;align-items:center;gap:10px;padding:11px 14px;cursor:pointer;flex-wrap:wrap;}
+  .chead:hover{background:#1c212b;}
+  .cid{font:12px var(--mono);color:var(--dim);}
+  .ctitle{font-weight:600;flex:1;min-width:240px;}
+  .pill{display:inline-block;font:11px var(--mono);padding:1px 8px;border-radius:20px;border:1px solid var(--line);color:var(--dim);white-space:nowrap;}
+  .pill.crit{color:var(--crit);border-color:var(--crit);}
+  .pill.maj{color:var(--maj);border-color:var(--maj);}
+  .pill.min{color:var(--min);border-color:var(--min);}
+  .pill.eff{color:var(--accent);border-color:var(--accent);}
+  select.dec{background:#0b0d11;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:5px 7px;font:12px var(--mono);}
+  select.dec[data-v="GO"]{color:var(--go);border-color:var(--go);}
+  select.dec[data-v="HOLD"]{color:var(--hold);border-color:var(--hold);}
+  select.dec[data-v="SKIP"]{color:var(--skip);border-color:var(--skip);}
+  .cbody{display:none;padding:0 16px 14px;border-top:1px solid var(--line);}
+  .cbody.open{display:block;}
+  .cbody h4{margin:12px 0 4px;font-size:12px;text-transform:uppercase;letter-spacing:.04em;color:var(--dim);}
+  .cbody ul{margin:4px 0;padding-left:18px;}
+  .cbody li{margin:3px 0;font-size:13.5px;}
+  .closes li{color:var(--dim);font:12px var(--mono);}
+  .plan{font-size:14px;}
+  .deps{font-size:12px;color:var(--dim);font-family:var(--mono);}
+  input.notes{width:100%;background:#0b0d11;color:var(--txt);border:1px solid var(--line);border-radius:6px;padding:6px 8px;font-size:13px;margin-top:8px;}
+  textarea{width:100%;height:340px;background:#0b0d11;color:var(--txt);border:1px solid var(--line);border-radius:8px;padding:12px;font:12px var(--mono);}
+  .out{display:none;}.out.show{display:block;}
+  .note{border-left:3px solid var(--accent);padding:8px 12px;background:#141925;border-radius:0 8px 8px 0;margin:12px 0;color:#cdd6e6;font-size:14px;}
+  footer{color:var(--dim);font-size:12px;margin-top:30px;border-top:1px solid var(--line);padding-top:14px;}
+  @media print{.bar,button,.cbody{display:none!important;}body{background:#fff;color:#000;}}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <h1>claude-tui Backend Hardening — Decomposed Plan</h1>
+  <p class="lead">The <a href="tui-hardening-2026-06-07.md">2026-06-07 audit</a>'s 48 verified findings, decomposed into
+  <b>22 shippable work-packages</b> across the 6 remediation phases, plus <b>9 investigation probes</b> from the coverage-gaps critic.
+  Each work-package lists the findings it closes, my proposed approach, acceptance criteria, tests, effort, and dependencies.
+  <b>Now filed</b> — tracked as <a href="https://github.com/blamechris/chroxy/issues/5338">epic #5338</a> (work-packages and probes #5307&ndash;#5337).
+  The <span class="pill go" style="color:var(--go);border-color:var(--go)">GO</span> /
+  <span class="pill" style="color:var(--hold);border-color:var(--hold)">HOLD</span> /
+  <span class="pill" style="color:var(--skip);border-color:var(--skip)">SKIP</span> marks below are preserved from the original triage; <b>Export → Markdown</b> remains available for reference.</p>
+  <div class="meta">
+    <span>48 findings → 22 work-packages + 9 probes</span>
+    <span>9 CRITICAL · 16 MAJOR · 14 MINOR (deduped)</span>
+    <span>Report-only until you greenlight</span>
+  </div>
+
+  <div class="bar">
+    <b>Decisions</b>
+    <span class="tally" id="tally"></span>
+    <button onclick="expandAll()">Expand all</button>
+    <button class="ghost" onclick="collapseAll()">Collapse</button>
+    <button onclick="exportMd()">Export → Markdown</button>
+    <button class="ghost" onclick="resetAll()">Reset</button>
+  </div>
+  <div class="out card" id="outBox" style="border-left:3px solid var(--accent)">
+    <div style="padding:14px 16px">
+    <p class="lead" style="margin-top:0">Your filing plan — the GO work-packages in dependency order. Hand this back to me to open the issues.</p>
+    <textarea id="outText" readonly></textarea>
+    <p style="margin:8px 0 0"><button class="ghost" onclick="copyOut()">Copy to clipboard</button></p>
+    </div>
+  </div>
+
+  <div class="note">
+    <b>Suggested cut line for "before flipping the default backend":</b> all of <b>Phase 0–2</b> (data integrity, crash vectors, per-session recovery)
+    plus <b>WP-3.1</b> and <b>WP-4.1</b>. Those are the findings that turn routine events into silent data loss, host-wide outages, or unrecoverable wedges.
+    Phase 5 and the probes can land after migration.
+  </div>
+
+  <div id="root"></div>
+
+  <footer>
+    Generated from <code>docs/audit/tui-hardening-2026-06-07.md</code>. Decisions persist in this browser only (localStorage).
+    Effort: <b>S</b> ≈ localized, half-day · <b>M</b> ≈ multi-file + tests, ~a day · <b>L</b> ≈ cross-cutting, careful testing, multi-day.
+  </footer>
+</div>
+
+<script>
+const PHASES = [
+  ['P0','Phase 0 · Data integrity','silent + permanent loss — fix first'],
+  ['P1','Phase 1 · Crash vectors','one fault must not kill the daemon'],
+  ['P2','Phase 2 · Per-session recovery','no unrecoverable zombie sessions'],
+  ['P3','Phase 3 · Interactive-flow correctness','AskUserQuestion + watchdogs'],
+  ['P4','Phase 4 · Auth observability','the #1 operational state for a subscription backend'],
+  ['P5','Phase 5 · Leaks & hardening','land after migration if needed'],
+  ['IP','Investigation probes','scope before fixing — from the coverage-gaps critic'],
+];
+
+const WP = [
+ {id:'WP-0.1',phase:'P0',sev:'crit',eff:'M',title:'Persist & forward resumeSessionId (continue the same claude conversation across restart)',
+  closes:['001 — claude-tui-session.js:687 (no resumeSessionId getter), :393 (ctor omits), :707 (mints fresh uuid), :804 (--session-id), :309 (resume:false); session-manager.js:1216/1340'],
+  plan:'Add <code>get resumeSessionId(){return this._sessionId}</code>; destructure <code>resumeSessionId</code> in the constructor and reuse the persisted uuid in start() instead of always minting a fresh one; spawn with <code>--resume &lt;uuid&gt;</code> when present (cf. cli-session.js:156); flip <code>capabilities.resume=true</code>.',
+  ac:['After a restart, a TUI session continues the SAME claude conversation (claude answers with memory of the prior turn).','serializeState persists a non-null sdkSessionId; restore round-trips it.'],
+  tests:'Unit: serialize/restore round-trips resumeSessionId. Extend the opt-forwarding lint to assert the primary provider carries resumeSessionId.',deps:'none'},
+ {id:'WP-0.2',phase:'P0',sev:'crit',eff:'M',title:'Flush state on every shutdown & crash path (supervised stop, child crash)',
+  closes:['002 — server-cli-child.js:110-114 (IPC shutdown exits w/o flush)','MAJOR — server-cli-child.js:123-137 (crash path destroys w/o serialize)','MINOR — crash handlers omit the explicit pre-destroy serializeState'],
+  plan:'IPC <code>shutdown</code> handler runs <code>wsServer.close()</code> + <code>sessionManager.destroyAll()</code> (guarded, idempotent serializeState) before exit; uncaughtException/unhandledRejection handlers call serializeState before destroy, matching the foreground server-cli.js handler.',
+  ac:['Supervised stop (SIGTERM → IPC shutdown) flushes session-state.json.','A simulated child crash still serializes before teardown.','No session loses history on a routine supervised restart.'],
+  tests:'Integration: spawn supervised, create a session, trigger IPC shutdown → assert state file updated; repeat for a simulated crash.',deps:'none'},
+ {id:'WP-0.3',phase:'P0',sev:'min',eff:'S',title:'Atomic + per-instance state writes; force flush on clean exit',
+  closes:['MINOR — platform.js:87/90 (fixed .tmp) + session-state-persistence.js:83 (no tmpSuffix)','MINOR — session-state-persistence.js:203-213 (2s debounce loss on SIGKILL)'],
+  plan:'Unique temp suffix per process (pid+rand) for the write+rename so two SessionManagers can\'t clobber; on shutdown/signal force an immediate synchronous flush (bypass the 2s debounce). SIGKILL/power-loss stays best-effort (documented).',
+  ac:['Two SessionManagers on the same file don\'t corrupt it.','A clean shutdown loses 0ms of pending history.'],
+  tests:'Unit: concurrent write integrity; flush-on-shutdown writes pending immediately.',deps:'rides with WP-0.2'},
+ {id:'WP-0.4',phase:'P0',sev:'maj',eff:'S',title:'Persist worktree binding across restart (no orphaned worktrees)',
+  closes:['MAJOR — session-manager.js:1212-1283 (serializeState omits worktree fields), :1327-1378 (restore omits worktree flag)'],
+  plan:'Include <code>worktreePath/worktreeRepoDir/worktree</code> in serializeState and rehydrate them in restoreState\'s createSession so <code>_removeWorktree</code> can later GC them.',
+  ac:['A worktree session, after restart, still knows its worktree and removes it on destroy.','No orphaned worktrees accrue across restarts.'],
+  tests:'Unit: serialize/restore round-trips worktree fields; destroy-after-restore removes the worktree.',deps:'none'},
+
+ {id:'WP-1.1',phase:'P1',sev:'crit',eff:'M',title:'PTY \'error\' listener + keep daemon alive on per-session PTY faults',
+  closes:['003 — claude-tui-session.js:851-904 (no this._term.on(\'error\'))'],
+  plan:'Register a session-scoped PTY <code>error</code> handler in _spawnPty that runs onExit-style cleanup and emits a session error (no rethrow); keep server-cli\'s uncaughtException resilient so a recoverable PTY fault tears down one session, not the host. (Note node-pty\'s &lt;2-listener throw quirk — pairs with WP-2.1.)',
+  ac:['A forced PTY socket error tears down only that session; the daemon stays up with other sessions live.'],
+  tests:'Unit: simulate _term error → session error emitted, _ptyExited set, no process exit.',deps:'pairs with WP-2.1'},
+ {id:'WP-1.2',phase:'P1',sev:'crit',eff:'S',title:'Guard the async HTTP request handler',
+  closes:['CRIT — http-routes.js:168 (async handler, no top-level try/catch); throws at 394/421/532/684'],
+  plan:'Wrap the async request handler in try/catch → 500 + log; guard the specific unguarded throws (diagnostics snapshot, readConnectionInfo, index read).',
+  ac:['A throw in any route returns 500 and the daemon stays up.'],
+  tests:'Unit: a route that throws → 500, process survives.',deps:'none'},
+ {id:'WP-1.3',phase:'P1',sev:'crit',eff:'M',title:'Contain fire-and-forget rejections & broadcast throws',
+  closes:['CRIT — handlers/input-handlers.js:502 (fire-and-forget sendMessage rejection)','MAJOR — event-normalizer.js:715-731 (broadcast in setTimeout)','MAJOR — ws-forwarding.js:51-110 (session_event listener), :161-189 (legacy-CLI listeners)'],
+  plan:'Add <code>.catch</code> to fire-and-forget sendMessage that surfaces a session error instead of escaping; wrap broadcast calls inside timers/listeners in try/catch; harden the session_event + legacy forwarding listeners.',
+  ac:['A sendMessage rejection / bad broadcast becomes a session error, never an unhandledRejection / process exit.'],
+  tests:'Unit: reject sendMessage → session error, no crash; a throwing broadcast is caught.',deps:'none'},
+ {id:'WP-1.4',phase:'P1',sev:'crit',eff:'M',title:'Supervisor crash safety + cloudflared leak on boot',
+  closes:['009 — supervisor.js:192-216 (no unhandledRejection/uncaughtException)','008 — server-cli.js:992-1010 (tunnel_recovered awaited waitForTunnel crashes server)','MAJOR — supervisor.js:183-223 (leaks cloudflared if boot waitForTunnel throws)'],
+  plan:'Add unhandledRejection/uncaughtException handlers in the supervisor that log + restart the child (not silent exit); wrap the async tunnel_recovered handler in try/catch; kill the cloudflared child if waitForTunnel throws on boot.',
+  ac:['A DNS-settle failure in tunnel_recovered doesn\'t kill the supervisor.','A boot tunnel failure doesn\'t leak cloudflared.'],
+  tests:'Unit: supervisor survives a rejecting tunnel_recovered; cloudflared reaped on boot throw.',deps:'none'},
+
+ {id:'WP-2.1',phase:'P2',sev:'crit',eff:'L',title:'Bounded per-session PTY respawn (no permanently-bricked sessions)',
+  closes:['007 — claude-tui-session.js:876-904 (no respawn; SessionManager doesn\'t listen)','MAJOR — unexpected PTY death emits a generic error, no recoverable/auto-restart'],
+  plan:'On unexpected PTY exit, attempt bounded auto-respawn (re-_spawnPty, re-emit ready, backoff, max ~3/60s, preserve session id + tab) matching cli-session.js; emit a categorized recoverable error; if respawn is exhausted, destroySession cleanly so no zombie lingers.',
+  ac:['Killing the claude PTY mid-session auto-recovers within backoff.','After max attempts the session leaves the list with a clear error (no input-rejecting zombie tab).'],
+  tests:'Unit: PTY exit → respawn invoked; exhausted → destroySession.',deps:'WP-1.1'},
+ {id:'WP-2.2',phase:'P2',sev:'maj',eff:'M',title:'start() rejects on spawn failure; never mark a dead PTY \'ready\'',
+  closes:['MAJOR — claude-tui-session.js:744-749/768-771/846-849 (start resolves+emits ready on spawn failure)','MAJOR — session-manager.js:823-830 (async start() rejection during restore erases history)'],
+  plan:'start() rejects on warmup PTY death / node-pty unavailable / spawn failure instead of emit-and-return-resolve; don\'t emit <code>ready</code> when _ptyExited; on restore, a start() rejection must NOT erase the restored session\'s history (keep the entry, mark errored/retryable).',
+  ac:['A spawn failure rejects start() so SessionManager surfaces it.','A failed restore preserves history.','No ready emitted for a dead PTY.'],
+  tests:'Unit: spawn fail → start() rejects; restore-with-spawn-fail preserves history.',deps:'WP-0.1, WP-2.1'},
+ {id:'WP-2.3',phase:'P2',sev:'maj',eff:'S',title:'destroy() SIGKILL escalation (no orphan claude / tool children)',
+  closes:['MAJOR — claude-tui-session.js:3270-3273 (SIGTERM only, no SIGKILL escalation)'],
+  plan:'After SIGTERM, escalate to SIGKILL on a grace timeout if the PTY/children haven\'t exited; reap tool child processes.',
+  ac:['destroy() leaves no orphan claude or tool child after a short grace period.'],
+  tests:'Unit: a PTY ignoring SIGTERM gets SIGKILL after grace.',deps:'none'},
+
+ {id:'WP-3.1',phase:'P3',sev:'crit',eff:'M',title:'Suspend stall/inactivity timers while waiting on a human answer',
+  closes:['004 — claude-tui-session.js:1235-1244, 1665-1716, 2125-2146, 2231-2300'],
+  plan:'When an AskUserQuestion is pending, suspend the stream-stall + soft-inactivity timers (the human is the bottleneck, not claude); resume on answer. Keep the dedicated long AskUserQuestion watchdog for true wedges.',
+  ac:['A human taking minutes to answer doesn\'t get a misleading "stream stalled" force-cancel.','A genuinely wedged form still recovers via the AskUserQuestion watchdog.'],
+  tests:'Unit: pending question suspends the stall timer; answering resumes it.',deps:'none'},
+ {id:'WP-3.2',phase:'P3',sev:'maj',eff:'M',title:'Per-pending watchdog map (parallel AskUserQuestion answers)',
+  closes:['MAJOR — claude-tui-session.js:466 (single _askUserQuestionWatchdog field), 2536-2547'],
+  plan:'Replace the single watchdog field with a Map keyed by toolUseId (mirrors the #4668 pending-answers Map) so parallel AskUserQuestion calls each get an independent watchdog.',
+  ac:['Two parallel pending questions each have an independent watchdog; answering one doesn\'t disarm the other.'],
+  tests:'Unit: two pendings, watchdogs independent.',deps:'none'},
+ {id:'WP-3.3',phase:'P3',sev:'maj',eff:'M',title:'Arm watchdog / emit error on every freeform/Other & PreToolUse path',
+  closes:['MAJOR — claude-tui-session.js:2496/2569-2579 (early-returns clear pending, arm no watchdog, emit no error)','MINOR — 2590-2632 (freeform IIFE races interrupt())','MINOR — 1679/1707-1714 (sync throw from intervention emit orphans pending)'],
+  plan:'Every early-return that clears the pending answer must arm a watchdog or emit a structured error; guard the freeform IIFE against <code>_activeTurn.aborted</code>; wrap the multi_question_intervention emit so a sync throw can\'t orphan the pending.',
+  ac:['No freeform/Other path clears pending without arming recovery.','An aborted turn cancels the IIFE.','An emit throw doesn\'t wedge the turn.'],
+  tests:'Unit: each early-return arms watchdog/error; abort mid-IIFE stops it.',deps:'WP-3.2'},
+
+ {id:'WP-4.1',phase:'P4',sev:'crit',eff:'L',title:'Detect & surface subscription auth failure (no 90s silent hang)',
+  closes:['CRIT — claude-tui-session.js:1275-1293 (never detects auth failure)','MAJOR — 350-360/317-338 (reports ready when never logged in; token never refreshed)','MAJOR — 905-924 (logged-out spawn → 90s silent wait)'],
+  plan:'Preflight a real auth check at start (not hardcoded <code>ready:true</code>); classify the auth-failure output pattern in the hook/stream so an expired/missing login surfaces a clear <code>AUTH_REQUIRED</code> error (with "run claude login" guidance) instead of a silent timeout; surface re-login-needed mid-session.',
+  ac:['A logged-out start gives an immediate AUTH_REQUIRED error with correct guidance.','Mid-session expiry surfaces a clear error, not a silent hang.','Health doesn\'t report ready when unauthenticated.'],
+  tests:'Unit: unauthenticated start → AUTH_REQUIRED; auth-fail stream pattern → categorized error.',deps:'none'},
+ {id:'WP-4.2',phase:'P4',sev:'min',eff:'S',title:'Don\'t leak credentials in PTY hex/tail dumps (security)',
+  closes:['MINOR/sec — claude-tui-session.js:921/1125/1015-1022/61-85 vs logger.js redactor'],
+  plan:'Route hex/tail dumps through the redactor (or gate behind a debug flag / redact token-shaped bytes) so warmup/timeout dumps can\'t print OAuth tokens.',
+  ac:['A dump containing a token-shaped string is redacted.'],
+  tests:'Unit: dump with a fake token → redacted.',deps:'none'},
+
+ {id:'WP-5.1',phase:'P5',sev:'maj',eff:'M',title:'Bound hook-sink files + _consumedFiles; boot-time sweep of /tmp sink',
+  closes:['MAJOR — claude-tui-session.js:1195-1245/1211-1231 (files + _consumedFiles grow unbounded for session lifetime)','MAJOR — no boot sweep of /tmp/chroxy-claude-tui/s-* (leaks every crash)'],
+  plan:'Unlink consumed hook files after processing (or cap + prune _consumedFiles); add a boot-time sweep of <code>/tmp/chroxy-claude-tui/s-*</code> like the worktree reaper.',
+  ac:['A long session\'s sink dir + _consumedFiles stay bounded.','Stale dirs from prior crashes are swept at boot.'],
+  tests:'Unit: consumed files unlinked; boot sweep removes stale dirs.',deps:'none'},
+ {id:'WP-5.2',phase:'P5',sev:'min',eff:'S',title:'Subprocess stdout/stderr \'error\' listeners (Codex/Gemini path)',
+  closes:['MINOR — jsonl-subprocess-session.js:378/387/450 (no stream error listeners)'],
+  plan:'Add <code>error</code> listeners to proc.stdout / proc.stderr so a stream error is handled, not uncaught.',
+  ac:['A stdout/stderr stream error is handled, not uncaught.'],tests:'Unit: emit a stream error → handled.',deps:'none'},
+ {id:'WP-5.3',phase:'P5',sev:'min',eff:'S',title:'Stream-tail ANSI-split handling (correct diagnostics)',
+  closes:['MINOR — claude-tui-session.js:851-875 (ANSI stripped per-chunk before concat → split escapes corrupt the tail)'],
+  plan:'Strip ANSI after concatenation (buffer across chunks) rather than per-chunk so escapes split across onData chunks are stripped correctly.',
+  ac:['An ANSI sequence split across two onData chunks is stripped correctly.'],tests:'Unit: split-escape tail strips clean.',deps:'none'},
+ {id:'WP-5.4',phase:'P5',sev:'min',eff:'S',title:'Periodic worktree auto-reaper (not just at startup)',
+  closes:['MINOR — server-cli.js:1122-1126 + worktree-reaper.js (runs once at boot only)'],
+  plan:'Run <code>maybeAutoReapWorktrees</code> on an unref\'d interval, not just at boot, so long-running daemons reap agent worktrees created mid-run.',
+  ac:['Worktrees created during a long run get reaped without a restart.'],tests:'Unit: interval invokes the reaper.',deps:'none'},
+ {id:'WP-5.5',phase:'P5',sev:'min',eff:'M',title:'Fix WebTaskManager poll (completes tasks; unref timer) — functional bug',
+  closes:['MINOR — web-task-manager.js:246-270 (poll is a placeholder, force-fails all tasks at MAX_POLL_COUNT)','MINOR — 226-228 (interval not unref\'d)'],
+  plan:'Implement the running→completed transition (today the poll never completes and force-fails healthy tasks as timed-out); unref the interval. <b>Note: this is arguably a functional bug, not just hardening.</b>',
+  ac:['A healthy web task completes instead of being force-failed.','The timer doesn\'t hold the event loop open.'],tests:'Unit: a completing task transitions to completed; timer unref\'d.',deps:'none'},
+ {id:'WP-5.6',phase:'P5',sev:'min',eff:'M',title:'Surface swallowed errors (observability grab-bag)',
+  closes:['docker-byok-pool.js:586-598 (rm -f failure swallowed)','tunnel/cloudflare.js:119-121 (named-tunnel error discarded)','server-cli.js:166-176 (tunnel_lost broadcasts lost into a downed tunnel)','doctor.js:147-159 (can\'t diagnose tunnel routability)','ws-forwarding.js:103-108 + ws-broadcaster.js:125-127 (session error only reaches subscribed clients)','ws-history.js:48-64 (replay drain has no max-wait cap)','claude-tui-session.js:657-659/970-986 (readiness keys on PTY pid, not claude\'s)'],
+  plan:'A grab-bag of observability fixes — preserve the real cloudflared error; operator-visible signal on docker eviction failure; cap ws-history replay drain; broadcast fatal session errors to all clients; make doctor probe tunnel routability; key readiness on claude\'s pid. <b>Splittable per item if you\'d rather file separately.</b>',
+  ac:['Each swallowed error reaches an operator/log/client appropriately.'],tests:'Per-item unit tests.',deps:'none'},
+
+ {id:'IP-1',phase:'IP',sev:'maj',eff:'S',title:'/tmp hook-sink as a runtime dependency that can vanish mid-session',
+  closes:['Probe — claude-tui-session.js:700 / drain loop :1197 (tmpwatch/tmpfs-clear/ENOSPC silently wedges the turn)'],
+  plan:'Probe: mid-turn, <code>rm -rf /tmp/chroxy-claude-tui/s-*</code> (or fill the tmp volume) and observe whether the session surfaces an error or silently hangs. Decide if the sink needs a non-/tmp location or a liveness check.',ac:['Decision recorded: does the hook sink need relocation/heartbeat?'],tests:'Manual probe → finding.',deps:'none'},
+ {id:'IP-2',phase:'IP',sev:'maj',eff:'S',title:'permission-hook.sh failure → unanswerable native claude dialog',
+  closes:['Probe — hooks/permission-hook.sh:172 (curl failure falls back to permissionDecision:"ask", but no human is at the PTY keyboard)'],
+  plan:'Probe: kill the daemon\'s HTTP listener while a Bash tool is pending permission; observe whether the PTY parks on a native dialog nobody can answer. Decide fallback (deny? watchdog?).',ac:['Decision recorded for the curl-failure fallback.'],tests:'Manual probe.',deps:'none'},
+ {id:'IP-3',phase:'IP',sev:'maj',eff:'S',title:'Fixed 120×30 PTY geometry couples the form-parser to terminal width',
+  closes:['Probe — claude-tui-session.js:841 (hardcoded cols:120 rows:30, no resize/SIGWINCH; form-drive byte sequences assume this width)'],
+  plan:'Probe: diff the pinned AskUserQuestion form byte-sequences against claude output at cols:80 and cols:200 to gauge how brittle the width assumption is.',ac:['Brittleness assessed; decide if geometry needs pinning/asserting.'],tests:'Manual probe.',deps:'none'},
+ {id:'IP-4',phase:'IP',sev:'maj',eff:'S',title:'Date.now() watchdogs break on laptop sleep / NTP step (23 sites)',
+  closes:['Probe — claude-tui-session.js (all stall/first-output/AskUserQuestion watchdogs use wall-clock Date.now())'],
+  plan:'Probe: step the clock backward during an active turn and watch the watchdogs (false-cancel or never-fire). If confirmed, migrate timing to a monotonic clock (performance.now()/hrtime).',ac:['Confirmed/refuted; monotonic-clock migration scoped if needed.'],tests:'Manual probe → possible fix.',deps:'none'},
+ {id:'IP-5',phase:'IP',sev:'maj',eff:'S',title:'Attachment disk-write failure → daemon crash',
+  closes:['Probe — claude-tui-attachments.js:195/219 (bare mkdirSync/writeFileSync; ENOSPC throws into sendMessage → crash via the fire-and-forget path)'],
+  plan:'Probe: fill the tmp volume and send a message with an image attachment. (Likely closed by WP-1.3 + a try/catch here.)',ac:['Confirmed; folded into WP-1.3 or its own fix.'],tests:'Manual probe.',deps:'WP-1.3'},
+ {id:'IP-6',phase:'IP',sev:'maj',eff:'S',title:'Sidecar permission-mode read/write race across the shell boundary',
+  closes:['Probe — claude-tui-session.js:2311-2337 (non-atomic writeFileSync) vs permission-hook.sh (cat on every PreToolUse)'],
+  plan:'Probe: hammer set_permission_mode in a loop during a tool-heavy turn and grep the hook output for empty-mode fallbacks. Fix = atomic temp+rename write.',ac:['Race confirmed; atomic-write fix scoped.'],tests:'Manual probe → fix.',deps:'none'},
+ {id:'IP-7',phase:'IP',sev:'maj',eff:'S',title:'Checkpoint restore failure + orphan git refs on the TUI path',
+  closes:['Probe — checkpoint-manager.js:375 (restore throws generic) + :109/215/233 (eviction failures swallowed → orphan refs)'],
+  plan:'Probe: corrupt a checkpoint git ref and trigger restore (does the session stay usable or wedge?); separately count dangling chroxy refs after many evictions.',ac:['Restore-failure UX + orphan-ref accrual assessed.'],tests:'Manual probe.',deps:'none'},
+ {id:'IP-8',phase:'IP',sev:'maj',eff:'S',title:'No SIGHUP handler on a PTY-owning daemon',
+  closes:['Probe — server-cli.js:1178-1179 (only SIGINT/SIGTERM; SIGHUP from a closed controlling terminal terminates + bypasses the state flush)'],
+  plan:'Probe: start the daemon non-detached, <code>kill -HUP</code>, check whether the state flush ran. Fix = add a SIGHUP handler routed through the same shutdown flush.',ac:['Confirmed; SIGHUP handler scoped.'],tests:'Manual probe → fix.',deps:'WP-0.2'},
+ {id:'IP-9',phase:'IP',sev:'maj',eff:'M',title:'Cross-session head-of-line blocking on the shared event loop',
+  closes:['Probe — synchronous readdirSync/readFileSync poll loops + sync attachment writes run on the shared loop; one slow/hung /tmp blocks every session'],
+  plan:'Probe: run 5 TUI sessions, put one session\'s sink dir on a frozen FUSE/NFS mount, measure latency on the other four. Fix = async fs in the poll/drain hot paths.',ac:['Blast radius measured; async-fs migration scoped if confirmed.'],tests:'Manual probe → possible fix.',deps:'none'},
+];
+
+const SEVRANK={crit:0,maj:1,min:2};
+const KEY='chroxy-tui-plan-v1';
+const store=JSON.parse(localStorage.getItem(KEY)||'{}');
+function save(){localStorage.setItem(KEY,JSON.stringify(store));tally();}
+function decSel(id){const v=store[id]?.d||'';return `<select class="dec" data-v="${v}" onclick="event.stopPropagation()" onchange="store['${id}']=Object.assign(store['${id}']||{},{d:this.value});this.dataset.v=this.value;save()">
+  <option value="">— decide —</option><option ${v==='GO'?'selected':''}>GO</option><option ${v==='HOLD'?'selected':''}>HOLD</option><option ${v==='SKIP'?'selected':''}>SKIP</option></select>`;}
+function esc(s){return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;').replace(/'/g,'&#39;');}
+function note(id){const n=store[id]?.n||'';return `<input class="notes" placeholder="notes / scope changes" value="${esc(n)}" onclick="event.stopPropagation()" oninput="store['${id}']=Object.assign(store['${id}']||{},{n:this.value});save()">`;}
+function sevLabel(s){return s==='crit'?'CRITICAL':s==='maj'?'MAJOR':'MINOR';}
+
+function render(){
+  let html='';
+  for(const [pk,ptitle,ptag] of PHASES){
+    const items=WP.filter(w=>w.phase===pk).sort((a,b)=>SEVRANK[a.sev]-SEVRANK[b.sev]);
+    if(!items.length) continue;
+    html+=`<h2>${ptitle} <span class="tag">${ptag}</span></h2>`;
+    for(const w of items){
+      const closes=w.closes.map(c=>`<li>${c}</li>`).join('');
+      const ac=w.ac.map(a=>`<li>${a}</li>`).join('');
+      html+=`<div class="card ${w.sev}">
+        <div class="chead" onclick="this.parentNode.querySelector('.cbody').classList.toggle('open')">
+          <span class="cid">${w.id}</span>
+          <span class="pill ${w.sev}">${sevLabel(w.sev)}</span>
+          <span class="pill eff">${w.eff}</span>
+          <span class="ctitle">${w.title}</span>
+          ${decSel(w.id)}
+        </div>
+        <div class="cbody">
+          <h4>Closes (audit findings)</h4><ul class="closes">${closes}</ul>
+          <h4>Proposed approach</h4><p class="plan">${w.plan}</p>
+          <h4>Acceptance criteria</h4><ul>${ac}</ul>
+          <h4>Tests</h4><p class="plan">${w.tests}</p>
+          <p class="deps">Depends on: ${w.deps}</p>
+          ${note(w.id)}
+        </div>
+      </div>`;
+    }
+  }
+  document.getElementById('root').innerHTML=html;
+}
+function expandAll(){document.querySelectorAll('.cbody').forEach(e=>e.classList.add('open'));}
+function collapseAll(){document.querySelectorAll('.cbody').forEach(e=>e.classList.remove('open'));}
+function tally(){
+  let go=0,hold=0,skip=0;Object.values(store).forEach(v=>{if(v.d==='GO')go++;else if(v.d==='HOLD')hold++;else if(v.d==='SKIP')skip++;});
+  const n=WP.length-go-hold-skip;
+  document.getElementById('tally').innerHTML=`<span style="color:var(--go)">▶ ${go} go</span><span style="color:var(--hold)">⏸ ${hold} hold</span><span style="color:var(--skip)">⊘ ${skip} skip</span><span style="color:var(--dim)">○ ${n} undecided</span>`;
+}
+function exportMd(){
+  let md=`# claude-tui hardening — filing plan\n\n`;
+  const go=WP.filter(w=>store[w.id]?.d==='GO');
+  if(!go.length){md+='_No GO items selected yet._\n';}
+  else{
+    md+=`## GO (${go.length}) — file these, in phase order\n\n`;
+    for(const [pk,ptitle] of PHASES){
+      const items=go.filter(w=>w.phase===pk).sort((a,b)=>SEVRANK[a.sev]-SEVRANK[b.sev]);
+      if(!items.length) continue;
+      md+=`### ${ptitle}\n\n`;
+      items.forEach(w=>{md+=`- **${w.id}** [${sevLabel(w.sev)}/${w.eff}] ${w.title}\n`;
+        md+=`  - closes: ${w.closes.map(c=>c.split(' — ')[0]).join(', ')}\n`;
+        md+=`  - deps: ${w.deps}\n`;
+        if(store[w.id]?.n) md+=`  - note: ${store[w.id].n}\n`;});
+      md+=`\n`;
+    }
+  }
+  const hold=WP.filter(w=>store[w.id]?.d==='HOLD');
+  if(hold.length){md+=`## HOLD (${hold.length})\n\n`+hold.map(w=>`- ${w.id} ${w.title}${store[w.id]?.n?' — '+store[w.id].n:''}`).join('\n')+`\n\n`;}
+  const skip=WP.filter(w=>store[w.id]?.d==='SKIP');
+  if(skip.length){md+=`## SKIP (${skip.length})\n\n`+skip.map(w=>`- ${w.id} ${w.title}`).join('\n')+`\n`;}
+  document.getElementById('outText').value=md;
+  document.getElementById('outBox').classList.add('show');
+  window.scrollTo({top:0,behavior:'smooth'});
+}
+function copyOut(){const t=document.getElementById('outText');t.select();
+  if(navigator.clipboard&&navigator.clipboard.writeText){navigator.clipboard.writeText(t.value).catch(()=>{try{document.execCommand('copy')}catch(e){}});}
+  else{try{document.execCommand('copy')}catch(e){}}}
+function resetAll(){if(confirm('Clear all decisions?')){for(const k in store)delete store[k];localStorage.removeItem(KEY);location.reload();}}
+render();tally();
+</script>
+</body>
+</html>

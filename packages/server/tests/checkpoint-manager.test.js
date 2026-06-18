@@ -1,6 +1,6 @@
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync } from 'fs'
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync, readFileSync, chmodSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
@@ -22,9 +22,14 @@ function createTempGitRepo() {
 describe('CheckpointManager', () => {
   let manager
   let gitDir
+  let tmpCheckpointsDir
 
   beforeEach(() => {
-    manager = new CheckpointManager()
+    // Pass a tmp checkpointsDir so the manager doesn't write to the
+    // developer's real ~/.chroxy/checkpoints/ (sandbox guard in
+    // tests/_setup.mjs blocks it; see #4633).
+    tmpCheckpointsDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-state-'))
+    manager = new CheckpointManager({ checkpointsDir: tmpCheckpointsDir })
     // Clear any persisted state from prior tests
     manager.clearCheckpoints('sess-1')
     gitDir = createTempGitRepo()
@@ -32,6 +37,7 @@ describe('CheckpointManager', () => {
 
   afterEach(() => {
     rmSync(gitDir, { recursive: true, force: true })
+    try { rmSync(tmpCheckpointsDir, { recursive: true, force: true }) } catch {}
   })
 
   it('creates a checkpoint with metadata', async () => {
@@ -52,6 +58,34 @@ describe('CheckpointManager', () => {
     assert.equal(cp.messageCount, 5)
     assert.ok(cp.createdAt > 0)
     assert.ok(cp.gitRef) // should have a git tag
+  })
+
+  it('#5731 (T3): emits checkpoint_persist_failed when the disk write fails, but still returns the checkpoint', async () => {
+    // Root bypasses DAC permission checks, so the read-only-dir trick can't force
+    // a write failure when run as uid 0 (Docker/devcontainer) — skip there, mirroring
+    // permission-hook-sidecar-integration.test.js.
+    if (process.getuid && process.getuid() === 0) return
+    // Read-only checkpoints dir → writeFileRestricted can't create the file.
+    const roDir = mkdtempSync(join(tmpdir(), 'chroxy-cp-ro-'))
+    chmodSync(roDir, 0o555)
+    const roManager = new CheckpointManager({ checkpointsDir: roDir })
+    let failed = null
+    roManager.on('checkpoint_persist_failed', (e) => { failed = e })
+    try {
+      const cp = await roManager.createCheckpoint({
+        sessionId: 'sess-ro', resumeSessionId: 'sdk-x', cwd: gitDir, name: 'x', messageCount: 1,
+      })
+      // The checkpoint exists in memory and is returned (the user sees it)...
+      assert.ok(cp.id)
+      assert.equal(roManager.listCheckpoints('sess-ro').length, 1)
+      // ...but the failed disk write is surfaced so the user knows it isn't durable.
+      assert.ok(failed, 'should emit checkpoint_persist_failed')
+      assert.equal(failed.sessionId, 'sess-ro')
+      assert.equal(failed.operation, 'create')
+    } finally {
+      chmodSync(roDir, 0o755)
+      try { rmSync(roDir, { recursive: true, force: true }) } catch {}
+    }
   })
 
   it('lists checkpoints for a session', async () => {
@@ -289,5 +323,123 @@ describe('CheckpointManager', () => {
 
     const content = readFileSync(join(gitDir, 'file.txt'), 'utf8')
     assert.equal(content, 'checkpoint content', 'file must be restored to checkpoint state')
+  })
+
+  // #5335 (IP-7) — restore-failure must not orphan the user's auto-stashed
+  // pending changes.
+  describe('restore failure preserves pending changes (#5335)', () => {
+    it('a corrupt/missing ref throws but pops the auto-stash back', async () => {
+      const cp = await manager.createCheckpoint({
+        sessionId: 'sess-1', resumeSessionId: 'sdk-1', cwd: gitDir, name: 'cp',
+      })
+      assert.ok(cp.gitRef, 'checkpoint captured a git ref')
+      // Simulate the corrupt-ref case: drop the tag so rev-parse fails.
+      execFileSync(GIT, ['tag', '-d', cp.gitRef], { cwd: gitDir })
+      // The user has uncommitted work in flight at restore time.
+      writeFileSync(join(gitDir, 'file.txt'), 'WORK IN PROGRESS')
+
+      await assert.rejects(
+        () => manager.restoreCheckpoint('sess-1', cp.id),
+        (err) => /Git restore failed/.test(err.message) && /pending changes were preserved/.test(err.message),
+        'restore must fail loudly AND report the changes were preserved'
+      )
+
+      // The crux: the pending work is still in the working tree, not stranded
+      // in a stash.
+      assert.equal(readFileSync(join(gitDir, 'file.txt'), 'utf8'), 'WORK IN PROGRESS',
+        'auto-stashed changes must be popped back when restore fails')
+      const stashList = execFileSync(GIT, ['stash', 'list'], { cwd: gitDir, encoding: 'utf8' })
+      assert.equal(stashList.trim(), '', 'no stash should be left behind')
+    })
+
+    it('a successful no-op restore (tag == HEAD) parks pending changes in a stash, leaving the checkpoint state', async () => {
+      // Checkpoint taken on a clean tree → tag points at HEAD → restore is a
+      // no-op. The contract matches the checkout success path: pending changes
+      // are SET ASIDE (recoverable via stash), not re-applied over the restore.
+      const cp = await manager.createCheckpoint({
+        sessionId: 'sess-1', resumeSessionId: 'sdk-1', cwd: gitDir, name: 'cp',
+      })
+      writeFileSync(join(gitDir, 'file.txt'), 'dirty work')
+
+      await manager.restoreCheckpoint('sess-1', cp.id) // resolves, no throw
+
+      assert.equal(readFileSync(join(gitDir, 'file.txt'), 'utf8'), 'initial content',
+        'working tree is left at the checkpoint (HEAD) state, not the dirty content')
+      const stashList = execFileSync(GIT, ['stash', 'list'], { cwd: gitDir, encoding: 'utf8' })
+      assert.match(stashList, /chroxy: auto-stash before rewind/,
+        'the pending changes are parked in a recoverable stash')
+    })
+  })
+
+  // #5335 (IP-7) — orphaned `chroxy-checkpoint/*` tags accrue when `git tag -d`
+  // fails. Rather than speculatively prune (which races in-flight tag creation
+  // and, since tags are repo-global, could delete a sibling worktree's live
+  // ref), we record the KNOWN-orphaned ref and retry deleting it later.
+  describe('orphan ref retry (#5335)', () => {
+    it('a tag-delete that fails is recorded and cleared on a later retry', async () => {
+      const cp = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'a' })
+      // Force the first delete to fail; record it, leave the tag in place.
+      const realDelete = manager._deleteGitRef.bind(manager)
+      let failOnce = true
+      manager._deleteGitRef = async (cwd, ref) => {
+        if (failOnce && ref === cp.gitRef) { failOnce = false; return false }
+        return realDelete(cwd, ref)
+      }
+      manager.deleteCheckpoint('sess-1', cp.id)
+      await new Promise((r) => setImmediate(r)) // let the fire-and-forget delete settle
+
+      // The checkpoint is gone from the manager but its tag leaked + was recorded.
+      let tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(tags.includes(cp.gitRef), 'tag survives the failed delete')
+      assert.ok(manager._failedRefDeletes.get(gitDir)?.has(cp.gitRef), 'failed delete is recorded for retry')
+
+      // Retry now succeeds (the forced failure was one-shot).
+      const cleared = await manager.retryFailedRefDeletes(gitDir)
+      assert.equal(cleared, 1, 'the recorded orphan is cleared on retry')
+      tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(!tags.includes(cp.gitRef), 'orphan tag is gone after retry')
+      assert.ok(!manager._failedRefDeletes.has(gitDir), 'cleared cwd is dropped from the map')
+    })
+
+    it('retry only ever touches KNOWN orphans — never a live or sibling-worktree ref', async () => {
+      // A live checkpoint exists; the retry set is empty → retry must be a no-op
+      // and must not list/inspect repo-global tags at all.
+      const cp = await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'a' })
+      assert.equal(await manager.retryFailedRefDeletes(gitDir), 0, 'no recorded orphans → no-op')
+      const tags = execFileSync(GIT, ['tag', '-l', 'chroxy-checkpoint/*'], { cwd: gitDir, encoding: 'utf8' })
+      assert.ok(tags.includes(cp.gitRef), 'a live ref is never touched by retry')
+    })
+
+    it('retryFailedRefDeletes counts only successful deletions', async () => {
+      // Record two orphans; make one delete keep failing.
+      manager._recordFailedRefDelete(gitDir, 'chroxy-checkpoint/gone-1')
+      manager._recordFailedRefDelete(gitDir, 'chroxy-checkpoint/stuck-2')
+      execFileSync(GIT, ['tag', 'chroxy-checkpoint/gone-1', 'HEAD'], { cwd: gitDir })
+      manager._deleteGitRef = async (_cwd, ref) =>
+        ref === 'chroxy-checkpoint/stuck-2' ? false : true
+
+      const cleared = await manager.retryFailedRefDeletes(gitDir)
+      assert.equal(cleared, 1, 'only the successful delete is counted')
+      assert.ok(manager._failedRefDeletes.get(gitDir)?.has('chroxy-checkpoint/stuck-2'),
+        'the still-failing ref stays recorded for a future retry')
+    })
+
+    it('createCheckpoint retries recorded orphans after an eviction', async () => {
+      const fakes = Array.from({ length: 50 }, (_, i) => ({
+        id: `fake-${i}`, sessionId: 'sess-1', cwd: gitDir,
+        gitRef: `chroxy-checkpoint/fake-${i}`, createdAt: i,
+      }))
+      manager._checkpoints.set('sess-1', fakes)
+      let retriedCwd = null
+      manager.retryFailedRefDeletes = async (cwd) => { retriedCwd = cwd; return 0 }
+
+      await manager.createCheckpoint({ sessionId: 'sess-1', resumeSessionId: 's', cwd: gitDir, name: 'new' })
+      assert.equal(retriedCwd, gitDir, 'eviction must trigger an orphan-retry for the evicted cwd')
+    })
+
+    it('_deleteGitRef reports already-absent tags as success', async () => {
+      assert.equal(await manager._deleteGitRef(gitDir, 'chroxy-checkpoint/never-existed'), true,
+        'a missing tag is "gone afterwards" → success, not a recorded failure')
+    })
   })
 })

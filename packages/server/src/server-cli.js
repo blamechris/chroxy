@@ -1,31 +1,51 @@
 import { SessionManager } from './session-manager.js'
-import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_RESULT_TIMEOUT_MS, DEFAULT_HARD_TIMEOUT_MS, DEFAULT_STREAM_STALL_TIMEOUT_MS } from './base-session.js'
+import { DEFAULT_TOOL_CALL_TIMEOUT_MS } from './byok-mcp-client.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
-import { WsServer, TUNNEL_STATUS_MIN_PROTOCOL_VERSION } from './ws-server.js'
+import { isOperatorTimeoutInRange } from './duration.js'
+import { WsServer } from './ws-server.js'
+import { BillingCanaryMonitor } from './billing-canary-monitor.js'
+import { resolvePublicIp } from './get-public-ip.js'
 import { createTunnel, parseTunnelArg } from './tunnel/index.js'
-import { QUICK_TUNNEL_DNS_SETTLE_MS, waitForTunnel } from './tunnel-check.js'
-import { PushManager } from './push.js'
+// #5368 slice (c): QUICK_TUNNEL_DNS_SETTLE_MS + TUNNEL_STATUS_MIN_PROTOCOL_VERSION
+// moved to tunnel-lifecycle-handler.js with the tunnel block; createTunnel +
+// waitForTunnel are still passed into the handler.
+import { waitForTunnel } from './tunnel-check.js'
+import { PushManager, settlePush } from './push.js'
+import { ensureIngestSecret } from './event-ingest.js'
+import { PushNotificationHandler } from './server-cli/push-notification-handler.js'
+import { StartupDisplay } from './server-cli/startup-display.js'
+import { TunnelLifecycleHandler } from './server-cli/tunnel-lifecycle-handler.js'
+import { ServerOrchestrator } from './server-cli/server-orchestrator.js'
 import { hostname, homedir } from 'os'
 import { readFileSync, existsSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join, relative, sep } from 'path'
-import QRCode from 'qrcode'
 import { createLogger, setJsonMode, initFileLogging } from './logger.js'
 
 const log = createLogger('cli')
-import { writeConnectionInfo, removeConnectionInfo } from './connection-info.js'
+// #5368 slice (b): QRCode + writeConnectionInfo moved to startup-display.js with
+// displayQr; only removeConnectionInfo (shutdown) is still used here.
+import { removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
+import { getOrCreateServerIdentity, IdentityUnavailableError } from './server-identity.js'
 import { getLanIp } from './lan-ip.js'
+import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopbackBind } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
 import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychain.js'
-import { registerDockerProvider, resolveProviderLabel } from './providers.js'
-import { loadModelsCache, getModels } from './models.js'
+import { maybeEncryptCredentialsAtRest } from './credential-store.js'
+import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from './providers.js'
+import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
+import { getSharedPoolStats } from './docker-byok-pool-stats.js'
+import { loadModelsCache, getModels, watchModelsOverlay } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -71,14 +91,19 @@ export function buildTunnelWarmingStatus({ tunnelMode, tunnelUrl, attempt, maxAt
  * signals the dashboard banner to disappear and the tunnel URL to be
  * considered routable.
  *
- * @param {{ tunnelUrl: string }} args
+ * `tunnelMode` (#5356) lets clients that connected before the tunnel came up
+ * (whose auth_ok exposure snapshot predates it) learn that a public quick
+ * tunnel is now live. Optional so older callers/tests stay valid.
+ *
+ * @param {{ tunnelUrl: string, tunnelMode?: string }} args
  * @returns {object} WS message envelope
  */
-export function buildTunnelReadyStatus({ tunnelUrl }) {
+export function buildTunnelReadyStatus({ tunnelUrl, tunnelMode }) {
   return {
     type: 'server_status',
     phase: 'ready',
     tunnelUrl,
+    ...(tunnelMode ? { tunnelMode } : {}),
     message: 'Tunnel is ready',
   }
 }
@@ -99,7 +124,7 @@ export function buildTunnelReadyStatus({ tunnelUrl }) {
  * @returns {string} Banner line (no outer box, no padding)
  */
 export function buildServerBanner({ version, provider }) {
-  const providerType = provider || 'claude-sdk'
+  const providerType = provider || DEFAULT_PROVIDER
   const modeStr = resolveProviderLabel(providerType)
   return `Chroxy Server v${version} (${modeStr})`
 }
@@ -150,11 +175,8 @@ function checkNoAuthWarnings({ authRequired, tunnel }) {
   }
 }
 
-function maskToken(token) {
-  if (!token) return ''
-  if (token.length <= 8) return token
-  return `${token.slice(0, 4)}...${token.slice(-4)}`
-}
+// #5368 slice (b): maskToken moved to server-cli/startup-display.js (its only
+// caller was displayQr). Still also inlined in supervisor.js + mask-token.test.js.
 
 function wireTunnelEvents(tunnel, wsServer) {
   tunnel.on('tunnel_lost', ({ code, signal }) => {
@@ -223,6 +245,63 @@ function isWithinHome(dir) {
  * @param {{ logLevel?: string, logDir?: string }} config
  * @returns {{ enabled: boolean, level: string, logDir: string|null, error?: string }}
  */
+/**
+ * #4509: resolve the three operator-facing inactivity timeouts
+ * (resultTimeoutMs / hardTimeoutMs / streamStallTimeoutMs) from a startup
+ * config object into BOTH shapes `startCliServer` needs:
+ *
+ *   - SessionManager constructor args (`*TimeoutMs`): null = let BaseSession
+ *     apply its default. The provider opts forwarding path treats null as
+ *     "omit", which is exactly the behaviour we want for fallback.
+ *   - Startup log line (`effective*TimeoutMs`): the resolved DEFAULT_*
+ *     constant so operators see the actual wall-clock value that will fire
+ *     instead of a misleading `null`.
+ *
+ * Previously these two sites hand-rolled the same
+ * `Number.isFinite(x) && x [>|>=] 0` check independently, with no
+ * MAX_SANE_DURATION_MS ceiling. Consolidating into one helper closes the
+ * #4509 gap and makes the two sites impossible to drift apart.
+ *
+ * @param {object} config - The merged startup config (from `~/.chroxy/config.json`
+ *   + CLI flags + env vars).
+ * @param {{ warn: Function }} log - Logger to emit the over-ceiling
+ *   warning through. Defaults to a no-op so callers can omit it in tests.
+ * @returns {{
+ *   resultTimeoutMs: number|null,
+ *   hardTimeoutMs: number|null,
+ *   streamStallTimeoutMs: number|null,
+ *   mcpToolCallTimeoutMs: number|null,
+ *   effectiveResultTimeoutMs: number,
+ *   effectiveHardTimeoutMs: number,
+ *   effectiveStreamStallTimeoutMs: number,
+ *   effectiveMcpToolCallTimeoutMs: number,
+ * }}
+ */
+export function resolveStartupTimeouts(config = {}, log = { warn: () => {} }) {
+  const resultOk = isOperatorTimeoutInRange(config.resultTimeoutMs, { name: 'resultTimeoutMs', log })
+  const hardOk = isOperatorTimeoutInRange(config.hardTimeoutMs, { name: 'hardTimeoutMs', log })
+  const stallOk = isOperatorTimeoutInRange(config.streamStallTimeoutMs, { allowZero: true, name: 'streamStallTimeoutMs', log })
+  // #4517: mcpToolCallTimeoutMs joined the ceiling-clamped family. Same
+  // `> 0` gate as the soft/hard timeouts (0 fires the callTool deadline
+  // immediately and would make every MCP tool look broken); same fall-back-
+  // to-null contract so byok-mcp-client's DEFAULT_TOOL_CALL_TIMEOUT_MS (30s)
+  // applies. The config.js validator already gates file-loaded values to
+  // 1s-10min — this guardrail catches programmatic instantiation and acts
+  // as defense-in-depth for any future config path that bypasses validation.
+  const mcpOk = isOperatorTimeoutInRange(config.mcpToolCallTimeoutMs, { name: 'mcpToolCallTimeoutMs', log })
+
+  return {
+    resultTimeoutMs: resultOk ? config.resultTimeoutMs : null,
+    hardTimeoutMs: hardOk ? config.hardTimeoutMs : null,
+    streamStallTimeoutMs: stallOk ? config.streamStallTimeoutMs : null,
+    mcpToolCallTimeoutMs: mcpOk ? config.mcpToolCallTimeoutMs : null,
+    effectiveResultTimeoutMs: resultOk ? config.resultTimeoutMs : DEFAULT_RESULT_TIMEOUT_MS,
+    effectiveHardTimeoutMs: hardOk ? config.hardTimeoutMs : DEFAULT_HARD_TIMEOUT_MS,
+    effectiveStreamStallTimeoutMs: stallOk ? config.streamStallTimeoutMs : DEFAULT_STREAM_STALL_TIMEOUT_MS,
+    effectiveMcpToolCallTimeoutMs: mcpOk ? config.mcpToolCallTimeoutMs : DEFAULT_TOOL_CALL_TIMEOUT_MS,
+  }
+}
+
 export function initFileLoggingFromConfig(config = {}) {
   if (process.env.CHROXY_NO_FILE_LOGGING === '1') {
     return { enabled: false, level: 'info', logDir: null }
@@ -241,6 +320,121 @@ export function initFileLoggingFromConfig(config = {}) {
     console.error(`[logger] file logging init failed: ${message}`)
     return { enabled: false, level, logDir, error: message }
   }
+}
+
+/**
+ * Decide whether to advertise the server over mDNS/Bonjour and, if so, publish
+ * the `_chroxy._tcp` service. Extracted from startCliServer so the loopback
+ * gating wiring is testable without booting the full CLI (#5280) — the pure
+ * resolver (bind-host.js) was already covered, but the decision to suppress the
+ * advertisement on a loopback bind was not.
+ *
+ * Returns `{ mdnsService, bonjourInstance }` (both null when not advertising) so
+ * the caller can stop/destroy them on shutdown.
+ *
+ * @param {object} opts
+ * @param {boolean} opts.noAuth   — auth disabled; never advertise.
+ * @param {string|undefined} opts.bindHost — the resolved bind host.
+ * @param {number} opts.port
+ * @param {string} opts.version
+ * @param {boolean} opts.hasToken — surfaced in the TXT record's `auth` field.
+ * @param {object} [opts.log]     — logger (defaults to console).
+ * @param {() => (object|Promise<object>)} [opts.bonjourFactory] — injectable
+ *   Bonjour instance factory for tests; defaults to dynamically importing
+ *   `bonjour-service`.
+ */
+export async function maybeAdvertiseMdns({
+  noAuth,
+  bindHost,
+  port,
+  version,
+  hasToken,
+  log = console,
+  bonjourFactory,
+} = {}) {
+  const none = { mdnsService: null, bonjourInstance: null }
+  // Auth-off skips discovery entirely (matches the pre-#5280 guards).
+  if (noAuth) return none
+  // Loopback bind — nothing on the LAN can reach it, so an _chroxy._tcp
+  // advertisement would be misleading.
+  if (isLoopbackHost(bindHost)) {
+    log.info?.('Loopback bind — skipping mDNS advertisement (server not LAN-reachable)')
+    return none
+  }
+  try {
+    const bonjourInstance = bonjourFactory
+      ? await bonjourFactory()
+      : await (async () => {
+          const { Bonjour } = await import('bonjour-service')
+          return new Bonjour()
+        })()
+    const mdnsService = bonjourInstance.publish({
+      name: `Chroxy (${hostname()})`,
+      type: 'chroxy',
+      port,
+      txt: { version, auth: hasToken ? 'token' : 'none' },
+    })
+    log.info?.(`Advertising _chroxy._tcp on port ${port} via mDNS`)
+    return { mdnsService, bonjourInstance }
+  } catch (err) {
+    // Normalize the error the way the rest of this file does — a Bonjour
+    // factory (or the dynamic import) that throws a non-Error / null must not
+    // turn the graceful no-advertisement fallback into a crash.
+    log.debug?.(`mDNS advertisement unavailable: ${err?.message || String(err)}`)
+    return none
+  }
+}
+
+/**
+ * #5369: best-effort teardown for STARTUP-ERROR paths (tunnel.start failure,
+ * waitForTunnel failure). Async — awaits tunnel.stop() because at startup there
+ * is no exit-deadline risk and we want a clean stop. Each step is try/catch-
+ * isolated so one failure can't strand the rest. Exported (no process.exit) so
+ * it can be unit-tested with fakes — mirrors flushAndDestroy in
+ * server-cli-child.js. Order is tunnel → ws → mdns → bonjour → token → pairing
+ * → sessionManager (the deliberate startup-error order; pool is NOT torn down
+ * at these sites today and must not be added).
+ */
+export async function emergencyCleanup({
+  tunnel, wsServer, mdnsService, bonjourInstance,
+  tokenManager, pairingManager, sessionManager, logger = log,
+}) {
+  // String(err?.message || err) so a non-Error throw (e.g. a Symbol) can't make
+  // the log-formatting itself throw and break this best-effort teardown chain.
+  try { if (tunnel) await tunnel.stop() } catch (err) { logger?.warn?.(`emergencyCleanup: tunnel.stop failed: ${String(err?.message || err)}`) }
+  try { wsServer?.close() } catch (err) { logger?.warn?.(`emergencyCleanup: wsServer.close failed: ${String(err?.message || err)}`) }
+  try { mdnsService?.stop?.() } catch {}
+  try { bonjourInstance?.destroy?.() } catch {}
+  try { tokenManager?.destroy() } catch {}
+  try { pairingManager?.destroy() } catch {}
+  try { sessionManager?.destroyAll() } catch (err) { logger?.warn?.(`emergencyCleanup: destroyAll failed: ${String(err?.message || err)}`) }
+}
+
+/**
+ * #5369: unified SYNCHRONOUS crash teardown for uncaughtException /
+ * unhandledRejection. `kind` is the log label. Deliberately NOT async and does
+ * NOT await tunnel.stop() — the sigterm-not-sigkill invariant: a hung stop must
+ * never block the setTimeout-driven process.exit in the caller (otherwise an
+ * installed crash handler suppresses Node's default crash-exit and could leave
+ * the process alive forever). Order: broadcast → serialize → destroyAll → ws
+ * close → tunnel.stop (fire-and-forget) → removeConnectionInfo. destroyAll runs
+ * before wsServer.close so SDK sessions auto-deny pending permissions first.
+ */
+export function emergencyCleanupSync({ kind, tunnel, wsServer, sessionManager, logger = log }) {
+  try { wsServer?.broadcastShutdown('crash', 0) } catch {}
+  // Persist sessions before destroying — losing the user's restored state on
+  // crash is worse UX than the small risk of writing partial state. The
+  // try/catch isolates serialization failures so destroyAll() still runs.
+  // logger?.warn?.() + String(...) so a minimal/nullish logger or a non-Error
+  // throw can't itself throw and abort the remaining crash teardown.
+  try { sessionManager?.serializeState() } catch (serializeErr) {
+    logger?.warn?.(`Failed to serialize state during ${kind}: ${String(serializeErr?.stack || serializeErr)}`)
+  }
+  try { sessionManager?.destroyAll() } catch {}
+  try { wsServer?.close() } catch {}
+  // NO await — see the invariant above.
+  try { if (tunnel) tunnel.stop() } catch {}
+  try { removeConnectionInfo() } catch {}
 }
 
 export async function startCliServer(config) {
@@ -286,6 +480,15 @@ export async function startCliServer(config) {
     process.exit(1)
   }
 
+  // #5154 — encrypt a legacy plaintext credentials.json at rest once an OS
+  // keychain is available (mirrors the primary-token migration above).
+  // Best-effort: never blocks boot.
+  try {
+    maybeEncryptCredentialsAtRest({ log })
+  } catch (err) {
+    log.warn(`Credentials at-rest encryption check failed: ${err.message}`)
+  }
+
   const banner = buildServerBanner({ version: SERVER_VERSION, provider: config.provider })
   const pad = Math.max(0, 38 - banner.length)
   const left = Math.floor(pad / 2)
@@ -319,15 +522,98 @@ export async function startCliServer(config) {
   // Register optional providers (e.g. docker) based on config
   await registerDockerProvider(config)
 
-  const providerType = config.provider || 'claude-sdk'
+  // #5419: register config-driven Anthropic-compatible endpoints from
+  // `providers.anthropicCompatible` (Z.ai GLM, Moonshot Kimi, MiniMax,
+  // LM Studio, llama.cpp, vLLM, OpenRouter, custom). Registered before
+  // the default-provider resolution below so `--provider <id>` /
+  // `config.provider` can select one. Invalid entries are warned about
+  // and skipped; valid siblings still register.
+  registerAnthropicCompatibleProviders(config)
+
+  const providerType = config.provider || DEFAULT_PROVIDER
+
+  // #4209 / #4246: resolve the effective skip-permissions setting from the
+  // merged config (CLI flag > canonical `dangerouslySkipPermissions` >
+  // legacy `skipPermissions` alias). When enabled, log a loud security
+  // banner identifying which key/source surfaced it — operators scanning
+  // their config.json shouldn't have to wonder why their TUI sessions
+  // started spawning with --dangerously-skip-permissions. When the legacy
+  // alias is used, also surface the deprecation warning so they're
+  // nudged to rename the key.
+  const skipPerms = resolveSkipPermissions(config)
+  if (skipPerms.deprecationWarning) {
+    log.warn(`[security] ${skipPerms.deprecationWarning}`)
+  }
+  if (skipPerms.enabled) {
+    log.warn(`[security] dangerouslySkipPermissions=true (source: config.${skipPerms.source}) — claude-tui sessions will spawn with --dangerously-skip-permissions and chroxy's permission gate is BYPASSED for those sessions`)
+  }
 
   // Create environment manager for persistent container environments (optional)
   let environmentManager = null
   if (config?.environments?.enabled) {
     const { EnvironmentManager } = await import('./environment-manager.js')
-    environmentManager = new EnvironmentManager()
+    // #4556: forward the operator-configured K8s workspace PVC default so
+    // every environment created on a K8s backend picks up the strategy
+    // without per-call plumbing. Shape was validated at config-load time
+    // (`validateConfig` in config.js); the manager re-passes it verbatim to
+    // the backend, which is the single enforcement point for runtime checks
+    // (K8sBackend.validateWorkspacePVC). Docker / other backends ignore the
+    // field, so this is safe to pass regardless of the active backend.
+    const workspacePVCDefault = config?.environments?.k8s?.workspace || null
+    if (workspacePVCDefault) {
+      const mountPath = workspacePVCDefault.mountPath || '/workspace'
+      const readOnlyTag = workspacePVCDefault.readOnly ? ' (readOnly)' : ''
+      // Make the K8s-only scope explicit so an operator who set this block
+      // against a Docker deployment doesn't assume the PVC is being mounted —
+      // Docker / other backends silently ignore the field at runtime.
+      log.info(`EnvironmentManager: K8s workspace PVC configured (claim: ${workspacePVCDefault.claimName}, mount: ${mountPath})${readOnlyTag} — active only on K8sBackend; ignored by Docker and other backends`)
+    }
+    // #5144: config-driven backend selection. `environments.backend` picks
+    // docker (default) | k8s | rancher; the selected backend's options come
+    // from `environments.k8s` / `environments.rancher` (Rancher token resolved
+    // from a secret-friendly source and never logged). The factory imports the
+    // backend module lazily so a Docker deployment never pulls in the kube SDK,
+    // and throws on a malformed k8s/rancher block — surfaced here as a fatal
+    // startup error rather than a silent fall-through to Docker.
+    let backend
+    try {
+      const built = await buildEnvironmentBackend(config)
+      backend = built.backend
+      if (built.type !== 'docker') {
+        log.info(`EnvironmentManager: using '${built.type}' backend (from environments.backend)`)
+      }
+    } catch (err) {
+      log.error(`EnvironmentManager: failed to construct '${config?.environments?.backend || 'docker'}' backend — ${err.message}`)
+      throw err
+    }
+    environmentManager = new EnvironmentManager({ backend, workspacePVCDefault })
     await logEnvironmentManagerReconnectResult(environmentManager, log)
   }
+
+  // #5081: boot-time garbage collection of leaked docker-byok compose stacks.
+  // A daemon crash / SIGKILL between `docker compose up` and `docker compose
+  // down` leaves the stack running with only an on-disk record (written by
+  // DockerByokSession on start). Sweep those orphans now — before any new
+  // session launches — so a crash can't leak stacks indefinitely. Entirely
+  // best-effort: a failure here (docker down, partial teardown) is logged and
+  // the offending entry stays on disk to be retried on the next boot.
+  try {
+    const { getSharedComposeStateStore } = await import('./byok-compose-state-shared.js')
+    const { sweepOrphanedComposeStacks } = await import('./byok-compose-state.js')
+    const store = getSharedComposeStateStore()
+    if (store.list().length > 0) {
+      const { DockerBackend } = await import('./environments/backends/docker.js')
+      const result = await sweepOrphanedComposeStacks({ store, backend: new DockerBackend() })
+      log.info(`docker-byok compose sweep: ${result.swept} orphaned stack(s) torn down, ${result.failed} deferred to next boot`)
+    }
+  } catch (err) {
+    log.warn(`docker-byok compose sweep failed: ${err.message}`)
+  }
+
+  // #4509: resolve once so the SessionManager arg side and the startup log
+  // line below can't drift apart, and any over-ceiling operator value emits
+  // a single warning here at boot (not three on each tunable).
+  const startupTimeouts = resolveStartupTimeouts(config, log)
 
   // 1. Create session manager
   const sessionManager = new SessionManager({
@@ -337,23 +623,59 @@ export async function startCliServer(config) {
     defaultCwd: config.cwd || (isWithinHome(process.cwd()) ? process.cwd() : homedir()),
     defaultModel: config.model || null,
     defaultPermissionMode: 'approve',
+    // #5859 (audit P1-7): reclaim orphaned chroxy session worktrees at boot when
+    // the operator opted into worktree auto-reaping. Clean-tree-guarded.
+    sweepOrphanWorktrees: config.worktreeGc?.autoReap === true,
+    // #4209 / #4246: seed the auto-created Default session + any
+    // subsequent createSession() that omits the field. Only honoured by
+    // the claude-tui provider; other providers ignore it harmlessly.
+    // Resolved via `resolveSkipPermissions()` so both the canonical
+    // `dangerouslySkipPermissions` key and the legacy `skipPermissions`
+    // alias are honoured (with a deprecation warning for the latter —
+    // see the [security] log lines above).
+    defaultSkipPermissions: skipPerms.enabled,
+    // #5985 (epic #5982): gate the embedded user-shell terminal. Off unless the
+    // operator set userShell.enabled:true in the config file. Enforced in
+    // SessionManager.createSession so it covers every spawn path.
+    userShellEnabled: isUserShellEnabled(config),
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],
     sessionTimeout: config.sessionTimeout || null,
     sandbox: config.sandbox || null,
     costBudget: config.costBudget || null,
+    // #5665: monthly programmatic-credit budget meter config.
+    billing: config.billing || null,
     maxMessages: config.maxMessages || config.maxHistory || null,
     // #3749 / #3884 / #3899: SOFT-warning inactivity timeout (ms). null = BaseSession default (30 min).
-    resultTimeoutMs:
-      Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
-        ? config.resultTimeoutMs
-        : null,
     // #3899: HARD-cap inactivity timeout (ms). null = BaseSession default (2h).
-    hardTimeoutMs:
-      Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
-        ? config.hardTimeoutMs
-        : null,
+    // #4467: stream-stall recovery (ms). null = BaseSession default (5min).
+    //   0 explicitly disables (operators with workloads that have legitimate
+    //   long event gaps can opt out).
+    // #4509: ceiling-clamped via `resolveStartupTimeouts()` above; an
+    // over-24h operator value falls back to null here so BaseSession applies
+    // its default (and the operator gets a warn log identifying the bad key).
+    resultTimeoutMs: startupTimeouts.resultTimeoutMs,
+    hardTimeoutMs: startupTimeouts.hardTimeoutMs,
+    streamStallTimeoutMs: startupTimeouts.streamStallTimeoutMs,
+    // #5288: background-shell hard-quiesce window (ms). null = BaseSession
+    // default (4h); 0 disables hard-reaping. SessionManager applies the same
+    // isOperatorTimeoutInRange ceiling guard (allowZero) as the timeouts.
+    backgroundShellHardQuiesceMs: config.backgroundShellHardQuiesceMs ?? null,
+    // #4601: per-provider streamStallTimeoutMs override map. SessionManager
+    // sanitises each entry against the same range gate as the global value
+    // (`allowZero: true`, 5s-24h ceiling) — bogus entries are dropped (with
+    // a warn) and the affected session falls through to the global value.
+    // The unsanitised object is forwarded as-is so SessionManager owns the
+    // single source of truth for validation.
+    providerStreamStallTimeoutMs: config.providerStreamStallTimeoutMs || null,
+    // #4482: per-MCP-call timeout (ms). null = byok-mcp-client default (30s).
+    // Unlike streamStallTimeoutMs, 0 is not a meaningful disable — every
+    // MCP tool would look broken — so non-positive falls back to null.
+    // #4517: ceiling-clamped via `resolveStartupTimeouts()` above; an
+    // over-24h operator value falls back to null here so byok-mcp-client
+    // applies its default (and the operator gets a warn log).
+    mcpToolCallTimeoutMs: startupTimeouts.mcpToolCallTimeoutMs,
     // Skills size budgets (#3202). null = use loader defaults (32KB / 256KB).
     maxSkillBytes: Number.isFinite(config.maxSkillBytes) ? config.maxSkillBytes : null,
     maxTotalSkillBytes: Number.isFinite(config.maxTotalSkillBytes) ? config.maxTotalSkillBytes : null,
@@ -361,15 +683,15 @@ export async function startCliServer(config) {
 
   // #3749 / #3899: surface the effective inactivity timeouts at startup so
   // operators can verify their config overrides took effect.
-  const effectiveResultTimeoutMs =
-    Number.isFinite(config.resultTimeoutMs) && config.resultTimeoutMs > 0
-      ? config.resultTimeoutMs
-      : DEFAULT_RESULT_TIMEOUT_MS
-  const effectiveHardTimeoutMs =
-    Number.isFinite(config.hardTimeoutMs) && config.hardTimeoutMs > 0
-      ? config.hardTimeoutMs
-      : DEFAULT_HARD_TIMEOUT_MS
-  log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms)`)
+  // #4509: re-use the already-clamped values from `resolveStartupTimeouts()`
+  // so the log line can't drift away from the SessionManager constructor
+  // args (e.g. log "12h hard-cap" while passing `null` because only one of
+  // the two sites caught a typo).
+  const { effectiveResultTimeoutMs, effectiveHardTimeoutMs, effectiveStreamStallTimeoutMs } = startupTimeouts
+  const stallLabel = effectiveStreamStallTimeoutMs === 0
+    ? 'disabled'
+    : `${formatIdleDuration(effectiveStreamStallTimeoutMs)} (${effectiveStreamStallTimeoutMs}ms)`
+  log.info(`Inactivity soft-warning: ${formatIdleDuration(effectiveResultTimeoutMs)} (${effectiveResultTimeoutMs}ms); hard-cap: ${formatIdleDuration(effectiveHardTimeoutMs)} (${effectiveHardTimeoutMs}ms); stream-stall: ${stallLabel}`)
 
   // 2. Try restoring session state from a previous instance
   let defaultSessionId
@@ -385,174 +707,21 @@ export async function startCliServer(config) {
 
   let wsServer
 
-  // #3866 — explicit per-session dedupe for the idle push. Each entry pins
-  // "we already sent an idle push for the current active→idle cycle of this
-  // session" so a duplicate `result` event (or a race where the gate flips
-  // mid-turn) can't produce two OS-level notifications. Cleared when the
-  // session next emits `stream_start` (next busy cycle) or is destroyed.
-  // Resurrects the 'idle' push category removed in the 2026-04-11 audit
-  // without recreating the duplicate-fire bug that prompted its removal.
-  const _idleNotifiedSessions = new Set()
+  // #5368 slice (a): the `session_event` → push-notification path (incl. the
+  // #3866 idle-push dedupe and the #3870/#3871/#3872 races) lives in
+  // PushNotificationHandler, constructed + started after pushManager exists and
+  // before wsServer (so the #3871 wsServer-undefined branch still covers an
+  // early restoreState event). See below, right after `new PushManager(...)`.
 
-  // Log events for debugging and forward critical errors
-  sessionManager.on('session_event', ({ sessionId, event, data }) => {
-    if (event === 'ready') {
-      log.info(`Session ${sessionId} ready: ${data.sessionId} (model: ${data.model})`)
-    } else if (event === 'error') {
-      log.error(`Session ${sessionId} error: ${data.message}`)
-      // Error is already broadcast as { type: 'message', messageType: 'error' } through
-      // the forwarding path (ws-forwarding.js → EventNormalizer). Don't also broadcastError()
-      // here — that produces a duplicate server_error message on every client.
-      // Activity update: error (immediate)
-      if (pushManager.hasTokens) {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_error', 'Session error', data.message, {
-          sessionId,
-          sessionName,
-          state: 'error',
-          detail: data.message,
-        })
-      }
-    } else if (event === 'result' && data.cost != null) {
-      log.info(`Session ${sessionId} query: $${data.cost.toFixed(4)} in ${data.duration}ms`)
-      // Note: this arm used to ALSO fire an 'idle' push here ("Claude is waiting")
-      // for the same unattended-completion case that the activity_update push below
-      // already covers. Because the two pushes used different rate-limit buckets
-      // (idle=60s, activity_update=10s) they never deduped each other, so every
-      // unattended completion produced two OS-level notifications on the phone.
-      // Removed in favor of the single activity_update fire below.
-    } else if (event === 'result') {
-      // result without cost (e.g. Gemini providers) — log duration if available
-      if (data.duration != null) {
-        log.info(`Session ${sessionId} query completed in ${data.duration}ms`)
-      }
-    } else if (event === 'budget_warning') {
-      log.warn(`Budget warning: ${data.message}`)
-    } else if (event === 'budget_exceeded') {
-      log.warn(`Budget exceeded: ${data.message}`)
-    }
-
-    // Reset the idle-push dedupe at the start of each busy cycle (#3866).
-    // Different providers emit different "session became busy" signals:
-    //   - SDK / Claude CLI turns typically fire stream_start first
-    //   - Codex tool-only turns can fire tool_start without any stream_start
-    //     (see codex-session.js _processJsonlLine — `item.type === 'tool_call'`
-    //     emits tool_start unconditionally)
-    // Without clearing on tool_start, a Codex turn that runs a tool and
-    // returns no streamed text would leave the dedupe latched, and the
-    // *next* turn's result would be wrongly suppressed as "already
-    // notified" (#3872, Copilot review).
-    if (event === 'stream_start' || event === 'tool_start') {
-      _idleNotifiedSessions.delete(sessionId)
-    }
-
-    // Push notifications for actionable events only (#2612)
-    // Intermediate events (stream_start, tool_start) no longer trigger pushes.
-    if (!pushManager.hasTokens && (event === 'result' || event === 'permission_request' || event === 'user_question')) {
-      // #3866 diagnostic — silently dropping a push because no client ever
-      // registered a push token is the most common "I'm getting nothing on
-      // Android" failure mode. Surface it at debug so operators can confirm
-      // registration happened on their last connect.
-      log.debug(`Push suppressed for ${event} on ${sessionId}: no registered tokens`)
-    }
-    if (pushManager.hasTokens) {
-      if (event === 'result') {
-        // Session idle push (#3866). Gate on noActiveViewers so the user
-        // isn't pinged while actively chatting with this session. The
-        // per-session dedupe Set prevents a duplicate `result` from
-        // firing twice for the same active→idle transition.
-        if (wsServer) {
-          const noClients = wsServer.authenticatedClientCount === 0
-          const noActiveViewers = !noClients && !wsServer.hasActiveViewersForSession(sessionId)
-          const allowed = noClients || noActiveViewers
-          const alreadyNotified = _idleNotifiedSessions.has(sessionId)
-          if (allowed && !alreadyNotified) {
-            const sessionName = sessionManager.getSession(sessionId)?.name
-            // #3870: latch SYNCHRONOUSLY before send() returns its promise
-            // so a second `result` arriving in the same tick can't double-
-            // fire (passes the !alreadyNotified gate twice). `send()` now
-            // returns a Promise<boolean> — `false` means Expo hard-failed
-            // (non-2xx or network throw, both caught inside _sendToTokenSet
-            // and surfaced via this return value, NOT via rejection since
-            // _sendToTokenSet swallows the throw). On hard failure, log at
-            // warn and RELEASE the latch so the next active→idle cycle gets
-            // a fresh chance — without this the user was silently dropped
-            // *and* permanently latched until the session went busy again.
-            _idleNotifiedSessions.add(sessionId)
-            Promise.resolve(
-              pushManager.send('activity_update', 'Session idle', 'Ready for next message', {
-                sessionId,
-                sessionName,
-                state: 'idle',
-                ...(data.duration != null && { elapsed: data.duration }),
-              })
-            ).then(ok => {
-              if (ok === false) {
-                log.warn(`Idle push send failed for ${sessionId} (Expo hard failure)`)
-                _idleNotifiedSessions.delete(sessionId)
-              }
-            }).catch(err => {
-              // Defensive — _sendToTokenSet should never throw, but if a
-              // future refactor lets one escape, treat it as hard failure.
-              log.warn(`Idle push send failed for ${sessionId}: ${err?.message || err}`)
-              _idleNotifiedSessions.delete(sessionId)
-            })
-          } else if (!allowed) {
-            // Diagnostic for #3866: surface why a push was suppressed so we
-            // can tell registration failures apart from "user is viewing".
-            log.debug(`Idle push suppressed for ${sessionId}: active viewers present`)
-          } else if (alreadyNotified) {
-            log.debug(`Idle push suppressed for ${sessionId}: already notified this turn`)
-          }
-        } else {
-          // #3871: session_event listener is registered BEFORE wsServer is
-          // constructed, so a result event from a restoreState-resurrected
-          // session can fire while wsServer is still undefined. Surface that
-          // here at debug so it's not silently dropped — same diagnostic
-          // discipline as the no-tokens / active-viewers / already-notified
-          // branches above (#3866).
-          log.debug(`Idle push suppressed for ${sessionId}: wsServer not yet initialized`)
-        }
-      } else if (event === 'permission_request') {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_waiting', 'Waiting for approval', `Permission needed: ${data.tool}`, {
-          sessionId,
-          sessionName,
-          state: 'waiting',
-          detail: data.tool,
-        })
-      } else if (event === 'user_question') {
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('activity_waiting', 'Input needed', 'Claude has a question', {
-          sessionId,
-          sessionName,
-          state: 'waiting',
-        })
-      } else if (event === 'inactivity_warning') {
-        // #3899: soft inactivity warning replaces the pre-#3899 kill-on-
-        // timeout behaviour. Push regardless of active-viewer state — a
-        // viewer with the dashboard open but AFK still benefits from the
-        // device-level nudge. (The transient UI chip in the dashboard
-        // covers the actively-watching case.)
-        const sessionName = sessionManager.getSession(sessionId)?.name
-        pushManager.send('inactivity_warning', 'Agent quiet for a while', 'Tap to check in', {
-          sessionId,
-          sessionName,
-          state: 'idle_warning',
-          prefab: data.prefab,
-          idleMs: data.idleMs,
-        })
-      }
-    }
-  })
-
+  // Log events for debugging
   sessionManager.on('session_created', ({ sessionId, name, cwd }) => {
     log.info(`Session created: ${sessionId} (${name}) in ${cwd}`)
   })
 
   sessionManager.on('session_destroyed', ({ sessionId }) => {
     log.info(`Session destroyed: ${sessionId}`)
-    _idleNotifiedSessions.delete(sessionId)
+    // #5368: the idle-push dedupe clear-on-destroy now lives in
+    // PushNotificationHandler (its own session_destroyed listener).
   })
 
   sessionManager.on('session_warning', ({ sessionId, name, reason, message, remainingMs }) => {
@@ -572,7 +741,43 @@ export async function startCliServer(config) {
   // 3. Create push notification manager, token manager, and WebSocket server
   const pushManager = new PushManager({
     storagePath: join(homedir(), '.chroxy', 'push-tokens.json'),
+    // #4541: notification preferences persistence. Co-located in
+    // ~/.chroxy alongside push-tokens.json so cleanup is one step.
+    prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
+    // #5413 Phase 2: Discord status-embed sink. Off by default — only
+    // active when a webhook URL resolves from CHROXY_DISCORD_WEBHOOK_URL
+    // or ~/.chroxy/credentials.json (0600). Non-secret knobs (bot name,
+    // per-project embed colors, throttle/heartbeat intervals) come from
+    // the `notifications.discord` config block; the status-message state
+    // (message ids, current state) persists alongside the other
+    // notification state in ~/.chroxy.
+    discord: {
+      statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+      // #5828: the billing-alert sink keeps its own state file, separate from
+      // the per-project status store above.
+      billingStatePath: join(homedir(), '.chroxy', 'discord-billing-state.json'),
+      ...(config.notifications?.discord || {}),
+    },
   })
+
+  // #5413 Phase 3: provision the daemon-level ingest secret for
+  // POST /api/events BEFORE any external hook needs to read it (emitters
+  // authenticate with the file's content, so it must exist up front).
+  // Fail-soft: on failure the route fails closed (rejects everything) and
+  // the warn log tells the operator why. Never logs the secret.
+  ensureIngestSecret()
+
+  // #5368 slice (a): wire the session_event → push path now that pushManager
+  // exists. `getWsServer` is lazy because the handler is started before wsServer
+  // is constructed (below) — an early restoreState `result` event must still
+  // route here and hit the wsServer-undefined branch (#3871).
+  const pushNotificationHandler = new PushNotificationHandler({
+    sessionManager,
+    pushManager,
+    getWsServer: () => wsServer,
+    logger: log,
+  })
+  pushNotificationHandler.start()
 
   const configFile = join(homedir(), '.chroxy', 'config.json')
   const tokenManager = NO_AUTH ? null : new TokenManager({
@@ -603,10 +808,70 @@ export async function startCliServer(config) {
   })
   if (tokenManager) tokenManager.start()
 
+  // #5536 — long-lived server identity for E2E key pinning. Minted once and
+  // persisted across restarts (keychain, or a 0600 file fallback). Its public
+  // half rides the pairing payload (pinned by clients); its secret half signs
+  // each connection's ephemeral exchange key so a pinned client can verify the
+  // exchange key really came from this daemon. Only relevant when encryption is
+  // on and auth is required — skip the keypair work for --no-auth / --no-encrypt
+  // so those modes carry no pinning surface (and old TOFU behaviour is unchanged).
+  let serverIdentity = null
+  if (!NO_AUTH && !config.noEncrypt) {
+    try {
+      serverIdentity = getOrCreateServerIdentity()
+    } catch (err) {
+      if (err instanceof IdentityUnavailableError) {
+        // #5615 case (b): the keychain is PRESENT but the identity read FAILED
+        // (locked / interaction-not-allowed). We deliberately did NOT mint a
+        // replacement — doing so would silently rotate the daemon's identity and
+        // brick every already-pinned client with a false "network impersonation"
+        // alert. A transient lock must not look like an active MITM.
+        //
+        // Fail loudly by default: refuse to start so the operator unlocks the
+        // keychain (or grants access) and the SAME pinned identity loads. The
+        // CHROXY_ALLOW_UNPINNED_BOOT escape hatch lets an operator who knows no
+        // clients are pinned boot anyway with pinning DISABLED this boot — the
+        // server then signs nothing. Clients that NEVER pinned this daemon see an
+        // old-daemon shape (TOFU). Clients that ALREADY pinned it will REFUSE the
+        // unsigned handshake (pinned-but-unsigned) — which is the safe outcome and
+        // still better than a false "impersonation" alert from a rotated identity.
+        // (err.message already begins with "server identity keychain read
+        // failed (…)", so log it directly — no redundant prefix.)
+        if (process.env.CHROXY_ALLOW_UNPINNED_BOOT === '1') {
+          log.warn(
+            `${err.message}. ` +
+            'CHROXY_ALLOW_UNPINNED_BOOT=1 set — starting WITH KEY PINNING DISABLED this boot ' +
+            '(server signs no exchange keys). Clients that never pinned this daemon get TOFU; ' +
+            'clients that ALREADY pinned it will refuse until you restore the identity. ' +
+            'Unlock the keychain and restart to restore pinning.',
+          )
+          serverIdentity = null
+        } else {
+          log.error(
+            `${err.message}. ` +
+            'Refusing to start: minting a replacement would rotate this daemon\'s identity and ' +
+            'falsely alarm every paired client as a network-impersonation attempt. ' +
+            'Unlock your OS keychain (or grant chroxy access) and start again. ' +
+            'If you are certain NO clients have pinned this daemon, set CHROXY_ALLOW_UNPINNED_BOOT=1 ' +
+            'to start once with key pinning disabled.',
+          )
+          process.exit(1)
+        }
+      } else {
+        // Any other failure (e.g. no keychain + unwritable fallback file) keeps
+        // the original behaviour: disable pinning, stay TOFU. This is NOT the
+        // silent-rotation hazard — there was no prior identity to contradict.
+        log.warn(`Could not establish server identity key (${err.message}); E2E key pinning disabled — connections stay TOFU`)
+        serverIdentity = null
+      }
+    }
+  }
+
   // Create pairing manager for ephemeral QR-based pairing (replaces permanent token in QR)
   const pairingManager = NO_AUTH ? null : new PairingManager({
     ttlMs: 60_000,
     autoRefresh: true,
+    identityPublicKey: serverIdentity?.publicKey || null,
   })
 
   wsServer = new WsServer({
@@ -620,91 +885,147 @@ export async function startCliServer(config) {
     noEncrypt: config.noEncrypt,
     tokenManager,
     pairingManager,
+    // #5536 — the identity keypair the WsServer uses to sign each connection's
+    // ephemeral exchange public key (both eager and discrete paths). Null when
+    // pinning is unavailable (no-auth / no-encrypt / keychain failure).
+    serverIdentity,
     environmentManager,
     // Full runtime config so handlers can consult settings at message
     // time — e.g. validateCwdAllowed consults config.workspaceRoots to
     // enforce the 2026-04-11 audit blocker 1 workspace allowlist.
     config,
   })
-  // Bind to localhost-only when auth is disabled
-  wsServer.start(NO_AUTH ? '127.0.0.1' : undefined)
+  // Resolve the bind address. --no-auth forces loopback; otherwise an explicit
+  // config.host (e.g. --host 127.0.0.1) binds that interface with auth still
+  // on, and the default (undefined) binds 0.0.0.0 as before.
+  const bindHost = resolveBindHost({ noAuth: NO_AUTH, host: config.host })
+  // #5356 (visibility layer): one warning when binding non-loopback (the
+  // default 0.0.0.0 included) — LAN peers can reach the unauthenticated
+  // surface (/health fingerprint, dashboard assets, rate-limited auth and
+  // pairing attempts). No default change; points at --host 127.0.0.1.
+  maybeWarnNonLoopbackBind({ bindHost, log })
+  wsServer.start(bindHost)
+
+  // #5932: hot-reload the ~/.chroxy/models.json overlay on edit — surfacing a
+  // new model id (or a label/contextWindow/pricing override) is "a config entry,
+  // not a code change", so it must not require a daemon restart. On a successful
+  // reload, re-broadcast `available_models` for the default (Claude) registry so
+  // connected pickers refresh live. A malformed save is ignored (last-good kept).
+  const modelsOverlayWatcher = watchModelsOverlay({
+    onReload: ({ models, defaultModelId }) => {
+      log.info(`Models overlay reloaded: ${models.map((m) => m.id).join(', ')}`)
+      wsServer.broadcast({ type: 'available_models', models, defaultModel: defaultModelId, provider: 'claude-sdk' })
+    },
+  })
+
+  // #5821 (live wiring): the billing canary. Recomputes the daemon's billing
+  // early-warnings (silent metered default; the dormant claude-tui
+  // reclassification tripwire) and broadcasts a `billing_canary` message when
+  // they change, so the dashboard can surface a banner during the 2026-06-15
+  // programmatic-credit window. Created after wsServer (it broadcasts through
+  // it); the provider is wired back into wsServer so the snapshot also seeds
+  // auth_ok for late joiners.
+  //
+  // #5828: datacenter-egress detection is OPT-IN via `config.billing.egressCheck`
+  // — only then do we pass `resolveEgressIp`, the one place the daemon makes an
+  // outbound IP lookup (consent-gated). `getDatacenterPrefixes` lets an operator
+  // add their cloud's ranges without a code change. `notify` fans a warning set
+  // out as a `billing_warning` push so an away operator hears about a metered
+  // default or a datacenter-egress flag without watching the dashboard.
+  const egressCheckEnabled = config.billing?.egressCheck === true
+  const billingCanaryMonitor = new BillingCanaryMonitor({
+    getSessions: () => sessionManager.listSessions(),
+    getDefaultProvider: () => config.provider || DEFAULT_PROVIDER,
+    getApiKeyAuth: () => (config.provider || DEFAULT_PROVIDER) === 'claude-sdk' && Boolean(process.env.ANTHROPIC_API_KEY),
+    broadcast: (msg) => { try { wsServer?.broadcast(msg) } catch { /* best-effort */ } },
+    logger: log,
+    resolveEgressIp: egressCheckEnabled ? () => resolvePublicIp() : undefined,
+    getDatacenterPrefixes: () => config.billing?.datacenterPrefixes || [],
+    notify: (warnings) => {
+      // #5828: the monitor fires this once per distinct warning SET, plus once
+      // on the non-empty→empty (all-clear) transition with an empty array. An
+      // empty set is the all-clear: send a `resolved` push so the Discord
+      // billing sink repaints its message green (and mobile gets a cleared
+      // note). settlePush (#5702) logs both a thrown error AND a `false`
+      // not-delivered return that a bare `.catch()` would drop.
+      if (warnings.length === 0) {
+        settlePush(
+          pushManager.send('billing_warning', 'Billing alert cleared', 'All billing warnings have cleared.', { resolved: true }),
+          'billing-canary-clear',
+          log,
+        )
+        return
+      }
+      // One aggregate push per distinct warning set — billing_warning has no
+      // rate limit (RATE_LIMITS), so the monitor's own change-detection is the
+      // throttle. Codes ride in `data` for clients that key off them.
+      const count = warnings.length
+      const title = count > 1 ? `Billing alert (${count})` : 'Billing alert'
+      const body = warnings.map((w) => w.message).join('\n\n')
+      const codes = warnings.map((w) => w.code)
+      settlePush(pushManager.send('billing_warning', title, body, { codes }), 'billing-canary', log)
+    },
+  })
+  wsServer.setBillingCanaryProvider(() => billingCanaryMonitor.current())
+  // Recompute on session lifecycle (changes the session set the canary reads);
+  // the periodic interval covers cost drift. These are additional listeners —
+  // they don't replace the logging ones above.
+  sessionManager.on('session_created', () => billingCanaryMonitor.refresh())
+  sessionManager.on('session_destroyed', () => billingCanaryMonitor.refresh())
+  billingCanaryMonitor.start()
+
+  // #5053: wire the pool stats aggregator to the shared pool so the
+  // dashboard's GET /api/pool/stats has rolling counters (hit rate,
+  // eviction-by-reason, recent evictions) to read. Default-OFF — only the
+  // shared pool exists when CHROXY_DOCKER_BYOK_POOL is enabled, so this is a
+  // no-op otherwise. attach() is idempotent (won't double-subscribe).
+  if (isPoolEnabled(process.env)) {
+    const statsPool = getSharedPool(process.env)
+    if (statsPool) getSharedPoolStats().attach(statsPool)
+  }
 
   // Wire session timeout to WsServer viewer checks
   sessionManager.setActiveViewersFn((sid) => wsServer.hasActiveViewersForSession(sid))
   sessionManager.startSessionTimeouts()
 
-  // Advertise via mDNS/Bonjour for local network discovery
-  let mdnsService = null
-  let bonjourInstance = null
-  if (!NO_AUTH) {
-    try {
-      const { Bonjour } = await import('bonjour-service')
-      bonjourInstance = new Bonjour()
-      mdnsService = bonjourInstance.publish({
-        name: `Chroxy (${hostname()})`,
-        type: 'chroxy',
-        port: PORT,
-        txt: { version: SERVER_VERSION, auth: API_TOKEN ? 'token' : 'none' },
-      })
-      log.info(`Advertising _chroxy._tcp on port ${PORT} via mDNS`)
-    } catch (err) {
-      log.debug(`mDNS advertisement unavailable: ${err.message}`)
-    }
-  }
+  // Advertise via mDNS/Bonjour for local network discovery. Suppressed on a
+  // loopback bind and when auth is off — see maybeAdvertiseMdns (#5280).
+  const { mdnsService, bonjourInstance } = await maybeAdvertiseMdns({
+    noAuth: NO_AUTH,
+    bindHost,
+    port: PORT,
+    version: SERVER_VERSION,
+    hasToken: !!API_TOKEN,
+    log,
+  })
 
-  // Track current WebSocket URL and mode label across all modes (tunnel, external, LAN)
+  // Track the live tunnel handle across modes (consumed by shutdown below).
   let tunnel = null
-  let currentWsUrl = null
-  let currentTunnelMode = 'none'
 
-  // Helper: build QR connection URL using ephemeral pairing ID (never the permanent token)
-  const buildPairingUrl = (wsUrlStr) => {
-    if (!pairingManager) return null
-    pairingManager.setWsUrl(wsUrlStr)
-    return pairingManager.currentPairingUrl
-  }
-
-  // Helper: display QR code and connection info
-  const SHOW_TOKEN = !!config.showToken || process.env.CHROXY_SHOW_TOKEN === '1'
-  const displayQr = async (wsUrlStr, httpUrlStr, modeLabel) => {
-    const pairingUrl = buildPairingUrl(wsUrlStr)
-    if (pairingUrl) {
-      console.log(`\n[✓] Server ready! (CLI headless mode, ${modeLabel})\n`)
-      console.log('📱 Scan this QR code with the Chroxy app:\n')
-      const qrText = await QRCode.toString(pairingUrl, { type: 'terminal', small: true })
-      process.stdout.write(qrText)
-      const displayToken = SHOW_TOKEN ? API_TOKEN : maskToken(API_TOKEN)
-      console.log(`\nOr connect manually:`)
-      console.log(`   URL:   ${wsUrlStr}`)
-      console.log(`   Token: ${displayToken}`)
-      if (httpUrlStr) {
-        if (SHOW_TOKEN) {
-          console.log(`   Dashboard: ${httpUrlStr}/dashboard?token=${API_TOKEN}`)
-        } else {
-          console.log(`   Dashboard: ${httpUrlStr}/dashboard (use --show-token to see full URL)`)
-        }
-      }
-    }
-
-    writeConnectionInfo({
-      wsUrl: wsUrlStr,
-      httpUrl: httpUrlStr,
-      apiToken: API_TOKEN,
-      connectionUrl: pairingUrl || `chroxy://${wsUrlStr.replace(/^wss?:\/\//, '')}?token=${API_TOKEN}`,
-      tunnelMode: modeLabel,
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
-  }
+  // #5368 slice (b): the connection display — QR render + manual-connect block +
+  // the connection-info side-car (displayQr), the ephemeral pairing-URL builder
+  // (buildPairingUrl), the current-URL/mode display state shared across modes,
+  // and the QR re-render listeners — lives in StartupDisplay. The mode branches
+  // below set `startupDisplay.currentWsUrl` / `currentTunnelMode` and call
+  // `startupDisplay.displayQr(...)`. The tunnel path sets currentWsUrl EARLY
+  // (before the first displayQr) so a mid-startup tunnel_recovered has a value to
+  // diff against — so displayQr deliberately does not mutate that state.
+  const startupDisplay = new StartupDisplay({
+    pairingManager,
+    tokenManager,
+    apiToken: API_TOKEN,
+    showToken: !!config.showToken || process.env.CHROXY_SHOW_TOKEN === '1',
+    logger: log,
+  })
 
   // External URL mode: reverse proxy / custom domain (skip tunnel entirely)
   const externalUrl = config.externalUrl || null
   if (externalUrl) {
     const wsUrl = externalUrl.replace(/^https?:\/\//, 'wss://')
-    currentWsUrl = wsUrl
-    currentTunnelMode = 'external'
+    startupDisplay.currentWsUrl = wsUrl
+    startupDisplay.currentTunnelMode = 'external'
     const httpUrl = externalUrl.replace(/^wss?:\/\//, 'https://')
-    await displayQr(wsUrl, httpUrl, 'external')
+    await startupDisplay.displayQr(wsUrl, httpUrl, 'external')
   }
 
   // Determine tunnel mode
@@ -712,119 +1033,59 @@ export async function startCliServer(config) {
   const SKIP_TUNNEL = NO_AUTH || !tunnelArg || !!externalUrl
 
   if (!SKIP_TUNNEL) {
-    // 4. Start the tunnel
-    tunnel = createTunnel({
-      port: PORT,
-      mode: tunnelArg.mode,
-      tunnelConfig: config.tunnelConfig,
-      tunnelName: config.tunnelName || null,
-      tunnelHostname: config.tunnelHostname || null,
+    // #5356 (visibility layer): record quick-tunnel exposure before startup so
+    // the auth_ok exposure snapshot covers clients that connect mid-warming.
+    wsServer.setQuickTunnelActive(tunnelArg.mode === 'quick')
+    // #5368 slice (c): the tunnel lifecycle (create + start + emergency-cleanup
+    // on a start throw, wireTunnelEvents, tunnel_recovered re-verify + QR
+    // re-render, waitForTunnel with warming/ready broadcasts + emergency-cleanup
+    // on failure, success QR + pairing-id extension) lives in
+    // TunnelLifecycleHandler. The function deps are passed in (createTunnel /
+    // waitForTunnel as test seams; emergencyCleanup / wireTunnelEvents /
+    // buildTunnel*Status are server-cli-defined, so injecting avoids a circular
+    // import). On startup failure it returns ok:false after the full cleanup —
+    // preserving startCliServer's original `process.exitCode = 1; return`.
+    const tunnelHandler = new TunnelLifecycleHandler({
+      createTunnel,
+      emergencyCleanup,
+      wireTunnelEvents,
+      waitForTunnel,
+      buildTunnelWarmingStatus,
+      buildTunnelReadyStatus,
+      config: {
+        port: PORT,
+        tunnelArg,
+        tunnelConfig: config.tunnelConfig,
+        tunnelName: config.tunnelName || null,
+        tunnelHostname: config.tunnelHostname || null,
+      },
+      wsServer,
+      startupDisplay,
+      pairingManager,
+      cleanupRefs: { mdnsService, bonjourInstance, tokenManager, sessionManager },
+      logger: log,
     })
-    let wsUrl, httpUrl
-    try {
-      ({ wsUrl, httpUrl } = await tunnel.start())
-    } catch (startErr) {
-      const message = `Tunnel start failed: ${startErr.message}`
-      log.error(message)
-      try { wsServer.broadcastError('tunnel', message, false) } catch {}
-      console.error(`\n  ✗ ${message}\n`)
-      try { await tunnel.stop() } catch {}
-      try { wsServer.close() } catch {}
-      try { mdnsService?.stop?.() } catch {}
-      try { bonjourInstance?.destroy?.() } catch {}
-      try { tokenManager?.destroy() } catch {}
-      try { pairingManager?.destroy() } catch {}
-      try { sessionManager.destroyAll() } catch {}
+    const result = await tunnelHandler.createAndStart()
+    tunnel = result.tunnel || tunnel
+    if (!result.ok) {
       process.exitCode = 1
       return
     }
-    currentWsUrl = wsUrl
-
-    // 5. Wire up tunnel lifecycle events (before waitForTunnel to catch early failures)
-    wireTunnelEvents(tunnel, wsServer)
-
-    tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
-      log.info(`Tunnel recovered after ${attempt} attempt(s)`)
-
-      // Re-verify the new tunnel URL
-      await waitForTunnel(newHttpUrl, {
-        initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
-      })
-
-      // Only display new QR code if URL actually changed
-      if (newWsUrl !== currentWsUrl) {
-        currentWsUrl = newWsUrl
-        if (pairingManager) pairingManager.refresh()
-        await displayQr(newWsUrl, newHttpUrl, modeLabel)
-        wsServer.broadcastStatus(`Tunnel reconnected with new URL: ${newWsUrl}`)
-      } else {
-        log.info(`Tunnel URL unchanged: ${newWsUrl}`)
-        wsServer.broadcastStatus('Tunnel connection recovered')
-      }
-    })
-
-    // 6. Wait for tunnel to be fully routable (DNS propagation)
-    // UX landmine #4: waitForTunnel now throws TUNNEL_NOT_ROUTABLE
-    // instead of silently proceeding with a broken QR.
-    // #2836: phase 'tunnel_warming' is the current wire name. The
-    // previous name 'tunnel_verifying' is still accepted by the dashboard
-    // handler for backward compatibility with in-flight clients.
-    //
-    // #2849: gate on protocolVersion >= 2. v1 dashboards render unknown
-    // `server_status` payloads as chat messages because they only read
-    // `msg.message` (falls through to the legacy plain-status branch).
-    // The structured phase field is a v2 addition.
-    wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, buildTunnelWarmingStatus({ tunnelMode: tunnelArg.mode, tunnelUrl: httpUrl }))
-    try {
-      await waitForTunnel(httpUrl, {
-        initialDelay: tunnelArg.mode === 'quick' ? QUICK_TUNNEL_DNS_SETTLE_MS : 0,
-        onAttempt: (attempt, maxAttempts) => {
-          wsServer.broadcastMinProtocolVersion(
-            TUNNEL_STATUS_MIN_PROTOCOL_VERSION,
-            buildTunnelWarmingStatus({
-              tunnelMode: tunnelArg.mode,
-              tunnelUrl: httpUrl,
-              attempt,
-              maxAttempts,
-            }),
-          )
-        },
-      })
-    } catch (tunnelErr) {
-      log.error(tunnelErr.message)
-      try { wsServer.broadcastError('tunnel', tunnelErr.message, false) } catch {}
-      console.error(`\n  ✗ ${tunnelErr.message}\n`)
-      // Clean up everything that's been started so we don't leave
-      // orphan processes or armed timers holding the event loop alive.
-      try { await tunnel.stop() } catch {}
-      try { wsServer.close() } catch {}
-      try { mdnsService?.stop?.() } catch {}
-      try { bonjourInstance?.destroy?.() } catch {}
-      try { tokenManager?.destroy() } catch {}
-      try { pairingManager?.destroy() } catch {}
-      try { sessionManager.destroyAll() } catch {}
-      process.exitCode = 1
-      return
-    }
-    wsServer.broadcastMinProtocolVersion(TUNNEL_STATUS_MIN_PROTOCOL_VERSION, buildTunnelReadyStatus({ tunnelUrl: httpUrl }))
-
-    // 7. Generate connection info
-    const modeLabel = `cloudflare:${tunnelArg.mode}`
-    currentTunnelMode = modeLabel
-    await displayQr(wsUrl, httpUrl, modeLabel)
-
-    // Extend the pairing ID validity after first QR display to give the user
-    // time to scan. Without this, slow tunnel setup (60-80s) can consume most
-    // of the default 60s TTL, causing rotation before the user can scan (#2599).
-    if (pairingManager) pairingManager.extendCurrentId()
 
   } else if (externalUrl) {
     // Ready message already printed above
   } else if (!tunnelArg && !NO_AUTH) {
-    const lanIp = getLanIp()
-    const host = lanIp || 'localhost'
-    currentWsUrl = `ws://${host}:${PORT}`
-    await displayQr(`ws://${host}:${PORT}`, `http://${host}:${PORT}`, 'none')
+    // When bound to loopback the LAN IP is not reachable — advertise localhost.
+    // When bound to a specific non-loopback interface, advertise that exact
+    // address (getLanIp() returns the first NIC, which may not be the bound
+    // one). Otherwise (default 0.0.0.0 bind) fall back to the discovered LAN IP.
+    const host = isLoopbackHost(bindHost)
+      ? 'localhost'
+      : (bindHost && bindHost !== '0.0.0.0' ? bindHost : (getLanIp() || 'localhost'))
+    // Bracket IPv6 literals so the URL authority is well-formed.
+    const authority = `${formatHostForUrl(host)}:${PORT}`
+    startupDisplay.currentWsUrl = `ws://${authority}`
+    await startupDisplay.displayQr(`ws://${authority}`, `http://${authority}`, 'none')
   } else if (!NO_AUTH) {
     // tunnelArg is set but SKIP_TUNNEL is true due to externalUrl — already handled above
   } else {
@@ -833,33 +1094,37 @@ export async function startCliServer(config) {
     console.log(`   Dashboard: http://localhost:${PORT}/dashboard`)
   }
 
-  // Re-render QR code when pairing auto-refreshes (keeps terminal QR scannable)
-  if (pairingManager) {
-    pairingManager.on('pairing_refreshed', async () => {
-      if (!currentWsUrl) return
-      const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-      await displayQr(currentWsUrl, httpBase, currentTunnelMode)
-      log.info('QR code refreshed with new pairing ID.')
-    })
+  // #5368 slice (b): QR re-render on pairing auto-refresh + token rotation now
+  // lives in StartupDisplay (it owns displayQr + the current-URL state the
+  // listeners read). Wired here, after the mode branches set the initial URL.
+  startupDisplay.wireReRenderListeners()
+
+  // #5158: opt-in worktree auto-reaper. When enabled, reclaim orphaned
+  // dead-pid-locked agent worktrees (clean trees only, never --force). Lazily
+  // imported so a default (disabled) boot pays nothing and a failure here never
+  // affects startup; the reaper itself yields between repos so the sweep
+  // doesn't starve the loop.
+  //
+  // #5326 (WP-5.4): sweep once at boot AND on a recurring unref'd interval, so
+  // a long-running daemon reclaims worktrees created mid-run without a restart.
+  // The timer handle is assigned inside the async import .then(); if shutdown
+  // races ahead of the import resolving, the clearInterval below is skipped —
+  // tolerated because the interval is unref'd and process.exit reaps it anyway.
+  let worktreeReapTimer = null
+  if (config.worktreeGc?.autoReap === true) {
+    import('./worktree-reaper.js')
+      .then(({ startPeriodicAutoReap }) => { worktreeReapTimer = startPeriodicAutoReap(config, log) })
+      .catch((err) => log.warn(`worktree auto-reaper failed: ${(err && err.message) || err}`))
   }
 
-  // Regenerate QR code and update connection info when token rotates
-  if (tokenManager) {
-    tokenManager.on('token_rotated', async () => {
-      if (!currentWsUrl) return // no-auth or localhost-only — no QR to update
-
-      // Refresh pairing ID when token rotates (old session tokens remain valid).
-      // The pairing_refreshed listener handles QR re-render; only call displayQr
-      // directly when pairingManager is absent (no pairing_refreshed will fire).
-      if (pairingManager) {
-        pairingManager.refresh()
-      } else {
-        const httpBase = currentWsUrl.replace(/^wss:\/\//, 'https://').replace(/^ws:\/\//, 'http://')
-        await displayQr(currentWsUrl, httpBase, currentTunnelMode)
-      }
-      log.info('API token rotated. QR code updated.')
-    })
-  }
+  // #5323 (WP-5.1) — sweep claude-tui hook-sink dirs left in /tmp by prior
+  // crashed processes (a leak on every crash). Safe + unconditional: only dirs
+  // whose owner pid is dead are removed, so a live daemon's dirs — including
+  // ours — are kept. Fire-and-forget + lazily imported so a non-tui boot pays
+  // nothing and a failure never affects startup.
+  import('./claude-tui-session.js')
+    .then(({ ClaudeTuiSession }) => ClaudeTuiSession.sweepStaleSinkDirs(log))
+    .catch((err) => log.warn(`claude-tui sink-dir sweep failed: ${(err && err.message) || err}`))
 
   console.log('\nPress Ctrl+C to stop.\n')
 
@@ -868,87 +1133,33 @@ export async function startCliServer(config) {
   // returns immediately. Without this, the second call ran serializeState()
   // against an already-empty `_sessions` Map and wrote 0 sessions to disk,
   // erasing the user's restored state across upgrade/quit cycles (#3697).
-  let shuttingDown = false
-  const shutdown = async (signal) => {
-    if (shuttingDown) {
-      log.info(`[${signal}] Shutdown already in progress, ignoring duplicate signal`)
-      return
-    }
-    shuttingDown = true
-    log.info(`[${signal}] Shutting down...`)
-    // Notify connected clients (ETA 0 = not coming back unless supervised)
-    wsServer.broadcastShutdown('shutdown', 0)
-    if (mdnsService) {
-      try { mdnsService.stop?.() } catch {}
-    }
-    if (bonjourInstance) {
-      try { bonjourInstance.destroy?.() } catch {}
-    }
-    if (tokenManager) tokenManager.destroy()
-    if (pairingManager) pairingManager.destroy()
-    // Persist sessions before destroying (enables restore on restart)
-    try { sessionManager.serializeState() } catch (err) {
-      log.error(`Failed to serialize session state: ${err?.message || err}`)
-    }
-    sessionManager.destroyAll()
-    wsServer.close()
-    if (tunnel) await tunnel.stop()
-    removeConnectionInfo()
-    process.exit(0)
-  }
-
-  process.on('SIGINT', () => { shutdown('SIGINT').catch(() => process.exit(1)) })
-  process.on('SIGTERM', () => { shutdown('SIGTERM').catch(() => process.exit(1)) })
-
-  process.on('uncaughtException', (err) => {
-    if (shuttingDown) {
-      // Late crash arriving during an already-running shutdown — still log
-      // it and schedule exit, otherwise installing this handler would
-      // suppress Node's default crash-exit and a stuck shutdown
-      // (e.g. hung tunnel.stop()) could leave the process alive forever.
-      log.error(`Uncaught exception during shutdown: ${err?.stack || err}`)
-      setTimeout(() => process.exit(1), 100)
-      return
-    }
-    shuttingDown = true
-    log.error(`Uncaught exception: ${err?.stack || err}`)
-    try { wsServer.broadcastShutdown('crash', 0) } catch {}
-    // Persist sessions before destroying — losing the user's restored state
-    // on crash is worse UX than the small risk of writing partial state. The
-    // try/catch isolates serialization failures so destroyAll() still runs.
-    try { sessionManager.serializeState() } catch (serializeErr) {
-      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
-    }
-    // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
-    try { sessionManager.destroyAll() } catch {}
-    try { wsServer.close() } catch {}
-    try { if (tunnel) tunnel.stop() } catch {}
-    try { removeConnectionInfo() } catch {}
-    setTimeout(() => process.exit(1), 100)
+  // #5368 slice (d): the process lifecycle — the shuttingDown latch, the
+  // graceful shutdown() teardown sequence, and the SIGINT/SIGTERM/SIGHUP/
+  // uncaughtException/unhandledRejection registrations (#5369 onFatal +
+  // emergencyCleanupSync) — lives in ServerOrchestrator. `worktreeReapTimer` is
+  // passed as a GETTER because it's assigned inside an async import().then() and
+  // may still be null now — the original shutdown closure read it lazily at
+  // shutdown time, so the getter reproduces that. emergencyCleanupSync is
+  // injected (server-cli-defined → avoids a circular import).
+  const orchestrator = new ServerOrchestrator({
+    wsServer,
+    sessionManager,
+    tunnel,
+    mdnsService,
+    bonjourInstance,
+    tokenManager,
+    pairingManager,
+    pushManager,
+    billingCanaryMonitor,
+    modelsOverlayWatcher,
+    getWorktreeReapTimer: () => worktreeReapTimer,
+    emergencyCleanupSync,
+    removeConnectionInfo,
+    isPoolEnabled,
+    getSharedPool,
+    logger: log,
   })
-
-  process.on('unhandledRejection', (err) => {
-    if (shuttingDown) {
-      log.error(`Unhandled rejection during shutdown: ${err?.stack || err}`)
-      setTimeout(() => process.exit(1), 100)
-      return
-    }
-    shuttingDown = true
-    log.error(`Unhandled rejection: ${err?.stack || err}`)
-    try { wsServer.broadcastShutdown('crash', 0) } catch {}
-    // Persist sessions before destroying — losing the user's restored state
-    // on crash is worse UX than the small risk of writing partial state. The
-    // try/catch isolates serialization failures so destroyAll() still runs.
-    try { sessionManager.serializeState() } catch (serializeErr) {
-      log.warn(`Failed to serialize state during crash: ${serializeErr?.stack || serializeErr}`)
-    }
-    // destroyAll() first: SDK sessions auto-deny pending permissions before WsServer closes
-    try { sessionManager.destroyAll() } catch {}
-    try { wsServer.close() } catch {}
-    try { if (tunnel) tunnel.stop() } catch {}
-    try { removeConnectionInfo() } catch {}
-    setTimeout(() => process.exit(1), 100)
-  })
+  orchestrator.install()
 
   // Return references for supervised child drain protocol
   return { sessionManager, wsServer }

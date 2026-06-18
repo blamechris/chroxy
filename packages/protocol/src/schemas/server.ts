@@ -38,6 +38,28 @@ const ClientInfoSchema = z.object({
   platform: z.string(),
 })
 
+// Billing canary (#5821 live wiring). A single billing early-warning entry —
+// `code` discriminates the kind (SILENT_METERED_DEFAULT, TUI_REPORTED_PROGRAMMATIC_COST,
+// DATACENTER_EGRESS); `message` is the human-facing copy. `provider` / `sessionId`
+// / `costUsd` are present only for the warnings that carry them. Defined ahead of
+// ServerAuthOkSchema so the snapshot can seed `auth_ok` for late-joining clients.
+export const BillingCanaryWarningSchema = z.object({
+  code: z.string(),
+  message: z.string(),
+  provider: z.string().optional(),
+  sessionId: z.string().optional(),
+  costUsd: z.number().finite().optional(),
+})
+
+// The canary's current state (no `type` — embedded in auth_ok as a seed and
+// extended into the billing_canary broadcast below). `warnings` empty = all clear.
+export const BillingCanarySnapshotSchema = z.object({
+  eraStarted: z.boolean(),
+  defaultProvider: z.string(),
+  defaultBillingClass: z.string(),
+  warnings: z.array(BillingCanaryWarningSchema),
+})
+
 export const ServerAuthOkSchema = z.object({
   type: z.literal('auth_ok'),
   clientId: z.string(),
@@ -76,6 +98,73 @@ export const ServerAuthOkSchema = z.object({
   // `DEFAULT_HARD_TIMEOUT_MS` exported from `base-session.js` but is
   // not re-exported from this package.)
   hardTimeoutMs: z.number().int().positive().finite().max(MAX_SANE_DURATION_MS).optional(),
+  // #4477: stream-stall recovery window in ms surfaced in auth_ok so the
+  // dashboard chip (#4476) can render "Stream stalled — no response for
+  // ${humanize(streamStallTimeoutMs)}" with the real configured value
+  // instead of hardcoding the 5-min default.
+  //
+  // Semantics differ from resultTimeoutMs / hardTimeoutMs: 0 is a valid
+  // emission meaning the operator explicitly disabled stream-stall
+  // recovery (CHROXY_STREAM_STALL_TIMEOUT_MS=0). BaseSession's
+  // `_armResultTimeout` skips arming the stall timer when
+  // `_streamStallTimeoutMs === 0`, so the wire must be able to communicate
+  // that state distinctly from "older server" (field absent). Hence
+  // `.nonnegative()` not `.positive()`.
+  //
+  // Optional because servers from before #4477 don't emit it — clients
+  // fall back to the 5-min default when absent. The matching server-side
+  // constant is `DEFAULT_STREAM_STALL_TIMEOUT_MS` exported from
+  // `base-session.js` but is not re-exported from this package.
+  streamStallTimeoutMs: z.number().int().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
+  // #5356 (visibility layer): exposure snapshot so clients can warn about the
+  // server's network posture. `lanBind` = the HTTP/WS socket is bound to a
+  // non-loopback interface (the historical 0.0.0.0 default included), so LAN
+  // peers can reach the unauthenticated surface (/health fingerprint,
+  // dashboard assets, rate-limited auth/pairing attempts). `quickTunnel` =
+  // a public trycloudflare quick tunnel is configured, so the server is
+  // internet-reachable at a random public URL (bearer-gated). `bindHost` is
+  // the literal address passed to listen(). Optional — servers from before
+  // #5356 don't emit it, and clients treat absence as "unknown" (no banner).
+  exposure: z.object({
+    lanBind: z.boolean(),
+    bindHost: z.string().nullable(),
+    quickTunnel: z.boolean(),
+  }).optional(),
+  // #5821 (live wiring) — current billing-canary snapshot, seeded into auth_ok
+  // so a freshly-connected client renders the billing banner immediately rather
+  // than waiting for the next broadcast. Optional: older servers omit it; live
+  // changes still arrive via the `billing_canary` broadcast.
+  billingCanary: BillingCanarySnapshotSchema.optional(),
+  // #5555 (eager key exchange) — the server's ephemeral X25519 public key,
+  // present ONLY when the client supplied a valid `eagerPublicKey` + `eagerSalt`
+  // in its `auth` message AND encryption is required. When present, the client
+  // derives the shared key immediately from this and the post-auth queue is
+  // already un-gated server-side, so the discrete `key_exchange` round trip is
+  // skipped. Field shape mirrors `key_exchange_ok`'s `publicKey`. Absent when:
+  // the client sent no eager fields (old client), encryption is disabled, or
+  // the server predates #5555 (old server) — in every absent case the client
+  // falls back to the discrete `key_exchange` handshake. No flag day.
+  serverPublicKey: z.string().max(512).optional(),
+  // #5536 (E2E key pinning) — base64 Ed25519 signature over `serverPublicKey`,
+  // present only on the eager path when the daemon has a pinned identity. A
+  // pinned client verifies it against the identity key it captured at pairing
+  // time before keying off `serverPublicKey`. Absent for unpinned daemons /
+  // older servers — old clients ignore it (TOFU unchanged).
+  serverKeySig: z.string().max(512).optional(),
+  // #5555 (auth_bootstrap) — fold the static permission-mode enum into auth_ok
+  // so a new client reads it here instead of waiting for the discrete
+  // `available_permission_modes` burst frame (still sent for older clients).
+  // Optional: servers from before #5555 omit it and clients fall back to the
+  // discrete frame.
+  // Object array — each entry is `{ id, label, description? }` (server
+  // `PERMISSION_MODES`), the SAME shape as the discrete
+  // `available_permission_modes` frame's `modes`. (#5592 review: a
+  // `z.array(z.string())` here would reject a real new-server auth_ok.)
+  availablePermissionModes: z.array(z.object({
+    id: z.string(),
+    label: z.string(),
+    description: z.string().optional(),
+  })).optional(),
 }).passthrough()
 
 export const ServerAuthFailSchema = z.object({
@@ -88,24 +177,118 @@ export const ServerPairFailSchema = z.object({
   reason: z.string(),
 })
 
+// -- Pairing-approval primitive (#5510, epic #5509) --
+//
+// The verify code travels ONLY server→surfaces: the requester receives it on
+// `pair_request_pending` to display; the approver receives it on `pair_pending`
+// to compare. The requester never sends the code back, so it cannot influence
+// the value (mismatch is impossible by construction). The issued token is
+// delivered EXACTLY once on `pair_result { ok: true }` — never logged.
+
+// To the requester, immediately after the daemon queues its pair_request.
+export const ServerPairRequestPendingSchema = z.object({
+  type: z.literal('pair_request_pending'),
+  requestId: z.string(),
+  // 6-digit human-comparable verification code (string to preserve leading
+  // zeros). Constrained to exactly 6 digits so a server-side regression to a
+  // different alphabet/length is caught at the validation boundary.
+  verifyCode: z.string().regex(/^\d{6}$/),
+})
+
+// Fanned out to HOST-LEVEL (unbound) approval surfaces. deviceName is
+// attacker-controlled — capped at the schema and rendered as plain text.
+export const ServerPairPendingSchema = z.object({
+  type: z.literal('pair_pending'),
+  requestId: z.string(),
+  deviceName: z.string().max(64),
+  // Exactly 6 digits — see ServerPairRequestPendingSchema.
+  verifyCode: z.string().regex(/^\d{6}$/),
+  // epoch ms when this request expires (lets the surface render a countdown
+  // and drop the entry on TTL without a separate message).
+  expiresAt: z.number().int().nonnegative().finite(),
+})
+
+// To the requester over its still-open connection. On approve: { ok: true,
+// token }. On deny / timeout / approver-gone: { ok: false, reason }.
+export const ServerPairResultSchema = z.object({
+  type: z.literal('pair_result'),
+  requestId: z.string(),
+  ok: z.boolean(),
+  token: z.string().optional(),
+  reason: z.string().optional(),
+})
+
+// Sent to a host-level surface to RETRACT a pending request that has been
+// resolved (approved/denied elsewhere, or expired) so every surface can drop
+// its banner. No verify code — just the id and why.
+export const ServerPairResolvedSchema = z.object({
+  type: z.literal('pair_resolved'),
+  requestId: z.string(),
+  reason: z.string(),
+})
+
+/**
+ * #5431 — one outstanding background task surfaced on `claude_ready`.
+ *
+ * `kind` maps the launching tool: a `run_in_background` Bash call, a
+ * `run_in_background` Agent (subagent) call, or a Monitor stream. The
+ * task is "outstanding" when its launch has no matching task-notification
+ * in the session transcript yet. `startedAt` is epoch ms (the transcript
+ * entry's timestamp), matching the `startedAt` convention used by
+ * `pendingBackgroundShells` / `activeTools`.
+ */
+export const BackgroundTaskSchema = z.object({
+  toolUseId: z.string(),
+  kind: z.enum(['bash', 'agent', 'monitor']),
+  description: z.string(),
+  startedAt: z.number().int().nonnegative().finite(),
+})
+
 export const ServerClaudeReadySchema = z.object({
   type: z.literal('claude_ready'),
+  // #5431: outstanding background work detected from the session
+  // transcript when the readiness probe flips to "ready for input".
+  // Both fields are OPTIONAL — servers from before #5431 (and session
+  // providers without transcript access) never emit them, and clients
+  // treat absence exactly like today's plain ready. An explicit empty
+  // `backgroundTasks: []` means "previously-reported tasks have all
+  // completed" so clients can clear a stale indicator.
+  backgroundTasks: z.array(BackgroundTaskSchema).optional(),
+  // #5431: a pending ScheduleWakeup — the agent ended its turn but
+  // arranged to resume at `at` (epoch ms). Absent when no wakeup is
+  // scheduled or it has already fired/been superseded.
+  scheduledWakeup: z.object({
+    at: z.number().int().nonnegative().finite(),
+    reason: z.string(),
+  }).optional(),
 })
+
+// #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
+// stamped on stream messages and the pong reply at broadcast time. Clients use
+// it to measure server→render latency (token-to-render) and to split RTT into
+// uplink/downlink. Wall-clock (not monotonic) because it crosses machines;
+// consumers MUST treat raw cross-machine subtraction as skew-prone and derive
+// one-way numbers from the RTT-split method instead (see app/dashboard
+// latency-stats). Always optional so older servers/clients interop unchanged.
+const ServerTsSchema = z.number().int().nonnegative().finite().optional()
 
 export const ServerStreamStartSchema = z.object({
   type: z.literal('stream_start'),
   messageId: z.string(),
+  serverTs: ServerTsSchema,
 })
 
 export const ServerStreamDeltaSchema = z.object({
   type: z.literal('stream_delta'),
   messageId: z.string(),
   delta: z.string(),
+  serverTs: ServerTsSchema,
 })
 
 export const ServerStreamEndSchema = z.object({
   type: z.literal('stream_end'),
   messageId: z.string(),
+  serverTs: ServerTsSchema,
 })
 
 export const ServerMessageSchema = z.object({
@@ -116,6 +299,42 @@ export const ServerMessageSchema = z.object({
   options: z.any().optional(),
   timestamp: z.number(),
   code: z.string().max(64).optional(),
+  // #4947 / #5006: only set on `messageType: 'error'` envelopes whose
+  // `code` is one of the two resume-failure codes emitted by CliSession's
+  // `_handleChildClose` resume-failure path:
+  //   - `'resume_unknown'` (server PR #4944) — recoverable; CliSession has
+  //     already auto-fallen-back to a fresh conversation.
+  //   - `'resume_unknown_exhausted'` (server PR #5004) — terminal; the
+  //     post-fallback retry ALSO matched the unknown-resume pattern, the
+  //     server has stopped auto-respawning, and the user must start a
+  //     fresh session manually.
+  //   - `'cli_respawn_exhausted'` (#5698) — terminal; CliSession's bounded
+  //     auto-respawn budget (rolling rate cap or the consecutive max of 5) is
+  //     spent, the server has stopped respawning, and the session is being
+  //     dropped. Distinct from a transient error toast so the client can
+  //     render a final "session ended (flapping)" state. DockerSession (the
+  //     only CliSession subclass) inherits it; the other subprocess providers
+  //     have no auto-respawn loop, and the claude-tui PTY mirror emits the
+  //     sibling `pty_respawn_exhausted` / `resume_unknown_exhausted` codes for
+  //     the same terminal condition.
+  // Carries the conversation id chroxy passed to `claude --resume <id>`
+  // before the CLI rejected it; dashboards surface it under the affordance
+  // for operator correlation against the persisted state file
+  // (`resumeConversationId` in `~/.chroxy/session-state.json`). Optional +
+  // length-capped so a malformed producer can't pollute the wire with
+  // megabyte payloads.
+  attemptedResumeId: z.string().max(256).optional(),
+  // #5067: captured stdout/stderr from a failed docker-byok
+  // postCreateCommand. Only set on `messageType: 'error'` envelopes
+  // whose `code` is `'post_create_command_failed'`; the session layer
+  // (docker-byok-session.js) tail-caps each stream to 4 KiB before
+  // emitting, and event-normalizer.js re-caps at 8 KiB at the wire
+  // boundary. The 8192 ceiling here is the wire-schema bound;
+  // producers (the session layer) apply a tighter cap. Optional so
+  // existing error envelopes (resume_unknown, generic crashes) stay
+  // shape-compatible.
+  stdout: z.string().max(8192).optional(),
+  stderr: z.string().max(8192).optional(),
 })
 
 export const ServerToolStartSchema = z.object({
@@ -134,9 +353,26 @@ export const ServerToolResultSchema = z.object({
   truncated: z.boolean().optional(),
 })
 
+// #4080 / #4081: incremental partial-JSON chunk for a streaming tool_use
+// `input`. Emitted between `tool_start` and `tool_result` while the
+// SDK's `input_json_delta` chunks arrive. `partialJson` is the raw
+// JSON fragment from that single SDK chunk — clients concatenate it
+// onto a per-toolUseId accumulator. Mid-stream partials are inherently
+// unparseable JSON; clients render verbatim until a chunk completes
+// the document or `tool_result` lands.
+export const ServerToolInputDeltaSchema = z.object({
+  type: z.literal('tool_input_delta'),
+  messageId: z.string(),
+  toolUseId: z.string(),
+  partialJson: z.string(),
+})
+
 export const ServerResultSchema = z.object({
   type: z.literal('result'),
-  cost: z.number().optional(),
+  // #5630: `null` means "cost unknown" (pricing/usage couldn't be computed) —
+  // distinct from a genuine $0 turn. Subscription runs and any turn whose model
+  // pricing is unknown emit `null`; the dashboard renders "n/a" for it.
+  cost: z.number().nullable().optional(),
   duration: z.number().optional(),
   usage: z.any().optional(),
   sessionId: z.string().nullable().optional(),
@@ -166,6 +402,28 @@ export const ServerPromptEvaluatorSkipPatternChangedSchema = z.object({
   type: z.literal('prompt_evaluator_skip_pattern_changed'),
   sessionId: z.string(),
   value: z.union([z.string(), z.null()]),
+})
+
+// #3805: per-session Chroxy context hint toggle changed. Broadcast to
+// every client bound to `sessionId` whenever the value actually flips.
+// Mirrors ServerPromptEvaluatorChangedSchema — clients re-render the
+// toggle and may refetch session_list for confirmation.
+export const ServerChroxyContextHintChangedSchema = z.object({
+  type: z.literal('chroxy_context_hint_changed'),
+  sessionId: z.string(),
+  value: z.boolean(),
+})
+
+// #4660: per-session preamble changed. Broadcast to every client bound to
+// `sessionId` whenever the trimmed value actually differs from the
+// previous stored value. Multi-client UIs use this to keep their text
+// areas in sync without re-fetching session_list. Value is the stored
+// (post-trim) string the server actually injects, not the raw input —
+// matters when the client typed leading/trailing whitespace.
+export const ServerSessionPreambleChangedSchema = z.object({
+  type: z.literal('session_preamble_changed'),
+  sessionId: z.string(),
+  value: z.string(),
 })
 
 /**
@@ -219,6 +477,71 @@ export const ServerPermissionRequestSchema = z.object({
   sessionId: z.string().optional(),
 })
 
+/**
+ * Single validated builder for the `permission_request` wire message (#6031).
+ *
+ * `permission_request` is the most security-relevant message on the wire — a
+ * dropped/misnamed binding field (e.g. `sessionId`) routes a prompt to the
+ * wrong session or strands it on the legacy resolver. It used to be hand-built
+ * as a raw object literal at 4+ emit sites (ws-permissions.js HTTP-fallback +
+ * two resend paths, event-normalizer.js), each free to drift its field set.
+ *
+ * This factory is the one place those sites construct the message, and it
+ * `safeParse`-validates against `ServerPermissionRequestSchema` so field drift
+ * (a missing required field, a wrong type) is caught instead of silently
+ * shipping a malformed prompt.
+ *
+ * Field hygiene:
+ *  - `type` is always set here — callers never pass it.
+ *  - Optional fields (`description`, `remainingMs`, `sessionId`) are omitted
+ *    entirely (absent, not `null`/`undefined`) when not provided, matching the
+ *    existing wire shape (clients fall back to the active session when
+ *    `sessionId` is absent).
+ *  - `input` is passed through as-is. Callers are responsible for redaction
+ *    (#6038: `description: redactValue(...)`, `input: sanitizeToolInput(...)`)
+ *    BEFORE handing values to this builder — it is a shape guard, not a
+ *    redaction layer, and must not re-process already-redacted values.
+ *
+ * Validation failures throw a descriptive `Error` (with the Zod issues) rather
+ * than returning a partial object, so a drift bug surfaces loudly at the emit
+ * site in dev/test/CI instead of corrupting the client prompt.
+ */
+export function buildPermissionRequestMessage(fields: {
+  requestId: string
+  tool: string
+  // `input` is REQUIRED (not `input?:`): the schema's `input: z.any()` accepts a
+  // missing key at runtime, so the type system is the only thing that catches an
+  // emitter dropping `input` — keeping it required is what makes this builder a
+  // real drift guard (Copilot review on #6052). All emit sites pass it.
+  input: unknown
+  description?: string
+  remainingMs?: number
+  sessionId?: string
+}): ServerPermissionRequestMessage {
+  const msg: Record<string, unknown> = {
+    type: 'permission_request',
+    requestId: fields.requestId,
+    tool: fields.tool,
+    input: fields.input,
+  }
+  // Omit optional fields when absent so the wire shape stays identical to the
+  // hand-built literals (clients fall back to the active session when
+  // `sessionId` is absent, not null).
+  if (fields.description !== undefined) msg.description = fields.description
+  if (fields.remainingMs !== undefined) msg.remainingMs = fields.remainingMs
+  if (fields.sessionId !== undefined) msg.sessionId = fields.sessionId
+
+  const result = ServerPermissionRequestSchema.safeParse(msg)
+  if (!result.success) {
+    throw new Error(
+      `buildPermissionRequestMessage: invalid permission_request (${result.error.issues
+        .map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`)
+        .join('; ')})`,
+    )
+  }
+  return result.data
+}
+
 export const ServerUserQuestionSchema = z.object({
   type: z.literal('user_question'),
   toolUseId: z.string(),
@@ -244,6 +567,1168 @@ export const ServerAgentCompletedSchema = z.object({
   type: z.literal('agent_completed'),
   toolUseId: z.string(),
 })
+
+/**
+ * #5016 — Task subagent intermediate progress event.
+ *
+ * Carries a re-emit of a Task subagent's intermediate wire event
+ * (`tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`)
+ * tagged with the parent Task tool_use id so the dashboard can render
+ * the child's progress as nested sub-bubbles inside the parent's Task
+ * tool_call bubble.
+ *
+ * `parentToolUseId` — the id of the parent's `Task` tool_use block
+ *   (same id used for `agent_spawned` / `agent_completed`). Consumers
+ *   key the nested sub-bubble container off this id.
+ * `eventType` — the child's original event name (e.g. `'tool_start'`).
+ *   Consumers switch on this to render the wire event in the same
+ *   shape they would for a top-level event.
+ * `payload` — the verbatim child event payload. Fields are best-effort;
+ *   renderers MUST treat absence as a no-op.
+ *
+ * Nested Task: when a Task subagent itself dispatches a Task, the
+ * grand-child's events are forwarded up the chain re-tagged with the
+ * IMMEDIATE parent's `toolUseId`. The dashboard sees a flat stream
+ * — nested-nested rendering is intentionally not in v2.
+ */
+export const ServerAgentEventSchema = z.object({
+  type: z.literal('agent_event'),
+  parentToolUseId: z.string(),
+  eventType: z.string(),
+  payload: z.record(z.string(), z.unknown()),
+})
+
+/**
+ * #4307 — one entry per backgrounded `Bash` shell the session is still
+ * waiting on. Pushed when the agent dispatches a `Bash` tool call with
+ * `run_in_background: true` (the matching tool_result carries the
+ * canonical `Command running in background with ID: <id>` text); cleared
+ * when the agent calls `BashOutput` (acknowledged) or the session is
+ * destroyed.
+ *
+ * `shellId` is the short alphanumeric token Claude prints (e.g.
+ * `brk57kt6pm`). `command` is the original Bash command text the agent
+ * dispatched, stashed at tool_use time so the dashboard can render
+ * "waiting on `<command>`" without a separate roundtrip. `startedAt` is
+ * the server-side wall-clock at the moment the tool_result was parsed —
+ * lets the dashboard surface elapsed wait time without trusting the
+ * client clock.
+ */
+export const ServerPendingBackgroundShellSchema = z.object({
+  shellId: z.string(),
+  command: z.string(),
+  startedAt: z.number().int().nonnegative(),
+})
+
+/**
+ * #4307 — transient event: the pending-background-shells snapshot for a
+ * session changed. Emitted both on push (a new `run_in_background` shell
+ * was registered) and on clear (`BashOutput` acknowledged or the session
+ * was destroyed). The full snapshot is on the wire (not a delta) so a
+ * late-joining client sees canonical state.
+ *
+ * Why a full snapshot instead of an event per delta: pending work is a
+ * tiny set (typically 0 or 1 entries) and the event fires rarely, so
+ * the wire cost is negligible. A delta protocol would force every
+ * client to also reconcile against `pendingBackgroundShells` on the
+ * `session_list` snapshot — the full-snapshot shape avoids that.
+ *
+ * Late joiners: `session_list` carries the same `pendingBackgroundShells`
+ * field on each entry, so a client that connects between
+ * `background_work_changed` events catches up via the next snapshot.
+ */
+export const ServerBackgroundWorkChangedSchema = z.object({
+  type: z.literal('background_work_changed'),
+  sessionId: z.string(),
+  pending: z.array(ServerPendingBackgroundShellSchema),
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// Control Room activity tree (#5159 epic, #5161 protocol contract)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Wire contract for the per-session "activity tree": the live map of every
+// in-flight process inside a chroxy-managed session — Task subagents, Bash
+// `run_in_background` shells, and long-running tool calls — each with a status,
+// elapsed time, and a parent→child hierarchy (session → agent → tool).
+//
+// This file defines ONLY the schemas/types (issue #5161). The server emitter
+// (#5160), store-core reducer (#5162), and dashboard panel (#5163) consume
+// these. The shape is deliberately minimal-but-complete so all three
+// downstream consumers can build on it without a wire change.
+//
+// Two message types form the contract:
+//   - `activity_snapshot` — the full current tree for a session. Emitted on
+//     subscribe / resync so a late-joining client gets canonical state in one
+//     message (mirrors the `background_work_changed` full-snapshot philosophy:
+//     a client never has to reconcile deltas against a separate snapshot to be
+//     correct).
+//   - `activity_delta` — an incremental change to a single entry (started /
+//     updated / ended). Emitted as work progresses so an already-subscribed
+//     client doesn't pay the full-snapshot cost on every status flip.
+//
+// Forward/back compat: both messages carry a `schemaVersion` (currently 1) so a
+// future field-set change can be signalled without a wire-shape break, and all
+// schemas strip unknown fields (Zod default) so an older client parsing a newer
+// server's payload silently ignores fields it doesn't recognise. Older clients
+// that predate these message types ignore the unknown `type` entirely at the
+// dispatch layer.
+
+/**
+ * Current schema version for the activity-tree wire contract. Carried on both
+ * `activity_snapshot` and `activity_delta` so consumers can branch on it if a
+ * future, additive field-set revision lands. Bump only for a deliberate shape
+ * change; additive optional fields do NOT require a bump (Zod strips unknowns,
+ * so older clients stay compatible).
+ */
+export const ACTIVITY_SCHEMA_VERSION = 1
+
+/**
+ * Kind of activity entry. The session→agent→tool hierarchy is expressed via
+ * `parentId`, but `kind` lets a consumer pick an icon / renderer without
+ * walking the tree:
+ *   - `'agent'` — a Task subagent (the `Task` tool's spawned worker). Maps to
+ *     the existing `agent_spawned` / `agent_event` signal (#5016/#5060/#5061).
+ *   - `'shell'` — a backgrounded `Bash` shell (`run_in_background: true`). Maps
+ *     to the existing `pendingBackgroundShells` model (#4307).
+ *   - `'tool'` — any other long-running tool call surfaced as its own node.
+ *
+ * Declared as a named enum (not inlined) so #5162/#5163 can import it for
+ * exhaustive switch handling.
+ */
+export const ActivityKindSchema = z.enum(['agent', 'shell', 'tool'])
+
+/**
+ * Lifecycle status of an activity entry:
+ *   - `'running'` — actively executing.
+ *   - `'blocked'` — alive but waiting on something (e.g. a pending permission
+ *     prompt or user input). Distinct from `running` so the Control Room can
+ *     flag "needs attention" without inferring it from elapsed time.
+ *   - `'done'`   — finished successfully.
+ *   - `'failed'` — finished with an error / non-zero exit.
+ *
+ * `done` and `failed` are terminal; `endedAt` MUST be set once an entry reaches
+ * either (enforced by `ActivityEntrySchema` below).
+ */
+export const ActivityStatusSchema = z.enum(['running', 'blocked', 'done', 'failed'])
+
+/**
+ * Reference that lets a consumer locate the live output stream for an entry so
+ * the Control Room can drill into it. Optional because not every entry has a
+ * separately-addressable stream (a synthetic grouping node may not), and absent
+ * on older servers.
+ *
+ * Modelled as a `{ kind, id }` pair rather than a bare string so the consumer
+ * knows WHICH existing stream channel to subscribe against without parsing the
+ * id:
+ *   - `'tool_use'` — `id` is the tool_use id; output arrives as the existing
+ *     `agent_event` stream keyed by `parentToolUseId` (#5016).
+ *   - `'shell'` — `id` is the short shell token (e.g. `brk57kt6pm`); output is
+ *     fetched via the existing `BashOutput` / background-shell path (#4307).
+ *   - `'message'` — `id` is a `stream_start` messageId; output arrives as the
+ *     existing `stream_delta` stream for that message.
+ *
+ * `kind` is an OPEN, non-empty string — deliberately NOT a closed `z.enum`. A
+ * future server may introduce a new channel kind additively, and a strict enum
+ * would reject the WHOLE activity message at an older client's schema boundary
+ * (the exact opposite of this contract's forward-compat intent). With an open
+ * string, an unrecognised kind parses cleanly and the consumer switches on the
+ * known values below, treating anything else as "no drill-in available". The
+ * three values defined today are:
+ *   - `'tool_use'` — `id` is the tool_use id; output arrives as the existing
+ *     `agent_event` stream keyed by `parentToolUseId` (#5016).
+ *   - `'shell'` — `id` is the short shell token (e.g. `brk57kt6pm`); output is
+ *     fetched via the existing `BashOutput` / background-shell path (#4307).
+ *   - `'message'` — `id` is a `stream_start` messageId; output arrives as the
+ *     existing `stream_delta` stream for that message.
+ *
+ * `ACTIVITY_OUTPUT_REF_KINDS` exports the known set so #5162/#5163 can branch
+ * exhaustively without re-declaring the literals.
+ */
+export const ACTIVITY_OUTPUT_REF_KINDS = ['tool_use', 'shell', 'message'] as const
+
+export const ActivityOutputRefSchema = z.object({
+  kind: z.string().min(1),
+  id: z.string().min(1),
+})
+
+/**
+ * The shared activity-entry shape — one node in the activity tree.
+ *
+ * Fields:
+ *   - `id`        — stable, server-assigned id for this entry. Consumers key the
+ *                   tree off it; deltas reference it; it MUST survive status
+ *                   flips so an `updated` delta lands on the right node.
+ *   - `kind`      — see `ActivityKindSchema`.
+ *   - `label`     — human-readable description (e.g. the Task prompt summary,
+ *                   the Bash command text, or the tool name). May be empty for
+ *                   an entry whose label isn't known yet.
+ *   - `status`    — see `ActivityStatusSchema`.
+ *   - `startedAt` — server wall-clock (ms epoch) when the entry began. Server
+ *                   clock so the Control Room can render elapsed time without
+ *                   trusting the client clock (same rationale as #4307's
+ *                   `startedAt`). Allowed to be 0 so a clock-skewed dev box
+ *                   doesn't bounce the message.
+ *   - `endedAt?`  — server wall-clock (ms epoch) when the entry reached a
+ *                   terminal status. REQUIRED once `status` is `done`/`failed`
+ *                   and FORBIDDEN while `running`/`blocked` (refined below) so
+ *                   "ended but no end time" / "running but has end time" can't
+ *                   reach a consumer.
+ *   - `parentId?` — id of the parent entry, expressing the session→agent→tool
+ *                   hierarchy. Absent / undefined for a top-level entry (a child
+ *                   of the session root). A consumer MUST treat an unknown
+ *                   `parentId` (parent not in the tree) as a top-level entry
+ *                   rather than dropping the node.
+ *   - `outputRef?`— see `ActivityOutputRefSchema`.
+ *
+ * `startedAt` / `endedAt` follow the ms-typed-field discipline at the top of
+ * this file (integer, finite, non-negative) but are wall-clock epochs not
+ * durations, so they are NOT bounded by `MAX_SANE_DURATION_MS` — a 2026 epoch
+ * (~1.7e12) is far past that 24h ceiling.
+ */
+export const ActivityEntrySchema = z.object({
+  id: z.string().min(1),
+  kind: ActivityKindSchema,
+  label: z.string(),
+  status: ActivityStatusSchema,
+  startedAt: z.number().int().nonnegative().finite(),
+  endedAt: z.number().int().nonnegative().finite().optional(),
+  parentId: z.string().min(1).optional(),
+  outputRef: ActivityOutputRefSchema.optional(),
+}).superRefine((entry, ctx) => {
+  const terminal = entry.status === 'done' || entry.status === 'failed'
+  if (terminal && entry.endedAt === undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['endedAt'],
+      message: 'endedAt is required when status is "done" or "failed"',
+    })
+  }
+  if (!terminal && entry.endedAt !== undefined) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['endedAt'],
+      message: 'endedAt must be absent while status is "running" or "blocked"',
+    })
+  }
+  if (entry.endedAt !== undefined && entry.endedAt < entry.startedAt) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['endedAt'],
+      message: 'endedAt must be >= startedAt',
+    })
+  }
+})
+
+/**
+ * #5161 — full current activity tree for a session. Emitted on subscribe /
+ * resync. The complete `entries` array is on the wire (a flat list; the tree is
+ * reconstructed from `parentId`) so a late-joining or reconnecting client
+ * reaches canonical state in one message without replaying deltas.
+ *
+ * `entries` is ordered server-side but consumers MUST NOT depend on the order
+ * for correctness (they reconstruct the tree from `id`/`parentId`). An empty
+ * array is the valid "session has no in-flight activity" state — never omitted.
+ */
+export const ServerActivitySnapshotSchema = z.object({
+  type: z.literal('activity_snapshot'),
+  sessionId: z.string(),
+  schemaVersion: z.number().int().positive(),
+  entries: z.array(ActivityEntrySchema),
+})
+
+/**
+ * #5161 — incremental change to a single activity entry. Emitted as work
+ * progresses so subscribed clients don't pay the full-snapshot cost on every
+ * status flip.
+ *
+ * `op` discriminates the change:
+ *   - `'started'` — a new entry appeared; `entry` is the full node.
+ *   - `'updated'` — an existing entry changed (status / label / endedAt / etc.);
+ *     `entry` is the full, current node (not a partial patch) so a consumer that
+ *     missed the `started` delta can still upsert by `entry.id`. Upsert-by-id is
+ *     the intended reducer behaviour — a `started` for an id already present, or
+ *     an `updated` for an id not yet present, both resolve to "replace the node".
+ *   - `'ended'`   — the entry reached a terminal status; `entry.status` is
+ *     `done`/`failed` and `entry.endedAt` is set (enforced by the entry schema
+ *     plus the refinement below).
+ *
+ * Carrying the full entry on every op (rather than a partial diff) keeps the
+ * reducer trivial and makes each delta self-healing against a dropped earlier
+ * delta — the deliberate tradeoff for a small, infrequently-changing tree.
+ */
+export const ServerActivityDeltaSchema = z.object({
+  type: z.literal('activity_delta'),
+  sessionId: z.string(),
+  schemaVersion: z.number().int().positive(),
+  op: z.enum(['started', 'updated', 'ended']),
+  entry: ActivityEntrySchema,
+}).superRefine((msg, ctx) => {
+  if (msg.op === 'ended') {
+    const terminal = msg.entry.status === 'done' || msg.entry.status === 'failed'
+    if (!terminal) {
+      ctx.addIssue({
+        code: 'custom',
+        path: ['entry', 'status'],
+        message: 'an "ended" delta must carry a terminal entry status ("done" or "failed")',
+      })
+    }
+  }
+})
+
+/**
+ * #5277: positive ack that a `cancel_activity` request was actioned. Success
+ * was previously silent — the terminal `activity_delta` was the only signal,
+ * which the dashboard couldn't correlate to a specific cancel click (and which
+ * could be delayed/dropped). This echoes the request's `activityId` and
+ * (when supplied) `requestId` so the caller gets a definite per-request signal.
+ * Failures continue to surface as a `CANCEL_ACTIVITY_FAILED` session_error,
+ * which also echoes `requestId`.
+ */
+export const ServerCancelActivityAckSchema = z.object({
+  type: z.literal('cancel_activity_ack'),
+  activityId: z.string(),
+  // #5277: the session the cancelled node belongs to. Activity ids (toolUseIds)
+  // are only unique WITHIN a session, so the dashboard scopes its pending-cancel
+  // state by sessionId+activityId — the ack echoes the session for that.
+  sessionId: z.string().optional(),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
+/**
+ * #5936 (epic #5935): outgoing-message queue mirror. The server-authoritative
+ * send queue holds a follow-up message the OWNER typed while the session was
+ * still mid-turn (busy) and flushes it FIFO on the turn-complete `result`
+ * event. These two transient events let clients render the queued message in a
+ * distinct "queued" state and reconcile it on flush/cancel — they are NOT
+ * replayed on reconnect (the live snapshot is authoritative).
+ *
+ * `message_queued` — a send-while-busy message was accepted into the queue.
+ * Carries the queued `text` (so clients can render the bubble), the sender's
+ * `clientMessageId` (when supplied, so the sender dedups its optimistic copy),
+ * and the post-enqueue `queueLength`.
+ */
+export const ServerMessageQueuedSchema = z.object({
+  type: z.literal('message_queued'),
+  sessionId: z.string(),
+  // Echoed when the sender supplied a well-formed clientMessageId so the
+  // originating client can match this queued entry to its optimistic copy.
+  clientMessageId: z.string().optional(),
+  text: z.string(),
+  queueLength: z.number().int().nonnegative(),
+}).passthrough()
+
+/**
+ * `message_dequeued` — a queued message left the queue. `reason` distinguishes
+ * the exit paths: `'flush'` (auto-sent on turn-complete — the client should
+ * transition the bubble from queued → sent), `'interrupted'` (the whole queue
+ * was cancelled by an interrupt — the client should remove the queued bubble),
+ * and `'cancelled'` (#5943 — the owner cancelled this ONE entry via
+ * `cancel_queued` — the client removes just this bubble, leaving the rest of the
+ * queue intact). The `queueLength` is the count remaining AFTER this item left.
+ */
+export const ServerMessageDequeuedSchema = z.object({
+  type: z.literal('message_dequeued'),
+  sessionId: z.string(),
+  clientMessageId: z.string().optional(),
+  queueLength: z.number().int().nonnegative(),
+  reason: z.enum(['flush', 'interrupted', 'cancelled']),
+}).passthrough()
+
+// ───────────────────────────────────────────────────────────────────────────
+// Host/Repo Status Control Room (#5170 epic, #5171 protocol contract)
+// ───────────────────────────────────────────────────────────────────────────
+//
+// Wire contract for the Host/Repo Status survey: a one-shot, pull-driven picture
+// of every repo the host knows about — `config.repos` unioned with repos
+// auto-discovered under a configurable root (default `~/Projects`). Each repo is
+// classified into a `verdict` (live / investigate / abandoned / recent /
+// onboarded) so the Control Room can colour-code the table and surface "needs
+// attention" repos without the client re-deriving the heuristic.
+//
+// This file defines ONLY the schemas/types (issue #5171). The server emitter,
+// store-core reducer, and dashboard panel consume these in sibling issues of the
+// #5170 epic.
+//
+// Flow: the client sends `host_status_request` (see client.ts) — typically the
+// Refresh button — and the server replies with exactly one
+// `host_status_snapshot`. There is no delta stream (unlike the activity tree):
+// the survey is cheap-enough-to-resend and the table is small, so a full
+// snapshot per refresh keeps both sides trivial.
+//
+// Forward/back compat: all schemas strip unknown fields (Zod default) so an
+// older client parsing a newer server's payload silently ignores fields it
+// doesn't recognise, and a client predating these message types ignores the
+// unknown `type` at the dispatch layer.
+
+/**
+ * Verdict for a repo — the survey's classification of "what is this repo's
+ * current state". Drives the colour-coded tag in the Control Room table:
+ *   - `'live'`        — actively worked (a chroxy session is/was recently running).
+ *   - `'investigate'` — ambiguous state worth a human look (e.g. dirty tree on a
+ *                       repo with no recent activity).
+ *   - `'abandoned'`   — likely abandoned (no recent activity, nothing in flight).
+ *   - `'recent'`      — touched recently but not classified as live.
+ *   - `'onboarded'`   — set up / onboarded (has the expected chroxy scaffolding)
+ *                       but not currently active.
+ *
+ * Declared as a named enum so downstream consumers can switch exhaustively.
+ */
+export const RepoVerdictSchema = z.enum([
+  'live',
+  'investigate',
+  'abandoned',
+  'recent',
+  'onboarded',
+])
+
+/**
+ * Working-tree cleanliness summary for a repo:
+ *   - `state`     — `'clean'` (nothing to commit) or `'dirty'` (anything staged,
+ *                   modified, or untracked).
+ *   - `untracked` — count of untracked files.
+ *   - `modified`  — count of tracked-but-modified (unstaged) files.
+ *   - `staged`    — count of staged (index) changes.
+ *
+ * Counts are non-negative integers. `state` is carried explicitly (rather than
+ * derived from the counts) so the server's notion of clean/dirty is the
+ * authority — e.g. a repo may be "dirty" for a reason the three counts don't
+ * capture, and the consumer should not re-derive it.
+ */
+export const RepoTreeSchema = z.object({
+  state: z.enum(['clean', 'dirty']),
+  untracked: z.number().int().nonnegative().finite(),
+  modified: z.number().int().nonnegative().finite(),
+  staged: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * One row in the Host/Repo Status table.
+ *
+ * Fields:
+ *   - `name`        — display name for the repo (typically the directory name).
+ *   - `path`        — absolute path on the host.
+ *   - `branch`      — current branch (or detached-HEAD description).
+ *   - `verdict`     — see `RepoVerdictSchema`.
+ *   - `live`        — true while a chroxy session is actively running in this
+ *                     repo. Distinct from `verdict === 'live'`: `verdict` is the
+ *                     survey's classification (may persist after the session
+ *                     ends), `live` is the instantaneous "session running now"
+ *                     state that drives the green dot.
+ *   - `tree`        — see `RepoTreeSchema`.
+ *   - `worktrees`   — count of git worktrees attached to this repo.
+ *   - `ahead`       — commits the current branch is AHEAD of its upstream, or
+ *                     `null` when there is no upstream / it can't be determined
+ *                     (detached HEAD, no tracking branch). `null` ≠ 0.
+ *   - `behind`      — commits the current branch is BEHIND its upstream, same
+ *                     `null` semantics as `ahead`. `null` ≠ 0.
+ *   - `openPRs`     — number of open PRs, or `null` when unknown (e.g. no GitHub
+ *                     remote, or the lookup was skipped/failed). `null` ≠ 0.
+ *   - `prChecks`    — rollup of CI + review state across this repo's open PRs
+ *                     (counts of open PRs that are CI-failing / CI-pending /
+ *                     review-approved / changes-requested), or `null` when the
+ *                     PR lookup was skipped/failed (same condition as a `null`
+ *                     `openPRs`). All-zero counts mean none of the tracked
+ *                     signals are present — this covers both "no open PRs" and
+ *                     PRs that only carry untracked states (e.g. passing CI with
+ *                     a `REVIEW_REQUIRED` decision). `null` ≠ all-zero.
+ *   - `prsUrl`      — the repo's GitHub pull-requests URL
+ *                     (`https://github.com/<owner>/<repo>/pulls`), derived from
+ *                     the `origin` remote, or `null` when there's no GitHub
+ *                     `origin` remote / it couldn't be determined. Powers the
+ *                     "View PRs" row action.
+ *   - `attribution` — whether commits carry the expected author attribution, or
+ *                     `null` when not evaluated. `null` ≠ false.
+ *   - `onboarding`  — human-readable onboarding state (free-form so the survey
+ *                     can describe partial/odd setups without a wire change).
+ *   - `lastTouched` — ISO-8601 timestamp of the most recent activity used to
+ *                     classify the verdict.
+ *   - `note?`       — optional annotation rendered as the `↳` sub-row under the
+ *                     repo (e.g. "dirty tree, last touched 3 weeks ago").
+ */
+export const RepoStatusSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  branch: z.string(),
+  verdict: RepoVerdictSchema,
+  live: z.boolean(),
+  tree: RepoTreeSchema,
+  worktrees: z.number().int().nonnegative().finite(),
+  ahead: z.number().int().nonnegative().finite().nullable(),
+  behind: z.number().int().nonnegative().finite().nullable(),
+  openPRs: z.number().int().nonnegative().finite().nullable(),
+  prChecks: z
+    .object({
+      failing: z.number().int().nonnegative().finite(),
+      pending: z.number().int().nonnegative().finite(),
+      approved: z.number().int().nonnegative().finite(),
+      changesRequested: z.number().int().nonnegative().finite(),
+    })
+    .nullable(),
+  // Constrained to the GitHub pulls-page shape (not a generic URL): this value
+  // is rendered into an <a href>, and `z.string().url()` would accept dangerous
+  // schemes like `javascript:`. Owner/repo are single path segments.
+  prsUrl: z
+    .string()
+    .regex(/^https:\/\/github\.com\/[^/]+\/[^/]+\/pulls$/, 'must be a GitHub pull-requests URL')
+    .nullable(),
+  attribution: z.boolean().nullable(),
+  onboarding: z.string(),
+  lastTouched: z.string().datetime(),
+  note: z.string().optional(),
+})
+
+/**
+ * Aggregate counts across the surveyed repos, one per verdict bucket. Carried
+ * alongside `repos` so the Control Room's summary chips don't have to re-tally
+ * the array (and stay consistent with the server's own count even if a future
+ * server truncates the `repos` list). All non-negative integers.
+ */
+export const HostStatusSummarySchema = z.object({
+  live: z.number().int().nonnegative().finite(),
+  onboarded: z.number().int().nonnegative().finite(),
+  abandoned: z.number().int().nonnegative().finite(),
+  investigate: z.number().int().nonnegative().finite(),
+  recent: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * #5171 — full Host/Repo Status snapshot. Emitted in reply to a
+ * `host_status_request` (see client.ts). Carries the survey root, the aggregate
+ * `summary`, and the per-repo `repos` rows. `generatedAt` is the ISO-8601 time
+ * the survey ran so the Control Room can render "generated Nm ago" and detect a
+ * stale snapshot. An empty `repos` array is the valid "no repos found under the
+ * root" state — never omitted.
+ */
+export const ServerHostStatusSnapshotSchema = z.object({
+  type: z.literal('host_status_snapshot'),
+  generatedAt: z.string().datetime(),
+  root: z.string(),
+  summary: HostStatusSummarySchema,
+  repos: z.array(RepoStatusSchema),
+})
+
+// ---------------------------------------------------------------------------
+// Mailbox (#5914 follow-up) — Control Room "Mailbox" tab snapshot.
+//
+// Reply to a `mailbox_status_request` (see client.ts). Two projections of the
+// daemon's in-memory mailbox state: the live `registrations` (which sessions
+// are addressable by which agentCommId, and whether each is idle/claude-tui —
+// the conditions the live-interrupt route injects under) and a bounded
+// `recentEvents` ring buffer of the last deliveries the route attempted (newest
+// first). `generatedAt` is the ISO-8601 snapshot time so the tab can render
+// "generated Nm ago". Empty arrays are valid (no registrations / no traffic yet).
+
+/** One live agentCommId → session registration row. */
+export const MailboxRegistrationSchema = z.object({
+  /** The mailbox identity an external sender targets (the route's `to`). */
+  agentCommId: z.string(),
+  /** The chroxy session it currently resolves to. */
+  sessionId: z.string(),
+  /** Display name for that session, or null when unnamed. */
+  sessionName: z.string().nullable(),
+  /** True while the session is mid-turn — the route notifies but does NOT inject. */
+  isBusy: z.boolean(),
+  /** True when the session can receive a PTY wakeup (claude-tui). */
+  isTui: z.boolean(),
+})
+
+/** One recorded live-interrupt delivery attempt. */
+export const MailboxDeliveryEventSchema = z.object({
+  /** Epoch-ms timestamp the ping was handled. */
+  at: z.number(),
+  /** Recipient mailbox id (the ping's `to`). */
+  to: z.string(),
+  /** Sender label (the ping's `from`, or 'unknown'). */
+  from: z.string(),
+  /** Unread count the sender reported, or null when it was absent/invalid. */
+  unreadCount: z.number().int().nonnegative().nullable(),
+  /** What the route did — mirrors handleMailboxPing's `reason`. */
+  outcome: z.enum(['injected', 'busy', 'not-tui', 'no-session', 'pty-dead']),
+})
+
+export const ServerMailboxStatusSnapshotSchema = z.object({
+  type: z.literal('mailbox_status_snapshot'),
+  /** Echoes the request's `requestId` when provided (null otherwise). */
+  requestId: z.string().nullable().optional(),
+  generatedAt: z.string().datetime(),
+  registrations: z.array(MailboxRegistrationSchema),
+  recentEvents: z.array(MailboxDeliveryEventSchema),
+  /** Present only on a refusal (e.g. a session-bound token surveying the host). */
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+})
+
+// ---------------------------------------------------------------------------
+// #5553: per-repo session preset surfaces.
+//
+// Two distinct projections of the resolved preset cross the wire:
+//   - on `session_switched` (create confirm): the DISCLOSURE shape — length-only
+//     preamble (the text is already folded into the prompt server-side) plus the
+//     seed text (staged editable into the composer) + trust metadata. See
+//     `ServerSessionPresetDisclosureSchema`.
+//   - on `session_preset_snapshot` (the per-repo drawer's read/write reply): the
+//     FULL shape including preamble + seed text so the operator can preview/edit
+//     the daemon override. This only reaches HOST-level clients (server gate).
+//
+// `source` is 'daemon' (a pre-trusted override in ~/.chroxy/config.json) or
+// 'repo' (a trust-gated `.chroxy/session.json`). `trustState` is 'trusted'
+// (active) or 'pending' (inert until approved). `active` = trusted && enabled —
+// only an active preset folds its preamble + stages its seed.
+
+export const ServerSessionPresetDisclosureSchema = z.object({
+  source: z.enum(['daemon', 'repo']),
+  active: z.boolean(),
+  trustState: z.enum(['trusted', 'pending']),
+  enabled: z.boolean(),
+  seed: z.string(),
+  preambleLength: z.number().int().nonnegative(),
+  seedLength: z.number().int().nonnegative(),
+  capped: z.boolean(),
+  repoPath: z.string().nullable(),
+})
+
+export const ServerSessionPresetFullSchema = z.object({
+  source: z.enum(['daemon', 'repo']),
+  active: z.boolean(),
+  trustState: z.enum(['trusted', 'pending']),
+  enabled: z.boolean(),
+  preamble: z.string(),
+  seed: z.string(),
+  preambleLength: z.number().int().nonnegative(),
+  seedLength: z.number().int().nonnegative(),
+  capped: z.boolean(),
+  repoPath: z.string().nullable(),
+})
+
+// Reply to session_preset_get / _set / _approve / _revoke (see client.ts).
+// `preset` is null when the repo has no preset at all. `requestId` is echoed
+// when the request carried one.
+export const ServerSessionPresetSnapshotSchema = z.object({
+  type: z.literal('session_preset_snapshot'),
+  cwd: z.string().nullable(),
+  preset: ServerSessionPresetFullSchema.nullable(),
+  requestId: z.string().max(128).optional(),
+})
+
+// ---------------------------------------------------------------------------
+// #5253: Self-hosted runner status Control Room surface.
+//
+// A second host-level pull survey, sibling to the Host/Repo Status one above.
+// The client sends `runner_status_request` (see client.ts — the Refresh button
+// on the "Self-hosted runners" Control Room tab) and the server replies with
+// exactly one `runner_status_snapshot`: the state of every GitHub Actions
+// self-hosted runner installed on the host, grouped by the repo (or org) it
+// serves. Same pull-on-Refresh model as host_status — no delta stream.
+//
+// Same forward/back-compat posture as the host survey: schemas strip unknown
+// fields, so an older client ignores newer fields and a client predating these
+// types ignores the unknown `type` at dispatch.
+// ---------------------------------------------------------------------------
+
+/**
+ * Per-runner verdict — the survey's roll-up of "is this runner healthy" from
+ * the LOCAL service state and (when available) GitHub's view. Drives the
+ * colour-coded tag in the runner table:
+ *   - `'busy'`         — running locally AND GitHub reports a job in progress.
+ *   - `'idle'`         — running locally AND GitHub online with no job (healthy,
+ *                        ready). Also used when GitHub data is unavailable but
+ *                        the local service is running cleanly.
+ *   - `'offline'`      — mismatch worth a look: the local service is running but
+ *                        GitHub says offline (registration/network problem), or
+ *                        GitHub says online but the local service isn't running.
+ *   - `'stopped'`      — the service is registered but not running (dead PID or a
+ *                        non-zero last exit).
+ *   - `'unregistered'` — an install directory with no registered service (the
+ *                        runner was configured but never `svc.sh install`-ed, or
+ *                        the service was removed).
+ */
+export const RunnerVerdictSchema = z.enum([
+  'busy',
+  'idle',
+  'offline',
+  'stopped',
+  'unregistered',
+])
+
+/**
+ * Local service-manager state for one runner install:
+ *   - `manager`       — which service manager was probed (`launchd` on macOS,
+ *                       `systemd` on Linux, or `none` when no `.service` file
+ *                       was present / the platform is unsupported).
+ *   - `label`         — the service label/unit probed (e.g.
+ *                       `actions.runner.owner-repo.name`), or `null` when none.
+ *   - `running`       — whether the service is currently running (a live PID
+ *                       under launchd, `active` under systemd).
+ *   - `pid`           — the running process id, or `null` when not running /
+ *                       unknown.
+ *   - `lastExitCode`  — the service's last exit status, or `null` when unknown.
+ *                       A non-zero value on a not-running service is the "it
+ *                       crashed" signal.
+ */
+export const RunnerServiceStateSchema = z.object({
+  manager: z.enum(['launchd', 'systemd', 'none']),
+  label: z.string().nullable(),
+  running: z.boolean(),
+  pid: z.number().int().nonnegative().finite().nullable(),
+  lastExitCode: z.number().int().finite().nullable(),
+})
+
+/**
+ * One self-hosted runner installation on the host.
+ *
+ * Fields:
+ *   - `name`        — the runner's agent name (from `.runner` `agentName`), the
+ *                     stable identifier GitHub shows for the runner.
+ *   - `dir`         — absolute path of the install directory on the host.
+ *   - `verdict`     — see `RunnerVerdictSchema`.
+ *   - `service`     — local service-manager state (see `RunnerServiceStateSchema`).
+ *   - `githubStatus`— GitHub's view of the runner (`'online' | 'offline'`), or
+ *                     `null` when the `gh` enrichment was skipped/failed/this
+ *                     runner wasn't matched. `null` ≠ offline.
+ *   - `busy`        — whether GitHub reports the runner mid-job, or `null` when
+ *                     the GitHub view is unavailable. `null` ≠ false.
+ *   - `os`          — GitHub-reported OS string (e.g. `macOS`), or `null`.
+ *   - `labels`      — GitHub-reported runner labels (self-hosted, OS, arch,
+ *                     custom). Empty array when unknown — never null.
+ */
+export const RunnerInfoSchema = z.object({
+  name: z.string(),
+  dir: z.string(),
+  verdict: RunnerVerdictSchema,
+  service: RunnerServiceStateSchema,
+  githubStatus: z.enum(['online', 'offline']).nullable(),
+  busy: z.boolean().nullable(),
+  os: z.string().nullable(),
+  labels: z.array(z.string()),
+})
+
+/**
+ * The runners serving one repo (or org), grouped under the GitHub target they
+ * register against.
+ *
+ * Fields:
+ *   - `name`      — display name (the repo name, or `org:<org>` for an org-level
+ *                   target).
+ *   - `owner`     — GitHub owner/org login, or `null` when the URL couldn't be
+ *                   parsed.
+ *   - `repo`      — GitHub repo name, or `null` for an org-level target / an
+ *                   unparseable URL.
+ *   - `githubUrl` — the raw `gitHubUrl` the runners registered against.
+ *   - `runnersUrl`— deep link to the repo/org runner-settings page, or `null`
+ *                   when the URL couldn't be derived. Constrained to the GitHub
+ *                   settings shape so it's safe to render as an `<a href>`.
+ *   - `runners`   — the runner installs serving this target (>= 1).
+ */
+export const RepoRunnersSchema = z.object({
+  name: z.string(),
+  owner: z.string().nullable(),
+  repo: z.string().nullable(),
+  githubUrl: z.string(),
+  runnersUrl: z
+    .string()
+    .regex(
+      /^https:\/\/github\.com\/(?:[^/]+\/[^/]+\/settings\/actions\/runners|organizations\/[^/]+\/settings\/actions\/runners)$/,
+      'must be a GitHub runner-settings URL',
+    )
+    .nullable(),
+  runners: z.array(RunnerInfoSchema),
+})
+
+/**
+ * Aggregate runner counts across the host, one per verdict bucket plus a
+ * `total`. Carried alongside `repos` so the runner tab's summary chips don't
+ * re-tally. All non-negative integers.
+ */
+export const RunnerStatusSummarySchema = z.object({
+  total: z.number().int().nonnegative().finite(),
+  busy: z.number().int().nonnegative().finite(),
+  idle: z.number().int().nonnegative().finite(),
+  offline: z.number().int().nonnegative().finite(),
+  stopped: z.number().int().nonnegative().finite(),
+  unregistered: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * #5253 — full self-hosted runner snapshot. Emitted in reply to a
+ * `runner_status_request` (see client.ts). `root` is the scanned runner-install
+ * root (default `~/github-runners`). `generatedAt` is the ISO-8601 survey time
+ * for the "generated Nm ago" line. An empty `repos` array is the valid "no
+ * runners installed under the root" state — never omitted.
+ */
+export const ServerRunnerStatusSnapshotSchema = z.object({
+  type: z.literal('runner_status_snapshot'),
+  // Echoes the client's `runner_status_request` requestId so the dashboard can
+  // correlate a snapshot to the Refresh click that triggered it. Present (null
+  // when the client omitted one); the handler always sets it.
+  requestId: z.string().nullable().optional(),
+  generatedAt: z.string().datetime(),
+  root: z.string(),
+  summary: RunnerStatusSummarySchema,
+  repos: z.array(RepoRunnersSchema),
+  // Additive degraded-snapshot annotation: on a forbidden/in-progress/failed
+  // survey the handler returns an otherwise-valid (empty repos, zeroed summary)
+  // snapshot plus this `error`, so consumers can surface the failure typed
+  // rather than special-casing a malformed reply.
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+    })
+    .optional(),
+})
+
+// ---------------------------------------------------------------------------
+// #5499 (epic #5498) — Control Room "Integrations" tab: per-repo repo-memory
+// observability. Emitted in reply to an `integration_status_request` (see
+// client.ts). Same pull-on-Refresh, degraded-snapshot-with-`error` contract as
+// the host and runner surveys above.
+// ---------------------------------------------------------------------------
+
+/**
+ * repo-memory cache file stats for one repo (`.repo-memory/cache.db` plus its
+ * `-wal` sidecar). `present` is false when the cache file doesn't exist yet
+ * (config without traffic); `sizeBytes` then reports 0. `lastModified` is the
+ * newest mtime across the db + wal files (ISO-8601), or null when absent —
+ * it doubles as a "last activity" proxy because the telemetry report carries
+ * no timestamp of its own.
+ */
+export const RepoMemoryCacheSchema = z.object({
+  present: z.boolean(),
+  sizeBytes: z.number().int().nonnegative().finite(),
+  lastModified: z.string().datetime().nullable(),
+})
+
+/**
+ * The repo-memory telemetry report for one repo, distilled from
+ * `repo-memory report <repoRoot> --json --diagnostics`. Field names follow the
+ * CLI's TokenReport shape (verified against `@blamechris/repo-memory` 0.15.0).
+ * The diagnostics-derived fields (`cacheEntryCount` / `staleEntryCount`) are
+ * nullable because older CLI versions may omit the `diagnostics` block.
+ * `lastActivity` is the newest telemetry timestamp when the CLI reports one
+ * (current versions don't — then it stays null and consumers fall back to
+ * `cache.lastModified`).
+ */
+export const RepoMemoryReportSchema = z.object({
+  totalEvents: z.number().int().nonnegative().finite(),
+  cacheHits: z.number().int().nonnegative().finite(),
+  cacheMisses: z.number().int().nonnegative().finite(),
+  cacheHitRatio: z.number().min(0).max(1),
+  estimatedTokensSaved: z.number().nonnegative().finite(),
+  cacheEntryCount: z.number().int().nonnegative().finite().nullable(),
+  staleEntryCount: z.number().int().nonnegative().finite().nullable(),
+  lastActivity: z.string().datetime().nullable(),
+})
+
+/**
+ * One repo's repo-memory status.
+ *
+ *   - `configured: false` — no `.repo-memory.json` in the repo root. A quiet
+ *     "not configured" row, not an error; every other field is null/empty.
+ *   - `configured: true` — `summarizer` + `toolGroups` parsed from the config
+ *     (null/empty when the file is unparseable), `cache` always present,
+ *     `report` populated from the CLI when it succeeded.
+ *   - `reason` — per-repo degradation note: why `report` is null for a
+ *     configured repo (CLI missing, CLI failed, unparseable output). Null when
+ *     nothing degraded.
+ */
+export const RepoMemoryStatusSchema = z.object({
+  configured: z.boolean(),
+  summarizer: z.string().nullable(),
+  toolGroups: z.array(z.string()),
+  cache: RepoMemoryCacheSchema.nullable(),
+  report: RepoMemoryReportSchema.nullable(),
+  reason: z.string().nullable(),
+})
+
+/**
+ * #5501 — one recent repo-relay workflow run, distilled from
+ * `gh run list --workflow=repo-relay.yml --json status,conclusion,event,createdAt,databaseId`.
+ * `databaseId` is GitHub's run id — #5502's rerun action consumes it, so it is
+ * carried verbatim. `conclusion` is null while the run is still in progress.
+ */
+export const RepoRelayRunSchema = z.object({
+  databaseId: z.number().int().nonnegative().finite(),
+  status: z.string().nullable(),
+  conclusion: z.string().nullable(),
+  event: z.string().nullable(),
+  createdAt: z.string().datetime().nullable(),
+})
+
+/**
+ * #5501 — per-repo repo-relay verdict, mirroring the runner tab's bucket
+ * style:
+ *
+ *   - 'failing'       — the latest CONCLUDED run failed (wins over drift:
+ *     a broken relay is more urgent than a stale pin).
+ *   - 'drifted'       — pinned version < latest release (sha pins resolve via
+ *     their `# vX.Y.Z` comment first).
+ *   - 'ok'            — latest concluded run succeeded and no drift.
+ *   - 'not_installed' — no `.github/workflows/repo-relay.yml` in the checkout.
+ *   - 'unknown'       — installed but unassessable (gh missing / rate-limited /
+ *     no GitHub remote / no concluded runs and no drift signal); the row's
+ *     `reason` explains why.
+ */
+export const RepoRelayVerdictSchema = z.enum(['ok', 'failing', 'drifted', 'not_installed', 'unknown'])
+
+/**
+ * #5501 — one repo's repo-relay status.
+ *
+ *   - `installed` — answered from the filesystem alone (the workflow file),
+ *     so it survives every gh/network degradation.
+ *   - `pinnedVersion` / `pinnedSha` — parsed from the workflow's
+ *     `uses: blamechris/repo-relay@<ref>` line. A tag pin fills
+ *     `pinnedVersion` only; a sha pin fills `pinnedSha` plus `pinnedVersion`
+ *     when a `# vX.Y.Z` comment resolves it.
+ *   - `driftUnknown` — installed but the pin couldn't be resolved to a
+ *     version (bare sha with no comment, branch pin, unparseable uses line)
+ *     so drift can't be assessed.
+ *   - `latestVersion` — `releases/latest` tag of blamechris/repo-relay,
+ *     fetched ONCE per snapshot (and cached briefly across snapshots).
+ *   - `runs` — most-recent-first; empty when unavailable (see `reason`).
+ *   - `failureStreak` — consecutive failed conclusions from the most recent
+ *     run backwards (in-progress runs are skipped, not streak-breaking).
+ *   - `workflowUrl` — Actions UI deep link, null without a GitHub remote.
+ *   - `reason` — per-repo degradation note (gh missing, rate limit, no
+ *     GitHub remote, …). Null when nothing degraded.
+ */
+export const RepoRelayStatusSchema = z.object({
+  installed: z.boolean(),
+  pinnedVersion: z.string().nullable(),
+  pinnedSha: z.string().nullable(),
+  latestVersion: z.string().nullable(),
+  runs: z.array(RepoRelayRunSchema),
+  failureStreak: z.number().int().nonnegative().finite(),
+  verdict: RepoRelayVerdictSchema,
+  driftUnknown: z.boolean(),
+  workflowUrl: z.string().nullable(),
+  reason: z.string().nullable(),
+})
+
+/**
+ * One surveyed repo in the Integrations snapshot. `repoMemory` is nullable so
+ * a future integration can appear without forcing a repo-memory block.
+ * `repoRelay` (#5501) is additive — optional so #5503-era producers/fixtures
+ * stay valid; the current survey always emits it (a repo without the workflow
+ * file gets a quiet `installed: false` block, same posture as unconfigured
+ * repo-memory).
+ */
+export const IntegrationRepoSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  repoMemory: RepoMemoryStatusSchema.nullable(),
+  repoRelay: RepoRelayStatusSchema.nullable().optional(),
+})
+
+/**
+ * Aggregate repo-memory counts across the surveyed repos, carried alongside
+ * `repos` so the Integrations tab's summary chips don't re-tally. `degraded`
+ * counts configured repos whose report cell carries a `reason`.
+ */
+export const IntegrationStatusSummarySchema = z.object({
+  total: z.number().int().nonnegative().finite(),
+  configured: z.number().int().nonnegative().finite(),
+  notConfigured: z.number().int().nonnegative().finite(),
+  degraded: z.number().int().nonnegative().finite(),
+  // #5501 (additive — optional so pre-relay snapshots stay valid): repo-relay
+  // tallies for the summary chips. `relayFailing` / `relayDrifted` count the
+  // verdict buckets; `relayInstalled` counts repos with the workflow file.
+  relayInstalled: z.number().int().nonnegative().finite().optional(),
+  relayFailing: z.number().int().nonnegative().finite().optional(),
+  relayDrifted: z.number().int().nonnegative().finite().optional(),
+})
+
+/**
+ * Snapshot-level note about the `repo-memory` CLI binary, probed ONCE per
+ * survey. When `found` is false every configured repo's CLI-derived cells are
+ * degraded and `note` explains why (the per-repo `reason` repeats it).
+ */
+export const IntegrationCliStatusSchema = z.object({
+  found: z.boolean(),
+  path: z.string().nullable(),
+  note: z.string().nullable(),
+})
+
+/**
+ * #5499 — full Integrations survey snapshot. Emitted in reply to an
+ * `integration_status_request` (see client.ts). `root` is the Control Room
+ * discovery root the repo set was resolved under (same as the host survey).
+ * An empty `repos` array is the valid "no repos under the root" state.
+ * `repoMemoryCli` is optional so the degraded error-snapshot (FORBIDDEN /
+ * SURVEY_IN_PROGRESS / SURVEY_FAILED) can reuse the shared error envelope; a
+ * successful survey always carries it.
+ */
+export const ServerIntegrationStatusSnapshotSchema = z.object({
+  type: z.literal('integration_status_snapshot'),
+  // Echoes the client's `integration_status_request` requestId so the
+  // dashboard can correlate a snapshot to the Refresh click that triggered it.
+  requestId: z.string().nullable().optional(),
+  generatedAt: z.string().datetime(),
+  root: z.string(),
+  summary: IntegrationStatusSummarySchema,
+  repos: z.array(IntegrationRepoSchema),
+  repoMemoryCli: IntegrationCliStatusSchema.optional(),
+  // #5501: snapshot-level note about the `gh` CLI, probed ONCE per survey —
+  // when `found` is false every repo-relay run/release cell degrades and
+  // `note` explains why (each installed repo's `reason` repeats it).
+  ghCli: IntegrationCliStatusSchema.optional(),
+  // Additive degraded-snapshot annotation — same posture as the host/runner
+  // snapshots: on a forbidden/in-progress/failed survey the handler returns an
+  // otherwise-valid empty snapshot plus this `error`.
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+    })
+    .optional(),
+})
+
+/**
+ * #5500 (epic #5498) — counts distilled from a `repo-memory index` run, as
+ * printed by the CLI's human-readable report (field names verified against
+ * the IndexReport shape in @blamechris/repo-memory: scanned / summarized /
+ * "already fresh" / skipped). All four are required — a partially parsed
+ * report is treated as unparseable and the ack carries `counts: null`
+ * instead, so the dashboard never renders a half-true breakdown.
+ */
+export const IntegrationActionCountsSchema = z.object({
+  scanned: z.number().int().nonnegative().finite(),
+  summarized: z.number().int().nonnegative().finite(),
+  fresh: z.number().int().nonnegative().finite(),
+  skipped: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * #5500 — positive ack that an `integration_action` request completed.
+ * Clones the `cancel_activity_ack` correlation contract (#5277): echoes the
+ * request's `action` + `repoPath` (and `requestId` when supplied) so the
+ * dashboard can clear the exact row's pending state. Failures surface as an
+ * `INTEGRATION_ACTION_FAILED` session_error, which also echoes
+ * `requestId` / `action` / `repoPath`.
+ *
+ * `action` is a plain string (not the client enum) so a future action's ack
+ * reaches older dashboards without a schema bump — consumers key off
+ * `repoPath` and treat unknown actions as opaque. `counts` is the parsed
+ * index result for `repo_memory_reindex`, or null when the CLI output
+ * couldn't be parsed (the UI then just refreshes the survey for the truth).
+ *
+ * #5502: `runId` echoes the re-run request's GitHub Actions run id on a
+ * `repo_relay_rerun` ack (null/absent on reindex acks). A rerun ack carries
+ * `counts: null` — there is nothing to count; the new attempt shows up as
+ * in_progress on the next survey refresh.
+ */
+export const ServerIntegrationActionAckSchema = z.object({
+  type: z.literal('integration_action_ack'),
+  action: z.string(),
+  repoPath: z.string(),
+  requestId: z.string().max(128).nullable().optional(),
+  runId: z.number().int().nonnegative().finite().nullable().optional(),
+  counts: IntegrationActionCountsSchema.nullable(),
+}).passthrough()
+
+// ───────────────────────────────────────────────────────────────────────────
+// #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * #5554 — one skill in the inventory snapshot. Carries only names /
+ * descriptions / metadata — never the skill BODY (the security boundary: skill
+ * bodies never leave the server). Fields:
+ *
+ *   - `name` / `description` — from the file + frontmatter (description is the
+ *     frontmatter `description:` or the first non-empty body line).
+ *   - `source` — which tier this entry came from: `global` (~/.chroxy/skills/)
+ *     or `repo` (a repo-local `.chroxy/skills/` overlay).
+ *   - `activation` — `auto` (always active) or `manual` (opt-in per session).
+ *   - `active` — whether the skill is in the default-active set (a manual skill
+ *     not yet activated reports `active: false`).
+ *   - `providers` — frontmatter provider scoping (empty = applies to all).
+ *   - `version` — frontmatter `version:` if present.
+ *   - `trustState` — `trusted` / `pending` for community-namespaced skills;
+ *     null for plain skills (implicitly trusted).
+ *   - `communityAuthor` — the `community/<author>/` namespace, when applicable.
+ *   - `hash` / `installed` — joined from the paired `skills.lock` (null when
+ *     the lock has no entry for this skill).
+ *   - `overridesGlobal` — set on a repo-tier entry that shadows a global skill
+ *     of the same name (the per-session loader's repo-wins precedence).
+ *   - `lastUsed` / `useCount` / `usedRepos` — the #5554 Phase 2 usage rollup
+ *     (lastUsed null + count 0 when never recorded).
+ */
+export const SkillInventoryEntrySchema = z.object({
+  name: z.string(),
+  description: z.string(),
+  source: z.enum(['global', 'repo']),
+  activation: z.enum(['auto', 'manual']),
+  active: z.boolean(),
+  providers: z.array(z.string()),
+  version: z.string().nullable(),
+  trustState: z.enum(['trusted', 'pending']).nullable(),
+  communityAuthor: z.string().nullable(),
+  hash: z.string().nullable(),
+  installed: z.string().nullable(),
+  overridesGlobal: z.boolean().optional(),
+  lastUsed: z.string().datetime().nullable(),
+  useCount: z.number().int().nonnegative().finite(),
+  usedRepos: z.array(z.string()),
+})
+
+/**
+ * #5554 — one surveyed repo's skill overlay. `skills` is the repo-local
+ * `.chroxy/skills/` overlay (empty when the repo has no overlay — absence is
+ * signal, not an error). `error` carries a per-repo scan-failure reason so a
+ * single broken overlay degrades to a chip on that card rather than a dead
+ * snapshot.
+ */
+export const SkillInventoryRepoSchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  skills: z.array(SkillInventoryEntrySchema),
+  error: z.string().nullable(),
+})
+
+/**
+ * #5554 — full Skills inventory snapshot, emitted in reply to a
+ * `skills_inventory_request` (see client.ts). `global` is the
+ * `~/.chroxy/skills/` tier; `repos` are the per-repo overlays for the surveyed
+ * repo set (same set the host / integration surveys resolve). `globalError`
+ * degrades the global tier the same way a repo `error` degrades a repo card.
+ * `root` is the Control Room discovery root the repo set was resolved under.
+ * Same degraded-snapshot-with-`error` posture as the sibling surveys: on a
+ * forbidden / in-progress / failed request the handler returns an otherwise
+ * valid empty snapshot plus the top-level `error`.
+ */
+export const ServerSkillsInventorySnapshotSchema = z.object({
+  type: z.literal('skills_inventory_snapshot'),
+  requestId: z.string().max(128).nullable().optional(),
+  generatedAt: z.string().datetime(),
+  root: z.string(),
+  global: z.array(SkillInventoryEntrySchema),
+  globalError: z.string().nullable().optional(),
+  repos: z.array(SkillInventoryRepoSchema),
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+    })
+    .optional(),
+})
+
+/**
+ * #5547: reply to a `summarize_session` request — the model-written
+ * continuation brief built from the session's persisted history. Sent only to
+ * the requesting client. `summary` is the editable brief the dashboard seeds
+ * into the create-session composer; `truncated` flags that the history was
+ * windowed before summarization (the brief's header also notes this).
+ * `sessionId` echoes the source session, `requestId` correlates the click.
+ * Failures surface separately as a `SUMMARIZE_FAILED` session_error echoing
+ * `sessionId` / `requestId`.
+ */
+export const ServerSummarizeSessionResultSchema = z.object({
+  type: z.literal('summarize_session_result'),
+  sessionId: z.string(),
+  summary: z.string(),
+  truncated: z.boolean().optional(),
+  requestId: z.string().max(128).nullable().optional(),
+}).passthrough()
 
 export const ServerClientFocusChangedSchema = z.object({
   type: z.literal('client_focus_changed'),
@@ -276,6 +1761,35 @@ export const ServerInactivityWarningSchema = z.object({
   prefab: z.string(),
 })
 
+// #4653: chroxy-side intervention surfaced to the user. Currently only the
+// multi-question AskUserQuestion deny shipped in #4648 fires this event.
+// The dashboard / mobile app append a SessionIntervention entry to the
+// targeted session's interventions ring and render a FooterBar counter
+// chip + (first-time only) inline system ChatMessage so users can tell
+// chroxy intervened — without this surface the deny is invisible.
+//
+// `reason` is a discriminator that lets future intervention kinds land
+// without a wire version bump (sibling-deny from #4668 would extend the
+// enum here). `questionCount >= 2` because the permission-hook only
+// denies multi-question forms — single-question is the happy path.
+export const ServerMultiQuestionInterventionSchema = z.object({
+  type: z.literal('multi_question_intervention'),
+  // Stable id of the tool_use the hook denied. Dashboard dedups by this
+  // so a stuck model re-emitting the same payload doesn't inflate the
+  // counter falsely (the #4666 / #4668 failure mode).
+  toolUseId: z.string(),
+  // Question count from the denied AskUserQuestion form. Hook only fires
+  // for length > 1, so the floor is 2 — defence-in-depth against a server
+  // bug that would otherwise inject a "0 questions" entry into the UI.
+  questionCount: z.number().int().min(2).finite(),
+  reason: z.literal('multi_question'),
+  // Server wall-clock when the deny happened. Allowed to be 0 (epoch) so
+  // a clock-skewed dev environment doesn't bounce the event off the wire,
+  // but typical values are 1.7e12+ (post-2023). The client renders relative
+  // ("3s ago") from this.
+  timestamp: z.number().int().min(0).finite(),
+})
+
 export const ServerMcpServersSchema = z.object({
   type: z.literal('mcp_servers'),
   servers: z.array(z.object({
@@ -291,6 +1805,30 @@ export const ServerPlanStartedSchema = z.object({
 export const ServerPlanReadySchema = z.object({
   type: z.literal('plan_ready'),
   allowedPrompts: z.array(z.any()).optional(),
+})
+
+// #4091: cumulative per-session token + cost totals. Emitted by
+// _trackUsage on every priced result event; consumed by the dashboard
+// sidebar cost badge (#4073) and mobile session-header badge (#4074).
+//
+// Token counts + turnsBilled are non-negative integers — they are
+// monotonic counters that only grow on priced result events. costUsd
+// is finite but intentionally kept unconstrained-sign: a refund /
+// credit-adjustment turn (#4099) subtracts from the running total,
+// and a session that received only refunds could legitimately end up
+// with a negative cumulative.
+//
+// Declared up here (and not next to the other event-emit schemas
+// further down the file) so it can be reused inline by
+// `ServerSessionListEntrySchema` below — keeps the snapshot field and
+// the event-emit shape in lockstep when either changes.
+export const CumulativeUsageSchema = z.object({
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  cacheReadTokens: z.number().int().nonnegative(),
+  cacheCreationTokens: z.number().int().nonnegative(),
+  costUsd: z.number().finite(),
+  turnsBilled: z.number().int().nonnegative(),
 })
 
 /**
@@ -330,6 +1868,11 @@ export const ServerSessionListEntrySchema = z.object({
   lastActivityAt: z.number().optional(),
   conversationId: z.string().nullable().optional(),
   provider: z.string().optional(),
+  // #5630/#5629: per-session era-aware billing class (mirrors the provider
+  // auth field) so the dashboard token view labels each session's cost row by
+  // class. Optional — older servers omit it; the client falls back to deriving
+  // it from `provider`.
+  billingClass: z.enum(['api-key', 'subscription', 'programmatic-credit']).optional(),
   capabilities: z.record(z.string(), z.unknown()).optional(),
   worktree: z.boolean().optional(),
   repoCwd: z.string().nullable().optional(),
@@ -339,6 +1882,15 @@ export const ServerSessionListEntrySchema = z.object({
   // dashboard can show / edit this; the server falls back to
   // `config.promptEvaluatorSkipPattern` when null.
   promptEvaluatorSkipPattern: z.union([z.string(), z.null()]).optional(),
+  // #3805: per-session opt-in Chroxy context hint flag. Optional because
+  // older servers (pre-#3805) omit the field; the dashboard treats
+  // `undefined` as `false` (toggle off).
+  chroxyContextHint: z.boolean().optional(),
+  // #4660: per-session user-authored preamble (free text prepended to
+  // the system prompt every turn). Optional because older servers
+  // (pre-#4660) omit the field; the dashboard treats `undefined` as
+  // empty string (no preamble injected).
+  sessionPreamble: z.string().optional(),
   stdinForwardingDisabled: z.boolean().optional(),
   // #3573: cumulative stdin_dropped totals seeded into the handshake so a
   // late-joining client sees the running counter without waiting for the
@@ -346,6 +1898,24 @@ export const ServerSessionListEntrySchema = z.object({
   // serialize as 0.
   stdinDroppedBytes: z.number().int().nonnegative().optional(),
   stdinDroppedCount: z.number().int().nonnegative().optional(),
+  // #4091: per-session running token + cost totals included in the
+  // session_list snapshot (#4072 / #4088). Optional because older
+  // servers omit it entirely; consumers should treat `undefined` as
+  // "no data yet" and an all-zero block as "session has had no priced
+  // turns yet" (e.g. subscription-billed providers).
+  //
+  // Token counts + turnsBilled are non-negative integers; cumulative
+  // costUsd is finite but intentionally allowed to be negative — a
+  // refund / credit-adjustment turn (#4099) can subtract from the
+  // running total, and a session that received only refunds could
+  // legitimately end up with a negative cumulative.
+  cumulativeUsage: CumulativeUsageSchema.optional(),
+  // #4307: pending backgrounded shells. Empty array when no work is
+  // pending — never `undefined` from a #4307-aware server (mirrors the
+  // `cumulativeUsage` shape, which always carries a zero block once
+  // present). Optional in the schema so pre-#4307 servers that omit
+  // the field still parse; consumers should treat `undefined` as `[]`.
+  pendingBackgroundShells: z.array(ServerPendingBackgroundShellSchema).optional(),
 }).passthrough()
 
 export const ServerSessionListSchema = z.object({
@@ -376,6 +1946,47 @@ export const ServerSessionRestoreFailedSchema = z.object({
   historyLength: z.number().optional(),
 })
 
+/**
+ * #5714 / #5701: emitted when a session-list mutation (create / rename / destroy)
+ * could not be flushed to disk — disk full, locked file, read-only home. The
+ * write is atomic so on-disk state isn't corrupted, but the in-memory change
+ * will be lost on the next restart. Clients surface this as an error banner so
+ * the operator knows their change wasn't saved (instead of silently believing it
+ * was). `name` is null when the entry was already removed before the flush
+ * (destroy path) and no label could be resolved.
+ */
+export const ServerSessionPersistFailedSchema = z.object({
+  type: z.literal('session_persist_failed'),
+  sessionId: z.string(),
+  name: z.string().nullable(),
+})
+
+/**
+ * #4756: user-initiated Stop confirmation broadcast. CliSession emits a
+ * `stopped` event from `_handleChildClose` when the child process exits
+ * cleanly after a Stop click (interrupt() set `_intentionalStop`). The
+ * SessionManager + ws-forwarding paths surface it as this `session_stopped`
+ * wire message so clients can render a quiet "Session stopped." confirmation
+ * — distinct from `session_error` (crash) which fires for unexpected exits
+ * that trigger the auto-respawn path.
+ *
+ * `sessionId` is injected by `_broadcastToSession` on the multi-session
+ * path, so it's optional on the schema for consumers that construct the
+ * message without it pre-broadcast (matches the `cost_update` / `session_usage`
+ * pattern). The legacy-cli path doesn't carry a sessionId at all.
+ *
+ * `code` is the child process exit code (number). Typically 0 on a clean
+ * SIGINT exit, but kept on the wire so clients can render the numeric code
+ * for non-zero exits (e.g. 143 = SIGTERM). Optional because future providers
+ * that adopt the `stopped` event for parity (see #4756 follow-up) may not
+ * have a meaningful exit code (e.g. in-process SDK session).
+ */
+export const ServerSessionStoppedSchema = z.object({
+  type: z.literal('session_stopped'),
+  sessionId: z.string().optional(),
+  code: z.number().int().optional(),
+})
+
 // #3404 audit (F1+F5): per-provider auth/billing summary so clients can
 // grey-out unusable providers and surface billing-identity confidence.
 // Optional on the wire so older servers stay parseable.
@@ -386,6 +1997,11 @@ const ProviderAuthSchema = z.object({
   envVars: z.array(z.string()),
   hint: z.string(),
   detail: z.string(),
+  // #5630/#5629: era-aware billing class so the client can label the cost row
+  // per class (api-key → "Cost (BYOK)", programmatic-credit → "Credit spend",
+  // subscription → "Included (subscription)"). Optional so older servers that
+  // omit it still parse; clients fall back to a static per-provider default.
+  billingClass: z.enum(['api-key', 'subscription', 'programmatic-credit']).optional(),
 })
 
 export const ServerProviderListSchema = z.object({
@@ -396,6 +2012,71 @@ export const ServerProviderListSchema = z.object({
     auth: ProviderAuthSchema.optional(),
   })),
 })
+
+// #5555 (auth_bootstrap) — single connect-time burst frame that carries the
+// provider / slash-command / agent lists right after auth_ok, so a new client
+// can SKIP its 3-request `list_providers` / `list_slash_commands` /
+// `list_agents` round trip. Payloads mirror the respective request responses
+// (`provider_list`, `slash_commands`, `agent_list`) so clients reuse their
+// existing per-list handlers to consume them. Each list is optional and
+// defaults to empty so a partial server compute (e.g. an unreadable agents
+// dir) still parses. `passthrough()` keeps the frame forward-compatible.
+export const ServerAuthBootstrapSchema = z.object({
+  type: z.literal('auth_bootstrap'),
+  providers: z.array(z.object({
+    name: z.string(),
+    capabilities: z.record(z.string(), z.boolean()).optional(),
+    auth: ProviderAuthSchema.optional(),
+  })).default([]),
+  slashCommands: z.array(z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    source: z.string().optional(),
+  })).default([]),
+  agents: z.array(z.object({
+    name: z.string(),
+    description: z.string().optional(),
+    source: z.string().optional(),
+  })).default([]),
+  // The active session id this burst was scoped to, when applicable. Lets a
+  // client ignore a stale burst if it has already switched sessions.
+  sessionId: z.string().optional(),
+  // #5555 (sub-item 7) — the server's current public tunnel URL as a `wss://`
+  // endpoint, when a tunnel is up. Carried in every connect-time bootstrap so a
+  // reconnecting client always re-learns the live URL (covers the case where a
+  // quick-tunnel rotation happened while the client was offline and it could
+  // not receive the live `tunnel_url_changed` push). Absent in LAN / no-tunnel
+  // deployments. Never a secret — the QR code already shares this URL.
+  tunnelUrl: z.string().optional(),
+}).passthrough()
+
+// #5555 (sub-item 7) — quick-tunnel recovery rotates the public URL. The
+// server pushes this to every connected client so they can update the stored
+// endpoint their reconnect path dials instead of hammering the dead URL.
+//
+// TIMING / BEST-EFFORT: when the tunnel URL rotates, tunnel-connected clients
+// are reaching the server THROUGH the old tunnel, which has just died — they
+// usually will NOT receive this frame (the socket is already gone). It is
+// genuinely best-effort for them; the durable recovery path for those clients
+// is `tunnelUrl` in the `auth_bootstrap` burst on their next reconnect. The
+// real beneficiaries are LAN-connected clients (desktop dashboard over
+// localhost, LAN clients) whose socket survives the rotation — they get the
+// fresh URL immediately and persist it.
+//
+// SECURITY: the tunnel URL is connection metadata, not a secret (it is shared
+// in the QR code), so it is broadcast to ALL authenticated clients including
+// pairing-bound ones — a bound client already knows the URL it connected to,
+// and a rotated URL is the same trust level. See
+// docs/security/bearer-token-authority.md.
+export const ServerTunnelUrlChangedSchema = z.object({
+  type: z.literal('tunnel_url_changed'),
+  // The new public endpoint as a `wss://` URL the client should dial on its
+  // next reconnect.
+  url: z.string(),
+  // The previous `wss://` URL, when known — lets a client match the rotation
+  // against a specific stored entry instead of guessing.
+  previousUrl: z.string().optional(),
+}).passthrough()
 
 export const ServerSkillsListSchema = z.object({
   type: z.literal('skills_list'),
@@ -543,6 +2224,92 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
   actualAuthor: z.string(),
 })
 
+// #4178: generic server `error` envelope shape — the catch-all schema for
+// `type: 'error'` messages that aren't covered by a code-specific variant
+// like `ServerSkillTrustGrantInvalidAuthorSchema`. `fatal: false` was
+// introduced by #4145 (MAX_TOOL_ROUNDS_REACHED) and is consumed by
+// #4176's warning-toast branch in the dashboard. Declaring it here lets
+// other clients (mobile app, future tools) consume the same shape via
+// the shared store-core `handleError` parser. `fatal` defaults unset
+// (treated as `true` by consumers) so omitting it preserves the
+// pre-#4145 contract.
+//
+// `correlationId` + `details` are emitted by the server's INVALID_MESSAGE
+// schema-rejection path (`ws-server.js:1314`) and any handler that calls
+// `handler-utils.sendError(ws, requestId, code, message, data)` — the
+// `data` arg is merged onto the envelope (`handler-utils.js:420-435`)
+// after a reserved-field guard. `.passthrough()` matches the wire and
+// preserves code-specific fields (e.g. `actualAuthor` on INVALID_AUTHOR,
+// `boundSessionId` on SESSION_TOKEN_MISMATCH) so future consumers parsing
+// against this generic schema don't silently lose context.
+export const ServerErrorEnvelopeSchema = z.object({
+  type: z.literal('error'),
+  requestId: z.string().nullable().optional(),
+  code: z.string().optional(),
+  message: z.string(),
+  fatal: z.boolean().optional(),
+  correlationId: z.string().optional(),
+  details: z.string().optional(),
+}).passthrough()
+
+// #4141: BYOK credentials status — emitted by handleByokGetCredentialsStatus /
+// handleByokSetCredentials / handleByokClearCredentials and broadcast to all
+// connected clients on set/clear (#4142). Dashboard previously type-cast the
+// payload with raw `as` casts at message-handler.ts:2660 which accepted any
+// status/source string from the wire — a malformed server could store
+// `status: 'unknown'` into the store. This schema constrains the shape.
+//
+// fileExists: tracks the on-disk credentials file presence (#4144). When
+// status === 'missing' but fileExists === true, the dashboard shows the
+// stale-file notice (#4175) — broaden contract handled separately.
+export const ServerByokCredentialsStatusSchema = z.object({
+  type: z.literal('byok_credentials_status'),
+  requestId: z.string().nullable().optional(),
+  status: z.enum(['set', 'missing']),
+  source: z.enum(['env', 'file', 'none']),
+  masked: z.string().optional(),
+  reason: z.string().optional(),
+  fileExists: z.boolean().optional(),
+}).passthrough()
+
+// #3855: generalized provider-credential status. One entry per known
+// credential env var. The raw value is NEVER on the wire — only `masked`
+// (a redacted preview) when status === 'set'. `source` adds 'store' (the
+// ~/.chroxy/credentials.json store) and 'oauth' (a detected OAuth credential
+// for the provider) to the BYOK set. Sent only to the requesting client
+// (admin state, no broadcast) plus a no-requestId broadcast after set/delete
+// so additional dashboards stay in sync.
+const ServerCredentialEntrySchema = z.object({
+  key: z.string(),
+  provider: z.string(),
+  label: z.string(),
+  kind: z.enum(['api-key', 'oauth-token']),
+  status: z.enum(['set', 'missing']),
+  source: z.enum(['env', 'store', 'oauth', 'none']),
+  masked: z.string().optional(),
+  oauth: z.boolean(),
+}).passthrough()
+
+export const ServerCredentialsStatusSchema = z.object({
+  type: z.literal('credentials_status'),
+  requestId: z.string().nullable().optional(),
+  credentials: z.array(ServerCredentialEntrySchema),
+  fileExists: z.boolean().optional(),
+  fileError: z.string().nullable().optional(),
+}).passthrough()
+
+// #3855: result of a `test_credential` ping. `ok` true means the provider
+// accepted the credential. Never carries the raw value.
+export const ServerCredentialTestResultSchema = z.object({
+  type: z.literal('credential_test_result'),
+  requestId: z.string().nullable().optional(),
+  key: z.string(),
+  ok: z.boolean(),
+  error: z.string().optional(),
+  model: z.string().optional(),
+  latencyMs: z.number().optional(),
+}).passthrough()
+
 // #3544: cumulative stdin_dropped totals broadcast to clients bound to the
 // session whenever a SidecarProcess pre-dial-cap drop occurs. Operators not
 // tailing the server log (mobile users, dashboard-only operators) see a live
@@ -575,6 +2342,55 @@ export const ServerPushTokenErrorSchema = z.object({
   message: z.string(),
 })
 
+// #4541: notification preferences snapshot. Emitted by
+// `handleNotificationPrefsGet` and again after every `notification_prefs_set`.
+// Mirrors the on-disk shape (~/.chroxy/notification-prefs.json) without the
+// header — the wire payload IS the prefs object.
+//
+// `categories` is an open-ended map keyed by RATE_LIMITS category names from
+// `push.js`. The server-side loader sanitises unknown keys at the storage
+// boundary, so the wire shape stays permissive — adding a new push category
+// in `push.js` does not require a protocol bump.
+//
+// `requestId` is echoed on the response to the originating client; the
+// broadcast variant emitted after a set carries no requestId so all
+// connected clients update in lockstep.
+const NotificationPrefsCategoriesSchema = z.record(z.string().min(1).max(64), z.boolean())
+// #4544: quiet-hours window carries an IANA timezone; per-device entries
+// may also carry their own `quietHours` and `bypassCategories` (the
+// device-level fields REPLACE the global value, see `notification-prefs.js`).
+const NotificationPrefsQuietHoursSchema = z.union([
+  z.null(),
+  z.object({
+    start: z.string().regex(/^\d{2}:\d{2}$/),
+    end: z.string().regex(/^\d{2}:\d{2}$/),
+    timezone: z.string().min(1).max(64),
+  }),
+])
+const NotificationPrefsBypassListSchema = z.array(z.string().min(1).max(64)).max(64)
+const NotificationPrefsDevicesSchema = z.record(
+  z.string().min(1).max(512),
+  z.object({
+    categories: NotificationPrefsCategoriesSchema.optional(),
+    quietHours: NotificationPrefsQuietHoursSchema.optional(),
+    bypassCategories: NotificationPrefsBypassListSchema.optional(),
+  }).passthrough(),
+)
+
+export const ServerNotificationPrefsSchema = z.object({
+  type: z.literal('notification_prefs'),
+  requestId: z.string().nullable().optional(),
+  prefs: z.object({
+    categories: NotificationPrefsCategoriesSchema,
+    devices: NotificationPrefsDevicesSchema,
+    quietHours: NotificationPrefsQuietHoursSchema,
+    // #4544: globally-applied bypass list. Optional in the wire schema so
+    // older servers that omit the field still parse — clients should treat
+    // `undefined` as "use the documented defaults" (permission + activity_error).
+    bypassCategories: NotificationPrefsBypassListSchema.optional(),
+  }).passthrough(),
+}).passthrough()
+
 export const ServerShutdownSchema = z.object({
   type: z.literal('server_shutdown'),
   // 'crash' is emitted from uncaughtException/unhandledRejection handlers in
@@ -585,6 +2401,10 @@ export const ServerShutdownSchema = z.object({
 
 export const ServerPongSchema = z.object({
   type: z.literal('pong'),
+  // #5515: optional wall-clock stamp so clients can split the ping/pong RTT
+  // into uplink (ping send → serverTs) and downlink (serverTs → pong recv)
+  // halves. See ServerStreamDeltaSchema for the wall-clock/skew caveat.
+  serverTs: z.number().int().nonnegative().finite().optional(),
 })
 
 export const ServerCostUpdateSchema = z.object({
@@ -592,6 +2412,29 @@ export const ServerCostUpdateSchema = z.object({
   sessionCost: z.number().nullable().optional(),
   totalCost: z.number().nullable().optional(),
   budget: z.number().nullable().optional(),
+})
+
+export const ServerSessionUsageSchema = z.object({
+  type: z.literal('session_usage'),
+  // sessionId is injected by _broadcastToSession; optional in the schema
+  // so consumers can construct the message without it pre-broadcast.
+  sessionId: z.string().optional(),
+  cumulativeUsage: CumulativeUsageSchema,
+})
+
+// #4075: soft per-session cost-threshold crossing. Fires ONCE per
+// session when cumulativeUsage.costUsd >= the configured threshold.
+//
+// costUsd is finite but kept unconstrained-sign: in practice it's the
+// running cumulative at the crossing point so always positive, but the
+// schema doesn't enforce that to stay consistent with CumulativeUsage
+// where refunds (#4099) can in principle drive the cumulative
+// negative. thresholdUsd is non-negative by setter contract.
+export const ServerSessionCostThresholdCrossedSchema = z.object({
+  type: z.literal('session_cost_threshold_crossed'),
+  sessionId: z.string().optional(),
+  costUsd: z.number().finite(),
+  thresholdUsd: z.number().finite().nonnegative(),
 })
 
 export const ServerBudgetWarningSchema = z.object({
@@ -608,6 +2451,53 @@ export const ServerBudgetExceededSchema = z.object({
   budget: z.number(),
   percent: z.number(),
   message: z.string(),
+})
+
+// #5821 (live wiring) — billing-canary broadcast. Pushed when the daemon's
+// billing early-warning state changes (silent metered default; the dormant
+// claude-tui reclassification tripwire). Empty `warnings` = all clear, so the
+// client clears its banner. The same snapshot also seeds `auth_ok` for late
+// joiners. Shares BillingCanarySnapshotSchema (defined near the top) so the
+// broadcast and the seed can't drift.
+export const ServerBillingCanarySchema = BillingCanarySnapshotSchema.extend({
+  type: z.literal('billing_canary'),
+})
+
+// #5752: positive ack for an actioned `resume_budget` request. The substantive
+// state change (un-pausing) is still broadcast as `budget_resumed` — but ONLY
+// when the session was actually paused, because that message injects a "session
+// resumed" chat note. The ack is sent to the *requesting* client unconditionally
+// so the resume control is never a dead button: a click on an already-resumed
+// session (e.g. a second client in a shared session, or a stale tap) resolves
+// cleanly with `wasPaused: false` instead of silence. Mirrors the
+// `cancel_activity_ack` correlation contract (#5277).
+export const ServerBudgetResumeAckSchema = z.object({
+  type: z.literal('budget_resume_ack'),
+  sessionId: z.string().optional(),
+  // True when this request actually un-paused the session (a `budget_resumed`
+  // broadcast accompanied it); false when the session was not paused (no-op).
+  wasPaused: z.boolean(),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
+// #5665: machine-wide monthly programmatic-credit budget meter. Broadcast to
+// ALL clients after each programmatic-credit-billed turn, and sent once on
+// connect as a snapshot. `budgetUsd`/`percent` are null when no cap is
+// configured (chroxy can't detect the plan tier). `justWarned`/`justExceeded`
+// mark one-shot threshold crossings on the live event and are omitted from the
+// on-connect snapshot.
+export const ServerMonthlyBudgetSchema = z.object({
+  type: z.literal('monthly_budget'),
+  month: z.string(), // "YYYY-MM" (UTC calendar month)
+  spentUsd: z.number().finite().nonnegative(),
+  turnsBilled: z.number().int().nonnegative(),
+  budgetUsd: z.number().finite().nonnegative().nullable(),
+  warningPercent: z.number().finite(),
+  percent: z.number().finite().nullable(),
+  warning: z.boolean(),
+  exceeded: z.boolean(),
+  justWarned: z.boolean().optional(),
+  justExceeded: z.boolean().optional(),
 })
 
 // -- Web task schemas --
@@ -791,15 +2681,109 @@ export const ServerEvaluatorClarifySchema = z.object({
 
 // -- Inferred TypeScript types --
 
+export type BillingCanaryWarning = z.infer<typeof BillingCanaryWarningSchema>
+export type BillingCanarySnapshot = z.infer<typeof BillingCanarySnapshotSchema>
+export type ServerBillingCanaryMessage = z.infer<typeof ServerBillingCanarySchema>
 export type ServerAuthOkMessage = z.infer<typeof ServerAuthOkSchema>
+export type ServerPairRequestPendingMessage = z.infer<typeof ServerPairRequestPendingSchema>
+export type ServerPairPendingMessage = z.infer<typeof ServerPairPendingSchema>
+export type ServerPairResultMessage = z.infer<typeof ServerPairResultSchema>
+export type ServerPairResolvedMessage = z.infer<typeof ServerPairResolvedSchema>
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
+// #4192: typed alias for the generic `type: 'error'` envelope added in #4178.
+// Downstream consumers (store-core handleError, dashboard message-handler,
+// future mobile dispatch) can import this directly instead of re-running
+// `z.infer<typeof ServerErrorEnvelopeSchema>` at each call site.
+export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchema>
 export type ServerCostUpdateMessage = z.infer<typeof ServerCostUpdateSchema>
+export type CumulativeUsage = z.infer<typeof CumulativeUsageSchema>
+export type ServerSessionUsageMessage = z.infer<typeof ServerSessionUsageSchema>
+// #4756: typed alias for the user-initiated Stop confirmation broadcast.
+export type ServerSessionStoppedMessage = z.infer<typeof ServerSessionStoppedSchema>
+export type ServerSessionCostThresholdCrossedMessage = z.infer<typeof ServerSessionCostThresholdCrossedSchema>
+// #5665: machine-wide monthly programmatic-credit meter snapshot/event.
+export type ServerMonthlyBudgetMessage = z.infer<typeof ServerMonthlyBudgetSchema>
 export type ServerExtensionMessage = z.infer<typeof ServerExtensionMessageSchema>
 export type ServerSkillsListMessage = z.infer<typeof ServerSkillsListSchema>
+export type ServerAuthBootstrapMessage = z.infer<typeof ServerAuthBootstrapSchema>
+// #5555 (sub-item 7) — quick-tunnel URL rotation push.
+export type ServerTunnelUrlChangedMessage = z.infer<typeof ServerTunnelUrlChangedSchema>
 export type ServerEvaluateDraftResultMessage = z.infer<typeof ServerEvaluateDraftResultSchema>
 export type ServerEvaluatorRewriteMessage = z.infer<typeof ServerEvaluatorRewriteSchema>
 export type ServerEvaluatorClarifyMessage = z.infer<typeof ServerEvaluatorClarifySchema>
 export type ServerSkillTrustGrantOkMessage = z.infer<typeof ServerSkillTrustGrantOkSchema>
 export type ServerSkillTrustGrantInvalidAuthorMessage = z.infer<typeof ServerSkillTrustGrantInvalidAuthorSchema>
+// #4141: typed BYOK credentials status payload.
+export type ServerByokCredentialsStatusMessage = z.infer<typeof ServerByokCredentialsStatusSchema>
+// #3855: generalized provider-credential status + test-result payloads.
+export type ServerCredentialsStatusMessage = z.infer<typeof ServerCredentialsStatusSchema>
+export type ServerCredentialTestResultMessage = z.infer<typeof ServerCredentialTestResultSchema>
+// #5161: Control Room activity-tree wire contract. Consumed by the server
+// emitter (#5160), store-core reducer (#5162), and dashboard panel (#5163).
+export type ActivityKind = z.infer<typeof ActivityKindSchema>
+export type ActivityStatus = z.infer<typeof ActivityStatusSchema>
+export type ActivityOutputRef = z.infer<typeof ActivityOutputRefSchema>
+export type ActivityEntry = z.infer<typeof ActivityEntrySchema>
+export type ServerActivitySnapshotMessage = z.infer<typeof ServerActivitySnapshotSchema>
+export type ServerActivityDeltaMessage = z.infer<typeof ServerActivityDeltaSchema>
+// #5277: positive ack for an actioned cancel_activity request.
+export type ServerCancelActivityAckMessage = z.infer<typeof ServerCancelActivityAckSchema>
+// #5936: outgoing-message queue mirror events.
+export type ServerMessageQueuedMessage = z.infer<typeof ServerMessageQueuedSchema>
+export type ServerMessageDequeuedMessage = z.infer<typeof ServerMessageDequeuedSchema>
+// #5752: positive ack for an actioned resume_budget request.
+export type ServerBudgetResumeAckMessage = z.infer<typeof ServerBudgetResumeAckSchema>
+// #5171: Host/Repo Status Control Room wire contract (#5170 epic). Consumed by
+// the server emitter, store-core reducer, and dashboard panel in sibling issues.
+export type RepoVerdict = z.infer<typeof RepoVerdictSchema>
+export type RepoTree = z.infer<typeof RepoTreeSchema>
+export type RepoStatus = z.infer<typeof RepoStatusSchema>
+export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>
+export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>
+export type ServerMailboxStatusSnapshotMessage = z.infer<typeof ServerMailboxStatusSnapshotSchema>
+export type MailboxRegistration = z.infer<typeof MailboxRegistrationSchema>
+export type MailboxDeliveryEvent = z.infer<typeof MailboxDeliveryEventSchema>
+
+// #5553: per-repo session preset wire types.
+export type ServerSessionPresetDisclosure = z.infer<typeof ServerSessionPresetDisclosureSchema>
+export type ServerSessionPresetFull = z.infer<typeof ServerSessionPresetFullSchema>
+export type ServerSessionPresetSnapshotMessage = z.infer<typeof ServerSessionPresetSnapshotSchema>
+
+// #5253: Self-hosted runner status Control Room contract. Consumed by the
+// server emitter (runners.js), the dashboard store handler, and the
+// RunnerStatusSection panel.
+export type RunnerVerdict = z.infer<typeof RunnerVerdictSchema>
+export type RunnerServiceState = z.infer<typeof RunnerServiceStateSchema>
+export type RunnerInfo = z.infer<typeof RunnerInfoSchema>
+export type RepoRunners = z.infer<typeof RepoRunnersSchema>
+export type RunnerStatusSummary = z.infer<typeof RunnerStatusSummarySchema>
+export type ServerRunnerStatusSnapshotMessage = z.infer<typeof ServerRunnerStatusSnapshotSchema>
+
+// #5499 (epic #5498): Integrations tab Control Room contract. Consumed by the
+// server emitter (control-room/integrations.js), the dashboard store handler,
+// and the IntegrationsSection panel.
+export type RepoMemoryCache = z.infer<typeof RepoMemoryCacheSchema>
+export type RepoMemoryReport = z.infer<typeof RepoMemoryReportSchema>
+export type RepoMemoryStatus = z.infer<typeof RepoMemoryStatusSchema>
+// #5501: repo-relay observability block (sibling to RepoMemoryStatus).
+export type RepoRelayRun = z.infer<typeof RepoRelayRunSchema>
+export type RepoRelayVerdict = z.infer<typeof RepoRelayVerdictSchema>
+export type RepoRelayStatus = z.infer<typeof RepoRelayStatusSchema>
+export type IntegrationRepo = z.infer<typeof IntegrationRepoSchema>
+export type IntegrationStatusSummary = z.infer<typeof IntegrationStatusSummarySchema>
+export type IntegrationCliStatus = z.infer<typeof IntegrationCliStatusSchema>
+export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegrationStatusSnapshotSchema>
+// #5500 — Reindex action ack (epic #5498); request side is
+// `IntegrationActionMessage` in client.ts.
+export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>
+export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>
+// #5554 — Skills inventory tab (epic #5159); request side is
+// `SkillsInventoryRequestMessage` in client.ts. Consumed by the server emitter
+// (control-room/skills-inventory.js), the dashboard store handler, and the
+// SkillsInventorySection panel.
+export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>
+export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>
+export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>
+export type ServerSummarizeSessionResultMessage = z.infer<typeof ServerSummarizeSessionResultSchema>

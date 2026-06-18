@@ -16,6 +16,7 @@ const APP_COMMANDS: &[&str] = &[
     "start_server",
     "stop_server",
     "restart_server",
+    "discover_lan_servers",
     "get_qr_code_svg",
     "pick_directory",
     "check_dependencies",
@@ -23,13 +24,19 @@ const APP_COMMANDS: &[&str] = &[
     "save_setup_config",
     "get_tunnel_mode",
     "set_tunnel_mode",
+    "get_expose_on_lan",
+    "set_expose_on_lan",
+    "get_summon_hotkey",
+    "set_summon_hotkey",
     "get_allow_auto_permission_mode",
     "set_allow_auto_permission_mode",
     "voice_available",
     "start_voice_input",
     "stop_voice_input",
+    "reset_speech_permissions",
     "tile_window",
     "read_clipboard_image",
+    "reveal_in_finder",
 ];
 
 fn main() {
@@ -57,6 +64,10 @@ fn main() {
         // consistent even if speech-helper.swift is temporarily absent.
         println!("cargo:rerun-if-changed={}", swift_src);
         println!("cargo:rerun-if-env-changed=APPLE_SIGNING_IDENTITY");
+        // APPLE_KEYCHAIN_PATH is passed to `codesign --keychain` below; toggling
+        // it between cargo invocations must invalidate the speech-helper cache
+        // marker so the binary is re-signed against the new keychain (#4252).
+        println!("cargo:rerun-if-env-changed=APPLE_KEYCHAIN_PATH");
 
         // Helper: run a command, panic with captured stderr on failure.
         fn run(label: &str, cmd: &mut std::process::Command) {
@@ -84,6 +95,9 @@ fn main() {
             //     but cargo's tracker is per-target_dir; the universal build
             //     uses two target dirs so we re-check explicitly here)
             //   - APPLE_SIGNING_IDENTITY (signature changes when identity does)
+            //   - APPLE_KEYCHAIN_PATH (#4252: passed to codesign --keychain;
+            //     swapping the keychain must re-sign the binary against the
+            //     new identity-resolution scope)
             //   - swiftc toolchain version (#3950: Xcode/Swift updates produce
             //     binaries with different runtime requirements; without this,
             //     a stale cache would silently ship a binary compiled against
@@ -102,12 +116,31 @@ fn main() {
             let swift_cache = format!("{}.cache", swift_out);
             // Track the cache marker so `rm <swift_cache>` reliably forces a
             // rebuild: without this, cargo only re-runs the build script when
-            // a tracked input changes (currently `swift_src` and
-            // `APPLE_SIGNING_IDENTITY`), so deleting the cache marker alone
-            // would be silently ignored on the next `cargo build`.
+            // a tracked input changes (currently `swift_src`,
+            // `APPLE_SIGNING_IDENTITY`, and `APPLE_KEYCHAIN_PATH`), so
+            // deleting the cache marker alone would be silently ignored on
+            // the next `cargo build`.
             println!("cargo:rerun-if-changed={}", swift_cache);
             let identity_for_cache = std::env::var("APPLE_SIGNING_IDENTITY").unwrap_or_default();
+            // Include the (possibly empty) keychain path in the cache key so a
+            // swap of APPLE_KEYCHAIN_PATH between two cargo invocations forces
+            // a re-sign even on a warm cache (#4252). On CI this is moot
+            // (fresh runner), but it matters for local experiments with
+            // alternate keychains.
+            let keychain_for_cache = std::env::var("APPLE_KEYCHAIN_PATH").unwrap_or_default();
             let src_mtime_secs = std::fs::metadata(&swift_src)
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
+                .map(|d| d.as_secs())
+                .unwrap_or(0);
+            // #4953: the helper-entitlements plist participates in the sign
+            // step now, so its mtime must invalidate the cache — otherwise
+            // edits to the plist (e.g. adding new entitlements) silently
+            // ship under the old signature on a warm cache.
+            let helper_ent_path = format!("{}/entitlements-helper.plist", manifest_dir);
+            println!("cargo:rerun-if-changed={}", helper_ent_path);
+            let helper_ent_mtime = std::fs::metadata(&helper_ent_path)
                 .ok()
                 .and_then(|m| m.modified().ok())
                 .and_then(|t| t.duration_since(std::time::UNIX_EPOCH).ok())
@@ -128,9 +161,14 @@ fn main() {
                     None
                 })
                 .unwrap_or_else(|| "unknown".to_string());
+            // BUMP THE v<N> PREFIX whenever the key schema (fields/format) changes
+            // — otherwise warm on-disk caches with the old schema match the new
+            // key by coincidence and ship a stale binary. Add a field → bump.
+            // Reorder fields → bump. Change the separator → bump.
             let cache_key = format!(
-                "v2\nsrc_mtime={}\nidentity={}\nswiftc={}\n",
-                src_mtime_secs, identity_for_cache, swiftc_version,
+                "v4\nsrc_mtime={}\nidentity={}\nkeychain={}\nswiftc={}\nhelper_ent_mtime={}\n",
+                src_mtime_secs, identity_for_cache, keychain_for_cache, swiftc_version,
+                helper_ent_mtime,
             );
 
             let cached = std::path::Path::new(&swift_out).exists()
@@ -168,15 +206,38 @@ fn main() {
                 // without any Apple credentials.
                 if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
                     if !identity.is_empty() && identity != "-" {
+                        // Optional explicit keychain (#3832). When set, scopes
+                        // codesign's identity lookup to that keychain — avoids
+                        // ambiguity in CI if login.keychain remains on the
+                        // search path alongside the temp signing keychain.
+                        let keychain = std::env::var("APPLE_KEYCHAIN_PATH").ok();
+                        // Helper-scoped entitlements (#4953). TCC binds
+                        // microphone access per-binary, so the parent app's
+                        // com.apple.security.device.audio-input does NOT
+                        // propagate to this subprocess — the helper needs its
+                        // own audio-input entitlement embedded at sign time.
+                        // Without --entitlements, the helper signs with empty
+                        // entitlements and AVAudioEngine init is denied
+                        // silently. #4801 / #4812 only patched the parent.
+                        let helper_entitlements = format!(
+                            "{}/entitlements-helper.plist", manifest_dir,
+                        );
+                        let mut args: Vec<&str> = vec![
+                            "--force",
+                            "--options", "runtime",
+                            "--timestamp",
+                            "--entitlements", &helper_entitlements,
+                            "--sign", &identity,
+                        ];
+                        if let Some(ref kc) = keychain {
+                            if !kc.is_empty() {
+                                args.extend_from_slice(&["--keychain", kc]);
+                            }
+                        }
+                        args.push(&swift_out);
                         run(
                             "codesign (speech-helper)",
-                            std::process::Command::new("codesign").args([
-                                "--force",
-                                "--options", "runtime",
-                                "--timestamp",
-                                "--sign", &identity,
-                                &swift_out,
-                            ]),
+                            std::process::Command::new("codesign").args(&args),
                         );
                         // Fail-fast verification: catches bad signatures here instead of
                         // letting them propagate to a ~15-minute Apple notarytool rejection.
@@ -243,18 +304,27 @@ fn main() {
 
                 if let Ok(identity) = std::env::var("APPLE_SIGNING_IDENTITY") {
                     if !identity.is_empty() && identity != "-" {
+                        // Optional explicit keychain (#3832). See speech-helper
+                        // block above for rationale.
+                        let keychain = std::env::var("APPLE_KEYCHAIN_PATH").ok();
                         for bin in ["pty.node", "spawn-helper"] {
                             let path = format!("{}/{}", arch_dir, bin);
                             if !std::path::Path::new(&path).exists() { continue }
+                            let mut args: Vec<&str> = vec![
+                                "--force",
+                                "--options", "runtime",
+                                "--timestamp",
+                                "--sign", &identity,
+                            ];
+                            if let Some(ref kc) = keychain {
+                                if !kc.is_empty() {
+                                    args.extend_from_slice(&["--keychain", kc]);
+                                }
+                            }
+                            args.push(&path);
                             run(
                                 &format!("codesign (node-pty {bin} {arch})"),
-                                std::process::Command::new("codesign").args([
-                                    "--force",
-                                    "--options", "runtime",
-                                    "--timestamp",
-                                    "--sign", &identity,
-                                    &path,
-                                ]),
+                                std::process::Command::new("codesign").args(&args),
                             );
                             run(
                                 &format!("codesign --verify (node-pty {bin} {arch})"),

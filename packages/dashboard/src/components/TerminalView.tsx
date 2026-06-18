@@ -20,6 +20,41 @@ export interface TerminalViewProps {
   className?: string
   initialData?: string
   onReady?: (handle: TerminalHandle) => void
+  /**
+   * #5835 (PR2): pin the terminal to a cols×rows grid and letterbox it (centered,
+   * no FitAddon stretch). Used for the live claude-tui PTY mirror, whose server
+   * PTY is a fixed grid — rendering at exactly that size keeps the mirror 1:1
+   * faithful (the authenticity surface) instead of scaling the xterm to the pane
+   * and misaligning the TUI's absolute cursor positioning. Omit for the normal
+   * fit-to-pane behaviour.
+   *
+   * #5835 Phase 2: this is now DYNAMIC — when it changes (the server reports a new
+   * authoritative size via terminal_size) the live terminal is resized in place,
+   * preserving scrollback. Pair with `onMeasure` to drive the size from the pane.
+   */
+  fixedSize?: { cols: number; rows: number }
+  /**
+   * #5835 Phase 2: in mirror (fixedSize) mode, called with the cols×rows that
+   * would fit the current pane (measured via FitAddon, never auto-applied) on
+   * mount and whenever the pane resizes. The parent debounces/dedupes and asks
+   * the server to resize the real PTY (terminal_resize); the authoritative size
+   * comes back via `fixedSize`. No-op in normal fit-to-pane mode.
+   */
+  onMeasure?: (cols: number, rows: number) => void
+  /**
+   * #5835 Phase 3: when true (mirror mode only), the terminal accepts keystrokes
+   * and forwards them via `onInput` — true remote control. When false the mirror
+   * stays read-only (an observer, or a non-claude-tui pane). Toggled at runtime
+   * (xterm `disableStdin`) so a role change (primary↔observer) flips interactivity
+   * without remounting / losing scrollback.
+   */
+  interactive?: boolean
+  /**
+   * #5835 Phase 3: called with raw terminal bytes for each keystroke (xterm
+   * `onData`) when interactive. The parent forwards them to the server as
+   * `terminal_input`. Only fires in mirror mode while interactive.
+   */
+  onInput?: (data: string) => void
 }
 
 export const BATCH_INTERVAL = 50 // ms — coalesce rapid writes
@@ -30,13 +65,27 @@ function safeFit(fit: FitAddon) {
   try { fit.fit() } catch { /* container not visible */ }
 }
 
-export function TerminalView({ className, initialData, onReady }: TerminalViewProps) {
+export function TerminalView({ className, initialData, onReady, fixedSize, onMeasure, interactive = false, onInput }: TerminalViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const termRef = useRef<Terminal | null>(null)
   const fitRef = useRef<FitAddon | null>(null)
   const batchRef = useRef<string[]>([])
   const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const disposedRef = useRef(false)
+  // #5835 Phase 2/3: keep the latest onMeasure/onInput callbacks in refs so the
+  // mount-once effect's handlers always call the current ones (the parent recreates
+  // the closures each render, but the terminal lifecycle is mount-once).
+  const onMeasureRef = useRef(onMeasure)
+  onMeasureRef.current = onMeasure
+  const onInputRef = useRef(onInput)
+  onInputRef.current = onInput
+  // Whether this terminal is a fixed-size letterboxed mirror. Mode is fixed at
+  // MOUNT — the xterm is constructed with mode-specific options (convertEol,
+  // initial cols/rows) and the mount-once onResize handler closes over this — so
+  // a caller must NOT toggle `fixedSize` between defined/undefined for a live
+  // terminal (the size VALUE may change freely; that's the resize effect below).
+  // The only consumer (MultiTerminalView) always passes a fixedSize.
+  const isMirror = !!fixedSize
 
   const flush = useCallback(() => {
     if (disposedRef.current) {
@@ -80,10 +129,14 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
 
     const term = new Terminal({
       disableStdin: true,
-      convertEol: true,
+      // A fixed-size mirror reproduces the server PTY's exact line layout, so
+      // DON'T translate \n→\r\n (the PTY already emits the control bytes). For
+      // the normal fit mode keep convertEol for plain text streams.
+      convertEol: !fixedSize,
       scrollback: 5000,
       fontSize: 13,
       fontFamily: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace",
+      ...(fixedSize ? { cols: fixedSize.cols, rows: fixedSize.rows } : {}),
       theme: {
         background: '#000000',
         foreground: '#e0e0e0',
@@ -92,13 +145,34 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
       },
     })
 
+    // #5835 (PR2): a fixedSize mirror renders at exactly cols×rows and is
+    // centered/letterboxed by the container — it must NOT stretch the xterm to
+    // the pane (that would make its grid disagree with the server PTY and
+    // misrender the TUI). #5835 Phase 2: still load a FitAddon in mirror mode,
+    // but ONLY to MEASURE the pane (proposeDimensions) — never fit() — so the
+    // parent can drive the server PTY to the pane's size. fit() (auto-apply) is
+    // still only for the normal fit-to-pane mode.
     const fitAddon = new FitAddon()
     term.loadAddon(fitAddon)
     term.open(containerRef.current)
-    safeFit(fitAddon)
+    if (!fixedSize) safeFit(fitAddon)
 
     termRef.current = term
-    fitRef.current = fitAddon
+    // #5835 Phase 2 (Copilot review): the exposed fit() handle must be a NO-OP in
+    // mirror mode — MultiTerminalView calls handle.fit() on tab switch, and now
+    // that a FitAddon is always loaded (for measurement) that would stretch the
+    // letterboxed mirror and break 1:1 PTY fidelity. Only publish the addon via
+    // fitRef (which fit() uses) in normal fit-to-pane mode; measurement below uses
+    // the local `fitAddon` directly, so it still works in mirror mode.
+    fitRef.current = fixedSize ? null : fitAddon
+
+    // #5835 Phase 3: forward keystrokes (true remote control). onData fires only
+    // when stdin is enabled (the interactive effect below toggles disableStdin),
+    // so an observer / non-interactive mirror never reaches here. Mirror mode only;
+    // the normal read-only output pane has no input path.
+    if (fixedSize) {
+      term.onData((data) => onInputRef.current?.(data))
+    }
 
     // Write initial data if provided
     if (initialData) {
@@ -108,29 +182,46 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     // Notify parent
     onReady?.({ write, clear, fit })
 
-    // Debounced resize handler — prevents excessive reflows during drag-resize
+    // Debounced resize handler — prevents excessive reflows during drag-resize.
+    // Normal mode: fit() the xterm to the pane. #5835 Phase 2 mirror mode: MEASURE
+    // the pane (proposeDimensions, no fit) and report the fitting cols×rows up so
+    // the parent can drive the server PTY — the xterm itself is resized only when
+    // the authoritative size comes back (the fixedSize effect below).
     let resizeTimer: ReturnType<typeof setTimeout> | null = null
-    const debouncedFit = () => {
+    let resizeObserver: ResizeObserver | undefined
+    const onResize = () => {
       if (disposedRef.current) return
       if (resizeTimer) clearTimeout(resizeTimer)
       resizeTimer = setTimeout(() => {
         if (disposedRef.current) return
-        safeFit(fitAddon)
+        if (isMirror) {
+          // Measure only — proposeDimensions returns the grid that fits the pane.
+          const dims = fitAddon.proposeDimensions()
+          if (dims && dims.cols > 0 && dims.rows > 0) {
+            onMeasureRef.current?.(dims.cols, dims.rows)
+          }
+        } else {
+          safeFit(fitAddon)
+        }
       }, RESIZE_DEBOUNCE)
     }
 
-    window.addEventListener('resize', debouncedFit)
-
-    // ResizeObserver for container-level resizing
-    let resizeObserver: ResizeObserver | undefined
+    window.addEventListener('resize', onResize)
     if (typeof ResizeObserver !== 'undefined') {
-      resizeObserver = new ResizeObserver(debouncedFit)
+      resizeObserver = new ResizeObserver(onResize)
       resizeObserver.observe(containerRef.current)
+    }
+    // Mirror mode: take an initial measurement so the server can size the PTY to
+    // the pane on first view (the ResizeObserver also fires on mount in most
+    // browsers, but don't rely on it). Normal mode already fit() above.
+    if (isMirror) {
+      const dims = fitAddon.proposeDimensions()
+      if (dims && dims.cols > 0 && dims.rows > 0) onMeasureRef.current?.(dims.cols, dims.rows)
     }
 
     return () => {
       disposedRef.current = true
-      window.removeEventListener('resize', debouncedFit)
+      window.removeEventListener('resize', onResize)
       resizeObserver?.disconnect()
       if (resizeTimer) clearTimeout(resizeTimer)
       if (timerRef.current) {
@@ -148,12 +239,42 @@ export function TerminalView({ className, initialData, onReady }: TerminalViewPr
     // terminal instance, losing all scrollback.
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
+  // #5835 Phase 2: when the authoritative mirror size changes (the server reports
+  // a new terminal_size), resize the live xterm in place — preserving scrollback
+  // and avoiding the mount-once teardown. Depend on the primitive cols/rows (not
+  // the object identity) so a new {cols,rows} object with the same values is a
+  // no-op. Normal fit-to-pane mode has no fixedSize and skips this.
+  useEffect(() => {
+    if (!fixedSize || disposedRef.current || !termRef.current) return
+    try {
+      termRef.current.resize(fixedSize.cols, fixedSize.rows)
+    } catch { /* terminal not ready / disposed */ }
+  }, [fixedSize?.cols, fixedSize?.rows]) // eslint-disable-line react-hooks/exhaustive-deps
+
+  // #5835 Phase 3: toggle interactivity at runtime so a role change (primary↔
+  // observer) flips the mirror between remote-control and read-only WITHOUT
+  // remounting (which would lose scrollback). Only mirror mode (fixedSize) can be
+  // interactive; the normal output pane and any non-interactive mirror stay
+  // read-only (disableStdin = true).
+  useEffect(() => {
+    if (disposedRef.current || !termRef.current) return
+    termRef.current.options.disableStdin = !(fixedSize && interactive)
+    // Depend on the primitive cols/rows (mode is mount-fixed, so fixedSize
+    // presence never changes) + interactive — consistent with the resize effect
+    // above and avoids re-running on an unrelated new {cols,rows} object.
+  }, [fixedSize?.cols, fixedSize?.rows, interactive]) // eslint-disable-line react-hooks/exhaustive-deps
+
   return (
     <div
       ref={containerRef}
       className={className}
       data-testid="terminal-container"
-      style={{ width: '100%', height: '100%' }}
+      // #5835 (PR2): letterbox a fixed-size mirror — center the 120×30 grid in
+      // the pane, with scroll if the pane is smaller than the grid (faithful
+      // beats wrap-distorted). Normal mode fills the pane for FitAddon.
+      style={fixedSize
+        ? { width: '100%', height: '100%', display: 'flex', alignItems: 'center', justifyContent: 'center', overflow: 'auto', background: '#000000' }
+        : { width: '100%', height: '100%' }}
     />
   )
 }

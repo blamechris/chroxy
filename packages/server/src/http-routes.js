@@ -1,4 +1,4 @@
-import { readFileSync, existsSync } from 'fs'
+import { readFileSync, existsSync, statSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
@@ -6,6 +6,92 @@ import { readConnectionInfo } from './connection-info.js'
 import { createLogger } from './logger.js'
 import { metrics } from './metrics.js'
 import { buildDiagnosticsSnapshot } from './diagnostics.js'
+import { getRateLimitKey } from './rate-limiter.js'
+import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
+import { handleEventIngest } from './event-ingest.js'
+import { handleMailboxPing, handleMailboxRegister } from './mailbox-route.js'
+import { isPoolEnabled } from './docker-byok-pool.js'
+import { getSharedPoolStats } from './docker-byok-pool-stats.js'
+import { isValidSlug, mimeForPath } from './pages-store.js'
+import { sendOversizeResponse } from './http-oversize.js'
+
+/**
+ * #5683 — read + JSON-parse a request body with a byte cap. Resolves to the
+ * parsed object, or `null` when it has already responded (413 oversize / 400
+ * invalid JSON). Mirrors the byte-counted, utf8-safe streaming guard in
+ * event-ingest.js (#5433): the violating chunk is never buffered, and the
+ * `end` body is wrapped so a parse throw can't escape to uncaughtException.
+ */
+function readJsonBodyCapped(req, res, maxBytes) {
+  return new Promise((resolve) => {
+    req.setEncoding('utf8')
+    let body = ''
+    let bytes = 0
+    let oversized = false
+    req.on('data', (chunk) => {
+      if (oversized) return
+      bytes += Buffer.byteLength(chunk, 'utf8')
+      if (bytes > maxBytes) {
+        oversized = true
+        sendOversizeResponse(req, res, { error: 'body too large' })
+        resolve(null)
+        return
+      }
+      body += chunk
+    })
+    req.on('end', () => {
+      // Wrap the WHOLE handler (not just JSON.parse): this listener runs on a
+      // later tick inside the Promise executor, OUTSIDE the dispatch try/catch
+      // (#5313), so an unguarded throw here (e.g. res write on a torn-down
+      // socket) would escape to uncaughtException.
+      try {
+        if (oversized) return
+        let parsed
+        try {
+          parsed = JSON.parse(body)
+        } catch {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'invalid JSON' }))
+          resolve(null)
+          return
+        }
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'body must be a JSON object' }))
+          resolve(null)
+          return
+        }
+        resolve(parsed)
+      } catch {
+        resolve(null)
+      }
+    })
+    // Settle on error AND close so a client abort / half-open socket can never
+    // leak a pending promise (resolve is idempotent, so a later `end` is a no-op).
+    req.on('error', () => resolve(null))
+    req.on('close', () => resolve(null))
+  })
+}
+
+// #5683 — security headers for every Chroxy Pages response. The `/p/<slug>`
+// route is intentionally UNAUTHENTICATED (the slug is the capability).
+// `script-src 'none'` + `connect-src 'none'` + `sandbox` make served pages
+// fully static (no JS, no network) — exactly right for the HTML reports this
+// serves, and defence-in-depth so a served page can never script same-origin
+// `/api/*` calls. (Note: `_validateBearerAuth` is HEADER-only — it does not
+// read a cookie; the `chroxy_auth` cookie `_authenticateDashboardRequest` sets
+// is `Path=/dashboard`-scoped + HttpOnly, so it never reaches `/p/*` or
+// `/api/*`. The CSP is belt-and-suspenders, not the sole guard.) See
+// docs/security/bearer-token-authority.md.
+const PAGE_SECURITY_HEADERS = {
+  'Content-Security-Policy':
+    "default-src 'none'; img-src 'self' data:; style-src 'unsafe-inline'; font-src 'self' data:; connect-src 'none'; script-src 'none'; base-uri 'none'; form-action 'none'; sandbox",
+  'X-Content-Type-Options': 'nosniff',
+  'X-Frame-Options': 'DENY',
+  'Cross-Origin-Resource-Policy': 'same-origin',
+  'Referrer-Policy': 'no-referrer',
+  'Cache-Control': 'no-store',
+}
 
 const log = createLogger('ws')
 
@@ -100,6 +186,48 @@ function parseLogTailBytes(url) {
 }
 
 /**
+ * Resolve the `removeImage(tag)` callback for the snapshot DELETE route (#5074).
+ *
+ * Preference order:
+ *   1. `server._snapshotRemoveImage` — test injection seam.
+ *   2. `server.environmentManager._backend.removeImage` — already
+ *      constructed for env-management. Reuses the same `_execFile`
+ *      injection path the env tests rely on.
+ *   3. A lazily-loaded fresh `DockerBackend()` — env management is
+ *      disabled but a snapshot DELETE still needs to call `docker rmi`.
+ *      Imported dynamically so tunnel-only installs that never trigger
+ *      this code path don't pay the module load. Cached across calls
+ *      (#5101) so batch cleanup doesn't re-run the dynamic `import()` and
+ *      re-allocate a `DockerBackend` on every DELETE — the `docker rmi`
+ *      shell-out still happens per call. The cache only covers this
+ *      fallback — the test seam and the env-manager path both pre-empt it.
+ */
+let _snapshotBackendPromise = null
+
+/** Reset the lazily-cached fallback DockerBackend init promise (#5101). Test-only. */
+export function _resetSnapshotBackendCacheForTests() {
+  _snapshotBackendPromise = null
+}
+
+export async function resolveRemoveImage(server) {
+  if (typeof server._snapshotRemoveImage === 'function') {
+    return server._snapshotRemoveImage
+  }
+  const fromEnvMgr = server.environmentManager?._backend?.removeImage
+  if (typeof fromEnvMgr === 'function') {
+    return (tag) => server.environmentManager._backend.removeImage(tag)
+  }
+  if (!_snapshotBackendPromise) {
+    _snapshotBackendPromise = (async () => {
+      const { DockerBackend } = await import('./environments/backends/docker.js')
+      const backend = new DockerBackend()
+      return (tag) => backend.removeImage(tag)
+    })()
+  }
+  return _snapshotBackendPromise
+}
+
+/**
  * Check if an Origin header matches the allowed list.
  * Localhost origins with any port are allowed for dev.
  */
@@ -119,10 +247,15 @@ function matchAllowedOrigin(origin) {
  * @returns {(req: import('http').IncomingMessage, res: import('http').ServerResponse) => void}
  */
 export function createHttpHandler(server) {
-  return async (req, res) => {
+  // #5312 (WP-1.2) — the actual routing logic, wrapped below in a top-level
+  // try/catch so an unguarded throw from any route (e.g. buildDiagnosticsSnapshot,
+  // readConnectionInfo, or readFileSync(index)) returns 500 instead of rejecting
+  // the handler promise → unhandledRejection → process.exit(1), which would take
+  // down the whole daemon (every session) on a single bad request.
+  const dispatch = async (req, res) => {
     // CORS preflight
     if (req.method === 'OPTIONS') {
-      const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect')
+      const isRestricted = req.url?.startsWith('/qr') || req.url?.startsWith('/connect') || req.url?.startsWith('/pairing-code') || req.url?.startsWith('/pair-discord')
       const corsOrigin = isRestricted
         ? matchAllowedOrigin(req.headers['origin'])
         : '*'
@@ -159,6 +292,88 @@ export function createHttpHandler(server) {
       })
       res.end(JSON.stringify({ status: 'ok', mode: server.serverMode, version: SERVER_VERSION }))
       return
+    }
+
+    // #5683 — Chroxy Pages: serve a published HTML artifact at an unguessable,
+    // UNAUTHENTICATED URL (the slug is the capability). Static-only CSP headers
+    // (PAGE_SECURITY_HEADERS) neutralize the cookie-auth risk. Placed in the
+    // public section, before the authed routes, and only active when a pages
+    // store is wired.
+    {
+      const pagesPath = (req.url ?? '').split('?')[0]
+      if (req.method === 'GET' && pagesPath.startsWith('/p/') && server.pagesStore) {
+        // Rate-limit BEFORE any filesystem work so the public route can't be
+        // used to scan slugs or DoS the disk.
+        const limiter = server._pagesRateLimiter
+        if (limiter) {
+          const socketIp = req.socket?.remoteAddress || ''
+          const { allowed, retryAfterMs } = limiter.check(getRateLimitKey(socketIp, req))
+          if (!allowed) {
+            res.writeHead(429, {
+              'Content-Type': 'text/plain; charset=utf-8',
+              'Retry-After': Math.ceil(retryAfterMs / 1000),
+              ...PAGE_SECURITY_HEADERS,
+            })
+            res.end('rate limited')
+            return
+          }
+        }
+
+        const notFound = () => {
+          res.writeHead(404, { 'Content-Type': 'text/plain; charset=utf-8', ...PAGE_SECURITY_HEADERS })
+          res.end('Not found')
+        }
+
+        const m = pagesPath.match(/^\/p\/([^/]+)(?:\/(.*))?$/)
+        let slug = null
+        let rel = ''
+        if (m) {
+          try {
+            slug = decodeURIComponent(m[1])
+            rel = m[2] != null ? decodeURIComponent(m[2]) : ''
+          } catch {
+            slug = null // malformed percent-encoding
+          }
+        }
+        if (!slug || !isValidSlug(slug) || !server.pagesStore.get(slug)) {
+          notFound()
+          return
+        }
+        // Trailing-slash redirect (`/p/<slug>` → `/p/<slug>/`) so a page's
+        // relative asset URLs resolve under its own directory.
+        if (m[2] == null) {
+          res.writeHead(301, { Location: `/p/${encodeURIComponent(slug)}/`, ...PAGE_SECURITY_HEADERS })
+          res.end()
+          return
+        }
+        const filePath = server.pagesStore.resolveFile(slug, rel)
+        if (!filePath) {
+          notFound()
+          return
+        }
+        let body
+        try {
+          // Defence-in-depth: enforce the per-page size cap on SERVE too, not
+          // just at publish time, so a file that somehow grew past the cap (a
+          // future publish path, an external write) can't be read unbounded
+          // into memory.
+          if (statSync(filePath).size > server.pagesStore.maxPageBytes) {
+            notFound()
+            return
+          }
+          body = readFileSync(filePath)
+        } catch {
+          notFound()
+          return
+        }
+        res.writeHead(200, {
+          'Content-Type': mimeForPath(filePath),
+          'Content-Length': body.byteLength,
+          ...PAGE_SECURITY_HEADERS,
+        })
+        res.end(body)
+        return
+      }
     }
 
     // Version endpoint
@@ -208,6 +423,225 @@ export function createHttpHandler(server) {
       return
     }
 
+    // Snapshot listing endpoint (#5074). Reads docker-byok snapshot
+    // metadata sidecars from `${CHROXY_CONFIG_DIR ?? ~/.chroxy}/snapshots/`
+    // and returns them as a newest-first array. The dashboard polls this
+    // on its SnapshotsPanel.
+    const snapPath = (req.url ?? '').split('?')[0]
+
+    // External event ingest (#5413 Phase 3). Accepts ONLY the daemon-level
+    // ingest secret (never the primary token — see
+    // docs/security/bearer-token-authority.md §6); auth, body cap, schema
+    // validation, per-source rate limiting, and the pipeline dispatch all
+    // live in event-ingest.js. The handler registers its own body-stream
+    // callbacks and guards them per the #5313 pattern.
+    if (req.method === 'POST' && snapPath === '/api/events') {
+      handleEventIngest(server, req, res)
+      return
+    }
+
+    // Mailbox live-interrupt (agent-comm-system delivery). Same daemon-level
+    // ingest-secret auth as /api/events (never the primary token). The ping
+    // route notifies + wakes a live idle claude-tui recipient; the register
+    // route populates the agent-id -> session map. See mailbox-route.js.
+    if (req.method === 'POST' && snapPath === '/api/mailbox') {
+      handleMailboxPing(server, req, res)
+      return
+    }
+
+    if (req.method === 'POST' && snapPath === '/api/mailbox/register') {
+      handleMailboxRegister(server, req, res)
+      return
+    }
+
+    if (req.method === 'GET' && snapPath === '/api/snapshots') {
+      if (!server._validateBearerAuth(req, res)) return
+      try {
+        const snapshots = listSnapshots()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ snapshots }))
+      } catch (err) {
+        log.warn(`GET /api/snapshots failed: ${err.message}`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Failed to list snapshots' }))
+      }
+      return
+    }
+
+    // Snapshot delete endpoint (#5074). Two-step: docker rmi → unlink sidecar.
+    // The slug is the sidecar filename without `.json`, exactly what
+    // /api/snapshots returns, so the server never has to re-derive it
+    // from the tag. Defence-in-depth: snapshots-store re-validates the
+    // slug against the filename-safe charset before joining it to a path.
+    //
+    // Host-level mutation (removes a docker image + sidecar shared across all
+    // sessions), so it requires PRIMARY authority — a bound (share-a-session)
+    // token must not delete host snapshots. Mirrors the /api/pages DELETE gate.
+    // The GET list above stays on _validateBearerAuth (reads are open). (#5074 / audit P1-6)
+    if (req.method === 'DELETE' && snapPath.startsWith('/api/snapshots/')) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const rawSlug = snapPath.slice('/api/snapshots/'.length)
+      let slug
+      try {
+        slug = decodeURIComponent(rawSlug)
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid slug encoding' }))
+        return
+      }
+      try {
+        const removeImage = await resolveRemoveImage(server)
+        const result = await deleteSnapshot(slug, { removeImage })
+        if (!result.ok) {
+          res.writeHead(result.status, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: result.error }))
+          return
+        }
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({
+          ok: true,
+          tag: result.tag,
+          imageRemoved: result.imageRemoved,
+        }))
+      } catch (err) {
+        log.warn(`DELETE /api/snapshots/${slug} failed: ${err.message}`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Failed to delete snapshot' }))
+      }
+      return
+    }
+
+    // docker-byok pool stats endpoint (#5053). Returns a rolling
+    // observability snapshot — hit/miss counters, hit rate,
+    // eviction-by-reason, the recent-evictions tail, and the live per-key
+    // parked buckets from pool.inspect(). Bearer-auth gated like every other
+    // /api route (primary token = full host authority; see
+    // docs/security/bearer-token-authority.md — this is read-only operational
+    // telemetry, no narrower scope needed).
+    //
+    // The pool is default-OFF (CHROXY_DOCKER_BYOK_POOL=1 to enable). When
+    // disabled we return a stable `{ enabled: false }` shape (still authed)
+    // so the dashboard can hide the panel without special-casing a 404.
+    //
+    // Test seams: `server._poolStatsEnabled` / `server._poolStats` override
+    // the env probe + aggregator so http-routes tests don't depend on
+    // process.env or a live pool.
+    // #5683 (PR-2) — Chroxy Pages publish/manage API. PRIMARY-token only: each
+    // call writes to the host disk and mints a PUBLIC capability URL, so it is
+    // host-authority (a bound/pairing token is rejected with primary_token_required,
+    // matching the other host-write routes — see bearer-token-authority.md §4).
+    if (req.method === 'POST' && snapPath === '/api/pages' && server.pagesStore) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      // Body cap a little above the per-page byte cap to allow JSON overhead.
+      const maxBody = server.pagesStore.maxPageBytes + 1024 * 1024
+      readJsonBodyCapped(req, res, maxBody)
+        .then((parsed) => {
+          if (parsed === null) return // 413/400 already sent
+          const title = typeof parsed.title === 'string' ? parsed.title : 'Untitled'
+          // Accept either { html } (single self-contained page) or
+          // { files: [{ path, content }] } (multi-file). `html` is shorthand.
+          let files
+          if (typeof parsed.html === 'string') {
+            files = [{ path: 'index.html', content: parsed.html }]
+          } else if (Array.isArray(parsed.files)) {
+            // Validate every entry instead of coercing a non-string `content` to
+            // '' — silent coercion turns an invalid client payload into a
+            // successfully published but empty/garbled page.
+            const invalid = parsed.files.find((f) => !f || typeof f.path !== 'string' || typeof f.content !== 'string')
+            if (invalid !== undefined) {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'each `files` entry requires a string `path` and string `content`' }))
+              return
+            }
+            files = parsed.files.map((f) => ({ path: f.path, content: f.content }))
+          } else {
+            res.writeHead(400, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'body must include `html` (string) or `files` (array)' }))
+            return
+          }
+          let meta
+          try {
+            meta = server.pagesStore.publish({ title, files })
+          } catch (err) {
+            // publish() throws for BOTH client validation errors (plain Errors —
+            // bad paths, missing index.html, size/count caps) AND server-side I/O
+            // faults (which carry an errno `code` like EACCES/ENOSPC). Don't
+            // misreport an I/O fault as a 400, and don't leak fs detail in it.
+            if (err && typeof err.code === 'string') {
+              log.warn(`POST /api/pages publish I/O error: ${err.code} ${err?.message || ''}`)
+              res.writeHead(500, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: 'publish failed' }))
+            } else {
+              res.writeHead(400, { 'Content-Type': 'application/json' })
+              res.end(JSON.stringify({ error: err?.message || 'publish failed' }))
+            }
+            return
+          }
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ slug: meta.slug, path: `/p/${meta.slug}/`, title: meta.title, bytes: meta.bytes, createdAt: meta.createdAt }))
+        })
+        .catch((err) => {
+          log.warn(`POST /api/pages failed: ${err?.message || err}`)
+          if (!res.headersSent) {
+            res.writeHead(500, { 'Content-Type': 'application/json' })
+            res.end(JSON.stringify({ error: 'publish failed' }))
+          }
+        })
+      return
+    }
+
+    if (req.method === 'GET' && snapPath === '/api/pages' && server.pagesStore) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const pages = server.pagesStore.list().map((p) => ({
+        slug: p.slug, title: p.title, createdAt: p.createdAt, bytes: p.bytes, path: `/p/${p.slug}/`,
+      }))
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ pages }))
+      return
+    }
+
+    if (req.method === 'DELETE' && snapPath.startsWith('/api/pages/') && server.pagesStore) {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      let slug
+      try {
+        slug = decodeURIComponent(snapPath.slice('/api/pages/'.length))
+      } catch {
+        res.writeHead(400, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'invalid slug' }))
+        return
+      }
+      // Idempotent: deleting an absent slug returns 200 { removed: false }
+      // rather than 404, so `chroxy pages rm` of an already-gone page reports
+      // cleanly instead of failing.
+      const removed = server.pagesStore.remove(slug)
+      res.writeHead(200, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ removed }))
+      return
+    }
+
+    if (req.method === 'GET' && snapPath === '/api/pool/stats') {
+      if (!server._validateBearerAuth(req, res)) return
+      const enabled = typeof server._poolStatsEnabled === 'boolean'
+        ? server._poolStatsEnabled
+        : isPoolEnabled(process.env)
+      if (!enabled) {
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ enabled: false }))
+        return
+      }
+      try {
+        const aggregator = server._poolStats ?? getSharedPoolStats()
+        const stats = aggregator.snapshot()
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ enabled: true, ...stats }))
+      } catch (err) {
+        log.warn(`GET /api/pool/stats failed: ${err.message}`)
+        res.writeHead(500, { 'Content-Type': 'application/json' })
+        res.end(JSON.stringify({ error: 'Failed to read pool stats' }))
+      }
+      return
+    }
+
     // Diagnostics endpoint — runtime snapshot for triaging stuck sessions (#3732).
     // Returns server state, per-session busy/pending/timeout-pause flags, and
     // a tail of the on-disk log (#3731). Bearer-auth gated; sensitive content
@@ -219,6 +653,28 @@ export function createHttpHandler(server) {
     // codebase that adds endpoints regularly.
     const diagPathname = (req.url ?? '').split('?')[0]
     if (req.method === 'GET' && diagPathname === '/diagnostics') {
+      // #3737: per-IP rate limit. Check BEFORE auth so a stolen token can't
+      // DoS the endpoint, and so an unauthenticated flood doesn't get a free
+      // pass to the auth code path. Uses getRateLimitKey so forwarded
+      // headers (CF-Connecting-IP / X-Forwarded-For) are trusted only when
+      // the TCP peer is loopback — i.e. the request came through the local
+      // cloudflared process. Direct connections use the socket address so
+      // header spoofing cannot exhaust another IP's bucket.
+      const limiter = server._diagnosticsRateLimiter
+      if (limiter) {
+        const socketIp = req.socket?.remoteAddress || ''
+        const rateLimitKey = getRateLimitKey(socketIp, req)
+        const { allowed, retryAfterMs } = limiter.check(rateLimitKey)
+        if (!allowed) {
+          log.warn(`Rate limited GET /diagnostics from ${rateLimitKey}`)
+          res.writeHead(429, {
+            'Content-Type': 'application/json',
+            'Retry-After': Math.ceil(retryAfterMs / 1000),
+          })
+          res.end(JSON.stringify({ error: 'rate limited', retryAfterMs }))
+          return
+        }
+      }
       if (!server._validateBearerAuth(req, res)) return
       // #3739: optional `?logTailBytes=N` lets operators widen the log
       // window (e.g. to 32KB for a slow stall) or shrink it for a tight
@@ -252,9 +708,19 @@ export function createHttpHandler(server) {
       return
     }
 
-    // Connection info endpoint
+    // Connection info endpoint.
+    //
+    // Gated on the PRIMARY token class (#5533 sibling audit): when auth is
+    // required (the normal case), the response body carries the raw PRIMARY
+    // apiToken and a connectionUrl that embeds it (see startup-display.js →
+    // writeConnectionInfo). Accepting a pairing-bound session token here would
+    // hand a once-paired, session-scoped device the full primary token — a
+    // strict privilege escalation, worse than the /qr + /pairing-code leak.
+    // The redaction branch below only fires when auth is DISABLED, so it cannot
+    // be relied on as the boundary. The dashboard's ConsolePage / tunnel-ready
+    // probe both fetch /connect with the primary token, so they keep working.
     if (req.method === 'GET' && req.url === '/connect') {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const connInfo = readConnectionInfo()
       if (!connInfo) {
         res.writeHead(404, { 'Content-Type': 'application/json' })
@@ -266,7 +732,10 @@ export function createHttpHandler(server) {
         delete connInfo.connectionUrl
       }
       const connectCors = matchAllowedOrigin(req.headers['origin'])
-      const connectHeaders = { 'Content-Type': 'application/json' }
+      // no-store: the body carries the raw primary apiToken (and a connectionUrl
+      // embedding it) when auth is required, so browsers/proxies must not cache
+      // it — mirrors /pairing-code, which is also live credential material.
+      const connectHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
       if (connectCors) {
         connectHeaders['Access-Control-Allow-Origin'] = connectCors
         connectHeaders['Vary'] = 'Origin'
@@ -276,12 +745,116 @@ export function createHttpHandler(server) {
       return
     }
 
+    // Typeable pairing-code endpoint (#5512): GET /pairing-code returns the
+    // current linking-mode pairing code as JSON so the dashboard/CLI can DISPLAY
+    // it beside the QR (the QR encodes the same id — one mechanism). Grace-
+    // extension mirrors /qr; camera-less devices enter this code by hand.
+    //
+    // Gated on the PRIMARY token class (#5533): the displayed code is live
+    // pairing material — anyone who can read it can onboard a new peer. A
+    // pairing-bound session token is scoped to one session, NOT host-level, so
+    // letting it read the current code would let a once-paired device
+    // transitively mint further peers. The daemon's own dashboard and
+    // `chroxy pair-code` both present the primary token, so the display path is
+    // unaffected; only the escalation path closes.
+    if (req.method === 'GET' && req.url?.split('?')[0] === '/pairing-code') {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const codeCors = matchAllowedOrigin(req.headers['origin'])
+      const codeHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      if (codeCors) {
+        codeHeaders['Access-Control-Allow-Origin'] = codeCors
+        codeHeaders['Vary'] = 'Origin'
+      }
+      if (!server._pairingManager) {
+        res.writeHead(503, codeHeaders)
+        res.end(JSON.stringify({ error: 'Pairing not available' }))
+        return
+      }
+      // Someone is actively viewing the code — extend the grace period so it
+      // survives long enough to be typed on the other device (mirrors /qr).
+      server._pairingManager.extendCurrentId()
+      const snap = server._pairingManager.currentPairingCode
+      if (!snap) {
+        res.writeHead(503, codeHeaders)
+        res.end(JSON.stringify({ error: 'Pairing code not available yet' }))
+        return
+      }
+      const expiresInMs = Math.max(0, snap.expiresAtMs - Date.now())
+      res.writeHead(200, codeHeaders)
+      res.end(JSON.stringify({
+        code: snap.code,
+        url: snap.url,
+        // #5536 — the daemon's pinned E2E identity public key. Absent (null)
+        // when encryption is disabled or the daemon predates pinning.
+        identityPublicKey: snap.identityPublicKey ?? null,
+        expiresAtMs: snap.expiresAtMs,
+        expiresInSeconds: Math.ceil(expiresInMs / 1000),
+      }))
+      return
+    }
+
+    // Discord pairing-link delivery (#5513, epic #5509): POST /pair-discord
+    // generates a FRESH approval-gated pairing id and posts its chroxy:// link
+    // to the configured Discord webhook. Host-triggered only (CLI / dashboard
+    // button). The gated id mints no token on redemption — the host must still
+    // approve (#5510) — so possession of the channel grants nothing.
+    //
+    // Gated on the PRIMARY token class from day one (#5533): posting a fresh
+    // pairing link is a host-authority action, so a pairing-bound session token
+    // (which is scoped, not host-level) is rejected. Mirrors /pairing-code's
+    // CORS, but uses _validatePrimaryBearerAuth instead of _validateBearerAuth.
+    if (req.method === 'POST' && req.url?.split('?')[0] === '/pair-discord') {
+      if (!server._validatePrimaryBearerAuth(req, res)) return
+      const pdCors = matchAllowedOrigin(req.headers['origin'])
+      const pdHeaders = { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+      if (pdCors) {
+        pdHeaders['Access-Control-Allow-Origin'] = pdCors
+        pdHeaders['Vary'] = 'Origin'
+      }
+      if (!server._pairingManager) {
+        res.writeHead(503, pdHeaders)
+        res.end(JSON.stringify({ error: 'Pairing not available' }))
+        return
+      }
+      // Fresh gated id per trigger (60s TTL, single-use). The chroxy:// link is
+      // the only material posted — no token.
+      const gated = server._pairingManager.createApprovalGatedPairingId()
+      if (!gated?.pairingUrl) {
+        res.writeHead(503, pdHeaders)
+        res.end(JSON.stringify({ error: 'Pairing link not available — server has no public URL yet' }))
+        return
+      }
+      const expiresInSeconds = Number.isFinite(gated.expiresAt)
+        ? Math.max(0, Math.ceil((gated.expiresAt - Date.now()) / 1000))
+        : 60
+      const result = await server._postPairLinkToDiscord({ url: gated.pairingUrl, expiresInSeconds })
+      if (result?.posted) {
+        res.writeHead(200, pdHeaders)
+        res.end(JSON.stringify({ posted: true, expiresInSeconds: result.expiresInSeconds ?? expiresInSeconds }))
+        return
+      }
+      // not_configured → 409 (no webhook set); anything else → 502 (post failed).
+      // The webhook URL / token never appears in the response — postPairLinkToDiscord
+      // returns only a fixed reason code.
+      const status = result?.reason === 'not_configured' ? 409 : 502
+      res.writeHead(status, pdHeaders)
+      res.end(JSON.stringify({ posted: false, reason: result?.reason || 'post_failed' }))
+      return
+    }
+
     // Per-session QR endpoint (#3070): GET /qr/session/:sessionId returns a
     // QR whose pairing URL issues a session-bound token. The scanner can chat
     // into that one session but cannot list/switch/destroy others. Must be
     // matched BEFORE the generic /qr handler since both share the prefix.
+    //
+    // Gated on the PRIMARY token class (#5533): generating a share QR MINTS a
+    // fresh bound pairing id (live pairing material). Letting a pairing-bound
+    // token reach this would let a once-paired device transitively mint peers
+    // for its session — the same escalation the linking /qr and /pairing-code
+    // close. The "Share this session" dashboard button runs on the daemon's own
+    // dashboard with the primary token, so the legitimate path is unaffected.
     if (req.method === 'GET' && req.url?.startsWith('/qr/session/')) {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const shareCors = matchAllowedOrigin(req.headers['origin'])
       const sharePathParts = req.url.split('?')[0].split('/').filter(Boolean) // ['qr','session','<id>']
       const writeShareErr = (status, body) => {
@@ -355,9 +928,16 @@ export function createHttpHandler(server) {
       return
     }
 
-    // QR code endpoint — uses live pairing URL (not stale file) when available
+    // QR code endpoint — uses live pairing URL (not stale file) when available.
+    //
+    // Gated on the PRIMARY token class (#5533): the linking QR encodes a live
+    // pairing URL — scanning it onboards a new peer. A pairing-bound session
+    // token is scoped to one session, not host-level, so it must not be able to
+    // read the current QR and transitively mint further peers. The daemon's own
+    // dashboard fetches /qr with the primary token, so the modal keeps working;
+    // only the escalation path closes.
     if (req.method === 'GET' && req.url?.startsWith('/qr')) {
-      if (!server._validateBearerAuth(req, res)) return
+      if (!server._validatePrimaryBearerAuth(req, res)) return
       const qrCors = matchAllowedOrigin(req.headers['origin'])
 
       // Prefer live pairing URL from PairingManager (always current).
@@ -447,7 +1027,25 @@ export function createHttpHandler(server) {
       const dashUrl = new URL(req.url, `http://${req.headers.host || 'localhost'}`)
 
       const securityHeaders = {
-        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http://127.0.0.1:* http://localhost:*; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+        // connect-src allows http:/https: alongside ws:/wss: so the dashboard
+        // can reach a REMOTE LAN daemon — both its pre-WS HTTP health-check
+        // (connection.ts) and the WebSocket itself. This unlocks the desktop
+        // acting as a LAN client + joining a shared session on another host.
+        //
+        // Why a wide connect-src is safe here:
+        //  - ws:/wss: were already scheme-open (any host), so adding http:/https:
+        //    is symmetric — no NEW reachable hosts beyond what WebSocket allowed.
+        //  - script-src stays 'self' (no inline/eval), so injected content can't
+        //    run a fetch() to abuse connect-src in the first place.
+        //  - The directives that actually gate *passive* exfil — img-src,
+        //    font-src, form-action, and the default-src fallback — all stay
+        //    'self'-scoped (img-src also data:), so a widened connect-src opens
+        //    no CSS/beacon/form exfil channel. Keep them 'self' if connect-src
+        //    is broad. (This CSP also ships on the tunnel-exposed dashboard, not
+        //    just the desktop's local view — acceptable in chroxy's single-
+        //    tenant model; see #5281 for the decision record.)
+        //  - The narrower 127.0.0.1/localhost http sources are subsumed by http:.
+        'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss: http: https:; img-src 'self' data:; font-src 'self'; frame-src 'none'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         'X-Frame-Options': 'DENY',
         'X-Content-Type-Options': 'nosniff',
         'Referrer-Policy': 'no-referrer',
@@ -460,7 +1058,7 @@ export function createHttpHandler(server) {
       const distDir = existsSync(workspaceDist) ? workspaceDist : bundleDist
       if (!existsSync(distDir) && !createHttpHandler._distMissWarned) {
         createHttpHandler._distMissWarned = true
-        log.warn(`Dashboard dist directory not found: ${distDir} — run "npm run dashboard:build"`)
+        log.warn(`Dashboard dist directory not found: ${distDir} — run "npm run build -w @chroxy/dashboard"`)
       }
       const relPath = dashUrl.pathname.replace(/^\/dashboard\/?/, '') || 'index.html'
 
@@ -512,7 +1110,7 @@ export function createHttpHandler(server) {
         res.end(html)
       } else {
         res.writeHead(404)
-        res.end('Dashboard not built. Run: npm run dashboard:build')
+        res.end('Dashboard not built. Run: npm run build -w @chroxy/dashboard')
       }
       return
     }
@@ -520,5 +1118,28 @@ export function createHttpHandler(server) {
     // Fallback 404
     res.writeHead(404)
     res.end()
+  }
+
+  // #5312 (WP-1.2) — top-level guard. Any throw/rejection escaping dispatch()
+  // becomes a 500, never an unhandledRejection that crashes the daemon. Headers
+  // may already be sent (a route threw mid-response); only write 500 if not.
+  return async (req, res) => {
+    try {
+      await dispatch(req, res)
+    } catch (err) {
+      // #5312 review — log the PATH only, never the raw req.url: query strings on
+      // dashboard/connect routes carry the API token (?token=...) which must not
+      // leak into server logs.
+      const pathOnly = (req.url || '').split('?')[0]
+      log.error(`Unhandled error in HTTP handler (${req.method} ${pathOnly}): ${err?.stack || err}`)
+      if (!res.headersSent) {
+        try {
+          res.writeHead(500, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({ error: 'Internal server error' }))
+        } catch { /* response already torn down */ }
+      } else {
+        try { res.end() } catch { /* already ended */ }
+      }
+    }
   }
 }

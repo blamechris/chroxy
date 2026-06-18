@@ -273,6 +273,47 @@ describe('CliSession stream-event handling', () => {
       assert.equal(events[0].messageId, 'msg-1-tool')
       assert.equal(events[0].toolUseId, 'msg-1-tool')
     })
+
+    it('aligns ctx.currentToolUseId with synthesized fallback when content_block.id is missing (#4778)', () => {
+      const session = createSession()
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Task' },
+        },
+      })
+
+      // Without #4778, ctx.currentToolUseId stays undefined on the fallback
+      // path and downstream emits (user_question / agent_spawned /
+      // _activeAgents.set) propagate toolUseId=undefined while the
+      // tool_start wire event already carries `${messageId}-tool`.
+      assert.equal(session._currentCtx.currentToolUseId, 'msg-1-tool')
+    })
+
+    it('propagates synthesized toolUseId to agent_spawned on Task fallback (#4778)', () => {
+      const session = createSession()
+      const spawned = []
+      session.on('agent_spawned', (info) => spawned.push(info))
+
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'tool_use', name: 'Task' },
+        },
+      })
+      session._handleEvent(inputJsonDelta('{"description":"do thing","prompt":"x"}'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(spawned.length, 1)
+      assert.equal(spawned[0].toolUseId, 'msg-1-tool')
+      // _activeAgents key must match the wire-emitted toolUseId so later
+      // lookups (agent_completed, etc.) resolve instead of writing to
+      // _activeAgents.set(undefined, ...).
+      assert.ok(session._activeAgents.has('msg-1-tool'))
+      assert.ok(!session._activeAgents.has(undefined))
+    })
   })
 
   describe('text streaming', () => {
@@ -348,6 +389,28 @@ describe('CliSession stream-event handling', () => {
 
       assert.equal(events.length, 0)
       assert.equal(session._waitingForAnswer, false)
+    })
+
+    it('still emits when JSON.parse legally returns a falsy value (#4774)', () => {
+      // Regression for Copilot review on #4774: gating the
+      // post-extraction emit on `if (!parsed)` would silently swallow
+      // legal falsy JSON like `0` / `false` / `null`, drifting from the
+      // pre-extraction behavior which only short-circuited on parse
+      // *failure*, not on falsy parsed values. AskUserQuestion in
+      // particular would emit `user_question` with `questions: undefined`
+      // pre-extraction; the refactor must preserve that.
+      const session = createSession()
+      const events = []
+      session.on('user_question', (data) => events.push(data))
+
+      session._handleEvent(toolUseStart('AskUserQuestion', 'toolu_falsy'))
+      session._handleEvent(inputJsonDelta('0'))
+      session._handleEvent(contentBlockStop())
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'toolu_falsy')
+      assert.equal(events[0].questions, undefined)
+      assert.equal(session._waitingForAnswer, true)
     })
   })
 
@@ -657,6 +720,449 @@ describe('CliSession stream-event handling', () => {
       assert.equal(events.length, 0)
 
       session.destroy()
+    })
+  })
+
+  describe('result fallback for non-streamed text (#5064 — /compact)', () => {
+    // The CLI's `/compact` slash command returns the compaction summary in
+    // `data.result` but emits either no `assistant` event at all, or one
+    // with empty / no-growth text content. Without a fallback the dashboard
+    // sees nothing — no stream_start, no message, no acknowledgement.
+    // SDK mode mirrors this fallback at sdk-session.js:801.
+
+    it('emits a fallback response message when result text exists and no stream started', () => {
+      const session = createSession()
+      const messages = []
+      const streams = []
+      session.on('message', (m) => messages.push(m))
+      session.on('stream_start', () => streams.push('start'))
+      session.on('stream_end', () => streams.push('end'))
+
+      // Simulate /compact: result arrives directly with summary text,
+      // no stream_event, no assistant event with non-empty text.
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'Conversation compacted to summary.',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      assert.equal(messages.length, 1)
+      assert.equal(messages[0].type, 'response')
+      assert.equal(messages[0].content, 'Conversation compacted to summary.')
+      // No stream_start / stream_end — pure fallback path.
+      assert.equal(streams.length, 0)
+    })
+
+    it('does not emit fallback when a stream already fired (normal streamed turn)', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // Simulate normal streamed turn: stream_event drives text delta,
+      // then result arrives with the same text echoed in data.result.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed reply' },
+        },
+      })
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'streamed reply',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      // Streamed turns must NOT double-emit a fallback message —
+      // the stream_delta is the canonical surface for the text.
+      assert.equal(messages.length, 0)
+    })
+
+    it('exposes the streamed reply via stream_delta on a normal streamed turn (#5090)', () => {
+      // Companion to the no-fallback case above. The `messages.length === 0`
+      // assertion only proves the fallback was suppressed — it does NOT prove
+      // the consumer sees the streamed text. Without this companion, a future
+      // regression where `stream_delta` is silently dropped AND the fallback
+      // is also suppressed would still pass the no-fallback test (both bugs
+      // would cancel out and the consumer would see nothing).
+      //
+      // Pin that the concatenated `stream_delta` chunks compose the final
+      // response text the consumer would render.
+      const session = createSession()
+      const messages = []
+      const streamDeltas = []
+      session.on('message', (m) => messages.push(m))
+      session.on('stream_delta', (d) => streamDeltas.push(d.delta))
+
+      // Same wire sequence as the no-fallback case, but split the text across
+      // two deltas so we also pin that concatenation order is preserved.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed ' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'reply' },
+        },
+      })
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'streamed reply',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      // Primary contract (mirrors the no-fallback case): no synthesized
+      // response message on streamed turns.
+      assert.equal(messages.length, 0)
+      // New contract: the streamed text reached the consumer via stream_delta,
+      // and the concatenated chunks equal the canonical reply text.
+      assert.equal(streamDeltas.length, 2)
+      assert.equal(streamDeltas.join(''), 'streamed reply')
+    })
+
+    it('does not emit fallback when data.result is empty or missing', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // Result with no `result` field at all (e.g. error subtype, tool turn).
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      assert.equal(messages.length, 0)
+
+      // Result with empty string `result`.
+      session._currentMessageId = 'msg-2'
+      session._currentCtx = {
+        hasStreamStarted: false,
+        didStreamText: false,
+        assistantTextSeen: 0,
+        currentContentBlockType: null,
+        currentToolName: null,
+        currentToolUseId: null,
+        toolInputChunks: '',
+        toolInputBytes: 0,
+        toolInputOverflow: false,
+      }
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: '',
+        total_cost_usd: 0,
+        duration_ms: 100,
+        usage: {},
+      })
+
+      assert.equal(messages.length, 0)
+    })
+
+    it('emits a result event regardless of fallback path', () => {
+      const session = createSession()
+      const results = []
+      session.on('result', (r) => results.push(r))
+
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'Conversation compacted.',
+        total_cost_usd: 0.001,
+        duration_ms: 250,
+        usage: { input_tokens: 10 },
+      })
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 'sess-1')
+      assert.equal(results[0].cost, 0.001)
+      assert.equal(results[0].duration, 250)
+    })
+
+    it('forwards the full usage payload on streamed turns, with no fallback message (#5095)', () => {
+      // Companion pin to #5084's fallback gate. The fallback is suppressed
+      // on streamed turns (ctx.hasStreamStarted === true), but we must also
+      // prove the `result` event still carries the canonical `usage` payload
+      // — input_tokens, output_tokens, cache_creation_input_tokens,
+      // cache_read_input_tokens — so the session-manager cost-gate
+      // (session-manager.js:1709 → _trackUsage) has the raw token counts to
+      // accumulate for the dashboard meter. A regression where #5084's
+      // fallback gate swallowed `usage` emission for streamed turns would
+      // silently zero the meter for every subscription user. This is the
+      // verification gap PR #5087 deferred.
+      const session = createSession()
+      const messages = []
+      const results = []
+      session.on('message', (m) => messages.push(m))
+      session.on('result', (r) => results.push(r))
+
+      // Drive a normal streamed turn end-to-end.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed reply' },
+        },
+      })
+
+      // Subscription-billed result: cost is null (no per-turn $$$), but
+      // usage carries real token counts. The `usage` payload here is a
+      // representative example of the shape `claude -p` emits on a
+      // subscription-billing path (illustrative values, not a captured
+      // wire sample).
+      const usage = {
+        input_tokens: 137,
+        output_tokens: 42,
+        cache_creation_input_tokens: 1024,
+        cache_read_input_tokens: 8192,
+      }
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-1',
+        subtype: 'success',
+        result: 'streamed reply',
+        total_cost_usd: null,
+        duration_ms: 250,
+        usage,
+      })
+
+      // Primary contract: NO synthetic fallback message on streamed turns.
+      // The stream_delta is the canonical surface for the text — a fallback
+      // here would double-emit the reply.
+      assert.equal(messages.length, 0)
+
+      // Canonical contract: the `result` event the session-manager listens
+      // for carries the full usage object verbatim. session-manager's
+      // _trackUsage reads `resultData.usage.{input_tokens, output_tokens,
+      // cache_read_input_tokens, cache_creation_input_tokens}` — pin all
+      // four so a future regression that drops a field (e.g. shallow
+      // restructure that forgets cache_* keys) fails here, not silently in
+      // the meter.
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 'sess-1')
+      assert.equal(results[0].cost, null)
+      assert.equal(results[0].duration, 250)
+      assert.ok(results[0].usage, 'usage must be present on streamed-turn result')
+      assert.equal(results[0].usage.input_tokens, 137)
+      assert.equal(results[0].usage.output_tokens, 42)
+      assert.equal(results[0].usage.cache_creation_input_tokens, 1024)
+      assert.equal(results[0].usage.cache_read_input_tokens, 8192)
+      // Structural-equality check: the result event must forward a usage
+      // object deeply equal to the one the wire payload carried — not a
+      // synthesized subset that drops cache fields.
+      assert.deepEqual(results[0].usage, usage)
+    })
+  })
+
+  describe('result fallback for error-subtype text (#5088)', () => {
+    // Some `claude -p` result events carry human-readable text in a
+    // structured `error.subtype` payload (e.g. permission_denied,
+    // usage_limit_exceeded) but never emit a stream_start. Without a
+    // dedicated fallback the user sees nothing — same silent-disappear
+    // pattern that #5064 fixed for `/compact`. Surface this by emitting a
+    // `type: 'error'` message (→ `messageType: 'error'` on the wire) so
+    // downstream consumers render it as a distinct error bubble rather
+    // than a normal `data.result` reply.
+    //
+    // The `data.result` path in #5064 takes priority — only fall back
+    // to error-subtype text when `data.result` is missing/empty, so we
+    // never double-emit for the same turn.
+    //
+    // Complementary to #5090 (stream_delta pinning) — touch this file
+    // additively, don't disturb the existing describe blocks.
+    function errorSubtype(text) {
+      return {
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        error: { subtype: text },
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      }
+    }
+
+    it('emits a fallback type=error message when error.subtype text exists and no stream started', () => {
+      const session = createSession()
+      const messages = []
+      const streams = []
+      session.on('message', (m) => messages.push(m))
+      session.on('stream_start', () => streams.push('start'))
+      session.on('stream_end', () => streams.push('end'))
+
+      session._handleEvent(errorSubtype('Permission denied: write to /etc/hosts'))
+
+      assert.equal(messages.length, 1)
+      assert.equal(messages[0].type, 'error')
+      assert.equal(messages[0].kind, undefined)
+      assert.equal(messages[0].content, 'Permission denied: write to /etc/hosts')
+      // No stream surfaced for this turn — pure fallback path.
+      assert.equal(streams.length, 0)
+    })
+
+    it('does not emit error-subtype fallback when a stream already fired', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // Normal streamed turn first.
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_start',
+          content_block: { type: 'text' },
+        },
+      })
+      session._handleEvent({
+        type: 'stream_event',
+        event: {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text: 'streamed reply' },
+        },
+      })
+      // Then a result event with an error subtype echoes alongside.
+      session._handleEvent(errorSubtype('Permission denied'))
+
+      // The streamed delta is the canonical surface — don't fall back.
+      assert.equal(messages.length, 0)
+    })
+
+    it('prefers data.result over error.subtype when both are present', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        result: 'Conversation compacted to summary.',
+        error: { subtype: 'Permission denied' },
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      })
+
+      // The existing #5064 path wins — don't double-emit.
+      assert.equal(messages.length, 1)
+      assert.equal(messages[0].type, 'response')
+      assert.equal(messages[0].content, 'Conversation compacted to summary.')
+      // No `kind` annotation when `data.result` provided the text.
+      assert.equal(messages[0].kind, undefined)
+    })
+
+    it('does not emit fallback when error.subtype is empty or missing', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // No `error` field at all.
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      })
+      assert.equal(messages.length, 0)
+
+      // `error` present but `subtype` empty.
+      session._currentMessageId = 'msg-2'
+      session._currentCtx = {
+        hasStreamStarted: false,
+        didStreamText: false,
+        assistantTextSeen: 0,
+        currentContentBlockType: null,
+        currentToolName: null,
+        currentToolUseId: null,
+        toolInputChunks: '',
+        toolInputBytes: 0,
+        toolInputOverflow: false,
+      }
+      session._handleEvent({
+        type: 'result',
+        session_id: 'sess-err',
+        subtype: 'error_during_execution',
+        error: { subtype: '' },
+        total_cost_usd: 0,
+        duration_ms: 50,
+        usage: {},
+      })
+      assert.equal(messages.length, 0)
+    })
+
+    it('does not widen to non-result events (system event with error.subtype is ignored)', () => {
+      const session = createSession()
+      const messages = []
+      session.on('message', (m) => messages.push(m))
+
+      // A system event happens to carry an `error.subtype` shaped field —
+      // the fallback must remain scoped to `result` events.
+      session._handleEvent({
+        type: 'system',
+        subtype: 'sub_agent_notification',
+        error: { subtype: 'should-not-fall-back' },
+      })
+
+      // System events emit a `system`-typed message via their own
+      // handler, never the error-subtype fallback's `error` bubble.
+      const fallbackBubbles = messages.filter((m) => m.type === 'error')
+      assert.equal(fallbackBubbles.length, 0)
+    })
+
+    it('still emits the result event after the error-subtype fallback fires', () => {
+      const session = createSession()
+      const results = []
+      session.on('result', (r) => results.push(r))
+
+      session._handleEvent(errorSubtype('Permission denied'))
+
+      assert.equal(results.length, 1)
+      assert.equal(results[0].sessionId, 'sess-err')
     })
   })
 })

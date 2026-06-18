@@ -1,6 +1,6 @@
 [package]
 name = "chroxy-desktop"
-version = "0.8.3"
+version = "0.9.46"
 edition = "2021"
 description = "Chroxy desktop tray app"
 
@@ -26,6 +26,8 @@ tauri-plugin-clipboard-manager = "2"
 tauri-plugin-dialog = "2"
 base64 = "0.22"
 tauri-plugin-window-state = "2"
+tauri-plugin-global-shortcut = "2"
+mdns-sd = "0.20"
 tokio = { version = "1", features = ["sync"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

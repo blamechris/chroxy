@@ -2,6 +2,7 @@ import { spawn, execFile } from 'child_process'
 import { createInterface } from 'readline'
 import { CliSession } from './cli-session.js'
 import { createLogger } from './logger.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 const log = createLogger('docker-session')
 
@@ -95,6 +96,75 @@ const FORWARDED_ENV_KEYS = [
 export class DockerSession extends CliSession {
   static get capabilities() {
     return { ...CliSession.capabilities, containerized: true }
+  }
+
+  /**
+   * Preflight credentials block — overrides CliSession's host-side spec (#4780).
+   *
+   * Inside a container `claude login` cannot work: there is no ~/.claude OAuth
+   * state and the host Keychain is invisible. The only valid path is the
+   * `ANTHROPIC_API_KEY` env var, which `_startContainer` forwards via
+   * `docker run --env`. CLAUDE_CODE_OAUTH_TOKEN is intentionally NOT in
+   * `envVars` — _startContainer does not forward it, so claiming the OAuth
+   * token satisfies auth would mislead the dashboard into reporting ready
+   * for a container that would still fail to authenticate.
+   */
+  static get preflight() {
+    const parent = CliSession.preflight
+    return {
+      ...parent,
+      credentials: {
+        envVars: ['ANTHROPIC_API_KEY'],
+        hint: 'set ANTHROPIC_API_KEY on the host so it is forwarded into the container (no OAuth fallback inside the container — the container has no ~/.claude state)',
+        optional: true,
+      },
+    }
+  }
+
+  /**
+   * Resolve runtime auth state for the dashboard (#4769, #4780).
+   *
+   * Docker container providers forward process.env.ANTHROPIC_API_KEY to
+   * the container at `docker run` time (see _startContainer). Inside the
+   * container there is no ~/.claude OAuth state, so the env var is the
+   * only auth path — no OAuth fallback even though the host-side preflight
+   * marks credentials as optional. Overrides CliSession's "subscription
+   * always" branch — container providers do not bill the host's subscription.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string, billingClass:string}}
+   */
+  static resolveAuth(env) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint
+
+    // docker-cli forwards the host's ANTHROPIC_API_KEY into the container and
+    // has NO OAuth fallback (the container has no ~/.claude state), so it
+    // always bills the raw API account — api-key, era-independent. The host's
+    // subscription/programmatic-credit pool never applies inside the container.
+    const billingClass = BILLING_CLASSES.API_KEY
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `Anthropic API (forwarded to container) (${matched} set)`,
+        billingClass,
+      }
+    }
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint,
+      detail: 'Not configured — set ANTHROPIC_API_KEY on the host (forwarded into the container at run time). No OAuth fallback inside the container — the container has no ~/.claude state.',
+      billingClass,
+    }
   }
 
   constructor(opts = {}) {
@@ -264,25 +334,7 @@ export class DockerSession extends CliSession {
       this._scheduleRespawn()
     })
 
-    child.on('close', (code) => {
-      this._cleanupReadlines()
-      this._processReady = false
-      this._child = null
-
-      if (this._destroying) return
-      if (this._respawning) return
-
-      if (this._isBusy && this._currentMessageId) {
-        if (this._currentCtx?.hasStreamStarted) {
-          this.emit('stream_end', { messageId: this._currentMessageId })
-        }
-        this._clearMessageState()
-      }
-
-      log.info(`Container exec exited (code ${code}), scheduling respawn`)
-      this.emit('error', { message: 'Claude process exited unexpectedly, restarting...' })
-      this._scheduleRespawn()
-    })
+    child.on('close', (code) => this._handleChildClose(code))
 
     this._processReady = true
     log.info('Container exec started, ready for messages')
@@ -297,6 +349,17 @@ export class DockerSession extends CliSession {
       log.info(`Dequeuing pending message (${this._pendingQueue.length} remaining)`)
       this.sendMessage(pending.prompt, pending.attachments, pending.options || {})
     }
+  }
+
+  // #4473: log the container-specific exit line under the docker-session
+  // namespace before delegating to the inherited handler (#4469). The
+  // inherited code emits its own "Process exited" line; this override
+  // lands first so `docker logs <ctr>` correlation by operators stays easy.
+  _handleChildClose(code) {
+    if (!this._destroying && !this._respawning) {
+      log.info(`Container exec exited (code ${code}), scheduling respawn`)
+    }
+    super._handleChildClose(code)
   }
 
   /**

@@ -1,6 +1,10 @@
-import { describe, it, beforeEach, afterEach, mock } from 'node:test'
+import { describe, it, beforeEach, afterEach, after, mock } from 'node:test'
 import assert from 'node:assert/strict'
+import { mkdtempSync, rmSync, writeFileSync, readFileSync, existsSync } from 'node:fs'
+import { join } from 'node:path'
+import { tmpdir } from 'node:os'
 import { SdkSession } from '../src/sdk-session.js'
+import { SessionStatePersistence } from '../src/session-state-persistence.js'
 import { resetModels } from '../src/models.js'
 
 /**
@@ -9,10 +13,42 @@ import { resetModels } from '../src/models.js'
  *
  * These tests instantiate SdkSession without calling start() or
  * sendMessage() and exercise internal methods directly.
+ *
+ * #4700: every test routes through a per-test temp `stateFilePath` so a
+ * future regression that gives SdkSession a persistence path can never
+ * contaminate `~/.chroxy/session-state.json`. SdkSession does not
+ * currently accept `stateFilePath` directly (the persistence layer lives
+ * on SessionManager / SessionStatePersistence), so the value is stashed
+ * on the instance as `_testStateFilePath` and ignored by the constructor
+ * — purely a belt-and-braces guard so the moment someone wires a write
+ * path on the session this hook already exists. Mirrors the temp-state
+ * discipline pinned in session-manager.test.js (#429, #2314).
  */
 
+// Module-level temp dir for tests that don't manage their own. Each call
+// returns a unique file path so concurrent describe blocks don't share
+// state. The `after` hook below tears the whole dir down.
+let _globalTmpDir
+function tmpStateFile() {
+  if (!_globalTmpDir) _globalTmpDir = mkdtempSync(join(tmpdir(), 'sdk-session-test-'))
+  return join(_globalTmpDir, `state-${Date.now()}-${Math.random().toString(36).slice(2)}.json`)
+}
+
+after(() => {
+  if (_globalTmpDir) rmSync(_globalTmpDir, { recursive: true, force: true })
+})
+
 function createSession(opts = {}) {
-  return new SdkSession({ cwd: '/tmp', ...opts })
+  const stateFilePath = opts.stateFilePath || tmpStateFile()
+  // SdkSession ignores unknown keys via destructuring today, so passing
+  // `stateFilePath` is a harmless no-op now AND auto-protects the suite
+  // the moment someone wires a persistence path on the session class —
+  // the destructured value will point at the per-test temp file instead
+  // of `~/.chroxy/session-state.json`. The path is also stashed on the
+  // instance so individual tests can assert on it.
+  const session = new SdkSession({ cwd: '/tmp', stateFilePath, ...opts })
+  session._testStateFilePath = stateFilePath
+  return session
 }
 
 describe('SdkSession', () => {
@@ -248,7 +284,7 @@ describe('SdkSession', () => {
     })
 
     it('re-emits permission_resolved on timeout (#3048)', async () => {
-      const fastSession = new SdkSession({ cwd: '/tmp' })
+      const fastSession = createSession()
       // Override the manager with a fast timeout so the test runs quickly
       fastSession._permissions._timeoutMs = 5
       const upstream = []
@@ -279,20 +315,30 @@ describe('SdkSession', () => {
       assert.deepStrictEqual(upstream[0], { requestId, decision: 'deny', reason: 'aborted' })
     })
 
-    it('does NOT re-emit AskUserQuestion permission_resolved (no requestId — separate wire contract, #3048)', async () => {
+    it('re-emits AskUserQuestion permission_resolved WITH toolUseId so questionSessionMap can prune via the unified pipeline (#3048, #3975, #3988)', async () => {
       const upstream = []
       session.on('permission_resolved', (data) => upstream.push(data))
 
       // AskUserQuestion routes through _handlePermission but resolves via
-      // the question path (toolUseId, no requestId). The PermissionManager
-      // emits { reason: 'answered' } with no requestId — SdkSession must
-      // NOT re-emit it onto the unified pipeline.
+      // the question path. PermissionManager emits permission_resolved
+      // with { toolUseId, reason: 'answered' } (#3988 — symmetric with the
+      // aborted/timeout/cleared question-variant emits added in #3975).
+      // SdkSession's gate at line ~281 allows toolUseId-only payloads
+      // through so EventNormalizer + ws-forwarding can prune
+      // questionSessionMap on the unified pipeline. The ws-server
+      // permission-audit listener still ignores question variants by
+      // gating on data.requestId.
       const promise = session._handlePermission('AskUserQuestion', { questions: [{ question: 'ok?' }] }, null)
       session.respondToQuestion('yes')
       await promise
 
-      assert.equal(upstream.length, 0,
-        'question paths use toolUseId and route via user_question, not permission_resolved')
+      assert.equal(upstream.length, 1,
+        'question variant emits permission_resolved with toolUseId for unified-pipeline cleanup')
+      assert.equal(upstream[0].requestId, undefined,
+        'question variant carries no requestId — distinct wire from permission requests')
+      assert.equal(typeof upstream[0].toolUseId, 'string',
+        'toolUseId is propagated so EventNormalizer can prune questionSessionMap')
+      assert.equal(upstream[0].reason, 'answered')
     })
   })
 
@@ -428,6 +474,25 @@ describe('SdkSession', () => {
       assert.ok(session._activeAgents.has('tool-1'))
     })
 
+    it('aligns toolUseId with synthesized fallback when block.id is missing (#4778)', () => {
+      const events = []
+      session.on('agent_spawned', (data) => events.push(data))
+
+      // Mirrors the defensive fallback path of buildToolStartData when
+      // upstream stream_event omits content_block.id. agent_spawned +
+      // _activeAgents must key off the synthesized `${messageId}-tool`
+      // id, not `undefined`, so they match the wire-emitted tool_start.
+      session._handleToolUseBlock('msg-99', {
+        name: 'Task',
+        input: { description: 'fallback path' },
+      })
+
+      assert.equal(events.length, 1)
+      assert.equal(events[0].toolUseId, 'msg-99-tool')
+      assert.ok(session._activeAgents.has('msg-99-tool'))
+      assert.ok(!session._activeAgents.has(undefined))
+    })
+
     it('truncates long descriptions to 200 chars', () => {
       const events = []
       session.on('agent_spawned', (data) => events.push(data))
@@ -484,6 +549,160 @@ describe('SdkSession', () => {
       s._handleToolUseBlock('msg-1', { name: 'Bash', id: 'tool-4', input: { cmd: 'x'.repeat(2000) } })
       assert.equal(errors.length, 1)
       s.destroy()
+    })
+
+    // #4307: background-shell tracking wired through SdkSession's
+    // tool_use → tool_result loop. Asserts: command stashing at
+    // tool_use time, BashOutput-triggered clearing, ignoring non-Bash
+    // run_in_background:false calls.
+    describe('#4307 — background-shell tracking', () => {
+      it('stashes the command on a run_in_background Bash tool_use', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-1',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        assert.equal(session._pendingBackgroundCommands.get('tu-bg-1'), 'sleep 600')
+        // No shell registered yet — that happens on the matching tool_result.
+        assert.equal(session._pendingBackgroundShells.size, 0)
+      })
+
+      it('does not stash on a regular Bash call (no run_in_background flag)', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-2',
+          input: { command: 'ls' },
+        })
+        assert.equal(session._pendingBackgroundCommands.size, 0)
+      })
+
+      it('does not stash on a non-Bash tool with run_in_background:true (defensive)', () => {
+        // The flag is Bash-specific in Claude's tool surface — a non-Bash
+        // call with the field is a malformed payload; reject without
+        // poisoning the pending-commands map.
+        session._handleToolUseBlock('msg-1', {
+          name: 'Edit',
+          id: 'tu-bg-3',
+          input: { file_path: '/foo', run_in_background: true },
+        })
+        assert.equal(session._pendingBackgroundCommands.size, 0)
+      })
+
+      it('records a pending shell when the matching tool_result carries the canonical id', () => {
+        const events = []
+        session.on('background_work_changed', (e) => events.push(e))
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-4',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-4',
+            content: 'Command running in background with ID: brk57kt6pm. Output…',
+          },
+        ])
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        const entry = session._pendingBackgroundShells.get('brk57kt6pm')
+        assert.equal(entry.command, 'sleep 600')
+        assert.equal(entry.shellId, 'brk57kt6pm')
+        assert.ok(entry.startedAt > 0)
+        // The ephemeral command stash drops once promoted to a pending shell.
+        assert.equal(session._pendingBackgroundCommands.has('tu-bg-4'), false)
+        // background_work_changed fired with the new snapshot.
+        assert.equal(events.length, 1)
+        assert.equal(events[0].pending[0].shellId, 'brk57kt6pm')
+      })
+
+      it('extracts the id from an array-form content block (text-only blocks)', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-5',
+          input: { command: 'long-running', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-5',
+            content: [
+              { type: 'text', text: 'Command running in background with ID: bg-abc-1.' },
+            ],
+          },
+        ])
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        assert.ok(session._pendingBackgroundShells.has('bg-abc-1'))
+      })
+
+      it('isRunning reports waiting (true) once _isBusy clears but the shell is pending', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-6',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-6',
+            content: 'Command running in background with ID: bg-6-id. Output…',
+          },
+        ])
+        // Simulate turn-end: _clearMessageState happens after `result`.
+        session._isBusy = true
+        session._clearMessageState()
+        assert.equal(session._isBusy, false)
+        // The waiting-on-background-work signal: isRunning stays true.
+        assert.equal(session.isRunning, true)
+        assert.equal(session._pendingBackgroundShells.size, 1)
+      })
+
+      it('clears the pending entry when the agent calls BashOutput with the matching bash_id', () => {
+        const events = []
+        // Set up a pending shell.
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-7',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-7',
+            content: 'Command running in background with ID: shell-77. Output…',
+          },
+        ])
+        session.on('background_work_changed', (e) => events.push(e))
+        // Now the agent calls BashOutput on shell-77.
+        session._handleToolUseBlock('msg-2', {
+          name: 'BashOutput',
+          id: 'tu-bo-1',
+          input: { bash_id: 'shell-77' },
+        })
+        assert.equal(session._pendingBackgroundShells.size, 0)
+        assert.equal(session.isRunning, false)
+        assert.equal(events.length, 1)
+        assert.equal(events[0].pending.length, 0)
+      })
+
+      it('destroy() clears the pending map (no leak)', () => {
+        session._handleToolUseBlock('msg-1', {
+          name: 'Bash',
+          id: 'tu-bg-8',
+          input: { command: 'sleep 600', run_in_background: true },
+        })
+        session._recordBackgroundShellsFromToolResults([
+          {
+            type: 'tool_result',
+            tool_use_id: 'tu-bg-8',
+            content: 'Command running in background with ID: shell-88. Output…',
+          },
+        ])
+        assert.equal(session._pendingBackgroundShells.size, 1)
+        session.destroy()
+        assert.equal(session._pendingBackgroundShells.size, 0)
+        // Re-create one for the afterEach destroy to not double-destroy.
+        session = createSession()
+      })
     })
   })
 
@@ -651,16 +870,39 @@ describe('SdkSession', () => {
 
       session.sendMessage('follow-up message')
       assert.equal(errors.length, 0)
-      assert.equal(session._pendingInput.length, 1)
-      assert.equal(session._pendingInput[0].prompt, 'follow-up message')
+      assert.equal(session._outgoingQueue.length, 1)
+      assert.equal(session._outgoingQueue[0].prompt, 'follow-up message')
     })
 
     it('clears pending queue on destroy', () => {
       session._isBusy = true
       session.sendMessage('queued')
-      assert.equal(session._pendingInput.length, 1)
+      assert.equal(session._outgoingQueue.length, 1)
       session.destroy()
-      assert.equal(session._pendingInput.length, 0)
+      assert.equal(session._outgoingQueue.length, 0)
+    })
+
+    // #5936: the SDK's old mid-turn cap of 3 (#5711) became the shared
+    // OUTGOING_QUEUE_MAX (10) on BaseSession; overflow still surfaces a visible
+    // `error` rather than a silent drop.
+    it('caps the mid-turn queue at OUTGOING_QUEUE_MAX and discards overflow with an error (#5936)', () => {
+      session._isBusy = true
+      const errors = []
+      session.on('error', (data) => errors.push(data))
+
+      // Fill the queue to the cap (10).
+      for (let i = 0; i < 10; i++) session.sendMessage(`q${i}`)
+      assert.equal(session._outgoingQueue.length, 10)
+      assert.equal(errors.length, 0)
+
+      // The 11th overflows: discarded with a visible error, queue stays at 10.
+      session.sendMessage('q-overflow')
+      assert.equal(session._outgoingQueue.length, 10)
+      assert.equal(errors.length, 1)
+      assert.match(errors[0].message, /queue full \(max 10\)/)
+      assert.equal(errors[0].code, 'queue_full')
+      // The discarded message is NOT in the queue.
+      assert.ok(!session._outgoingQueue.some((m) => m.prompt === 'q-overflow'))
     })
   })
 
@@ -748,7 +990,7 @@ describe('SdkSession', () => {
       s.sendMessage('q1')
       s.sendMessage('q2')
       s.sendMessage('q3')
-      assert.equal(s._pendingInput.length, 3, 'precondition: three messages queued')
+      assert.equal(s._outgoingQueue.length, 3, 'precondition: three messages queued')
 
       // Flag flips mid-turn (e.g. SidecarProcess loses stdin while query is
       // still streaming). Now any new sendMessage must reject AND drain the
@@ -760,7 +1002,7 @@ describe('SdkSession', () => {
       await s.sendMessage('arriving while disabled')
 
       assert.equal(captured.length, 0, '_callQuery must not be invoked')
-      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained')
+      assert.equal(s._outgoingQueue.length, 0, 'queued follow-ups must be drained')
       assert.equal(errors.length, 1, 'a single error event covers the drained batch + new call')
       assert.equal(errors[0].code, 'stdin_disabled')
 
@@ -769,7 +1011,7 @@ describe('SdkSession', () => {
 
     // #3562: short-circuit dequeue in finally when stdin forwarding is disabled.
     //
-    // PR #3560 (closes #3539) drains _pendingInput at the *entry* of sendMessage
+    // PR #3560 (closes #3539) drains _outgoingQueue at the *entry* of sendMessage
     // when the flag is set. This handles the case "next caller hits the gate".
     // But the post-turn dequeue path in sendMessage's finally block still has
     // its own "shift + process.nextTick(sendMessage)" branch. If a turn is
@@ -799,7 +1041,7 @@ describe('SdkSession', () => {
       }
 
       // Pre-queue a follow-up so the dequeue site has work to do.
-      s._pendingInput = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
+      s._outgoingQueue = [{ prompt: 'queued-follow-up', attachments: undefined, sendOptions: {} }]
 
       const errors = []
       s.on('error', (e) => errors.push(e))
@@ -813,7 +1055,7 @@ describe('SdkSession', () => {
       await new Promise((resolve) => setImmediate(resolve))
 
       assert.equal(callCount, 1, '_callQuery must only be invoked for the original turn — no recursive dequeue')
-      assert.equal(s._pendingInput.length, 0, 'queued follow-ups must be drained at the dequeue site')
+      assert.equal(s._outgoingQueue.length, 0, 'queued follow-ups must be drained at the dequeue site')
       assert.equal(errors.length, 0, 'dequeue-site short-circuit must not emit a per-message error (the warn is enough)')
 
       s.destroy()
@@ -983,11 +1225,11 @@ describe('SdkSession', () => {
         // First refused call — both warns fire (refusal + drain of 0
         // queued follow-ups won't fire; pre-load the queue to force the
         // drain warn to be eligible).
-        s._pendingInput = [{ prompt: 'q1' }, { prompt: 'q2' }]
+        s._outgoingQueue = [{ prompt: 'q1' }, { prompt: 'q2' }]
         await s.sendMessage('attempt 1')
         // Second refused call inside the window — re-queue and verify the
         // drain warn is suppressed alongside the refusal warn.
-        s._pendingInput = [{ prompt: 'q3' }]
+        s._outgoingQueue = [{ prompt: 'q3' }]
         s._lastRefusedWarnTs = Date.now()
         await s.sendMessage('attempt 2')
       } finally {
@@ -1001,7 +1243,7 @@ describe('SdkSession', () => {
       )
       assert.equal(drainWarns.length, 1,
         'drain warn must share the rate-limit gate with the refusal warn')
-      assert.equal(s._pendingInput.length, 0,
+      assert.equal(s._outgoingQueue.length, 0,
         'queue must still be drained even when the warn is suppressed')
 
       s.destroy()
@@ -1055,6 +1297,121 @@ describe('SdkSession', () => {
 
       assert.equal(captured.length, 1)
       assert.equal(captured[0].options.sandbox, undefined)
+    })
+  })
+
+  // -- thinking keyword escalation (#4306) --
+
+  describe('thinking keyword escalation (#4306)', () => {
+    // The native CLI's REPL scans user prompts for magic thinking keywords
+    // ("think", "think hard", "think harder", "megathink", "ultrathink") and
+    // escalates maxThinkingTokens for that turn. SdkSession's query() path
+    // does NOT do this — the scanner lives in the REPL, not the SDK. These
+    // tests assert that Chroxy detects the keyword server-side and bumps
+    // maxThinkingTokens on the per-turn options object before the query
+    // generator is invoked.
+    function setupCapturingSession(opts = {}) {
+      const s = createSession(opts)
+      s._processReady = true
+      const captured = []
+      s._callQuery = (args) => {
+        captured.push(args)
+        return (async function* () {
+          yield { type: 'result', session_id: 'test', total_cost_usd: 0, duration_ms: 0, usage: {} }
+        })()
+      }
+      return { s, captured }
+    }
+
+    it('does NOT set maxThinkingTokens when no keyword present', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('please refactor this function')
+      s.destroy()
+      assert.equal(captured.length, 1)
+      assert.equal(captured[0].options.maxThinkingTokens, undefined,
+        'plain prompts must not bump the SDK thinking budget')
+    })
+
+    it('escalates to 4_000 for bare "think"', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('please think about this')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 4_000)
+    })
+
+    it('escalates to 10_000 for "think hard"', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('think hard about edge cases')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 10_000)
+    })
+
+    it('escalates to 32_000 for "think harder" (prefers over "think hard")', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('think harder please')
+      s.destroy()
+      // Without longest-match-first, this would fall through to `think hard`
+      // (which is also a substring) and shortchange the user's intent.
+      assert.equal(captured[0].options.maxThinkingTokens, 32_000)
+    })
+
+    it('escalates to 128_000 for "ultrathink"', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('ultrathink the architecture trade-offs')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000)
+    })
+
+    it('case-insensitive: ULTRATHINK still escalates', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('ULTRATHINK now')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000)
+    })
+
+    it('does NOT match `think` inside `unthinkingly` (word boundary)', async () => {
+      const { s, captured } = setupCapturingSession()
+      await s.sendMessage('I unthinkingly committed this')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, undefined,
+        'substring matches must not trigger escalation — the user did not type a keyword')
+    })
+
+    // The dropdown-driven thinking level (#2263) and the per-turn keyword
+    // escalation are layered: the keyword must never DOWNgrade an explicit
+    // max-level session. Mirrors the native CLI's "more thinking, never less"
+    // semantic — typing `think` on a session you already cranked to `max`
+    // should leave it at max for that turn, not drop it to 4_000.
+    it('keyword does NOT lower an already-elevated dropdown level', async () => {
+      const { s, captured } = setupCapturingSession()
+      s._thinkingLevel = 'max' // dropdown set to 128_000
+      await s.sendMessage('please think about this')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000,
+        'dropdown-level budget must win when it is higher than the keyword budget')
+    })
+
+    it('keyword DOES raise above the dropdown level when bigger', async () => {
+      const { s, captured } = setupCapturingSession()
+      s._thinkingLevel = 'high' // dropdown set to 32_000
+      await s.sendMessage('ultrathink this one')
+      s.destroy()
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000,
+        'a stronger keyword must override a weaker dropdown level for the turn')
+    })
+
+    it('keyword escalation is per-turn and does NOT mutate the session-wide level', async () => {
+      const { s, captured } = setupCapturingSession()
+      // First turn: keyword present.
+      await s.sendMessage('ultrathink this design')
+      assert.equal(captured[0].options.maxThinkingTokens, 128_000)
+      assert.equal(s._thinkingLevel, null, 'session-wide level must remain unchanged')
+
+      // Second turn: no keyword — must drop back to no escalation.
+      await s.sendMessage('now write the code')
+      s.destroy()
+      assert.equal(captured[1].options.maxThinkingTokens, undefined,
+        'per-turn escalation must NOT bleed into subsequent turns without the keyword')
     })
   })
 
@@ -1891,7 +2248,7 @@ describe('SdkSession', () => {
       const { addLogListener, removeLogListener } = await import('../src/logger.js')
 
       // Construct with the persisted latch already set.
-      const restored = new SdkSession({ cwd: '/tmp', stdinForwardingDisabled: true })
+      const restored = createSession({ stdinForwardingDisabled: true })
       const proc = new EventEmitter()
       const entries = []
       const listener = (entry) => entries.push(entry)
@@ -2282,5 +2639,362 @@ describe('SdkSession', () => {
       assert.equal(totalsEvents[2].bytes, 100)
       assert.equal(totalsEvents[2].count, 3, 'count still increments on unknown payloads')
     })
+  })
+
+  // #4467: stream-stall recovery — SDK sibling of the CLI watchdog
+  // (already shipped in cli-session.js via #4475). The SDK path was
+  // missing the third timer, so a half-open HTTPS connection to the
+  // Anthropic API would leave the session at "Thinking…" until the user
+  // clicked Stop. These tests pin the unit behaviour of the handler
+  // itself; the arm/reset/pause integration tests live in
+  // sdk-session-timeout-pause.test.js alongside the soft+hard suite.
+  describe('SdkSession._handleStreamStall (#4467: stream-stall recovery)', () => {
+    it('emits stream_end + error{code:stream_stall} so dashboard can offer retry', () => {
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+      s._sessionId = 'sess_ss'
+
+      const events = []
+      s.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+      s.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+      s._handleStreamStall('msg_ss', true)
+
+      assert.deepEqual(events.map((e) => e.name), ['stream_end', 'error'])
+      assert.equal(events[0].payload.messageId, 'msg_ss')
+      assert.equal(events[1].payload.code, 'stream_stall',
+        'error MUST carry code:stream_stall so dashboard can distinguish from generic errors')
+      assert.match(events[1].payload.message, /stalled/i)
+      assert.equal(s._isBusy, false,
+        'busy state must clear so the user can retry from the same session')
+      s.destroy()
+    })
+
+    it('does NOT emit stream_end when the stream had not yet started', () => {
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+
+      const events = []
+      s.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+      s.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+      s._handleStreamStall('msg_ss', false)
+
+      assert.deepEqual(events.map((e) => e.name), ['error'])
+      assert.equal(events[0].payload.code, 'stream_stall')
+      s.destroy()
+    })
+
+    it('no-ops when not busy (timer fired against an idle session)', () => {
+      const s = createSession()
+      s._isBusy = false
+
+      const events = []
+      s.on('stream_end', () => events.push('stream_end'))
+      s.on('error', () => events.push('error'))
+
+      s._handleStreamStall('msg_x', true)
+      assert.deepEqual(events, [])
+      s.destroy()
+    })
+
+    it('emits synthetic `result` so event-normalizer fans to agent_idle → activeTools clear (#4616)', () => {
+      // #4616 — without the synthetic `result` event, the dashboard's
+      // activeTools entries linger after a stream stall: the event-
+      // normalizer only synthesizes `agent_idle` from `result` (see
+      // event-normalizer.js:253), and store-core handleAgentIdle clears
+      // `activeTools: []` as the #4308 safety net. CLI does the same via
+      // _emitInterruptedTurnResult (stream_end + result). Pre-#4616 the
+      // SDK was missing the `result` half of the pair, so its footer
+      // pill never cleared after a stall.
+      const s = createSession({ streamStallTimeoutMs: 60_000 })
+      s._isBusy = true
+      s._currentMessageId = 'msg_ss'
+      s._sessionId = 'sess_ss'
+      s._sdkSessionId = 'sess_ss'
+
+      const events = []
+      s.on('stream_end', (p) => events.push({ name: 'stream_end', payload: p }))
+      s.on('result', (p) => events.push({ name: 'result', payload: p }))
+      s.on('error', (p) => events.push({ name: 'error', payload: p }))
+
+      s._handleStreamStall('msg_ss', true)
+
+      assert.deepEqual(events.map((e) => e.name), ['stream_end', 'result', 'error'],
+        'order is stream_end → result → error so agent_idle lands before the toast')
+
+      const resultEvent = events[1].payload
+      assert.equal(resultEvent.cost, null,
+        'cost MUST be null so session-manager skips billing accumulation on a stalled turn')
+      assert.equal(resultEvent.usage, null,
+        'usage MUST be null on a stalled turn — no real assistant response was produced')
+      assert.equal(resultEvent.sessionId, 'sess_ss',
+        'sessionId snapshotted before _clearMessageState so the synthetic result is correctly identified')
+      assert.equal(typeof resultEvent.duration, 'number',
+        'duration carries the stall timeout so the dashboard can render an approximate turn time')
+
+      assert.equal(events[2].payload.code, 'stream_stall',
+        'error still carries the structured code for the dashboard stall chip')
+      s.destroy()
+    })
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #4700 — Session-state persistence roundtrip.
+//
+// SdkSession does not own a `saveSessionState()` / `restoreSessionState()`
+// pair directly — the persistence layer lives on `SessionManager` /
+// `SessionStatePersistence`, which serializes session metadata (model,
+// permissionMode, sdkSessionId, stdinForwardingDisabled, …) to JSON. The
+// roundtrip tested here is the JSON shape contract on each side of that
+// boundary:
+//
+//   1. Snapshot the session metadata SessionManager would persist.
+//   2. JSON-stringify it to a temp `stateFilePath` (atomic write contract).
+//   3. Parse it back.
+//   4. Reconstruct a fresh SdkSession with the restored opts.
+//   5. Assert every persisted field round-tripped exactly.
+//
+// The audit (#4700) flagged this as the missing layer: SessionManager-level
+// restore tests already cover the persistence path end-to-end (see
+// session-manager.test.js), but a regression on the SDK side — a field
+// that survives restore in shape but no longer hydrates into the
+// constructor — would only show up in integration tests, not at the
+// unit layer.
+//
+// The corrupt-file + mismatched-id branches mirror the same patterns
+// covered in session-manager.test.js for symmetry. The Map-serialization
+// branch pins the JSON gotcha that #4687 surfaced for the analogous
+// claude-tui-session `_pendingUserAnswers` field: a naive
+// `JSON.stringify(new Map(…))` silently emits `{}` and loses every
+// entry — the canonical workaround is `[...map.entries()]`. The test
+// fails on any future SDK code that tries to persist a Map field
+// directly.
+// ---------------------------------------------------------------------------
+
+describe('SdkSession state-persistence roundtrip (#4700)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'sdk-roundtrip-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  // Snapshot the fields SessionManager.serializeState() would write for an
+  // SdkSession entry. Mirrors the shape pinned in session-manager.test.js
+  // (`stdinForwardingDisabled`, `sdkSessionId`, `model`, `permissionMode`,
+  // `name`, `cwd`) — keep these two in sync.
+  function snapshotForPersistence(session, { name, cwd }) {
+    return {
+      name,
+      cwd,
+      model: session.model,
+      permissionMode: session.permissionMode,
+      sdkSessionId: session.resumeSessionId,
+      stdinForwardingDisabled: !!session._stdinForwardingDisabled,
+    }
+  }
+
+  it('happy path: create → snapshot → write → read → restore → asserts metadata equality', () => {
+    // Step 1: build a session with non-default metadata so the restore
+    // side has to actually hydrate every field. `_sdkSessionId` is the
+    // SDK resume key — restored sessions feed it back into `resume`.
+    const original = createSession({
+      model: 'claude-sonnet-4-6',
+      permissionMode: 'auto',
+      stdinForwardingDisabled: true,
+    })
+    original._sdkSessionId = 'sdk-resume-abc-123'
+
+    // Step 2: snapshot + write atomically (mirrors SessionStatePersistence
+    // tmp + rename, simplified to a single write since the test owns the
+    // file lifecycle).
+    const state = {
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [snapshotForPersistence(original, { name: 'Restored', cwd: '/tmp' })],
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+    assert.ok(existsSync(stateFile), 'state file must exist after write')
+
+    // Step 3: destroy the original — restoration is the only path that
+    // recovers the metadata from disk.
+    original.destroy()
+
+    // Step 4: read back and reconstruct.
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    assert.equal(parsed.version, 1)
+    assert.equal(parsed.sessions.length, 1)
+    const persisted = parsed.sessions[0]
+
+    const restored = createSession({
+      model: persisted.model,
+      permissionMode: persisted.permissionMode,
+      resumeSessionId: persisted.sdkSessionId,
+      stdinForwardingDisabled: persisted.stdinForwardingDisabled,
+    })
+
+    // Step 5: every field that mattered to the user is back.
+    assert.equal(restored.model, 'claude-sonnet-4-6',
+      'model must round-trip — dashboard renders this on the session header')
+    assert.equal(restored.permissionMode, 'auto',
+      'permissionMode must round-trip — controls every canUseTool prompt')
+    assert.equal(restored.resumeSessionId, 'sdk-resume-abc-123',
+      'SDK resume key must round-trip — without it the restored session starts a new conversation')
+    assert.equal(restored._stdinForwardingDisabled, true,
+      'stdin_disabled latch must round-trip — restored sessions surface the disabled state immediately (#3540)')
+
+    restored.destroy()
+  })
+
+  it('corrupt state file: production restoreState must return null silently, not throw', () => {
+    // A truncated / hand-edited / partial-write state file must not take
+    // the server down. Pin the PRODUCTION contract: drive the real
+    // `SessionStatePersistence.restoreState()` (the entry point
+    // `SessionManager.restoreState()` calls — see session-manager.js:1266)
+    // and assert it returns `null` without throwing. The internal
+    // try/catch in session-state-persistence.js:148-170 swallows the
+    // SyntaxError, attempts .bak recovery, and falls back to null when
+    // no backup exists — supervisor / dashboard depend on that silent
+    // behaviour so a corrupt state file cannot block server boot.
+    writeFileSync(stateFile, '{ this is not valid json')
+
+    const persistence = new SessionStatePersistence({ stateFilePath: stateFile })
+    let restored
+    let threw = null
+    try {
+      restored = persistence.restoreState()
+    } catch (err) {
+      threw = err
+    }
+
+    assert.equal(threw, null,
+      'restoreState() MUST NOT throw on corrupt JSON — supervisor depends on the silent-null contract; ' +
+      'a throw here would crash the server on every restart after a partial write')
+    assert.equal(restored, null,
+      'restoreState() must return null on corrupt JSON so SessionManager treats it as "no prior state" and starts fresh')
+
+    // Secondary assertion documenting the underlying mechanism: the raw
+    // JSON.parse used inside restoreState() does throw a SyntaxError —
+    // that's why restoreState() wraps it in try/catch. The corrupt file
+    // was unlinked by restoreState's recovery path, so we re-write it
+    // here to pin the raw behaviour.
+    writeFileSync(stateFile, '{ this is not valid json')
+    let rawThrew = null
+    try { JSON.parse(readFileSync(stateFile, 'utf-8')) } catch (err) { rawThrew = err }
+    assert.ok(rawThrew instanceof SyntaxError,
+      'raw JSON.parse throws SyntaxError — restoreState() exists specifically to swallow this')
+
+    // The fallback path: instantiate a fresh SdkSession with no restored
+    // opts. Must succeed — a corrupt state file cannot block new session
+    // creation.
+    const fresh = createSession()
+    assert.equal(fresh._sdkSessionId, null,
+      'fresh session after corrupt-file restore must have no SDK resume id')
+    assert.equal(fresh._stdinForwardingDisabled, false,
+      'fresh session must start with stdin latch off — no carryover from corrupt state')
+    fresh.destroy()
+  })
+
+  it('mismatched session id: persisted resumeSessionId is silently ignored when the restoring caller does not forward it', () => {
+    // Operator hand-edits the state file (or schema drift, or a partial
+    // write that produced a half-valid entry): the file contains a
+    // resumeSessionId but the caller chooses not to plumb it through
+    // (e.g. because the SDK key no longer maps to a live conversation).
+    // The constructor must accept the choice without throwing or
+    // silently re-instating the stale id.
+    const state = {
+      version: 1,
+      timestamp: Date.now(),
+      sessions: [{
+        name: 'Stale',
+        cwd: '/tmp',
+        model: null,
+        permissionMode: 'approve',
+        sdkSessionId: 'sdk-resume-stale-9999',
+        stdinForwardingDisabled: false,
+      }],
+    }
+    writeFileSync(stateFile, JSON.stringify(state))
+
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    const persisted = parsed.sessions[0]
+    assert.equal(persisted.sdkSessionId, 'sdk-resume-stale-9999',
+      'precondition: state file carries the stale id')
+
+    // Caller decides NOT to forward the resumeSessionId (mismatch — the
+    // id no longer corresponds to a valid SDK conversation on the
+    // upstream). The fresh session must start clean.
+    const fresh = createSession({
+      model: persisted.model,
+      permissionMode: persisted.permissionMode,
+      // resumeSessionId intentionally omitted
+    })
+
+    assert.equal(fresh._sdkSessionId, null,
+      'session must not silently adopt a stale persisted SDK resume id — caller controls forwarding')
+    assert.equal(fresh.resumeSessionId, null,
+      'public accessor must also report null when no resume id was forwarded')
+
+    fresh.destroy()
+  })
+
+  // #4700 — Map-serialization contract. PR #4687 changed
+  // `_pendingUserAnswers` on claude-tui-session.js from a single field to
+  // a Map keyed by toolUseId. This test pins the canonical JSON
+  // workaround for ANY Map field that a future SdkSession (or any
+  // BaseSession descendant) might want to persist. The naive write
+  // (`JSON.stringify(new Map(…))`) silently emits `{}` and loses every
+  // entry — a regression that would not be caught by any existing
+  // serialize/restore test because the Map's *type* is lost before the
+  // disk hop, so the restored "Map" is an empty `{}` and round-trip
+  // assertions pass on shape but fail in semantics.
+  it('Map field serialization roundtrip: pins the entries-array contract (#4687 surface)', () => {
+    // Build a Map with the same shape as `_pendingUserAnswers`: keyed by
+    // tool_use_id, values are per-turn pending entries.
+    const pending = new Map()
+    pending.set('toolu_first', { questions: [{ question: 'Q1?' }], options: ['A', 'B'] })
+    pending.set('toolu_second', { questions: [{ question: 'Q2?' }], options: ['Y', 'N'] })
+
+    // The trap: naive Map serialization loses every entry. This
+    // assertion documents the gotcha so a future contributor who writes
+    // `JSON.stringify(session._someMap)` sees this test and remembers
+    // to convert to an array first.
+    assert.equal(JSON.stringify(pending), '{}',
+      'NAIVE Map.toJSON is {} — every entry is silently lost. ' +
+      'Any persistence of a Map field MUST use [...map.entries()] (see workaround below)')
+
+    // The canonical workaround: serialize as an array of entries so the
+    // restore side can feed `new Map(parsed)` and recover every key.
+    const serialized = JSON.stringify([...pending.entries()])
+    writeFileSync(stateFile, serialized)
+
+    const parsed = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    const restored = new Map(parsed)
+
+    assert.equal(restored.size, 2,
+      'entries-array roundtrip must preserve every key')
+    assert.ok(restored.has('toolu_first'),
+      'first toolUseId key must survive — sibling pending answers from parallel AskUserQuestion blocks (#4668) depend on this')
+    assert.ok(restored.has('toolu_second'),
+      'second toolUseId key must survive — the bug #4687 fixed was the single-field overwrite')
+    assert.deepEqual(restored.get('toolu_first').questions, [{ question: 'Q1?' }])
+    assert.deepEqual(restored.get('toolu_second').options, ['Y', 'N'])
+
+    // Symmetry assertion: the restored Map iterates in the same order
+    // as the original. JSON arrays preserve insertion order, so this
+    // pins the contract that "most-recent" fallback semantics (see
+    // claude-tui-session.js `_lastPendingAnswerToolUseId`) survive a
+    // restart.
+    assert.deepEqual([...restored.keys()], ['toolu_first', 'toolu_second'],
+      'Map insertion order must round-trip so "most-recent" semantics survive a restart')
   })
 })

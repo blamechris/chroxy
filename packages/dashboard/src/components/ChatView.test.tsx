@@ -51,6 +51,23 @@ describe('ChatView', () => {
     expect(screen.queryByTestId('thinking-dots')).not.toBeInTheDocument()
   })
 
+  // #5953 — the streaming tail shows the labelled WorkingIndicator.
+  it('shows the working indicator with the generic default label when streaming', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming />)
+    expect(screen.getByTestId('working-indicator')).toBeInTheDocument()
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Claude is working…')
+  })
+
+  it('surfaces the in-flight activity via workingLabel', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming workingLabel="Running Bash…" />)
+    expect(screen.getByTestId('working-label')).toHaveTextContent('Running Bash…')
+  })
+
+  it('hides the working indicator when idle', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming={false} isBusy={false} workingLabel="Running Bash…" />)
+    expect(screen.queryByTestId('working-indicator')).not.toBeInTheDocument()
+  })
+
   it('shows scroll-to-bottom button when scrolled up', () => {
     const messages = makeMessages(3)
     render(<ChatView messages={messages} isStreaming={false} />)
@@ -63,6 +80,37 @@ describe('ChatView', () => {
     fireEvent.scroll(container)
 
     expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+  })
+
+  // #5939 (epic #5935 ④): queued send-while-busy follow-ups render a "Queued"
+  // badge + cancel affordance on the matching user_input bubble.
+  describe('queued-message badge (#5939)', () => {
+    const userMsg: ChatViewMessage = { id: 'uin-1', type: 'user_input', content: 'follow-up', timestamp: Date.now() }
+
+    it('renders a Queued badge on a user bubble whose id is in queuedIds', () => {
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} />)
+      expect(screen.getByTestId('msg-queued-uin-1')).toBeInTheDocument()
+      expect(screen.getByText('Queued')).toBeInTheDocument()
+    })
+
+    it('does NOT render a badge when the id is not queued', () => {
+      render(<ChatView messages={[userMsg]} isStreaming={false} queuedIds={new Set()} />)
+      expect(screen.queryByTestId('msg-queued-uin-1')).not.toBeInTheDocument()
+    })
+
+    it('renders a cancel button that calls onCancelQueued with the message id', () => {
+      const onCancelQueued = vi.fn()
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} onCancelQueued={onCancelQueued} />)
+      fireEvent.click(screen.getByTestId('msg-queued-cancel-uin-1'))
+      expect(onCancelQueued).toHaveBeenCalledTimes(1)
+      expect(onCancelQueued).toHaveBeenCalledWith('uin-1')
+    })
+
+    it('omits the cancel button when no onCancelQueued is supplied', () => {
+      render(<ChatView messages={[userMsg]} isStreaming queuedIds={new Set(['uin-1'])} />)
+      expect(screen.getByTestId('msg-queued-uin-1')).toBeInTheDocument()
+      expect(screen.queryByTestId('msg-queued-cancel-uin-1')).not.toBeInTheDocument()
+    })
   })
 
   it('hides scroll-to-bottom when at bottom', () => {
@@ -126,11 +174,292 @@ describe('ChatView', () => {
     await act(() => { vi.advanceTimersByTime(50) })
     expect(container.scrollTop).toBe(200)
 
-    // Now add a new message — auto-scroll SHOULD fire (new count resets)
+    // #4652 — even when a new message arrives, a user who is actively
+    // scrolled up should NOT be snapped back to the bottom. They keep
+    // their reading position and can click the scroll-to-bottom button
+    // (which appears) when they're ready. Previously the count-change
+    // effect unconditionally reset `userScrolledUp` and scrolled — that
+    // made history unreachable while an AskUserQuestion form was open
+    // and downstream tool_use events kept arriving.
+    const moreMessages = makeMessages(4)
+    rerender(<ChatView messages={moreMessages} isStreaming={false} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(200)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('auto-scrolls on new message when user is at bottom (#4652)', async () => {
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(<ChatView messages={messages} isStreaming={false} />)
+    const container = screen.getByTestId('chat-messages')
+
+    // Setup: at bottom; user has not scrolled up
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // New message arrives — should snap to bottom (user is at bottom, so no
+    // disruption).
     const moreMessages = makeMessages(4)
     rerender(<ChatView messages={moreMessages} isStreaming={false} />)
     await act(() => { vi.advanceTimersByTime(50) })
     expect(container.scrollTop).toBe(1000)
+    vi.useRealTimers()
+  })
+
+  // #5954 — behavior guard: the streaming RAF keeps re-pinning to the growing
+  // bottom, and an at-bottom self-induced scroll does not surface the
+  // scroll-to-bottom button. NOTE: this is a happy-path guard, not a regression
+  // test for the deferred-flag-clear fix specifically — the exact
+  // synchronous-vs-next-frame `programmaticScrollRef` timing depends on the
+  // browser's async scroll-event dispatch ordering, which jsdom doesn't model,
+  // so it would also pass on the pre-fix code. The suppression fix is verified
+  // by reasoning + on-device confirmation (#5954 stays open for the live check).
+  it('keeps following the bottom while streaming as content grows (#5954)', async () => {
+    vi.useFakeTimers()
+    render(<ChatView messages={makeMessages(3)} isStreaming />)
+    const container = screen.getByTestId('chat-messages')
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 0, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+
+    // Streaming RAF pins to the current bottom.
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+
+    // Content grows (a stream_delta) — the RAF re-pins to the NEW bottom.
+    Object.defineProperty(container, 'scrollHeight', { value: 1500, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1500)
+
+    // The self-induced scroll event (flag still held) must NOT surface the
+    // scroll-to-bottom button — i.e. it isn't misread as a user scroll-up.
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  // #5954 (occlusion) — when the input area grows (multi-line textarea,
+  // attachments, the activity / check-in chips appearing) the `.chat-messages`
+  // viewport shrinks, which fires the container's ResizeObserver. While the user
+  // is following the tail, the observer must re-pin to the bottom so the newest
+  // lines stay ABOVE the input bar instead of sliding below the now-shorter
+  // fold. jsdom has no ResizeObserver, so install a controllable one (the same
+  // pattern as the virtualization test) and fire the container's callback by
+  // hand after shrinking `clientHeight`.
+  // NOTE: this positive case is tautological in isolation — `userScrolledUp`
+  // defaults to false, so it would pass even if the `userScrolledUpRef` gate were
+  // broken. The scrolled-up negative test directly below is the load-bearing one
+  // (it proves the ref gate actually suppresses the re-pin); keep both.
+  it('re-pins to the bottom when the input area grows while following (#5954)', async () => {
+    type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
+    const observers: Entry[] = []
+    class MockRO {
+      cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe(el: Element) { observers.push({ el: el as HTMLElement, cb: this.cb }) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver
+    ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
+      MockRO as unknown as typeof ResizeObserver
+    try {
+      render(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+      // Following the tail: at bottom, user has not scrolled up.
+      Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+      Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+      Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+
+      // The input area grows → the viewport shrinks and the browser leaves the
+      // tail below the new fold (scrollTop now short of the new bottom).
+      container.scrollTop = 600
+      Object.defineProperty(container, 'clientHeight', { value: 250, configurable: true })
+
+      // Fire the container's ResizeObserver (the real reflow path). The observer
+      // re-pins to the bottom because the user is still following.
+      const containerRO = observers.find(o => o.el === container)
+      expect(containerRO).toBeTruthy()
+      await act(async () => { containerRO!.cb([], containerRO as unknown as ResizeObserver) })
+      expect(container.scrollTop).toBe(1000)
+    } finally {
+      ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = origRO
+    }
+  })
+
+  it('does NOT re-pin on resize when the user has scrolled up (#5954 / #4652)', async () => {
+    type Entry = { el: HTMLElement; cb: ResizeObserverCallback }
+    const observers: Entry[] = []
+    class MockRO {
+      cb: ResizeObserverCallback
+      constructor(cb: ResizeObserverCallback) { this.cb = cb }
+      observe(el: Element) { observers.push({ el: el as HTMLElement, cb: this.cb }) }
+      unobserve() {}
+      disconnect() {}
+    }
+    const origRO = globalThis.ResizeObserver
+    ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver =
+      MockRO as unknown as typeof ResizeObserver
+    try {
+      render(<ChatView messages={makeMessages(3)} isStreaming={false} />)
+      const container = screen.getByTestId('chat-messages')
+      Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+      Object.defineProperty(container, 'scrollTop', { value: 100, writable: true, configurable: true })
+      Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+      // User deliberately scrolled up to read history.
+      await act(async () => { fireEvent.scroll(container) })
+      expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+      // The input area grows; the observer must leave the reading position alone.
+      Object.defineProperty(container, 'clientHeight', { value: 250, configurable: true })
+      const containerRO = observers.find(o => o.el === container)
+      expect(containerRO).toBeTruthy()
+      await act(async () => { containerRO!.cb([], containerRO as unknown as ResizeObserver) })
+      expect(container.scrollTop).toBe(100)
+    } finally {
+      ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserver }).ResizeObserver = origRO
+    }
+  })
+
+  it('snaps to bottom when scrollToBottomSignal bumps, even if scrolled up (#5780)', async () => {
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(
+      <ChatView messages={messages} isStreaming={false} scrollToBottomSignal={0} />,
+    )
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // User scrolls up to read history — the scroll-to-bottom button appears
+    // and the count-change auto-follow would now leave them in place.
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // User sends a message: the parent bumps the signal. Even though they were
+    // scrolled up, the explicit action snaps the view back to the bottom and
+    // clears the scrolled-up flag (button disappears).
+    rerender(<ChatView messages={makeMessages(4)} isStreaming={false} scrollToBottomSignal={1} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('does not scroll on the initial scrollToBottomSignal value (#5780)', async () => {
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    render(<ChatView messages={messages} isStreaming={false} scrollToBottomSignal={7} />)
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // Scroll up; the initial signal value must NOT pull the view back down
+    // (only a genuine change to the nonce triggers the jump).
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(100)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('does not snap to bottom when scrollToBottomSignal is unchanged across a rerender (#5786)', async () => {
+    // After the #5786 DRY refactor the signal effect routes through the shared
+    // scrollToBottomNow() helper. This guards the lastScrollSignalRef compare on
+    // a *live* rerender (distinct from the initial-value test): a prop churn that
+    // re-renders ChatView without bumping the nonce must NOT force-scroll a user
+    // who has scrolled up to read history.
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(
+      <ChatView messages={messages} isStreaming={false} scrollToBottomSignal={2} />,
+    )
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // User scrolls up to read history.
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // Rerender with the SAME signal value (a no-op prop churn, e.g. a new
+    // renderMessage identity). The view must stay put.
+    rerender(<ChatView messages={messages} isStreaming={false} scrollToBottomSignal={2} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(100)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('snaps to bottom via the shared helper when scrollToBottomSignal bumps after refactor (#5786)', async () => {
+    // Companion to the #5780 bump test: confirms the extracted scrollToBottomNow()
+    // path still snaps to bottom (programmaticScrollRef + scrollTop = scrollHeight
+    // + RAF reset) when the nonce changes across two distinct, non-initial values.
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(
+      <ChatView messages={messages} isStreaming={false} scrollToBottomSignal={5} />,
+    )
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // Approve/answer-style bump (the App-level wiring increments the same nonce).
+    rerender(<ChatView messages={messages} isStreaming={false} scrollToBottomSignal={6} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(1000)
+    expect(screen.queryByTestId('scroll-to-bottom')).not.toBeInTheDocument()
+    vi.useRealTimers()
+  })
+
+  it('preserves scrolled-up position when streaming ends mid-history-read (#4652)', async () => {
+    // Repro for the AskUserQuestion scenario: streaming flips to false
+    // when the question arrives. Previously, the streaming-end effect
+    // unconditionally reset `userScrolledUp` to false — snapping the
+    // user back to the bottom while they were reading history.
+    vi.useFakeTimers()
+    const messages = makeMessages(3)
+    const { rerender } = render(<ChatView messages={messages} isStreaming />)
+    const container = screen.getByTestId('chat-messages')
+
+    Object.defineProperty(container, 'scrollHeight', { value: 1000, configurable: true })
+    Object.defineProperty(container, 'scrollTop', { value: 1000, writable: true, configurable: true })
+    Object.defineProperty(container, 'clientHeight', { value: 400, configurable: true })
+    await act(() => { vi.advanceTimersByTime(50) })
+
+    // User scrolls up while assistant is still streaming
+    container.scrollTop = 100
+    await act(() => { fireEvent.scroll(container) })
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
+
+    // Streaming ends (AskUserQuestion arrived); user is still scrolled up
+    rerender(<ChatView messages={messages} isStreaming={false} />)
+    await act(() => { vi.advanceTimersByTime(50) })
+    expect(container.scrollTop).toBe(100)
+    expect(screen.getByTestId('scroll-to-bottom')).toBeInTheDocument()
     vi.useRealTimers()
   })
 
@@ -221,6 +550,109 @@ describe('ChatView', () => {
       />
     )
     expect(screen.getByText('Fallback content')).toBeInTheDocument()
+  })
+
+  // #4398 — when the parent passes `hidden`, ChatView is memoized so a
+  // stream of prop changes (new messages, fresh renderMessage callback,
+  // etc.) does NOT re-render the hidden component. The first render
+  // where `hidden` flips back to `false` always proceeds with the
+  // latest props, so the user sees the up-to-date view immediately on
+  // tab switch.
+  describe('hidden memoization (#4398)', () => {
+    it('skips renderMessage invocations while hidden=true on subsequent renders', () => {
+      const renderMessage = vi.fn(() => null)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      // First mount renders once — establishes the baseline.
+      expect(renderMessage).toHaveBeenCalledTimes(1)
+      renderMessage.mockClear()
+
+      // Re-render with new messages while still hidden — memo comparator
+      // returns true, so renderMessage is NOT invoked.
+      const updated: ChatViewMessage[] = [
+        ...initial,
+        { id: 'msg-2', type: 'response', content: 'Second', timestamp: 2 },
+      ]
+      rerender(
+        <ChatView messages={updated} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      expect(renderMessage).not.toHaveBeenCalled()
+    })
+
+    it('re-renders with latest props when hidden flips false', () => {
+      const renderMessage = vi.fn((m: ChatViewMessage) => <span>{`custom:${m.content}`}</span>)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      renderMessage.mockClear()
+
+      // Accumulate updates while hidden — none should reach the render tree.
+      const updated: ChatViewMessage[] = [
+        ...initial,
+        { id: 'msg-2', type: 'response', content: 'Second', timestamp: 2 },
+      ]
+      rerender(
+        <ChatView messages={updated} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      expect(renderMessage).not.toHaveBeenCalled()
+      expect(screen.queryByText('custom:Second')).not.toBeInTheDocument()
+
+      // Flip hidden=false — memo lets the render through with latest props.
+      rerender(
+        <ChatView messages={updated} isStreaming={false} hidden={false} renderMessage={renderMessage} />
+      )
+      expect(renderMessage).toHaveBeenCalled()
+      expect(screen.getByText('custom:Second')).toBeInTheDocument()
+    })
+
+    it('renders normally when hidden is omitted (default visible)', () => {
+      const renderMessage = vi.fn(() => null)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} renderMessage={renderMessage} />
+      )
+      renderMessage.mockClear()
+
+      const updated: ChatViewMessage[] = [
+        ...initial,
+        { id: 'msg-2', type: 'response', content: 'Second', timestamp: 2 },
+      ]
+      rerender(
+        <ChatView messages={updated} isStreaming={false} renderMessage={renderMessage} />
+      )
+      // Without `hidden`, memo comparator returns false → normal re-render.
+      expect(renderMessage).toHaveBeenCalled()
+    })
+
+    it('does not skip render on the visible→hidden transition (so display:none takes effect)', () => {
+      const renderMessage = vi.fn(() => null)
+      const initial: ChatViewMessage[] = [
+        { id: 'msg-1', type: 'response', content: 'First', timestamp: 1 },
+      ]
+      const { rerender } = render(
+        <ChatView messages={initial} isStreaming={false} hidden={false} renderMessage={renderMessage} />
+      )
+      renderMessage.mockClear()
+
+      // visible → hidden — comparator's `prev.hidden && next.hidden`
+      // is false (prev.hidden=false), so this render proceeds. That
+      // matters because the parent's display:none wrapper takes effect
+      // in the same commit, and we want the latest props applied right
+      // before we go dark.
+      rerender(
+        <ChatView messages={initial} isStreaming={false} hidden renderMessage={renderMessage} />
+      )
+      expect(renderMessage).toHaveBeenCalled()
+    })
   })
 })
 

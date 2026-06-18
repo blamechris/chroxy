@@ -16,7 +16,7 @@ import { CameraView, useCameraPermissions, BarcodeScanningResult } from 'expo-ca
 import * as Network from 'expo-network';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
-import { setPendingPairingId } from '../store/message-handler';
+import { setPendingPairingId, setPendingPairingIdentityKey } from '../store/message-handler';
 import { Icon } from '../components/Icon';
 import { ICON_TRIANGLE_DOWN, ICON_TRIANGLE_RIGHT, ICON_BULLET } from '../constants/icons';
 import { COLORS } from '../constants/colors';
@@ -27,8 +27,8 @@ const DEFAULT_PORT = 8765;
 
 
 type ParseResult =
-  | { ok: true; wsUrl: string; token: string; pairingId?: undefined }
-  | { ok: true; wsUrl: string; token?: undefined; pairingId: string }
+  | { ok: true; wsUrl: string; token: string; pairingId?: undefined; identityKey?: string }
+  | { ok: true; wsUrl: string; token?: undefined; pairingId: string; identityKey?: string }
   | { ok: false; reason: 'not_chroxy' | 'missing_token' | 'invalid_url' };
 
 export function parseChroxyUrl(raw: string): ParseResult {
@@ -36,19 +36,33 @@ export function parseChroxyUrl(raw: string): ParseResult {
     const trimmed = raw.trim();
     if (trimmed.startsWith('chroxy://')) {
       const parsed = new URL(trimmed.replace('chroxy://', 'https://'));
-      const wsUrl = `wss://${parsed.host}`;
+      // #5298 — the chroxy:// scheme drops ws/wss, so infer it from the port.
+      // A LAN daemon's pairing/QR URL always has an explicit port and serves
+      // plain ws:// (no TLS); a tunnel URL has no port and is wss:// on 443.
+      // So: port present ⇒ ws (LAN), port absent ⇒ wss (tunnel). `parsed.host`
+      // already carries the port (and brackets, for IPv6). Mirrors the
+      // dashboard's parsePairingUrl scheme inference.
+      const scheme = parsed.port ? 'ws' : 'wss';
+      const wsUrl = `${scheme}://${parsed.host}`;
+
+      // #5536 — the daemon's pinned E2E identity public key (base64 Ed25519),
+      // conveyed over the trusted pairing channel as `idk=`. Captured here and
+      // pinned on first connect; absent for older daemons / encryption-off.
+      const identityKey = parsed.searchParams.get('idk') ?? undefined;
 
       // New pairing flow: chroxy://host?pair=PAIRING_ID
       const pairingId = parsed.searchParams.get('pair');
-      if (pairingId) return { ok: true, wsUrl, pairingId };
+      if (pairingId) return { ok: true, wsUrl, pairingId, ...(identityKey ? { identityKey } : {}) };
 
       // Legacy flow: chroxy://host?token=TOKEN
       const token = parsed.searchParams.get('token');
-      if (token) return { ok: true, wsUrl, token };
+      if (token) return { ok: true, wsUrl, token, ...(identityKey ? { identityKey } : {}) };
 
       return { ok: false, reason: 'missing_token' };
     }
-    if (trimmed.startsWith('wss://')) {
+    // A directly-entered ws:// or wss:// URL keeps its own scheme — the
+    // override for the rare port-bearing wss (custom proxy) case.
+    if (trimmed.startsWith('ws://') || trimmed.startsWith('wss://')) {
       return { ok: true, wsUrl: trimmed, token: '' };
     }
   } catch {
@@ -91,6 +105,7 @@ export function ConnectScreen() {
 
   const [scanning, setScanning] = useState(false);
   const [scanCompleted, setScanCompleted] = useState(false);
+  const [scanError, setScanError] = useState(false);
   const [discoveredServers, setDiscoveredServers] = useState<DiscoveredServer[]>([]);
   const [scanProgress, setScanProgress] = useState(0);
   const [scanPort, setScanPort] = useState(String(DEFAULT_PORT));
@@ -120,7 +135,8 @@ export function ConnectScreen() {
       const saved = useConnectionLifecycleStore.getState().savedConnection;
       if (saved) {
         setAutoConnecting(true);
-        connect(saved.url, saved.token, { silent: true });
+        // #5518 — auto-select LAN vs tunnel for the saved record on reconnect.
+        void useConnectionStore.getState().connectAuto(saved, { silent: true });
       }
     });
     return () => { mounted = false; };
@@ -147,6 +163,9 @@ export function ConnectScreen() {
       const parsed = parseChroxyUrl(rawUrl);
       if (parsed.ok) {
         Keyboard.dismiss();
+        // #5536 — capture the pinned identity (if the URL carried `idk=`) so the
+        // key-exchange handler pins it on first connect.
+        setPendingPairingIdentityKey(parsed.identityKey ?? null);
         if ('pairingId' in parsed && parsed.pairingId) {
           setPendingPairingId(parsed.pairingId);
           connect(parsed.wsUrl, '');
@@ -192,7 +211,8 @@ export function ConnectScreen() {
 
   const handleReconnect = () => {
     if (savedConnection) {
-      connect(savedConnection.url, savedConnection.token);
+      // #5518 — re-select LAN vs tunnel for the saved record on reconnect.
+      void useConnectionStore.getState().connectAuto(savedConnection);
     }
   };
 
@@ -218,6 +238,9 @@ export function ConnectScreen() {
     const parsed = parseChroxyUrl(result.data);
     if (parsed.ok) {
       setShowScanner(false);
+      // #5536 — capture the pinned identity (if the QR carried `idk=`) so the
+      // key-exchange handler pins it on first connect / verifies on later ones.
+      setPendingPairingIdentityKey(parsed.identityKey ?? null);
       if ('pairingId' in parsed && parsed.pairingId) {
         // New pairing flow: set pairing ID before connecting
         setPendingPairingId(parsed.pairingId);
@@ -263,6 +286,7 @@ export function ConnectScreen() {
 
     setScanning(true);
     setScanCompleted(false);
+    setScanError(false);
     setDiscoveredServers([]);
     setScanProgress(0);
 
@@ -289,11 +313,9 @@ export function ConnectScreen() {
         onProgress: (p) => setScanProgress(p),
         onFound: (found) => setDiscoveredServers((prev) => [...prev, ...found]),
       });
-    } catch {
-      Alert.alert(
-        'Network Error',
-        'Could not scan the local network. Make sure you are connected to WiFi and your phone and computer are on the same network.',
-      );
+    } catch (err) {
+      console.warn('[LAN scan] scan threw unexpectedly:', err);
+      setScanError(true);
     }
 
     if (!abort.signal.aborted) {
@@ -482,8 +504,34 @@ export function ConnectScreen() {
       )}
 
       {scanCompleted && discoveredServers.length === 0 && !scanning && (
-        <View style={styles.discoveredSection}>
-          <Text style={styles.scanEmptyText}>No servers found on LAN (port {scanPort})</Text>
+        <View
+          style={styles.discoveredSection}
+          testID="lan-scan-empty-state"
+          accessibilityLabel={scanError ? 'LAN scan result: scan failed' : 'LAN scan result: no servers found'}
+        >
+          {scanError ? (
+            <>
+              <Text style={styles.scanEmptyTitle} testID="lan-scan-error-title">
+                Scan failed (port {scanPort})
+              </Text>
+              <Text style={styles.scanEmptyHint} testID="lan-scan-error-hint">
+                Could not scan the network. Make sure WiFi is on and your phone and computer are on the same network.{'\n'}
+                If Chroxy is running but not visible, open Chroxy on your computer, go to Settings, and enable{' '}
+                <Text style={styles.scanEmptyHighlight}>"Expose on local network"</Text>, then scan again.
+              </Text>
+            </>
+          ) : (
+            <>
+              <Text style={styles.scanEmptyTitle} testID="lan-scan-empty-title">
+                No servers found on port {scanPort}
+              </Text>
+              <Text style={styles.scanEmptyHint} testID="lan-scan-empty-hint">
+                Chroxy binds to loopback by default and won't appear in a LAN scan.{'\n'}
+                On your computer, open Chroxy {'→'} Settings and enable{' '}
+                <Text style={styles.scanEmptyHighlight}>"Expose on local network"</Text>, then scan again.
+              </Text>
+            </>
+          )}
         </View>
       )}
 
@@ -492,6 +540,7 @@ export function ConnectScreen() {
         onPress={() => setShowManual(!showManual)}
         accessibilityRole="button"
         accessibilityLabel="Enter server address manually"
+        testID="connect-manual-toggle"
       >
         <Text style={styles.manualToggleText}>
           {showManual ? `${ICON_TRIANGLE_DOWN} Hide manual entry` : `${ICON_TRIANGLE_RIGHT} Enter manually`}
@@ -511,6 +560,7 @@ export function ConnectScreen() {
             autoCapitalize="none"
             autoCorrect={false}
             accessibilityLabel="Server URL"
+            testID="connect-server-url"
           />
 
           <Text style={styles.label}>
@@ -528,6 +578,7 @@ export function ConnectScreen() {
               autoCorrect={false}
               secureTextEntry={!showToken}
               accessibilityLabel="API Token"
+              testID="connect-api-token"
             />
             <TouchableOpacity
               style={styles.tokenEyeButton}
@@ -539,7 +590,7 @@ export function ConnectScreen() {
             </TouchableOpacity>
           </View>
 
-          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect to server">
+          <TouchableOpacity style={styles.connectButton} onPress={handleConnect} accessibilityRole="button" accessibilityLabel="Connect to server" testID="connect-submit">
             <Text style={styles.connectButtonText}>Connect</Text>
           </TouchableOpacity>
         </View>
@@ -773,6 +824,23 @@ const styles = StyleSheet.create({
     fontSize: 14,
     textAlign: 'center',
     paddingVertical: 8,
+  },
+  scanEmptyTitle: {
+    color: COLORS.textMuted,
+    fontSize: 13,
+    fontWeight: '600',
+    textAlign: 'center',
+    marginBottom: 6,
+  },
+  scanEmptyHint: {
+    color: COLORS.textDim,
+    fontSize: 13,
+    textAlign: 'center',
+    lineHeight: 19,
+  },
+  scanEmptyHighlight: {
+    color: COLORS.textMuted,
+    fontWeight: '600',
   },
   discoveredItem: {
     flexDirection: 'row',

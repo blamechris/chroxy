@@ -32,7 +32,7 @@ When the user is the sole tester driving real workflows through a working build,
    ```
 4. **On confirmation**:
    - `git checkout -b manual-testing/v{NEXT}`
-   - Bump version across all version-bearing files: `package.json` (root), `packages/{app,desktop,protocol,dashboard,store-core,server}/package.json`, `packages/desktop/src-tauri/Cargo.toml`, `packages/desktop/src-tauri/tauri.conf.json`
+   - Bump version across all version-bearing files: `package.json` (root), `packages/server/package.json`, `packages/app/package.json`, `packages/desktop/package.json`, `packages/protocol/package.json`, `packages/dashboard/package.json`, `packages/store-core/package.json`, `packages/desktop/src-tauri/tauri.conf.json`, `packages/desktop/src-tauri/Cargo.toml`
    - Run `grep '"version":' package.json packages/*/package.json packages/desktop/src-tauri/tauri.conf.json && grep '^version' packages/desktop/src-tauri/Cargo.toml` and confirm each file shows the new version.
    - Commit: `chore(release): bump version to {NEXT}` with a body explaining why (so manual-testing builds are visibly distinct from main).
 5. **Save bootstrap state** to a session-scoped task list (use TaskCreate) for the running list of filed issues:
@@ -100,10 +100,14 @@ with open('/path/to/screenshot.png','rb') as f:
 BLOB=$(gh api -X POST /repos/{OWNER}/{REPO}/git/blobs --input /tmp/blob.json -q '.sha')
 
 # 2. First-time-only: orphan branch (no parent, no base_tree).
-# Subsequent times: pass -f "parents[]=$PARENT" to the commit AND -f "base_tree=$PARENT" to the tree.
+# Subsequent times: pass -f "parents[]=$PARENT" to the commit AND -f "base_tree=$PARENT_TREE" to the tree.
+# NOTE: base_tree wants a *tree* SHA, not a commit SHA. The ref gives you the commit; you must
+# look up that commit's tree separately.
 PARENT=$(gh api /repos/{OWNER}/{REPO}/git/refs/heads/screenshots -q '.object.sha' 2>/dev/null || echo "")
+PARENT_TREE=""
+[ -n "$PARENT" ] && PARENT_TREE=$(gh api /repos/{OWNER}/{REPO}/git/commits/$PARENT -q '.tree.sha')
 TREE_ARGS=( -f "tree[][path]=$SLUG" -f "tree[][mode]=100644" -f "tree[][type]=blob" -f "tree[][sha]=$BLOB" )
-[ -n "$PARENT" ] && TREE_ARGS=( -f "base_tree=$PARENT" "${TREE_ARGS[@]}" )
+[ -n "$PARENT_TREE" ] && TREE_ARGS=( -f "base_tree=$PARENT_TREE" "${TREE_ARGS[@]}" )
 TREE=$(gh api -X POST /repos/{OWNER}/{REPO}/git/trees "${TREE_ARGS[@]}" -q '.sha')
 
 COMMIT_ARGS=( -f "message=screenshots: add $SLUG" -f "tree=$TREE" )
@@ -216,4 +220,4 @@ A: ## Manual testing session: v0.6.11 (2026-04-26)
 
 Want me to open a PR for the fixes, or leave the branch local?
 ```
-<!-- skill-templates: manual-testing-mode 7298d6f 2026-04-26 -->
+<!-- skill-templates: manual-testing-mode ebdb14e 2026-06-02 -->

@@ -5,12 +5,81 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
+# commits, rebases) doesn't run the full matrix N times. Keying on the PR's
+# source branch groups a PR's runs together; on push to main `head_ref` is empty
+# so we fall back to the unique `run_id` — every main run gets its own group and
+# is therefore never cancelled OR queued behind another main run (each validates
+# a distinct merged commit and must complete).
+concurrency:
+  group: ci-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
 
+# SELF_HOSTED_OR_HOSTED runner routing
+# ------------------------------------
+# The `runner-target` job below computes the Linux runner label set ONCE and
+# exposes it as a JSON-string output (`needs.runner-target.outputs.runner`).
+# Jobs that opt into the routing declare `needs: runner-target` and
+# `runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}`. This routes
+# them to the self-hosted Linux runner pool (Docker-based, labels
+# self-hosted,Linux,ARM64) for SAME-REPO pushes and PRs, keeping them off the
+# GitHub-hosted bill. If no self-hosted Linux runner is online, those jobs queue
+# until one appears. FORK PRs fall back to `ubuntu-24.04` (GitHub-hosted) so
+# untrusted contributor code never executes on the self-hosted machine, while
+# external contributors still get full CI.
+#
+# Deduplicating into a single output (vs the former ~200-char ternary that was
+# copy-pasted into every job) gives the routing rule ONE source of truth — edit
+# `runner-target` and every consumer follows. The cost is one extra
+# job-scheduling hop and a `needs:` edge per consumer.
+#
+# The macOS desktop job uses the separate self-hosted macOS runner and routes on
+# the same boolean inline in its `if:` (it has no shared `runs-on` array, so it
+# is not a `runner-target` consumer). The Windows job stays GitHub-hosted (no
+# self-hosted Windows box). After the Linux runner was bumped to 24GB (#6046),
+# Store Core Tests and App Tests moved to the self-hosted pool (their blocker was
+# npm-ci/transform OOM, not arch). Server Tests stays GitHub-hosted — RAM was
+# ruled out; 9 tests fail on the ARM64 container from genuine env differences
+# (keychain, Docker-in-Docker, fs perms) — tracked in #6075.
+
 jobs:
+  runner-target:
+    name: Resolve Runner Target
+    # Tiny hosted gate job that resolves the SELF_HOSTED_OR_HOSTED routing once
+    # and exposes it as a JSON-string output, consumed downstream via
+    # `runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}`:
+    #   * SAME-REPO push or PR -> the JSON array ["self-hosted","Linux","ARM64"]
+    #     (fromJSON yields a label array -> self-hosted Linux pool).
+    #   * FORK PR              -> the JSON string "ubuntu-24.04"
+    #     (fromJSON yields the plain string -> GitHub-hosted).
+    # MUST stay GitHub-hosted: a fork PR has to be able to resolve the target
+    # WITHOUT scheduling anything on the self-hosted machine, so this gate job
+    # can never itself be self-hosted.
+    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    outputs:
+      runner: ${{ steps.resolve.outputs.runner }}
+    steps:
+      - id: resolve
+        # The condition is the same routing predicate the per-job ternary used:
+        # push events and same-repo PRs are trusted; fork PRs are not.
+        run: |
+          if [ "${{ github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository }}" = "true" ]; then
+            echo 'runner=["self-hosted", "Linux", "ARM64"]' >> "$GITHUB_OUTPUT"
+          else
+            echo 'runner="ubuntu-24.04"' >> "$GITHUB_OUTPUT"
+          fi
   server-tests:
     name: Server Tests
+    # Stays GitHub-hosted (#6046): RAM was ruled out — with the self-hosted
+    # runner at 24GB, 9 tests still fail on the ARM64 Linux container from
+    # genuine env differences (keychain rekey, create_environment /
+    # Docker-in-Docker, disk-cache paths, permission-hook pipeline,
+    # ws-file-ops + directory-listing fs perms). Making the server suite
+    # container-portable is tracked in #6075.
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -35,6 +104,13 @@ jobs:
 
       - name: Run tests with coverage
         run: npm test
+        env:
+          # #5579: arm the reverse-index drift assert (#5563) so the production
+          # assert path runs across the full server suite, not just the
+          # in-test parity oracle. Cheap O(clients × sessions) check per
+          # mutation; surfaces a desync between the per-client Sets and the
+          # sessionId→clients reverse index immediately.
+          CHROXY_WS_INDEX_ASSERT: '1'
 
       - name: Upload server coverage
         if: always()
@@ -44,9 +120,127 @@ jobs:
           path: packages/server/coverage/
           retention-days: 14
 
+  changes:
+    name: Detect Changed Paths
+    # Lightweight ubuntu job that classifies which paths a PR touches so
+    # downstream jobs can self-gate. Today this only feeds the Windows
+    # platform-tests job (#5002) — `windows-latest` is billed at a 5x
+    # multiplier vs `ubuntu-24.04`, so we only fire it on PRs that touch
+    # the files it actually covers. Pushes to `main` skip this job and
+    # always run the Windows suite (see `server-tests-windows.if`).
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 2
+    if: github.event_name == 'pull_request'
+    # `dorny/paths-filter` calls the GitHub REST API (`listFiles`) to read the
+    # PR's changed-file list on `pull_request` events. The workflow-level
+    # `permissions: contents: read` block at the top of this file zeros out
+    # every other scope, so we have to re-grant `pull-requests: read` at the
+    # job level — without it, the API call fails with "Resource not accessible
+    # by integration" on fork PRs and (potentially) any future GitHub change
+    # that tightens the implicit same-repo grant. Same-repo PRs happen to work
+    # today via the implicit token grant, but the explicit permission is what
+    # the action documents and what survives a fork PR.
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      platform: ${{ steps.filter.outputs.platform }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - id: filter
+        uses: dorny/paths-filter@d1c1ffe0248fe513906c8e24db8ea791d46f8590 # v3
+        with:
+          filters: |
+            platform:
+              # Source — the production Windows code path lives in
+              # platform.js today, but glob with `platform*` so a future
+              # `platform-windows.js` / `platform-posix.js` split still
+              # triggers the Windows job without an edit here.
+              - 'packages/server/src/platform*.js'
+              # Tests — both the cross-platform suite (exercises the
+              # Windows branch via `_isWindowsOverride`) and the
+              # Windows-only suite. Glob covers any future
+              # platform-*.test.js additions.
+              - 'packages/server/tests/platform*.test.js'
+              # Workflow itself — so edits to this gating logic always
+              # exercise the gated job on the same PR.
+              - '.github/workflows/ci.yml'
+
+  server-tests-windows:
+    name: Server Platform Tests (Windows)
+    # Real Windows runner coverage for `writeFileRestricted`'s Windows
+    # code path (#4927). The cross-platform tests in `platform.test.js`
+    # already exercise the Windows branch on POSIX runners via the
+    # `_isWindowsOverride` option, but a handful of edge cases — ACL
+    # inheritance from the per-user storage directory, native
+    # `MoveFileExW` atomicity, and behaviour under real Windows fs.renameSync
+    # error codes — can ONLY be validated on `windows-latest`. The
+    # additional Windows-specific suite lives in `platform-windows.test.js`.
+    #
+    # Scope is deliberately narrow: we run ONLY the platform suites
+    # (not the full server test set), because (a) GitHub-hosted Windows
+    # runners are slow and cost more, and (b) much of the server suite
+    # depends on node-pty / POSIX signals / shell scripts that don't have
+    # a Windows analogue. The full POSIX suite continues to run on
+    # `ubuntu-24.04` in the `server-tests` job above.
+    #
+    # Trigger gate (#5002): `windows-latest` is 5x the per-minute cost
+    # of `ubuntu-24.04`. To avoid paying that on every PR push:
+    #   * On `push` to `main` we ALWAYS run — catches transitive breakage
+    #     from PRs that merged without touching platform.js but broke
+    #     something the Windows suite covers.
+    #   * On `pull_request` we only run when the `changes` job flagged
+    #     a platform-related edit. Filter scope (see `changes` above) is
+    #     deliberately a touch broader than just `platform.js` to cover
+    #     the foreseeable refactor that splits the file in two.
+    needs: changes
+    # `always()` is required because the `changes` job is gated to
+    # `pull_request` and gets skipped on `push` events. Without it,
+    # the default `needs:` semantics ("skip downstream when any
+    # dependency is skipped") would also skip this job on pushes to
+    # `main`, which is the exact opposite of what we want.
+    if: |
+      always() &&
+      (github.event_name == 'push' ||
+       (github.event_name == 'pull_request' && needs.changes.result == 'success' && needs.changes.outputs.platform == 'true'))
+    runs-on: windows-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: packages/server
+        shell: bash
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      - name: Run platform tests (cross-platform + Windows-only)
+        # Invoke node's built-in test runner directly with the two platform
+        # test files. Mirrors the flags from `npm test` (sandbox guard via
+        # `--import ./tests/_setup.mjs`, `--experimental-test-module-mocks`)
+        # but scopes to the platform suite to keep the Windows job fast.
+        # `c8` is intentionally omitted — we don't need coverage from the
+        # Windows runner; the ubuntu job is the source of truth there.
+        run: node --import ./tests/_setup.mjs --experimental-test-module-mocks --test --test-force-exit ./tests/platform.test.js ./tests/platform-windows.test.js
+
   server-lint:
     name: Server Lint
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -79,9 +273,90 @@ jobs:
             exit 1
           }
 
+      - name: Check tests pass stateFilePath to SessionManager
+        run: |
+          # Issue #4633 — every `new SessionManager(...)` in tests must include
+          # a `stateFilePath` option, otherwise the test writes to the real
+          # ~/.chroxy/session-state.json (or, in CI, to the runner home).
+          # The sandbox guard in tests/_setup.mjs (loaded via `node --import`)
+          # patches the write-side of `fs` to throw on real-home writes — it
+          # does NOT override HOME — so accidental contamination fails loudly,
+          # but the explicit option keeps the intent obvious in review and
+          # avoids surprise side effects.
+          if scripts/lint-tests-state-file-path.sh; then
+            echo "OK — every new SessionManager(...) in tests passes stateFilePath"
+          else
+            echo "::error::Tests instantiated SessionManager without stateFilePath. See packages/server/scripts/lint-tests-state-file-path.sh."
+            exit 1
+          fi
+
+      - name: Check session subclasses forward every BaseSession opt
+        run: |
+          # Issue #4797 — every provider session class that extends
+          # BaseSession (or JsonlSubprocessSession) must destructure AND
+          # forward every BaseSession constructor opt via super({ ... }).
+          # The "middle-layer trap" documented in project memory as
+          # feedback_jsonl_subprocess_middle_layer.md has bitten three times
+          # (#3224, #3231, #4790). This lint blocks the next recurrence at
+          # PR time instead of catching it in production.
+          if scripts/lint-session-opt-forwarding.sh; then
+            echo "OK — every session subclass forwards every BaseSession opt"
+          else
+            echo "::error::A provider session class drops a BaseSession opt on its way to super(). See packages/server/scripts/lint-session-opt-forwarding.sh."
+            exit 1
+          fi
+
+      - name: Check session-aware modules use loggerForSession
+        run: |
+          # Issue #4792 — durable follow-up to #4787 / #4793. Session-aware
+          # modules (claude-tui-session.js, handlers/input-handlers.js, ...)
+          # MUST import `loggerForSession` from logger.js so per-session log
+          # lines carry sessionId. Without it the WsServer log fan-out
+          # (#4787 defensive filter) silently drops the entry from bound
+          # dashboard clients — operators lose useful diagnostics.
+          # The lint is ratcheted by file; see scripts/lint-logger-session-scoping.mjs
+          # for the enforced set.
+          if scripts/lint-logger-session-scoping.sh; then
+            echo "OK — enforced modules use loggerForSession"
+          else
+            echo "::error::A session-aware module dropped its loggerForSession import or introduced a bare createLogger. See packages/server/scripts/lint-logger-session-scoping.sh."
+            exit 1
+          fi
+
+      - name: Check reverse-index mutations route through ws-client-manager
+        run: |
+          # Issue #5579 — the sessionId→clients reverse index (#5575) only
+          # stays correct if every change to a client's active session or
+          # subscription Set goes through the index-maintaining mutators on
+          # ws-client-manager.js. A bare `client.activeSessionId = x` or
+          # `client.subscribedSessionIds.add(...)` elsewhere silently drifts
+          # the index. This lint forbids those outside the owner file (the two
+          # guarded #5563 fixture fallbacks carry a lint-ignore comment).
+          if scripts/lint-ws-index-mutations.sh; then
+            echo "OK — no bare reverse-index mutations outside ws-client-manager.js"
+          else
+            echo "::error::A bare reverse-index mutation was found outside ws-client-manager.js. See packages/server/scripts/lint-ws-index-mutations.sh."
+            exit 1
+          fi
+
+      - name: Check ClaudeByokSession subclasses declare claudeFamily explicitly
+        run: |
+          # Issue #5891 — Claude-family membership (strict vs soft-fallback model
+          # id validation) is the single `static claudeFamily` flag. A new class
+          # that `extends ClaudeByokSession` and forgets `static claudeFamily =
+          # false` silently inherits `true` and is mis-classified. This lint
+          # requires every subclass to declare membership explicitly.
+          if scripts/lint-claude-family-explicit.sh; then
+            echo "OK — every ClaudeByokSession subclass declares static claudeFamily"
+          else
+            echo "::error::A class extending ClaudeByokSession is missing an explicit static claudeFamily. See packages/server/scripts/lint-claude-family-explicit.sh."
+            exit 1
+          fi
+
   dashboard-tests:
     name: Dashboard Tests
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
     defaults:
       run:
@@ -116,7 +391,8 @@ jobs:
 
   dashboard-typecheck:
     name: Dashboard Type Check
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -143,7 +419,11 @@ jobs:
 
   store-core-tests:
     name: Store Core Tests
-    runs-on: ubuntu-24.04
+    # Self-hosted (#6046): the prior install OOM (exit 137) was the 7.7GB Docker
+    # VM, not arch — with the runner bumped to 24GB the full suite (1676 tests)
+    # passes on ARM64. Fork PRs still route to ubuntu-24.04 via runner-target.
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -164,9 +444,39 @@ jobs:
       - name: Run tests
         run: npm test
 
+  claude-hooks-tests:
+    name: Claude Hooks Tests
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 5
+    defaults:
+      run:
+        working-directory: packages/claude-hooks
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: '**/package-lock.json'
+
+      - name: Install dependencies
+        run: npm ci
+        working-directory: .
+
+      # Tests validate envelopes against the real IngestEventSchema
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      - name: Run tests
+        run: npm test
+
   store-core-typecheck:
     name: Store Core Type Check
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -189,7 +499,11 @@ jobs:
 
   app-tests:
     name: App Tests
-    runs-on: ubuntu-24.04
+    # Self-hosted (#6046): the jest-expo "failed to run" suites were transform
+    # OOM under the 7.7GB VM, not arch — with the runner at 24GB all 147 suites
+    # (1973 tests) pass on ARM64. Fork PRs still route to ubuntu-24.04.
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -227,7 +541,8 @@ jobs:
 
   app-typecheck:
     name: App Type Check
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -254,7 +569,8 @@ jobs:
 
   app-expo-doctor:
     name: App Expo Doctor
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -281,9 +597,9 @@ jobs:
       # build. Added 2026-04-11 after a cascade of five failed EAS preview builds
       # traced to bugs that expo-doctor would have flagged instantly.
       #
-      # The "non-CNG project with native config" check is excluded — the project
-      # intentionally commits packages/app/ios/ for LiveActivity custom targets
-      # and is tracked as a P2 migration, not a P0 failure.
+      # Both native dirs (android/, ios/) are now CNG (gitignored), so the
+      # former "non-CNG project with native config" warning no longer fires and
+      # its allowlist entry has been removed (#5642).
       #
       # expo-doctor is pinned to a specific version (not `@1`) so that a minor
       # release can't silently change the human-readable title string this
@@ -300,11 +616,7 @@ jobs:
           failures=$(printf '%s\n' "$output" | grep -E '^✖' || true)
           # Strip known-acceptable warnings before deciding to fail:
           #
-          # 1. "non-CNG project with native config" — the project intentionally
-          #    commits packages/app/ios/ for LiveActivity custom targets and is
-          #    tracked as a P2 migration, not a P0 failure.
-          #
-          # 2. "packages match versions required by installed Expo SDK" — the
+          # 1. "packages match versions required by installed Expo SDK" — the
           #    Expo team periodically releases SDK 54.x patch updates that flag
           #    pinned versions as out-of-date until we bump. Bumping cascades
           #    into transitive-dep duplicates because expo-camera and friends
@@ -313,9 +625,27 @@ jobs:
           #    drift it was trying to resolve. Treated as an upkeep task that
           #    lands in a dedicated PR when the whole transitive set has caught
           #    up, not a per-PR release blocker.
+          #
+          # 2. "issues with Metro config" — the monorepo intentionally uses a
+          #    custom metro.config.js that does NOT extend "expo/metro-config"
+          #    because the chroxy mock-server resolver + workspace symlink
+          #    handling require a hand-built config. Tracked as a P2 migration.
+          #
+          # 3. "no duplicate dependencies are installed" — npm workspaces hoist
+          #    some expo-* packages to the root while expo's own nested deps
+          #    keep their own copies (expo-font, expo-asset, expo-modules-core,
+          #    @expo/fingerprint). Harmless at runtime; same upkeep-task class
+          #    as (2) above.
+          #
+          # 4. "Validate packages against React Native Directory" — the RN
+          #    directory metadata occasionally flags packages as unmaintained
+          #    upstream (e.g. expo-live-activity). We accept the warning until
+          #    a replacement lands; not a per-PR release blocker.
           filtered_failures=$(printf '%s\n' "$failures" \
-            | grep -v "Check for app config fields that may not be synced in a non-CNG project" \
             | grep -v "Check that packages match versions required by installed Expo SDK" \
+            | grep -v "Check for issues with Metro config" \
+            | grep -v "Check that no duplicate dependencies are installed" \
+            | grep -v "Validate packages against React Native Directory package metadata" \
             || true)
           if [ -n "$filtered_failures" ]; then
             echo "::error::expo-doctor reported check failures above. Fix them or extend the allowlist in .github/workflows/ci.yml if the warning is genuinely accepted."
@@ -330,7 +660,8 @@ jobs:
 
   protocol-tests:
     name: Protocol Tests
-    runs-on: ubuntu-24.04
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -351,12 +682,26 @@ jobs:
       - name: Build @chroxy/protocol
         run: npm run build
 
+      - name: Check protocol dist is in sync with src
+        working-directory: .
+        run: |
+          git diff --exit-code packages/protocol/dist || {
+            echo "::error::packages/protocol/dist drift detected. Run 'npm run build -w packages/protocol' and commit the changes."
+            exit 1
+          }
+
       - name: Run tests
         run: npm test
 
   desktop-tests:
     name: Desktop Rust Tests
-    runs-on: macos-latest
+    # Runs on the self-hosted macOS runner (Apple Silicon) to avoid GitHub-hosted
+    # macOS minutes (billed at 10x ubuntu). SECURITY: this repo is public, so the
+    # job is gated to same-repo events only — fork PRs must NOT execute on the
+    # self-hosted host. A fork PR touching desktop code simply skips this job
+    # (maintainer can validate it locally / on a hosted re-run if needed).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 15
     defaults:
       run:
@@ -382,3 +727,25 @@ jobs:
 
       - name: Run tests
         run: cargo test --locked
+
+      - name: Run verify-entitlements.sh tests (#4801)
+        working-directory: packages/desktop
+        run: bash scripts/verify-entitlements.test.sh
+
+  scripts-tests:
+    name: Scripts Tests
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Run bump-version.sh tests
+        run: bash scripts/__tests__/bump-version.test.sh
+
+      - name: Run flush-and-exit.mjs tests
+        run: node scripts/__tests__/flush-and-exit.test.mjs

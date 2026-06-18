@@ -190,9 +190,13 @@ pub fn percent_encode_html(html: &str) -> String {
     encoded
 }
 
-/// Show and focus the main window.
+/// Show, un-minimize, and focus the main window. Un-minimizing first means a
+/// "summon" (tray item or global hotkey) reliably brings the window forward even
+/// when it was minimized to the Dock — `show()` + `set_focus()` alone leave a
+/// minimized window minimized (#5281 ②). Mirrors the single-instance focus path.
 pub fn show_window(app: &AppHandle) {
     if let Some(win) = app.get_webview_window(MAIN_LABEL) {
+        let _ = win.unminimize();
         let _ = win.show();
         let _ = win.set_focus();
     }

@@ -6,6 +6,7 @@
  */
 import { useCallback, useMemo } from 'react'
 import type { ModelInfo } from '../store/types'
+import type { PermissionMode } from '@chroxy/store-core'
 
 /**
  * Compose the hover tooltip for the active-model select (#3888).
@@ -41,7 +42,18 @@ export interface ChatSettingsDropdownProps {
   activeModel: string | null
   defaultModelId: string | null
   onModelChange: (id: string) => void
-  availablePermissionModes: { id: string; label: string }[]
+  // #4464: render a non-interactive pill instead of the model <select>
+  // when the active provider doesn't expose a mid-session model switch
+  // (today: claude TUI — see claude-tui-session.js capability.modelSwitch=false).
+  // Passing a string here causes the badge to render in the picker's slot
+  // showing that id (or "Default" when empty). Null hides any model UI —
+  // same as today's "availableModels=[]" behaviour for the transient
+  // provider-switch case where we don't want a flash of a stale label.
+  readOnlyModel?: string | null
+  // #4019: PermissionMode carries an optional `description` field server-side
+  // (PERMISSION_MODES exports it for every mode). Use the typed import from
+  // store-core so the title-attribute hint stays in lockstep with the wire shape.
+  availablePermissionModes: PermissionMode[]
   permissionMode: string | null
   onPermissionModeChange: (mode: string) => void
   // Hide the permission-mode picker when the active provider doesn't expose
@@ -70,6 +82,7 @@ export function ChatSettingsDropdown({
   showThinkingLevel,
   thinkingLevel,
   onThinkingLevelChange,
+  readOnlyModel = null,
 }: ChatSettingsDropdownProps) {
   const handleModelChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
     const v = e.target.value
@@ -90,6 +103,32 @@ export function ChatSettingsDropdown({
     [availableModels, activeModel],
   )
 
+  // #5628: the session's active model arrives as either a short id ('fable')
+  // or a full id ('claude-fable-5'), but the <option> values are short ids
+  // (m.id). A native <select> whose `value` matches no <option> silently
+  // renders the FIRST option — so a full-id activeModel made the header show
+  // "Default (Sonnet 4.6)" even while the status bar (which dual-matches on
+  // id||fullId) showed the real model. Resolve the active model the same way
+  // the status bar does, then drive the <select> off the resolved short id so
+  // it matches its option. `activeEntry` is null for a model not in the list
+  // (e.g. unknown/unbroadcast) — we then render a synthetic option carrying the
+  // raw id so the picker degrades to the real id rather than misrendering as
+  // "Default" (#5631 graceful-degradation).
+  const activeEntry = useMemo(
+    () => availableModels.find(m => m.id === activeModel || m.fullId === activeModel) ?? null,
+    [availableModels, activeModel],
+  )
+  // The <option> value that represents the active model: its short id when
+  // known, else the raw activeModel string (matched by the synthetic option).
+  const activeOptionValue = activeEntry?.id ?? activeModel ?? ''
+  // True only when the active model genuinely IS the server default — compared
+  // on the normalized short id so a full-id activeModel still resolves.
+  const activeIsDefault = defaultModelId != null && activeOptionValue === defaultModelId
+  // Render a synthetic option ONLY when the active model is set, isn't the
+  // default, and isn't already one of the listed options.
+  const needsSyntheticOption =
+    !activeIsDefault && !!activeModel && activeEntry === null
+
   return (
     <>
       {/* Model */}
@@ -97,7 +136,7 @@ export function ChatSettingsDropdown({
         <select
           data-testid="chat-settings-trigger"
           data-kind="model"
-          value={activeModel === defaultModelId ? '' : (activeModel || '')}
+          value={activeIsDefault ? '' : activeOptionValue}
           onChange={handleModelChange}
           title={modelTitle}
           aria-label={modelTitle}
@@ -107,6 +146,9 @@ export function ChatSettingsDropdown({
               ? availableModels.find(m => m.id === defaultModelId)?.label
               : availableModels[0]?.label) ?? 'recommended'})
           </option>
+          {needsSyntheticOption && (
+            <option value={activeOptionValue}>{activeModel}</option>
+          )}
           {availableModels
             .filter(m => m.id !== defaultModelId)
             .map(m => (
@@ -115,15 +157,41 @@ export function ChatSettingsDropdown({
         </select>
       )}
 
+      {/* #4464: read-only badge for providers without modelSwitch (claude TUI).
+          Renders ONLY when the picker is hidden (availableModels empty) AND a
+          read-only label was explicitly passed — never on the transient
+          "models not yet broadcast" window where readOnlyModel stays null. */}
+      {availableModels.length === 0 && readOnlyModel !== null && (
+        <span
+          data-testid="active-model-badge"
+          data-kind="model-readonly"
+          className="chat-settings-readonly-badge"
+          title={modelTitle}
+          aria-label={modelTitle}
+          role="status"
+        >
+          {readOnlyModel || 'Default'}
+        </span>
+      )}
+
       {/* Permission Mode */}
       {showPermissionMode && availablePermissionModes.length > 0 && (
         <select
           data-kind="permission"
+          aria-label="Permission mode"
           value={permissionMode || ''}
           onChange={e => onPermissionModeChange(e.target.value)}
+          // #4019: server-side PERMISSION_MODES carries a `description` for
+          // every mode (e.g. "Auto-approve every tool call without prompting").
+          // Surface the description for the currently-selected option as a
+          // title so the user gets the same trade-off explanation mid-session
+          // they get at creation time. Each <option> also carries its own
+          // title — most browsers don't show option tooltips reliably, but
+          // it's harmless and feeds AT-friendly machinery for those that do.
+          title={availablePermissionModes.find(m => m.id === permissionMode)?.description}
         >
           {availablePermissionModes.map(m => (
-            <option key={m.id} value={m.id}>{m.label}</option>
+            <option key={m.id} value={m.id} title={m.description}>{m.label}</option>
           ))}
         </select>
       )}
@@ -132,6 +200,7 @@ export function ChatSettingsDropdown({
       {showThinkingLevel && (
         <select
           data-kind="thinking"
+          aria-label="Thinking level"
           value={thinkingLevel || 'default'}
           onChange={e => onThinkingLevelChange(e.target.value)}
         >

@@ -1,7 +1,14 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
-import { K8sBackend } from '../../../src/environments/backends/k8s.js'
+import {
+  K8sBackend,
+  sanitizeNamespaceLabel,
+  buildResourceBlock,
+  buildResourceQuotaSpec,
+  buildLimitRangeSpec,
+  DEFAULT_RESOURCES,
+} from '../../../src/environments/backends/k8s.js'
 
 // ─── Mock CoreV1Api factory ───────────────────────────────────────────────────
 
@@ -14,9 +21,22 @@ import { K8sBackend } from '../../../src/environments/backends/k8s.js'
  * @param {Function} [opts.readPod]      - Override for `readNamespacedPod` (poll) call
  * @param {Function} [opts.createSecret] - Override for `createNamespacedSecret` call
  * @param {Function} [opts.deleteSecret] - Override for `deleteNamespacedSecret` call
+ * @param {Function} [opts.readNs]       - Override for `readNamespace` (ensureNamespace probe)
+ * @param {Function} [opts.createNs]     - Override for `createNamespace` (ensureNamespace create)
+ * @param {Function} [opts.listPods]     - Override for `listNamespacedPod` (listEnvironments)
+ * @param {Function} [opts.readQuota]    - Override for `readNamespacedResourceQuota` (ensureResourceQuota probe)
+ * @param {Function} [opts.createQuota]  - Override for `createNamespacedResourceQuota` (ensureResourceQuota create)
+ * @param {Function} [opts.readLimitRange]   - Override for `readNamespacedLimitRange` (ensureLimitRange probe)
+ * @param {Function} [opts.createLimitRange] - Override for `createNamespacedLimitRange` (ensureLimitRange create)
  */
-function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret } = {}) {
-  const calls = { create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [] }
+function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecret, readSecret,
+  readNs, createNs, listPods,
+  readQuota, createQuota, readLimitRange, createLimitRange } = {}) {
+  const calls = {
+    create: [], delete: [], read: [], createSecret: [], deleteSecret: [], readSecret: [],
+    readNs: [], createNs: [], listPods: [],
+    readQuota: [], createQuota: [], readLimitRange: [], createLimitRange: [],
+  }
 
   const api = {
     createNamespacedPod: createPod
@@ -42,6 +62,40 @@ function createMockApi({ createPod, deletePod, readPod, createSecret, deleteSecr
     readNamespacedSecret: readSecret
       ? async (args) => { calls.readSecret.push(args); return readSecret(args) }
       : async (args) => { calls.readSecret.push(args); return {} },
+
+    // Namespace lifecycle (#3194). Default readNamespace resolves so the
+    // namespace is treated as already-existing and createEnvironment does NOT
+    // attempt a create — existing createEnvironment tests keep their behaviour.
+    readNamespace: readNs
+      ? async (args) => { calls.readNs.push(args); return readNs(args) }
+      : async (args) => { calls.readNs.push(args); return {} },
+
+    createNamespace: createNs
+      ? async (args) => { calls.createNs.push(args); return createNs(args) }
+      : async (args) => { calls.createNs.push(args); return {} },
+
+    listNamespacedPod: listPods
+      ? async (args) => { calls.listPods.push(args); return listPods(args) }
+      : async (args) => { calls.listPods.push(args); return { items: [] } },
+
+    // Namespace-level ResourceQuota / LimitRange lifecycle (#5142). Default read
+    // resolves so the object is treated as already-existing — when the feature is
+    // enabled and no override is given, ensure does NOT attempt a create.
+    readNamespacedResourceQuota: readQuota
+      ? async (args) => { calls.readQuota.push(args); return readQuota(args) }
+      : async (args) => { calls.readQuota.push(args); return {} },
+
+    createNamespacedResourceQuota: createQuota
+      ? async (args) => { calls.createQuota.push(args); return createQuota(args) }
+      : async (args) => { calls.createQuota.push(args); return {} },
+
+    readNamespacedLimitRange: readLimitRange
+      ? async (args) => { calls.readLimitRange.push(args); return readLimitRange(args) }
+      : async (args) => { calls.readLimitRange.push(args); return {} },
+
+    createNamespacedLimitRange: createLimitRange
+      ? async (args) => { calls.createLimitRange.push(args); return createLimitRange(args) }
+      : async (args) => { calls.createLimitRange.push(args); return {} },
   }
 
   api.calls = calls
@@ -938,13 +992,561 @@ describe('K8sBackend.createEnvironment() — workspace mount (#3316)', () => {
 })
 
 // ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — PVC workspace strategy (#3385)
+//
+// The hostPath workspace mount only works on single-node clusters where the
+// scheduled Node shares the host filesystem. Multi-node operators need a
+// PVC-backed workspace; opts.workspacePVC = { claimName, mountPath?, readOnly? }
+// translates to a persistentVolumeClaim volume + matching volumeMount.
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — PVC workspace strategy (#3385)', () => {
+  it('mounts opts.workspacePVC as a persistentVolumeClaim volume named "workspace"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-test',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-workspace-pvc' },
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const mounts = body.spec.containers[0].volumeMounts
+
+    assert.ok(Array.isArray(volumes), 'spec.volumes must be an array')
+    const wsVol = volumes.find(v => v.name === 'workspace')
+    assert.ok(wsVol, 'must have a volume named "workspace"')
+    assert.ok(wsVol.persistentVolumeClaim, 'workspace volume must use persistentVolumeClaim')
+    assert.equal(wsVol.persistentVolumeClaim.claimName, 'my-workspace-pvc')
+    assert.equal(wsVol.hostPath, undefined, 'PVC workspace must NOT also set hostPath')
+
+    assert.ok(Array.isArray(mounts), 'container.volumeMounts must be an array')
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount, 'volumeMounts must include the workspace volume')
+    assert.equal(wsMount.mountPath, '/workspace', 'default mountPath must be /workspace')
+  })
+
+  it('honours opts.workspacePVC.mountPath when provided', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-custom-path',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc', mountPath: '/srv/workspace' },
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount)
+    assert.equal(wsMount.mountPath, '/srv/workspace')
+  })
+
+  it('sets readOnly on the volumeMount when opts.workspacePVC.readOnly is true', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-ro',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc', readOnly: true },
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount)
+    assert.equal(wsMount.readOnly, true)
+  })
+
+  it('does not set readOnly on the volumeMount by default', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-rw',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc' },
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount)
+    assert.equal(wsMount.readOnly, undefined)
+  })
+
+  it('throws when both opts.cwd and opts.workspacePVC are set (mutually exclusive)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-and-cwd',
+        image: 'agent:latest',
+        cwd: '/home/user/proj',
+        workspacePVC: { claimName: 'my-pvc' },
+      }),
+      /workspacePVC.*cwd|cwd.*workspacePVC/i,
+      'should reject when both workspace strategies are provided',
+    )
+
+    assert.equal(api.calls.create.length, 0, 'Pod must NOT be created when validation fails')
+    assert.equal(api.calls.createSecret.length, 0, 'Secret must NOT be created when validation fails')
+  })
+
+  it('throws when opts.workspacePVC is provided without claimName', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-no-claim',
+        image: 'agent:latest',
+        workspacePVC: {},
+      }),
+      /claimName/i,
+    )
+
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
+  })
+
+  it('throws when opts.workspacePVC.claimName is an empty string', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-empty-claim',
+        image: 'agent:latest',
+        workspacePVC: { claimName: '' },
+      }),
+      /claimName/i,
+    )
+  })
+
+  it('throws when opts.workspacePVC.claimName is not a string', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'pvc-bad-claim',
+        image: 'agent:latest',
+        workspacePVC: { claimName: 42 },
+      }),
+      /claimName/i,
+    )
+  })
+
+  it('combines a PVC workspace with extra opts.mounts (hostPath entries still work)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'pvc-plus-extras',
+      image: 'agent:latest',
+      workspacePVC: { claimName: 'my-pvc' },
+      mounts: ['/host/certs:/certs:ro'],
+    })
+
+    const volumes = api.calls.create[0].body.spec.volumes
+    assert.ok(volumes.find(v => v.name === 'workspace' && v.persistentVolumeClaim?.claimName === 'my-pvc'))
+    assert.ok(volumes.find(v => v.name === 'extra-vol-0' && v.hostPath?.path === '/host/certs'))
+    assert.equal(volumes.length, 2)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — git-clone workspace strategy (#3193)
+//
+// Phase 1: provision the Pod workspace by cloning the repo into an emptyDir via
+// a git-clone init container, since a remote-node Pod can't bind-mount the
+// operator's host filesystem. PVC-backed persistence is the follow-up (#3385).
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend.createEnvironment() — git-clone workspace strategy (#3193)', () => {
+  it('provisions an emptyDir workspace + a git-clone init container', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-test',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://github.com/example/repo.git' },
+    })
+
+    const { body } = api.calls.create[0]
+    const volumes = body.spec.volumes
+    const wsVol = volumes.find(v => v.name === 'workspace')
+    assert.ok(wsVol, 'must have a volume named "workspace"')
+    assert.deepEqual(wsVol.emptyDir, {}, 'git-clone workspace must be an emptyDir')
+    assert.equal(wsVol.hostPath, undefined, 'git-clone workspace must NOT set hostPath')
+    assert.equal(wsVol.persistentVolumeClaim, undefined, 'git-clone workspace must NOT set a PVC')
+
+    const initContainers = body.spec.initContainers
+    assert.ok(Array.isArray(initContainers), 'spec.initContainers must be an array')
+    assert.equal(initContainers.length, 1, 'no commit pin → single clone init container')
+    const clone = initContainers[0]
+    assert.equal(clone.name, 'git-clone')
+    assert.deepEqual(clone.command, ['git'])
+    assert.deepEqual(
+      clone.args,
+      ['clone', '--', 'https://github.com/example/repo.git', '/workspace'],
+    )
+    const cloneMount = clone.volumeMounts.find(m => m.name === 'workspace')
+    assert.ok(cloneMount, 'init container must mount the workspace volume')
+    assert.equal(cloneMount.mountPath, '/workspace')
+  })
+
+  it('the main container also mounts the cloned workspace at /workspace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-main-mount',
+      image: 'agent:latest',
+      gitRepo: 'https://github.com/example/repo.git', // string shorthand
+    })
+
+    const mounts = api.calls.create[0].body.spec.containers[0].volumeMounts
+    const wsMount = mounts.find(m => m.name === 'workspace')
+    assert.ok(wsMount, 'main container must mount the workspace volume')
+    assert.equal(wsMount.mountPath, '/workspace')
+  })
+
+  it('accepts a bare URL string as shorthand for { url }', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-shorthand',
+      image: 'agent:latest',
+      gitRepo: 'git@github.com:example/repo.git',
+    })
+
+    const clone = api.calls.create[0].body.spec.initContainers[0]
+    assert.deepEqual(clone.args, ['clone', '--', 'git@github.com:example/repo.git', '/workspace'])
+  })
+
+  it('honours branch pinning via --branch', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-branch',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', branch: 'develop' },
+    })
+
+    const clone = api.calls.create[0].body.spec.initContainers[0]
+    assert.deepEqual(
+      clone.args,
+      ['clone', '--branch', 'develop', '--', 'https://example.com/r.git', '/workspace'],
+    )
+  })
+
+  it('honours shallow depth via --depth', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-depth',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', depth: 1 },
+    })
+
+    const clone = api.calls.create[0].body.spec.initContainers[0]
+    assert.deepEqual(
+      clone.args,
+      ['clone', '--depth', '1', '--', 'https://example.com/r.git', '/workspace'],
+    )
+  })
+
+  it('pins an exact commit via a second checkout init container', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-commit',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'deadbeef' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.equal(initContainers.length, 2, 'commit pin → clone + checkout init containers')
+    assert.equal(initContainers[0].name, 'git-clone')
+    const checkout = initContainers[1]
+    assert.equal(checkout.name, 'git-checkout')
+    assert.deepEqual(checkout.command, ['git'])
+    assert.deepEqual(
+      checkout.args,
+      ['-C', '/workspace', 'checkout', '--detach', '--', 'deadbeef'],
+    )
+    const checkoutMount = checkout.volumeMounts.find(m => m.name === 'workspace')
+    assert.ok(checkoutMount)
+    assert.equal(checkoutMount.mountPath, '/workspace')
+  })
+
+  it('combines branch + commit (clone branch tip, then pin commit)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-branch-commit',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', branch: 'main', commit: 'abc123' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.deepEqual(
+      initContainers[0].args,
+      ['clone', '--branch', 'main', '--', 'https://example.com/r.git', '/workspace'],
+    )
+    assert.deepEqual(
+      initContainers[1].args,
+      ['-C', '/workspace', 'checkout', '--detach', '--', 'abc123'],
+    )
+  })
+
+  it('honours a custom mountPath for clone, main mount, and checkout', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-mountpath',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'c0ffee', mountPath: '/src' },
+    })
+
+    const { body } = api.calls.create[0]
+    assert.equal(
+      body.spec.containers[0].volumeMounts.find(m => m.name === 'workspace').mountPath,
+      '/src',
+    )
+    assert.deepEqual(
+      body.spec.initContainers[0].args,
+      ['clone', '--', 'https://example.com/r.git', '/src'],
+    )
+    assert.deepEqual(
+      body.spec.initContainers[1].args,
+      ['-C', '/src', 'checkout', '--detach', '--', 'c0ffee'],
+    )
+  })
+
+  it('uses the constructor gitImage for init containers', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, gitImage: 'my-registry/git:2.44' })
+
+    await backend.createEnvironment({
+      envId: 'git-image',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'x' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.equal(initContainers[0].image, 'my-registry/git:2.44')
+    assert.equal(initContainers[1].image, 'my-registry/git:2.44')
+  })
+
+  it('defaults the git image to alpine/git:latest', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-default-image',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git' },
+    })
+
+    assert.equal(
+      api.calls.create[0].body.spec.initContainers[0].image,
+      'alpine/git:latest',
+    )
+  })
+
+  it('propagates imagePullPolicy to init containers', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, imagePullPolicy: 'IfNotPresent' })
+
+    await backend.createEnvironment({
+      envId: 'git-pull-policy',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git', commit: 'x' },
+    })
+
+    const initContainers = api.calls.create[0].body.spec.initContainers
+    assert.equal(initContainers[0].imagePullPolicy, 'IfNotPresent')
+    assert.equal(initContainers[1].imagePullPolicy, 'IfNotPresent')
+  })
+
+  it('git-clone workspace coexists with extra opts.mounts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'git-plus-mounts',
+      image: 'agent:latest',
+      gitRepo: { url: 'https://example.com/r.git' },
+      mounts: ['/host/certs:/certs:ro'],
+    })
+
+    const volumes = api.calls.create[0].body.spec.volumes
+    assert.ok(volumes.find(v => v.name === 'workspace' && v.emptyDir))
+    assert.ok(volumes.find(v => v.name === 'extra-vol-0' && v.hostPath?.path === '/host/certs'))
+    assert.equal(volumes.length, 2)
+  })
+
+  // ─── Validation / mutual exclusion ───────────────────────────────────────
+
+  it('throws when gitRepo.url is missing', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({ envId: 'no-url', image: 'agent:latest', gitRepo: {} }),
+      /gitRepo\.url must be a non-empty string/,
+    )
+    assert.equal(api.calls.create.length, 0, 'no Pod created on validation failure')
+  })
+
+  it('throws when gitRepo.url starts with "-" (argument injection guard)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-url',
+        image: 'agent:latest',
+        gitRepo: { url: '--upload-pack=touch /tmp/pwned' },
+      }),
+      /must not start with "-"/,
+    )
+  })
+
+  it('throws when gitRepo.branch starts with "-"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-branch',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', branch: '--config=core.fsmonitor=evil' },
+      }),
+      /branch must not start with "-"/,
+    )
+  })
+
+  it('throws when gitRepo.commit starts with "-"', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'inject-commit',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', commit: '--evil' },
+      }),
+      /commit must not start with "-"/,
+    )
+  })
+
+  it('throws when gitRepo.depth is not a positive integer', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    for (const bad of [0, -1, 1.5, '1']) {
+      await assert.rejects(
+        () => backend.createEnvironment({
+          envId: 'bad-depth',
+          image: 'agent:latest',
+          gitRepo: { url: 'https://example.com/r.git', depth: bad },
+        }),
+        /depth must be a positive integer/,
+      )
+    }
+  })
+
+  it('throws when gitRepo.mountPath is relative (must be absolute)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'rel-mountpath',
+        image: 'agent:latest',
+        gitRepo: { url: 'https://example.com/r.git', mountPath: 'src' },
+      }),
+      /mountPath must be an absolute path/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('throws when gitRepo.mountPath contains "." or ".." segments', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    for (const bad of ['/work/../etc', '/work/./x']) {
+      await assert.rejects(
+        () => backend.createEnvironment({
+          envId: 'dotdot-mountpath',
+          image: 'agent:latest',
+          gitRepo: { url: 'https://example.com/r.git', mountPath: bad },
+        }),
+        /must not contain "\." or "\.\." segments/,
+      )
+    }
+  })
+
+  it('throws when both opts.cwd and opts.gitRepo are set (mutually exclusive)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'cwd-and-git',
+        image: 'agent:latest',
+        cwd: '/home/user/proj',
+        gitRepo: { url: 'https://example.com/r.git' },
+      }),
+      /cwd and opts\.gitRepo are mutually exclusive/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('throws when both opts.workspacePVC and opts.gitRepo are set (mutually exclusive)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+    await assert.rejects(
+      () => backend.createEnvironment({
+        envId: 'pvc-and-git',
+        image: 'agent:latest',
+        workspacePVC: { claimName: 'my-pvc' },
+        gitRepo: { url: 'https://example.com/r.git' },
+      }),
+      /workspacePVC and opts\.gitRepo are mutually exclusive/,
+    )
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('omits initContainers when no git-clone strategy is requested', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'no-git', image: 'agent:latest' })
+
+    assert.equal(
+      api.calls.create[0].body.spec.initContainers, undefined,
+      'initContainers must be absent without a git-clone strategy',
+    )
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
 // K8sBackend.createEnvironment — resource limits (#3316)
 // ─────────────────────────────────────────────────────────────────────────────
 
+// These tests exercise the legacy flat `memoryLimit`/`cpuLimit` opts in
+// isolation, so the backend is constructed with `defaultResources: null` to
+// suppress the #3195 defaults that would otherwise fill the unset dimension.
 describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
   it('sets resources.limits and resources.requests when memoryLimit is provided', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'mem-only',
@@ -961,7 +1563,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('sets resources.limits and resources.requests when cpuLimit is provided', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'cpu-only',
@@ -978,7 +1580,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('sets both memory and cpu limits when both are provided', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'both-limits',
@@ -996,7 +1598,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('normalises Docker-style memory suffix "g" to "Gi"', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'mem-g',
@@ -1010,7 +1612,7 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
 
   it('normalises Docker-style memory suffix "m" to "Mi"', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({
       envId: 'mem-m',
@@ -1022,14 +1624,243 @@ describe('K8sBackend.createEnvironment() — resource limits (#3316)', () => {
     assert.equal(resources.limits.memory, '512Mi', '"512m" must be normalised to "512Mi"')
   })
 
-  it('omits container.resources when neither memoryLimit nor cpuLimit is provided', async () => {
+  it('omits container.resources when no limits are set AND defaults disabled', async () => {
     const api = createMockApi()
-    const backend = new K8sBackend({ _coreV1Api: api })
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
 
     await backend.createEnvironment({ envId: 'no-limits', image: 'agent:latest' })
 
     const container = api.calls.create[0].body.spec.containers[0]
     assert.equal(container.resources, undefined, 'resources must be absent when no limits are set')
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// K8sBackend.createEnvironment — structured resources + defaults (#3195)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend resource defaults (#3195)', () => {
+  it('applies DEFAULT_RESOURCES when no resource opts are given', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'defaults', image: 'agent:latest' })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.deepEqual(resources, {
+      requests: { cpu: '500m', memory: '512Mi' },
+      limits: { cpu: '2', memory: '4Gi' },
+    })
+  })
+
+  it('exposes the documented default quantities', () => {
+    assert.equal(DEFAULT_RESOURCES.cpu, '500m')
+    assert.equal(DEFAULT_RESOURCES.memory, '512Mi')
+    assert.equal(DEFAULT_RESOURCES.cpuLimit, '2')
+    assert.equal(DEFAULT_RESOURCES.memoryLimit, '4Gi')
+  })
+
+  it('constructor-level defaultResources merge over the built-in defaults', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      defaultResources: { cpu: '250m', memoryLimit: '8Gi' },
+    })
+
+    await backend.createEnvironment({ envId: 'merged-defaults', image: 'agent:latest' })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    // Overridden fields take the operator value; untouched fields keep the built-in.
+    assert.equal(resources.requests.cpu, '250m')
+    assert.equal(resources.requests.memory, '512Mi')
+    assert.equal(resources.limits.cpu, '2')
+    assert.equal(resources.limits.memory, '8Gi')
+  })
+
+  it('defaultResources: null omits the resources block entirely', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, defaultResources: null })
+
+    await backend.createEnvironment({ envId: 'no-defaults', image: 'agent:latest' })
+
+    assert.equal(api.calls.create[0].body.spec.containers[0].resources, undefined)
+  })
+
+  it('rejects a malformed quantity in constructor defaultResources', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), defaultResources: { cpu: 'not-a-cpu' } }),
+      /not a valid K8s CPU quantity/,
+    )
+  })
+
+  it('rejects a non-object defaultResources', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), defaultResources: '500m' }),
+      /defaultResources must be an object or null/,
+    )
+  })
+})
+
+describe('K8sBackend structured resources opt (#3195)', () => {
+  it('maps resources.{cpu,memory} to requests and {cpuLimit,memoryLimit} to limits', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'structured',
+      image: 'agent:latest',
+      resources: { cpu: '250m', memory: '256Mi', cpuLimit: '1', memoryLimit: '1Gi' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.deepEqual(resources, {
+      requests: { cpu: '250m', memory: '256Mi' },
+      limits: { cpu: '1', memory: '1Gi' },
+    })
+  })
+
+  it('structured resources override the legacy flat opts', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'override-legacy',
+      image: 'agent:latest',
+      cpuLimit: '4',
+      memoryLimit: '8Gi',
+      resources: { cpuLimit: '1', memoryLimit: '1Gi' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    // resources.* wins for limits; legacy flat opts still seed the requests for
+    // the dimensions structured-resources left unset (cpu/memory requests).
+    assert.equal(resources.limits.cpu, '1')
+    assert.equal(resources.limits.memory, '1Gi')
+    assert.equal(resources.requests.cpu, '4')
+    assert.equal(resources.requests.memory, '8Gi')
+  })
+
+  it('a partial structured resources fills the rest from defaults', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'partial',
+      image: 'agent:latest',
+      resources: { memoryLimit: '16Gi' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.limits.memory, '16Gi')   // explicit
+    assert.equal(resources.limits.cpu, '2')          // default
+    assert.equal(resources.requests.cpu, '500m')     // default
+    assert.equal(resources.requests.memory, '512Mi') // default
+  })
+
+  it('normalises Docker-style memory suffixes in structured resources', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'structured-norm',
+      image: 'agent:latest',
+      resources: { memory: '256m', memoryLimit: '2g' },
+    })
+
+    const { resources } = api.calls.create[0].body.spec.containers[0]
+    assert.equal(resources.requests.memory, '256Mi')
+    assert.equal(resources.limits.memory, '2Gi')
+  })
+
+  it('rejects a malformed CPU quantity before creating the Secret', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'bad-cpu',
+        image: 'agent:latest',
+        resources: { cpu: '500x' },
+      }),
+      /not a valid K8s CPU quantity/,
+    )
+    // No Secret/Pod should have been created — validation runs before either call.
+    assert.equal(api.calls.createSecret.length, 0)
+    assert.equal(api.calls.create.length, 0)
+  })
+
+  it('rejects a malformed memory quantity', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'bad-mem',
+        image: 'agent:latest',
+        resources: { memory: '512Megabytes' },
+      }),
+      /not a valid K8s memory quantity/,
+    )
+  })
+
+  it('rejects a non-object resources opt', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(
+      backend.createEnvironment({
+        envId: 'bad-resources',
+        image: 'agent:latest',
+        resources: '500m',
+      }),
+      /opts\.resources must be an object/,
+    )
+  })
+})
+
+describe('buildResourceBlock() (#3195)', () => {
+  it('round-trips a full structured resources object', () => {
+    const block = buildResourceBlock(
+      { cpu: '500m', memory: '512Mi', cpuLimit: '2', memoryLimit: '4Gi' },
+      undefined, undefined, null,
+    )
+    assert.deepEqual(block, {
+      requests: { cpu: '500m', memory: '512Mi' },
+      limits: { cpu: '2', memory: '4Gi' },
+    })
+  })
+
+  it('returns an empty block when nothing is set and defaults are disabled', () => {
+    assert.deepEqual(buildResourceBlock(undefined, undefined, undefined, null), {})
+  })
+
+  it('legacy flat limit applies to both request and limit for its dimension', () => {
+    const block = buildResourceBlock(undefined, '2', undefined, null)
+    assert.deepEqual(block, { requests: { cpu: '2' }, limits: { cpu: '2' } })
+  })
+
+  it('accepts a variety of valid CPU quantities', () => {
+    for (const cpu of ['1', '0.5', '.5', '500m', '1500m', '2']) {
+      assert.doesNotThrow(() => buildResourceBlock({ cpu }, undefined, undefined, null), `cpu=${cpu}`)
+    }
+  })
+
+  it('rejects malformed CPU quantities', () => {
+    for (const cpu of ['', '500x', 'abc', '1Gi', '1.2.3', '500 m', '-1']) {
+      assert.throws(() => buildResourceBlock({ cpu }, undefined, undefined, null), `cpu=${cpu} should throw`)
+    }
+  })
+
+  it('accepts a variety of valid memory quantities (post-normalisation)', () => {
+    for (const memory of ['512Mi', '2Gi', '1G', '500M', '1024', '1.5Gi', '128974848', '64Mi', '1e6']) {
+      assert.doesNotThrow(() => buildResourceBlock({ memory }, undefined, undefined, null), `memory=${memory}`)
+    }
+  })
+
+  it('rejects malformed memory quantities', () => {
+    for (const memory of ['', '512Megabytes', 'abc', '2 Gi', '1.2.3Gi', 'Gi', '-512Mi']) {
+      assert.throws(() => buildResourceBlock({ memory }, undefined, undefined, null), `memory=${memory} should throw`)
+    }
   })
 })
 
@@ -2415,7 +3246,6 @@ describe('K8sBackend Phase-1 stubs', () => {
     ['createComposeEnvironment', b => b.createComposeEnvironment({})],
     ['destroyComposeEnvironment', b => b.destroyComposeEnvironment({})],
     ['removeImage', b => b.removeImage('tag')],
-    ['listEnvironments', b => b.listEnvironments()],
     ['commitEnvironment', b => b.commitEnvironment('id', 'tag')],
     ['restoreEnvironment', b => b.restoreEnvironment({})],
   ]
@@ -3868,5 +4698,764 @@ describe('SidecarProcess stdin disabled signal (#3402)', () => {
       'data must NOT be buffered once forwarding is disabled')
 
     proc.stdout.resume(); proc.stderr.resume()
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// #3194 — per-user/per-project namespace isolation
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('K8sBackend namespace isolation (#3194)', () => {
+  // ─── default namespaceFor mapping ──────────────────────────────────────────
+
+  it('createEnvironment derives chroxy-user-<userId> namespace from userId', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest', userId: 'alice' })
+
+    assert.equal(api.calls.create[0].namespace, 'chroxy-user-alice')
+    assert.equal(api.calls.createSecret[0].namespace, 'chroxy-user-alice')
+  })
+
+  it('falls back to projectId when no userId is supplied', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest', projectId: 'team-x' })
+
+    assert.equal(api.calls.create[0].namespace, 'chroxy-user-team-x')
+  })
+
+  it('userId takes precedence over projectId in the default mapping', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'agent:latest', userId: 'alice', projectId: 'team-x',
+    })
+
+    assert.equal(api.calls.create[0].namespace, 'chroxy-user-alice')
+  })
+
+  it('explicit opts.namespace overrides identity mapping', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'agent:latest', userId: 'alice', namespace: 'production',
+    })
+
+    assert.equal(api.calls.create[0].namespace, 'production')
+  })
+
+  it('falls back to the static default namespace when no identity is supplied', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'shared', _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest' })
+
+    assert.equal(api.calls.create[0].namespace, 'shared')
+  })
+
+  it('accepts a custom namespaceFor mapping function', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({
+      _coreV1Api: api,
+      namespaceFor: ({ projectId }) => projectId ? `proj-${projectId}` : null,
+    })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'agent:latest', projectId: 'foo' })
+
+    assert.equal(api.calls.create[0].namespace, 'proj-foo')
+  })
+
+  it('throws if namespaceFor is not a function', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceFor: 'nope' }),
+      /namespaceFor must be a function/,
+    )
+  })
+
+  // ─── sanitization (RFC 1123) and tenant collision-resistance ───────────────
+
+  it('sanitizes uppercase and invalid characters into a valid RFC 1123 label', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'agent:latest', userId: 'Alice.Smith@Example.com',
+    })
+
+    const ns = api.calls.create[0].namespace
+    // Valid RFC 1123 label: lowercase alnum + hyphens, start/end alnum, <=63.
+    assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
+    assert.ok(ns.length <= 63, `namespace too long: ${ns.length}`)
+  })
+
+  it('is deterministic — same identity maps to the same namespace', async () => {
+    const api1 = createMockApi()
+    const api2 = createMockApi()
+    const b1 = new K8sBackend({ _coreV1Api: api1 })
+    const b2 = new K8sBackend({ _coreV1Api: api2 })
+
+    await b1.createEnvironment({ envId: 'e1', image: 'a', userId: 'weird/id.v2' })
+    await b2.createEnvironment({ envId: 'e2', image: 'a', userId: 'weird/id.v2' })
+
+    assert.equal(api1.calls.create[0].namespace, api2.calls.create[0].namespace)
+  })
+
+  it('distinct identities that sanitize alike still map to DIFFERENT namespaces (no cross-tenant collision)', async () => {
+    const apiA = createMockApi()
+    const apiB = createMockApi()
+    const bA = new K8sBackend({ _coreV1Api: apiA })
+    const bB = new K8sBackend({ _coreV1Api: apiB })
+
+    // 'a.b' and 'a/b' both naively sanitize to 'a-b'; the hash suffix keeps them apart.
+    await bA.createEnvironment({ envId: 'e1', image: 'a', userId: 'a.b' })
+    await bB.createEnvironment({ envId: 'e2', image: 'a', userId: 'a/b' })
+
+    assert.notEqual(apiA.calls.create[0].namespace, apiB.calls.create[0].namespace)
+  })
+
+  it('case-only differences map to DIFFERENT namespaces (case folding is disambiguated)', async () => {
+    const apiA = createMockApi()
+    const apiB = createMockApi()
+    const bA = new K8sBackend({ _coreV1Api: apiA })
+    const bB = new K8sBackend({ _coreV1Api: apiB })
+
+    // RFC 1123 labels are lowercase-only; without the hash suffix 'alice' and
+    // 'Alice' would collapse onto the same namespace and share Pods.
+    await bA.createEnvironment({ envId: 'e1', image: 'a', userId: 'alice' })
+    await bB.createEnvironment({ envId: 'e2', image: 'a', userId: 'Alice' })
+
+    assert.notEqual(apiA.calls.create[0].namespace, apiB.calls.create[0].namespace)
+  })
+
+  it('truncates very long identities to within the 63-char RFC 1123 limit', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({
+      envId: 'e1', image: 'a', userId: 'x'.repeat(200),
+    })
+
+    const ns = api.calls.create[0].namespace
+    assert.ok(ns.length <= 63, `namespace exceeds 63 chars: ${ns.length}`)
+    assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
+  })
+
+  it('an all-symbol identity still produces a valid label (hash fallback)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: '@@@///...' })
+
+    const ns = api.calls.create[0].namespace
+    assert.match(ns, /^chroxy-user-[a-z0-9]([a-z0-9-]*[a-z0-9])?$/)
+  })
+
+  // ─── sanitizeNamespaceLabel length-cap hard guarantee ──────────────────────
+
+  it('sanitizeNamespaceLabel never exceeds maxLength, even for tiny caps', () => {
+    // The hash suffix is "-" + 8 hex = 9 chars; a maxLength below that must
+    // still be honoured (the function falls back to a truncated hash).
+    for (const maxLength of [1, 3, 5, 9, 12, 20]) {
+      const out = sanitizeNamespaceLabel('some.very/long@identity-value', { maxLength })
+      assert.ok(out.length <= maxLength, `len ${out.length} > maxLength ${maxLength} for "${out}"`)
+      assert.ok(out.length >= 1, 'must be non-empty')
+      assert.match(out, /^[a-z0-9]([a-z0-9-]*[a-z0-9])?$/, `"${out}" is not a valid RFC 1123 label`)
+    }
+  })
+
+  it('sanitizeNamespaceLabel leaves a clean identity untouched (no hash)', () => {
+    assert.equal(sanitizeNamespaceLabel('alice'), 'alice')
+  })
+
+  // ─── ensureNamespace idempotency ───────────────────────────────────────────
+
+  it('createEnvironment creates the namespace when it does not exist (404 → create)', async () => {
+    const api = createMockApi({ readNs: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.readNs.length, 1)
+    assert.equal(api.calls.createNs.length, 1)
+    assert.equal(api.calls.createNs[0].body.metadata.name, 'chroxy-user-bob')
+    assert.equal(api.calls.createNs[0].body.metadata.labels['app.kubernetes.io/managed-by'], 'chroxy')
+  })
+
+  it('does NOT create the namespace when it already exists (read succeeds)', async () => {
+    const api = createMockApi() // default readNamespace resolves
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.readNs.length, 1)
+    assert.equal(api.calls.createNs.length, 0)
+  })
+
+  it('ensureNamespace swallows 409 AlreadyExists on concurrent create', async () => {
+    const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { throw make409() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    // Must not throw despite the 409 from createNamespace.
+    await backend.ensureNamespace('chroxy-user-race')
+    assert.equal(api.calls.createNs.length, 1)
+  })
+
+  it('ensureNamespace re-throws a non-404 read error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ readNs: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(() => backend.ensureNamespace('chroxy-user-x'), /boom/)
+  })
+
+  it('ensureNamespace re-throws a non-409 create error', async () => {
+    const make500 = () => Object.assign(new Error('denied'), { code: 500 })
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { throw make500() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(() => backend.ensureNamespace('chroxy-user-x'), /denied/)
+  })
+
+  it('ensureNamespace caches per process — second call for same ns is a no-op', async () => {
+    const api = createMockApi({ readNs: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.ensureNamespace('chroxy-user-cache')
+    await backend.ensureNamespace('chroxy-user-cache')
+
+    assert.equal(api.calls.readNs.length, 1, 'read should only happen once')
+    assert.equal(api.calls.createNs.length, 1, 'create should only happen once')
+  })
+
+  it('ensureNamespace never creates the static default namespace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api })
+
+    await backend.ensureNamespace('default')
+
+    assert.equal(api.calls.readNs.length, 0)
+    assert.equal(api.calls.createNs.length, 0)
+  })
+
+  it('createEnvironment ensures the namespace BEFORE creating the Secret/Pod', async () => {
+    const order = []
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { order.push('createNs'); return {} },
+      createSecret: () => { order.push('createSecret'); return {} },
+      createPod: () => { order.push('createPod'); return {} },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'carol' })
+
+    assert.deepEqual(order, ['createNs', 'createSecret', 'createPod'])
+  })
+
+  // ─── scoped listEnvironments ───────────────────────────────────────────────
+
+  it('listEnvironments scopes to the identity namespace + chroxy label', async () => {
+    const api = createMockApi({
+      listPods: () => ({
+        items: [
+          { metadata: { name: 'chroxy-env-a' } },
+          { metadata: { name: 'chroxy-env-b' } },
+        ],
+      }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const names = await backend.listEnvironments({ userId: 'dana' })
+
+    assert.deepEqual(names, ['chroxy-env-a', 'chroxy-env-b'])
+    assert.equal(api.calls.listPods[0].namespace, 'chroxy-user-dana')
+    assert.equal(api.calls.listPods[0].labelSelector, 'app.kubernetes.io/managed-by=chroxy')
+  })
+
+  it('listEnvironments filters out pods with no name and returns [] for an empty namespace', async () => {
+    const api = createMockApi({
+      listPods: () => ({ items: [{ metadata: {} }, { metadata: { name: '' } }] }),
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const names = await backend.listEnvironments({ userId: 'empty' })
+    assert.deepEqual(names, [])
+  })
+
+  it('listEnvironments returns [] when the tenant namespace does not exist yet (404)', async () => {
+    const api = createMockApi({ listPods: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    // Brand-new user with no environments: namespace not created yet.
+    const names = await backend.listEnvironments({ userId: 'newcomer' })
+    assert.deepEqual(names, [])
+    assert.equal(api.calls.listPods[0].namespace, 'chroxy-user-newcomer')
+  })
+
+  it('listEnvironments re-throws a non-404 list error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ listPods: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await assert.rejects(() => backend.listEnvironments({ userId: 'x' }), /boom/)
+  })
+
+  it('listEnvironments uses the static default namespace when no identity is given', async () => {
+    const api = createMockApi({ listPods: () => ({ items: [] }) })
+    const backend = new K8sBackend({ namespace: 'shared', _coreV1Api: api })
+
+    await backend.listEnvironments()
+    assert.equal(api.calls.listPods[0].namespace, 'shared')
+  })
+
+  it('two tenants never see each other in listEnvironments (separate namespaces)', async () => {
+    const seenNamespaces = []
+    const api = createMockApi({
+      listPods: (args) => {
+        seenNamespaces.push(args.namespace)
+        return { items: [{ metadata: { name: `pod-in-${args.namespace}` } }] }
+      },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const alice = await backend.listEnvironments({ userId: 'alice' })
+    const bob = await backend.listEnvironments({ userId: 'bob' })
+
+    assert.deepEqual(alice, ['pod-in-chroxy-user-alice'])
+    assert.deepEqual(bob, ['pod-in-chroxy-user-bob'])
+    assert.deepEqual(seenNamespaces, ['chroxy-user-alice', 'chroxy-user-bob'])
+  })
+
+  // ─── identity routing on destroy / status ──────────────────────────────────
+
+  it('destroyEnvironment targets the identity namespace', async () => {
+    const api = createMockApi({ deletePod: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.destroyEnvironment('chroxy-env-e1', { userId: 'erin' })
+
+    assert.equal(api.calls.delete[0].namespace, 'chroxy-user-erin')
+    assert.equal(api.calls.deleteSecret[0].namespace, 'chroxy-user-erin')
+  })
+
+  it('getEnvironmentStatus targets the identity namespace', async () => {
+    const api = createMockApi({ readPod: () => ({ status: { phase: 'Running' } }) })
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    const running = await backend.getEnvironmentStatus('chroxy-env-e1', { userId: 'frank' })
+
+    assert.equal(running, true)
+    assert.equal(api.calls.read[0].namespace, 'chroxy-user-frank')
+  })
+
+  it('rejects an identity that maps to an invalid namespace before any API call', async () => {
+    const api = createMockApi()
+    // A namespaceFor that returns a clearly-invalid label must be caught by
+    // _validateNamespace, not silently sent to the API server.
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceFor: () => 'BAD_NS' })
+
+    await assert.rejects(
+      () => backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'x' }),
+      /RFC 1123/,
+    )
+    assert.equal(api.calls.create.length, 0)
+    assert.equal(api.calls.createSecret.length, 0)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Namespace-level ResourceQuota / LimitRange (#5142)
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('buildResourceQuotaSpec() (#5142)', () => {
+  it('maps cpu/memory to aggregate requests.* keys', () => {
+    const hard = buildResourceQuotaSpec({ cpu: '8', memory: '16Gi' })
+    assert.deepEqual(hard, { 'requests.cpu': '8', 'requests.memory': '16Gi' })
+  })
+
+  it('maps cpuLimit/memoryLimit to aggregate limits.* keys', () => {
+    const hard = buildResourceQuotaSpec({ cpuLimit: '16', memoryLimit: '32Gi' })
+    assert.deepEqual(hard, { 'limits.cpu': '16', 'limits.memory': '32Gi' })
+  })
+
+  it('maps pods to a stringified count quota', () => {
+    const hard = buildResourceQuotaSpec({ pods: 5 })
+    assert.deepEqual(hard, { pods: '5' })
+  })
+
+  it('combines every dimension', () => {
+    const hard = buildResourceQuotaSpec({
+      cpu: '4', memory: '8Gi', cpuLimit: '8', memoryLimit: '16Gi', pods: 10,
+    })
+    assert.deepEqual(hard, {
+      'requests.cpu': '4',
+      'requests.memory': '8Gi',
+      'limits.cpu': '8',
+      'limits.memory': '16Gi',
+      pods: '10',
+    })
+  })
+
+  it('normalises Docker-style memory suffixes via the shared validator', () => {
+    const hard = buildResourceQuotaSpec({ memory: '16g' })
+    assert.equal(hard['requests.memory'], '16Gi')
+  })
+
+  it('throws on a malformed CPU quantity', () => {
+    assert.throws(() => buildResourceQuotaSpec({ cpu: 'lots' }), /not a valid K8s CPU quantity/)
+  })
+
+  it('throws on a malformed memory quantity', () => {
+    assert.throws(() => buildResourceQuotaSpec({ memory: '8 gigabytes' }), /not a valid K8s memory quantity/)
+  })
+
+  it('throws on a non-positive / non-integer pods count', () => {
+    assert.throws(() => buildResourceQuotaSpec({ pods: 0 }), /positive integer/)
+    assert.throws(() => buildResourceQuotaSpec({ pods: 2.5 }), /positive integer/)
+    assert.throws(() => buildResourceQuotaSpec({ pods: -1 }), /positive integer/)
+  })
+
+  it('throws when no cap is set', () => {
+    assert.throws(() => buildResourceQuotaSpec({}), /at least one of/)
+  })
+
+  it('throws on a non-object spec', () => {
+    assert.throws(() => buildResourceQuotaSpec(null), /must be an object/)
+    assert.throws(() => buildResourceQuotaSpec([]), /must be an object/)
+    assert.throws(() => buildResourceQuotaSpec('8'), /must be an object/)
+  })
+})
+
+describe('buildLimitRangeSpec() (#5142)', () => {
+  it('maps cpu/memory to defaultRequest.*', () => {
+    const item = buildLimitRangeSpec({ cpu: '250m', memory: '256Mi' })
+    assert.deepEqual(item, {
+      type: 'Container',
+      defaultRequest: { cpu: '250m', memory: '256Mi' },
+    })
+  })
+
+  it('maps cpuLimit/memoryLimit to default.*', () => {
+    const item = buildLimitRangeSpec({ cpuLimit: '1', memoryLimit: '1Gi' })
+    assert.deepEqual(item, {
+      type: 'Container',
+      default: { cpu: '1', memory: '1Gi' },
+    })
+  })
+
+  it('combines requests + limits in one container item', () => {
+    const item = buildLimitRangeSpec({ cpu: '250m', memory: '256Mi', cpuLimit: '1', memoryLimit: '1Gi' })
+    assert.deepEqual(item, {
+      type: 'Container',
+      default: { cpu: '1', memory: '1Gi' },
+      defaultRequest: { cpu: '250m', memory: '256Mi' },
+    })
+  })
+
+  it('normalises Docker-style memory suffixes via the shared validator', () => {
+    const item = buildLimitRangeSpec({ memoryLimit: '1g' })
+    assert.equal(item.default.memory, '1Gi')
+  })
+
+  it('throws on a malformed quantity', () => {
+    assert.throws(() => buildLimitRangeSpec({ cpu: 'nope' }), /not a valid K8s CPU quantity/)
+  })
+
+  it('throws when no default is set', () => {
+    assert.throws(() => buildLimitRangeSpec({}), /at least one of/)
+  })
+
+  it('throws on a non-object spec', () => {
+    assert.throws(() => buildLimitRangeSpec(null), /must be an object/)
+    assert.throws(() => buildLimitRangeSpec([]), /must be an object/)
+  })
+})
+
+describe('K8sBackend constructor namespaceQuota / namespaceLimitRange validation (#5142)', () => {
+  it('validates namespaceQuota at construction (fails fast on bad quantity)', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceQuota: { cpu: 'bad' } }),
+      /not a valid K8s CPU quantity/,
+    )
+  })
+
+  it('validates namespaceLimitRange at construction (fails fast on bad quantity)', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceLimitRange: { memoryLimit: 'bad' } }),
+      /not a valid K8s memory quantity/,
+    )
+  })
+
+  it('rejects an empty namespaceQuota object at construction', () => {
+    assert.throws(
+      () => new K8sBackend({ _coreV1Api: createMockApi(), namespaceQuota: {} }),
+      /at least one of/,
+    )
+  })
+
+  it('accepts a valid namespaceQuota / namespaceLimitRange', () => {
+    assert.doesNotThrow(() => new K8sBackend({
+      _coreV1Api: createMockApi(),
+      namespaceQuota: { cpu: '8', memory: '16Gi', pods: 10 },
+      namespaceLimitRange: { cpu: '250m', cpuLimit: '1' },
+    }))
+  })
+
+  it('treats null / omitted as feature-off (no spec stored)', () => {
+    const off = new K8sBackend({ _coreV1Api: createMockApi() })
+    assert.equal(off._namespaceQuotaSpec, null)
+    assert.equal(off._namespaceLimitRangeSpec, null)
+    const explicitNull = new K8sBackend({
+      _coreV1Api: createMockApi(), namespaceQuota: null, namespaceLimitRange: null,
+    })
+    assert.equal(explicitNull._namespaceQuotaSpec, null)
+    assert.equal(explicitNull._namespaceLimitRangeSpec, null)
+  })
+})
+
+describe('K8sBackend.ensureResourceQuota() / ensureLimitRange() (#5142)', () => {
+  const QUOTA = { cpu: '8', memory: '16Gi', pods: 10 }
+  const LIMITS = { cpu: '250m', memory: '256Mi', cpuLimit: '1', memoryLimit: '1Gi' }
+
+  // ─── opt-in / no-op when unconfigured ──────────────────────────────────────
+
+  it('is a no-op when neither quota nor limitrange is configured', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.ensureResourceQuota('chroxy-user-x')
+    await backend.ensureLimitRange('chroxy-user-x')
+
+    assert.equal(api.calls.readQuota.length, 0)
+    assert.equal(api.calls.createQuota.length, 0)
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  it('createEnvironment never touches quota/limitrange when feature is off', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.readQuota.length, 0)
+    assert.equal(api.calls.createQuota.length, 0)
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  // ─── ResourceQuota idempotent ensure ───────────────────────────────────────
+
+  it('ensureResourceQuota creates the quota when it does not exist (404 → create)', async () => {
+    const api = createMockApi({ readQuota: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-bob')
+
+    assert.equal(api.calls.readQuota.length, 1)
+    assert.equal(api.calls.createQuota.length, 1)
+    assert.equal(api.calls.createQuota[0].namespace, 'chroxy-user-bob')
+    const body = api.calls.createQuota[0].body
+    assert.equal(body.kind, 'ResourceQuota')
+    assert.equal(body.metadata.name, 'chroxy-quota')
+    assert.equal(body.metadata.labels['app.kubernetes.io/managed-by'], 'chroxy')
+    assert.deepEqual(body.spec.hard, {
+      'requests.cpu': '8', 'requests.memory': '16Gi', pods: '10',
+    })
+  })
+
+  it('ensureResourceQuota does NOT create when it already exists (read succeeds)', async () => {
+    const api = createMockApi() // default readQuota resolves
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-bob')
+
+    assert.equal(api.calls.readQuota.length, 1)
+    assert.equal(api.calls.createQuota.length, 0)
+  })
+
+  it('ensureResourceQuota swallows 409 AlreadyExists on concurrent create', async () => {
+    const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
+    const api = createMockApi({
+      readQuota: () => { throw make404Error() },
+      createQuota: () => { throw make409() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-race')
+    assert.equal(api.calls.createQuota.length, 1)
+  })
+
+  it('ensureResourceQuota re-throws a non-404 read error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ readQuota: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await assert.rejects(() => backend.ensureResourceQuota('chroxy-user-x'), /boom/)
+  })
+
+  it('ensureResourceQuota re-throws a non-409 create error', async () => {
+    const make500 = () => Object.assign(new Error('denied'), { code: 500 })
+    const api = createMockApi({
+      readQuota: () => { throw make404Error() },
+      createQuota: () => { throw make500() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await assert.rejects(() => backend.ensureResourceQuota('chroxy-user-x'), /denied/)
+  })
+
+  it('ensureResourceQuota caches per process — second call is a no-op', async () => {
+    const api = createMockApi({ readQuota: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('chroxy-user-cache')
+    await backend.ensureResourceQuota('chroxy-user-cache')
+
+    assert.equal(api.calls.readQuota.length, 1)
+    assert.equal(api.calls.createQuota.length, 1)
+  })
+
+  it('ensureResourceQuota never touches the static default namespace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.ensureResourceQuota('default')
+
+    assert.equal(api.calls.readQuota.length, 0)
+    assert.equal(api.calls.createQuota.length, 0)
+  })
+
+  // ─── LimitRange idempotent ensure ──────────────────────────────────────────
+
+  it('ensureLimitRange creates the limitrange when it does not exist (404 → create)', async () => {
+    const api = createMockApi({ readLimitRange: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-bob')
+
+    assert.equal(api.calls.readLimitRange.length, 1)
+    assert.equal(api.calls.createLimitRange.length, 1)
+    const body = api.calls.createLimitRange[0].body
+    assert.equal(body.kind, 'LimitRange')
+    assert.equal(body.metadata.name, 'chroxy-limits')
+    assert.equal(body.metadata.labels['app.kubernetes.io/managed-by'], 'chroxy')
+    assert.deepEqual(body.spec.limits, [{
+      type: 'Container',
+      default: { cpu: '1', memory: '1Gi' },
+      defaultRequest: { cpu: '250m', memory: '256Mi' },
+    }])
+  })
+
+  it('ensureLimitRange does NOT create when it already exists (read succeeds)', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-bob')
+
+    assert.equal(api.calls.readLimitRange.length, 1)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  it('ensureLimitRange re-throws a non-404 read error', async () => {
+    const make500 = () => Object.assign(new Error('boom'), { code: 500 })
+    const api = createMockApi({ readLimitRange: () => { throw make500() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await assert.rejects(() => backend.ensureLimitRange('chroxy-user-x'), /boom/)
+  })
+
+  it('ensureLimitRange re-throws a non-409 create error', async () => {
+    const make500 = () => Object.assign(new Error('denied'), { code: 500 })
+    const api = createMockApi({
+      readLimitRange: () => { throw make404Error() },
+      createLimitRange: () => { throw make500() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await assert.rejects(() => backend.ensureLimitRange('chroxy-user-x'), /denied/)
+  })
+
+  it('ensureLimitRange swallows 409 AlreadyExists on concurrent create', async () => {
+    const make409 = () => Object.assign(new Error('Conflict'), { code: 409 })
+    const api = createMockApi({
+      readLimitRange: () => { throw make404Error() },
+      createLimitRange: () => { throw make409() },
+    })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-race')
+    assert.equal(api.calls.createLimitRange.length, 1)
+  })
+
+  it('ensureLimitRange caches per process — second call is a no-op', async () => {
+    const api = createMockApi({ readLimitRange: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('chroxy-user-cache')
+    await backend.ensureLimitRange('chroxy-user-cache')
+
+    assert.equal(api.calls.readLimitRange.length, 1)
+    assert.equal(api.calls.createLimitRange.length, 1)
+  })
+
+  it('ensureLimitRange never touches the static default namespace', async () => {
+    const api = createMockApi()
+    const backend = new K8sBackend({ namespace: 'default', _coreV1Api: api, namespaceLimitRange: LIMITS })
+
+    await backend.ensureLimitRange('default')
+
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
+  })
+
+  // ─── composition with ensureNamespace via createEnvironment ─────────────────
+
+  it('createEnvironment ensures namespace → quota → limitrange → secret → pod, in order', async () => {
+    const order = []
+    const api = createMockApi({
+      readNs: () => { throw make404Error() },
+      createNs: () => { order.push('createNs'); return {} },
+      readQuota: () => { throw make404Error() },
+      createQuota: () => { order.push('createQuota'); return {} },
+      readLimitRange: () => { throw make404Error() },
+      createLimitRange: () => { order.push('createLimitRange'); return {} },
+      createSecret: () => { order.push('createSecret'); return {} },
+      createPod: () => { order.push('createPod'); return {} },
+    })
+    const backend = new K8sBackend({
+      _coreV1Api: api, namespaceQuota: QUOTA, namespaceLimitRange: LIMITS,
+    })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'carol' })
+
+    assert.deepEqual(order, [
+      'createNs', 'createQuota', 'createLimitRange', 'createSecret', 'createPod',
+    ])
+    assert.equal(api.calls.createQuota[0].namespace, 'chroxy-user-carol')
+    assert.equal(api.calls.createLimitRange[0].namespace, 'chroxy-user-carol')
+  })
+
+  it('createEnvironment ensures only the quota when only namespaceQuota is set', async () => {
+    const api = createMockApi({ readQuota: () => { throw make404Error() } })
+    const backend = new K8sBackend({ _coreV1Api: api, namespaceQuota: QUOTA })
+
+    await backend.createEnvironment({ envId: 'e1', image: 'a', userId: 'bob' })
+
+    assert.equal(api.calls.createQuota.length, 1)
+    assert.equal(api.calls.readLimitRange.length, 0)
+    assert.equal(api.calls.createLimitRange.length, 0)
   })
 })

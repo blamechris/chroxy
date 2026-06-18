@@ -9,12 +9,21 @@ export interface ModalProps {
   title: string
   children: ReactNode
   maxWidth?: string
+  /**
+   * When false, clicking the backdrop does NOT close the modal — only the
+   * Escape key and the modal's own controls can dismiss it (#5779). Defaults
+   * to true to preserve the existing click-outside-to-close behaviour for
+   * lightweight modals (confirm dialogs, QR sheets). Forms that hold
+   * in-progress user input should pass false so a stray outside click can't
+   * silently discard typed/selected values.
+   */
+  closeOnBackdrop?: boolean
 }
 
 const FOCUSABLE_SELECTOR =
   'a[href], button:not([disabled]), textarea:not([disabled]), input:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])'
 
-export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) {
+export function Modal({ open, onClose, title, children, maxWidth, closeOnBackdrop = true }: ModalProps) {
   const titleId = useId()
   const overlayRef = useRef<HTMLDivElement>(null)
   const contentRef = useRef<HTMLDivElement>(null)
@@ -99,7 +108,7 @@ export function Modal({ open, onClose, title, children, maxWidth }: ModalProps) 
       className="modal-overlay"
       data-modal-overlay
       data-testid="modal-overlay"
-      onClick={onClose}
+      onClick={closeOnBackdrop ? onClose : undefined}
     >
       <div
         ref={contentRef}

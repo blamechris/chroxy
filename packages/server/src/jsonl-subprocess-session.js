@@ -1,7 +1,8 @@
 import { spawn } from 'child_process'
 import { createInterface } from 'readline'
-import { BaseSession } from './base-session.js'
+import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
+import { guardChildStreams } from './child-stream-guard.js'
 
 const log = createLogger('jsonl-subprocess-session')
 
@@ -85,48 +86,15 @@ export class JsonlSubprocessSession extends BaseSession {
   // Lifecycle
   // ------------------------------------------------------------------
 
-  constructor({
-    cwd,
-    model,
-    permissionMode,
-    skillsDir,
-    repoSkillsDir,
-    maxSkillBytes,
-    maxTotalSkillBytes,
-    provider,
-    activeManualSkills,
-    providerSkillAllowlist,
-    trustStore,
-    trustMismatchMode,
-    promptEvaluator,
-    promptEvaluatorSkipPattern,
-    resultTimeoutMs,
-    // #3899: hard-cap timeout (per-session backstop) flows through this
-    // middle layer to BaseSession exactly like resultTimeoutMs. Memory
-    // [[feedback_jsonl_subprocess_middle_layer]] — when adding a
-    // BaseSession option, plumb it through here too or Codex / Gemini
-    // silently fall back to the default.
-    hardTimeoutMs,
-    resumeSessionId,
-  } = {}) {
-    super({
-      cwd,
-      model,
-      permissionMode: permissionMode || 'auto',
-      skillsDir,
-      repoSkillsDir,
-      maxSkillBytes,
-      maxTotalSkillBytes,
-      provider,
-      activeManualSkills,
-      providerSkillAllowlist,
-      trustStore,
-      trustMismatchMode,
-      promptEvaluator,
-      promptEvaluatorSkipPattern,
-      resultTimeoutMs,
-      hardTimeoutMs,
-    })
+  constructor(opts = {}) {
+    // #5367: forward every BaseSession opt via the canonical picker (preserves
+    // the #3805 / #4660 / #3899 / #4790 / #5288 plumbing that this middle layer
+    // historically had to re-declare by hand — the trap documented in
+    // [[feedback_jsonl_subprocess_middle_layer]]). The lone override is
+    // permissionMode, which defaults to 'auto' for subprocess providers.
+    super(buildBaseSessionOpts(opts, { permissionMode: opts.permissionMode || 'auto' }))
+    // JsonlSubprocessSession-local opt (not a BaseSession opt).
+    const { resumeSessionId } = opts
     // #3865: accept resumeSessionId from constructor so SessionManager's
     // serializeState/restoreState path carries a captured Codex thread_id
     // across server restarts. Without this, persistence was wired up at
@@ -138,6 +106,19 @@ export class JsonlSubprocessSession extends BaseSession {
     // Skills MVP (#2957) — providers without a system-prompt flag (Codex,
     // Gemini) prepend skills text to the first user message only.
     this._skillsPrepended = false
+    // #4881: provider parity with CliSession's #4602 _intentionalStop flag.
+    // Set by `interrupt()` immediately before SIGINT-ing the child, then
+    // consumed inside `proc.on('close')` so a user-initiated Stop:
+    //   - suppresses the loud "{provider} process exited with code N" error
+    //     emit (SIGINT exits the JSONL subprocess with code 130 or null
+    //     depending on the CLI), and
+    //   - emits a single transient `stopped` event with the exit `code` so
+    //     the dashboard/mobile UX can render the same quiet confirmation
+    //     surface PR #4868 wired for CliSession.
+    // Single-use: cleared on every close path (close, destroy) so the flag
+    // never leaks past one sendMessage cycle. Matches CliSession's
+    // capture-and-clear discipline in `_handleChildClose`.
+    // The flag itself is declared+initialized on BaseSession (#5375).
   }
 
   start() {
@@ -155,6 +136,9 @@ export class JsonlSubprocessSession extends BaseSession {
     this._destroying = true
     this._processReady = false
     this._isBusy = false
+    // #4881: clear so a teardown after interrupt() never leaks the flag past
+    // this session instance. Mirrors CliSession.destroy() (#4602).
+    this._clearIntentionalStop()
     if (this._process) {
       try {
         this._process.kill('SIGTERM')
@@ -165,11 +149,15 @@ export class JsonlSubprocessSession extends BaseSession {
   }
 
   interrupt() {
-    if (this._process) {
-      try {
-        this._process.kill('SIGINT')
-      } catch { /* already dead */ }
-    }
+    if (!this._process) return
+    // #4881: mark the imminent child exit as user-initiated so the
+    // proc.on('close') handler suppresses the "exited with code N" error and
+    // instead emits a quiet `stopped` event with the exit code. Cleared in
+    // the close handler (single-use, mirrors CliSession #4602).
+    this.markIntentionalStop()
+    try {
+      this._process.kill('SIGINT')
+    } catch { /* already dead */ }
   }
 
   setPermissionMode(_mode) {
@@ -358,15 +346,31 @@ export class JsonlSubprocessSession extends BaseSession {
       }
     })
 
+    // #5324 (WP-5.2) — guard the child's stdout/stderr streams against an
+    // unhandled 'error' event that would crash the daemon. Shared helper (P2-9);
+    // `_destroying` flips after attach so it is read lazily.
+    guardChildStreams(proc, { destroying: () => this._destroying, log, label: Klass.providerName })
+
     proc.on('close', (code) => {
       this._process = null
       this._isBusy = false
+      // #4881: capture-and-clear BEFORE the _destroying short-circuit so the
+      // flag never leaks past a close even when destroy() fires first.
+      // Mirrors CliSession._handleChildClose (#4602).
+      const wasIntentionalStop = this._consumeIntentionalStop()
       if (this._destroying) return
       if (ctx.didStreamStart) {
         this.emit('stream_end', { messageId: ctx.messageId })
         ctx.didStreamStart = false
       }
-      if (code !== 0 && code !== null) {
+      if (wasIntentionalStop) {
+        // #4881: user clicked Stop — interrupt() set the flag, SIGINT brought
+        // the child down. Skip the loud "{provider} process exited with code
+        // N" error surface and emit the quiet `stopped` event for parity
+        // with CliSession (#4868). SIGINT typically exits with 130 or null
+        // depending on the CLI; both are user-initiated and not crashes.
+        this.emit('stopped', { code })
+      } else if (code !== 0 && code !== null) {
         // Prefer high-signal stderr; fall back to raw so the user always
         // sees *some* explanation when the child died.
         const sourceBuf = stderrBuf || rawStderrBuf

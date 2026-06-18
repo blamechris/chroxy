@@ -1,8 +1,15 @@
 import { JsonlSubprocessSession } from './jsonl-subprocess-session.js'
+import { buildBaseSessionOpts } from './base-session.js'
 import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import {
+  CONTEXT_WINDOW_HEADROOM,
+  getRatchetCap,
+  maybeRatchetContextWindow,
+} from './utils/context-window-learn.js'
+import { BILLING_CLASSES } from './billing-class.js'
 
 /**
  * Manages a Gemini CLI session using `gemini -p --output-format stream-json`.
@@ -67,6 +74,41 @@ const GEMINI_FALLBACK_MODELS = Object.freeze(GEMINI_ALLOWED_MODELS.map(id => {
     contextWindow: meta.contextWindow,
   })
 }))
+
+/**
+ * Headroom multiplier for the learn-loop (#4414). Re-exported from the
+ * shared `CONTEXT_WINDOW_HEADROOM` constant in `utils/context-window-learn.js`
+ * so Gemini and Codex stay aligned on the same value.
+ */
+export const GEMINI_CONTEXT_WINDOW_HEADROOM = CONTEXT_WINDOW_HEADROOM
+
+/**
+ * Sanity cap on the learn-loop ratchet target for the Gemini provider
+ * (#4414). A single `result` event with a corrupt or malicious
+ * `input_tokens` value (overflow, JSONL parse glitch, future Gemini CLI
+ * bug) must not be able to balloon the registered window to an absurd
+ * number. 4,000,000 tokens is double today's largest published Gemini
+ * window (2M for gemini-2.5-pro / gemini-2.0-pro / gemini-1.5-pro) —
+ * leaves room for the next-gen bump without needing another source change.
+ *
+ * Sourced from the per-provider cap table in `utils/context-window-learn.js`
+ * — bump it there if a legit future Gemini model exceeds 4M.
+ */
+export const GEMINI_CONTEXT_WINDOW_RATCHET_CAP = getRatchetCap('gemini')
+
+/**
+ * #4414 learn-loop helper. Thin Gemini-specific wrapper around the shared
+ * `maybeRatchetContextWindow` so unit tests can drive the helper directly
+ * without going through the JSONL readline pipeline.
+ *
+ * @param {import('events').EventEmitter} session  The GeminiSession instance
+ * @param {string} modelId  Short id or fullId of the active Gemini model
+ * @param {number} inputTokens  `usage.input_tokens` from the `result` event
+ * @returns {boolean}  true when the registry was updated, false when no-op
+ */
+export function _maybeRatchetContextWindow(session, modelId, inputTokens) {
+  return maybeRatchetContextWindow('gemini', modelId, inputTokens, session.emit.bind(session))
+}
 
 export class GeminiSession extends JsonlSubprocessSession {
   // ------------------------------------------------------------------
@@ -191,16 +233,78 @@ export class GeminiSession extends JsonlSubprocessSession {
     }
   }
 
-  constructor({ cwd, model, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider, activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId } = {}) {
-    // #3899: hardTimeoutMs forwarded to BaseSession — same shape as
-    // CodexSession. When Gemini gets the soft/hard split as a follow-
-    // up, the operator config will already be flowing in.
-    super({ cwd, model: model || DEFAULT_MODEL, permissionMode, skillsDir, repoSkillsDir, maxSkillBytes, maxTotalSkillBytes, provider: provider || 'gemini', activeManualSkills, providerSkillAllowlist, trustStore, trustMismatchMode, promptEvaluator, promptEvaluatorSkipPattern, resultTimeoutMs, hardTimeoutMs, resumeSessionId })
+  /**
+   * Resolve runtime auth state for the dashboard (#4769).
+   *
+   * Gemini accepts GEMINI_API_KEY / GOOGLE_API_KEY env vars OR the OAuth
+   * state cached under `~/.gemini/` by `gemini login` (#4301). Filename
+   * varies between CLI versions — oauth_creds.json or google_accounts.json
+   * — the probe accepts either.
+   *
+   * @param {NodeJS.ProcessEnv} env
+   * @param {{ hasGeminiOAuthCreds: () => boolean }} helpers
+   * @returns {{ready:boolean, source:string, envVar:string|null, envVars:string[], hint:string, detail:string}}
+   */
+  static resolveAuth(env, helpers) {
+    const credSpec = this.preflight.credentials
+    const envVars = credSpec.envVars
+    const hint = credSpec.hint || `set ${envVars.join(' or ')}`
+
+    const matched = envVars.find(v => env[v])
+    if (matched) {
+      return {
+        ready: true,
+        source: 'env',
+        envVar: matched,
+        envVars,
+        hint: '',
+        detail: `Google API (${matched} set)`,
+        billingClass: BILLING_CLASSES.API_KEY,
+      }
+    }
+    if (helpers.hasGeminiOAuthCreds()) {
+      return {
+        ready: true,
+        source: 'oauth',
+        envVar: null,
+        envVars,
+        hint,
+        detail: 'Google API (OAuth from `gemini login`)',
+        billingClass: BILLING_CLASSES.API_KEY,
+      }
+    }
+    const resolvedHint = hint
+      ? `${hint} or run \`gemini login\``
+      : 'run `gemini login` or set GEMINI_API_KEY'
+    return {
+      ready: false,
+      source: 'none',
+      envVar: null,
+      envVars,
+      hint: resolvedHint,
+      detail: envVars.length ? `Not configured — ${resolvedHint}` : 'Not configured',
+      // Non-Claude provider — always per-token api-key billing, era-independent.
+      billingClass: BILLING_CLASSES.API_KEY,
+    }
   }
 
-  setModel(model) {
-    return super.setModel(model)
+  constructor(opts = {}) {
+    // #5367: forward every BaseSession opt via the canonical picker (which
+    // preserves the #3899 hardTimeoutMs / #4790 streamStallTimeoutMs plumbing
+    // that used to be hand-maintained here). Overrides: provider default,
+    // `model || DEFAULT_MODEL`, and `resumeSessionId` — the last is a
+    // JsonlSubprocessSession-local opt (not a BaseSession key) so it must ride
+    // through the overrides bag to reach the middle layer.
+    super(buildBaseSessionOpts(opts, {
+      provider: opts.provider || 'gemini',
+      model: opts.model || DEFAULT_MODEL,
+      resumeSessionId: opts.resumeSessionId,
+    }))
   }
+
+  // #5374: removed the no-op `setModel` override — it only forwarded to
+  // BaseSession.setModel, which now owns the guard + the (default no-op)
+  // _onModelChanged hook.
 
   // ------------------------------------------------------------------
   // JsonlSubprocessSession overrides
@@ -275,12 +379,26 @@ export class GeminiSession extends JsonlSubprocessSession {
           ctx.didStreamStart = false
         }
         const usage = event.usage || {}
+        const inputTokens = usage.input_tokens || 0
+        const outputTokens = usage.output_tokens || 0
+        // #4414 learn-loop: same drift pattern as Codex (#3857) — the static
+        // window in GEMINI_MODEL_METADATA will go stale as Google bumps the
+        // window for gemini-2.5-pro / future variants. When the observed
+        // `input_tokens` exceeds the registered window, ratchet the registry
+        // upward so the meter reflects reality, and emit `models_updated` so
+        // connected dashboards refresh.
+        //
+        // Only ratchets *up* — a single small turn must never shrink the
+        // registered window.
+        if (this.model && inputTokens > 0) {
+          _maybeRatchetContextWindow(this, this.model, inputTokens)
+        }
         this.emit('result', {
           cost: null,
           duration: null,
           usage: {
-            input_tokens: usage.input_tokens || 0,
-            output_tokens: usage.output_tokens || 0,
+            input_tokens: inputTokens,
+            output_tokens: outputTokens,
           },
           sessionId: null,
         })
@@ -335,6 +453,13 @@ export class GeminiSession extends JsonlSubprocessSession {
 
       case 'result': {
         const usage = event.usage || {}
+        // NOTE: the context-window learn-loop (`maybeRatchetContextWindow`)
+        // is deliberately NOT wired in here. Production routes end-of-turn
+        // events through `_processJsonlLine`, which owns the ratchet call.
+        // This legacy path exists only for tests / direct callers and is
+        // intentionally minimal — duplicating the ratchet would risk
+        // double-emitting `models_updated` if both paths ever fire on the
+        // same event.
         this.emit('result', {
           cost: null,
           duration: null,

@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: SessionScreen file browser navigation
 ---
 
@@ -37,9 +37,12 @@ name: SessionScreen file browser navigation
 # Take screenshot of src directory
 - takeScreenshot: file-browser-src
 
-# Navigate back
+# Navigate back via FileBrowser's "< Back" button. Match the exact visible
+# text — a loose ".*Back.*" regex also matches the navigation stack's hidden
+# "Back" element, and tapping that pops the Session screen (the app drops to
+# a fresh Chat state and then disconnects).
 - tapOn:
-    text: ".*Back.*"
+    text: "< Back"
 
 # Verify we're back at root
 - extendedWaitUntil:

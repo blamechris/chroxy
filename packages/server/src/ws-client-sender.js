@@ -1,4 +1,5 @@
 import { encrypt, DIRECTION_SERVER } from '@chroxy/store-core/crypto'
+import { metrics } from './metrics.js'
 
 /** Backpressure thresholds (bytes) */
 const WARN_THRESHOLD = 64 * 1024    // 64KB — log warning
@@ -13,12 +14,29 @@ const WARN_THROTTLE_MS = 30_000
  * post-auth queue buffering, flush-overflow buffering, and post-send
  * backpressure monitoring.
  *
+ * Post-send backpressure is intentionally distinct from the pre-send
+ * check in `WsBroadcaster._sendOneWithBackpressure` (#4775). The
+ * broadcaster only protects multi-recipient broadcast paths; single-
+ * recipient sends from `WsServer._send` (pong, token_rotated,
+ * auth_fail, rate_limited, server_status, error, etc.) bypass the
+ * broadcaster entirely, so this post-send path is the only thing that
+ * evicts a slow client on those code paths. Per #4804 both paths must
+ * emit `backpressure.disconnects` so alerting catches either eviction
+ * source — see `metrics.inc('backpressure.disconnects')` below.
+ *
  * @param {object} log - Logger with .error() and .warn() methods
  * @param {object} [opts] - Optional overrides (for testing)
  * @param {number} [opts.warnThreshold] - Bytes above which to log warning
  * @param {number} [opts.evictThreshold] - Bytes above which to close client
  * @param {number} [opts.warnThrottleMs] - Min ms between warnings per client
- * @returns {(ws: WebSocket, client: object|undefined, message: object) => void}
+ * @returns {(ws: WebSocket, client: object|undefined, message: object) => boolean}
+ *   Returns `true` when the message was handed to `ws.send` without throwing
+ *   (or accepted into the post-auth / flush-overflow queue for later delivery),
+ *   `false` when it could not be delivered — the client was already evicted, or
+ *   `ws.send` threw (a torn-down / half-open socket). #5721: callers that gate
+ *   crypto state on a frame actually reaching the wire (the eager handshake's
+ *   `auth_ok` carrying `serverPublicKey`) MUST check this — the catch below
+ *   swallows the throw, so there is no exception to observe otherwise.
  */
 export function createClientSender(log, opts = {}) {
   const warnThreshold = opts.warnThreshold ?? WARN_THRESHOLD
@@ -26,16 +44,23 @@ export function createClientSender(log, opts = {}) {
   const warnThrottleMs = opts.warnThrottleMs ?? WARN_THROTTLE_MS
 
   return function send(ws, client, message) {
+    // #4834: short-circuit if this client has already been evicted. ws.close()
+    // is async (CLOSING → CLOSED), so subsequent synchronous sends in the same
+    // chain (e.g. replayHistory / flushPostAuthQueue) would otherwise keep
+    // serializing + encrypting messages that will never leave the buffer.
+    if (client?._evicted) {
+      return false
+    }
     // Queue messages while key exchange is pending
     if (client?.encryptionPending && client.postAuthQueue) {
       client.postAuthQueue.push(message)
-      return
+      return true
     }
     // Buffer messages while post-auth queue is still flushing
     if (client?._flushing) {
       client._flushOverflow = client._flushOverflow || []
       client._flushOverflow.push(message)
-      return
+      return true
     }
     // Assign per-client monotonic sequence number
     if (client) {
@@ -54,19 +79,37 @@ export function createClientSender(log, opts = {}) {
 
       // Post-send backpressure monitoring
       const buffered = ws.bufferedAmount
-      if (buffered > evictThreshold && client) {
+      if (buffered > evictThreshold && client && !client._evicted) {
+        // #4834: sticky _evicted flag prevents log spam + metric over-counting
+        // while ws.close() is in flight. Without this, 10+ sends after the
+        // first eviction can each re-log and re-increment for a single close.
+        client._evicted = true
         log.warn(`Backpressure: evicting client ${client.id} — bufferedAmount ${buffered} exceeds ${evictThreshold} bytes`)
+        // #4804: unify observability with WsBroadcaster._sendOneWithBackpressure
+        // so both backpressure systems feed the same metric. Without this the
+        // single-recipient eviction path silently bypasses alerting.
+        metrics.inc('backpressure.disconnects')
         ws.close(4008, 'Backpressure: slow client evicted')
       } else if (buffered > warnThreshold && client) {
         const now = Date.now()
         const lastWarn = client._lastBackpressureWarn || 0
         if (now - lastWarn >= warnThrottleMs) {
           client._lastBackpressureWarn = now
-          log.warn(`Backpressure: client ${client.id} bufferedAmount ${buffered} exceeds warning threshold (${warnThreshold} bytes)`)
+          // Wedge instrumentation (#4678 follow-up): include the message
+          // type so we can correlate a warn at restore-time with which
+          // broadcast tipped the buffer. Without the type we cannot tell
+          // whether the restore session_list broadcast or a subsequent
+          // stream_start broadcast pushed past the threshold.
+          log.warn(`Backpressure: client ${client.id} bufferedAmount ${buffered} exceeds warning threshold (${warnThreshold} bytes) type=${message?.type || 'unknown'}`)
         }
       }
+      // #5721: the frame was handed to ws.send without throwing. A post-send
+      // backpressure eviction above (ws.close) affects FUTURE sends, not this
+      // one — this message already left for the socket buffer, so report success.
+      return true
     } catch (err) {
       log.error(`Send error: ${err.message}`)
+      return false
     }
   }
 }

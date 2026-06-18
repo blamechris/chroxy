@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: SessionScreen connected state
 ---
 
@@ -16,10 +16,11 @@ name: SessionScreen connected state
 - assertVisible:
     text: ".*"
 
-# Verify settings/disconnect buttons are present (icon buttons)
-# The close (X) button for disconnect
+# Verify the disconnect affordance is present (header's red "Disconnect"
+# text button \u2014 the old "\u2715" close icon is gone). Match its accessibilityLabel
+# \u2014 it overrides the visible text in Maestro's matcher.
 - assertVisible:
-    text: ".*\u2715.*"
+    text: "Disconnect and go back"
 
 # Take screenshot for verification
 - takeScreenshot: session-connected

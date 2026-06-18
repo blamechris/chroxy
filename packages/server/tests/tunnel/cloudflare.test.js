@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'events'
 import { CloudflareTunnelAdapter } from '../../src/tunnel/cloudflare.js'
@@ -97,6 +97,111 @@ describe('CloudflareTunnelAdapter', () => {
         /cloudflared exited with code 1 before establishing tunnel/
       )
     })
+
+    it('includes the captured cloudflared output in a named-tunnel failure (#5328)', async () => {
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          // The real reason a named tunnel fails to start — previously discarded.
+          proc.stderr.emit('data', Buffer.from("ERR couldn't find tunnel credentials file"))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        config: { tunnelName: 'mytunnel', tunnelHostname: 'host.example.com' },
+      })
+
+      // Call _startNamedTunnel directly — start() wraps it in a 3-attempt retry
+      // with real 3s/6s backoff sleeps, which we don't want to exercise here.
+      await assert.rejects(
+        () => tunnel._startNamedTunnel(),
+        /cloudflared exited with code 1 before establishing tunnel\. Last output: .*couldn't find tunnel credentials file/,
+      )
+    })
+
+    it('redacts token-shaped runs in the captured cloudflared output (#5328)', async () => {
+      // 48 chars after the prefix — redactSensitive's sk-ant- pattern needs 40+.
+      const secret = 'sk-ant-api03-' + 'A'.repeat(48)
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from(`ERR auth failed with token ${secret}`))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({
+        port: 3000,
+        mockSpawn,
+        mode: 'named',
+        config: { tunnelName: 'mytunnel', tunnelHostname: 'host.example.com' },
+      })
+
+      await tunnel._startNamedTunnel().then(
+        () => assert.fail('expected _startNamedTunnel() to reject'),
+        (err) => {
+          assert.match(err.message, /Last output:/)
+          assert.ok(!err.message.includes(secret), `token must be redacted, got: ${err.message}`)
+        },
+      )
+    })
+
+    it('includes the captured cloudflared output in a QUICK-tunnel failure (audit P2-11)', async () => {
+      // The default quick path previously rejected with only "exited with code N",
+      // dropping the real reason — now it retains the same redacted tail the
+      // named path does.
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from('ERR failed to connect to the Cloudflare edge'))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+
+      await assert.rejects(
+        () => tunnel._startQuickTunnel(),
+        /cloudflared exited with code 1 before establishing tunnel\. Last output: .*failed to connect to the Cloudflare edge/,
+      )
+    })
+
+    it('redacts token-shaped runs in the QUICK-tunnel captured output (audit P2-11)', async () => {
+      const secret = 'sk-ant-api03-' + 'A'.repeat(48)
+      const mockSpawn = () => {
+        const proc = new EventEmitter()
+        proc.stdout = new EventEmitter()
+        proc.stderr = new EventEmitter()
+        proc.kill = function () { this.killed = true }
+        setImmediate(() => {
+          proc.stderr.emit('data', Buffer.from(`ERR auth failed with token ${secret}`))
+          proc.emit('close', 1, null)
+        })
+        return proc
+      }
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+
+      await tunnel._startQuickTunnel().then(
+        () => assert.fail('expected _startQuickTunnel() to reject'),
+        (err) => {
+          assert.match(err.message, /Last output:/)
+          assert.ok(!err.message.includes(secret), `token must be redacted, got: ${err.message}`)
+        },
+      )
+    })
   })
 
   describe('auto-recovery on unexpected exit', () => {
@@ -176,7 +281,7 @@ describe('CloudflareTunnelAdapter', () => {
       await tunnel.stop()
     })
 
-    it('stops after maxRecoveryAttempts failures', async () => {
+    it('stops after maxRecoveryAttempts failures', async (t) => {
       let spawnCount = 0
       const mockSpawn = () => {
         spawnCount++
@@ -192,6 +297,11 @@ describe('CloudflareTunnelAdapter', () => {
       }
 
       const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+      // #6027: recovery is an unbounded long-tail loop — after the first round
+      // emits tunnel_failed it keeps retrying in the background. stop() aborts
+      // it; register via t.after so it runs even if an assertion below throws
+      // (otherwise the leaked backoff would hang the suite w/o force-exit).
+      t.after(() => tunnel.stop())
       tunnel.recoveryBackoffs = [10, 20, 30]
 
       await tunnel.start()
@@ -203,6 +313,37 @@ describe('CloudflareTunnelAdapter', () => {
       const failedEvent = await failedPromise
       assert.ok(failedEvent.message.includes('3 attempts'))
       assert.equal(spawnCount, 4)
+    })
+  })
+
+  describe('cold-start timeout', () => {
+    // Regression: the 30s cold-start timeout used to set the instance-wide
+    // `intentionalShutdown` kill switch. That (a) made start()'s retry loop give
+    // up on the very transient failure it exists to absorb, and (b) suppressed
+    // ALL future recovery for the adapter's lifetime. The timeout must scope its
+    // suppression to the timed-out process only.
+    it('does not set intentionalShutdown or trigger recovery (#5851)', async () => {
+      // A process that never emits a URL and never closes on its own, so only
+      // the 30s timeout can resolve the start promise.
+      const proc = createMockProcess({ skipDefaultUrl: true })
+      const tunnel = new TestCloudflareAdapter({ port: 3000, mode: 'quick', mockSpawn: () => proc })
+
+      let recoveryCalled = false
+      tunnel._handleUnexpectedExit = async () => { recoveryCalled = true }
+
+      mock.timers.enable({ apis: ['setTimeout'] })
+      try {
+        const startP = tunnel._startQuickTunnel()
+        mock.timers.tick(30_000) // fire the cold-start timeout
+        await assert.rejects(startP, /timed out after 30s/)
+        // The timeout's proc.kill() emits 'close' on a setImmediate (real timer).
+        await new Promise((resolve) => setImmediate(resolve))
+      } finally {
+        mock.timers.reset()
+      }
+
+      assert.equal(tunnel.intentionalShutdown, false, 'cold-start timeout must not poison the instance-wide kill switch')
+      assert.equal(recoveryCalled, false, 'a timeout-killed process must not be treated as a mid-session outage')
     })
   })
 
@@ -279,13 +420,18 @@ describe('CloudflareTunnelAdapter', () => {
       await tunnel.stop()
     })
 
-    it('rejects when tunnelName is missing', async () => {
+    it('rejects when tunnelName is missing', async (t) => {
       const tunnel = new TestCloudflareAdapter({
         port: 3000,
         mockSpawn: () => createNamedMockProcess(),
         mode: 'named',
         config: { tunnelHostname: 'chroxy.example.com' },
       })
+      // #6027: a failed named-tunnel start leaves the retry/recovery loop
+      // scheduling backoff sleeps in the background. stop() aborts it; via
+      // t.after so it runs even if the assertion below throws (otherwise the
+      // leaked timer keeps the suite alive without --test-force-exit).
+      t.after(() => tunnel.stop())
 
       await assert.rejects(
         async () => await tunnel.start(),
@@ -293,13 +439,15 @@ describe('CloudflareTunnelAdapter', () => {
       )
     })
 
-    it('rejects when tunnelHostname is missing', async () => {
+    it('rejects when tunnelHostname is missing', async (t) => {
       const tunnel = new TestCloudflareAdapter({
         port: 3000,
         mockSpawn: () => createNamedMockProcess(),
         mode: 'named',
         config: { tunnelName: 'chroxy' },
       })
+      // #6027: stop the background retry/recovery loop (see tunnelName test).
+      t.after(() => tunnel.stop())
 
       await assert.rejects(
         async () => await tunnel.start(),
@@ -346,5 +494,62 @@ describe('CloudflareTunnelAdapter', () => {
     it('has correct static name', () => {
       assert.equal(CloudflareTunnelAdapter.name, 'cloudflare')
     })
+  })
+})
+
+// #5356 (visibility layer): quick-tunnel startup emits one public-exposure
+// warning. The tunnel logger writes warn-level lines via console.warn, so the
+// warning is captured there (same pattern as tunnel-check-logging.test.js).
+describe('quick-tunnel public exposure warning (#5356)', () => {
+  afterEach(() => {
+    mock.restoreAll()
+  })
+
+  it('warns that the quick tunnel URL is publicly reachable', async () => {
+    const warns = []
+    mock.method(console, 'warn', (msg) => warns.push(String(msg)))
+
+    const mockSpawn = () => createMockProcess({ url: 'https://exposed-test.trycloudflare.com' })
+    const tunnel = new TestCloudflareAdapter({ port: 3000, mockSpawn })
+    await tunnel.start()
+
+    const exposureWarns = warns.filter((l) => l.includes('publicly reachable'))
+    assert.equal(exposureWarns.length, 1, `expected exactly one exposure warning, got: ${JSON.stringify(warns)}`)
+    assert.ok(exposureWarns[0].includes('https://exposed-test.trycloudflare.com'), 'warning names the public URL')
+    assert.match(exposureWarns[0], /bearer-token gated/)
+    assert.match(exposureWarns[0], /--tunnel none/)
+
+    await tunnel.stop()
+  })
+
+  it('does not emit the exposure warning for a named tunnel', async () => {
+    const warns = []
+    mock.method(console, 'warn', (msg) => warns.push(String(msg)))
+
+    const mockSpawn = () => {
+      const proc = new EventEmitter()
+      proc.stdout = new EventEmitter()
+      proc.stderr = new EventEmitter()
+      proc.killed = false
+      proc.kill = function () {
+        this.killed = true
+        setImmediate(() => this.emit('close', 0, null))
+      }
+      setImmediate(() => {
+        proc.stderr.emit('data', Buffer.from('Registered tunnel connection connIndex=0'))
+      })
+      return proc
+    }
+    const tunnel = new TestCloudflareAdapter({
+      port: 3000,
+      mockSpawn,
+      mode: 'named',
+      config: { tunnelName: 'chroxy', tunnelHostname: 'chroxy.example.com' },
+    })
+    await tunnel.start()
+
+    assert.equal(warns.filter((l) => l.includes('publicly reachable')).length, 0)
+
+    await tunnel.stop()
   })
 })

@@ -3,9 +3,21 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, unlinkSync, existsSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { GeminiSession } from '../src/gemini-session.js'
+import {
+  GeminiSession,
+  GEMINI_CONTEXT_WINDOW_HEADROOM,
+  GEMINI_CONTEXT_WINDOW_RATCHET_CAP,
+  _maybeRatchetContextWindow,
+} from '../src/gemini-session.js'
+import { getRegistryForProvider } from '../src/models.js'
 import { SkillsTrustStore } from '../src/skills-trust.js'
 import { waitFor } from './test-helpers.js'
+// Importing providers.js triggers built-in provider registration so
+// getRegistryForProvider('gemini') can wire to GeminiSession's static hooks
+// when this suite runs in isolation. Without this the registry falls back
+// to the default Claude registry and the #4414 learn-loop tests below
+// would silently no-op.
+import '../src/providers.js'
 
 describe('GeminiSession', () => {
   let savedApiKey
@@ -78,6 +90,26 @@ describe('GeminiSession', () => {
   it('defaults _resultTimeoutMs to 30 min when omitted (#3755 / #3884)', () => {
     const session = new GeminiSession({ cwd: '/tmp' })
     assert.equal(session._resultTimeoutMs, 30 * 60 * 1000)
+  })
+
+  // #4790: GeminiSession → JsonlSubprocessSession → BaseSession forwarding of
+  // streamStallTimeoutMs. SessionManager (PR #4745) wired per-provider
+  // overrides into providerOpts but each middle layer dropped the key.
+  // The CapturingProvider-based test in session-manager.test.js missed this
+  // because CapturingProvider has no middle layer.
+  it('forwards streamStallTimeoutMs to BaseSession (#4790)', () => {
+    const session = new GeminiSession({ cwd: '/tmp', streamStallTimeoutMs: 900_000 })
+    assert.equal(session._streamStallTimeoutMs, 900_000)
+  })
+
+  it('defaults _streamStallTimeoutMs to 5 min when omitted (#4790)', () => {
+    const session = new GeminiSession({ cwd: '/tmp' })
+    assert.equal(session._streamStallTimeoutMs, 5 * 60 * 1000)
+  })
+
+  it('forwards streamStallTimeoutMs: 0 (explicit disable) to BaseSession (#4790)', () => {
+    const session = new GeminiSession({ cwd: '/tmp', streamStallTimeoutMs: 0 })
+    assert.equal(session._streamStallTimeoutMs, 0)
   })
 
   // ---------------------------------------------------------------------
@@ -597,6 +629,115 @@ describe('GeminiSession', () => {
       assert.equal(toolResults.length, 1)
       assert.equal(toolResults[0].toolUseId, 'g-tool-7')
       assert.equal(toolResults[0].result, 'matched 1 doc')
+    })
+  })
+
+  describe('#4414 learn-loop — _maybeRatchetContextWindow()', () => {
+    // The gemini provider registry is module-cached; reset before each test
+    // so the pollution from a previous ratchet doesn't bleed in. Mirrors the
+    // Codex test setup so both providers exercise the helper identically.
+    beforeEach(() => {
+      const r = getRegistryForProvider('gemini')
+      r.resetModels()
+    })
+
+    it('no-op when input_tokens is at or below the registered window', () => {
+      const emitted = []
+      const fakeSession = { model: 'gemini-2.5-pro', emit: (e, d) => emitted.push({ e, d }) }
+      // 2M window — a 500k turn should not trigger.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-pro', 500_000)
+      assert.equal(changed, false)
+      assert.equal(emitted.length, 0)
+    })
+
+    it('ratchets up when input_tokens exceeds the registered window', () => {
+      const emitted = []
+      const fakeSession = { model: 'gemini-2.5-pro', emit: (e, d) => emitted.push({ e, d }) }
+      // 2.5M input on a 2M registered window → bump to >= 2.5M * 1.1 = 2.75M.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-pro', 2_500_000)
+      assert.equal(changed, true)
+
+      const r = getRegistryForProvider('gemini')
+      const m = r.getModels().find(x => x.fullId === 'gemini-2.5-pro')
+      assert.ok(m)
+      assert.ok(m.contextWindow >= 2_500_000 * GEMINI_CONTEXT_WINDOW_HEADROOM,
+        `expected ratcheted window >= ${2_500_000 * GEMINI_CONTEXT_WINDOW_HEADROOM}, got ${m.contextWindow}`)
+      // Round-to-1k cleanliness check — meter should not display "2750127".
+      assert.equal(m.contextWindow % 1000, 0,
+        `expected ratcheted window rounded up to nearest 1k, got ${m.contextWindow}`)
+    })
+
+    it('emits models_updated with the updated registry when ratcheted', () => {
+      const emitted = []
+      const fakeSession = { model: 'gemini-2.5-pro', emit: (e, d) => emitted.push({ e, d }) }
+      _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-pro', 2_500_000)
+      const evt = emitted.find(x => x.e === 'models_updated')
+      assert.ok(evt, 'should emit models_updated so dashboards refresh')
+      assert.ok(Array.isArray(evt.d.models))
+      const m = evt.d.models.find(x => x.fullId === 'gemini-2.5-pro')
+      assert.ok(m && m.contextWindow >= 2_500_000 * GEMINI_CONTEXT_WINDOW_HEADROOM)
+    })
+
+    it('only ratchets up — never shrinks the registered window', () => {
+      const r = getRegistryForProvider('gemini')
+      // Ratchet up first (gemini-2.5-flash starts at 1M).
+      const fakeSession = { model: 'gemini-2.5-flash', emit: () => {} }
+      _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-flash', 1_500_000)
+      const after = r.getModels().find(x => x.fullId === 'gemini-2.5-flash').contextWindow
+      assert.ok(after > 1_000_000, 'sanity: ratchet should have raised the window')
+
+      // Now a small turn comes in. Must NOT ratchet down.
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-flash', 100_000)
+      assert.equal(changed, false)
+      const stable = r.getModels().find(x => x.fullId === 'gemini-2.5-flash').contextWindow
+      assert.equal(stable, after,
+        'a small follow-up turn must not shrink the ratcheted window')
+    })
+
+    it('no-op for an unknown model id', () => {
+      const emitted = []
+      const fakeSession = { model: 'gemini-99-future', emit: (e, d) => emitted.push({ e, d }) }
+      const changed = _maybeRatchetContextWindow(fakeSession, 'gemini-99-future', 999_999_999)
+      assert.equal(changed, false, 'unknown models should be a silent no-op, not a throw')
+      assert.equal(emitted.length, 0)
+    })
+
+    // The cap exists to make a single corrupt turn unable to balloon the
+    // registry to an absurd number — a JSONL parse glitch or future Gemini
+    // CLI bug must not blow up the meter math downstream. 4M is double
+    // today's largest published Gemini window (2M for gemini-2.5-pro), so
+    // anything above suggests bad data.
+    it('caps the ratchet target at GEMINI_CONTEXT_WINDOW_RATCHET_CAP', () => {
+      const fakeSession = { model: 'gemini-2.5-pro', emit: () => {} }
+      // A wildly high observed value — e.g. CLI bug or overflow
+      _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-pro', 20_000_000)
+      const r = getRegistryForProvider('gemini')
+      const m = r.getModels().find(x => x.fullId === 'gemini-2.5-pro')
+      assert.ok(m)
+      assert.ok(m.contextWindow <= GEMINI_CONTEXT_WINDOW_RATCHET_CAP,
+        `expected ratchet capped at ${GEMINI_CONTEXT_WINDOW_RATCHET_CAP}, got ${m.contextWindow}`)
+    })
+
+    // Defensive guards: a corrupt usage payload (NaN, Infinity, negative)
+    // must not feed the ratchet math. NaN * 1.1 = NaN; Infinity * 1.1 =
+    // Infinity → unbounded growth (or NaN propagation through the
+    // registry → meter showing NaN%). Silent no-op is the right failure.
+    for (const bad of [NaN, Infinity, -Infinity, -1, 0]) {
+      it(`no-op when input_tokens is invalid (${bad})`, () => {
+        const emitted = []
+        const fakeSession = { model: 'gemini-2.5-pro', emit: (e, d) => emitted.push({ e, d }) }
+        const changed = _maybeRatchetContextWindow(fakeSession, 'gemini-2.5-pro', bad)
+        assert.equal(changed, false)
+        assert.equal(emitted.length, 0)
+      })
+    }
+
+    it('Gemini cap (4M) is independent of the Codex cap (2M)', () => {
+      // Sanity check that the per-provider cap table actually returns
+      // different values for the two providers — guards against a future
+      // refactor that accidentally collapses them.
+      assert.equal(GEMINI_CONTEXT_WINDOW_RATCHET_CAP, 4_000_000,
+        'Gemini cap should be 4M per CONTEXT_WINDOW_RATCHET_CAPS')
     })
   })
 })

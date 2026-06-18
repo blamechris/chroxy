@@ -1,12 +1,16 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: ConnectScreen renders correctly
 ---
 
 # Navigate to ConnectScreen from any state
 - runFlow: setup/ensure-connect-screen.yaml
 
-# Verify the ConnectScreen loads with all expected elements
-- assertVisible: "Connect to Chroxy"
+# Verify the ConnectScreen loads with all expected elements. extendedWaitUntil
+# (not bare assertVisible) so the assertions don't race the screen settling in
+# right after the onboarding-skip + dev-menu-dismiss in the setup flow.
+- extendedWaitUntil:
+    visible: "Connect to Chroxy"
+    timeout: 8000
 
 - assertVisible:
     text: ".*Scan QR Code.*"
@@ -14,8 +18,14 @@ name: ConnectScreen renders correctly
 - assertVisible:
     text: ".*Scan Local Network.*"
 
-- assertVisible:
-    text: ".*Enter manually.*"
+# Match by testID, not text — the manual-entry toggle's accessibilityLabel is
+# "Enter server address manually" (which maestro matches against), and its
+# visible text is icon-prefixed ("▶ Enter manually"), so a ".*Enter manually.*"
+# text match misses it. The testID is the stable anchor.
+- extendedWaitUntil:
+    visible:
+      id: "connect-manual-toggle"
+    timeout: 5000
 
 # Port input should show default port
 - assertVisible: "8765"

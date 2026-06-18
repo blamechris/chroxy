@@ -4,7 +4,7 @@ import type { LogEntry } from '../store/types'
 
 type LogLevel = LogEntry['level']
 
-const LEVELS: LogLevel[] = ['debug', 'info', 'warn', 'error']
+const LEVELS: LogLevel[] = ['debug', 'info', 'warn', 'error', 'audit']
 
 export function LogPanel() {
   const logEntries = useConnectionStore((state) => state.logEntries)
@@ -12,7 +12,7 @@ export function LogPanel() {
   const activeSessionId = useConnectionStore((state) => state.activeSessionId)
   const sessionCount = useConnectionStore((state) => state.sessions.length)
 
-  const [filter, setFilter] = useState<Set<LogLevel>>(new Set(['info', 'warn', 'error']))
+  const [filter, setFilter] = useState<Set<LogLevel>>(new Set(['info', 'warn', 'error', 'audit']))
   const [sessionFilter, setSessionFilter] = useState(true) // filter by active session when multi-session
   const [autoScroll, setAutoScroll] = useState(true)
   const [copied, setCopied] = useState(false)

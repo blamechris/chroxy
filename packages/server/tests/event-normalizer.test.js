@@ -1,4 +1,4 @@
-import { describe, it, beforeEach, afterEach } from 'node:test'
+import { describe, it, beforeEach, afterEach, mock } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventNormalizer, EVENT_MAP } from '../src/event-normalizer.js'
 import { ServerSkillChangedSchema } from '@chroxy/protocol'
@@ -44,6 +44,18 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: session_usage (#4072) ----
+
+  describe('session_usage event', () => {
+    it('forwards cumulativeUsage on the wire payload', () => {
+      const usage = { inputTokens: 17, outputTokens: 23, cacheReadTokens: 5, cacheCreationTokens: 2, costUsd: 0.00198, turnsBilled: 2 }
+      const result = normalizer.normalize('session_usage', { cumulativeUsage: usage }, makeCtx())
+      assert.equal(result.messages.length, 1)
+      assert.equal(result.messages[0].msg.type, 'session_usage')
+      assert.deepEqual(result.messages[0].msg.cumulativeUsage, usage)
+    })
+  })
+
   // ---- EVENT_MAP: ready ----
 
   describe('ready event', () => {
@@ -69,6 +81,65 @@ describe('EventNormalizer', () => {
       const result = normalizer.normalize('ready', {}, ctx)
       assert.equal(result.messages.length, 1)
       assert.equal(result.messages[0].msg.type, 'claude_ready')
+    })
+
+    // #5431 — enriched ready: a session exposing getBackgroundTaskSnapshot()
+    // gets its outstanding work attached; a computed-but-empty snapshot still
+    // emits backgroundTasks: [] (the authoritative clear — a task-notification
+    // that landed mid-turn must not strand a stale client indicator); sessions
+    // without the method (or a throwing one) stay byte-identical plain ready.
+    it('attaches backgroundTasks + scheduledWakeup from the session snapshot (#5431)', () => {
+      const task = { toolUseId: 'toolu_01', kind: 'bash', description: 'Wait for CI', startedAt: 1781068000000 }
+      const wakeup = { at: 1781068600000, reason: 'watching CI' }
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: {
+            model: 'claude-sonnet-4-6',
+            permissionMode: 'approve',
+            getBackgroundTaskSnapshot: () => ({ backgroundTasks: [task], scheduledWakeup: wakeup }),
+          },
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[0].msg.type, 'claude_ready')
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [task])
+      assert.deepEqual(result.messages[0].msg.scheduledWakeup, wakeup)
+    })
+
+    it('emits an explicit empty backgroundTasks for a computed empty snapshot (#5431)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: {
+            model: 'claude-sonnet-4-6',
+            permissionMode: 'approve',
+            getBackgroundTaskSnapshot: () => ({ backgroundTasks: [], scheduledWakeup: null }),
+          },
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [])
+      assert.equal('scheduledWakeup' in result.messages[0].msg, false)
+    })
+
+    it('omits the fields entirely when the session has no snapshot method (#5431)', () => {
+      const result = normalizer.normalize('ready', {}, makeCtx())
+      assert.equal('backgroundTasks' in result.messages[0].msg, false)
+      assert.equal('scheduledWakeup' in result.messages[0].msg, false)
+    })
+
+    it('omits the fields and stays plain when the snapshot getter throws (#5431)', () => {
+      const ctx = makeCtx({
+        getSessionEntry: () => ({
+          session: {
+            model: 'claude-sonnet-4-6',
+            permissionMode: 'approve',
+            getBackgroundTaskSnapshot: () => { throw new Error('boom') },
+          },
+        }),
+      })
+      const result = normalizer.normalize('ready', {}, ctx)
+      assert.equal(result.messages[0].msg.type, 'claude_ready')
+      assert.equal('backgroundTasks' in result.messages[0].msg, false)
     })
 
     // #3687: when the user didn't specify a model, session.model is null
@@ -144,6 +215,29 @@ describe('EventNormalizer', () => {
   })
 
   // ---- EVENT_MAP: conversation_id ----
+
+  // ---- EVENT_MAP: background_tasks_changed (#5431) ----
+
+  describe('background_tasks_changed event', () => {
+    it('re-emits claude_ready with the fresh snapshot', () => {
+      const task = { toolUseId: 'toolu_02', kind: 'monitor', description: 'tail log', startedAt: 5 }
+      const result = normalizer.normalize(
+        'background_tasks_changed',
+        { backgroundTasks: [task], scheduledWakeup: { at: 9, reason: 'r' } },
+        makeCtx()
+      )
+      assert.equal(result.messages.length, 1)
+      assert.equal(result.messages[0].msg.type, 'claude_ready')
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [task])
+      assert.deepEqual(result.messages[0].msg.scheduledWakeup, { at: 9, reason: 'r' })
+    })
+
+    it('emits the explicit empty-array clear when work drains', () => {
+      const result = normalizer.normalize('background_tasks_changed', { backgroundTasks: [], scheduledWakeup: null }, makeCtx())
+      assert.deepEqual(result.messages[0].msg.backgroundTasks, [])
+      assert.equal('scheduledWakeup' in result.messages[0].msg, false)
+    })
+  })
 
   describe('conversation_id event', () => {
     it('emits conversation_id message and session_list side effect', () => {
@@ -299,6 +393,59 @@ describe('EventNormalizer', () => {
     })
   })
 
+  describe('agent_event event (#5016 / #5056)', () => {
+    it('maps a relayed child wire event to the agent_event message', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'tool_start',
+        payload: { toolUseId: 'tu_child', tool: 'Read' },
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      assert.equal(result.messages[0].msg.type, 'agent_event')
+      assert.equal(result.messages[0].msg.parentToolUseId, 'tu_task')
+      assert.equal(result.messages[0].msg.eventType, 'tool_start')
+      assert.deepEqual(result.messages[0].msg.payload, { toolUseId: 'tu_child', tool: 'Read' })
+      // Non-permission events must NOT register a permissionSessionMap entry.
+      assert.equal(result.registrations, undefined)
+    })
+
+    it('#5056: a relayed permission_request registers the requestId to the PARENT session id', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'permission_request',
+        payload: { requestId: 'perm-child-1', tool: 'mcp__foo__bar', input: { x: 1 } },
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      // Bound dashboard clients respond on the parent session, so the map
+      // entry MUST point requestId -> parent session id (ctx.sessionId).
+      assert.deepEqual(result.registrations, [
+        { map: 'permission', key: 'perm-child-1', value: 'sess-1' },
+      ])
+    })
+
+    it('#5056: a relayed permission_resolved emits the matching delete registration', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'permission_resolved',
+        payload: { requestId: 'perm-child-1', decision: 'allow' },
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      assert.deepEqual(result.registrations, [
+        { map: 'permission', key: 'perm-child-1', action: 'delete' },
+      ])
+    })
+
+    it('#5056: a relayed permission_request without a requestId registers nothing', () => {
+      const data = {
+        parentToolUseId: 'tu_task',
+        type: 'permission_request',
+        payload: {},
+      }
+      const result = normalizer.normalize('agent_event', data, makeCtx())
+      assert.equal(result.registrations, undefined)
+    })
+  })
+
   // ---- EVENT_MAP: plan_started / plan_ready ----
 
   describe('plan_started event', () => {
@@ -336,6 +483,35 @@ describe('EventNormalizer', () => {
       const result = normalizer.normalize('inactivity_warning', data, makeCtx())
       const types = result.messages.map((m) => m.msg.type)
       assert.deepEqual(types, ['inactivity_warning'])
+    })
+  })
+
+  // ---- EVENT_MAP: multi_question_intervention (#4653) ----
+
+  describe('multi_question_intervention event', () => {
+    it('forwards toolUseId, questionCount, reason and timestamp to the WS payload', () => {
+      const data = {
+        toolUseId: 'toolu_norm',
+        questionCount: 4,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      }
+      const result = normalizer.normalize('multi_question_intervention', data, makeCtx())
+      assert.equal(result.messages.length, 1)
+      assert.deepEqual(result.messages[0].msg, {
+        type: 'multi_question_intervention',
+        toolUseId: 'toolu_norm',
+        questionCount: 4,
+        reason: 'multi_question',
+        timestamp: 1700000000000,
+      })
+    })
+
+    it('does not emit any sibling messages (session stays alive — no agent_idle/result)', () => {
+      const data = { toolUseId: 't', questionCount: 2, reason: 'multi_question', timestamp: 1 }
+      const result = normalizer.normalize('multi_question_intervention', data, makeCtx())
+      const types = result.messages.map((m) => m.msg.type)
+      assert.deepEqual(types, ['multi_question_intervention'])
     })
   })
 
@@ -547,6 +723,73 @@ describe('EventNormalizer', () => {
     })
   })
 
+  // ---- EVENT_MAP: stopped (#4756) ----
+  //
+  // CliSession emits `stopped` after a clean user-initiated SIGINT exit
+  // (cli-session.js `_handleChildClose` gated on `_intentionalStop`). The
+  // normalizer translates it into `session_stopped` so paired clients can
+  // render a quiet confirmation distinct from the louder `session_error`
+  // crash toast.
+
+  describe('stopped event (#4756)', () => {
+    it('maps to a session_stopped wire message in multi mode', () => {
+      const result = normalizer.normalize('stopped', { code: 0 }, makeCtx())
+      assert.equal(result.messages.length, 1)
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'session_stopped')
+      assert.equal(msg.sessionId, 'sess-1')
+      assert.equal(msg.code, 0)
+    })
+
+    it('forwards the numeric exit code on the wire', () => {
+      // SIGTERM = 143; clients should see the raw code for non-zero exits
+      // so they can render a diagnostic detail line.
+      const result = normalizer.normalize('stopped', { code: 143 }, makeCtx())
+      assert.equal(result.messages[0].msg.code, 143)
+    })
+
+    it('omits sessionId in legacy-cli mode (ctx.sessionId is null)', () => {
+      const ctx = makeCtx({ sessionId: null, mode: 'legacy-cli' })
+      const result = normalizer.normalize('stopped', { code: 0 }, ctx)
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'session_stopped')
+      // Do not emit `sessionId: null` — let the receiver treat absence as
+      // "applies to the connected legacy CLI". Matches the `error` /
+      // `claude_ready` legacy-cli convention.
+      assert.ok(!('sessionId' in msg), 'sessionId should be absent in legacy-cli mode')
+      assert.equal(msg.code, 0)
+    })
+
+    it('omits code when data is missing or non-numeric', () => {
+      // Defensive: future providers that adopt `stopped` for parity may
+      // not carry an exit code (e.g. in-process SDK session). Schema
+      // marks `code` optional.
+      const result = normalizer.normalize('stopped', {}, makeCtx())
+      const msg = result.messages[0].msg
+      assert.equal(msg.type, 'session_stopped')
+      assert.equal(msg.sessionId, 'sess-1')
+      assert.ok(!('code' in msg), 'code should be omitted when not numeric')
+    })
+
+    it('emits no side effects or registrations (informational only)', () => {
+      const result = normalizer.normalize('stopped', { code: 0 }, makeCtx())
+      assert.equal(result.sideEffects, undefined)
+      assert.equal(result.registrations, undefined)
+    })
+
+    // Per Copilot review on #4868: the protocol schema is z.number().int(),
+    // so the normalizer must reject non-integer numbers (floats, NaN,
+    // Infinity) to prevent client-side schema-validation failures. Bare
+    // `typeof === 'number'` would let any of these through.
+    it('omits code when data.code is a float, NaN, or Infinity', () => {
+      for (const badCode of [1.5, NaN, Infinity, -Infinity]) {
+        const result = normalizer.normalize('stopped', { code: badCode }, makeCtx())
+        const msg = result.messages[0].msg
+        assert.ok(!('code' in msg), `code=${badCode} should be dropped (not a finite integer)`)
+      }
+    })
+  })
+
   // ---- Delta buffering ----
 
   describe('delta buffering', () => {
@@ -578,6 +821,32 @@ describe('EventNormalizer', () => {
       assert.equal(entries.length, 2)
     })
 
+    // #5515 (epic #5514): the buffer carries the FIRST emit monotonic time per
+    // key so ws-forwarding can measure emit→broadcast (server-side coalescing).
+    it('carries the first emitMonoMs per key through flushSession (#5515)', () => {
+      normalizer.bufferDelta('sess-1', 'msg-1', 'Hello', 1000)
+      normalizer.bufferDelta('sess-1', 'msg-1', ' World', 1005)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries.length, 1)
+      // First-write-wins: the oldest token's emit time, not the latest.
+      assert.equal(entries[0].emitMonoMs, 1000)
+    })
+
+    it('emitMonoMs is undefined when not supplied (additive, #5515)', () => {
+      normalizer.bufferDelta('sess-1', 'msg-1', 'Hello')
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries[0].emitMonoMs, undefined)
+    })
+
+    it('does not leak emitMonoMs across flush windows for the same key (#5515)', () => {
+      normalizer.bufferDelta('sess-1', 'msg-1', 'A', 1000)
+      normalizer.flushSession('sess-1')
+      // New window for the same key: a fresh emit time should win.
+      normalizer.bufferDelta('sess-1', 'msg-1', 'B', 2000)
+      const entries = normalizer.flushSession('sess-1')
+      assert.equal(entries[0].emitMonoMs, 2000)
+    })
+
     it('fires onFlush callback on timer', async () => {
       let flushed = null
       normalizer.onFlush = (entries) => { flushed = entries }
@@ -587,6 +856,150 @@ describe('EventNormalizer', () => {
       assert.ok(flushed)
       assert.equal(flushed.length, 1)
       assert.equal(flushed[0].delta, 'hello')
+    })
+
+    // #5313 (WP-1.3): the timer-driven flush invokes onFlush (a broadcast). A
+    // throw there used to escape the setTimeout → uncaughtException → daemon
+    // crash. The flush now contains the throw, and clears the buffer in a
+    // finally so a throwing flush can't wedge the buffer for every later stream.
+    it('does not propagate a throwing onFlush out of the flush timer (#5313)', async () => {
+      normalizer.onFlush = () => { throw new Error('boom: broadcast failed') }
+
+      const uncaught = []
+      const onUncaught = (err) => { uncaught.push(err) }
+      process.on('uncaughtException', onUncaught)
+      try {
+        normalizer.bufferDelta('sess-1', 'msg-1', 'hello')
+        // Wait past the flush interval (10ms) for the timer to fire.
+        await new Promise((resolve) => setTimeout(resolve, 40))
+      } finally {
+        process.removeListener('uncaughtException', onUncaught)
+      }
+
+      assert.equal(uncaught.length, 0, 'throwing onFlush must not escape the flush timer')
+    })
+
+    it('clears the delta buffer even when onFlush throws (#5313)', async () => {
+      normalizer.onFlush = () => { throw new Error('boom') }
+      normalizer.bufferDelta('sess-1', 'msg-1', 'hello')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+      assert.equal(normalizer._deltaBuffer.size, 0,
+        'buffer must be cleared so a throwing flush does not wedge subsequent streams')
+    })
+
+    it('stays functional after a throwing flush — a later flush still delivers (#5313)', async () => {
+      let lastFlushed = null
+      // First flush throws, then we swap in a good callback for the next round.
+      normalizer.onFlush = () => { throw new Error('boom') }
+      normalizer.bufferDelta('sess-1', 'msg-1', 'first')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      normalizer.onFlush = (entries) => { lastFlushed = entries }
+      normalizer.bufferDelta('sess-2', 'msg-2', 'second')
+      await new Promise((resolve) => setTimeout(resolve, 40))
+
+      assert.ok(lastFlushed, 'a subsequent flush still fires after a prior throwing flush')
+      assert.equal(lastFlushed.length, 1)
+      assert.equal(lastFlushed[0].delta, 'second')
+    })
+
+    // ---- #5555: residency caps (per-key + total) ----
+    //
+    // A runaway provider can grow the un-flushed buffer faster than socket
+    // backpressure can react (data hasn't reached a socket yet). The caps force
+    // an immediate ORDERED flush — never truncation — bounding heap residency.
+    describe('residency caps (#5555)', () => {
+      it('forces an immediate flush of a key that exceeds the per-key byte cap', () => {
+        const flushed = []
+        // Tiny caps so the test stays cheap; the production defaults are 256KB/2MB.
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'msg-1', 'a'.repeat(60)) // under cap, buffered
+          assert.equal(flushed.length, 0, 'no flush before the cap is crossed')
+          n.bufferDelta('sess-1', 'msg-1', 'b'.repeat(50)) // 110 >= 100 → force flush
+          assert.equal(flushed.length, 1, 'crossing the per-key cap forces one flush')
+          // Content preserved in order, nothing truncated.
+          assert.equal(flushed[0].delta, 'a'.repeat(60) + 'b'.repeat(50))
+          assert.equal(flushed[0].sessionId, 'sess-1')
+          assert.equal(flushed[0].messageId, 'msg-1')
+          // Key was flushed out of the buffer; counters reset for it.
+          assert.equal(n._deltaBuffer.has('sess-1:msg-1'), false)
+          assert.equal(n._deltaTotalBytes, 0)
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('preserves order: post-flush deltas re-buffer behind the flushed chunk', () => {
+        const flushed = []
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'msg-1', 'x'.repeat(120)) // force-flush chunk 1
+          n.bufferDelta('sess-1', 'msg-1', 'tail') // re-buffers fresh behind it
+          const rest = n.flushSession('sess-1')
+          assert.equal(flushed.length, 1)
+          assert.equal(flushed[0].delta, 'x'.repeat(120))
+          assert.equal(rest.length, 1)
+          assert.equal(rest[0].delta, 'tail', 'later delta lands after the force-flushed chunk, in order')
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('only one key under the per-key cap does not flush others', () => {
+        const flushed = []
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'big', 'z'.repeat(120)) // force-flush this key
+          n.bufferDelta('sess-1', 'small', 'tiny') // stays buffered
+          assert.equal(flushed.length, 1)
+          assert.equal(flushed[0].messageId, 'big')
+          assert.equal(n._deltaBuffer.has('sess-1:small'), true, 'under-cap key is untouched')
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('forces a full flush when the aggregate total cap is exceeded', () => {
+        const flushed = []
+        // Per-key cap high enough that no single key trips it; total cap small
+        // so the many-small-streams case is what forces the flush.
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 10_000, maxTotalBytes: 250 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          n.bufferDelta('sess-1', 'm1', 'p'.repeat(100))
+          n.bufferDelta('sess-1', 'm2', 'q'.repeat(100))
+          assert.equal(flushed.length, 0, 'still under the total cap')
+          n.bufferDelta('sess-1', 'm3', 'r'.repeat(100)) // 300 >= 250 → full flush
+          // All three keys flushed in one pass; content intact.
+          assert.equal(flushed.length, 3)
+          const byKey = Object.fromEntries(flushed.map(e => [e.messageId, e.delta]))
+          assert.equal(byKey.m1, 'p'.repeat(100))
+          assert.equal(byKey.m2, 'q'.repeat(100))
+          assert.equal(byKey.m3, 'r'.repeat(100))
+          assert.equal(n._deltaBuffer.size, 0)
+          assert.equal(n._deltaTotalBytes, 0)
+        } finally {
+          n.destroy()
+        }
+      })
+
+      it('measures bytes (UTF-8), not chars — multibyte content trips the cap sooner', () => {
+        const flushed = []
+        const n = new EventNormalizer({ flushIntervalMs: 10, maxKeyBytes: 100, maxTotalBytes: 10_000 })
+        n.onFlush = (entries) => { flushed.push(...entries) }
+        try {
+          // '😀' is 4 UTF-8 bytes. 30 of them = 120 bytes (only 60 UTF-16 units).
+          n.bufferDelta('sess-1', 'emoji', '😀'.repeat(30))
+          assert.equal(flushed.length, 1, 'byte-counted cap trips on multibyte payload')
+          assert.equal(flushed[0].delta, '😀'.repeat(30), 'no truncation of multibyte content')
+        } finally {
+          n.destroy()
+        }
+      })
     })
 
     it('cancels timer when buffer emptied by flushSession', () => {
@@ -602,6 +1015,320 @@ describe('EventNormalizer', () => {
       assert.equal(normalizer._deltaBuffer.size, 0)
       assert.equal(normalizer._deltaFlushTimer, null)
     })
+  })
+})
+
+// ---- #5516 (epic #5514): adaptive single-client coalescing window ----
+
+describe('EventNormalizer adaptive flush window (#5516)', () => {
+  // Capture the delay each bufferDelta schedules its flush timer with, without
+  // depending on real wall-clock timing. We spy on global.setTimeout, record
+  // the requested delay, and return a dummy handle so the timer never actually
+  // fires during the assertion.
+  function withSetTimeoutSpy(fn) {
+    const delays = []
+    const orig = global.setTimeout
+    mock.method(global, 'setTimeout', (cb, ms, ...rest) => {
+      delays.push(ms)
+      // Real handle so clearTimeout works in the reschedule path; we never let
+      // it fire (orig with a huge delay would, so use a no-op handle instead).
+      return orig(() => {}, 1_000_000, ...rest)
+    })
+    try { fn(delays) } finally { mock.restoreAll() }
+  }
+
+  // #5562: the server micro-batch window was shrunk from 25/50ms to 8/16ms so
+  // it no longer stacks on the client's 16-100ms EWMA. These assert the NEW
+  // contract (8ms single-subscriber / 16ms otherwise).
+  it('uses the 8ms window when a session has exactly one subscriber', () => {
+    const n = new EventNormalizer({ getSubscriberCount: () => 1 })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 8)
+    })
+    n.destroy()
+  })
+
+  it('uses the default 16ms window when 2+ clients are subscribed', () => {
+    const n = new EventNormalizer({ getSubscriberCount: () => 2 })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('uses the default window when 0 clients (or unknown count) are subscribed', () => {
+    const nZero = new EventNormalizer({ getSubscriberCount: () => 0 })
+    withSetTimeoutSpy((delays) => {
+      nZero.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    nZero.destroy()
+
+    const nNull = new EventNormalizer({ getSubscriberCount: () => null })
+    withSetTimeoutSpy((delays) => {
+      nNull.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    nNull.destroy()
+  })
+
+  it('keeps the default window when no subscriber-count resolver is wired (legacy)', () => {
+    const n = new EventNormalizer()
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('honors custom interval overrides', () => {
+    const n = new EventNormalizer({
+      flushIntervalMs: 80,
+      singleClientFlushIntervalMs: 12,
+      getSubscriberCount: () => 1,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 12)
+    })
+    n.destroy()
+  })
+
+  it('a single-client buffer pulls in an already-armed default-window deadline', () => {
+    // Per-session subscriber counts: sess-multi has 3 clients, sess-solo has 1.
+    const counts = { 'sess-multi': 3, 'sess-solo': 1 }
+    const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
+    withSetTimeoutSpy((delays) => {
+      // Pin the clock the normalizer reads so the pull-in is deterministic.
+      // bufferDelta computes `wantDeadline = performance.now() + intervalMs` on
+      // each call and only reschedules when the new deadline is SOONER than the
+      // armed one. The solo call (now+8) must beat the multi deadline (now0+16),
+      // which holds only while < 8ms of wall-clock elapsed between the two
+      // synchronous calls. Under a >8ms GC/scheduling stall on a loaded CI runner
+      // that window closes and the reschedule is (correctly) skipped — a real
+      // flake (#5923). Freeze performance.now so the two reads are equal (0ms
+      // elapsed), exercising the pull-in path the assertions below describe.
+      mock.method(performance, 'now', () => 1000)
+      // Multi-client session arms the 16ms timer first.
+      n.bufferDelta('sess-multi', 'm', 'a')
+      assert.equal(delays[0], 16)
+      // A solo session buffered immediately after must SHORTEN the deadline:
+      // the reschedule clears the old timer and arms a sooner one (~8ms).
+      n.bufferDelta('sess-solo', 's', 'b')
+      assert.equal(delays.length, 2, 'a reschedule must have occurred')
+      assert.ok(delays[1] <= 8, `expected reschedule <=8ms, got ${delays[1]}`)
+    })
+    n.destroy()
+  })
+
+  it('does NOT push the deadline out when a multi-client session buffers after a solo one', () => {
+    const counts = { 'sess-multi': 3, 'sess-solo': 1 }
+    const n = new EventNormalizer({ getSubscriberCount: (s) => counts[s] ?? 0 })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-solo', 's', 'a')      // arms ~8ms
+      assert.equal(delays[0], 8)
+      n.bufferDelta('sess-multi', 'm', 'b')     // wants 16ms — but 8ms deadline is sooner
+      // No reschedule: the existing sooner deadline stands.
+      assert.equal(delays.length, 1, 'must not reschedule to a later deadline')
+    })
+    n.destroy()
+  })
+
+  // #5562 + #5520: real-timer sanity check that the shrunk window actually
+  // flushes a buffered delta through the real setTimeout path, and that the
+  // #5515/#5520 emitMonoMs instrumentation bufferDelta carries through still
+  // round-trips to the flushed entry after the window change. The EXACT 8/16ms
+  // contract is locked by the setTimeout-spy tests above; this test deliberately
+  // does NOT re-assert it. The upper bound here is a loose ceiling only — proof
+  // the flush is no longer near the old 25/50ms-stacked floor — set well above
+  // worst-case timer slip so it can't go flaky under CI scheduling jitter. A
+  // bounded timeout makes a never-fired callback fail fast instead of hanging,
+  // and destroy() runs in finally so an assertion failure can't leak the timer.
+  it('flushes a single-subscriber delta via the real timer and round-trips emitMonoMs', async () => {
+    const n = new EventNormalizer({ getSubscriberCount: () => 1 })
+    try {
+      const flushed = []
+      let resolveFlush
+      const done = new Promise((res) => { resolveFlush = res })
+      n.onFlush = (entries) => {
+        flushed.push({ at: performance.now(), entries })
+        resolveFlush()
+      }
+      const emitMono = Number(process.hrtime.bigint() / 1_000_000n)
+      const buffered = performance.now()
+      n.bufferDelta('sess-1', 'msg-1', 'hello', emitMono)
+      // Bounded race: if the flush callback never fires, fail fast rather than
+      // hang until the test-runner timeout.
+      let bail
+      const timeout = new Promise((_, rej) => {
+        bail = setTimeout(() => rej(new Error('flush callback did not fire within 1000ms')), 1000)
+      })
+      try {
+        await Promise.race([done, timeout])
+      } finally {
+        clearTimeout(bail)
+      }
+      const elapsed = flushed[0].at - buffered
+      // Loose ceiling — NOT the 8ms contract (that's the spy tests' job). 100ms is
+      // far above any realistic single-timer slip yet still well below the old
+      // 25/50ms server window stacked on the client EWMA, so it confirms the
+      // server half no longer dominates without being jitter-sensitive.
+      assert.ok(elapsed < 100, `expected a prompt real-timer flush, got ${elapsed.toFixed(1)}ms`)
+      assert.equal(flushed[0].entries.length, 1)
+      assert.equal(flushed[0].entries[0].delta, 'hello')
+      // The #5520 emitMonoMs instrumentation survives the coalescing path.
+      assert.equal(flushed[0].entries[0].emitMonoMs, emitMono)
+    } finally {
+      n.destroy()
+    }
+  })
+})
+
+describe('EventNormalizer deflate-aware flush window (#5578)', () => {
+  // Same setTimeout spy as the #5516 block: record the scheduled flush delay
+  // without letting the timer fire.
+  function withSetTimeoutSpy(fn) {
+    const delays = []
+    const orig = global.setTimeout
+    mock.method(global, 'setTimeout', (cb, ms, ...rest) => {
+      delays.push(ms)
+      return orig(() => {}, 1_000_000, ...rest)
+    })
+    try { fn(delays) } finally { mock.restoreAll() }
+  }
+
+  // Policy table (#5578):
+  //   subscribers      | all-LAN | any-deflate
+  //   ---------------- | ------- | -----------
+  //   single (count 1) |   8ms   |    16ms
+  //   multi  (count≥2) |  16ms   |    25ms
+  // "any-deflate" = at least one subscriber on a deflate-negotiated
+  // (tunnel/cellular) socket, where each sub-1024B stream_delta ships
+  // uncompressed and the LAN floors triple the small-packet count.
+
+  it('keeps the 8ms LAN floor for a single all-LAN subscriber', () => {
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 1,
+      getHasDeflateSubscriber: () => false,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 8)
+    })
+    n.destroy()
+  })
+
+  it('keeps the 16ms LAN floor for multiple all-LAN subscribers', () => {
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 3,
+      getHasDeflateSubscriber: () => false,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('widens to 16ms when the sole subscriber is on a deflate socket', () => {
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 1,
+      getHasDeflateSubscriber: () => true,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('widens to 25ms when a multi-client session has any deflate subscriber (mixed)', () => {
+    // 3 subscribers, at least one on a deflate socket → the widened multi window.
+    const n = new EventNormalizer({
+      getSubscriberCount: () => 3,
+      getHasDeflateSubscriber: () => true,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 25)
+    })
+    n.destroy()
+  })
+
+  it('re-resolves the window when subscribers join/leave mid-session', () => {
+    // The predicates are read live on every bufferDelta, so a join (LAN→deflate)
+    // or a leave (deflate→LAN) flips the window without any cached state.
+    const state = { count: 1, deflate: false }
+    const n = new EventNormalizer({
+      getSubscriberCount: () => state.count,
+      getHasDeflateSubscriber: () => state.deflate,
+    })
+    withSetTimeoutSpy((delays) => {
+      // 1 LAN viewer → 8ms.
+      n.bufferDelta('sess-1', 'm1', 'a')
+      assert.equal(delays.at(-1), 8)
+      // A phone on cellular joins (now a deflate subscriber present, still single
+      // would be 16, but it's now 2 clients) → widened multi window 25ms. The
+      // delta buffers into the SAME pending window, which only shortens, so to
+      // observe the new resolve we flush first.
+      n.flushSession('sess-1')
+      state.count = 2
+      state.deflate = true
+      n.bufferDelta('sess-1', 'm2', 'b')
+      assert.equal(delays.at(-1), 25)
+      // The cellular peer leaves; back to a single LAN viewer → 8ms floor.
+      n.flushSession('sess-1')
+      state.count = 1
+      state.deflate = false
+      n.bufferDelta('sess-1', 'm3', 'c')
+      assert.equal(delays.at(-1), 8)
+    })
+    n.destroy()
+  })
+
+  it('honors custom deflate interval overrides', () => {
+    const n = new EventNormalizer({
+      deflateFlushIntervalMs: 40,
+      deflateSingleClientFlushIntervalMs: 20,
+      getSubscriberCount: () => 1,
+      getHasDeflateSubscriber: () => true,
+    })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 20)
+    })
+    n.destroy()
+  })
+
+  it('ignores the deflate predicate when no subscriber-count resolver is wired (legacy)', () => {
+    // Legacy single-session mode has no way to resolve subscribers; the LAN
+    // default stands regardless of the deflate predicate.
+    const n = new EventNormalizer({ getHasDeflateSubscriber: () => true })
+    withSetTimeoutSpy((delays) => {
+      n.bufferDelta('sess-1', 'msg-1', 'hi')
+      assert.equal(delays[0], 16)
+    })
+    n.destroy()
+  })
+
+  it('does NOT re-scan all clients — resolves via the wired O(subscribers) predicates only', () => {
+    // Guard against a regression that reintroduces an O(all-clients) scan on the
+    // per-token hot path: bufferDelta must consult ONLY the injected resolvers,
+    // once each per call, never iterate a client collection itself.
+    let countCalls = 0
+    let deflateCalls = 0
+    const n = new EventNormalizer({
+      getSubscriberCount: () => { countCalls++; return 1 },
+      getHasDeflateSubscriber: () => { deflateCalls++; return true },
+    })
+    withSetTimeoutSpy(() => {
+      n.bufferDelta('sess-1', 'm1', 'a')
+    })
+    assert.equal(countCalls, 1, 'subscriber count resolved exactly once per buffered delta')
+    assert.equal(deflateCalls, 1, 'deflate predicate resolved exactly once per buffered delta')
+    n.destroy()
   })
 })
 
@@ -801,6 +1528,8 @@ describe('EVENT_MAP', () => {
       plan_ready: { allowedPrompts: [] },
       inactivity_warning: { messageId: 'm1', idleMs: 30_000, prefab: 'Status update?' },
       result: { cost: 0, duration: 0, usage: {} },
+      cost_update: { sessionCost: 0.05, totalCost: 0.5, budget: 1.0 },
+      session_usage: { cumulativeUsage: { inputTokens: 10, outputTokens: 5, cacheReadTokens: 0, cacheCreationTokens: 0, costUsd: 0.001, turnsBilled: 1 } },
       user_question: { toolUseId: 'tu1', questions: [] },
       permission_request: { requestId: 'r1', tool: 'Bash', description: 'd', input: 'i', remainingMs: 60000 },
       error: { message: 'err' },

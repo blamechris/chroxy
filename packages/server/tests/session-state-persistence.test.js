@@ -19,6 +19,23 @@ describe('SessionStatePersistence.serializeState', () => {
     rmSync(tempDir, { recursive: true, force: true })
   })
 
+  // #5309 (WP-0.3) — serializeState must route its atomic temp through a
+  // per-pid suffix, not writeFileRestricted's shared default `.tmp`, so a second
+  // process writing the same state file can't clobber a shared intermediate.
+  // Proof without forking: occupy the DEFAULT `.tmp` path with a directory — if
+  // serializeState used the default suffix it would EISDIR; succeeding proves it
+  // routes through `.tmp-<pid>` instead. (Binds the caller fix, not just the
+  // platform primitive, which is covered by the #4874 platform test.)
+  it('routes its atomic temp through a per-pid suffix, not the shared .tmp (#5309)', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    mkdirSync(`${stateFile}.tmp`) // booby-trap the shared default temp path
+    const state = { version: 1, timestamp: Date.now(), sessions: [{ id: 's1', name: 'A', cwd: '/tmp' }] }
+    assert.doesNotThrow(() => p.serializeState(state), 'must not write through the shared .tmp')
+    assert.strictEqual(JSON.parse(readFileSync(stateFile, 'utf-8')).sessions[0].id, 's1')
+    // The per-pid temp is renamed into place, leaving no orphan after success.
+    assert.strictEqual(existsSync(`${stateFile}.tmp-${process.pid}`), false, 'per-pid temp cleaned after rename')
+  })
+
   it('writes JSON state to file', () => {
     const p = new SessionStatePersistence({ stateFilePath: stateFile })
     const state = {
@@ -75,6 +92,32 @@ describe('SessionStatePersistence.serializeState', () => {
     const fileContents = JSON.parse(readFileSync(stateFile, 'utf-8'))
     assert.deepEqual(fileContents.costs, { s1: 2.50 })
     assert.deepEqual(fileContents.budgetWarned, ['s1'])
+  })
+})
+
+describe('SessionStatePersistence.flushPersist (#5701)', () => {
+  let tempDir
+  let stateFile
+
+  beforeEach(() => {
+    tempDir = mkdtempSync(join(tmpdir(), 'chroxy-flush-test-'))
+    stateFile = join(tempDir, 'session-state.json')
+  })
+
+  afterEach(() => {
+    rmSync(tempDir, { recursive: true, force: true })
+  })
+
+  it('returns true when the write succeeds', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const ok = p.flushPersist(() => p.serializeState({ version: 1, timestamp: Date.now(), sessions: [] }))
+    assert.strictEqual(ok, true)
+  })
+
+  it('returns false (no longer swallows) when the serialize throws', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const ok = p.flushPersist(() => { throw new Error('ENOSPC: no space left on device') })
+    assert.strictEqual(ok, false)
   })
 })
 
@@ -143,6 +186,39 @@ describe('SessionStatePersistence.restoreState', () => {
     }))
     const p = new SessionStatePersistence({ stateFilePath: stateFile, stateTtlMs: 5 * 60 * 1000 })
     assert.equal(p.restoreState(), null, 'State older than custom 5min TTL should be rejected')
+  })
+
+  it('drops only the stale sessions, keeping fresh ones by per-entry lastActivityAt (audit P2-12)', () => {
+    const now = Date.now()
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      // Whole-file timestamp is old enough that the legacy whole-file check
+      // would have discarded EVERYTHING.
+      timestamp: now - 25 * 60 * 60 * 1000,
+      sessions: [
+        { id: 'stale', name: 'Stale', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000 },
+        { id: 'fresh', name: 'Fresh', cwd: '/tmp', lastActivityAt: now - 60 * 1000 },
+      ],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    const result = p.restoreState()
+    assert.ok(result, 'fresh session keeps the restore alive')
+    assert.equal(result.sessions.length, 1)
+    assert.equal(result.sessions[0].id, 'fresh')
+  })
+
+  it('returns null when every session is individually stale (audit P2-12)', () => {
+    const now = Date.now()
+    writeFileSync(stateFile, JSON.stringify({
+      version: 1,
+      timestamp: now,
+      sessions: [
+        { id: 'a', name: 'A', cwd: '/tmp', lastActivityAt: now - 25 * 60 * 60 * 1000 },
+        { id: 'b', name: 'B', cwd: '/tmp', lastActivityAt: now - 26 * 60 * 60 * 1000 },
+      ],
+    }))
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    assert.equal(p.restoreState(), null)
   })
 
   it('returns parsed state for valid file', () => {
@@ -411,6 +487,42 @@ describe('SessionStatePersistence backup rotation (regression: #2906)', () => {
     assert.equal(existsSync(stateFile), false)
     assert.ok(existsSync(stateFile + '.bak'), '.bak preserved for future recovery')
   })
+
+  // #4908 crash-safety pin: serializeState was collapsed onto the shared
+  // writeFileRestricted helper. The key invariant pinned here is that rotation
+  // must happen BEFORE the main-path write so `.bak` always captures the prior
+  // generation — without reintroducing a bespoke tmp+rename layer on top of
+  // the shared helper. Reversing the order (write-then-rotate) would mean a
+  // successful write followed by rotation would copy the NEW generation into
+  // `.bak`, overwriting the recoverable prior generation. Spy on the instance's
+  // `_rotateToBak` method (instance binding, not an imported one, so we can
+  // replace it directly) and capture filesystem state at the moment rotation
+  // is invoked.
+  it('rotates BEFORE writing the new generation (crash-safety pin for #4908)', () => {
+    const p = new SessionStatePersistence({ stateFilePath: stateFile })
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'gen1', name: 'Gen1', cwd: '/tmp' }] })
+
+    // Capture main file contents at the moment _rotateToBak runs. Rotate-then-
+    // write means main still holds Gen1 at this point; write-then-rotate would
+    // mean main already holds Gen2.
+    let mainAtRotation = null
+    const originalRotate = p._rotateToBak.bind(p)
+    p._rotateToBak = function spyRotate(mainPath, bakPath) {
+      mainAtRotation = existsSync(mainPath) ? JSON.parse(readFileSync(mainPath, 'utf-8')) : null
+      return originalRotate(mainPath, bakPath)
+    }
+
+    p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'gen2', name: 'Gen2', cwd: '/tmp' }] })
+
+    assert.ok(mainAtRotation, '_rotateToBak must be called while main still exists (rotate-then-write order)')
+    assert.equal(mainAtRotation.sessions[0].name, 'Gen1',
+      'at rotation time, main must hold the PRIOR generation — proves rotation runs BEFORE the new write')
+
+    const main = JSON.parse(readFileSync(stateFile, 'utf-8'))
+    const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
+    assert.equal(main.sessions[0].name, 'Gen2')
+    assert.equal(bak.sessions[0].name, 'Gen1')
+  })
 })
 
 describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', () => {
@@ -462,8 +574,13 @@ describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', ()
     })
 
     assert.ok(unlinkedBak, 'should unlink the locked .bak before retrying rotation')
-    // Rename called: (1) initial rotate (threw), (2) retry rotate, (3) tmp → main
-    assert.equal(renameCalls, 3, 'should call rename three times: initial rotate + retry + final tmp→main')
+    // Rename called twice via fs.renameSync (rotation path): (1) initial rotate
+    // (threw EPERM), (2) retry rotate (succeeded). The final main-file write is
+    // delegated to writeFileRestricted (#4908 collapse) which imports its rename
+    // binding directly from 'fs' as a named import — that call bypasses
+    // mock.method(fs, 'renameSync', ...) so it is not visible here. The
+    // existsSync post-condition verifies the write happened.
+    assert.equal(renameCalls, 2, 'fs.renameSync called twice in rotation path: initial rotate + retry (final write goes through writeFileRestricted)')
     assert.ok(existsSync(stateFile), 'main state file should exist after serialize')
     assert.ok(existsSync(stateFile + '.bak'), '.bak should exist after successful retry')
     const bak = JSON.parse(readFileSync(stateFile + '.bak', 'utf-8'))
@@ -490,7 +607,11 @@ describe('SessionStatePersistence Windows .bak rotation (regression: #2908)', ()
       p.serializeState({ version: 1, timestamp: Date.now(), sessions: [{ id: 'new', name: 'New', cwd: '/tmp' }] })
     })
 
-    assert.ok(renameCalls >= 3, 'rotate attempted twice, then final tmp → main')
+    // fs.renameSync called twice (rotation initial + retry, both threw EBUSY).
+    // The main write goes through writeFileRestricted whose internal rename
+    // bypasses mock.method(fs, ...) — see the EPERM test above. The existsSync
+    // post-condition verifies the new generation was still written.
+    assert.ok(renameCalls >= 2, 'rotate attempted twice (initial + retry)')
     assert.ok(existsSync(stateFile), 'main state file must still be written when rotation fails')
     const main = JSON.parse(readFileSync(stateFile, 'utf-8'))
     assert.equal(main.sessions[0].name, 'New', 'new state should be persisted even if .bak rotation failed')

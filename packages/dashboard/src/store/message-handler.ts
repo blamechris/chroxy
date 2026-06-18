@@ -19,28 +19,31 @@ import {
   handleMessage as sharedMessageHandler,
   handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
-  handleAvailablePermissionModes as sharedAvailablePermissionModes,
-  handleSessionUpdated as sharedSessionUpdated,
-  handleConfirmPermissionMode as sharedConfirmPermissionMode,
+  // available_permission_modes / session_updated / confirm_permission_mode /
+  // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
   handleAgentIdle as sharedAgentIdle,
-  handleAgentBusy as sharedAgentBusy,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
-  handleBudgetResumed as sharedBudgetResumed,
-  handlePlanStarted as sharedPlanStarted,
+  // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
+  // migrated to the shared dispatch table (#5556 slice 2)
   handlePlanReady as sharedPlanReady,
-  handleInactivityWarning as sharedInactivityWarning,
-  handleDevPreview as sharedDevPreview,
-  handleDevPreviewStopped as sharedDevPreviewStopped,
+  // #4653: chroxy-side multi-question deny intervention surfaced to the user
+  handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
+  applyInterventionBuilder,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
+  handleToolInputDelta as sharedToolInputDelta,
   handleStreamStart as sharedStreamStart,
+  sharedStreamDelta,
   handleStreamEnd as sharedStreamEnd,
   handleAuthOk as sharedAuthOk,
+  parseConnectedClients as sharedParseConnectedClients,
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
+  decideKeyPinWithPairingIdentity,
+  decodeEncryptionGate,
   handleServerMode as sharedServerMode,
   handleCheckpointCreated as sharedCheckpointCreated,
   handleCheckpointList as sharedCheckpointList,
@@ -50,17 +53,39 @@ import {
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
+  handleSessionRole as sharedSessionRole,
   handleClientFocusChanged as sharedClientFocusChanged,
-  handleConversationId as sharedConversationId,
+  // conversation_id migrated to the shared dispatch table (#5556)
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
+  // #5555.3 / #5555.4 — lastSeq cursor + no-blank-flash reconcile.
+  recordHistorySeq,
+  reconcileReplayStart,
+  reconcileReplayEnd,
+  replayDedupCache,
+  resetReplayReconcile,
   handlePermissionExpired as sharedPermissionExpired,
-  handlePermissionRulesUpdated as sharedPermissionRulesUpdated,
+  // permission_rules_updated migrated to the shared dispatch table (#5556)
+  // #5454 — dashboard adopts the shared permission family + the remaining
+  // both-sides duplicates
+  handlePermissionRequest as sharedPermissionRequest,
+  handlePermissionResolved as sharedPermissionResolved,
+  handlePermissionTimeout as sharedPermissionTimeout,
+  handleSessionStopped as sharedSessionStopped,
+  handleCheckpointRestored as sharedCheckpointRestored,
+  handleConversationsList as sharedConversationsList,
+  handleRawOutput as sharedRawOutput,
+  handleTokenRotated as sharedTokenRotated,
+  handlePairFail as sharedPairFail,
+  // session_cost_threshold_crossed / notification_prefs migrated to the shared
+  // dispatch table (#5556 slice 2)
+  // #5454 — pure core of the #554 stream-split block (permission_request)
+  resolvePermissionStreamSplit,
   handleDirectoryListing as sharedDirectoryListing,
   handleFileListing as sharedFileListing,
   handleFileContent as sharedFileContent,
-  handleSessionList as sharedSessionList,
-  handleSessionContext as sharedSessionContext,
+  buildSessionListPatches as sharedBuildSessionListPatches,
+  cumulativeUsageEquals as sharedCumulativeUsageEquals,
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
@@ -68,31 +93,68 @@ import {
   handleSlashCommands as sharedSlashCommands,
   handleAgentList as sharedAgentList,
   handleProviderList as sharedProviderList,
+  handleAuthBootstrap as sharedAuthBootstrap,
+  handleTunnelUrlChanged as sharedTunnelUrlChanged,
   handleFileList as sharedFileList,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
-  handleAgentSpawned as sharedAgentSpawned,
-  handleAgentCompleted as sharedAgentCompleted,
+  // agent_spawned / agent_completed / agent_event / background_work_changed
+  // migrated to the shared dispatch table (#5556 slice 2)
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
   handleAvailableModels as sharedAvailableModels,
-  handleMcpServers as sharedMcpServers,
+  // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
   handleCostUpdate as sharedCostUpdate,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
-  handleWebTaskUpsert as sharedWebTaskUpsert,
+  // web_task_created / web_task_updated — migrated to the shared dispatch table
+  // (#5556 slice 4); the dashboard no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
-  handleWebTaskList as sharedWebTaskList,
-  handleWebFeatureStatus as sharedWebFeatureStatus,
+  // web_task_list / web_feature_status migrated to the shared dispatch table
+  // (#5556 slice 2)
   handleSearchResults as sharedSearchResults,
   handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5163 (epic #5159): Control Room activity reducer — snapshot replace +
+  // self-healing delta upsert + terminal-retention prune. The dashboard
+  // panel and future mobile parity both consume this one implementation.
+  applyActivitySnapshot,
+  applyActivityDelta,
+  clearSessionActivity,
+  // #5039: pre-formatted partial-cost sub-line used by the `case 'error'`
+  // branch so the toast and the mobile Alert share copy.
+  formatPartialCostLine,
+  // #5515 (epic #5514): latency instrumentation primitives.
+  RollingPercentiles,
+  // #5556 (epic #5514): shared stateful EWMA RTT smoother.
+  RttSmoother,
+  // #6035: shared connection runtime — the heartbeat ping loop, pong-timeout
+  // reaper, handshake-window timer, and pong RTT measurement. The dashboard
+  // injects its wsSend / quality-write sink / owned RttSmoother / latency-log
+  // hook; the timer mechanics are shared with the app. Constants aliased so the
+  // local `HEARTBEAT_INTERVAL_MS` / `HANDSHAKE_TIMEOUT_MS` exports re-source them.
+  createHeartbeatController,
+  HEARTBEAT_INTERVAL_MS as SC_HEARTBEAT_INTERVAL_MS,
+  HANDSHAKE_TIMEOUT_MS as SC_HANDSHAKE_TIMEOUT_MS,
+  LATENCY_LOG_INTERVAL_MS as SC_LATENCY_LOG_INTERVAL_MS,
+  // #5556 (epic #5514): shared delta-flusher wiring (accumulator + timer +
+  // override) — the dashboard supplies only its `applyDeltas` store mutation.
+  createDeltaFlusher,
+  type DeltaFlusher,
   type PlatformAdapters, type StorageAdapter,
+  // epic #5556, sub-item 3: shared client message dispatch table.
+  // Pure-delegation cases that were byte-identical with the app route through
+  // this table; a miss falls through to the HANDLERS map + switch unchanged.
+  createDispatchTable,
+  runDispatch,
+  type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
   deriveSharedKey,
@@ -104,9 +166,10 @@ import {
 } from './crypto';
 import { filterThinking, nextMessageId } from './utils';
 import { calculateCost } from '../lib/model-pricing';
+import { CLIENT_ESTIMATED_COST_PROVIDERS } from '../lib/client-estimated-cost-providers';
+import { unwrapToolResultText } from '../lib/tool-result-text';
 import type {
   ChatMessage,
-  ConnectedClient,
   ConnectionContext,
   ConnectionState,
   CustomAgent,
@@ -114,7 +177,6 @@ import type {
   EnvironmentInfo,
   EvaluatorRewriteMeta,
   FileEntry,
-  McpServer,
   PendingCommunitySkill,
   PendingEvaluatorClarify,
   QueuedMessage,
@@ -123,9 +185,7 @@ import type {
   SessionState,
   SlashCommand,
   FilePickerItem,
-  ConversationSummary,
   ProviderInfo,
-  WebTask,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -256,6 +316,141 @@ export function clearPendingTrustGrants(): void {
   _pendingTrustGrants.clear();
 }
 
+// #5711 (Gap 2, client half): set_model is applied OPTIMISTICALLY (the dropdown
+// flips immediately), but the server may reject it (MODEL_NOT_APPLIED — e.g. a
+// mid-turn change is a no-op server-side, fixed in #5696). Without a rollback
+// the dashboard keeps showing a model the session never switched to. Remember
+// the model we switched FROM, keyed by the set_model requestId the server
+// echoes on its error, so the `error` handler can roll the optimistic update
+// back. Cleared on the matching `model_changed` success, on a matching error,
+// or on disconnect. Bounded FIFO like the trust-grant map.
+interface PendingModelRevert {
+  sessionId: string | null;
+  previousModel: string | null;
+}
+
+const _pendingModelReverts = new Map<string, PendingModelRevert>();
+const MODEL_REVERT_PENDING_CAP = 16;
+
+export function registerModelChangeRequest(requestId: string, entry: PendingModelRevert): void {
+  if (_pendingModelReverts.size >= MODEL_REVERT_PENDING_CAP) {
+    const oldestKey = _pendingModelReverts.keys().next().value;
+    if (oldestKey !== undefined) _pendingModelReverts.delete(oldestKey);
+  }
+  _pendingModelReverts.set(requestId, { ...entry });
+}
+
+function consumePendingModelRevert(requestId: string): PendingModelRevert | null {
+  const entry = _pendingModelReverts.get(requestId);
+  if (!entry) return null;
+  _pendingModelReverts.delete(requestId);
+  return entry;
+}
+
+/** Clear all pending model reverts — called on WebSocket close. */
+export function clearPendingModelReverts(): void {
+  _pendingModelReverts.clear();
+}
+
+/** @internal test seam. */
+export function _testModelRevertPendingSize(): number {
+  return _pendingModelReverts.size;
+}
+
+// #5716 (sibling of #5711): set_permission_mode is also applied OPTIMISTICALLY
+// (the dropdown flips immediately in setPermissionMode), but the server may
+// reject it (PERMISSION_MODE_NOT_APPLIED — a mid-turn change or same-mode no-op
+// is rejected server-side, settings-handlers.js). Without a rollback the
+// dashboard keeps showing a permission mode the session never switched to —
+// the most dangerous case being a phantom "auto"/bypass that the session never
+// entered. Remember the mode we switched FROM, keyed by the set_permission_mode
+// requestId the server echoes on its error, so the `error` handler can roll the
+// optimistic update back. Cleared on the matching error or on disconnect — NOT
+// on success: the server sends permission_mode_changed XOR error per requestId,
+// so clearing on success would drop a second in-flight revert (the #5715 bug).
+// Bounded FIFO like the model-revert map.
+interface PendingPermissionModeRevert {
+  sessionId: string | null;
+  previousMode: string | null;
+  // The Shift+Tab toggle target (previousPermissionMode) as it was BEFORE the
+  // optimistic change overwrote it, so a rejected change can restore it too
+  // (#5722 review). Optional for back-compat with entries that predate the field.
+  priorPreviousMode?: string | null;
+}
+
+const _pendingPermissionModeReverts = new Map<string, PendingPermissionModeRevert>();
+const PERMISSION_MODE_REVERT_PENDING_CAP = 16;
+
+export function registerPermissionModeChangeRequest(requestId: string, entry: PendingPermissionModeRevert): void {
+  if (_pendingPermissionModeReverts.size >= PERMISSION_MODE_REVERT_PENDING_CAP) {
+    const oldestKey = _pendingPermissionModeReverts.keys().next().value;
+    if (oldestKey !== undefined) _pendingPermissionModeReverts.delete(oldestKey);
+  }
+  _pendingPermissionModeReverts.set(requestId, { ...entry });
+}
+
+function consumePendingPermissionModeRevert(requestId: string): PendingPermissionModeRevert | null {
+  const entry = _pendingPermissionModeReverts.get(requestId);
+  if (!entry) return null;
+  _pendingPermissionModeReverts.delete(requestId);
+  return entry;
+}
+
+/** Clear all pending permission-mode reverts — called on WebSocket close. */
+export function clearPendingPermissionModeReverts(): void {
+  _pendingPermissionModeReverts.clear();
+}
+
+/** @internal test seam. */
+export function _testPermissionModeRevertPendingSize(): number {
+  return _pendingPermissionModeReverts.size;
+}
+
+// #5731 T9 (sibling of #5711/#5716): set_thinking_level is also applied
+// OPTIMISTICALLY (the dropdown flips immediately in setThinkingLevel) so it
+// doesn't snap back before the server's thinking_level_changed broadcast lands.
+// The server may reject it (THINKING_LEVEL_NOT_APPLIED — an invalid level, a
+// provider without thinking-level control, or setThinkingLevel throwing), in
+// which case the dropdown would otherwise stay on a level the session never
+// entered. Remember the level we switched FROM, keyed by the set_thinking_level
+// requestId the server echoes on its error, so the `error` handler can roll the
+// optimistic update back. Cleared on the matching error or on disconnect — NOT
+// on success (the server sends thinking_level_changed XOR error per requestId,
+// so clearing on success would drop a second in-flight revert, the #5715 class).
+// Bounded FIFO like the model/permission-mode revert maps.
+interface PendingThinkingLevelRevert {
+  sessionId: string | null;
+  previousLevel: string | null;
+}
+
+const _pendingThinkingLevelReverts = new Map<string, PendingThinkingLevelRevert>();
+const THINKING_LEVEL_REVERT_PENDING_CAP = 16;
+
+export function registerThinkingLevelChangeRequest(requestId: string, entry: PendingThinkingLevelRevert): void {
+  if (_pendingThinkingLevelReverts.size >= THINKING_LEVEL_REVERT_PENDING_CAP) {
+    const oldestKey = _pendingThinkingLevelReverts.keys().next().value;
+    if (oldestKey !== undefined) _pendingThinkingLevelReverts.delete(oldestKey);
+  }
+  _pendingThinkingLevelReverts.set(requestId, { ...entry });
+}
+
+function consumePendingThinkingLevelRevert(requestId: string): PendingThinkingLevelRevert | null {
+  const entry = _pendingThinkingLevelReverts.get(requestId);
+  if (!entry) return null;
+  _pendingThinkingLevelReverts.delete(requestId);
+  return entry;
+}
+
+/** Clear all pending thinking-level reverts — called on WebSocket close. */
+export function clearPendingThinkingLevelReverts(): void {
+  _pendingThinkingLevelReverts.clear();
+}
+
+/** @internal test seam. */
+export function _testThinkingLevelRevertPendingSize(): number {
+  return _pendingThinkingLevelReverts.size;
+}
+
 /** @internal Exposed for tests so they can inspect the in-flight map. */
 export function _testTrustGrantPendingSize(): number {
   return _pendingTrustGrants.size;
@@ -267,6 +462,14 @@ export function _testTrustGrantPendingSize(): number {
 let _encryptionState: EncryptionState | null = null;
 let _pendingKeyPair: KeyPair | null = null;
 let _pendingSalt: string | null = null;
+
+// #5555 (auth_bootstrap) — set fresh from each auth_ok's
+// `capabilities.authBootstrap`. When true, the server pushes an
+// `auth_bootstrap` burst frame with the provider / slash-command / agent
+// lists, so the connect-time list_* request round trip is skipped (in both the
+// eager and discrete key-exchange paths). Defaults false (old server) and is
+// overwritten on every connect, so it never goes stale across reconnects.
+let _serverWillBootstrap = false;
 
 /**
  * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
@@ -374,6 +577,40 @@ export function setPendingKeyPair(kp: KeyPair | null): void {
   _pendingKeyPair = kp;
 }
 
+// #5536 — the daemon's E2E identity public key captured from the trusted pairing
+// URL (`idk=`) for THIS pairing attempt, not yet committed as the pin. The
+// key-exchange handler verifies the server's signed exchange key against it and
+// pins it (on the active registry entry) on first successful connect. Cleared
+// once consumed so it never leaks into a later dial.
+let _pendingPairingIdentityKey: string | null = null;
+
+export function setPendingPairingIdentityKey(key: string | null): void {
+  _pendingPairingIdentityKey = key;
+}
+
+export function getPendingPairingIdentityKey(): string | null {
+  return _pendingPairingIdentityKey;
+}
+
+/**
+ * #5555 (eager key exchange) — generate this connection's ephemeral X25519
+ * keypair + per-connection salt and stash them so they can be sent WITH the
+ * `auth` message (in `socket.onopen`). Returns the public key + salt to inline
+ * into auth.
+ *
+ * The discrete `key_exchange_ok` / fallback handler reads the same module-level
+ * `_pendingKeyPair` + `_pendingSalt`, so if the server omits `serverPublicKey`
+ * from auth_ok (old server, encryption disabled, eager derivation failed) the
+ * client still has everything it needs to fall back to the discrete handshake
+ * without regenerating keys. Crypto is identical to the discrete path — only
+ * the send timing changes.
+ */
+export function prepareEagerKeyExchange(): { publicKey: string; salt: string } {
+  _pendingKeyPair = createKeyPair();
+  _pendingSalt = generateConnectionSalt();
+  return { publicKey: _pendingKeyPair.publicKey, salt: _pendingSalt };
+}
+
 // ---------------------------------------------------------------------------
 // Connection attempt tracking
 // ---------------------------------------------------------------------------
@@ -381,8 +618,28 @@ export let connectionAttemptId = 0;
 export let disconnectedAttemptId = -1;
 export let lastConnectedUrl: string | null = null;
 
+// #5555.5 — consecutive close/error-path reconnect counter, used to index the
+// RETRY_DELAYS backoff ladder so a flapping tunnel escalates its retry spacing
+// (1s → 2s → 3s → 5s → 8s) instead of hammering the handshake at a fixed delay.
+// Reset to 0 on `auth_ok` (a *successful* connect — proof the link is healthy),
+// NOT on mere socket-open, so a socket that opens but never authenticates keeps
+// climbing the ladder. Lives here (not a connect() closure) because the count
+// must survive the connect() → drop → connect() cycle and be cleared from the
+// auth_ok handler.
+export let reconnectAttempt = 0;
+
 export function bumpConnectionAttemptId(): number {
   return ++connectionAttemptId;
+}
+
+/** Advance the backoff ladder, returning the pre-increment attempt index. */
+export function nextReconnectAttempt(): number {
+  return reconnectAttempt++;
+}
+
+/** Reset the backoff ladder — called from the `auth_ok` handler on a clean connect. */
+export function resetReconnectAttempt(): void {
+  reconnectAttempt = 0;
 }
 
 export function setDisconnectedAttemptId(id: number): void {
@@ -396,10 +653,16 @@ export function setLastConnectedUrl(url: string | null): void {
 // ---------------------------------------------------------------------------
 // History replay flags
 // ---------------------------------------------------------------------------
-let _receivingHistoryReplay = false;
+// #4493 — per-session replay tracking. `replayHistory()` on the server chunks
+// the replay over `setImmediate` (ws-history.js), which yields the event loop
+// between chunks, so live broadcasts from OTHER sessions can interleave with
+// session A's replay. A module-level boolean would gate all sessions on A's
+// replay state and drop legitimate live activity for sessions B/C/etc.
+// Scope the flag per-session id and gate per-target.
+const _replayingSessions = new Set<string>();
 
 export function resetReplayFlags(): void {
-  _receivingHistoryReplay = false;
+  _replayingSessions.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -444,65 +707,107 @@ export function clearTerminalWriteBatching(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Client-side heartbeat
+// Client-side heartbeat + handshake timeout
 // ---------------------------------------------------------------------------
-let _heartbeatInterval: ReturnType<typeof setInterval> | null = null;
-let _pongTimeout: ReturnType<typeof setTimeout> | null = null;
-let _lastPingSentAt = 0;
-let _ewmaRtt: number | null = null; // EWMA-smoothed RTT for stable quality display
-const HEARTBEAT_INTERVAL_MS = 15_000;
-const PONG_TIMEOUT_MS = 5_000;
-const EWMA_ALPHA = 0.3; // Weight for new samples (higher = more responsive)
+// #6035: the heartbeat ping loop, the pong-timeout reaper, the handshake-window
+// timer, and the pong RTT measurement now live in the shared
+// `createHeartbeatController` (store-core/connection-runtime), lifted from the
+// byte-identical copy this file shared with the app's message-handler.ts. The
+// dashboard injects only the genuinely platform-specific effects: its `wsSend`
+// (E2E envelope), the quality-write sink (`getStore().setState`), the owned
+// `_rttSmoother` (also read by the delta-flusher), and the latency-log hook
+// that gates on the shared `_lastLatencyLogAt` throttle cursor.
+//
+// `_rttSmoother` stays declared here (not inside the controller) because the
+// delta-flusher reads `_rttSmoother.value` for its adaptive interval (#5556).
+const _rttSmoother = new RttSmoother();
+
+// #5515 (epic #5514): latency instrumentation. `_deltaServerTs` records the
+// server-stamped serverTs (and local recv time) of the OLDEST un-rendered
+// delta per messageId; on flush we measure serverTs→render (token-to-render)
+// and recv→render (client render cost) into the rolling p50/p95 buffers. See
+// store-core/latency-stats for the clock discipline. Dev-only console readout,
+// throttled so a streaming turn can't spam the log. `_lastLatencyLogAt` is the
+// shared throttle cursor for BOTH the pong-split log (in the controller's
+// onLatencyLog hook below) and recordLatencySamples (the delta path).
+const _deltaServerTs = new Map<string, { serverTs: number; recvAt: number }>();
+const _tokenToRender = new RollingPercentiles(200);
+const _clientRender = new RollingPercentiles(200);
+let _lastLatencyLogAt = 0;
+
+const _heartbeat = createHeartbeatController({
+  wsSend,
+  rttSmoother: _rttSmoother,
+  onPongQuality: (latencyMs, quality) => {
+    getStore().setState({ latencyMs, connectionQuality: quality });
+  },
+  // The dashboard runs in the browser where WebSocket.OPEN === 1.
+  openReadyState: WebSocket.OPEN,
+  onLatencyLog: (line, pongRecvAt) => {
+    if (pongRecvAt - _lastLatencyLogAt >= LATENCY_LOG_INTERVAL_MS) {
+      _lastLatencyLogAt = pongRecvAt;
+      console.log(line);
+    }
+  },
+});
+
+export const HEARTBEAT_INTERVAL_MS = SC_HEARTBEAT_INTERVAL_MS;
+// #5721 (item 2) — client-side handshake timeout budget (re-exported from
+// store-core so connection.ts and the tests can read it). The heartbeat does
+// NOT start until `auth_ok` is processed, so the handshake window had no
+// liveness coverage before this timer; it hands off to the reconnect ladder
+// ("Handshake failed — reconnecting") instead of a silent stall.
+export const HANDSHAKE_TIMEOUT_MS = SC_HANDSHAKE_TIMEOUT_MS;
+const LATENCY_LOG_INTERVAL_MS = SC_LATENCY_LOG_INTERVAL_MS;
 
 export function stopHeartbeat(): void {
-  if (_heartbeatInterval) { clearInterval(_heartbeatInterval); _heartbeatInterval = null; }
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-  _lastPingSentAt = 0;
-  _ewmaRtt = null; // Reset smoothed RTT on disconnect
+  _heartbeat.stopHeartbeat();
 }
 
 export function startHeartbeat(socket: WebSocket): void {
-  stopHeartbeat();
-  _heartbeatInterval = setInterval(() => {
-    if (socket.readyState !== WebSocket.OPEN) { stopHeartbeat(); return; }
-    try {
-      _lastPingSentAt = Date.now();
-      wsSend(socket, { type: 'ping' });
-    } catch { stopHeartbeat(); return; }
-    _pongTimeout = setTimeout(() => {
-      console.warn('[ws] Heartbeat pong timeout — closing dead connection');
-      stopHeartbeat();
-      try { socket.close(); } catch {}
-    }, PONG_TIMEOUT_MS);
-  }, HEARTBEAT_INTERVAL_MS);
+  _heartbeat.startHeartbeat(socket);
 }
 
-function _onPong(): void {
-  if (_pongTimeout) { clearTimeout(_pongTimeout); _pongTimeout = null; }
-  // Measure RTT and update connection quality using EWMA for stability
-  if (_lastPingSentAt > 0) {
-    const rttMs = Date.now() - _lastPingSentAt;
-    _lastPingSentAt = 0;
-    // EWMA: smoothed = alpha * new + (1 - alpha) * prev (first sample bootstraps)
-    _ewmaRtt = _ewmaRtt === null ? rttMs : EWMA_ALPHA * rttMs + (1 - EWMA_ALPHA) * _ewmaRtt;
-    const smoothed = Math.round(_ewmaRtt);
-    const quality: 'good' | 'fair' | 'poor' = smoothed < 200 ? 'good' : smoothed < 500 ? 'fair' : 'poor';
-    getStore().setState({ latencyMs: smoothed, connectionQuality: quality });
-  }
+export function armHandshakeTimer(onTimeout: () => void): void {
+  _heartbeat.armHandshakeTimer(onTimeout);
+}
+
+export function clearHandshakeTimer(): void {
+  _heartbeat.clearHandshakeTimer();
+}
+
+function _onPong(serverTs?: number): void {
+  _heartbeat.handlePong(serverTs);
 }
 
 // ---------------------------------------------------------------------------
 // Delta batching
 // ---------------------------------------------------------------------------
-const pendingDeltas = new Map<string, { sessionId: string | null; delta: string }>();
-let deltaFlushTimer: ReturnType<typeof setTimeout> | null = null;
+// #5556 (epic #5514): the accumulator map + coalescing timer + adaptive window
+// now live inside the shared `createDeltaFlusher`, sized off `_rttSmoother`. The
+// dashboard supplies `applyDeltaBatch` — its store mutation, which (unlike the
+// app) keeps a flat-`messages` fallback. The hot path writes into
+// `deltaFlusher.pendingDeltas`; teardown goes through `deltaFlusher.clear()`.
+const deltaFlusher: DeltaFlusher = createDeltaFlusher({
+  getEwmaRtt: () => _rttSmoother.value,
+  applyDeltas: applyDeltaBatch,
+});
+const pendingDeltas = deltaFlusher.pendingDeltas;
 
-function flushPendingDeltas(): void {
-  deltaFlushTimer = null;
-  if (pendingDeltas.size === 0) return;
-  const updates = new Map(pendingDeltas);
-  pendingDeltas.clear();
+// #5516 (epic #5514): adaptive delta-flush interval (was a fixed 100ms).
+// Production adapts to the current EWMA RTT via `resolveDeltaFlushMs`
+// (16-33ms cheap → 100ms poor). Tests pin it with
+// `setDeltaFlushIntervalOverride(N)`; `null` restores adaptive behavior.
+// #5556: delegates to the flusher's own override.
+export function setDeltaFlushIntervalOverride(ms: number | null): void {
+  deltaFlusher.setIntervalOverride(ms);
+}
 
+// #5556: the store-mutation half of the old `flushPendingDeltas`. The shared
+// flusher owns the accumulator/timer, snapshots+clears `pendingDeltas`, then
+// hands us the batch. Dashboard-side this writes session state AND a flat-
+// `messages` fallback (the app has only the former).
+function applyDeltaBatch(updates: Map<string, { sessionId: string | null; delta: string }>): void {
   const state = getStore().getState();
 
   const bySession = new Map<string | null, Map<string, string>>();
@@ -564,14 +869,45 @@ function flushPendingDeltas(): void {
   if (!flatUpdated) {
     getStore().setState({ sessionStates: newSessionStates });
   }
+
+  // #5515 (epic #5514): the store writes above are the render trigger; sample
+  // latency for the ids we just flushed. See store-core/latency-stats for the
+  // clock discipline (serverTs→render is approximate/wall-clock; recv→render is
+  // the skew-free client render cost).
+  recordLatencySamples(updates.keys());
+}
+
+// #5515: measure token-to-render for the flushed message ids into the rolling
+// p50/p95 buffers and emit a throttled dev log. Each id's stamp is consumed
+// once so the next flush window restamps.
+function recordLatencySamples(messageIds: Iterable<string>): void {
+  const now = Date.now();
+  let sampled = false;
+  for (const id of messageIds) {
+    const stamp = _deltaServerTs.get(id);
+    if (!stamp) continue;
+    _deltaServerTs.delete(id);
+    _tokenToRender.add(now - stamp.serverTs);
+    _clientRender.add(now - stamp.recvAt);
+    sampled = true;
+  }
+  if (!sampled) return;
+  if (now - _lastLatencyLogAt < LATENCY_LOG_INTERVAL_MS) return;
+  _lastLatencyLogAt = now;
+  const ttr = _tokenToRender.summary();
+  const cr = _clientRender.summary();
+  console.log(
+    `[latency] token→render(~approx, wall-clock) n=${ttr.count} p50=${ttr.p50}ms p95=${ttr.p95}ms | ` +
+    `client-render n=${cr.count} p50=${cr.p50}ms p95=${cr.p95}ms`
+  );
 }
 
 export function clearDeltaBuffers(): void {
-  if (deltaFlushTimer) {
-    clearTimeout(deltaFlushTimer);
-    deltaFlushTimer = null;
-  }
-  pendingDeltas.clear();
+  // #5556: the flusher cancels its timer and drops the accumulator (teardown,
+  // not flush — these deltas belong to a connection that's going away).
+  deltaFlusher.clear();
+  // #5515: drop un-flushed latency stamps so they can't survive a reset.
+  _deltaServerTs.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -585,6 +921,15 @@ const QUEUE_TTLS: Record<string, number> = {
 };
 const QUEUE_MAX_SIZE = 10;
 const QUEUE_EXCLUDED = new Set(['set_model', 'set_permission_mode', 'mode', 'resize']);
+
+/**
+ * #4148: server error codes whose envelopes are NON-fatal even when the
+ * server forgot to set `fatal: false`. Routed to severity='warning'
+ * (yellow toast) instead of the destructive red error treatment.
+ * Hoisted to module scope so the 'error' case doesn't reallocate the
+ * Set every message.
+ */
+const NON_FATAL_ERROR_CODES = new Set(['MAX_TOOL_ROUNDS_REACHED']);
 const messageQueue: QueuedMessage[] = [];
 
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
@@ -668,6 +1013,34 @@ export function updateActiveSession(updater: (session: SessionState) => Partial<
 }
 
 // ---------------------------------------------------------------------------
+// Shared dispatch table (epic #5556, sub-item 3)
+//
+// Pure-delegation message cases that were byte-identical with the app's
+// handler are owned by the store-core table. `handleMessage` runs the table
+// first; a miss falls through to the HANDLERS map + switch below, so the
+// remaining (and genuinely divergent) cases stay exactly where they were.
+// ---------------------------------------------------------------------------
+
+const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
+  getActiveSessionId: () => getStore().getState().activeSessionId,
+  hasSession: (id) => !!getStore().getState().sessionStates[id],
+  updateSession: (id, updater) => updateSession(id, updater),
+  setState: (patch) => getStore().setState(patch as Partial<ConnectionState>),
+  // #5556 slice 4 — functional flat-state update for the web-task upsert cases.
+  // Mirrors the prior inline `set((state) => …)` exactly (Zustand merges the
+  // returned partial). The loose record in/out is cast to the store's
+  // ConnectionState shape, same as `setState` above.
+  updateState: (updater) =>
+    getStore().setState((state) =>
+      updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
+    ),
+  addMessage: (m) => getStore().getState().addMessage(m),
+  getSessions: () => getStore().getState().sessions,
+};
+
+const _dispatchTable = createDispatchTable<SessionState>();
+
+// ---------------------------------------------------------------------------
 // Session notification helper
 // ---------------------------------------------------------------------------
 
@@ -726,6 +1099,106 @@ export function clearSavedCredentials(): void {
   _storage.clearSavedCredentials()
 }
 
+/**
+ * #5536 — verify the server's signed ephemeral exchange key against the pinned
+ * (or pairing-time) E2E identity before keying off it. Shared by BOTH handshake
+ * paths (eager auth_ok and discrete key_exchange_ok).
+ *
+ * The pinned identity lives on the ACTIVE registry entry (the dashboard's
+ * per-server record). On REFUSE (server identity changed / MITM / pinned-but-
+ * unsigned downgrade) it tears the socket down and writes a distinct, specific
+ * error so the UI shows a "server identity changed" state — NOT a silent retry
+ * loop. On CONNECT it pins the pairing-time identity onto the active entry on a
+ * pin-on-first-use.
+ *
+ * @returns true to PROCEED with the handshake, false to ABORT (already refused).
+ */
+function verifyServerIdentityOrRefuse(
+  ctx: { socket: WebSocket; silent: boolean },
+  exchangePublicKey: string,
+  serverKeySig: string | null,
+): boolean {
+  const state = getStore().getState();
+  const activeServerId = state.activeServerId;
+  const activeEntry = activeServerId
+    ? state.serverRegistry.find((s) => s.id === activeServerId)
+    : undefined;
+  const pinnedIdentityKey = activeEntry?.pinnedIdentityKey ?? null;
+  const decision = decideKeyPinWithPairingIdentity({
+    pinnedIdentityKey,
+    pairingIdentityKey: getPendingPairingIdentityKey(),
+    exchangePublicKey,
+    serverKeySig,
+  });
+  if (decision.action === 'refuse') {
+    applyIdentityRefusal(ctx, decision.reason, decision.message);
+    return false;
+  }
+  // Connect — pin on first use, then clear the pairing identity.
+  if (decision.action === 'pin-and-connect' && activeServerId) {
+    getStore().getState().updateServer(activeServerId, { pinnedIdentityKey: decision.identityKey });
+  }
+  setPendingPairingIdentityKey(null);
+  return true;
+}
+
+/**
+ * #5614/#5536 — apply the loud, terminal "server identity refused" effects.
+ * Shared by the signature/unsigned mismatch path and the plaintext-downgrade
+ * gate so both surface identically (no silent retry, no fall-through to an
+ * unencrypted session). We do NOT remove the registry entry — the user re-pairs
+ * to adopt the new identity (which overwrites the pin). userDisconnected stops
+ * the auto-reconnect loop from immediately re-dialing a box we just refused.
+ */
+function applyIdentityRefusal(
+  ctx: { socket: WebSocket; silent: boolean },
+  reason: string,
+  message: string,
+): void {
+  console.error(`[crypto] Server identity verification failed (${reason}) — refusing connection`);
+  try { ctx.socket.close(); } catch { /* already closing */ }
+  getStore().setState({
+    connectionPhase: 'disconnected',
+    socket: null,
+    connectionError: message,
+    userDisconnected: true,
+  });
+  if (!ctx.silent) {
+    _adapters.alert.alert('Server Identity Changed', message);
+  }
+  // Consume the pairing identity so a later dial doesn't reuse it.
+  setPendingPairingIdentityKey(null);
+}
+
+/**
+ * #5614 — the plaintext-downgrade gate, run at the TOP of the `auth_ok` handler
+ * BEFORE the `encryption === 'required'` branch (where the pin check lives). If
+ * this connection is pinned (committed pin or pairing-time identity) and the
+ * server did not negotiate encryption, refuse — a MITM cannot otherwise be
+ * stopped from forging a plaintext `auth_ok` that skips verification entirely.
+ *
+ * @returns true to PROCEED, false when the connection was refused (caller breaks).
+ */
+function enforceEncryptionGateOrRefuse(
+  ctx: { socket: WebSocket; silent: boolean },
+  encryptionMode: string | null | undefined,
+): boolean {
+  const state = getStore().getState();
+  const activeEntry = state.activeServerId
+    ? state.serverRegistry.find((s) => s.id === state.activeServerId)
+    : undefined;
+  const gate = decodeEncryptionGate({
+    pinnedIdentityKey: activeEntry?.pinnedIdentityKey ?? null,
+    pairingIdentityKey: getPendingPairingIdentityKey(),
+    encryptionMode,
+  });
+  if (gate.action === 'refuse') {
+    applyIdentityRefusal(ctx, gate.reason, gate.message);
+    return false;
+  }
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Map-based handler infrastructure
 // ---------------------------------------------------------------------------
@@ -740,20 +1213,54 @@ type Handler = (msg: Record<string, unknown>, get: MsgGet, set: MsgSet, ctx: Con
 
 // --- Extracted handler functions ---
 
-function handlePong(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  _onPong();
+function handlePong(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  _onPong(typeof msg.serverTs === 'number' ? msg.serverTs : undefined);
 }
 
 function handleRaw(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  get().appendTerminalData(msg.data as string);
+  get().appendTerminalData(sharedRawOutput(msg).data);
 }
 
 function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  get().appendTerminalData(msg.data as string);
+  get().appendTerminalData(sharedRawOutput(msg).data);
+}
+
+// #5835 (PR2): live claude-tui PTY mirror. The server delivers terminal_output
+// only to clients that opted in (terminal_subscribe) for a session they're
+// viewing — i.e. the active session whose Output tab is showing — so route the
+// raw bytes through appendTerminalData (active-session). Guard on the active id
+// anyway so a stale frame arriving just after a session switch can't paint the
+// new session's terminal.
+function handleTerminalOutput(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  if (typeof msg.data !== 'string') return;
+  // Require an explicit string sessionId that matches the active session. The
+  // server always stamps one (ws-forwarding.js); dropping a frame without one
+  // (malformed/legacy/empty) keeps it from bleeding into whatever terminal is
+  // currently active, matching the typeof guard the rest of this file uses.
+  if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
+  get().appendTerminalData(msg.data);
+}
+
+// #5835 Phase 2: the server's authoritative live-PTY grid size for a session
+// (sent on terminal_subscribe and on every primary-driven resize). Record it so
+// the mirror renders at exactly this size, letterboxed. Same active-session +
+// string-sessionId guard as terminal_output: the server only sends this for a
+// session we're viewing, so an off-session/malformed frame is dropped.
+function handleTerminalSize(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // Positive integers only. The typeof check narrows for the setTerminalSize call
+  // below; Number.isInteger then rejects NaN/Infinity/floats and > 0 keeps a
+  // 0/negative grid out of term.resize. Matches the other numeric guards in this
+  // file (the server sends sane clamped ints; defensive).
+  if (typeof msg.cols !== 'number' || typeof msg.rows !== 'number') return;
+  if (!Number.isInteger(msg.cols) || !Number.isInteger(msg.rows) || msg.cols <= 0 || msg.rows <= 0) return;
+  if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
+  get().setTerminalSize(msg.sessionId, msg.cols, msg.rows);
 }
 
 function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const newToken = typeof msg.token === 'string' ? msg.token : null;
+  // Token parse shared via store-core (#5454); the URL-rewrite side effect
+  // stays dashboard-specific.
+  const { token: newToken } = sharedTokenRotated(msg);
   if (newToken) {
     // Server sent the new token — update URL query param for reconnection
     console.log('[ws] Server token rotated — updating stored token');
@@ -767,9 +1274,60 @@ function handleTokenRotated(msg: Record<string, unknown>, _get: MsgGet, _set: Ms
   }
 }
 
-function handleCheckpointRestored(_msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // Server has created a new session from the checkpoint.
-  // The session_list update will follow from the server — nothing to do here.
+/**
+ * #5555 (sub-item 7) — repoint the active server-registry entry's `wsUrl` to a
+ * rotated tunnel URL so the dashboard's reconnect path dials the new endpoint
+ * instead of the dead one. localStorage-backed, so the fix survives a tab
+ * refresh / process restart.
+ *
+ * Only mutates a NON-localhost registry entry (`activeServerId !== null`): the
+ * same-origin "this machine" connection (`activeServerId === null`) dials
+ * `window.location` and never the tunnel URL, so a rotation does not affect it.
+ * The entry is updated only when its current `wsUrl` is a `wss://` URL — i.e. it
+ * really is a tunnel endpoint, not a `ws://` LAN entry. When the server told us
+ * the `previousUrl`, we additionally require the stored URL to match it, so we
+ * never clobber an entry the operator pointed at a different host.
+ *
+ * @returns true when an entry was updated, false on a no-op.
+ */
+function applyRotatedTunnelUrlDashboard(
+  get: MsgGet,
+  newUrl: string,
+  previousUrl: string | null,
+): boolean {
+  if (!newUrl || !/^wss:\/\//i.test(newUrl)) return false;
+  const state = get();
+  const activeServerId = state.activeServerId;
+  if (!activeServerId) return false;
+  const entry = state.serverRegistry.find((s) => s.id === activeServerId);
+  if (!entry) return false;
+  // Only repoint a tunnel (wss://) entry; never a ws:// LAN entry.
+  if (!/^wss:\/\//i.test(entry.wsUrl)) return false;
+  if (entry.wsUrl === newUrl) return false;
+  // When the server told us the prior URL, require the stored URL to match it
+  // so we don't repoint an entry the operator aimed at a different host.
+  if (previousUrl && entry.wsUrl !== previousUrl) return false;
+  try {
+    state.updateServer(activeServerId, { wsUrl: newUrl });
+    return true;
+  } catch {
+    // validateWsUrl rejected the new URL — leave the stored entry untouched.
+    return false;
+  }
+}
+
+function handleCheckpointRestored(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  // Server has created a new session from the checkpoint and already moved
+  // this client's server-side activeSessionId onto it (the message is sent
+  // only to the requesting client — see checkpoint-handlers.js). #5454:
+  // adopt the shared parser and auto-switch to the restored session, matching
+  // the app. Previously the dashboard left the operator on the old tab until
+  // they clicked the new "Rewind: …" entry; the session_list broadcast that
+  // follows still populates the tab strip.
+  const restored = sharedCheckpointRestored(msg);
+  if (restored) {
+    get().switchSession(restored.newSessionId);
+  }
 }
 
 /**
@@ -782,17 +1340,13 @@ function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set
   set(state => ({ pairingRefreshedCount: (state.pairingRefreshedCount ?? 0) + 1 }));
 }
 
-function handleWebFeatureStatus(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  set(sharedWebFeatureStatus(msg));
-}
-
-function handleWebTaskList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const { tasks } = sharedWebTaskList(msg);
-  set({ webTasks: tasks as WebTask[] });
-}
+// web_feature_status + web_task_list migrated to the shared dispatch table
+// (#5556 slice 2)
 
 function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const conversations = Array.isArray(msg.conversations) ? (msg.conversations as ConversationSummary[]) : [];
+  // Parser shared via store-core (#5454); the dashboard intentionally has no
+  // `conversationHistoryError` / conversation-store mirror (those are app-only).
+  const { conversations } = sharedConversationsList(msg);
   set({ conversationHistory: conversations, conversationHistoryLoading: false });
 }
 
@@ -804,6 +1358,13 @@ function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgS
   } else {
     set({ activeModel: model });
   }
+  // #5711: deliberately do NOT clear pending reverts here. The server sends
+  // model_changed XOR error per requestId (never both), so a successful change
+  // never receives a later error to mis-consume. Clearing by sessionId would be
+  // too coarse — with two rapid changes on one session (A→B, B→C), the ack for
+  // the first would drop the SECOND's still-in-flight revert, stranding the
+  // dropdown if the second is then rejected. Stale success entries are bounded
+  // by the FIFO cap and cleared on disconnect.
 }
 
 function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
@@ -825,6 +1386,35 @@ function handlePromptEvaluatorChanged(msg: Record<string, unknown>, get: MsgGet,
   if (!targetId) return;
   const sessions = get().sessions.map(s =>
     s.sessionId === targetId ? { ...s, promptEvaluator: value } : s,
+  );
+  _set({ sessions });
+}
+
+// #3805: per-session Chroxy context hint toggle changed. Mirrors
+// handlePromptEvaluatorChanged — update the `sessions` array entry so
+// every client bound to the session sees the new state immediately.
+function handleChroxyContextHintChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const value = typeof msg.value === 'boolean' ? msg.value : null;
+  if (value === null) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId) return;
+  const sessions = get().sessions.map(s =>
+    s.sessionId === targetId ? { ...s, chroxyContextHint: value } : s,
+  );
+  _set({ sessions });
+}
+
+// #4660: server-broadcast confirmation that the per-session preamble
+// landed (and what trimmed value it actually stored). Mirrors
+// handleChroxyContextHintChanged — accept only string-typed payloads,
+// fall back to no-op for malformed events instead of clobbering state.
+function handleSessionPreambleChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
+  const value = typeof msg.value === 'string' ? msg.value : null;
+  if (value === null) return;
+  const targetId = resolveSessionId(msg, get().activeSessionId);
+  if (!targetId) return;
+  const sessions = get().sessions.map(s =>
+    s.sessionId === targetId ? { ...s, sessionPreamble: value } : s,
   );
   _set({ sessions });
 }
@@ -1137,24 +1727,25 @@ function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, 
   set({ pendingPermissionConfirm: null });
 }
 
-function handleAvailablePermissionModes(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const modes = sharedAvailablePermissionModes(msg);
-  if (modes) {
-    set({ availablePermissionModes: modes });
-  }
-}
-
-function handleSessionUpdated(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const updated = sharedSessionUpdated(msg, get().sessions);
-  if (updated) {
-    set({ sessions: updated });
-  }
-}
+// available_permission_modes + session_updated migrated to the shared
+// store-core dispatch table (#5556)
 
 function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const switched = sharedSessionSwitched(msg);
   if (!switched) return;
   const { newSessionId: sessionId, conversationId: switchConvId } = switched;
+  // #5553: a create-confirm may carry the resolved repo preset. When it carries
+  // a SEED, stash it keyed by sessionId so App's create-confirm effect can stage
+  // it EDITABLE into the new session's composer (never auto-sent — same path as
+  // the #5547 summarize seed). The preamble is already folded server-side; only
+  // the seed crosses into the composer.
+  const presetRaw = (msg as { sessionPreset?: unknown }).sessionPreset;
+  if (presetRaw && typeof presetRaw === 'object') {
+    const seed = (presetRaw as { seed?: unknown }).seed;
+    if (typeof seed === 'string' && seed.length > 0) {
+      set({ pendingServerSeed: { ...get().pendingServerSeed, [sessionId]: seed } });
+    }
+  }
   // Per-id dedup runs on every history replay path (#2901), so we no longer
   // need a "pending-switch" hint to distinguish user-initiated session switches
   // from auth-triggered ones.
@@ -1191,7 +1782,9 @@ function handleSessionSwitched(msg: Record<string, unknown>, get: MsgGet, set: M
 }
 
 function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const patch = sharedClaudeReady();
+  // #5431: pass the wire message through — enriched ready carries
+  // transcript-derived backgroundTasks / scheduledWakeup fields.
+  const patch = sharedClaudeReady(msg);
   const targetId = resolveSessionId(msg, get().activeSessionId);
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, () => patch);
@@ -1218,12 +1811,7 @@ function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, set: MsgSet,
   }
 }
 
-function handleAgentBusy(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => sharedAgentBusy());
-  }
-}
+// agent_busy migrated to the shared store-core dispatch table (#5556)
 
 function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const targetId = (msg.sessionId as string) || get().activeSessionId;
@@ -1260,105 +1848,143 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
 }
 
 function handleStreamDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  let deltaId = msg.messageId as string;
-  const capturedSessionId = (msg.sessionId as string) || get().activeSessionId;
-
-  // Forward delta text to terminal view (synthesize raw output in CLI mode)
-  if (typeof msg.delta === 'string' && msg.delta.length > 0) {
-    get().appendTerminalData(msg.delta);
-  }
-
-  // Permission boundary split: first delta after a split creates a new message
-  if (_postPermissionSplits.has(deltaId)) {
-    _postPermissionSplits.delete(deltaId);
-    const newId = `${deltaId}-post-${Date.now()}`;
-    _deltaIdRemaps.set(deltaId, newId);
-    const newMsg: ChatMessage = {
-      id: newId,
-      type: 'response',
-      content: '',
-      timestamp: Date.now(),
-    };
-    const targetId = capturedSessionId;
-    if (targetId && get().sessionStates[targetId]) {
-      updateSession(targetId, (ss) => ({
-        streamingMessageId: newId,
-        messages: [...ss.messages, newMsg],
-      }));
-    } else {
-      set((state: ConnectionState) => ({
-        streamingMessageId: newId,
-        messages: [...state.messages, newMsg],
-      }));
-    }
-    deltaId = newId;
-  } else if (_deltaIdRemaps.has(deltaId)) {
-    deltaId = _deltaIdRemaps.get(deltaId)!;
-  } else {
-    // Defensive: server reuses messageId for tool_start and the post-tool
-    // stream_start. If stream_start was dropped or hasn't registered the
-    // remap yet (e.g., session not in store at the time), the delta would
-    // otherwise concatenate onto the tool_use bubble. Detect that here and
-    // route to a suffixed response id, lazy-creating the bubble.
-    const targetId = capturedSessionId;
-    const effectiveSessionId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
-    if (effectiveSessionId && get().sessionStates[effectiveSessionId]) {
-      const ss = get().sessionStates[effectiveSessionId]!;
-      const existing = ss.messages.find((m) => m.id === deltaId);
-      if (existing && existing.type !== 'response') {
-        const suffixed = `${deltaId}-response`;
-        _deltaIdRemaps.set(deltaId, suffixed);
-        if (!ss.messages.some((m) => m.id === suffixed)) {
-          updateSession(effectiveSessionId, (s) => ({
-            streamingMessageId: suffixed,
-            messages: [
-              ...s.messages,
-              { id: suffixed, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          }));
-        }
-        deltaId = suffixed;
-      }
-    } else {
-      // Flat-messages fallback: when no session state is active (e.g., pre-session
-      // bootstrap, or the session hasn't been registered in sessionStates yet),
-      // the same collision can occur on the flat messages array. Mirror the
-      // sessionStates branch here so deltas don't leak into a tool_use bubble.
-      const flat = get().messages;
-      const existing = flat.find((m) => m.id === deltaId);
-      if (existing && existing.type !== 'response') {
-        const suffixed = `${deltaId}-response`;
-        _deltaIdRemaps.set(deltaId, suffixed);
-        if (!flat.some((m) => m.id === suffixed)) {
-          set((s) => ({
-            streamingMessageId: suffixed,
-            messages: [
-              ...s.messages,
-              { id: suffixed, type: 'response' as const, content: '', timestamp: Date.now() },
-            ],
-          }));
-        }
-        deltaId = suffixed;
-      }
+  // #5515 (epic #5514): record the server-stamped serverTs and local recv time
+  // of the OLDEST un-rendered delta for this messageId so flushPendingDeltas
+  // can measure token-to-render. First-write-wins until the next flush clears
+  // it (mirrors the server's per-flush emit stamp).
+  if (typeof msg.messageId === 'string') {
+    const sTs = typeof msg.serverTs === 'number' ? msg.serverTs : null;
+    if (sTs !== null && !_deltaServerTs.has(msg.messageId)) {
+      _deltaServerTs.set(msg.messageId, { serverTs: sTs, recvAt: Date.now() });
     }
   }
+  // #4981 — thin wrapper over `sharedStreamDelta`. The platform-neutral hot
+  // path (post-permission split, single-hop defensive remap, post-tool
+  // continuation split with the #4999/#5014 sentence gate and #4975 mid-word
+  // peel, buffered append + 100ms flush) lives in store-core. The dashboard-
+  // specific side effects stay here: the terminal-data write, the #4297
+  // empty-response-slot reorder, and the flat-`messages` fallbacks (the app
+  // has neither — see the StreamDeltaContext doc comment).
+  sharedStreamDelta(msg, {
+    activeSessionId: get().activeSessionId,
+    pendingDeltas,
+    deltaIdRemaps: _deltaIdRemaps,
+    postPermissionSplits: _postPermissionSplits,
+    replayingSessions: _replayingSessions,
 
-  const existingDelta = pendingDeltas.get(deltaId);
-  pendingDeltas.set(deltaId, {
-    sessionId: capturedSessionId,
-    delta: (existingDelta?.delta || '') + (msg.delta as string),
+    getSessionMessages: (sessionId) =>
+      sessionId && get().sessionStates[sessionId]
+        ? get().sessionStates[sessionId]!.messages
+        : null,
+    getFlatMessages: () => get().messages,
+
+    // Forward delta text to terminal view (synthesize raw output in CLI mode).
+    // The shared fn already gates on `typeof msg.delta === 'string' && length`.
+    appendTerminalDelta: (delta) => {
+      get().appendTerminalData(delta);
+    },
+
+    // #4297 — TUI fires stream_start at turn-start (#4010), creating an empty
+    // response slot. Tool events that follow append AFTER the slot. If the
+    // turn ends with a summary stream_delta, the text would otherwise
+    // materialize at the early slot position — making claude's wrap-up appear
+    // ABOVE the tool groups it summarized. On the first delta for an empty
+    // response slot, move it to the current end of the messages array. We gate
+    // on content === '' so a reconnect-replayed response (already populated)
+    // is never shifted. The shared fn applies the not-split / not-remapped /
+    // not-pending guard before calling this.
+    reorderEmptyResponseSlot: (deltaId, capturedSessionId) => {
+      const targetForReorder = (capturedSessionId && get().sessionStates[capturedSessionId])
+        ? capturedSessionId
+        : null;
+      if (targetForReorder) {
+        const ss = get().sessionStates[targetForReorder]!;
+        const idx = ss.messages.findIndex((m) => m.id === deltaId);
+        if (idx >= 0 && idx < ss.messages.length - 1) {
+          const slot = ss.messages[idx]!;
+          if (slot.type === 'response' && slot.content === '') {
+            updateSession(targetForReorder, (s) => ({
+              messages: [
+                ...s.messages.slice(0, idx),
+                ...s.messages.slice(idx + 1),
+                slot,
+              ],
+            }));
+          }
+        }
+      } else {
+        // Flat-messages fallback (pre-session bootstrap)
+        const flat = get().messages;
+        const idx = flat.findIndex((m) => m.id === deltaId);
+        if (idx >= 0 && idx < flat.length - 1) {
+          const slot = flat[idx]!;
+          if (slot.type === 'response' && slot.content === '') {
+            set((state) => ({
+              messages: [
+                ...state.messages.slice(0, idx),
+                ...state.messages.slice(idx + 1),
+                slot,
+              ],
+            }));
+          }
+        }
+      }
+    },
+
+    // Append a fresh response slot + set streamingMessageId. A null target (or
+    // a target without session state) routes to the flat-messages array —
+    // mirroring the dashboard's original session-state-or-flat branches for
+    // the permission split, defensive `-response` suffix, and `-cont-` split.
+    appendResponseSlot: (targetSessionId, slot, opts) => {
+      if (targetSessionId && get().sessionStates[targetSessionId]) {
+        if (opts?.onlyIfAbsent
+            && get().sessionStates[targetSessionId]!.messages.some((m) => m.id === slot.id)) {
+          return;
+        }
+        updateSession(targetSessionId, (ss) => ({
+          streamingMessageId: slot.id,
+          messages: [...ss.messages, slot],
+        }));
+      } else {
+        if (opts?.onlyIfAbsent && get().messages.some((m) => m.id === slot.id)) {
+          return;
+        }
+        set((state: ConnectionState) => ({
+          streamingMessageId: slot.id,
+          messages: [...state.messages, slot],
+        }));
+      }
+    },
+
+    // Peel `count` trailing chars off the flushed content of the response slot
+    // at `deltaId`. Null target routes to flat messages.
+    peelSlotContent: (targetSessionId, deltaId, count) => {
+      const updater = (ss: { messages: ChatMessage[] }) => ({
+        messages: ss.messages.map((m) =>
+          m.id === deltaId && m.type === 'response'
+            ? { ...m, content: m.content.slice(0, m.content.length - count) }
+            : m
+        ),
+      });
+      if (targetSessionId && get().sessionStates[targetSessionId]) {
+        updateSession(targetSessionId, updater);
+      } else {
+        set((s) => ({ messages: updater({ messages: s.messages }).messages }));
+      }
+    },
+
+    // #5556 — arm the shared coalescing window (adaptive interval; was a fixed
+    // 100ms). Memoized rows (step 1) make the tighter flush cheap: only the tail
+    // re-renders. First-arm-wins inside the flusher.
+    scheduleFlush: () => {
+      deltaFlusher.schedule();
+    },
   });
-  if (!deltaFlushTimer) {
-    deltaFlushTimer = setTimeout(flushPendingDeltas, 100);
-  }
 }
 
 function handleStreamEnd(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   // Flush any buffered deltas immediately before clearing streaming state
-  if (deltaFlushTimer) {
-    clearTimeout(deltaFlushTimer);
-  }
-  flushPendingDeltas();
+  deltaFlusher.flushNow();
   // Add newline separator after response ends for Output view readability
   get().appendTerminalData('\r\n');
   const out = sharedStreamEnd(msg, get().activeSessionId);
@@ -1388,12 +2014,22 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   // terminal preview write — matches the prior inline ordering.
   const toolName = typeof msg.tool === 'string' ? msg.tool : 'tool';
   get().appendTerminalData(`\r\n\x1b[36m⏺ ${toolName}\x1b[0m\r\n`);
+  const toolStartTargetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
   const cached = (() => {
-    const targetId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
-    const targetState = targetId ? get().sessionStates[targetId] : null;
-    return targetState ? targetState.messages : get().messages;
+    const targetState = toolStartTargetId ? get().sessionStates[toolStartTargetId] : null;
+    // #5555.4 — scope to the appended replay tail during a full rebuild (see
+    // the `message` case for the rationale).
+    return replayDedupCache(
+      toolStartTargetId,
+      targetState ? targetState.messages : get().messages,
+    );
   })();
-  const result = sharedToolStart(msg, get().activeSessionId, _receivingHistoryReplay, cached);
+  // #4493 — per-session replay scoping. Dedup against the cached history
+  // only when THIS message's session is currently replaying.
+  const toolStartIsReplay = toolStartTargetId ? _replayingSessions.has(toolStartTargetId) : false;
+  // #5555.3 — advance the cursor for replayed tool_start entries.
+  if (toolStartIsReplay) recordHistorySeq(toolStartTargetId, (msg as { historySeq?: unknown }).historySeq);
+  const result = sharedToolStart(msg, get().activeSessionId, toolStartIsReplay, cached);
   if (!result.shouldDispatch || !result.chatMessage) return;
   const toolMsg = result.chatMessage;
   const targetId = result.sessionId;
@@ -1412,6 +2048,13 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
       if (ss.streamingMessageId === 'pending') {
         patch.streamingMessageId = toolMsg.id;
       }
+      // #4308 — track the in-flight tool in activeTools[]. Same-reference
+      // no-op (dedup by toolUseId) is honoured so a duplicate broadcast
+      // doesn't churn state.
+      const nextActiveTools = result.applyToActiveTools(ss.activeTools);
+      if (nextActiveTools !== ss.activeTools) {
+        patch.activeTools = nextActiveTools;
+      }
       return patch;
     });
   } else {
@@ -1423,16 +2066,17 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
   }
 }
 
-function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const result = sharedToolResult(msg, get().activeSessionId);
+function handleToolInputDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  // #4081: append the partialJson chunk to the matching tool_use
+  // bubble's `toolInputPartial` accumulator. sharedToolInputDelta
+  // validates the wire payload (toolUseId + partialJson string types),
+  // resolves sessionId, and returns an `applyTo` that no-ops when no
+  // matching tool_use is found (mirrors handleToolResult). Permission-
+  // pending suppression lives on the server (#4080) — by the time a
+  // delta reaches this handler the bubble is guaranteed to be the
+  // live target.
+  const result = sharedToolInputDelta(msg, get().activeSessionId);
   if (!result) return;
-  // Forward tool result to terminal view (dashboard-only side effect).
-  if (result.resultText) {
-    const preview = result.resultText.length > 500
-      ? result.resultText.slice(0, 500) + '...'
-      : result.resultText;
-    get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
-  }
   const targetId = result.sessionId;
   if (targetId && get().sessionStates[targetId]) {
     updateSession(targetId, (ss: SessionState) => {
@@ -1448,26 +2092,79 @@ function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet
   }
 }
 
+function handleToolResult(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const result = sharedToolResult(msg, get().activeSessionId);
+  if (!result) return;
+  // Forward tool result to terminal view (dashboard-only side effect).
+  // #5778: unwrap the result envelope first so the Output tab shows the
+  // stdout/stderr text rather than the raw `{"stdout":...}` JSON.
+  if (result.resultText) {
+    const text = unwrapToolResultText(result.resultText);
+    const preview = text.length > 500
+      ? text.slice(0, 500) + '...'
+      : text;
+    get().appendTerminalData(`\x1b[2m${preview}\x1b[0m\r\n`);
+  }
+  const targetId = result.sessionId;
+  if (targetId && get().sessionStates[targetId]) {
+    updateSession(targetId, (ss: SessionState) => {
+      const updated = result.applyTo(ss.messages);
+      // #4308 — drop the resolved entry from activeTools[]. Same-reference
+      // no-op (tool not currently tracked) is honoured to skip the write.
+      const nextActiveTools = result.applyToActiveTools(ss.activeTools);
+      const patch: Partial<SessionState> = {};
+      if (updated !== ss.messages) patch.messages = updated;
+      if (nextActiveTools !== ss.activeTools) patch.activeTools = nextActiveTools;
+      return patch;
+    });
+  } else {
+    const updated = result.applyTo(get().messages);
+    if (updated !== get().messages) {
+      set({ messages: updated });
+    }
+  }
+}
+
 function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  // Split streaming response at permission boundary (#554)
+  // #5454: payload parse is shared via store-core (`handlePermissionRequest`)
+  // — same handler the app uses. Dashboard-specific glue kept below:
+  //   - flat-state fallbacks (`get().messages` / top-level `streamingMessageId`)
+  //     for sessions not yet in `sessionStates`;
+  //   - #2853 options trimming (allow/deny only — see comment below);
+  //   - the simpler 4-arg `pushSessionNotification` (no input preview).
+  const permPayload = sharedPermissionRequest(msg);
+  // Skip malformed messages with missing/non-string requestId — matches the
+  // app and the shared-handler contract. (Previously the dashboard would
+  // insert a prompt with an `undefined` requestId and still run the stream
+  // split; such a message is unanswerable, so drop it outright.)
+  if (!permPayload.requestId) return;
+  // #5693 containment: a permission MAPPED to a session must surface in THAT
+  // session's transcript, never whatever tab is focused — and must not disturb
+  // the focused tab's in-flight stream. Create the owning session's empty state
+  // (tab-invisible — tabs come from `sessions`, not `sessionStates`) BEFORE the
+  // #554 stream-split below, so the split reads the owning session's stream
+  // (null for a freshly-created state) instead of falling back to the ACTIVE
+  // session's `streamingMessageId` and clearing a different tab's stream.
+  // Unmapped prompts (no wire sessionId) intentionally stay with the active
+  // session (still answerable, not mislabeled — originSessionId stays undefined).
+  const ownerSessionId = permPayload.sessionId;
+  if (ownerSessionId && !get().sessionStates[ownerSessionId]) {
+    set((state) => ({
+      sessionStates: { ...state.sessionStates, [ownerSessionId]: createEmptySessionState() },
+    }));
+  }
+  // Split streaming response at permission boundary (#554). The pure
+  // split/remap-resolution core is shared via store-core (#5454); the side
+  // effects below keep their original order.
   {
-    const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+    const permTargetId = permPayload.sessionId || get().activeSessionId;
     const currentStreamId = permTargetId && get().sessionStates[permTargetId]
       ? get().sessionStates[permTargetId]!.streamingMessageId
       : get().streamingMessageId;
-    if (currentStreamId && currentStreamId !== 'pending') {
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
-      let serverStreamId = currentStreamId;
-      for (const [origId, remappedId] of _deltaIdRemaps) {
-        if (remappedId === currentStreamId) {
-          serverStreamId = origId;
-          break;
-        }
-      }
-      _postPermissionSplits.add(serverStreamId);
+    const split = resolvePermissionStreamSplit(currentStreamId, _deltaIdRemaps);
+    if (split) {
+      deltaFlusher.flushNow();
+      _postPermissionSplits.add(split.serverStreamId);
       if (permTargetId && get().sessionStates[permTargetId]) {
         updateSession(permTargetId, () => ({ streamingMessageId: null }));
       } else {
@@ -1475,19 +2172,21 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       }
     }
   }
-  const permRequestId = msg.requestId as string;
+  const permRequestId = permPayload.requestId;
   // #2853: PermissionPrompt hardcodes its own buttons (Allow / Allow for Session
   // / Deny) and never reads this array; `sendPermissionResponse` only accepts
   // 'allow' | 'deny' | 'allowSession'. Keep only the wire-level allow/deny
   // options in the stored payload for history/debug inspection, without
   // advertising dashboard-only decisions ('allowSession') or unreachable ones
-  // ('allowAlways') here.
+  // ('allowAlways') here. (Intentional divergence from the app, which builds
+  // its options list dynamically — including the #3072 provider-capability
+  // gate for 'Allow for Session' — because its prompt UI renders from it.)
   const newOptions = [
     { label: 'Allow', value: 'allow' },
     { label: 'Deny', value: 'deny' },
   ];
-  const newExpiresAt = typeof msg.remainingMs === 'number' ? Date.now() + msg.remainingMs : undefined;
-  const permTargetId = (msg.sessionId as string) || get().activeSessionId;
+  const newExpiresAt = permPayload.remainingMs !== null ? Date.now() + permPayload.remainingMs : undefined;
+  const permTargetId = permPayload.sessionId || get().activeSessionId;
 
   const targetMessages = permTargetId && get().sessionStates[permTargetId]
     ? get().sessionStates[permTargetId]!.messages
@@ -1510,28 +2209,31 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
       set({ messages: updater({ messages: get().messages }).messages });
     }
   } else {
-    // Validate string fields up front so the prompt content and tool slot
-    // are guaranteed strings — non-string `msg.tool`/`msg.description` could
-    // otherwise leak through `as string` casts and violate ChatMessage.content.
-    const tool = typeof msg.tool === 'string' ? msg.tool : null;
-    const description = typeof msg.description === 'string' ? msg.description : null;
     const permMsg: ChatMessage = {
       id: nextMessageId('perm'),
       type: 'prompt',
       // Render only the tool name when description is missing; otherwise
       // combine `"<tool>: <description>"`. Fallback to a generic label when
       // neither is available. Fixes the "Tool: undefined" string that the
-      // prior `${tool}: ${description}` template produced (#3122).
-      content: tool
-        ? (description ? `${tool}: ${description}` : tool)
-        : (description || 'Permission required'),
-      tool: tool ?? undefined,
+      // prior `${tool}: ${description}` template produced (#3122). The
+      // string guards (#3122) and the array-rejecting input guard (#3123)
+      // live in the shared parser.
+      content: permPayload.tool
+        ? (permPayload.description ? `${permPayload.tool}: ${permPayload.description}` : permPayload.tool)
+        : (permPayload.description || 'Permission required'),
+      tool: permPayload.tool ?? undefined,
       requestId: permRequestId,
-      // Reject arrays — match the tightened guard in handlePermissionRequest (#3123)
-      toolInput: msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input) ? msg.input as Record<string, unknown> : undefined,
+      toolInput: permPayload.input ?? undefined,
       options: newOptions,
       expiresAt: newExpiresAt,
       timestamp: Date.now(),
+      // #5667 — record the OWNING session (the wire sessionId), so the renderer
+      // can label which session asked. Deliberately not `permTargetId`: that
+      // falls back to the active session for unmapped/legacy requests, which
+      // would mislabel them as the active session's own prompt. Undefined when
+      // the request maps to no session (contract: originSessionId is the owner
+      // or absent).
+      originSessionId: permPayload.sessionId ?? undefined,
     };
     if (permTargetId && get().sessionStates[permTargetId]) {
       updateSession(permTargetId, (ss) => ({
@@ -1542,7 +2244,7 @@ function handlePermissionRequest(msg: Record<string, unknown>, get: MsgGet, set:
     }
   }
   if (permTargetId) {
-    const toolDesc = msg.tool ? `${msg.tool}` : 'Permission needed';
+    const toolDesc = permPayload.tool ?? 'Permission needed';
     pushSessionNotification(permTargetId, 'permission', toolDesc, permRequestId);
   }
 }
@@ -1551,13 +2253,16 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   // Another client resolved this permission — dismiss the prompt on this client.
   // The permission_request may have been stored in ANY session state (whichever tab
   // was active when it arrived), so search all session states for the matching requestId.
-  const resolvedRequestId = msg.requestId as string;
-  const resolvedDecision = msg.decision as string;
+  // #5454: payload parse shared via store-core (same handler the app uses);
+  // the flat-messages fallback and #5008 mark-read banner draining below are
+  // dashboard-specific.
+  const { requestId: resolvedRequestId, decision: resolvedDecision } =
+    sharedPermissionResolved(msg);
   if (resolvedRequestId) {
     const updater = (ss: { messages: ChatMessage[] }) => ({
       messages: ss.messages.map((m) =>
         m.requestId === resolvedRequestId && m.type === 'prompt'
-          ? { ...m, answered: resolvedDecision, answeredAt: Date.now(), options: undefined }
+          ? { ...m, answered: resolvedDecision ?? undefined, answeredAt: Date.now(), options: undefined }
           : m
       ),
     });
@@ -1575,10 +2280,27 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
     if (!found) {
       set({ messages: updater({ messages: get().messages }).messages });
     }
-    // Auto-dismiss matching notification banner
+    // #5008 — drain the banner stack (which filters by `readAt === undefined`)
+    // without dropping the entry from `sessionNotifications`. Pre-#5008 we
+    // hard-removed the row, which silently drained every resolved alert from
+    // the NotificationsWidget's "durable history" view. Stamping `readAt`
+    // instead keeps the row visible in the widget (read row treatment) while
+    // the banner stack still vanishes.
+    //
+    // Idempotent — only stamp entries that have not already been acked, so a
+    // server-driven resolution arriving after the operator already marked the
+    // row read via the widget can't clobber the original ack timestamp.
+    //
+    // Hoist `Date.now()` out of the `.map(...)` so every matching row in this
+    // mutation shares a single timestamp. Matches the existing pattern at
+    // connection.ts:2167 (`switchReadStamp`) and connection.ts:2461
+    // (`markAllSessionNotificationsRead`).
+    const readStamp = Date.now();
     set((s) => ({
-      sessionNotifications: s.sessionNotifications.filter(
-        (n) => n.requestId !== resolvedRequestId
+      sessionNotifications: (s.sessionNotifications ?? []).map((n) =>
+        n.requestId === resolvedRequestId && n.readAt === undefined
+          ? { ...n, readAt: readStamp }
+          : n
       ),
     }));
   }
@@ -1622,17 +2344,7 @@ function handleBudgetExceeded(msg: Record<string, unknown>, get: MsgGet, _set: M
   }
 }
 
-function handleBudgetResumed(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const { systemMessage } = sharedBudgetResumed();
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, (ss) => ({
-      messages: [...ss.messages, systemMessage],
-    }));
-  } else {
-    get().addMessage(systemMessage);
-  }
-}
+// budget_resumed migrated to the shared store-core dispatch table (#5556)
 
 function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const { serverError, chatMessage: errorMsg } = sharedServerError(msg);
@@ -1668,23 +2380,367 @@ function handleServerShutdown(msg: Record<string, unknown>, _get: MsgGet, set: M
 }
 
 /**
+ * #5163 (epic #5159) — Control Room `activity_snapshot`: REPLACE the target
+ * session's activity tree with the snapshot's entries via the store-core
+ * reducer. Emitted on subscribe / resync so a late-joining or reconnecting
+ * client reaches canonical state in one message.
+ *
+ * The wire shape is validated with the protocol Zod schema (same defensive
+ * pattern as the credential-status handlers) so a malformed payload is dropped
+ * rather than crashing the reducer. `applyActivityDelta`/`applyActivitySnapshot`
+ * return the SAME state reference on a no-op, so the equality short-circuit
+ * below skips a needless re-render.
+ */
+function handleActivitySnapshot(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerActivitySnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const prev = get().activity;
+  const next = applyActivitySnapshot(prev, parsed.data);
+  if (next === prev) return;
+  set({ activity: next });
+}
+
+/**
+ * #5163 (epic #5159) — Control Room `activity_delta`: upsert the carried entry
+ * into its session by id. `op` is advisory — the full entry drives the result,
+ * so a dropped earlier delta is self-healed by the next one. Validated +
+ * no-op-short-circuited like the snapshot handler above.
+ *
+ * Copilot review: an `activity_delta` is a genuine live state change (a
+ * background shell / subagent / tool started, progressed, or ended), so it
+ * also counts as activity-bearing — bump `lastClientActivityAt` and clear any
+ * outstanding `inactivityWarning` for the delta's session so the "Working… last
+ * activity Ns ago" indicator and the inactivity chip don't go stale while only
+ * Control Room traffic is flowing. Gated on `_replayingSessions` exactly like
+ * the dispatch-level bump (#4466) so a session switch's history replay doesn't
+ * reset the timestamp. NOTE: `activity_snapshot` deliberately does NOT bump —
+ * it's a full-state resync emitted on subscribe / reconnect, not fresh work.
+ */
+function handleActivityDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerActivityDeltaSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const prev = get().activity;
+  const next = applyActivityDelta(prev, parsed.data);
+  if (next === prev) return;
+  set({ activity: next });
+
+  // #5277: if a node we were cancelling just went terminal (whether from the
+  // cancel itself or natural completion racing it), drop its pending state so
+  // the id can't leak in cancellingActivityIds after the row is gone/finished.
+  if (parsed.data.op === 'ended') {
+    clearCancellingActivity(get, set, parsed.data.sessionId, parsed.data.entry.id);
+  }
+
+  const sessionId = parsed.data.sessionId;
+  if (get().sessionStates[sessionId] && !_replayingSessions.has(sessionId)) {
+    updateSession(sessionId, (ss) => {
+      const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
+      if (ss.inactivityWarning) patch.inactivityWarning = null;
+      return patch;
+    });
+  }
+}
+
+/**
+ * #5277 — Control Room `cancel_activity_ack`: positive confirmation that a
+ * cancel_activity request was actioned. Clears the node's "cancelling" pending
+ * state (the terminal activity_delta separately updates the tree itself).
+ */
+function handleCancelActivityAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerCancelActivityAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  clearCancellingActivity(get, set, parsed.data.sessionId, parsed.data.activityId);
+}
+
+/** #5277 — composite key: activity ids are only unique within a session. */
+function cancelKey(sessionId: string | undefined, activityId: string | undefined): string | null {
+  if (!sessionId || !activityId) return null;
+  return `${sessionId}:${activityId}`;
+}
+
+/**
+ * #5277 — drop one `${sessionId}:${activityId}` from the in-flight cancel set
+ * (shared by the success ack, the CANCEL_ACTIVITY_FAILED session_error, and a
+ * terminal activity_delta). No-op if absent.
+ */
+function clearCancellingActivity(get: MsgGet, set: MsgSet, sessionId: string | undefined, activityId: string | undefined): void {
+  const key = cancelKey(sessionId, activityId);
+  if (!key) return;
+  const prev = get().cancellingActivityIds;
+  if (!prev || !prev.has(key)) return;
+  const next = new Set(prev);
+  next.delete(key);
+  set({ cancellingActivityIds: next });
+}
+
+/**
+ * #5277 — drop ALL pending cancels for a session. Used when a session-level
+ * error (SESSION_NOT_FOUND) means no cancel for that session can ever resolve,
+ * so its nodes must not stay stuck "Cancelling…".
+ */
+function clearCancellingForSession(get: MsgGet, set: MsgSet, sessionId: string | undefined): void {
+  if (!sessionId) return;
+  const prev = get().cancellingActivityIds;
+  if (!prev || prev.size === 0) return;
+  const prefix = `${sessionId}:`;
+  let changed = false;
+  const next = new Set<string>();
+  for (const key of prev) {
+    if (key.startsWith(prefix)) { changed = true; continue; }
+    next.add(key);
+  }
+  if (changed) set({ cancellingActivityIds: next });
+}
+
+/**
+ * #5175 (epic #5170) — Host/Repo Status Control Room `host_status_snapshot`:
+ * REPLACE the stored survey with the carried snapshot and clear the in-flight
+ * loading flag. The survey is a full picture (no delta stream), so each
+ * snapshot wholesale-replaces the previous one — the Control Room section
+ * re-renders the fleet table from `hostStatus`.
+ *
+ * The wire shape is validated with the protocol Zod schema (same defensive
+ * pattern as the activity / credential-status handlers) so a malformed payload
+ * is dropped rather than crashing the renderer. `hostStatusLoading` is cleared
+ * even on a successful parse only — a malformed payload leaves the spinner up
+ * so a buggy server doesn't make the Refresh button silently lie.
+ */
+function handleHostStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerHostStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ hostStatus: parsed.data, hostStatusLoading: false });
+}
+
+/**
+ * Mailbox (#5914 follow-up) — Control Room "Mailbox" tab `mailbox_status_snapshot`:
+ * REPLACE the stored snapshot with the carried one and clear the in-flight
+ * loading flag. Same defensive pattern as the host/runner snapshots — the wire
+ * shape is Zod-validated so a malformed payload is dropped rather than crashing
+ * the panel, and `mailboxStatusLoading` is cleared only on a successful parse so
+ * a buggy server doesn't make Refresh silently lie.
+ */
+function handleMailboxStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerMailboxStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ mailboxStatus: parsed.data, mailboxStatusLoading: false });
+}
+
+/**
+ * #5553 — per-repo session-preset snapshot. The reply to session_preset_get /
+ * _set / _approve / _revoke. Store the resolved preset keyed by cwd so the
+ * create-session modal can disclose "repo preset applies" and the per-repo
+ * drawer can render/edit it. Validated with the protocol Zod schema; a
+ * malformed payload is dropped rather than crashing the renderer. A null preset
+ * (no preset for the repo) is stored explicitly so the modal can distinguish
+ * "no preset" from "not yet fetched".
+ */
+function handleSessionPresetSnapshot(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSessionPresetSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { cwd, preset } = parsed.data;
+  if (!cwd) return;
+  const next = { ...get().sessionPresetSnapshots, [cwd]: preset };
+  set({ sessionPresetSnapshots: next });
+}
+
+/**
+ * #5510 (epic #5509) — a new device requested pairing; the daemon fanned the
+ * request out to this host surface. Append it to `pendingPairRequests` (deduped
+ * by requestId so a replay/reconnect can't double-stack the banner). Validated
+ * with the protocol Zod schema; a malformed payload is dropped rather than
+ * crashing the renderer. `deviceName` is attacker-controlled — stored as-is and
+ * rendered as plain text (React escapes on render).
+ */
+function handlePairPending(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerPairPendingSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const existing = get().pendingPairRequests;
+  const next = existing.filter((p) => p.requestId !== parsed.data.requestId);
+  next.push(parsed.data);
+  set({ pendingPairRequests: next });
+}
+
+/**
+ * #5510 — a pending pair request was resolved (approved/denied elsewhere, or it
+ * expired). Drop it from the banner queue. The carried `reason` is informational
+ * only; the surface simply retracts the entry.
+ */
+function handlePairResolved(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerPairResolvedSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const next = get().pendingPairRequests.filter((p) => p.requestId !== parsed.data.requestId);
+  set({ pendingPairRequests: next });
+}
+
+/**
+ * #5253 — self-hosted runner survey `runner_status_snapshot`: REPLACE the
+ * stored runner survey and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the host survey
+ * handler above.
+ */
+function handleRunnerStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerRunnerStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ runnerStatus: parsed.data, runnerStatusLoading: false });
+}
+
+/**
+ * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
+ * REPLACE the stored survey and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the host and
+ * runner survey handlers above.
+ */
+function handleIntegrationStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerIntegrationStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ integrationStatus: parsed.data, integrationStatusLoading: false });
+}
+
+/**
+ * #5554 (epic #5159) — Skills inventory survey `skills_inventory_snapshot`:
+ * REPLACE the stored inventory and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the host /
+ * runner / integration survey handlers above.
+ */
+function handleSkillsInventorySnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSkillsInventorySnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ skillsInventory: parsed.data, skillsInventoryLoading: false });
+}
+
+/**
+ * #5500 — resolve one repo's pending Reindex state: drop the repoPath from
+ * `reindexingRepoPaths` and record the outcome (ack counts or failure
+ * message) in `reindexResults` for inline display. Shared by the success ack
+ * and the INTEGRATION_ACTION_FAILED session_error — the same
+ * clear-pending-on-either-outcome contract as the cancel_activity pair.
+ */
+function resolveReindex(
+  get: MsgGet,
+  set: MsgSet,
+  repoPath: string,
+  result: { counts: import('@chroxy/protocol').IntegrationActionCounts | null; error: string | null },
+): void {
+  const pending = new Set(get().reindexingRepoPaths);
+  pending.delete(repoPath);
+  set({
+    reindexingRepoPaths: pending,
+    reindexResults: { ...get().reindexResults, [repoPath]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #5502 — same contract for the relay Re-run action, against its own bucket
+ * (`relayRerunningRepoPaths` / `relayRerunResults`): a rerun outcome must
+ * never clear, or be cleared by, a reindex on the same repoPath.
+ */
+function resolveRelayRerun(
+  get: MsgGet,
+  set: MsgSet,
+  repoPath: string,
+  result: { error: string | null },
+): void {
+  const pending = new Set(get().relayRerunningRepoPaths);
+  pending.delete(repoPath);
+  set({
+    relayRerunningRepoPaths: pending,
+    relayRerunResults: { ...get().relayRerunResults, [repoPath]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #5500 — Reindex success ack: positive confirmation that the
+ * `integration_action` repo_memory_reindex run completed, echoing the
+ * request's repoPath (+ requestId) with the parsed index counts (`null` when
+ * the server couldn't parse the CLI report — the row then shows a neutral
+ * "reindexed" note and the next Refresh shows the cache truth). A malformed
+ * ack is dropped (Zod safeParse) so the row keeps its honest pending state
+ * rather than rendering a half-true breakdown.
+ */
+function handleIntegrationActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerIntegrationActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  // #5502: route by the echoed action — a relay re-run ack resolves the
+  // rerun bucket, a reindex ack the reindex bucket. An unknown future
+  // action's ack stays opaque (the protocol's forward-compat contract):
+  // this client can't have pending state for an action it can't send, so
+  // clearing either bucket would clobber the wrong row.
+  if (parsed.data.action === 'repo_relay_rerun') {
+    resolveRelayRerun(get, set, parsed.data.repoPath, { error: null });
+    return;
+  }
+  if (parsed.data.action !== 'repo_memory_reindex') return;
+  resolveReindex(get, set, parsed.data.repoPath, { counts: parsed.data.counts, error: null });
+}
+
+/**
+ * #5547: a `summarize_session_result` resolves the pending summarize promise
+ * (keyed by the echoed requestId) so the awaiting create-session flow opens
+ * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
+ * promise from the session_error branch below.
+ */
+function handleSummarizeSessionResult(msg: Record<string, unknown>): void {
+  const parsed = ServerSummarizeSessionResultSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const requestId = parsed.data.requestId;
+  if (typeof requestId !== 'string' || !requestId) return;
+  resolveSummarizeRequest(requestId, {
+    summary: parsed.data.summary,
+    truncated: Boolean(parsed.data.truncated),
+  });
+}
+
+/**
+ * #5821 — `billing_canary` broadcast. Validated via the shared schema (drop on
+ * mismatch). Stores the snapshot; resets the per-connection dismissal ONLY when
+ * the warning set changed (a new/cleared warning re-surfaces the banner) so an
+ * unchanged re-broadcast doesn't un-dismiss what the user already dismissed.
+ */
+function handleBillingCanary(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerBillingCanarySchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { eraStarted, defaultProvider, defaultBillingClass, warnings } = parsed.data;
+  const snapshot = { eraStarted, defaultProvider, defaultBillingClass, warnings };
+  const prev = get().billingCanary;
+  // Signature over the FULL warning content (not just `code`): a reclassification
+  // trip can emit multiple warnings sharing TUI_REPORTED_PROGRAMMATIC_COST but
+  // differing in session/cost, and a code-only signature would mask that change
+  // and leave a dismissed banner stale (#5829 / review). Serialize each warning's
+  // identifying fields, order-independent.
+  const sig = (s: typeof snapshot | null) =>
+    s
+      ? s.warnings
+          .map((w) => `${w.code} ${w.sessionId ?? ''} ${w.costUsd ?? ''} ${w.message}`)
+          .sort()
+          .join('')
+      : '';
+  const changed = sig(prev) !== sig(snapshot);
+  set(changed ? { billingCanary: snapshot, billingBannerDismissed: false } : { billingCanary: snapshot });
+}
+
+/**
  * Map of message type → handler function for the simplest, most self-contained
  * cases. handleMessage() dispatches to this map first; unmatched types fall
  * through to the legacy switch statement below.
  */
 const HANDLERS: Record<string, Handler> = {
+  billing_canary: handleBillingCanary,
   pong: handlePong,
   raw: handleRaw,
   raw_background: handleRawBackground,
+  terminal_output: handleTerminalOutput,
+  terminal_size: handleTerminalSize,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
   checkpoint_restored: handleCheckpointRestored,
-  web_feature_status: handleWebFeatureStatus,
-  web_task_list: handleWebTaskList,
+  // web_feature_status / web_task_list migrated to the shared dispatch table
+  // (#5556 slice 2)
   conversations_list: handleConversationsList,
   model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
+  chroxy_context_hint_changed: handleChroxyContextHintChanged,
+  session_preamble_changed: handleSessionPreambleChanged,
   // #3188: auto-evaluator broadcast events (#3186 emit, #3208 schema)
   evaluator_rewrite: handleEvaluatorRewrite,
   evaluator_clarify: handleEvaluatorClarify,
@@ -1697,24 +2753,48 @@ const HANDLERS: Record<string, Handler> = {
   skill_trust_granted: handleSkillTrustGranted,
   skill_trust_grant_ok: handleSkillTrustGrantOk,
   permission_mode_changed: handlePermissionModeChanged,
-  available_permission_modes: handleAvailablePermissionModes,
-  session_updated: handleSessionUpdated,
+  // available_permission_modes / session_updated / agent_busy migrated to the
+  // shared store-core dispatch table (#5556)
   session_switched: handleSessionSwitched,
   claude_ready: handleClaudeReady,
   agent_idle: handleAgentIdle,
-  agent_busy: handleAgentBusy,
   stream_start: handleStreamStart,
   stream_delta: handleStreamDelta,
   stream_end: handleStreamEnd,
   tool_start: handleToolStart,
+  tool_input_delta: handleToolInputDelta,
   tool_result: handleToolResult,
   permission_request: handlePermissionRequest,
   permission_resolved: handlePermissionResolved,
   budget_warning: handleBudgetWarning,
   budget_exceeded: handleBudgetExceeded,
-  budget_resumed: handleBudgetResumed,
+  // budget_resumed migrated to the shared store-core dispatch table (#5556)
   server_error: handleServerError,
   server_shutdown: handleServerShutdown,
+  // #5163 (epic #5159): Control Room live activity tree.
+  activity_snapshot: handleActivitySnapshot,
+  activity_delta: handleActivityDelta,
+  // #5277: positive ack correlating a cancel_activity request to its outcome.
+  cancel_activity_ack: handleCancelActivityAck,
+  // #5510 (epic #5509): pairing-approval primitive — host-surface fan-out.
+  pair_pending: handlePairPending,
+  pair_resolved: handlePairResolved,
+  // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
+  host_status_snapshot: handleHostStatusSnapshot,
+  // Mailbox (#5914 follow-up): Control Room "Mailbox" tab survey snapshot.
+  mailbox_status_snapshot: handleMailboxStatusSnapshot,
+  session_preset_snapshot: handleSessionPresetSnapshot,
+  // #5253: self-hosted runner Control Room survey snapshot.
+  runner_status_snapshot: handleRunnerStatusSnapshot,
+  // #5499 (epic #5498): Control Room Integrations survey snapshot.
+  integration_status_snapshot: handleIntegrationStatusSnapshot,
+  skills_inventory_snapshot: handleSkillsInventorySnapshot,
+  // #5500: positive ack correlating an integration_action (repo-memory
+  // Reindex) request to its outcome.
+  integration_action_ack: handleIntegrationActionAck,
+  // #5547: one-shot session-summary result; resolves the pending summarize
+  // promise so the create-session flow can open with the brief seeded.
+  summarize_session_result: handleSummarizeSessionResult,
 };
 
 // ---------------------------------------------------------------------------
@@ -1748,9 +2828,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   // #3899 — any activity event also dismisses an outstanding inactivity
   // warning: by definition the silence has ended, so the chip should
   // disappear without waiting for the user to dismiss it manually.
+  //
+  // #4466 — gate on the replay set. switch_session on the server replays
+  // every past event in the target session through this handler, and a
+  // replayed tool_start / message / result is NOT fresh activity. Without
+  // this gate the act of switching tabs:
+  //   1) bumps lastClientActivityAt to Date.now(), so "Working… last
+  //      activity Ns ago" resets to 1s no matter how idle the session was;
+  //   2) wipes inactivityWarning, so the "Agent quiet for 46m 32s · Status
+  //      update?" chip disappears without the user ever seeing it again.
+  // The live activity events that arrive AFTER history_replay_end removes
+  // the session from the set still bump correctly — verified by the
+  // regression-guard tests in message-handler.test.ts.
+  //
+  // #4493 — gate per target session id (Set membership), not a module flag.
+  // `replayHistory()` chunks over setImmediate, so live broadcasts from
+  // session B can interleave with A's replay. A module-wide boolean would
+  // wrongly suppress B's live activity bump for the duration of A's replay.
   if (isActivityEvent(msg.type)) {
     const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
-    if (targetId && get().sessionStates[targetId]) {
+    if (targetId && get().sessionStates[targetId] && !_replayingSessions.has(targetId)) {
       updateSession(targetId, (ss) => {
         const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
         if (ss.inactivityWarning) patch.inactivityWarning = null;
@@ -1759,7 +2856,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
   }
 
-  // Dispatch to the handler map first — extracted, self-contained cases.
+  // #5556 — shared dispatch table first. A hit handles the message and
+  // returns; a miss falls through to the dashboard's own HANDLERS map +
+  // switch below, keeping migration incremental.
+  if (runDispatch(_dispatchTable, msg, _dispatchAdapter)) return;
+
+  // Dispatch to the handler map next — extracted, self-contained cases.
   const handler = HANDLERS[msg.type];
   if (handler) {
     handler(msg, get, set, ctx);
@@ -1769,100 +2871,108 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
   switch (msg.type) {
 
     case 'auth_ok': {
-      // Reset replay flags — fresh auth means clean slate
-      _receivingHistoryReplay = false;
+      // Reset replay flags — fresh auth means clean slate (#4493: clear the
+      // per-session replaying set so a reconnect doesn't leave stale ids
+      // gating future activity bumps).
+      _replayingSessions.clear();
+      // #5555.4 — clear any in-progress replay BASELINE (a rebuild that never
+      // saw its history_replay_end before the socket dropped). Cursors are
+      // intentionally RETAINED so this reconnect's replay can be incremental.
+      resetReplayReconcile();
+      // #5555.5 — a successful auth is the ONLY proof the link is healthy, so
+      // reset the close/error-path backoff ladder here (not on socket-open). A
+      // socket that opens but never authenticates keeps climbing the ladder.
+      resetReconnectAttempt();
+      // #5721 (item 2) — auth_ok is the authoritative handshake-completion frame
+      // (the issue calls it out by name); a discrete key_exchange round-trip, when
+      // it happens, only ever FOLLOWS a successful auth_ok. Clear the handshake
+      // timer here so the (healthy) encryption sub-handshake isn't counted against
+      // the budget. Eager-encryption and no-encryption connects never send
+      // key_exchange, so this is the single authoritative clear.
+      clearHandshakeTimer();
       // Track this URL as successfully connected
       lastConnectedUrl = ctx.url;
-      // Extract server context fields via shared handler (#3102)
-      const authPayload = sharedAuthOk(msg);
-      const authServerMode = authPayload.serverMode;
-      const authSessionCwd = authPayload.sessionCwd;
-      const authDefaultCwd = authPayload.defaultCwd;
-      const authServerVersion = authPayload.serverVersion;
-      const authLatestVersion = authPayload.latestVersion;
-      const authServerCommit = authPayload.serverCommit;
-      const authProtocolVersion = authPayload.protocolVersion;
-      // #3760: server-advertised inactivity timeout. Older servers omit this
-      // field — we leave it null and ActivityIndicator falls back to its
-      // hardcoded reference timeout. Mirror the server's Number.isFinite
-      // guard so Infinity/NaN never reach the store (the server would have
-      // rejected them upstream, but clients shouldn't trust the wire).
-      const authResultTimeoutMs =
-        typeof msg.resultTimeoutMs === 'number' &&
-        Number.isFinite(msg.resultTimeoutMs) &&
-        msg.resultTimeoutMs > 0
-          ? msg.resultTimeoutMs
-          : null;
-      // Parse connected clients list with self-detection via clientId
-      const myClientId = typeof msg.clientId === 'string' ? msg.clientId : null;
-      const rawClients = Array.isArray(msg.connectedClients) ? msg.connectedClients : [];
-      const clients: ConnectedClient[] = rawClients
-        .filter((c: unknown): c is { clientId: string } => !!c && typeof c === 'object' && typeof (c as Record<string, unknown>).clientId === 'string')
-        .map((c: { clientId: string; deviceName?: string; deviceType?: string; platform?: string }) => ({
-          clientId: c.clientId,
-          deviceName: typeof c.deviceName === 'string' ? c.deviceName : null,
-          deviceType: (['phone', 'tablet', 'desktop', 'unknown'].includes(c.deviceType ?? '') ? c.deviceType : 'unknown') as ConnectedClient['deviceType'],
-          platform: typeof c.platform === 'string' ? c.platform : 'unknown',
-          isSelf: c.clientId === myClientId,
-        }));
+      // #4766: full wire-shape decode lives in the shared parser
+      // (handleAuthOk + parseConnectedClients). The dashboard assembles the
+      // platform-specific `set()` patch from the parsed payload below.
+      const auth = sharedAuthOk(msg);
+      const clients = sharedParseConnectedClients(msg.connectedClients, auth.myClientId);
 
-      // Parse web feature status from auth_ok
-      const webFeaturesRaw = msg.webFeatures as Record<string, unknown> | undefined;
-      const webFeatures = webFeaturesRaw ? {
-        available: !!webFeaturesRaw.available,
-        remote: !!webFeaturesRaw.remote,
-        teleport: !!webFeaturesRaw.teleport,
-      } : { available: false, remote: false, teleport: false };
-
-      // #3272: parse server-advertised capability map. Older servers
-      // omit the field; treat absence as "no advertised capabilities"
-      // so feature-gated UI hides itself fail-closed (rather than
-      // silently no-oping clicks against unimplemented WS handlers).
-      // Coerce values to boolean so a malformed entry can't accidentally
-      // enable a gate.
-      const capabilitiesRaw = msg.capabilities as Record<string, unknown> | undefined;
-      const serverCapabilities: Record<string, boolean> = {};
-      if (capabilitiesRaw && typeof capabilitiesRaw === 'object' && !Array.isArray(capabilitiesRaw)) {
-        for (const [k, v] of Object.entries(capabilitiesRaw)) {
-          serverCapabilities[k] = v === true;
-        }
+      // #5281 ③ PR 2 — a pairing handshake issues a session token in auth_ok;
+      // adopt it as the effective token so reconnects authenticate normally.
+      // For the normal token-auth path `auth.sessionToken` is null and this is
+      // just `ctx.token`.
+      const effectiveToken = auth.sessionToken ?? ctx.token;
+      // Persist the issued session token onto the active registry entry (which
+      // was added with an empty token by pairServer) so connectToServer/
+      // switchServer reuse it later.
+      const pairedServerId = get().activeServerId;
+      if (auth.sessionToken && pairedServerId) {
+        get().updateServer(pairedServerId, { token: auth.sessionToken });
       }
+
+      // #5356: exposure snapshot (non-loopback bind / public quick tunnel).
+      // Read off the raw message — the auth_ok schema is passthrough and the
+      // shared parser predates the field. Absent/malformed → null (no banner).
+      const rawExposure = (msg as { exposure?: { lanBind?: unknown; quickTunnel?: unknown } }).exposure;
+      const serverExposure =
+        rawExposure && typeof rawExposure === 'object'
+          ? { lanBind: rawExposure.lanBind === true, quickTunnel: rawExposure.quickTunnel === true }
+          : null;
+
+      // #5821: billing-canary snapshot seed from auth_ok. Validated via the
+      // shared schema so a malformed/absent field → null (no banner). Live
+      // changes arrive via the `billing_canary` broadcast handled below.
+      const rawBillingCanary = (msg as { billingCanary?: unknown }).billingCanary;
+      const billingCanarySeed = rawBillingCanary
+        ? (BillingCanarySnapshotSchema.safeParse(rawBillingCanary).success
+            ? BillingCanarySnapshotSchema.parse(rawBillingCanary)
+            : null)
+        : null;
 
       // On reconnect, preserve messages and terminal buffer
       const connectedState = {
         connectionPhase: 'connected' as const,
         viewingCachedSession: false,
         wsUrl: ctx.url,
-        apiToken: ctx.token,
+        apiToken: effectiveToken,
         socket: ctx.socket,
         claudeReady: false,
-        serverMode: authServerMode,
-        sessionCwd: authSessionCwd,
-        defaultCwd: authDefaultCwd,
-        serverVersion: authServerVersion,
-        latestVersion: authLatestVersion,
-        serverCommit: authServerCommit,
-        serverProtocolVersion: authProtocolVersion,
-        serverResultTimeoutMs: authResultTimeoutMs,
+        serverMode: auth.serverMode,
+        sessionCwd: auth.sessionCwd,
+        defaultCwd: auth.defaultCwd,
+        serverVersion: auth.serverVersion,
+        latestVersion: auth.latestVersion,
+        serverCommit: auth.serverCommit,
+        serverProtocolVersion: auth.protocolVersion,
+        serverResultTimeoutMs: auth.resultTimeoutMs,
+        streamStallTimeoutMs: auth.streamStallTimeoutMs,
         streamingMessageId: null,
-        myClientId: myClientId,
+        myClientId: auth.myClientId,
         connectedClients: clients,
         connectionError: null as string | null,
         connectionRetryCount: 0,
         // Clear shutdown / startup state on successful connect
         serverPhase: null,
         tunnelProgress: null,
+        serverExposure,
+        billingCanary: billingCanarySeed,
         shutdownReason: null,
         restartEtaMs: null,
         restartingSince: null,
-        webFeatures,
-        serverCapabilities,
+        webFeatures: auth.webFeatures,
+        serverCapabilities: auth.serverCapabilities,
       };
       if (ctx.isReconnect) {
         set(connectedState);
       } else {
         set({
           ...connectedState,
+          // #5356: a fresh (non-reconnect) connection re-surfaces the
+          // exposure banner; silent reconnects keep the user's dismissal.
+          exposureBannerDismissed: false,
+          // #5821: same for the billing banner — fresh connect re-surfaces it.
+          billingBannerDismissed: false,
           messages: [],
           terminalBuffer: '',
           terminalRawBuffer: '',
@@ -1872,21 +2982,110 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           customAgents: [],
         });
       }
-      // Start client-side heartbeat for dead connection detection
-      startHeartbeat(ctx.socket);
+      // #5555 — fold the static permission-mode enum out of auth_ok when the
+      // server provided it, so we don't have to wait for the discrete
+      // `available_permission_modes` burst frame. Older servers omit the field
+      // (null) and the discrete frame still lands; new servers send both and
+      // this just wins the race harmlessly (idempotent set).
+      if (auth.availablePermissionModes) {
+        set({ availablePermissionModes: auth.availablePermissionModes });
+      }
 
-      // Initiate key exchange if server requires encryption
-      if (msg.encryption === 'required') {
-        _pendingKeyPair = createKeyPair();
-        _pendingSalt = generateConnectionSalt();
-        // Send key_exchange plaintext (before encryption is active)
-        ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey, salt: _pendingSalt }));
-        // Post-auth messages will be sent after key_exchange_ok arrives
-      } else {
-        // No encryption — send post-auth messages immediately
+      // #5555 (auth_bootstrap) — when the server advertises the bootstrap
+      // capability it pushes an `auth_bootstrap` burst frame carrying the
+      // provider / slash-command / agent lists right after auth_ok. In that
+      // case we SKIP the 3 connect-time list requests (they arrive unsolicited
+      // in the burst). Older servers don't set the flag, so we request as
+      // before. The list_* request paths stay live for post-connect refreshes.
+      _serverWillBootstrap = auth.serverCapabilities.authBootstrap === true;
+      const sendConnectListRequests = () => {
+        if (_serverWillBootstrap) return;
         wsSend(ctx.socket, { type: 'list_providers' });
         wsSend(ctx.socket, { type: 'list_slash_commands' });
         wsSend(ctx.socket, { type: 'list_agents' });
+      };
+
+      // Start client-side heartbeat for dead connection detection
+      startHeartbeat(ctx.socket);
+
+      // #5614 — close the plaintext-auth_ok downgrade cell. If this connection is
+      // PINNED, a non-`required` auth_ok is a downgrade attempt (a MITM forging a
+      // plaintext auth_ok would otherwise skip the pin check that lives inside the
+      // encryption branch below). Refuse BEFORE that branch — fail closed, same
+      // terminal "identity refused" path as a signature mismatch. Unpinned
+      // connections fall through and keep TOFU (encryption optional) as before.
+      if (!enforceEncryptionGateOrRefuse(ctx, auth.encryption)) {
+        _pendingKeyPair = null;
+        _pendingSalt = null;
+        break;
+      }
+
+      // Initiate key exchange if server requires encryption
+      if (auth.encryption === 'required') {
+        // #5555 (eager key exchange) — the ephemeral keypair + salt were
+        // already generated and sent WITH the auth message (socket.onopen →
+        // prepareEagerKeyExchange), stashed on _pendingKeyPair / _pendingSalt.
+        // If the server honoured the eager path it returns its public key in
+        // auth_ok; derive the shared key immediately and start the burst a full
+        // RTT earlier than the discrete handshake.
+        //
+        // #5555 follow-up (hardening) — `auth.serverPublicKey` is shared-parser
+        // normalized (empty/non-string → null) but a non-empty MALFORMED value
+        // (bad base64 / wrong length) still passes that filter and makes
+        // `deriveSharedKey` throw. The discrete `key_exchange_ok` handler
+        // guards against a bad key; mirror that here by wrapping the eager
+        // derivation in try/catch and FALLING BACK to the discrete handshake
+        // on any failure instead of letting the throw tear down the connection.
+        let eagerEstablished = false;
+        if (auth.serverPublicKey && _pendingKeyPair) {
+          // #5536 — verify the server's signed exchange key against the pinned
+          // (or pairing-time) identity BEFORE deriving the shared key. On a
+          // mismatch this closes the socket + surfaces the refusal; abort.
+          if (!verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig)) {
+            _pendingKeyPair = null;
+            _pendingSalt = null;
+            break;
+          }
+          try {
+            const rawSharedKey = deriveSharedKey(auth.serverPublicKey, _pendingKeyPair.secretKey);
+            const encryptionKey = _pendingSalt
+              ? deriveConnectionKey(rawSharedKey, _pendingSalt)
+              : rawSharedKey;
+            _encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
+            _pendingKeyPair = null;
+            _pendingSalt = null;
+            eagerEstablished = true;
+            console.log('[crypto] E2E encryption established (eager)');
+            // Burst un-gated: server already activated encryption after auth_ok.
+            sendConnectListRequests();
+            resetClientVisibleMemo();
+            if (typeof document !== 'undefined') {
+              sendClientVisible(ctx.socket, document.visibilityState === 'visible');
+            }
+          } catch (err) {
+            // Malformed eager key — discard any partial state and fall through
+            // to the discrete handshake below (regenerating the keypair if the
+            // eager attempt consumed it).
+            console.warn('[crypto] Eager key derivation failed, falling back to discrete key_exchange', err);
+            _encryptionState = null;
+          }
+        }
+        if (!eagerEstablished) {
+          // Fallback (old server / no eager key / eager derivation failed): the
+          // keypair is still stashed from onopen — send the discrete
+          // key_exchange. If onopen never ran (defensive) or the eager attempt
+          // nulled it, regenerate so we never send an empty handshake.
+          if (!_pendingKeyPair) {
+            _pendingKeyPair = createKeyPair();
+            _pendingSalt = generateConnectionSalt();
+          }
+          // Send key_exchange plaintext (before encryption is active)
+          ctx.socket.send(JSON.stringify({ type: 'key_exchange', publicKey: _pendingKeyPair.publicKey, salt: _pendingSalt }));
+          // Post-auth messages will be sent after key_exchange_ok arrives
+        }
+      } else {
+        // No encryption — send post-auth messages immediately
+        sendConnectListRequests();
         // #3671: server defaults visible=true on a fresh connect; sync if we
         // reconnected while the tab was hidden so completion pushes fire.
         resetClientVisibleMemo();
@@ -1894,19 +3093,27 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           sendClientVisible(ctx.socket, document.visibilityState === 'visible');
         }
       }
-      // Save for quick reconnect
-      saveConnection(ctx.url, ctx.token);
-      set({ savedConnection: { url: ctx.url, token: ctx.token } });
+      // Save for quick reconnect (the issued session token, when paired).
+      saveConnection(ctx.url, effectiveToken);
+      set({ savedConnection: { url: ctx.url, token: effectiveToken } });
       break;
     }
 
     case 'key_exchange_ok': {
       if (_pendingKeyPair) {
-        const { publicKey: serverPublicKey } = sharedKeyExchangeOk(msg);
+        const { publicKey: serverPublicKey, serverKeySig } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
           set({ connectionPhase: 'disconnected', socket: null });
+          _pendingKeyPair = null;
+          _pendingSalt = null;
+          break;
+        }
+        // #5536 — verify the server's signed exchange key against the pinned (or
+        // pairing-time) identity BEFORE deriving the shared key. On a mismatch
+        // this closes the socket + surfaces the refusal; abort the handshake.
+        if (!verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig)) {
           _pendingKeyPair = null;
           _pendingSalt = null;
           break;
@@ -1918,11 +3125,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         _encryptionState = { sharedKey: encryptionKey, sendNonce: 0, recvNonce: 0 };
         _pendingKeyPair = null;
         _pendingSalt = null;
+        // #5721 (item 2) — defensive: auth_ok already cleared the handshake timer
+        // (it always precedes this discrete round-trip), but clear again here so a
+        // future reordering that makes the encryption sub-handshake the real
+        // completion point can't leave a timer to fire spuriously. Idempotent.
+        clearHandshakeTimer();
         console.log('[crypto] E2E encryption established');
-        // Now send the post-auth messages that were deferred
-        wsSend(ctx.socket, { type: 'list_providers' });
-        wsSend(ctx.socket, { type: 'list_slash_commands' });
-        wsSend(ctx.socket, { type: 'list_agents' });
+        // Now send the post-auth messages that were deferred. #5555: skip the
+        // 3 list requests when the server advertised the auth_bootstrap
+        // capability (the burst frame already carries that data, queued behind
+        // encryption and decrypted once this handshake completes).
+        if (!_serverWillBootstrap) {
+          wsSend(ctx.socket, { type: 'list_providers' });
+          wsSend(ctx.socket, { type: 'list_slash_commands' });
+          wsSend(ctx.socket, { type: 'list_agents' });
+        }
         // #3671: sync visibility once encryption is established (mirrors the
         // unencrypted auth_ok path above).
         resetClientVisibleMemo();
@@ -1943,6 +3160,43 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'pair_fail': {
+      // #5281 ③ PR 2 — pairing rejected (invalid/expired/already-used id, rate
+      // limited, pairing disabled). The pendingPairingId was already consumed on
+      // send. pairServer optimistically added a still-tokenless registry entry;
+      // pairing failed before a session token was issued, so drop the dead entry.
+      ctx.socket.close();
+      set({ connectionPhase: 'disconnected', socket: null });
+      const { reason } = sharedPairFail(msg, 'unknown');
+      const failedServerId = get().activeServerId;
+      // Capture the failed host BEFORE removing the optimistic entry, so the
+      // approval-gated path below can re-open the request-pair flow for it.
+      const failedEntry = failedServerId
+        ? get().serverRegistry.find((s) => s.id === failedServerId)
+        : undefined;
+      if (failedEntry && !failedEntry.token) get().removeServer(failedServerId!);
+
+      // #5513 (epic #5509) — the redeemed ?pair= link was approval-gated (a
+      // Discord-delivered link). Possession of the link is never sufficient: the
+      // device must REQUEST pairing and the host must approve it. Transparently
+      // fall into the request-pair UX (RequestPairPanel) for the same host
+      // instead of dead-ending on an alert. Old/other surfaces that don't read
+      // pendingApprovalPairHost still see the legible reason via the alert below.
+      if (reason === 'requires_approval' && failedEntry?.wsUrl) {
+        set({ pendingApprovalPairHost: { name: failedEntry.name, wsUrl: failedEntry.wsUrl } });
+        break;
+      }
+
+      if (!ctx.silent) {
+        // Reason parse shared via store-core (#5454). The dashboard keeps its
+        // plain `Pairing failed: <reason>` copy — the friendly
+        // PAIR_FAIL_MESSAGES strings are QR-flow wording ("Scan the latest QR
+        // code…") that doesn't fit this paste-a-pairing-URL surface.
+        _adapters.alert.alert('Pairing Failed', `Pairing failed: ${reason}`);
+      }
+      break;
+    }
+
     case 'server_mode': {
       const { mode } = sharedServerMode(msg);
       if (mode) {
@@ -1956,110 +3210,232 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // --- Multi-session messages ---
 
     case 'session_list': {
-      const sessionList = sharedSessionList(msg);
-      if (sessionList) {
-        // GC persisted messages for sessions that dropped out of the list
-        const prevSessionIds = Object.keys(get().sessionStates);
-        const newSessionIdSet = new Set(sessionList.map((s) => s.sessionId));
-        const removedIds = prevSessionIds.filter((id) => !newSessionIdSet.has(id));
-        for (const prevId of removedIds) {
-          void clearPersistedSession(prevId);
+      // #4767: centralised dispatch — store-core precomputes GC + new-session
+      // ids + conversationId / cumulativeUsage / pendingShells patch maps;
+      // the consumer applies them with platform-specific side-effects
+      // (dashboard's activeModel lookup + isBusy → isIdle resync stay here).
+      const initialActiveId = get().activeSessionId;
+      const patches = sharedBuildSessionListPatches(
+        msg,
+        Object.keys(get().sessionStates),
+        initialActiveId,
+      );
+      if (!patches) break;
+      const {
+        sessionList,
+        removedIds,
+        newSessionIds,
+        conversationIdPatches,
+        cumulativeUsagePatches,
+        backgroundShellBuilders,
+      } = patches;
+      // GC persisted messages for sessions that dropped out of the list
+      for (const prevId of removedIds) {
+        void clearPersistedSession(prevId);
+      }
+      // Batch in-memory cleanup into a single state update
+      if (removedIds.length > 0) {
+        const patch: Partial<ConnectionState> = {};
+        const newStates = { ...get().sessionStates };
+        for (const id of removedIds) {
+          delete newStates[id];
         }
-        // Batch in-memory cleanup into a single state update
-        if (removedIds.length > 0) {
-          const patch: Partial<ConnectionState> = {};
-          const newStates = { ...get().sessionStates };
-          for (const id of removedIds) {
-            delete newStates[id];
-          }
-          patch.sessionStates = newStates;
-          // If the active session was removed, switch to next available
-          if (get().activeSessionId && removedIds.includes(get().activeSessionId!)) {
-            const remaining = Object.keys(newStates);
-            const nextId = remaining.length > 0 ? remaining[0] : null;
-            patch.activeSessionId = nextId;
-            if (nextId && newStates[nextId]) {
-              const ss = newStates[nextId];
-              patch.messages = ss.messages;
-              patch.streamingMessageId = ss.streamingMessageId;
-              patch.claudeReady = ss.claudeReady;
-              patch.activeModel = ss.activeModel;
-              patch.permissionMode = ss.permissionMode;
-              patch.contextUsage = ss.contextUsage;
-              patch.lastResultCost = ss.lastResultCost;
-              patch.lastResultDuration = ss.lastResultDuration;
-              patch.isIdle = ss.isIdle;
-            } else {
-              patch.messages = [];
-              patch.streamingMessageId = null;
-              patch.claudeReady = false;
-              patch.activeModel = null;
-              patch.permissionMode = null;
-              patch.contextUsage = null;
-              patch.lastResultCost = null;
-              patch.lastResultDuration = null;
-              patch.isIdle = true;
-            }
-          }
-          set(patch);
+        patch.sessionStates = newStates;
+        // #5163: drop the Control Room activity tree for any session that
+        // dropped out of the list so a closed session's tree doesn't linger.
+        let nextActivity = get().activity;
+        for (const id of removedIds) {
+          nextActivity = clearSessionActivity(nextActivity, id);
         }
-        set({ sessions: sessionList });
-        // Sync activeModel from session list to prevent dropdown reset.
-        // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
-        // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
-        const activeSessionId = get().activeSessionId;
-        if (activeSessionId) {
-          const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
-          if (activeSessionInfo?.model) {
-            const fullId = activeSessionInfo.model as string;
-            const models = get().availableModels;
-            const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
-            set({ activeModel: matched ? matched.id : fullId });
+        if (nextActivity !== get().activity) patch.activity = nextActivity;
+        // If the active session was removed, switch to next available
+        if (initialActiveId && removedIds.includes(initialActiveId)) {
+          const remaining = Object.keys(newStates);
+          const nextId = remaining.length > 0 ? remaining[0] : null;
+          patch.activeSessionId = nextId;
+          if (nextId && newStates[nextId]) {
+            const ss = newStates[nextId];
+            patch.messages = ss.messages;
+            patch.streamingMessageId = ss.streamingMessageId;
+            patch.claudeReady = ss.claudeReady;
+            patch.activeModel = ss.activeModel;
+            patch.permissionMode = ss.permissionMode;
+            patch.contextUsage = ss.contextUsage;
+            patch.lastResultCost = ss.lastResultCost;
+            patch.lastResultDuration = ss.lastResultDuration;
+            patch.isIdle = ss.isIdle;
+          } else {
+            patch.messages = [];
+            patch.streamingMessageId = null;
+            patch.claudeReady = false;
+            patch.activeModel = null;
+            patch.permissionMode = null;
+            patch.contextUsage = null;
+            patch.lastResultCost = null;
+            patch.lastResultDuration = null;
+            patch.isIdle = true;
           }
         }
-        // Initialize session state for any new sessions not yet tracked
+        set(patch);
+      }
+      set({ sessions: sessionList });
+      // Sync activeModel from session list to prevent dropdown reset.
+      // session_list sends full model IDs (e.g. claude-sonnet-4-5-20250929) but the
+      // dropdown uses short IDs (e.g. sonnet). Resolve via availableModels lookup.
+      const activeSessionId = get().activeSessionId;
+      if (activeSessionId) {
+        const activeSessionInfo = sessionList.find((s: { sessionId?: string }) => s.sessionId === activeSessionId);
+        if (activeSessionInfo?.model) {
+          const fullId = activeSessionInfo.model as string;
+          const models = get().availableModels;
+          const matched = models.find((m) => m.fullId === fullId || m.id === fullId);
+          set({ activeModel: matched ? matched.id : fullId });
+        }
+      }
+      // Initialize session state for any new sessions not yet tracked.
+      // #4639: seed `isIdle` from the server's authoritative `isBusy` so a
+      // fresh tab / new-session entry reflects the real working state
+      // instead of defaulting to `isIdle: true` and silently dropping the
+      // Working banner until the next live event arrives.
+      if (newSessionIds.length > 0) {
         const currentStates = get().sessionStates;
         const newInitStates = { ...currentStates };
-        let initStatesChanged = false;
-        for (const s of sessionList) {
-          if (!newInitStates[s.sessionId]) {
-            newInitStates[s.sessionId] = createEmptySessionState();
-            initStatesChanged = true;
+        const sessionsBySid = new Map(sessionList.map((s) => [s.sessionId, s]));
+        for (const sid of newSessionIds) {
+          if (!newInitStates[sid]) {
+            const fresh = createEmptySessionState();
+            const s = sessionsBySid.get(sid);
+            if (s && typeof s.isBusy === 'boolean') fresh.isIdle = !s.isBusy;
+            newInitStates[sid] = fresh;
           }
         }
-        if (initStatesChanged) {
-          set({ sessionStates: newInitStates });
-        }
-        // Sync conversationId from session list into session states
-        for (const s of sessionList) {
-          if (s.conversationId && get().sessionStates[s.sessionId]) {
-            updateSession(s.sessionId, (ss) =>
-              ss.conversationId !== s.conversationId ? { conversationId: s.conversationId } : {}
-            );
-          }
+        set({ sessionStates: newInitStates });
+      }
+      // #4639: resync `isIdle` on EXISTING session states against the
+      // snapshot's `isBusy`. Without this, a session that became busy on
+      // the server while the dashboard's local handlers missed the flip
+      // (tab swap during a long turn, peer-tab triggered the work, race
+      // between agent_busy and history_replay) shows the wrong banner and
+      // the wrong Send/Stop button. The snapshot is the source of truth.
+      for (const s of sessionList) {
+        if (typeof s.isBusy !== 'boolean') continue;
+        if (!get().sessionStates[s.sessionId]) continue;
+        const desiredIsIdle = !s.isBusy;
+        updateSession(s.sessionId, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
+      }
+      // Sync conversationId from session list into session states
+      for (const [sid, cid] of conversationIdPatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          ss.conversationId !== cid ? { conversationId: cid } : {}
+        );
+      }
+      // #4073: seed cumulativeUsage from the snapshot so refreshing the
+      // dashboard mid-session shows the running total without waiting
+      // for the next session_usage event to land. listSessions on the
+      // server emits the field with zero defaults when no result has
+      // landed yet — `cumulativeUsage` is undefined only when an older
+      // server omits it entirely. Six-field equality short-circuit lives
+      // in store-core via {@link sharedCumulativeUsageEquals} (#4767).
+      for (const [sid, snapshot] of cumulativeUsagePatches) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) =>
+          sharedCumulativeUsageEquals(ss.cumulativeUsage, snapshot)
+            ? {}
+            : { cumulativeUsage: snapshot }
+        );
+      }
+      // #4307: seed pendingBackgroundShells from the snapshot so a
+      // fresh tab / reconnect catches up to any sessions already
+      // waiting on background work without needing the next
+      // background_work_changed event to arrive. The
+      // `handleBackgroundWorkChanged` builder does the
+      // same-reference short-circuit so duplicate seeds don't
+      // re-render. The field is optional on `SessionInfo` because
+      // older servers omit it; treat `undefined` as "no waiting
+      // work" (empty array passthrough).
+      for (const [sid, builder] of backgroundShellBuilders) {
+        if (!get().sessionStates[sid]) continue;
+        updateSession(sid, (ss) => {
+          const next = builder.applyTo(ss.pendingBackgroundShells);
+          return next === ss.pendingBackgroundShells
+            ? {}
+            : { pendingBackgroundShells: next };
+        });
+      }
+      break;
+    }
+
+    // session_context — migrated to the shared store-core dispatch table (#5618)
+
+    case 'monthly_budget': {
+      // #5665 — machine-wide monthly programmatic-credit meter snapshot/event.
+      // Sent on connect and after each programmatic-credit-billed turn. Store
+      // the latest snapshot for the sidebar meter, and fire a one-time info
+      // toast when the server reports a fresh threshold crossing
+      // (justWarned/justExceeded — latched once per month server-side, so the
+      // toast never spams turn-over-turn while over the threshold).
+      const month = typeof msg.month === 'string' ? msg.month : null;
+      if (month) {
+        const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
+        const numOrNull = (v: unknown): number | null =>
+          v === null ? null : typeof v === 'number' && Number.isFinite(v) ? v : null;
+        const spentUsd = num(msg.spentUsd);
+        const budgetUsd = numOrNull(msg.budgetUsd);
+        getStore().setState({
+          monthlyBudget: {
+            month,
+            spentUsd,
+            turnsBilled: num(msg.turnsBilled),
+            budgetUsd,
+            warningPercent: num(msg.warningPercent),
+            percent: numOrNull(msg.percent),
+            warning: msg.warning === true,
+            exceeded: msg.exceeded === true,
+          },
+        });
+        const cap = budgetUsd != null ? `$${budgetUsd.toFixed(2)}` : '';
+        const spent = `$${spentUsd.toFixed(2)}`;
+        if (msg.justExceeded === true) {
+          get().addInfoNotification(
+            `Monthly programmatic-credit budget exceeded — ${spent}${cap ? ` of ${cap}` : ''} of your credit pool spent this month (chroxy-observed).`,
+          );
+        } else if (msg.justWarned === true) {
+          const pct = numOrNull(msg.percent);
+          get().addInfoNotification(
+            `Monthly credit budget at ${pct != null ? `${Math.round(pct)}%` : 'the warning threshold'} — ${spent}${cap ? ` of ${cap}` : ''} spent this month (chroxy-observed).`,
+          );
         }
       }
       break;
     }
 
-    case 'session_context': {
-      const { sessionId: ctxSessionId, patch } = sharedSessionContext(msg, get().activeSessionId);
-      if (ctxSessionId && get().sessionStates[ctxSessionId]) {
-        updateSession(ctxSessionId, () => patch);
+    case 'session_activity': {
+      // #4639: server-emitted busy/idle broadcast (ws-forwarding.js fires it
+      // on stream_start and result for every session, to every authenticated
+      // client). Pre-fix the dashboard had no handler, so a peer tab driving
+      // the session — or this tab's own session_list snapshot — was the only
+      // way to learn about busy state changes for non-active sessions. That
+      // gap is what made the Working banner desync after a tab swap.
+      //
+      // Defensive: ignore if either field is missing/wrong type, and skip
+      // unknown sessions (session_list is responsible for seeding new
+      // entries — we don't want session_activity racing it).
+      const activitySessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const activityIsBusy = typeof msg.isBusy === 'boolean' ? msg.isBusy : null;
+      if (activitySessionId && activityIsBusy !== null && get().sessionStates[activitySessionId]) {
+        const desiredIsIdle = !activityIsBusy;
+        updateSession(activitySessionId, (ss) =>
+          ss.isIdle === desiredIsIdle ? {} : { isIdle: desiredIsIdle }
+        );
       }
       break;
     }
 
-    case 'conversation_id': {
-      // Parser is shared via store-core; the session-existence guard and the
-      // updateSession call stay here. Note: this handler does NOT fall back
-      // to activeSessionId — a missing sessionId skips the patch entirely.
-      const { sessionId: convSessionId, conversationId } = sharedConversationId(msg);
-      if (convSessionId && get().sessionStates[convSessionId]) {
-        updateSession(convSessionId, () => ({ conversationId }));
-      }
-      break;
-    }
+    // conversation_id — migrated to the shared dispatch table (#5556)
+
 
     case 'evaluate_draft_result': {
       // #3068: route to the resolver registered by the matching evaluateDraft()
@@ -2093,16 +3469,152 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // platform-specific surfaces (notification, alert, server error banner)
       // stay here.
       const parsed = sharedSessionError(msg, get().activeSessionId);
+      // #5277: clear pending "cancelling" state so the ActivityTree button
+      // recovers. CANCEL_ACTIVITY_FAILED echoes the exact sessionId+activityId;
+      // SESSION_NOT_FOUND means the whole session is gone, so no cancel for it
+      // can resolve — drop all of its pending cancels.
+      if (parsed.code === 'CANCEL_ACTIVITY_FAILED' && typeof msg.sessionId === 'string' && typeof msg.activityId === 'string') {
+        clearCancellingActivity(get, set, msg.sessionId, msg.activityId);
+      } else if (parsed.code === 'SESSION_NOT_FOUND') {
+        clearCancellingForSession(get, set, parsed.attemptedSessionId ?? undefined);
+      } else if (parsed.code === 'SUMMARIZE_FAILED' && typeof msg.requestId === 'string') {
+        // #5547: a failed summarize_session echoes the requestId — reject the
+        // pending promise so the awaiting create-session flow surfaces the
+        // (curated, leak-free) message. Return early: the generic toast below
+        // would double-report; the caller decides how to surface it.
+        rejectSummarizeRequest(msg.requestId, parsed.message || 'Could not summarize this session.');
+        return;
+      } else if (parsed.code === 'INTEGRATION_ACTION_FAILED' && typeof msg.repoPath === 'string') {
+        // #5500/#5502: a failed integration action echoes the exact repoPath
+        // (and action) — clear that row's pending state and surface the
+        // reason inline (the generic branch below still raises the toast,
+        // matching the CANCEL_ACTIVITY_FAILED precedent). Routed by the
+        // echoed action so a rerun failure can't clear a reindex pending;
+        // an unknown future action's failure touches neither bucket (the
+        // generic toast below still fires).
+        if (msg.action === 'repo_relay_rerun') {
+          resolveRelayRerun(get, set, msg.repoPath, {
+            error: parsed.message || 'Re-run failed.',
+          });
+        } else if (msg.action === 'repo_memory_reindex') {
+          resolveReindex(get, set, msg.repoPath, {
+            counts: null,
+            error: parsed.message || 'Reindex failed.',
+          });
+        }
+      }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;
         if (crashedId && get().sessionStates[crashedId]) {
           updateSession(crashedId, () => ({ health: 'crashed' as const }));
           pushSessionNotification(crashedId, 'error', 'Session crashed');
         }
+      } else if (parsed.code === 'SESSION_NOT_FOUND') {
+        // #4982 — dashboard's persisted `activeSessionId` points at a
+        // pre-restart session id that no longer exists after
+        // `session-manager.restoreState()` regenerated ids on the daemon
+        // side (#4979). Without clearing the stale id, the next user send
+        // trips the same error in a loop and the operator stays wedged.
+        //
+        // The SessionNotFoundChip reads `sessionNotFoundError` from the
+        // store and renders an actionable banner over the empty-state
+        // pane. The toast still fires so the operator sees the immediate
+        // signal too, but the loop stops because activeSessionId is gone
+        // and the next send addresses a different (operator-picked) id.
+        get().setSessionNotFoundError({
+          attemptedSessionId: parsed.attemptedSessionId ?? null,
+          message: parsed.message ?? 'Session not found.',
+        });
+        set({ activeSessionId: null });
+        if (parsed.message) {
+          _adapters.alert.alert('Session Restarted', parsed.message);
+          get().addServerError(parsed.message);
+        }
+      } else if (parsed.category === 'input_conflict') {
+        // #5281 ①.3 — an expected "can't send right now" event, NOT a failure:
+        // either another device's request is mid-flight, or this session is
+        // still evaluating a previous draft. The generic branch below would
+        // raise a modal alert + red serverError, which is the wrong register.
+        // Instead: drop the stranded optimistic user message (its send was
+        // rejected) + its thinking spinner, and surface a calm, transient
+        // notice using the server's specific reason.
+        //
+        // sessionId resolution leans on the invariant that the dashboard only
+        // ever sends to (and optimistically records on) its active session —
+        // sendInput sets payload.sessionId = activeSessionId — so the echoed
+        // sessionId is where the ghost lives. Revisit if a multi-session send
+        // path is ever added.
+        const conflictSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : get().activeSessionId;
+        const rejectedId = typeof msg.clientMessageId === 'string' && msg.clientMessageId.length > 0
+          ? msg.clientMessageId
+          : null;
+        // filterThinking drops the spinner immediately (no 5s safety-net wait);
+        // the id filter removes the ghost send when the server echoed which
+        // message it rejected — but ONLY the optimistic user_input at that id,
+        // never a colliding message of another type.
+        const dropGhost = (messages: ChatMessage[]) =>
+          filterThinking(messages).filter(
+            (m) => !(rejectedId && m.id === rejectedId && m.type === 'user_input'),
+          );
+        if (conflictSessionId && get().sessionStates[conflictSessionId]) {
+          updateSession(conflictSessionId, (ss) => ({
+            messages: dropGhost(ss.messages),
+            streamingMessageId: ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+          }));
+        } else {
+          // Root-level (CLI single-session) store mode: addUserMessage put the
+          // optimistic entry on the top-level messages/streamingMessageId, so
+          // clean those instead of a per-session slot.
+          set((state: ConnectionState) => ({
+            messages: dropGhost(state.messages),
+            streamingMessageId: state.streamingMessageId === 'pending' ? null : state.streamingMessageId,
+          }));
+        }
+        // Prefer the server's specific reason (cross-device vs evaluator lock);
+        // fall back to a variant-neutral notice for an older server.
+        get().addInfoNotification(
+          parsed.message || 'Your message wasn’t sent — the session is busy. Wait for it to finish, or interrupt the current run.',
+        );
       } else if (parsed.message) {
         _adapters.alert.alert('Session Error', parsed.message);
         get().addServerError(parsed.message);
       }
+      break;
+    }
+
+    case 'session_stopped': {
+      // #4878: quiet, informational confirmation when CliSession exits
+      // cleanly after a user-initiated Stop. The wire path was wired in
+      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
+      // ServerSessionStoppedSchema). Routed through `addInfoNotification`
+      // (info-level toast, not the red `addServerError` reserved for
+      // crashes / STREAM_ERROR / ABORT) so the operator gets a positive
+      // "you clicked Stop and the session did indeed stop" confirmation.
+      //
+      // A non-zero exit code is surfaced as a small diagnostic suffix
+      // (e.g. "Session stopped. (exit 143)" for SIGTERM). Code 0 is the
+      // common clean-exit case and gets no decoration — the bare
+      // "Session stopped." carries the full signal there. Missing code
+      // (future in-process providers per the #4756 follow-up) is also
+      // bare; surfacing "(exit undefined)" would be noisier than useful.
+      //
+      // #5454: parse + session patch shared via store-core (same handler the
+      // app uses; it also tightens the code guard with Number.isInteger so a
+      // fractional/NaN code renders bare instead of "(exit 1.5)"). The patch
+      // sets `stoppedAt`/`stoppedCode` on the target session — already part
+      // of the dashboard's BaseSessionState shape (#4879 parity) and cleared
+      // by `handleClaudeReady` exactly as on the app. The info toast stays
+      // dashboard-specific (#4878).
+      const stoppedPatch = sharedSessionStopped(msg, get().activeSessionId);
+      const stoppedTarget = stoppedPatch.sessionId;
+      if (stoppedTarget && get().sessionStates[stoppedTarget]) {
+        updateSession(stoppedTarget, () => stoppedPatch.patch);
+      }
+      const stoppedCode = stoppedPatch.patch.stoppedCode as number | null;
+      const stoppedMessage = stoppedCode != null && stoppedCode !== 0
+        ? `Session stopped. (exit ${stoppedCode})`
+        : 'Session stopped.';
+      get().addInfoNotification(stoppedMessage);
       break;
     }
 
@@ -2111,22 +3623,39 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'history_replay_start': {
       // Parser is shared via store-core; flag mutation stays at this call
       // site (module-level state, not store state).
-      const { fullHistory, sessionId: replayTargetId } = sharedHistoryReplayStart(
+      const { fullHistory, sessionId: replayTargetId, latestSeq } = sharedHistoryReplayStart(
         msg,
         get().activeSessionId,
       );
-      _receivingHistoryReplay = true;
-      // Full history replay (from request_full_history): clear messages before replay
-      if (fullHistory) {
-        if (replayTargetId && get().sessionStates[replayTargetId]) {
-          updateSession(replayTargetId, () => ({ messages: [] }));
-        }
+      // #4493 — track per-session. Falls back to activeSessionId via
+      // sharedHistoryReplayStart, matching the gate's targetId resolution.
+      if (replayTargetId) _replayingSessions.add(replayTargetId);
+      // #5555.4 — DO NOT wipe messages here. For a full rebuild we record the
+      // pre-replay baseline and keep the existing messages visible; the
+      // authoritative replayed set is appended after the baseline and swapped
+      // in atomically at history_replay_end (no blank flash). For a delta
+      // replay (cursor honoured) this is purely append-only. `latestSeq` seeds
+      // the cursor so an already-current empty replay still advances it.
+      {
+        const curLen =
+          (replayTargetId && get().sessionStates[replayTargetId]?.messages.length) || 0;
+        reconcileReplayStart(replayTargetId, fullHistory, curLen, latestSeq);
       }
       // Clear transient state — these events are not replayed from history,
       // so any surviving entries are stale from pre-disconnect
       updateActiveSession((ss) => {
         const patch: Partial<SessionState> = {};
         if (ss.activeAgents.length > 0) patch.activeAgents = [];
+        // #4466: preserve activeTools through the replay boundary. The
+        // earlier #4308 wipe rebuilt entries from replayed tool_start
+        // events with startedAt = Date.now(), so the "Running <tool> · Ns"
+        // pill restarted at 1s every time the user switched tabs. The
+        // in-flight set is authoritative (carried in-memory, not derivable
+        // from history), so keeping it intact preserves the elapsed-time
+        // clock. tool_result events that fire during replay still
+        // correctly drop resolved entries via sharedToolResult, and the
+        // dedup logic in sharedToolStart prevents replayed tool_start
+        // events from re-adding tools already in activeTools.
         if (ss.isPlanPending) {
           patch.isPlanPending = false;
           patch.planAllowedPrompts = [];
@@ -2138,7 +3667,37 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'history_replay_end':
       // Parser is shared via store-core; flag mutation stays here.
-      _receivingHistoryReplay = sharedHistoryReplayEnd().receivingHistoryReplay;
+      sharedHistoryReplayEnd();
+      // #4493 — remove this session id from the replaying set. Falls back
+      // to activeSessionId to mirror sharedHistoryReplayStart's resolution.
+      {
+        const endTargetId =
+          (typeof msg.sessionId === 'string' && msg.sessionId) || get().activeSessionId;
+        if (endTargetId) _replayingSessions.delete(endTargetId);
+        // #5555.4 — atomic swap for a full rebuild: replace messages with the
+        // appended replayed tail in ONE update (old prefix dropped here, not at
+        // start → no blank flash). reconcileReplayEnd also advances the cursor
+        // from `latestSeq`. Returns null for a delta replay (nothing to swap).
+        const endLatestSeq =
+          typeof msg.latestSeq === 'number' && Number.isFinite(msg.latestSeq)
+            ? msg.latestSeq
+            : undefined;
+        if (endTargetId && get().sessionStates[endTargetId]) {
+          const { swappedMessages } = reconcileReplayEnd(
+            endTargetId,
+            get().sessionStates[endTargetId]!.messages,
+            endLatestSeq,
+          );
+          if (swappedMessages) {
+            updateSession(endTargetId, () => ({
+              messages: swappedMessages as SessionState['messages'],
+            }));
+          }
+        } else {
+          // Session vanished mid-replay — still settle the cursor.
+          reconcileReplayEnd(endTargetId, [], endLatestSeq);
+        }
+      }
       // Mark all replayed prompts as answered — any prompt in history
       // has already been resolved by the server.
       updateActiveSession((ss) => {
@@ -2190,8 +3749,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // Resolve the cache used for replay-dedup (target session if known,
       // else the global message log).
       const targetState = targetId ? get().sessionStates[targetId] : null;
-      const cached = targetState ? targetState.messages : get().messages;
-      const result = sharedMessageHandler(msg, get().activeSessionId, _receivingHistoryReplay, cached);
+      // #5555.4 — during a FULL rebuild, dedup only against the appended replay
+      // tail (replayDedupCache slices off the about-to-be-discarded prefix) so a
+      // replayed entry isn't suppressed by an id in the prefix and then lost in
+      // the swap. For delta replay / no rebuild this returns the whole array.
+      const cached = replayDedupCache(
+        targetId,
+        targetState ? targetState.messages : get().messages,
+      );
+      // #4493 — dedup against history only when THIS message's session is
+      // currently replaying. A module-wide boolean would suppress live
+      // messages for session B while A replays.
+      const messageIsReplay = targetId ? _replayingSessions.has(targetId) : false;
+      // #5555.3 — advance this session's cursor as we apply a replayed entry.
+      if (messageIsReplay) recordHistorySeq(targetId, (msg as { historySeq?: unknown }).historySeq);
+      const result = sharedMessageHandler(msg, get().activeSessionId, messageIsReplay, cached);
       if (!result.shouldDispatch) break;
       const newMsg = result.chatMessage;
       if (targetId && get().sessionStates[targetId]) {
@@ -2213,25 +3785,32 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'result': {
       // Flush any buffered deltas before clearing streaming state
-      if (deltaFlushTimer) {
-        clearTimeout(deltaFlushTimer);
-      }
-      flushPendingDeltas();
+      deltaFlusher.flushNow();
       // Clean up permission boundary split tracking
       _postPermissionSplits.clear();
       _deltaIdRemaps.clear();
       const normalized = sharedResultUsage(msg, get().activeSessionId);
       const targetId = normalized.sessionId;
       // Resolve cost: server provides it for Claude; compute client-side for
-      // Codex/Gemini sessions that emit cost: null. The shared helper returns
-      // null when msg.cost is missing/non-numeric — fall back to client-side
-      // pricing only when we have a usage payload to work with.
+      // sessions whose provider really cannot return a cost number (Codex,
+      // Gemini). The provider gate is intentionally narrow — see
+      // CLIENT_ESTIMATED_COST_PROVIDERS — so a new server-side priced
+      // provider that just happens to emit `cost: null` momentarily (race,
+      // edge case) doesn't get a wrong client-side estimate written into
+      // its session state. The shared helper returns null when msg.cost
+      // is missing/non-numeric; we fall back to client-side pricing only
+      // when we have a usage payload AND the provider is on the list.
+      // #4206: this list is also imported by status-tooltips.ts so the
+      // "estimated client-side" tooltip wording can only diverge with an
+      // explicit double edit.
       let resolvedCost: number | null = normalized.lastResultCost;
       if (resolvedCost === null && normalized.contextUsage) {
-        const sessionModel = get().sessions.find(
+        const session = get().sessions.find(
           (s: SessionInfo) => s.sessionId === targetId,
-        )?.model ?? null;
-        if (sessionModel) {
+        );
+        const sessionModel = session?.model ?? null;
+        const sessionProvider = session?.provider ?? null;
+        if (sessionModel && sessionProvider && CLIENT_ESTIMATED_COST_PROVIDERS.has(sessionProvider)) {
           resolvedCost = calculateCost(
             sessionModel,
             normalized.contextUsage.inputTokens,
@@ -2252,10 +3831,31 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       if (targetId && get().sessionStates[targetId]) {
         // Force a new messages array reference so selectors detect the change,
         // even when flushPendingDeltas() was a no-op (timer already flushed).
-        updateSession(targetId, (ss) => ({
-          ...resultPatch,
-          messages: [...ss.messages],
-        }));
+        updateSession(targetId, (ss) => {
+          // #4308 — `result` is a guaranteed turn boundary; any still-tracked
+          // activeTools are a missed tool_result (server crash, dropped
+          // broadcast) and must be dropped so the activity indicator can't
+          // get stuck on a phantom "Running X". Mirror in agent_idle.
+          //
+          // #4466 — but ONLY for live result events. `result` events are
+          // recorded in the server's per-session history ring buffer
+          // (session-message-history.js) and replayed on switch_session via
+          // PROXIED_EVENTS (session-manager.js). Without this gate, every
+          // tab switch on a session that's completed at least one prior
+          // turn fires a replayed `result` that wipes the activeTools the
+          // history_replay_start guard is trying to preserve — the
+          // replayed in-flight tool_start then re-adds the entry with a
+          // fresh Date.now() startedAt, restoring the exact "Running X · 1s"
+          // clock-reset symptom #4466 set out to fix.
+          const patch: Partial<SessionState> = {
+            ...resultPatch,
+            messages: [...ss.messages],
+          };
+          // #4493 — gate per target session id. A live `result` for
+          // session B during A's replay must still sweep B's activeTools.
+          if (ss.activeTools.length > 0 && !_replayingSessions.has(targetId)) patch.activeTools = [];
+          return patch;
+        });
       } else {
         set((s) => ({ ...resultPatch, messages: [...s.messages] }));
       }
@@ -2271,43 +3871,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'confirm_permission_mode': {
-      const pending = sharedConfirmPermissionMode(msg);
-      if (pending) {
-        set({ pendingPermissionConfirm: pending });
-      }
-      break;
-    }
+    // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 
-    case 'agent_spawned': {
-      const builder = sharedAgentSpawned(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.activeAgents);
-          return next === ss.activeAgents ? {} : { activeAgents: next };
-        });
-      }
-      break;
-    }
 
-    case 'agent_completed': {
-      const builder = sharedAgentCompleted(msg, get().activeSessionId);
-      if (builder.sessionId && get().sessionStates[builder.sessionId]) {
-        updateSession(builder.sessionId, (ss) => {
-          const next = builder.applyTo(ss.activeAgents);
-          return next === ss.activeAgents ? {} : { activeAgents: next };
-        });
-      }
-      break;
-    }
-
-    case 'plan_started': {
-      const planStarted = sharedPlanStarted(msg, get().activeSessionId);
-      if (planStarted.sessionId && get().sessionStates[planStarted.sessionId]) {
-        updateSession(planStarted.sessionId, () => planStarted.patch);
-      }
-      break;
-    }
+    // agent_spawned / agent_completed / agent_event / background_work_changed /
+    // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'plan_ready': {
       const planReady = sharedPlanReady(msg, get().activeSessionId);
@@ -2317,16 +3885,51 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'inactivity_warning': {
-      // #3899 — server fired the soft check-in prompt. Store on the
-      // targeted session so the CheckInChip can render the prefab
-      // button. Activity event handler above clears this on the next
-      // stream_*/tool_*/result/message; sendInput clears it locally
-      // when the user actually sends a follow-up.
-      const warning = sharedInactivityWarning(msg, get().activeSessionId);
-      if (warning && warning.sessionId && get().sessionStates[warning.sessionId]) {
-        updateSession(warning.sessionId, () => warning.patch);
-      }
+    // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
+
+    case 'multi_question_intervention': {
+      // #4653 — chroxy's permission-hook (#4648) just denied a multi-question
+      // AskUserQuestion. Append a SessionIntervention entry so the
+      // FooterBar counter ticks, and on the FIRST such intervention per
+      // session push a one-time system ChatMessage explaining what
+      // happened (without it the deny is invisible — see v0.9.24
+      // dogfood feedback on #4653).
+      //
+      // applyInterventionBuilder dedups by toolUseId (a stuck model
+      // re-emitting the same payload won't double-count) and tells us
+      // whether this was the session's first intervention so the inline
+      // notice only fires once.
+      const builder = sharedMultiQuestionIntervention(msg, get().activeSessionId);
+      if (!builder) break;
+      const targetId = builder.sessionId;
+      if (!targetId) break;
+      const targetState = get().sessionStates[targetId];
+      if (!targetState) break;
+      const { interventions: nextInterventions, isFirst } = applyInterventionBuilder(
+        builder,
+        targetState.interventions,
+      );
+      // Skip the state mutation if nothing changed (dedup'd repeat) so React
+      // doesn't re-render the footer counter on every stuck-model re-emit.
+      if (nextInterventions === targetState.interventions) break;
+      updateSession(targetId, (ss) => {
+        if (isFirst) {
+          return {
+            interventions: nextInterventions,
+            messages: [
+              ...ss.messages,
+              {
+                id: nextMessageId('system'),
+                type: 'system',
+                content:
+                  "chroxy intercepted a multi-question form and asked the agent to break it into single questions.",
+                timestamp: Date.now(),
+              },
+            ],
+          };
+        }
+        return { interventions: nextInterventions };
+      });
       break;
     }
 
@@ -2340,10 +3943,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // append so the UI does not surface this as an error to the user.
         const alreadyResolved = Boolean(get().resolvedPermissions?.[expiredRequestId]);
         if (alreadyResolved) {
-          // Still dismiss any lingering notification banner for this request.
+          // #5008 — drain the banner stack without dropping the row from the
+          // widget's durable history. See handlePermissionResolved for the
+          // full rationale; this branch handles the #2833 race where expiry
+          // arrives after we already resolved locally. Single timestamp per
+          // mutation — see handlePermissionResolved for the pattern source.
+          const readStamp = Date.now();
           set((s) => ({
-            sessionNotifications: s.sessionNotifications.filter(
-              (n) => n.requestId !== expiredRequestId
+            sessionNotifications: s.sessionNotifications.map((n) =>
+              n.requestId === expiredRequestId && n.readAt === undefined
+                ? { ...n, readAt: readStamp }
+                : n
             ),
           }));
           // #2839: surface a user-centric info toast confirming the
@@ -2363,27 +3973,77 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             ),
           }));
         }
-        // Auto-dismiss matching notification banner (#1580)
+        // #5008 — drain banner without dropping widget history. Mark the
+        // matching row read; the banner filter (`readAt === undefined`)
+        // drops it and the widget keeps the entry as part of its durable
+        // intervention history. Updates the original #1580 auto-dismiss
+        // contract from "remove" to "mark-read-and-keep". Single timestamp
+        // per mutation — see handlePermissionResolved for the pattern source.
+        const readStamp = Date.now();
         set((s) => ({
-          sessionNotifications: s.sessionNotifications.filter(
-            (n) => n.requestId !== expiredRequestId
+          sessionNotifications: s.sessionNotifications.map((n) =>
+            n.requestId === expiredRequestId && n.readAt === undefined
+              ? { ...n, readAt: readStamp }
+              : n
           ),
         }));
       }
       break;
     }
 
-    case 'permission_rules_updated': {
-      // Server broadcasts the full rule set for a session after a successful
-      // set_permission_rules call. Store it on the session so "Allow for
-      // Session" (#2834) can append new rules without clobbering existing ones.
-      const { sessionId: rulesExplicitSessionId, rules } = sharedPermissionRulesUpdated(msg);
-      const rulesSessionId = rulesExplicitSessionId || get().activeSessionId;
-      if (rulesSessionId && get().sessionStates[rulesSessionId]) {
-        updateSession(rulesSessionId, () => ({ sessionRules: rules }));
+    case 'permission_timeout': {
+      // #5454: the dashboard previously dropped this event on the floor while
+      // the app handled it (the #2661 close-out flagged the gap). Not yet
+      // emitted by the server (see the handler-coverage SYNTHETIC_TYPES
+      // note) — wired up now for parity via the shared store-core handler so
+      // both clients react identically when the server grows the emit side.
+      const { requestId: timeoutRequestId, systemMessage: timeoutSystemMsg } =
+        sharedPermissionTimeout(msg);
+      if (timeoutRequestId) {
+        // Mark the matching prompt as auto-denied. Scan all session states
+        // first (the prompt may have been stored in any session — mirrors the
+        // handlePermissionResolved all-sessions search), then fall back to
+        // the flat messages array for sessions not in sessionStates.
+        const timeoutUpdater = (ss: { messages: ChatMessage[] }) => ({
+          messages: ss.messages.map((m) =>
+            m.requestId === timeoutRequestId && m.type === 'prompt'
+              ? { ...m, content: `${m.content}\n(Auto-denied — permission timed out)`, options: undefined }
+              : m
+          ),
+        });
+        const timeoutStates = get().sessionStates;
+        let timeoutFound = false;
+        for (const sid of Object.keys(timeoutStates)) {
+          if (timeoutStates[sid]?.messages.some((m) => m.requestId === timeoutRequestId)) {
+            updateSession(sid, timeoutUpdater);
+            timeoutFound = true;
+            break;
+          }
+        }
+        if (!timeoutFound) {
+          set({ messages: timeoutUpdater({ messages: get().messages }).messages });
+        }
+        // #5008 — drain the banner stack without dropping the row from the
+        // NotificationsWidget's durable history: stamp `readAt` instead of
+        // removing (see handlePermissionResolved for the pattern source).
+        const readStamp = Date.now();
+        set((s) => ({
+          sessionNotifications: s.sessionNotifications.map((n) =>
+            n.requestId === timeoutRequestId && n.readAt === undefined
+              ? { ...n, readAt: readStamp }
+              : n
+          ),
+        }));
       }
+      // Surface a dismissible error toast so the operator knows the
+      // permission was auto-denied (wording comes from the shared handler so
+      // the two clients stay in sync).
+      get().addServerError(timeoutSystemMsg.content);
       break;
     }
+
+    // permission_rules_updated — migrated to the shared dispatch table (#5556)
+
 
     case 'user_question': {
       const parsed = sharedUserQuestion(msg, get().activeSessionId);
@@ -2417,10 +4077,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         break;
       }
       if (phase === 'ready') {
-        set({
+        const readyPatch: Partial<ConnectionState> = {
           serverPhase: 'ready',
           tunnelProgress: null,
-        } as Partial<ConnectionState>);
+        };
+        // #5356: a quick tunnel coming up mid-connection makes the server
+        // publicly reachable — merge into the exposure snapshot so the
+        // warning banner appears even when auth_ok predated the tunnel.
+        if ((msg as { tunnelMode?: unknown }).tunnelMode === 'quick') {
+          const prevExposure = get().serverExposure;
+          readyPatch.serverExposure = {
+            lanBind: prevExposure?.lanBind ?? false,
+            quickTunnel: true,
+          };
+        }
+        set(readyPatch);
         break;
       }
 
@@ -2513,6 +4184,26 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else if (!primarySessionId || primarySessionId === 'default') {
         set({ primaryClientId });
+      }
+      break;
+    }
+
+    case 'session_role': {
+      // #5589 / #5281 — explicit primary-ownership. Derive THIS client's role
+      // by comparing the server-named primary to our own id (from auth_ok,
+      // stored flat as `myClientId`). Stored per-session on `sessionRole` to
+      // drive the ViewersIndicator's observer state + claim affordance, and we
+      // mirror `primaryClientId` so presence stays in sync without depending on
+      // a separate legacy `primary_changed`. Kept platform-local (not in the
+      // shared dispatch table) for the same reason `primary_changed` is — the
+      // app's dedicated multi-client store vs the dashboard's flat+per-session
+      // slots diverge (see dispatch-table.ts divergent-cases note).
+      const role = sharedSessionRole(msg, get().myClientId);
+      if (role.sessionId && get().sessionStates[role.sessionId]) {
+        updateSession(role.sessionId, () => ({
+          sessionRole: role.role,
+          primaryClientId: role.primaryClientId,
+        }));
       }
       break;
     }
@@ -2610,6 +4301,137 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'auth_bootstrap': {
+      // #5555 — connect-time bootstrap burst folds the provider / slash-command
+      // / agent lists into one server-initiated frame so the client skips its
+      // 3-request connect-time round trip. Apply each list through the SAME
+      // store mutations the discrete responses use.
+      const boot = sharedAuthBootstrap(msg);
+      // #5555 (sub-item 7): re-learn the live tunnel URL on every connect. If a
+      // quick-tunnel rotation happened while this dashboard was disconnected
+      // (so it missed the live `tunnel_url_changed` push), repoint the stored
+      // server entry to the working endpoint. No-op for the same-origin
+      // connection and for LAN entries.
+      if (boot.tunnelUrl) applyRotatedTunnelUrlDashboard(get, boot.tunnelUrl, null);
+      set({ availableProviders: boot.providers as ProviderInfo[] });
+      // Slash commands + agents are scoped to the connect-time active session.
+      // Guard against a stale burst: if a session switch already moved the
+      // active id off the burst's `sessionId`, skip the session-scoped lists
+      // (the post-switch flow re-requests them) but keep the server-wide
+      // provider list applied above.
+      const activeId = get().activeSessionId;
+      if (boot.sessionId && activeId && boot.sessionId !== activeId) break;
+      set({ slashCommands: boot.slashCommands as SlashCommand[] });
+      set({ customAgents: boot.agents as CustomAgent[] });
+      break;
+    }
+
+    case 'tunnel_url_changed': {
+      // #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL.
+      // Repoint the active server-registry entry so the next reconnect dials
+      // the working URL (and survives a tab refresh — localStorage-backed).
+      //
+      // A localhost dashboard (served by the local daemon, activeServerId ===
+      // null) keeps its socket across the rotation and so RELIABLY receives
+      // this push — but it dials window.location, not the tunnel, so the
+      // helper is a no-op for it. A remote/LAN dashboard reaches the server
+      // THROUGH the tunnel, so it usually will NOT receive this frame (the old
+      // tunnel just died); its durable recovery is the `tunnelUrl` in the
+      // auth_bootstrap burst on the next reconnect (handled above).
+      const rotated = sharedTunnelUrlChanged(msg);
+      if (rotated) applyRotatedTunnelUrlDashboard(get, rotated.url, rotated.previousUrl);
+      break;
+    }
+
+    case 'byok_credentials_status': {
+      // #4052: server replies after refresh / set / clear. The masked
+      // form is intentionally the only key-shaped string we ever store —
+      // never the raw value, even transiently.
+      // #4144: fileExists must flow through too — the stale-file notice
+      // and the Remove button are both gated on it. Hand-picking fields
+      // here silently dropped it before (caught by agent-review on
+      // PR #4174).
+      // #4141: validate the wire payload via the protocol Zod schema
+      // instead of raw `as` casts. A malformed server can no longer
+      // store `status: 'unknown'` into the store; safeParse failure
+      // logs a warn and leaves the store unchanged.
+      const parsed = ServerByokCredentialsStatusSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('byok_credentials_status: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const payload = parsed.data;
+      set({
+        byokCredentialsStatus: {
+          status: payload.status,
+          source: payload.source,
+          masked: payload.masked,
+          reason: payload.reason,
+          fileExists: payload.fileExists,
+        },
+      });
+      break;
+    }
+
+    case 'credentials_status': {
+      // #3855: generalized provider-credential snapshot. Emitted in reply to
+      // get_credentials_status and broadcast after every set/delete. The
+      // masked previews are the only key-shaped strings we ever store — never
+      // a raw value. Validate the wire payload via the protocol Zod schema so
+      // a malformed server can't poison the store.
+      const parsed = ServerCredentialsStatusSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('credentials_status: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const payload = parsed.data;
+      set({
+        credentialsStatus: {
+          credentials: payload.credentials.map((c) => ({
+            key: c.key,
+            provider: c.provider,
+            label: c.label,
+            kind: c.kind,
+            status: c.status,
+            source: c.source,
+            masked: c.masked,
+            oauth: c.oauth,
+          })),
+          fileExists: payload.fileExists,
+          fileError: payload.fileError ?? null,
+        },
+      });
+      break;
+    }
+
+    case 'credential_test_result': {
+      // #3855: per-key test outcome. Store keyed by credential key so each row
+      // renders its own inline result.
+      const parsed = ServerCredentialTestResultSchema.safeParse(msg);
+      if (!parsed.success) {
+        // eslint-disable-next-line no-console
+        console.warn('credential_test_result: invalid payload from server', parsed.error.issues);
+        break;
+      }
+      const payload = parsed.data;
+      set((state) => ({
+        credentialTestResults: {
+          ...state.credentialTestResults,
+          [payload.key]: {
+            ok: payload.ok,
+            error: payload.error,
+            model: payload.model,
+            latencyMs: payload.latencyMs,
+          },
+        },
+      }));
+      break;
+    }
+
+    // notification_prefs — migrated to the shared dispatch table (#5556 slice 2)
+
     case 'checkpoint_created': {
       const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
       if (next) set({ checkpoints: next });
@@ -2643,15 +4465,24 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'mcp_servers': {
-      const result = sharedMcpServers(msg, get().activeSessionId);
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => ({
-          mcpServers: result.patch.mcpServers as McpServer[],
-        }));
-      }
+    case 'session_persist_failed': {
+      // #5714/#5701: a session-list mutation (create/rename/destroy) could not be
+      // flushed to disk and will be lost on restart. The write is atomic so
+      // on-disk state isn't corrupted — this is purely the "your change wasn't
+      // saved" signal, surfaced as an error banner so the user isn't left
+      // silently believing it persisted.
+      const persistSid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
+      const persistName = typeof msg.name === 'string' ? msg.name : null;
+      const label = persistName ? `"${persistName}"` : (persistSid ? `session ${persistSid}` : 'your session change');
+      get().addServerError(
+        `Couldn't save ${label} — the change may be lost on restart. Check the daemon's disk space and write permissions.`,
+      );
+      // eslint-disable-next-line no-console
+      console.warn('[session_persist_failed]', { sessionId: persistSid, name: persistName });
       break;
     }
+
+    // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
     case 'cost_update': {
       const result = sharedCostUpdate(msg, get().activeSessionId);
@@ -2661,36 +4492,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'dev_preview': {
-      const builder = sharedDevPreview(msg, get().activeSessionId);
-      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
-      if (builder.sessionId && target) {
-        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
-      }
-      break;
-    }
-
-    case 'dev_preview_stopped': {
-      const builder = sharedDevPreviewStopped(msg, get().activeSessionId);
-      const target = builder.sessionId ? get().sessionStates[builder.sessionId] : undefined;
-      if (builder.sessionId && target) {
-        updateSession(builder.sessionId, (s) => builder.applyTo(s.devPreviews));
-      }
-      break;
-    }
+    // session_usage / session_cost_threshold_crossed / dev_preview /
+    // dev_preview_stopped — migrated to the shared dispatch table (#5556 slice 2)
 
     // -- Web tasks (Claude Code Web) --
 
-    case 'web_task_created':
-    case 'web_task_updated': {
-      const { task } = sharedWebTaskUpsert(msg);
-      if (!task) break;
-      set((state: ConnectionState) => {
-        const existing = state.webTasks.filter((t) => t.taskId !== task.taskId);
-        return { webTasks: [...existing, task] };
-      });
-      break;
-    }
+    // web_task_created / web_task_updated — migrated to the shared dispatch
+    // table (#5556 slice 4). Both were the byte-identical `sharedWebTaskUpsert`
+    // → filter-and-append upsert (identical to the app's), now run by the table
+    // via `_dispatchAdapter.updateState` (functional flat-state update).
 
     case 'web_task_error': {
       const { taskId: errTaskId, errorMessage, chatMessageContent } = sharedWebTaskError(msg);
@@ -2833,7 +4643,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     case 'error': {
       // Structured error response from a handler catch block.
       // Log it and surface it as a server error notification.
-      const { code: errCode, message: errMsg } = sharedError(msg);
+      // #4178: `fatal` is read off the typed parser return so dashboard
+      // + app share a single normalised shape (no `msg.fatal` reach-in,
+      // no per-client type guard, and a typo'd value can't silently
+      // degrade severity).
+      // #5039: `partialCost` carries the optional PR #5037 fold of
+      // parent + Task subagent rounds completed before the error fired.
+      // Pre-formatted with the shared helper so the dashboard toast and
+      // mobile alert show identical wording.
+      const { code: errCode, message: errMsg, fatal: errFatal, partialCost } = sharedError(msg);
+      const partialCostLine = partialCost ? formatPartialCostLine(partialCost) : undefined;
       console.error(`[ws] Server handler error [${errCode}]: ${errMsg}`);
       // #3588: clear any in-flight skill_trust_grant whose requestId
       // matches this error envelope so the SkillsPanel "Pending review"
@@ -2845,6 +4664,56 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const errReqId = typeof msg.requestId === 'string' ? msg.requestId : null;
       if (errReqId) {
         clearPendingTrustGrantByRequestId(errReqId, get);
+      }
+      // #5711 (Gap 2, client half): roll back the optimistic set_model when the
+      // server says it never applied (MODEL_NOT_APPLIED — e.g. a mid-turn
+      // change). Without this the dropdown keeps showing a model the session
+      // never switched to. Mirror handleModelChanged's session-vs-flat write so
+      // the revert lands exactly where the optimistic update did.
+      if (errCode === 'MODEL_NOT_APPLIED' && errReqId) {
+        const revert = consumePendingModelRevert(errReqId);
+        if (revert) {
+          if (revert.sessionId && get().sessionStates[revert.sessionId]) {
+            updateSession(revert.sessionId, () => ({ activeModel: revert.previousModel }));
+          } else {
+            set({ activeModel: revert.previousModel });
+          }
+        }
+      }
+      // #5716: roll back the optimistic set_permission_mode when the server says
+      // it never applied (PERMISSION_MODE_NOT_APPLIED — mid-turn or no-op). Mirror
+      // setPermissionMode's session-vs-flat optimistic write so the revert lands
+      // exactly where the optimistic update did. Critical for a rejected switch to
+      // 'auto'/bypass: without it the dropdown shows bypass the session never entered.
+      if (errCode === 'PERMISSION_MODE_NOT_APPLIED' && errReqId) {
+        const revert = consumePendingPermissionModeRevert(errReqId);
+        if (revert) {
+          if (revert.sessionId && get().sessionStates[revert.sessionId]) {
+            updateSession(revert.sessionId, () => ({ permissionMode: revert.previousMode }));
+          } else {
+            set({ permissionMode: revert.previousMode });
+          }
+          // #5722 review: also roll back the Shift+Tab toggle target. The
+          // optimistic setPermissionMode overwrote previousPermissionMode with the
+          // mode we tried to switch FROM (revert.previousMode); restore the value
+          // it had before. Compare-and-swap on that exact value so a later
+          // successful change (which re-set previousPermissionMode) is not clobbered.
+          if (revert.priorPreviousMode !== undefined && get().previousPermissionMode === revert.previousMode) {
+            set({ previousPermissionMode: revert.priorPreviousMode });
+          }
+        }
+      }
+      // #5731 T9: roll back the optimistic set_thinking_level when the server
+      // says it never applied (THINKING_LEVEL_NOT_APPLIED — invalid level,
+      // provider without thinking-level control, or a setThinkingLevel throw).
+      // thinkingLevel is per-session only (no flat ConnectionState mirror, unlike
+      // activeModel/permissionMode), so the revert writes to the session state —
+      // matching setThinkingLevel's optimistic updateActiveSession write.
+      if (errCode === 'THINKING_LEVEL_NOT_APPLIED' && errReqId) {
+        const revert = consumePendingThinkingLevelRevert(errReqId);
+        if (revert?.sessionId && get().sessionStates[revert.sessionId]) {
+          updateSession(revert.sessionId, () => ({ thinkingLevel: (revert.previousLevel ?? 'default') as SessionState['thinkingLevel'] }));
+        }
       }
       // #3570: skill_trust_grant INVALID_AUTHOR carries a structured
       // `actualAuthor` field (#3568, locked by
@@ -2896,7 +4765,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       } else {
         surfaced = errMsg;
       }
-      get().addServerError(surfaced, action);
+      // #4148: non-fatal server signals (MAX_TOOL_ROUNDS_REACHED and any
+      // future error envelope that sets fatal: false) render as warnings
+      // — yellow toast, role=status, less alarming — instead of the
+      // destructive red toast used for STREAM_ERROR / ABORT. The session
+      // remains usable; the toast is informational. errCode-list lets us
+      // keep the fatal: false check for future-proofing while still
+      // catching codes that don't carry the flag.
+      // #4178: `errFatal` is the typed (boolean | undefined) value from
+      // sharedError. A typo on the wire ('fatal': 'false') resolves to
+      // undefined, which falls back to the errCode-list — preserving
+      // the loud red toast instead of silently degrading.
+      const isNonFatal = errFatal === false || NON_FATAL_ERROR_CODES.has(errCode);
+      const severity: 'error' | 'warning' = isNonFatal ? 'warning' : 'error';
+      // #5039: thread the optional partial-cost sub-line through to the
+      // store. addServerError keeps it undefined for every pre-#5037
+      // error path so the existing toast layout is unchanged.
+      get().addServerError(surfaced, action, severity, partialCostLine);
       break;
     }
 

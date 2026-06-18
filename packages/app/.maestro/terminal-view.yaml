@@ -1,0 +1,140 @@
+appId: com.blamechris.chroxy
+name: TerminalView render + raw data forwarding (#4701)
+---
+
+# #4701 — End-to-end coverage for the TerminalView (xterm.js WebView)
+# render path. Unit + integration tests cover the imperative `write` +
+# `clear` handle and the message-handler's `case 'raw'` branch, but no
+# E2E ever switched to the Terminal mode toggle or asserted that the
+# WebView actually mounts when `viewMode === 'terminal'`. This flow
+# pins:
+#   (a) The Terminal mode button renders when `activeSession.hasTerminal`
+#       is true (mock-server now reports `hasTerminal: true`),
+#   (b) tapping the Terminal mode button sets `viewMode === 'terminal'`
+#       which renders the `<TerminalView />` branch in SessionScreen,
+#   (c) the `terminal-view` testID is reachable on the WebView wrapper
+#       (added in this PR to TerminalView.tsx),
+#   (d) the wire path message-handler `case 'raw'` →
+#       `appendTerminalData(data)` → the imperative `terminalWrite`
+#       callback fires without throwing (we don't introspect xterm.js
+#       inside the WebView — the testID on the wrapper is what we
+#       assert).
+#
+# Trigger: 'show-terminal' user input → mock-server emits a `raw` event
+# with ANSI-styled fixture text. The fixture seeding pattern is
+# documented in CLAUDE.md → "Fixture Seeding for Structured Renderers".
+#
+# Tested devices: portrait iPhone (iOS 17+). Mirrors chat-todolist /
+# stream-stall-chip flows.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Self-contained (no `runFlow: setup/...`) because the existing setup/
+# flows target Expo Go (appId host.exp.Exponent), whereas this needs
+# the chroxy dev client (com.blamechris.chroxy). Mirrors the
+# chat-todolist.yaml / stream-stall-chip.yaml structure.
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Verify the Terminal mode toggle is present — mock-server reports
+# `hasTerminal: true` so SessionScreen renders the Term button.
+- extendedWaitUntil:
+    visible:
+      id: "terminal-mode-button"
+    timeout: 5000
+
+# Tap Terminal mode — switches `viewMode === 'terminal'`.
+- tapOn:
+    id: "terminal-mode-button"
+- waitForAnimationToEnd
+
+# Assert the TerminalView root testID is reachable. This proves the
+# `<TerminalView />` branch of the SessionScreen render switch fired
+# (and the WebView wrapper mounted).
+- extendedWaitUntil:
+    visible:
+      id: "terminal-view"
+    timeout: 5000
+
+- takeScreenshot: terminal-view-mounted
+
+# Seed terminal data via the mock-server `show-terminal` trigger.
+# Send the trigger from the input bar — even in terminal viewMode the
+# input bar appends \r and forwards via `sendInput`, which the
+# mock-server's `case 'input'` handler reads and responds to with a
+# `raw` envelope. The store's `case 'raw'` handler calls
+# `appendTerminalData(data)` → the imperative `terminalWrite`
+# callback fires → xterm.js inside the WebView renders the text.
+#
+# Tap by the placeholder text, NOT `id: chat-message-input`: in
+# terminal viewMode the input is in newline mode (multiline TextInput
+# → UITextView), and XCUITest does not expose the testID on the empty
+# multiline field — the placeholder accessibilityText is the reliable
+# anchor (verified via `maestro hierarchy` on-device 2026-06-10).
+- tapOn:
+    text: "Message Claude..."
+- inputText: "show-terminal"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Re-assert the TerminalView is still mounted post-raw-write. The
+# WebView is not introspectable from Maestro (xterm.js text lives
+# inside a child <canvas>), so we cannot grep for the ANSI fixture
+# string itself — but the round-trip is exercised by the wire and
+# any throw inside `injectJavaScript` would surface as a JS error.
+- assertVisible:
+    id: "terminal-view"
+
+- takeScreenshot: terminal-view-after-raw-write

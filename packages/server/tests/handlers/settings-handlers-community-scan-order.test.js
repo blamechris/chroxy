@@ -20,7 +20,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, writeFileSync, mkdirSync, realpathSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 if (typeof mock.module !== 'function') {
   describe('_scanCommunityForSkillName deterministic order (#3549)', () => {
@@ -75,8 +75,16 @@ if (typeof mock.module !== 'function') {
 
   function makeCtx(sessions = new Map()) {
     const sent = []
-    return {
-      send: createSpy((_ws, msg) => { sent.push(msg) }),
+    return nsCtx({
+      // #5632: sendError now routes through ctx.transport.send. Mirror the real
+      // WsServer._send → ws.send step so the existing `ws._messages` assertions
+      // still observe error frames.
+      send: createSpy((_ws, msg) => {
+        sent.push(msg)
+        if (_ws && typeof _ws.send === 'function' && _ws.readyState === 1) {
+          _ws.send(JSON.stringify(msg))
+        }
+      }),
       broadcast: createSpy(() => {}),
       broadcastToSession: createSpy(() => {}),
       sessionManager: { getSession: createSpy((id) => sessions.get(id)) },
@@ -85,7 +93,7 @@ if (typeof mock.module !== 'function') {
       pendingPermissions: new Map(),
       permissions: null,
       _sent: sent,
-    }
+    })
   }
 
   function makeClient(overrides = {}) {

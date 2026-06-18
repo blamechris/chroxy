@@ -13,7 +13,13 @@ const log = createLogger('checkpoint')
 
 const execFileAsync = promisify(execFileCb)
 
-const CHECKPOINTS_DIR = join(homedir(), '.chroxy', 'checkpoints')
+// Resolve at call time, not module-load time, so tests that set
+// CHROXY_CONFIG_DIR in beforeEach are respected. Mirrors models.js and
+// connection-info.js (#4633).
+function defaultCheckpointsDir() {
+  const configDir = process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy')
+  return join(configDir, 'checkpoints')
+}
 const MAX_CHECKPOINTS_PER_SESSION = 50
 
 /**
@@ -60,16 +66,31 @@ async function acquireCwdLock(cwd) {
  * conversation ID, effectively branching the conversation.
  */
 export class CheckpointManager extends EventEmitter {
-  constructor() {
+  /**
+   * @param {object} [options]
+   * @param {string} [options.checkpointsDir] - Override the on-disk directory
+   *   for checkpoint state files. Defaults to `$CHROXY_CONFIG_DIR/checkpoints`
+   *   (or `~/.chroxy/checkpoints` when unset). Tests should pass a tmp
+   *   directory (or set `CHROXY_CONFIG_DIR`) to avoid contaminating the
+   *   developer's real state (#4633).
+   */
+  constructor(options = {}) {
     super()
     this._checkpoints = new Map() // sessionId -> Checkpoint[]
     this._counters = new Map() // sessionId -> monotonic counter for default names
+    this._checkpointsDir = options.checkpointsDir || defaultCheckpointsDir()
+    // #5335: refs whose `git tag -d` failed (cwd -> Set<gitRef>). These are
+    // KNOWN orphans — the checkpoint they backed was already removed — so they
+    // can be retried later without any speculative "is this tag still live?"
+    // guess (which would race in-flight tag creation and, since tags are
+    // repo-global, delete a sibling worktree's live ref).
+    this._failedRefDeletes = new Map()
     this._ensureDir()
   }
 
   _ensureDir() {
-    if (!existsSync(CHECKPOINTS_DIR)) {
-      mkdirSync(CHECKPOINTS_DIR, { recursive: true })
+    if (!existsSync(this._checkpointsDir)) {
+      mkdirSync(this._checkpointsDir, { recursive: true })
     }
   }
 
@@ -88,12 +109,12 @@ export class CheckpointManager extends EventEmitter {
     const checkpoints = this._getCheckpoints(sessionId)
 
     // Enforce max checkpoints — remove oldest if at limit
+    let evictedCwd = null
     if (checkpoints.length >= MAX_CHECKPOINTS_PER_SESSION) {
       const evicted = checkpoints.shift()
       if (evicted?.gitRef) {
-        this._deleteGitRef(evicted.cwd, evicted.gitRef).catch((err) => {
-          log.warn(`Failed to delete evicted git ref ${evicted.gitRef}: ${err.message} (non-critical, orphaned ref)`)
-        })
+        evictedCwd = evicted.cwd
+        this._deleteGitRefTracked(evicted.cwd, evicted.gitRef)
       }
     }
 
@@ -123,7 +144,22 @@ export class CheckpointManager extends EventEmitter {
     checkpoints.push(checkpoint)
     this._counters.set(sessionId, (this._counters.get(sessionId) || 0) + 1)
     this._checkpoints.set(sessionId, checkpoints)
-    this._persist(sessionId)
+    // #5731 (T3): the checkpoint exists in memory and is returned to the client,
+    // but if the disk write failed it'll be gone on restart — surface that so the
+    // user isn't told their rewind point is saved when it isn't.
+    if (!this._persist(sessionId)) {
+      this.emit('checkpoint_persist_failed', { sessionId, checkpointId: checkpoint.id, operation: 'create' })
+    }
+
+    // #5335: opportunistically retry any refs whose delete previously failed
+    // for this cwd, so transient `git tag -d` failures don't accrue. Race-free
+    // (only known orphans are retried) and fire-and-forget — never blocks or
+    // fails checkpoint creation.
+    if (evictedCwd) {
+      this.retryFailedRefDeletes(evictedCwd).catch((err) => {
+        log.warn(`retryFailedRefDeletes failed for ${evictedCwd}: ${err.message}`)
+      })
+    }
 
     this.emit('checkpoint_created', checkpoint)
     return checkpoint
@@ -197,14 +233,16 @@ export class CheckpointManager extends EventEmitter {
 
     // Clean up git ref if present
     if (checkpoint.gitRef) {
-      this._deleteGitRef(checkpoint.cwd, checkpoint.gitRef).catch((err) => {
-        log.warn(`Failed to delete git ref ${checkpoint.gitRef}: ${err.message} (non-critical, orphaned ref)`)
-      })
+      this._deleteGitRefTracked(checkpoint.cwd, checkpoint.gitRef)
     }
 
     checkpoints.splice(idx, 1)
     this._checkpoints.set(sessionId, checkpoints)
-    this._persist(sessionId)
+    // #5731 (T3): a failed write here means the deleted checkpoint reappears on
+    // restart — surface it rather than silently "deleting" something that comes back.
+    if (!this._persist(sessionId)) {
+      this.emit('checkpoint_persist_failed', { sessionId, checkpointId, operation: 'delete' })
+    }
   }
 
   /**
@@ -215,14 +253,12 @@ export class CheckpointManager extends EventEmitter {
     const checkpoints = this._getCheckpoints(sessionId)
     for (const cp of checkpoints) {
       if (cp.gitRef) {
-        this._deleteGitRef(cp.cwd, cp.gitRef).catch((err) => {
-          log.warn(`Failed to delete git ref ${cp.gitRef}: ${err.message} (non-critical, orphaned ref)`)
-        })
+        this._deleteGitRefTracked(cp.cwd, cp.gitRef)
       }
     }
     this._checkpoints.delete(sessionId)
 
-    const file = join(CHECKPOINTS_DIR, `${sessionId}.json`)
+    const file = join(this._checkpointsDir, `${sessionId}.json`)
     if (existsSync(file)) {
       try { unlinkSync(file) } catch { /* ignore */ }
     }
@@ -324,6 +360,11 @@ export class CheckpointManager extends EventEmitter {
    *      to overwrite all files in the working tree with the snapshot state.
    */
   async _restoreGitSnapshot(cwd, gitRef) {
+    // #5335: we auto-stash the user's pending changes BEFORE resolving the tag.
+    // If anything after the stash fails (e.g. a corrupt/missing ref), the work
+    // would be silently orphaned in a stash. Track whether we stashed so the
+    // catch can put it back instead of leaving the user wedged.
+    let stashed = false
     try {
       // Stash any pending changes before restoring
       const { stdout: status } = await execFileAsync(
@@ -333,6 +374,7 @@ export class CheckpointManager extends EventEmitter {
 
       if (status.trim()) {
         await execFileAsync(GIT, ['stash', 'push', '-u', '-m', 'chroxy: auto-stash before rewind'], { cwd })
+        stashed = true
       }
 
       // Resolve the tag to the snapshot commit SHA
@@ -347,7 +389,11 @@ export class CheckpointManager extends EventEmitter {
 
       const resolvedSha = snapshotSha.trim()
       if (resolvedSha === headCommit.trim()) {
-        // Tag points to HEAD — working tree is already at the correct state
+        // Tag points to HEAD — working tree is already at the correct state.
+        // Leave the auto-stash parked, exactly like the checkout success path
+        // below: "restore to checkpoint" sets the user's pending changes aside
+        // (recoverable via the stash) rather than re-applying them over the
+        // restored state.
         return
       }
 
@@ -357,14 +403,75 @@ export class CheckpointManager extends EventEmitter {
       await execFileAsync(GIT, ['checkout', resolvedSha, '--', '.'], { cwd })
     } catch (err) {
       log.warn(`Failed to restore git snapshot: ${err.message}`)
+      // #5335: don't strand the auto-stashed changes. The common failure mode
+      // is a corrupt/missing ref, which throws at rev-parse BEFORE any checkout
+      // ran — so the tree is clean and the stash pops back cleanly.
+      if (stashed) {
+        try {
+          await execFileAsync(GIT, ['stash', 'pop'], { cwd })
+        } catch (popErr) {
+          // Pop failed (rare: a conflicting checkout ran before the failure).
+          // Point the user at the stash so the work isn't lost.
+          throw new Error(
+            `Git restore failed: ${err.message}. Your pending changes were auto-stashed but could not be re-applied (${popErr.message}) — recover them with \`git stash list\` / \`git stash pop\` (message: "chroxy: auto-stash before rewind")`
+          )
+        }
+        // Pop succeeded — the user's working state is intact.
+        throw new Error(`Git restore failed: ${err.message} (your pending changes were preserved)`)
+      }
       throw new Error(`Git restore failed: ${err.message}`)
     }
   }
 
+  // Delete a checkpoint's git tag. Returns true if the tag is gone afterwards
+  // (deleted now, or already absent), false if the delete genuinely failed
+  // (e.g. a transient lock) so the caller can record it for retry.
   async _deleteGitRef(cwd, gitRef) {
     try {
       await execFileAsync(GIT, ['tag', '-d', gitRef], { cwd })
-    } catch { /* tag may already be gone */ }
+      return true
+    } catch (err) {
+      // "tag '...' not found" → already gone; treat as success.
+      if (/not found|No such|unknown tag/i.test(err.message || '')) return true
+      return false
+    }
+  }
+
+  // #5335: best-effort delete of a checkpoint's ref that records the ref for a
+  // later retry if the delete fails, so a transient `git tag -d` failure does
+  // not leak a `chroxy-checkpoint/*` tag forever.
+  _deleteGitRefTracked(cwd, gitRef) {
+    this._deleteGitRef(cwd, gitRef).then((ok) => {
+      if (!ok) {
+        this._recordFailedRefDelete(cwd, gitRef)
+        log.warn(`Failed to delete git ref ${gitRef} (recorded for retry)`)
+      }
+    })
+  }
+
+  _recordFailedRefDelete(cwd, gitRef) {
+    if (!this._failedRefDeletes.has(cwd)) this._failedRefDeletes.set(cwd, new Set())
+    this._failedRefDeletes.get(cwd).add(gitRef)
+  }
+
+  /**
+   * Retry deleting refs whose previous delete failed for `cwd`. Race-free: only
+   * KNOWN orphans (a checkpoint we already removed) are retried — never a
+   * speculative classification of a repo-global tag — so this can never delete
+   * an in-flight or sibling-worktree checkpoint's ref.
+   * @param {string} cwd
+   * @returns {Promise<number>} number of orphaned refs successfully cleared
+   */
+  async retryFailedRefDeletes(cwd) {
+    const set = this._failedRefDeletes.get(cwd)
+    if (!set || set.size === 0) return 0
+    let cleared = 0
+    for (const ref of [...set]) {
+      if (await this._deleteGitRef(cwd, ref)) { set.delete(ref); cleared++ }
+    }
+    if (set.size === 0) this._failedRefDeletes.delete(cwd)
+    if (cleared > 0) log.info(`Cleared ${cleared} previously-orphaned checkpoint ref(s) in ${cwd}`)
+    return cleared
   }
 
   // -- Persistence --
@@ -377,7 +484,7 @@ export class CheckpointManager extends EventEmitter {
   }
 
   _load(sessionId) {
-    const file = join(CHECKPOINTS_DIR, `${sessionId}.json`)
+    const file = join(this._checkpointsDir, `${sessionId}.json`)
     try {
       if (existsSync(file)) {
         const data = JSON.parse(readFileSync(file, 'utf8'))
@@ -390,13 +497,19 @@ export class CheckpointManager extends EventEmitter {
     }
   }
 
+  // #5731 (T3): returns true on success, false if the write failed (disk full,
+  // locked file, read-only home). Callers emit `checkpoint_persist_failed` on
+  // false so the user is told their checkpoint wasn't durable instead of believing
+  // it was — the same silent-loss class fixed for session state in #5714.
   _persist(sessionId) {
-    const file = join(CHECKPOINTS_DIR, `${sessionId}.json`)
+    const file = join(this._checkpointsDir, `${sessionId}.json`)
     const data = { version: 1, checkpoints: this._getCheckpoints(sessionId) }
     try {
       writeFileRestricted(file, JSON.stringify(data, null, 2))
+      return true
     } catch (err) {
-      log.warn(`Failed to persist checkpoint: ${err.message}`)
+      log.warn(`Failed to persist checkpoint for ${sessionId}: ${err.message}`)
+      return false
     }
   }
 }

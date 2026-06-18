@@ -19,7 +19,7 @@ import {
 import { clientHasCapability } from '../src/handler-utils.js'
 import nacl from 'tweetnacl'
 import naclUtil from 'tweetnacl-util'
-import { deriveSharedKey, deriveConnectionKey, generateConnectionSalt } from '@chroxy/store-core/crypto'
+import { deriveSharedKey, deriveConnectionKey, generateConnectionSalt, createSigningKeyPair, verifyExchangeKeySignature } from '@chroxy/store-core/crypto'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -245,6 +245,52 @@ describe('handleAuthMessage', () => {
       assert.equal(onAuthSuccess.callCount, 1)
     })
 
+    // #5985b (epic #5982) — the WS primary-token primitive. A token is primary
+    // iff it is NOT a PairingManager-issued session token (mirrors the HTTP
+    // _validatePrimaryBearerAuth). Gates the user-shell create + terminal_*.
+    it('marks a non-pairing token as primary (isPrimaryToken === true)', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        pairingManager: { isSessionTokenValid: () => false, getSessionIdForToken: () => null },
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'primary-token' })
+      assert.equal(client.isPrimaryToken, true)
+    })
+
+    it('marks a pairing-issued session token as NOT primary', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        // Unbound linking-mode pairing token: valid + isSessionTokenValid true,
+        // but getSessionIdForToken null (no boundSessionId). Must NOT be primary.
+        pairingManager: { isSessionTokenValid: () => true, getSessionIdForToken: () => null },
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'pairing-token' })
+      assert.equal(client.isPrimaryToken, false)
+      assert.equal(client.boundSessionId, undefined, 'unbound pairing token has no boundSessionId')
+    })
+
+    it('treats every client as primary in no-auth mode', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: false,
+        isTokenValid: () => false,
+        pairingManager: { isSessionTokenValid: () => true, getSessionIdForToken: () => null },
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'any' })
+      assert.equal(client.isPrimaryToken, true)
+    })
+
+    it('marks the primary as primary when there is no pairing manager at all', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+        pairingManager: null,
+      })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'primary-token' })
+      assert.equal(client.isPrimaryToken, true)
+    })
+
     it('clears auth failures on successful auth', () => {
       const authFailures = new Map([['127.0.0.1', { count: 3, blockedUntil: 0 }]])
       const { ctx, ws } = makeAuthCtx({
@@ -254,6 +300,109 @@ describe('handleAuthMessage', () => {
       })
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
       assert.equal(authFailures.has('127.0.0.1'), false)
+    })
+
+    // #5555 (eager key exchange) — when the auth message carries both
+    // eagerPublicKey and eagerSalt, stash them on the client so
+    // sendPostAuthInfo can derive the shared key inline.
+    it('stashes eager key-exchange fields when both are present', () => {
+      const { ctx, ws, client } = makeAuthCtx({
+        authRequired: true,
+        isTokenValid: () => true,
+      })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        eagerPublicKey: 'client-pub-key',
+        eagerSalt: 'client-salt',
+      })
+      assert.deepEqual(client.eagerKeyExchange, {
+        publicKey: 'client-pub-key',
+        salt: 'client-salt',
+      })
+    })
+
+    it('does NOT stash eager fields when only one is present (old/partial client)', () => {
+      for (const partial of [
+        { eagerPublicKey: 'pub-only' },
+        { eagerSalt: 'salt-only' },
+        { eagerPublicKey: '', eagerSalt: 'salt' },
+        { eagerPublicKey: 'pub', eagerSalt: '' },
+        {}, // neither — the old-client wire shape
+      ]) {
+        const { ctx, ws, client } = makeAuthCtx({
+          authRequired: true,
+          isTokenValid: () => true,
+        })
+        handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token', ...partial })
+        assert.equal(
+          client.eagerKeyExchange,
+          undefined,
+          `partial eager fields ${JSON.stringify(partial)} must not stash`,
+        )
+      }
+    })
+  })
+
+  // #5555.3 (lastSeq delta replay) — the per-session history cursor map stashed
+  // off `auth` so replayHistory can send only entries newer than the cursor.
+  describe('history cursors (#5555.3)', () => {
+    it('stashes a valid per-session history cursor map', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        historyCursors: { 'sess-1': 42, 'sess-2': 0 },
+      })
+      assert.deepEqual(client.historyCursors, { 'sess-1': 42, 'sess-2': 0 })
+    })
+
+    it('leaves historyCursors undefined for old clients (field absent)', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token' })
+      assert.equal(client.historyCursors, undefined)
+    })
+
+    it('rejects auth when a cursor value is invalid (negative / non-finite / non-integer / non-numeric)', () => {
+      // AuthSchema validates historyCursors as
+      // z.record(z.string(), z.number().int().nonnegative()), so a single bad
+      // VALUE fails the whole safeParse → auth_fail (invalid_message), not a
+      // silent filter. The handler's defensive value-filter loop is therefore
+      // belt-and-suspenders only — these inputs never reach it. We pin the real
+      // wire behaviour here so a future schema relaxation can't regress to
+      // silently honouring a malformed cursor.
+      for (const bad of [-1, Infinity, NaN, 1.5, 'x', null]) {
+        const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+        handleAuthMessage(ctx, ws, {
+          type: 'auth',
+          token: 'good-token',
+          historyCursors: { ok: 7, bad },
+        })
+        const last = ws.lastSent()
+        assert.equal(last?.type, 'auth_fail', `bad value ${String(bad)} must reject auth`)
+        assert.equal(last?.reason, 'invalid_message')
+        assert.equal(client.authenticated, false)
+        assert.equal(client.historyCursors, undefined)
+      }
+    })
+
+    it('honours a fully-valid cursor map (handler filter passes every entry through)', () => {
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, {
+        type: 'auth',
+        token: 'good-token',
+        historyCursors: { ok: 7, zero: 0 },
+      })
+      assert.deepEqual(client.historyCursors, { ok: 7, zero: 0 })
+    })
+
+    it('caps the number of honoured cursors at MAX_HISTORY_CURSORS', () => {
+      const big = {}
+      for (let i = 0; i < 200; i++) big[`s${i}`] = i + 1
+      const { ctx, ws, client } = makeAuthCtx({ authRequired: true, isTokenValid: () => true })
+      handleAuthMessage(ctx, ws, { type: 'auth', token: 'good-token', historyCursors: big })
+      assert.ok(client.historyCursors)
+      assert.equal(Object.keys(client.historyCursors).length, 64)
     })
   })
 
@@ -631,6 +780,8 @@ describe('handleAuthMessage', () => {
     it('sets boundSessionId when pairingManager returns a session binding', () => {
       const pairingManager = {
         getSessionIdForToken: (token) => token === 'paired-tok' ? 'session-123' : null,
+        // paired-tok is a pairing-issued (session-bound) token.
+        isSessionTokenValid: (token) => token === 'paired-tok',
       }
       const { ctx, ws, client } = makeAuthCtx({
         authRequired: true,
@@ -640,11 +791,14 @@ describe('handleAuthMessage', () => {
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'paired-tok' })
       assert.equal(client.authenticated, true)
       assert.equal(client.boundSessionId, 'session-123')
+      assert.equal(client.isPrimaryToken, false, 'a pairing-bound token is not primary')
     })
 
     it('does not set boundSessionId when token has no session binding', () => {
       const pairingManager = {
         getSessionIdForToken: () => null,
+        // api-tok is the primary token, not a pairing-issued session token.
+        isSessionTokenValid: () => false,
       }
       const { ctx, ws, client } = makeAuthCtx({
         authRequired: true,
@@ -654,6 +808,7 @@ describe('handleAuthMessage', () => {
       handleAuthMessage(ctx, ws, { type: 'auth', token: 'api-tok' })
       assert.equal(client.authenticated, true)
       assert.equal(client.boundSessionId, undefined)
+      assert.equal(client.isPrimaryToken, true, 'the primary token is primary')
     })
 
     it('does not set boundSessionId when no pairingManager is provided', () => {
@@ -774,6 +929,33 @@ describe('handlePairMessage', () => {
       handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'bad' })
       assert.ok(authFailures.has('203.0.113.42'), 'pair failure must be keyed by rateLimitKey')
       assert.ok(!authFailures.has('127.0.0.1'), 'pair failure must NOT be keyed by socketIp')
+    })
+  })
+
+  describe('approval-gated redemption (#5513)', () => {
+    it('does NOT authenticate or mint a token when validation returns requires_approval', () => {
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'requires_approval' })) }
+      const { ctx, ws, client, onAuthSuccess } = makePairCtx({ pairingManager })
+      const result = handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'gated-id' })
+      assert.equal(result, true)
+      assert.equal(client.authenticated, false, 'a gated id must never authenticate the client')
+      assert.equal(client._sessionToken, undefined, 'no token material is issued')
+      assert.equal(onAuthSuccess.callCount, 0)
+      const last = ws.lastSent()
+      assert.equal(last.type, 'pair_fail')
+      assert.equal(last.reason, 'requires_approval', 'legible reason so old clients fail cleanly and new clients fall into request-pair')
+      assert.equal(ws.closed, true)
+    })
+
+    it('does NOT count requires_approval toward the brute-force rate limiter', () => {
+      const authFailures = new Map()
+      const benignPairAttempts = new Map()
+      const pairingManager = { validatePairing: createSpy(() => ({ valid: false, reason: 'requires_approval' })) }
+      const client = makeMockClient({ ip: '127.0.0.1', rateLimitKey: '203.0.113.9' })
+      const { ctx, ws } = makePairCtx({ pairingManager, authFailures, benignPairAttempts, client })
+      handlePairMessage(ctx, ws, { type: 'pair', pairingId: 'gated-id' })
+      assert.equal(authFailures.has('203.0.113.9'), false, 'requires_approval is not a brute-force signal')
+      assert.equal(benignPairAttempts.has('203.0.113.9'), false, 'requires_approval is a normal redemption, not benign hammering')
     })
   })
 
@@ -1426,6 +1608,33 @@ describe('handleKeyExchange', () => {
       assert.equal(ws.closed, false)
     })
 
+    it('aborts the handshake (rolls back crypto state, closes) when key_exchange_ok send fails (#5702 8b)', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx, client, flushPostAuthQueue } = makeKeyExchangeCtx({ ws })
+      client.postAuthQueue = [{ type: 'session_list' }]
+      // The key_exchange_ok send fails (half-open / torn-down socket). It's the
+      // only ws.send on the valid path, so this isolates the failure to it.
+      ws.send = () => { throw new Error('socket gone') }
+
+      const result = handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+      assert.equal(result, true)
+
+      // Crypto state rolled back — the server must NOT believe E2E is established
+      // (else it would encrypt frames the client never got the key for).
+      assert.equal(client.encryptionState, null)
+      assert.equal(client.encryptionPending, false)
+      // The post-auth queue must NOT be flushed.
+      assert.equal(flushPostAuthQueue.callCount, 0)
+      assert.equal(client.postAuthQueue, null)
+      // Connection closed so the client reconnects and retries the handshake.
+      assert.equal(ws.closed, true)
+      assert.equal(ws.closeCode, 1011)
+    })
+
     it('derives per-connection sub-key when client sends salt', () => {
       const clientKp = nacl.box.keyPair()
       const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
@@ -1504,6 +1713,65 @@ describe('handleKeyExchange', () => {
       // Keys will differ because server generates fresh keypair each time
       assert.notDeepEqual(client1.encryptionState.sharedKey, client2.encryptionState.sharedKey,
         'different salts (and fresh server keypairs) must produce different encryption keys')
+    })
+  })
+
+  describe('identity signing (#5536)', () => {
+    it('signs the exchange key with the configured identity so it verifies under the identity pubkey', () => {
+      const identity = createSigningKeyPair()
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws })
+      ctx.serverIdentity = identity
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      assert.ok(keOk.serverKeySig, 'key_exchange_ok should carry serverKeySig when an identity is configured')
+      // The signature must verify over the SERVER's exchange public key under the
+      // identity public key — the exact check a pinned client runs.
+      assert.equal(
+        verifyExchangeKeySignature(keOk.publicKey, keOk.serverKeySig, identity.publicKey),
+        true,
+      )
+    })
+
+    it('omits serverKeySig when no identity is configured (TOFU unchanged)', () => {
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws }) // no serverIdentity on ctx
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      assert.ok(keOk, 'key_exchange_ok still sent')
+      assert.equal(keOk.serverKeySig, undefined, 'no signature when no identity')
+    })
+
+    it('the signature does NOT verify under a DIFFERENT identity (MITM key swap is detectable)', () => {
+      const realIdentity = createSigningKeyPair()
+      const attackerIdentity = createSigningKeyPair()
+      const clientKp = nacl.box.keyPair()
+      const clientPubB64 = naclUtil.encodeBase64(clientKp.publicKey)
+      const salt = generateConnectionSalt()
+
+      const ws = makeMockWs()
+      const { ctx } = makeKeyExchangeCtx({ ws })
+      ctx.serverIdentity = realIdentity
+
+      handleKeyExchange(ctx, ws, { type: 'key_exchange', publicKey: clientPubB64, salt })
+      const keOk = ws.sent().find(m => m.type === 'key_exchange_ok')
+      // A client that pinned the attacker's identity would reject this.
+      assert.equal(
+        verifyExchangeKeySignature(keOk.publicKey, keOk.serverKeySig, attackerIdentity.publicKey),
+        false,
+      )
     })
   })
 

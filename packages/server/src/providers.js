@@ -13,32 +13,67 @@
  * interrupt/setModel/setPermissionMode plus a static `capabilities` getter.
  * See sdk-session.js or cli-session.js for a worked example.
  */
-import { existsSync, readFileSync } from 'fs'
-import { join } from 'path'
-import { homedir } from 'os'
 import { CliSession } from './cli-session.js'
 import { SdkSession } from './sdk-session.js'
 import { ClaudeTuiSession } from './claude-tui-session.js'
+import { ClaudeChannelSession } from './claude-channel-session.js'
+import { ClaudeByokSession } from './byok-session.js'
+import { DeepSeekSession } from './deepseek-session.js'
+import { OllamaSession } from './ollama-session.js'
 import { GeminiSession } from './gemini-session.js'
 import { CodexSession } from './codex-session.js'
+import { UserShellSession } from './user-shell-session.js'
 import { registerProviderRegistry } from './models.js'
+import { BILLING_CLASSES } from './billing-class.js'
+import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import {
+  hasClaudeOAuthCreds,
+  hasCodexOAuthCreds,
+  hasGeminiOAuthCreds,
+  cachedResolveCredentialFile,
+  resetCachesForTest,
+} from './auth-probes.js'
 
 const PROVIDERS = {
   'claude-cli': CliSession,
   'claude-sdk': SdkSession,
   'claude-tui': ClaudeTuiSession,
+  // #3953 — research-preview `claude --channels` MCP transport. Scaffold
+  // only: ClaudeChannelSession.start() throws until the bridge lands in
+  // #3954. Registered so the dashboard can list it + `chroxy doctor` runs
+  // its preflight; gated as a preview option (never default — see
+  // DEFAULT_PROVIDER below).
+  'claude-channel': ClaudeChannelSession,
+  'claude-byok': ClaudeByokSession,
+  'deepseek': DeepSeekSession,
+  // Local models via Ollama's Anthropic-compatible Messages API (v0.14+).
+  // Rides the BYOK agent loop; no credentials, zero cost, models are
+  // whatever the user has pulled locally. See ollama-session.js.
+  'ollama': OllamaSession,
   'gemini': GeminiSession,
   'codex': CodexSession,
+  // #5983 (epic #5982) — general-purpose user shell ($SHELL via node-pty).
+  // Gated OFF by default (userShell.enabled, #5985a) and primary-token-only
+  // on create + every terminal_* op (#5985b); excluded from mailbox injection
+  // (#5984). PTY-only — no chat/turn semantics. Provider id single-sourced
+  // from @chroxy/protocol (#5986) so server + clients can't drift.
+  [USER_SHELL_PROVIDER]: UserShellSession,
 }
+
+// The default provider lives in @chroxy/protocol so the server, dashboard,
+// and mobile app all agree on "which provider is the default?" from one
+// source (#5823). Re-exported here so existing server call sites
+// (server-cli.js, doctor.js, session-manager.js) keep importing it from the
+// provider registry. Flipped to claude-tui ahead of the 2026-06-15 cutover
+// (#5819) — see the protocol constant's doc for the billing rationale.
+export { DEFAULT_PROVIDER, USER_SHELL_PROVIDER }
 
 // Names hidden from listProviders() (backward-compat aliases, etc.)
-const HIDDEN = new Set()
-
-// Seed per-provider registries for built-in providers so models.js can
-// resolve provider-scoped model metadata without waiting for registerProvider.
-for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
-  registerProviderRegistry(name, ProviderClass)
-}
+// #5994: user-shell is NOT a chat provider — it's a terminal-only session
+// created via a dedicated shell affordance (#5986/#5987), never the chat
+// provider picker. Hiding it keeps it out of listProviders() so it can't be
+// selected as a (fake-ready) chat backend. getProvider/create still resolve it.
+const HIDDEN = new Set([USER_SHELL_PROVIDER])
 
 /** Required methods every provider class prototype must expose. */
 const REQUIRED_METHODS = ['sendMessage', 'interrupt', 'setModel', 'setPermissionMode', 'start', 'destroy']
@@ -73,6 +108,19 @@ export function validateProviderClass(ProviderClass, name) {
   }
 }
 
+// #5555: validate every built-in against the ProviderSession contract at
+// registry construction, then seed its per-provider model registry. Before
+// this, validateProviderClass only ran on the registerProvider() path
+// (Docker / external / config-driven endpoints) — the 9 first-class providers
+// in the PROVIDERS literal got NO interface check, so the documented contract
+// didn't actually cover its main case. A built-in that drops a required method
+// (or flips inProcessPermissions without the permission methods) now fails
+// loudly at module load instead of throwing deep inside a live session.
+for (const [name, ProviderClass] of Object.entries(PROVIDERS)) {
+  validateProviderClass(ProviderClass, name)
+  registerProviderRegistry(name, ProviderClass)
+}
+
 /**
  * Register a provider class by name.
  * @param {string} name - Provider identifier (e.g. 'claude-sdk')
@@ -93,6 +141,19 @@ export function registerProvider(name, ProviderClass, opts) {
   // (#2956) can source its fallback list and ID convention from the
   // provider itself instead of hard-coding Claude behaviour globally.
   registerProviderRegistry(name, ProviderClass)
+}
+
+/**
+ * List the names currently in the registry — built-ins plus anything
+ * registered since startup (docker providers, config-driven
+ * Anthropic-compatible endpoints, embedder providers). Includes hidden
+ * aliases: the caller (#5419 collision checking) needs the FULL claimed
+ * namespace, not just what the dashboard lists.
+ *
+ * @returns {string[]} Registered provider names
+ */
+export function getRegisteredProviderNames() {
+  return Object.keys(PROVIDERS)
 }
 
 /**
@@ -187,13 +248,82 @@ export function listProviders() {
 }
 
 /**
- * Resolve the auth/billing state for a single provider.
+ * Helpers passed to each provider's `static resolveAuth(env, helpers)` call.
+ * Bundles the shared OAuth probes and credential-file resolver cache so the
+ * provider doesn't have to import them directly — keeps the contract small
+ * and the surface easy to mock in tests (#4769).
+ */
+const AUTH_HELPERS = Object.freeze({
+  hasClaudeOAuthCreds,
+  hasCodexOAuthCreds,
+  hasGeminiOAuthCreds,
+  cachedResolveCredentialFile,
+})
+
+/**
+ * Generic fallback auth resolver for providers that don't declare their own
+ * `static resolveAuth`. Returns the same shape — `{ ready, source, envVar,
+ * envVars, hint, detail }` — using only the preflight credentials spec.
  *
- * The Claude CLI provider (and its docker-cli variant) explicitly strips
- * `ANTHROPIC_API_KEY` before spawning the binary — see spawn-env.js's
- * `claude` denylist — so it always bills the claude.ai subscription
- * regardless of whether the env var is present. Other providers route to
- * whichever credential they find first.
+ * Behaviour matches what the pre-#4769 dispatcher did when none of the
+ * provider-specific branches fired:
+ *   - No `credentials` block in preflight → ready (opt-out for custom providers)
+ *   - An env var is set → source: 'env'
+ *   - `optional: true` with no env var → not-ready with the spec hint
+ *   - Required env var missing → not-ready with the spec hint
+ *
+ * Provider-specific behaviour (OAuth probes, file resolvers, container
+ * overrides) lives on the provider classes — see `ProviderClass.resolveAuth`.
+ */
+function genericResolveAuth(ProviderClass, env) {
+  const spec = ProviderClass.preflight
+  const credSpec = spec?.credentials
+  if (!credSpec) {
+    return {
+      ready: true,
+      source: 'none',
+      envVar: null,
+      envVars: [],
+      hint: '',
+      detail: 'No credential check declared by this provider',
+      // Custom/external providers default to per-token api-key billing — they
+      // never draw on Claude's subscription/credit pool (#5630).
+      billingClass: BILLING_CLASSES.API_KEY,
+    }
+  }
+  const envVars = Array.isArray(credSpec.envVars) ? credSpec.envVars : []
+  const hint = credSpec.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
+  const matched = envVars.find(v => env[v])
+  if (matched) {
+    return {
+      ready: true,
+      source: 'env',
+      envVar: matched,
+      envVars,
+      hint: '',
+      detail: `External provider (${matched} set)`,
+      billingClass: BILLING_CLASSES.API_KEY,
+    }
+  }
+  return {
+    ready: false,
+    source: 'none',
+    envVar: null,
+    envVars,
+    hint,
+    detail: envVars.length ? `Not configured — ${hint}` : 'Not configured',
+    billingClass: BILLING_CLASSES.API_KEY,
+  }
+}
+
+/**
+ * Resolve the auth/billing state for a single provider (#4769 dispatcher).
+ *
+ * Each provider class owns its own `static resolveAuth(env, helpers)` method
+ * — see e.g. CliSession, SdkSession, CodexSession. This dispatcher is now
+ * just a thin shim that hands the active env + shared helpers to the
+ * provider, with a generic fallback for custom/external providers that
+ * haven't (yet) declared `resolveAuth`.
  *
  * Returns:
  *   ready    : boolean — false only when required creds are missing
@@ -203,235 +333,25 @@ export function listProviders() {
  *   hint     : human-readable fix hint
  *   detail   : human-readable summary including billing identity
  *
- * @param {string} name
+ * @param {string} _name - Provider id (unused — kept for caller back-compat)
  * @param {Function} ProviderClass
  */
-function getProviderAuthInfo(name, ProviderClass) {
-  const spec = ProviderClass.preflight
-  const credSpec = spec?.credentials
-  const envVars = (credSpec && Array.isArray(credSpec.envVars)) ? credSpec.envVars : []
-  const optional = !!credSpec?.optional
-  const hint = credSpec?.hint || (envVars.length ? `set ${envVars.join(' or ')}` : '')
-
-  // Providers that opt out of preflight credentials checking (custom/external
-  // providers, or any class that doesn't declare a `credentials` block) have
-  // no env-var requirement we can verify — treat as ready so the UI doesn't
-  // disable a working provider just because it skipped declaring preflight.
-  if (!credSpec) {
-    return {
-      ready: true,
-      source: 'none',
-      envVar: null,
-      envVars: [],
-      hint: '',
-      detail: 'No credential check declared by this provider',
-    }
+export function getProviderAuthInfo(_name, ProviderClass) {
+  if (typeof ProviderClass.resolveAuth === 'function') {
+    return ProviderClass.resolveAuth(process.env, AUTH_HELPERS)
   }
-
-  // Bare claude-cli on the host always bills subscription: spawn-env.js's
-  // `claude` denylist strips ANTHROPIC_API_KEY before the subprocess starts,
-  // and the CLI auths via the host's ~/.claude OAuth state.
-  // claude-tui follows the same pattern — it explicitly deletes
-  // ANTHROPIC_API_KEY from the spawn env and routes via OAuth/Keychain so
-  // the round-trip bills as a subscription. The OAuth-creds probe doesn't
-  // see Keychain credentials, so we mark these providers ready up-front.
-  // Note: docker-cli is NOT in this set — see container-provider handling below.
-  const isHostClaudeCli = name === 'claude-cli' || name === 'claude-tui'
-
-  // Container providers (docker-cli / docker-sdk) explicitly forward
-  // process.env.ANTHROPIC_API_KEY to the container at `docker run` time
-  // (see docker-session.js _startContainer + docker-sdk-session.js _startContainer).
-  // Inside the container there is no ~/.claude OAuth state, so the env var
-  // is the only auth path — no OAuth fallback even though the host-side
-  // preflight marks credentials as optional.
-  const isContainerProvider = name === 'docker-cli' || name === 'docker-sdk'
-
-  if (isHostClaudeCli) {
-    const detail = name === 'claude-tui'
-      ? 'Claude subscription (interactive TUI under PTY — bypasses programmatic credit metering)'
-      : 'Claude subscription (CLI strips ANTHROPIC_API_KEY before spawn)'
-    return {
-      ready: true,
-      source: 'oauth',
-      envVar: null,
-      envVars,
-      hint: 'run `claude login` if not yet authed',
-      detail,
-    }
-  }
-
-  // Look for any matching env var.
-  const matched = envVars.find(v => process.env[v])
-
-  if (matched) {
-    return {
-      ready: true,
-      source: 'env',
-      envVar: matched,
-      envVars,
-      hint: '',
-      detail: `${describeBillingIdentity(name, matched)} (${matched} set)`,
-    }
-  }
-
-  // Container providers can't reach host OAuth state — required-only.
-  if (isContainerProvider) {
-    return {
-      ready: false,
-      source: 'none',
-      envVar: null,
-      envVars,
-      hint: hint || 'set ANTHROPIC_API_KEY (forwarded to the container at run time)',
-      detail: 'Not configured — container providers need ANTHROPIC_API_KEY on the host (no OAuth fallback inside the container)',
-    }
-  }
-
-  // No env var matched — optional creds (host claude-sdk) can fall back to
-  // an OAuth subscription cached on disk by `claude login`. Earlier code
-  // optimistically reported ready=true here, but #3674 caught that this
-  // misleads users who never ran `claude login`: their session creation
-  // would fail at runtime while the UI showed the chip enabled. We now
-  // best-effort probe the on-disk auth state and only claim ready when at
-  // least one known credential file is present.
-  if (optional) {
-    if (_hasClaudeOAuthCreds()) {
-      return {
-        ready: true,
-        source: 'oauth',
-        envVar: null,
-        envVars,
-        hint,
-        detail: `${describeBillingIdentity(name, null)} (OAuth from \`claude login\`)`,
-      }
-    }
-    return {
-      ready: false,
-      source: 'none',
-      envVar: null,
-      envVars,
-      hint: hint || 'run `claude login` or set ANTHROPIC_API_KEY',
-      detail: `Not configured — ${hint || 'run \`claude login\` or set ANTHROPIC_API_KEY'}`,
-    }
-  }
-
-  // Required creds missing — provider can't run.
-  return {
-    ready: false,
-    source: 'none',
-    envVar: null,
-    envVars,
-    hint,
-    detail: envVars.length
-      ? `Not configured — ${hint}`
-      : 'Not configured',
-  }
+  return genericResolveAuth(ProviderClass, process.env)
 }
 
 /**
- * Best-effort probe for `claude login` OAuth state on disk (#3674).
- *
- * Different versions of the Claude Agent SDK and Claude Code CLI cache
- * subscription credentials in different files; we cover the three known
- * locations and return true if any of them looks plausibly populated:
- *
- *   1. `~/.claude/auth.json`            — current SDK auth file
- *   2. `~/.claude/.credentials.json`    — older Claude Code CLI keystore
- *   3. `~/.claude.json`                 — global config; contains a
- *                                          `claudeAiOauth` block when the
- *                                          user has logged in via subscription
- *
- * The check is deliberately conservative: file presence (or the presence
- * of the OAuth key inside `~/.claude.json`) is enough — we don't validate
- * tokens or expiry. False positives are possible if the files are stale,
- * but the alternative (false negatives) is what #3674 was filed to fix.
- *
- * Override paths for tests / atypical installs:
- *   - `CHROXY_CLAUDE_HOME`   — overrides the directory for the first two
- *                              file checks AND the default location of
- *                              `.claude.json` (one level up from this dir).
- *   - `CHROXY_CLAUDE_CONFIG` — overrides the global `.claude.json` path
- *                              directly. Wins over the `CHROXY_CLAUDE_HOME`-
- *                              derived default when both are set.
- *
- * @returns {boolean}
- */
-function _probeClaudeOAuthCreds() {
-  try {
-    const claudeHome = process.env.CHROXY_CLAUDE_HOME || join(homedir(), '.claude')
-    if (existsSync(join(claudeHome, 'auth.json'))) return true
-    if (existsSync(join(claudeHome, '.credentials.json'))) return true
-    // Global config file lives one level up; some installs only have this.
-    const globalConfig = process.env.CHROXY_CLAUDE_CONFIG
-      || (process.env.CHROXY_CLAUDE_HOME
-            ? join(process.env.CHROXY_CLAUDE_HOME, '..', '.claude.json')
-            : join(homedir(), '.claude.json'))
-    if (existsSync(globalConfig)) {
-      try {
-        const parsed = JSON.parse(readFileSync(globalConfig, 'utf-8'))
-        if (parsed && typeof parsed === 'object' && parsed.claudeAiOauth) {
-          return true
-        }
-      } catch {
-        // Malformed JSON — treat as absent.
-      }
-    }
-  } catch {
-    // Any unexpected fs error → behave as if no creds, so the UI surfaces
-    // the missing-creds state instead of silently misreporting ready.
-  }
-  return false
-}
-
-/**
- * 5s TTL cache around `_probeClaudeOAuthCreds()` (#3678).
- *
- * `listProviders()` is called from `handleListProviders` on every dashboard
- * `list_providers` WS request and once per `auth_ok` from `ws-history.js`.
- * Each call performs three `existsSync` + an optional small `readFileSync` +
- * `JSON.parse`. The cache is keyed on the override env vars so a test (or a
- * runtime tweak) that changes `CHROXY_CLAUDE_HOME` / `CHROXY_CLAUDE_CONFIG`
- * naturally invalidates the previous result.
- */
-let _credsCache = { value: null, expiresAt: 0, key: null }
-
-function _hasClaudeOAuthCreds() {
-  const key = `${process.env.CHROXY_CLAUDE_HOME ?? ''}|${process.env.CHROXY_CLAUDE_CONFIG ?? ''}`
-  const now = Date.now()
-  if (_credsCache.key === key && _credsCache.expiresAt > now) {
-    return _credsCache.value
-  }
-  const value = _probeClaudeOAuthCreds()
-  _credsCache = { value, expiresAt: now + 5_000, key }
-  return value
-}
-
-/**
- * Test-only hook to drop the cached creds-probe result so suites that mutate
- * the override env vars (or write/delete files under `CHROXY_CLAUDE_HOME`
- * without changing the env-var values) start from a clean slate. Production
- * code should never call this — the natural env-var-keyed invalidation plus
- * the 5s TTL is what users see.
+ * Test-only hook (back-compat re-export from #4769 extraction): drop the
+ * cached creds-probe results so suites that mutate the `CHROXY_*_HOME`
+ * overrides or write/delete files under them start from a clean slate.
+ * Now delegates to `auth-probes.js#resetCachesForTest()`. Production code
+ * should never call this.
  */
 export function _resetCredsCacheForTest() {
-  _credsCache = { value: null, expiresAt: 0, key: null }
-}
-
-function describeBillingIdentity(name, envVar) {
-  // Claude SDK family + ANTHROPIC_API_KEY → API; else OAuth fallback → subscription.
-  if (name === 'claude-sdk') {
-    if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API'
-    if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token)'
-    return 'Claude subscription'
-  }
-  // Container providers always bill API (no in-container OAuth fallback).
-  if (name === 'docker-cli' || name === 'docker-sdk') {
-    if (envVar === 'ANTHROPIC_API_KEY') return 'Anthropic API (forwarded to container)'
-    if (envVar === 'CLAUDE_CODE_OAUTH_TOKEN') return 'Anthropic API (OAuth token forwarded to container)'
-    return 'Anthropic API (forwarded to container)'
-  }
-  if (name === 'codex') return 'OpenAI API'
-  if (name === 'gemini') return 'Google API'
-  return 'External provider'
+  resetCachesForTest()
 }
 
 /**
@@ -441,10 +361,22 @@ function describeBillingIdentity(name, envVar) {
  * Registers:
  *   - 'docker-cli': DockerSession (CLI-based, extends CliSession)
  *   - 'docker-sdk': DockerSdkSession (SDK-based, extends SdkSession)
+ *   - 'docker-byok': DockerByokSession (#4053, Claude BYOK loop on the host)
  *   - 'docker': backward-compatible alias for 'docker-cli'
  *
  * @param {object} config - Merged server config
  */
+// #5448: every docker provider id registered below. store-core's
+// CLAUDE_BACKED_DOCKER_IDS allowlist assumes ALL of these run Claude sessions
+// (so a missing model contextWindow resolves to the Claude 200k default). That
+// is true today — each maps to a Claude wrapper (DockerSession/DockerSdkSession
+// extend the Claude CLI/SDK sessions; DockerByokSession runs the Claude BYOK
+// loop). If you register a NON-Claude provider under a `docker-*` name, you MUST
+// add it here AND decide its context-window story in store-core — otherwise the
+// providers test (every DOCKER_PROVIDER_ID must be Claude-backed) trips, instead
+// of the session silently regressing to a fabricated "% of 200k" meter.
+export const DOCKER_PROVIDER_IDS = ['docker-cli', 'docker-sdk', 'docker-byok', 'docker']
+
 export async function registerDockerProvider(config) {
   if (!config?.environments?.enabled) return
 
@@ -465,8 +397,17 @@ export async function registerDockerProvider(config) {
   const { DockerSdkSession } = await import('./docker-sdk-session.js')
   registerProvider('docker-sdk', DockerSdkSession)
 
+  // #4053: docker-byok — runs the BYOK agent loop on the host, tool
+  // execution inside the container. Same gating story as the other
+  // docker-* providers: only registered when environments are enabled
+  // AND `docker info` succeeded above. The provider's own start()
+  // does a second `docker info` preflight per session because the
+  // daemon can go down between server boot and session create.
+  const { DockerByokSession } = await import('./docker-byok-session.js')
+  registerProvider('docker-byok', DockerByokSession)
+
   // Backward compatibility: 'docker' maps to 'docker-cli' (hidden from listProviders)
   registerProvider('docker', DockerSession, { alias: true })
 
-  log.info('Docker providers registered (docker-cli, docker-sdk)')
+  log.info(`Docker providers registered (${DOCKER_PROVIDER_IDS.filter((id) => id !== 'docker').join(', ')})`)
 }

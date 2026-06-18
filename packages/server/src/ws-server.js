@@ -5,6 +5,8 @@ import { WebSocketServer } from 'ws'
 import { readFileSync } from 'fs'
 import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
+import { homedir } from 'os'
+import { PagesStore } from './pages-store.js'
 import { decrypt, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { safeTokenCompare } from './token-compare.js'
 import { createClientSender } from './ws-client-sender.js'
@@ -14,8 +16,11 @@ import { createFileOps } from './ws-file-ops/index.js'
 import { createPermissionHandler } from './ws-permissions.js'
 import { setupForwarding } from './ws-forwarding.js'
 import { handleSessionMessage, handleCliMessage } from './ws-message-handlers.js'
-import { handleAuthMessage, handlePairMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
+import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleKeyExchange, BENIGN_PAIR_WINDOW_MS } from './ws-auth.js'
+import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
+import { createDevicePreferences } from './device-preferences.js'
+import { isUserShellEnabled } from './config.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -25,7 +30,11 @@ import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
 import { WsClientManager } from './ws-client-manager.js'
+import { terminalMirrorRecipient } from './handler-utils.js'
 import { getProviderDataDirs } from './providers.js'
+import { assertCtxShape } from './ws-handler-context.js'
+import { isLoopbackHost } from './bind-host.js'
+import { isLocalOrLanPeer } from './connection-locality.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -42,6 +51,68 @@ export function sanitizeErrorMessage(err) {
   }
   return 'An internal error occurred'
 }
+
+/**
+ * Resolve the per-IP rate-limit config for GET /diagnostics (#3737).
+ *
+ * Override precedence:
+ *   1. Constructor opt `diagnosticsRateLimit` — full RateLimiter options
+ *      object `{ windowMs, maxMessages, burst }`. Used by tests.
+ *   2. `CHROXY_DIAGNOSTICS_RATE_LIMIT` env var — a single positive integer
+ *      sets `maxMessages`; burst defaults to `Math.max(1, Math.floor(N/3))`.
+ *   3. Defaults — 12 req/min + 4 burst (half of /permission since the cost
+ *      is comparable but legitimate use is diagnostic, not interactive).
+ *
+ * Invalid env values (NaN, non-integer, < 1) silently fall through to
+ * defaults. Sub-integer values like `0.5` are rejected outright rather
+ * than truncated, because Math.trunc(0.5) = 0 and RateLimiter treats
+ * `maxMessages: 0` as "use default" via `||`, which would *raise* the
+ * limit instead of restoring it.
+ *
+ * @param {object|null} overrideOpts
+ * @returns {{ windowMs: number, maxMessages: number, burst: number }}
+ */
+export function resolveDiagnosticsRateLimit(overrideOpts) {
+  if (overrideOpts && typeof overrideOpts === 'object') return overrideOpts
+  const raw = process.env.CHROXY_DIAGNOSTICS_RATE_LIMIT
+  if (raw != null && raw !== '') {
+    const n = Number(raw)
+    if (Number.isInteger(n) && n >= 1) {
+      return {
+        windowMs: 60_000,
+        maxMessages: n,
+        burst: Math.max(1, Math.floor(n / 3)),
+      }
+    }
+  }
+  return { windowMs: 60_000, maxMessages: 12, burst: 4 }
+}
+
+/**
+ * Parse a duration value coming from a `CHROXY_DEVICE_PREFS_*_MS` env var.
+ * Accepts:
+ *   - a non-negative numeric string → that many milliseconds (fractional
+ *     values are floored, e.g. `"1.9"` → 1)
+ *   - `"0"` → 0 (the literal zero; callers decide what 0 means — the
+ *     device-preferences `prune()` treats `maxAgeMs === 0` as "no age
+ *     cap", so setting `CHROXY_DEVICE_PREFS_MAX_AGE_MS=0` disables the
+ *     hard age cap rather than evicting every entry)
+ *   - empty / null / non-numeric → fall back to `defaultMs`
+ *
+ * Negative numbers are silently coerced to the default so a typo can't
+ * disable the prune by making `now - updatedAt > -1` always true.
+ *
+ * @param {string|undefined|null} raw
+ * @param {number} defaultMs
+ * @returns {number}
+ */
+export function parseDevicePrefsDuration(raw, defaultMs) {
+  if (raw == null || raw === '') return defaultMs
+  const n = Number(raw)
+  if (!Number.isFinite(n) || n < 0) return defaultMs
+  return Math.floor(n)
+}
+
 const SERVER_VERSION = packageJson.version
 const log = createLogger('ws')
 
@@ -88,8 +159,8 @@ export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
  * v1 (initial) — baseline message set: auth, auth_ok, message, assistant,
  *   result, raw_output, model_changed, permission_request, tool_use, etc.
  *   All subsequent additive message types (e.g. plan_started, plan_ready,
- *   models_updated, client_focus_changed) do NOT bump the version per the
- *   breaking-changes-only policy above.
+ *   models_updated, client_focus_changed, message_queued, message_dequeued)
+ *   do NOT bump the version per the breaking-changes-only policy above.
  *
  * v2 (#2849) — `server_status` gained a structured `phase` field
  *   ('tunnel_warming' | 'ready') that v1 dashboards don't know how to
@@ -105,6 +176,16 @@ export const TUNNEL_STATUS_MIN_PROTOCOL_VERSION = 2
 /** Cached latest version from npm registry (null if unavailable) */
 let _latestVersionCache = { version: null, checkedAt: 0 }
 const VERSION_CHECK_TTL = 3600_000 // 1 hour
+
+// #5555.6 — keepalive sweep cadence. Previously 30s, which (with the
+// two-phase mark-then-terminate cycle) held a zombie client up to ~60s — ~6×
+// longer than a client holds a zombie server (15s ping + 5s pong timeout =
+// 20s). We now (1) treat ANY inbound frame as proof of life (the client's own
+// 15s heartbeat ping suffices — see ws.on('message')), and (2) drop the sweep
+// to 15s so a client that goes truly silent is detected in 15–30s, ~2× the
+// client cadence. The server's own ws.ping() still fires each sweep to hold
+// Cloudflare / mobile-OS idle timeouts open for clients that don't initiate.
+export const KEEPALIVE_SWEEP_MS = 15_000
 
 async function checkLatestVersion(packageName) {
   const now = Date.now()
@@ -167,13 +248,14 @@ function _isSecureRequest(req) {
  * Client -> Server:
  *   { type: 'auth',      token: '...', deviceInfo? }   — authenticate (deviceInfo: { deviceId, deviceName, deviceType, platform })
  *   { type: 'input',     data: '...' }               — send text to active session
- *   { type: 'interrupt' }                             — interrupt active session
+ *   { type: 'interrupt' }                             — interrupt active session (also cancels the WHOLE outgoing queue)
+ *   { type: 'cancel_queued', clientMessageId, sessionId? } — cancel ONE queued send-while-busy follow-up (#5943); server emits message_dequeued(reason: 'cancelled')
  *   { type: 'set_model', model: '...' }              — change model on active session
  *   { type: 'set_permission_mode', mode: '...', confirmed? } — change permission mode (confirmed: true required for 'auto')
  *   { type: 'permission_response', requestId, decision } — respond to permission prompt
  *   { type: 'list_sessions' }                         — request session list
  *   { type: 'switch_session', sessionId }             — switch to a different session
- *   { type: 'create_session', name?, cwd?, provider? } — create a new session
+ *   { type: 'create_session', name?, cwd?, provider?, agentCommId? } — create a new session
  *   { type: 'destroy_session', sessionId }            — destroy a session
  *   { type: 'rename_session', sessionId, name }       — rename a session
  *   { type: 'register_push_token', token }             — register push token for notifications
@@ -218,10 +300,16 @@ function _isSecureRequest(req) {
  *   { type: 'search_conversations', query }             — search saved conversations
  *   { type: 'subscribe_sessions' }                      — subscribe to session discovery events
  *   { type: 'unsubscribe_sessions' }                    — unsubscribe from session discovery
+ *   { type: 'terminal_subscribe', sessionId }           — #5835 opt IN to a session's live PTY mirror (terminal_output); only opted-in clients receive raw bytes
+ *   { type: 'terminal_unsubscribe', sessionId }         — #5835 opt OUT of a session's live PTY mirror
+ *   { type: 'terminal_resize', sessionId, cols, rows }  — #5835 Phase 2 request to resize the live claude-tui PTY; applied only for the session's primary owner (or an unclaimed session), then broadcast back as terminal_size
+ *   { type: 'terminal_input', sessionId, data }         — #5835 Phase 3 raw keystrokes → live claude-tui PTY (true remote control); authority mirrors `input` (bound-session check + single-driver primary gate; an observer's keystroke is rejected with input_conflict)
  *   { type: 'set_thinking_level', level }               — set thinking budget level ('default'|'high'|'max')
  *   { type: 'set_permission_rules', rules, sessionId }  — set per-session auto-approval rules
  *   { type: 'set_prompt_evaluator', value: boolean, sessionId? } — toggle the per-session promptEvaluator (#3185)
  *   { type: 'set_prompt_evaluator_skip_pattern', value: string|null, sessionId? } — set the per-session evaluator skip-pattern source (#3639)
+ *   { type: 'set_chroxy_context_hint', value: boolean, sessionId? } — toggle the per-session Chroxy context hint (#3805)
+ *   { type: 'set_session_preamble', value: string, sessionId? } — set the per-session user-authored preamble (#4660)
  *   { type: 'skill_activate', skillName, sessionId? }   — activate a manual skill at runtime (#3209)
  *   { type: 'skill_deactivate', skillName, sessionId? } — deactivate a manual skill at runtime (#3209)
  *   { type: 'skill_trust_accept', skillName, sessionId?, requestId? } — re-trust a skill after a content-hash mismatch (#3235)
@@ -234,15 +322,20 @@ function _isSecureRequest(req) {
  *
  * Server -> Client:
  *   All session-scoped messages include a `sessionId` field for background sync.
- *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms — #3760, #3905)
+ *   { type: 'auth_ok', clientId, serverMode, serverVersion, latestVersion, serverCommit, cwd, defaultCwd, connectedClients, encryption, resultTimeoutMs, hardTimeoutMs, streamStallTimeoutMs } — auth succeeded (encryption: 'required'|'disabled'; resultTimeoutMs = soft-warning window in ms, hardTimeoutMs = hard-kill window in ms, streamStallTimeoutMs = stream-stall recovery window in ms (0 = disabled) — #3760, #3905, #4477)
  *   { type: 'key_exchange_ok', publicKey }               — server's ephemeral X25519 public key (E2E encryption)
+ *   { type: 'auth_bootstrap', providers, slashCommands, agents, sessionId?, tunnelUrl? } — #5555: connect-time burst folding the provider/slash-command/agent lists so a new client skips its 3-request list_* round trip; tunnelUrl re-advertises the live public URL (sub-item 7)
+ *   { type: 'tunnel_url_changed', url, previousUrl? } — #5555 (sub-item 7): quick-tunnel recovery rotated the public URL; clients repoint their stored endpoint. Best-effort for tunnel-connected clients (their socket rode the now-dead old tunnel); durable recovery is auth_bootstrap.tunnelUrl on reconnect
  *   { type: 'auth_fail',    reason: '...' }           — auth failed
  *   { type: 'server_mode',  mode: 'cli' }             — which backend mode is active
  *   { type: 'message',      ... }                     — parsed chat message
  *   { type: 'stream_start', messageId: '...' }        — beginning of streaming response
  *   { type: 'stream_delta', messageId, delta }         — token-by-token text
  *   { type: 'stream_end',   messageId: '...' }        — streaming response complete
+ *   { type: 'terminal_output', sessionId, data }       — #5835 live claude-tui PTY mirror (raw, ANSI-intact, coalesced ~50ms); emitted from ws-forwarding.js to clients that opted in via terminal_subscribe; the remote-viewer / authenticity surface
+ *   { type: 'terminal_size', sessionId, cols, rows }   — #5835 Phase 2 authoritative live-PTY grid size; sent to a client on terminal_subscribe and broadcast to all terminal subscribers on a primary-driven terminal_resize so observers re-letterbox to the same grid
  *   { type: 'tool_start',   messageId, toolUseId, tool, input, serverName? } — tool invocation (serverName present for MCP tools)
+ *   { type: 'tool_input_delta', messageId, toolUseId, partialJson } — #4080/#4081: incremental partial JSON for the streaming tool_use `input`; concatenate per-toolUseId for the live bubble preview
  *   { type: 'tool_result',  toolUseId, result, truncated, images? }  — tool result (images: [{mediaType, data}])
  *   { type: 'mcp_servers',  servers: [{ name, status }] }     — connected MCP servers
  *   { type: 'result',       ... }                     — query stats
@@ -255,11 +348,15 @@ function _isSecureRequest(req) {
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated
  *   { type: 'available_permission_modes', modes: [...] } — permission modes
  *   { type: 'session_list', sessions: [...] }         — all sessions
- *   { type: 'session_switched', sessionId, name, cwd, conversationId? } — switched active session
+ *   { type: 'session_switched', sessionId, name, cwd, conversationId?, sessionPreset? } — switched active session. On a fresh create-confirm `sessionPreset` (#5553) discloses the resolved per-repo preset (length-only preamble — the text is already folded into the prompt server-side — plus the seed staged editable into the composer + trust metadata); omitted when the session has no preset.
  *   { type: 'session_created', sessionId, name }      — new session created
  *   { type: 'session_destroyed', sessionId }          — session removed
+ *   { type: 'session_stopped', sessionId?, code? } — user-initiated Stop confirmation (#4756); CliSession emitted `stopped` after a clean SIGINT exit; pairs with the louder `session_error` crash toast
  *   { type: 'session_restore_failed', sessionId, name, provider, cwd?, model?, permissionMode?, errorCode, errorMessage, originalHistoryPreserved, historyLength? }
  *     — session in persisted state could not be restored (e.g. missing env var); history kept on disk for retry
+ *   { type: 'session_persist_failed', sessionId, name|null }
+ *     — a session-list mutation (create/rename/destroy) could not be flushed to disk and will be lost on restart (#5714).
+ *       `name` is null on the destroy path where the entry was already removed before the flush.
  *   { type: 'session_error', message, category?, sessionId?, recoverable? } — session operation error
  *   { type: 'history_replay_start', sessionId, fullHistory?, truncated? } — beginning of history replay
  *   { type: 'history_replay_end', sessionId }         — end of history replay
@@ -270,6 +367,7 @@ function _isSecureRequest(req) {
  *   { type: 'plan_started' }                         — Claude entered plan mode (transient)
  *   { type: 'plan_ready', allowedPrompts }           — plan complete, awaiting approval (transient)
  *   { type: 'inactivity_warning', messageId, idleMs, prefab } — soft check-in prompt, session stays alive (#3899)
+ *   { type: 'multi_question_intervention', toolUseId, questionCount, reason, timestamp } — chroxy permission-hook denied a multi-question AskUserQuestion (#4653)
  *   { type: 'server_shutdown', reason, restartEtaMs } — server shutting down (reason: 'restart'|'shutdown')
  *   { type: 'server_status', message }               — non-error status update (e.g., recovery)
  *   { type: 'server_error', category, message, recoverable, sessionId? } — server-side error forwarded to app
@@ -285,9 +383,10 @@ function _isSecureRequest(req) {
  *   { type: 'checkpoint_list', sessionId, checkpoints }   — list of checkpoints
  *   { type: 'checkpoint_restored', checkpointId, newSessionId, name } — checkpoint restored (new session created)
  *   { type: 'primary_changed', sessionId, clientId } — last-writer-wins primary changed (null on disconnect)
+ *   { type: 'session_role', sessionId, primaryClientId } — #5589/#5281: explicit primary-ownership; client derives its role (primary iff primaryClientId === own clientId, observer if another holds it, null = unclaimed)
  *   { type: 'pong' }                                    — heartbeat response
  *   { type: 'permission_expired', requestId, sessionId, message }  — permission response could not be routed (expired/handled)
- *   { type: 'token_rotated', expiresAt }                — API token was rotated, client must re-authenticate
+ *   { type: 'token_rotated', token?, expiresAt, reason? } — API token changed. Scheduled rotation carries the new `token` to encrypted clients (transparent re-key, sessions survive). A `reason: 'revoke'` (#6006) carries NO token: the operator revoked, so the server severed user-shell sessions and cleared this connection's auth — the client must re-authenticate with the current token (obtained out-of-band).
  *   { type: 'session_warning', sessionId, name, reason, message, remainingMs } — session about to timeout
  *   { type: 'session_timeout', sessionId, name, idleMs }         — session destroyed due to idle timeout
  *   { type: 'dev_preview', port, url, sessionId }       — dev server preview tunnel opened
@@ -316,10 +415,32 @@ function _isSecureRequest(req) {
  *   { type: 'discovered_sessions', sessions }           — discovered local Claude sessions
  *   { type: 'pair_fail', reason }                       — pairing failed
  *   { type: 'pairing_refreshed' }                       — pairing ID consumed; clients should re-fetch /qr (#2916)
+ *   { type: 'pair_request_pending', requestId, verifyCode } — pairing-approval primitive (#5510, epic #5509): ack to the camera-less requester carrying the 6-digit code to DISPLAY. Sent only over the requester's own pre-auth connection; the code travels server→requester only and is never echoed back.
+ *   { type: 'pair_pending', requestId, deviceName, verifyCode, expiresAt } — pairing-approval fan-out (#5510) to HOST-LEVEL (unbound) surfaces only; carries the verify code to COMPARE and the attacker-controlled (schema-capped, plain-text) deviceName. Bound/session-scoped clients never receive it.
+ *   { type: 'pair_result', requestId, ok, token?, reason? } — pairing-approval terminal result (#5510) to the requester over its still-open connection. On approve `ok: true` + the unbound (host-authority) session token, delivered exactly once and never logged; on deny/expire/disconnect `ok: false` + reason.
+ *   { type: 'pair_resolved', requestId, reason } — pairing-approval retraction (#5510) to host-level surfaces so every banner drops a request that was approved/denied/expired/disconnected elsewhere.
  *   { type: 'rate_limited', message }                   — client rate-limited
  *   { type: 'agent_spawned', sessionId, agentId, parentToolId, model } — background agent spawned
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
+ *   { type: 'agent_event', sessionId, parentToolUseId, eventType, payload } — Task subagent intermediate wire event re-emit (#5016, transient; eventType is one of `tool_start` / `tool_input_delta` / `tool_result` / `stream_delta`)
+ *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
+ *   { type: 'activity_snapshot', sessionId, schemaVersion, entries } — Control Room full activity tree for a session, on subscribe/resync (#5161 schema; emitter #5160; `entries: [{ id, kind, label, status, startedAt, endedAt?, parentId?, outputRef? }, …]`)
+ *   { type: 'activity_delta', sessionId, schemaVersion, op, entry } — Control Room incremental activity-entry change (#5161 schema; emitter #5160; `op` is one of `started` / `updated` / `ended`; `entry` is the full node)
+ *   { type: 'message_queued', sessionId, clientMessageId?, text, queueLength } — a send-while-busy follow-up entered the server's outgoing-message queue (#5936/#5937, transient; mirrors `_outgoingQueue`)
+ *   { type: 'message_dequeued', sessionId, clientMessageId?, queueLength, reason } — a queued follow-up left the queue (#5936/#5937/#5943, transient; `reason` is `flush` (auto-sent on turn-complete), `interrupted` (whole queue cancelled by a Stop), or `cancelled` (one item cancelled via `cancel_queued`))
+ *   { type: 'host_status_snapshot', requestId?, generatedAt, root, summary, repos, error? } — Control Room Host/Repo Status survey reply (#5171 schema; emitter #5174); reply to a `host_status_request`. Always carries the full snapshot shape (so it is protocol-schema-valid); on failure `repos` is empty, `summary` is zeroed, and an additive `error: { code, message }` annotation is present for the consumer to branch on. `requestId` echoes the request when provided.
+ *   { type: 'runner_status_snapshot', requestId?, generatedAt, root, summary, repos, error? } — Control Room self-hosted runner survey reply (#5253 schema + emitter); reply to a `runner_status_request`. Same degraded-snapshot-with-`error` posture as `host_status_snapshot`: always the full shape; on failure `repos` is empty, `summary` is zeroed, and an additive `error: { code, message }` is present. `requestId` echoes the request when provided.
+ *   { type: 'integration_status_snapshot', requestId?, generatedAt, root, summary, repos, repoMemoryCli?, error? } — Control Room Integrations survey reply (#5499 schema + emitter, epic #5498); reply to an `integration_status_request`. Per-repo repo-memory status (config, cache stats, telemetry report); `repoMemoryCli` notes the once-per-snapshot binary probe. Same degraded-snapshot-with-`error` posture as the host/runner surveys. `requestId` echoes the request when provided.
+ *   { type: 'integration_action_ack', action, repoPath, requestId?, counts } — Control Room Integrations action ack (#5500, epic #5498); reply to a successful `integration_action` (currently `repo_memory_reindex`). Echoes `action`/`repoPath` (+ `requestId` when provided) cloning the cancel_activity_ack correlation contract; `counts` carries the parsed scanned/summarized/fresh/skipped index result, or null when the CLI output was unparseable. Failures surface as an INTEGRATION_ACTION_FAILED `session_error` echoing the same correlation fields.
+ *   { type: 'skills_inventory_snapshot', requestId?, generatedAt, root, global, globalError?, repos, error? } — Control Room Skills inventory survey reply (#5554 schema + emitter, epic #5159); reply to a `skills_inventory_request`. `global` is the `~/.chroxy/skills/` tier and `repos` the per-repo `.chroxy/skills/` overlays, each entry carrying name/description/activation/trust/hash/installed + usage (lastUsed/count/repos). Skill BODIES never leave the server. Same degraded-snapshot-with-`error` posture as the host/runner/integration surveys; `globalError` / per-repo `error` degrade a single tier without blanking the snapshot. `requestId` echoes the request when provided.
+ *   { type: 'mailbox_status_snapshot', requestId?, generatedAt, registrations, recentEvents, error? } — Control Room "Mailbox" tab survey reply (#5914 follow-up); reply to a `mailbox_status_request`. `registrations` is the live agentCommId→session map (each with sessionName/isBusy/isTui) and `recentEvents` a bounded newest-first ring buffer of recent live-interrupt deliveries (to/from/unreadCount/outcome). Host-level: a session-bound token is refused with an additive `error: { code, message }` on an otherwise-empty (schema-valid) snapshot. `requestId` echoes the request when provided.
+ *   { type: 'summarize_session_result', sessionId, summary, truncated?, requestId? } — reply to a `summarize_session` (#5547); the model-written continuation brief built from the session's persisted history, seeded editable into the dashboard's create-session composer. `truncated` flags a windowed history. Failures surface as a SUMMARIZE_FAILED `session_error` echoing `sessionId`/`requestId` (curated message — no token/key material).
+ *   { type: 'session_preset_snapshot', cwd, preset: { source, active, trustState, enabled, preamble, seed, preambleLength, seedLength, capped, repoPath } | null, requestId? } — Control Room per-repo session-preset reply (#5553, epic #5159); reply to a host-authority `session_preset_get` / `session_preset_set` / `session_preset_approve` / `session_preset_revoke`. `preset` is null when the repo has no preset. Full preamble + seed text reaches HOST-level clients only (the four requests are rejected for session-bound pairing clients). `requestId` echoes the request when provided.
  *   { type: 'provider_list', providers }                — available providers
+ *   { type: 'byok_credentials_status', requestId?, status, source, masked?, reason? } — BYOK credentials state for the dashboard (#4052)
+ *   { type: 'credentials_status', requestId?, credentials: [{ key, provider, label, kind, status, source, masked?, oauth }], fileExists?, fileError? } — generalized provider-credential status for the dashboard (#3855); masked, value-free; sent to requester + broadcast after set/delete
+ *   { type: 'credential_test_result', requestId?, key, ok, error?, model?, latencyMs? } — result of a test_credential ping (#3855)
+ *   { type: 'notification_prefs', requestId?, prefs: { categories, devices, quietHours } } — current notification preferences snapshot (#4541/#4542); echoed back on `notification_prefs_get` and broadcast after every `notification_prefs_set`
  *   { type: 'skills_list', skills }                     — active skills (name, description, activation, active per entry)
  *   { type: 'skill_changed', skillName, sessionId, oldHashPrefix, newHashPrefix, mode } — skill content-hash mismatch (#3234, transient)
  *   { type: 'skill_activated', sessionId, skillName }   — manual skill toggled on at runtime (#3209)
@@ -329,9 +450,12 @@ function _isSecureRequest(req) {
  *   { type: 'skill_trust_granted', sessionId, skillName, author } — community skill trust granted (#3297)
  *   { type: 'skill_trust_grant_ok', requestId, sessionId, skillName, author } — ack for skill_trust_grant handler (#3297)
  *   { type: 'push_token_error', message }               — push token registration error
- *   { type: 'cost_update', sessionId, cost }            — session cost update
+ *   { type: 'cost_update', sessionId, sessionCost, totalCost, budget } — session cost update (budget-oriented; sessionId injected by _broadcastToSession)
+ *   { type: 'session_usage', sessionId, cumulativeUsage } — per-session cumulative tokens + cost; cumulativeUsage = { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled } (#4072)
+ *   { type: 'session_cost_threshold_crossed', sessionId, costUsd, thresholdUsd } — soft "you've spent $X" warning; fires ONCE per session when cumulativeUsage.costUsd >= threshold (#4075)
  *   { type: 'budget_warning', sessionId, message, ... } — budget approaching limit
  *   { type: 'budget_exceeded', sessionId, message, ... } — budget exceeded
+ *   { type: 'monthly_budget', month, spentUsd, budgetUsd, percent, warning, exceeded, ... } — machine-wide monthly programmatic-credit meter (#5665); broadcast to ALL clients after each programmatic-credit turn + sent once on connect
  *   { type: 'web_feature_status', features }            — web feature availability
  *   { type: 'permission_rules_updated', rules }         — per-session auto-approval rules changed
  *   { type: 'extension_message', ... }                  — opaque extension payload (passthrough, no server handling)
@@ -343,6 +467,8 @@ function _isSecureRequest(req) {
  *   { type: 'evaluate_draft_result', requestId, verdict?, rewritten?, clarification?, reasoning?, error? } — prompt evaluator response (#3068)
  *   { type: 'prompt_evaluator_changed', sessionId, value: boolean } — per-session promptEvaluator toggle changed (#3185)
  *   { type: 'prompt_evaluator_skip_pattern_changed', sessionId, value: string|null } — per-session evaluator skip pattern changed (#3639)
+ *   { type: 'chroxy_context_hint_changed', sessionId, value: boolean } — per-session Chroxy context hint toggle changed (#3805)
+ *   { type: 'session_preamble_changed', sessionId, value: string } — per-session preamble changed (#4660)
  *   { type: 'evaluator_rewrite', sessionId, originalDraft, rewritten, reasoning, evaluatorIterationId } — auto-evaluator rewrite verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'evaluator_clarify', sessionId, originalDraft, clarification, reasoning, evaluatorIterationId, evaluatorIteration } — auto-evaluator clarify verdict broadcast (#3208 schema, #3186 emit, #3188 dashboard handler)
  *   { type: 'stdin_dropped_totals', sessionId, bytes, count, reason, escalated } — cumulative SidecarProcess pre-dial-cap drop totals (#3544, transient)
@@ -387,11 +513,17 @@ function _isSecureRequest(req) {
  *   - A session operation failed in an expected, user-facing way → `session_error`
  */
 export class WsServer {
-  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, maxPendingConnections, backpressureThreshold, environmentManager, config = null } = {}) {
+  constructor({ port, apiToken, cliSession, sessionManager, defaultSessionId, authRequired = true, pushManager = null, maxPayload, noEncrypt, keyExchangeTimeoutMs, localhostBypass, tokenManager, pairingManager, serverIdentity = null, maxPendingConnections, backpressureThreshold, environmentManager, config = null, diagnosticsRateLimit = null, devicePreferences = null, pagesStore = null, pagesRateLimiter } = {}) {
     this.port = port
     this.apiToken = apiToken
     this._tokenManager = tokenManager || null
     this._pairingManager = pairingManager || null
+    // #5536 — long-lived Ed25519 identity keypair. Its secret half signs each
+    // connection's ephemeral exchange public key (eager + discrete paths) so a
+    // pinned client can verify the exchange key came from this daemon. Null when
+    // pinning is unavailable — in that case the server signs nothing and the
+    // exchange stays TOFU (backward compatible: old clients never look for a sig).
+    this._serverIdentity = serverIdentity || null
     // Runtime config object — exposed to handler dispatch so validators
     // can read settings (e.g. workspaceRoots for cwd allowlist) at
     // message time. May be null in tests that don't pass it through.
@@ -402,14 +534,117 @@ export class WsServer {
     this._keyExchangeTimeoutMs = keyExchangeTimeoutMs ?? 10_000
     this._localhostBypass = localhostBypass ?? true
     this._maxPendingConnections = maxPendingConnections ?? 20
+    // #5356 (visibility layer): exposure snapshot surfaced in auth_ok so the
+    // dashboard can warn about non-loopback binds / public quick tunnels.
+    // _boundHost is set in start(); _quickTunnelActive by server-cli when a
+    // quick (trycloudflare) tunnel is configured.
+    this._boundHost = undefined
+    this._quickTunnelActive = false
+    // #5555 (sub-item 7): the server's current public tunnel URL as a `wss://`
+    // endpoint, set by server-cli once the tunnel is up and updated on a
+    // quick-tunnel URL rotation. Surfaced in the auth_bootstrap burst so a
+    // reconnecting client always re-learns the live URL. `null` for LAN /
+    // no-tunnel deployments.
+    this._tunnelUrl = null
     this._backpressureThreshold = backpressureThreshold ?? 1024 * 1024 // 1MB default
     this._backpressureMaxDrops = 10 // close connection after this many consecutive drops
-    this._rateLimiter = new RateLimiter()
+    // #3996: name each limiter so eviction logs and /diagnostics
+    // rateLimiters[].name can identify which one is shedding entries.
+    this._rateLimiter = new RateLimiter({ name: 'ws' })
     // Separate, relaxed limiter for permission/question responses (60 per minute, no burst)
-    this._permissionRateLimiter = new RateLimiter({ windowMs: 60_000, maxMessages: 60, burst: 0 })
+    this._permissionRateLimiter = new RateLimiter({ name: 'permission', windowMs: 60_000, maxMessages: 60, burst: 0 })
+    // #3737: per-IP limiter for GET /diagnostics. Default 12 req/min + 4 burst
+    // — half of /permission since the cost (FS read + session iteration) is
+    // comparable but legitimate use is diagnostic, not interactive. Override
+    // via constructor opt (tests) or `CHROXY_DIAGNOSTICS_RATE_LIMIT` (deploy:
+    // a single integer sets maxMessages, with a 1/3 burst).
+    this._diagnosticsRateLimiter = new RateLimiter(
+      { name: 'diagnostics', ...resolveDiagnosticsRateLimit(diagnosticsRateLimit) }
+    )
+    // #5683 — Chroxy Pages. Per-IP limiter for the public `/p/<slug>` route
+    // (assets + refreshes are more frequent than diagnostics, hence higher
+    // than /diagnostics but still bounded to blunt slug-scanning). The store is
+    // injectable for tests; the default is rooted at $CHROXY_CONFIG_DIR /
+    // ~/.chroxy/pages and only READS on construct (no sandbox write).
+    // Injectable so tests/deployments can override or DISABLE it (pass null).
+    // `!== undefined` (not ||/??) so an explicit null genuinely disables the
+    // limiter rather than falling back to the default.
+    this._pagesRateLimiter = pagesRateLimiter !== undefined
+      ? pagesRateLimiter
+      : new RateLimiter({ name: 'pages', windowMs: 60_000, maxMessages: 120, burst: 30 })
+    this.pagesStore = pagesStore || new PagesStore({
+      pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
+    })
     this._clientSend = createClientSender(log)
-    this._clientManager = new WsClientManager()
+    // audit P1-2: when a client's active session changes, re-sync the live
+    // terminal mirror gate for BOTH the session it left and the one it joined.
+    // Without this a client opted into session A's terminal that switches to B
+    // would fall out of A's delivery filter while A's coalescer kept running to
+    // nobody (the waste #5837/#5844 set out to kill). _syncTerminalMirror
+    // no-ops on a null id, so passing prev=null is safe.
+    this._clientManager = new WsClientManager({
+      onActiveSessionChanged: (_client, prev, next) => {
+        this._syncTerminalMirror(prev)
+        this._syncTerminalMirror(next)
+      },
+    })
     this.clients = this._clientManager.clients // back-compat: expose the raw Map for context objects
+    // #4835: per-device active-session memory. Caller can inject a custom
+    // store (tests do this with a tmp file path); otherwise we construct
+    // the default disk-backed store rooted at $CHROXY_CONFIG_DIR /
+    // ~/.chroxy. The store is consumed by ws-history.sendPostAuthInfo on
+    // reconnect and updated by session-handlers.handleSwitchSession after
+    // every explicit switch.
+    this._devicePreferences = devicePreferences || createDevicePreferences()
+    // #5821: provider for the current billing-canary snapshot, wired by
+    // server-cli after the monitor is constructed (the monitor depends on this
+    // WsServer's broadcast, so it's created after — set the provider here once
+    // it exists). null = no seed (older boot / tests); the ctx getter folds this in.
+    this._billingCanaryProvider = null
+    // #4849: lazy startup prune. server-cli calls sessionManager.restoreState()
+    // before constructing the WsServer, so any device-pref entry whose
+    // activeSessionId is missing here is genuinely orphaned (a session
+    // destroyed in a previous run, or one rotated out by the user). The
+    // grace window guards against the rare path where restoreState
+    // intentionally skipped a session (e.g. corrupted state). prune is a
+    // no-op when the device list is empty, so the disk-I/O cost is zero
+    // for first-run installs and for users who never connected from
+    // ephemeral devices. Threshold env vars:
+    //   - CHROXY_DEVICE_PREFS_MAX_AGE_MS — hard age cap (default 90d)
+    //   - CHROXY_DEVICE_PREFS_STALE_GRACE_MS — stale-session grace (default 30d)
+    // Both can be set to 0 to disable. See #4849.
+    if (sessionManager && typeof this._devicePreferences.prune === 'function') {
+      try {
+        const maxAgeMs = parseDevicePrefsDuration(
+          process.env.CHROXY_DEVICE_PREFS_MAX_AGE_MS,
+          90 * 24 * 60 * 60 * 1000,
+        )
+        const staleGraceMs = parseDevicePrefsDuration(
+          process.env.CHROXY_DEVICE_PREFS_STALE_GRACE_MS,
+          30 * 24 * 60 * 60 * 1000,
+        )
+        // Only enable stale-session pruning when SessionManager actually
+        // exposes getSession. With optional chaining, `getSession?.(id)`
+        // silently returns undefined when the method is missing — every
+        // session would look "stale" and the prune would evict everything
+        // past the grace window. Belt-and-braces: when the predicate is
+        // omitted, prune() skips the stale-session arm and only the
+        // age-based cap (if any) applies.
+        const pruneOpts = {
+          maxAgeMs,
+          staleSessionGraceMs: staleGraceMs,
+        }
+        if (typeof sessionManager.getSession === 'function') {
+          pruneOpts.sessionExists = (id) => !!sessionManager.getSession(id)
+        }
+        this._devicePreferences.prune(pruneOpts)
+      } catch (err) {
+        // A prune failure must never block server startup — the next mutation
+        // will reload the file anyway, and the worst case is a slightly
+        // larger preferences file.
+        log.warn(`device-preferences startup prune failed: ${err.message}`)
+      }
+    }
     this.httpServer = null
     this.wss = null
     this._pingInterval = null
@@ -422,15 +657,40 @@ export class WsServer {
     // so a long-running server doesn't leak entries for destroyed sessions.
     this._evaluatorIterations = new Map() // sessionId -> iteration count
     this._permissionSessionMap = new Map() // requestId -> sessionId (for routing responses to correct session)
+    // #5704: refcount of permission-INDUCED session subscriptions, per client.
+    // clientId -> Map<sessionId, refcount>. _registerPermissionRoute increments
+    // it for a new route's auto-subscribe UNLESS that subscription is explicitly
+    // owned (the client holds it with refcount 0) — so a permission can never
+    // "steal ownership" of an explicit subscription, while a second concurrent
+    // permission on an already permission-owned session does count up;
+    // _unregisterPermissionRoute (wired to every resolve/expire/cleanup site)
+    // decrements it and tears the auto-subscription back down when the count
+    // hits zero AND the client is neither active on nor explicitly subscribed to
+    // the session. An explicit switch_session/subscribe_sessions ADOPTS the
+    // subscription by zeroing this refcount (see _adoptPermissionSubscription),
+    // so permission teardown never unsubscribes a client that asked to watch.
+    this._permissionSubs = new Map() // clientId -> Map<sessionId, refcount>
     this._hookSecrets = new Set() // per-session hook secrets registered by active CliSessions
     this._sessionHookSecrets = new Map() // sessionId -> hookSecret (for cleanup on session_destroyed)
     this._questionSessionMap = new Map() // toolUseId -> sessionId (for routing question responses)
-    this._primaryClients = new Map() // sessionId -> clientId (last-writer-wins)
+    // #5563: primary-ownership now lives on the WsClientManager (sessionId →
+    // primary clientId) with explicit claim/observe/hand-off semantics, not a
+    // last-writer-wins map. `primaryClients` is no longer a server-owned Map;
+    // handlers query it through ctx.transport.getPrimary / isPrimary / claim /
+    // clear helpers below.
+    // #5510: pairing-approval primitive — requestId → requester ws. The
+    // requester's WS stays open (pre-auth) after pair_request; on approve/deny/
+    // expire/disconnect we look it up here to deliver `pair_result`. Bounded by
+    // the PairingManager queue cap; cleaned up on resolution and on disconnect.
+    this._pairRequesters = new Map() // requestId -> ws
     // Late-binding wrappers: allows tests to monkey-patch _send/_broadcast
     const self = this
     const sendFn = (ws, msg) => self._send(ws, msg)
     this._broadcaster = new WsBroadcaster({
       clients: this.clients,
+      // #5563: share the reverse index owner so session broadcasts + subscriber
+      // counts iterate the sessionId→clients index instead of scanning all clients.
+      clientManager: this._clientManager,
       sendFn,
       backpressureThreshold: this._backpressureThreshold,
       backpressureMaxDrops: this._backpressureMaxDrops,
@@ -448,6 +708,14 @@ export class WsServer {
       pushManager,
       pendingPermissions: this._pendingPermissions,
       permissionSessionMap: this._permissionSessionMap,
+      // #4798: same auto-subscribe helper used by ws-forwarding's dispatch
+      // path. Hook-originated HTTP permission requests also need to seed
+      // subscribedSessionIds on connected viewers so the settings-handler
+      // subscription guard accepts the legitimate response.
+      registerPermissionRoute: (requestId, sessionId) => self._registerPermissionRoute(requestId, sessionId),
+      // #5704: tear down the permission-induced subscription refcount in lockstep
+      // with the map entry on every resolve / expire / cleanup / drain / destroy.
+      unregisterPermissionRoute: (requestId) => self._unregisterPermissionRoute(requestId),
       getSessionManager: () => self.sessionManager,
       // Pass pairingManager so the HTTP /permission-response fallback can
       // enforce session binding — see 2026-04-11 audit blocker 5.
@@ -460,58 +728,145 @@ export class WsServer {
       // via getter because _permissionAudit is constructed after this call.
       getPermissionAudit: () => self._permissionAudit,
     })
-    // Handler context: late-bound via getters for test compat (tests may reassign properties)
+    // Handler context (#5558): role-scoped namespaces, not a flat god-context.
+    // Each bucket declares what a handler couples to — transport (send/
+    // broadcast/subscribe), sessions (the session managers), permissions
+    // (audit + routing maps), services (managers + config + fileOps), runtime
+    // (drain flag, provider dirs, evaluator counters). Late-bound via getters
+    // for test compat (tests may reassign the underlying server properties).
+    // The single source of truth for the shape is ws-handler-context.js.
     this._handlerCtx = {
-      send: sendFn,
-      broadcast: broadcastFn,
-      broadcastToSession: (sid, msg, filter) => self._broadcastToSession(sid, msg, filter),
-      broadcastSessionList: () => {
-        const allSessions = self.sessionManager.listSessions()
-        for (const [ws, c] of self.clients) {
-          if (c.authenticated && ws.readyState === 1) {
-            const sessions = c.boundSessionId
-              ? allSessions.filter(s => s.sessionId === c.boundSessionId)
-              : allSessions
-            sendFn(ws, { type: 'session_list', sessions })
+      transport: {
+        send: sendFn,
+        broadcast: broadcastFn,
+        broadcastToSession: (sid, msg, filter) => self._broadcastToSession(sid, msg, filter),
+        broadcastSessionList: () => {
+          const allSessions = self.sessionManager.listSessions()
+          for (const [ws, c] of self.clients) {
+            if (c.authenticated && ws.readyState === 1) {
+              const sessions = c.boundSessionId
+                ? allSessions.filter(s => s.sessionId === c.boundSessionId)
+                : allSessions
+              sendFn(ws, { type: 'session_list', sessions })
+            }
           }
-        }
+        },
+        // #5563: index-maintaining mutators for client subscription / active
+        // session. Handlers MUST route subscription + active-session changes
+        // through these (NOT bare `client.subscribedSessionIds.add()` /
+        // `client.activeSessionId = x`) so the sessionId→clients reverse index
+        // can never drift from the per-client Sets.
+        subscribeClient: (client, sid) => {
+          // #5704: an EXPLICIT subscribe (switch_session / subscribe_sessions /
+          // session-create auto-sub all route through here) adopts the
+          // subscription — zero any permission-induced refcount so permission
+          // teardown can never tear down a subscription the client asked for.
+          self._adoptPermissionSubscription(client.id, sid)
+          self._clientManager.subscribe(client, sid)
+        },
+        unsubscribeClient: (client, sid) => {
+          // #5704: an explicit unsubscribe also drops any permission refcount —
+          // the client chose to stop watching; a later permission teardown must
+          // not be a no-op-that-leaks the bookkeeping entry.
+          self._adoptPermissionSubscription(client.id, sid)
+          self._clientManager.unsubscribe(client, sid)
+        },
+        setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
+        // #5563: explicit primary-ownership surface. `updatePrimary` is the
+        // first-input adoption path (claims if unclaimed, no-op if already
+        // primary, REJECTED-without-side-effects if another client owns it).
+        // `claimPrimary` is the explicit claim/hand-off path (force=true for an
+        // operator-driven hand-off). `getPrimary`/`isPrimary` are reads used by
+        // the input_conflict gate. `clearPrimary` is the destroy/cleanup path.
+        updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
+        claimPrimary: (sid, cid, opts) => self._claimPrimary(sid, cid, opts),
+        getPrimary: (sid) => self._clientManager.getPrimary(sid),
+        isPrimary: (sid, cid) => self._clientManager.isPrimary(sid, cid),
+        clearPrimary: (sid) => self._clearPrimary(sid),
+        // #5837: re-evaluate the terminal-mirror coalescer gate for a session
+        // after its subscriber set changes (handlers call this on subscribe/
+        // unsubscribe; departure is handled server-side in _handleClientDeparture).
+        syncTerminalMirror: (sid) => self._syncTerminalMirror(sid),
+        sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
+        replayHistory: (ws, sid, opts) => self._replayHistory(ws, sid, opts),
+        get clients() { return self.clients },
       },
-      get sessionManager() { return self.sessionManager },
-      get cliSession() { return self.cliSession },
-      get pushManager() { return self.pushManager },
-      get checkpointManager() { return self._checkpointManager },
-      get devPreview() { return self._devPreview },
-      get webTaskManager() { return self._webTaskManager },
-      primaryClients: this._primaryClients,
-      get clients() { return self.clients },
-      permissionSessionMap: this._permissionSessionMap,
-      questionSessionMap: this._questionSessionMap,
-      // #3637: stable per-session auto-evaluator iteration counter (#3186).
-      // See WsServer constructor for the lifecycle rationale.
-      _evaluatorIterations: this._evaluatorIterations,
-      pendingPermissions: this._pendingPermissions,
-      fileOps: this._fileOps,
-      permissions: this._permissions,
-      get permissionAudit() { return self._permissionAudit },
-      updatePrimary: (sid, cid) => self._updatePrimary(sid, cid),
-      sendSessionInfo: (ws, sid) => self._sendSessionInfo(ws, sid),
-      replayHistory: (ws, sid) => self._replayHistory(ws, sid),
-      get draining() { return self._draining },
-      get environmentManager() { return self.environmentManager },
-      // Runtime config exposed to handlers so validators (e.g.
-      // validateCwdAllowed) can consult workspaceRoots, feature flags,
-      // etc. Late-bound so test harnesses that mutate this.config after
-      // construction still see the updated value.
-      get config() { return self.config },
-      // Multi-provider data dirs (#2965): computed fresh each access so new
-      // provider registrations are reflected without restarting the server.
-      get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
-      get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+      sessions: {
+        get sessionManager() { return self.sessionManager },
+        get cliSession() { return self.cliSession },
+      },
+      permissions: {
+        permissions: this._permissions,
+        get permissionAudit() { return self._permissionAudit },
+        pendingPermissions: this._pendingPermissions,
+        permissionSessionMap: this._permissionSessionMap,
+        // #5704: the resolver in settings-handlers (WS permission_response) must
+        // route its map delete through this so the permission-induced
+        // subscription refcount is decremented in lockstep — same hook the HTTP
+        // resolver uses via createPermissionHandler.
+        unregisterPermissionRoute: (requestId) => self._unregisterPermissionRoute(requestId),
+        questionSessionMap: this._questionSessionMap,
+      },
+      services: {
+        get pushManager() { return self.pushManager },
+        // #5510: pairing-approval primitive — host-level approve/deny handlers.
+        get pairingManager() { return self._pairingManager },
+        get checkpointManager() { return self._checkpointManager },
+        // #6006: the token lifecycle manager — exposed so the primary-gated
+        // `revoke_token` handler can fire the operator panic button
+        // (TokenManager.revoke()). Null when auth is disabled (--no-auth).
+        get tokenManager() { return self._tokenManager },
+        get devPreview() { return self._devPreview },
+        get webTaskManager() { return self._webTaskManager },
+        get environmentManager() { return self.environmentManager },
+        // #4835: per-device active-session memory. handleSwitchSession writes
+        // here after every successful switch so the next reconnect can
+        // restore the same session.
+        get devicePreferences() { return self._devicePreferences },
+        fileOps: this._fileOps,
+        // Runtime config exposed to handlers so validators (e.g.
+        // validateCwdAllowed) can consult workspaceRoots, feature flags,
+        // etc. Late-bound so test harnesses that mutate this.config after
+        // construction still see the updated value.
+        get config() { return self.config },
+        // #5554: the per-skill usage recorder lives on the SessionManager (it
+        // records activations at session creation); the Skills inventory handler
+        // reads its aggregates to join lastUsed / count / repos onto the snapshot.
+        get skillsUsageRecorder() { return self.sessionManager?.skillsUsageRecorder ?? null },
+        resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),
+        broadcastPairResolved: (requestId, reason) => self._broadcastPairResolved(requestId, reason),
+      },
+      runtime: {
+        get draining() { return self._draining },
+        // Multi-provider data dirs (#2965): computed fresh each access so new
+        // provider registrations are reflected without restarting the server.
+        get projectsDirs() { return getProviderDataDirs().map(d => join(d, 'projects')) },
+        get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+        // #3637: stable per-session auto-evaluator iteration counter (#3186).
+        // See WsServer constructor for the lifecycle rationale.
+        evaluatorIterations: this._evaluatorIterations,
+      },
     }
+    // Fail loudly if the production ctx ever drifts from the declared shape.
+    // #5579: deep assert so a CTX_NAMESPACES field forgotten on _handlerCtx
+    // fails at construction, not as a silent `undefined` read in prod. The
+    // deep check uses `key in bucket`, which does NOT invoke getters — so the
+    // late-bound getter fields (config, skillsUsageRecorder, projectsDirs, …)
+    // are verified present without triggering their side effects. One-time
+    // cost at startup is acceptable.
+    assertCtxShape(this._handlerCtx, { deep: true })
 
     // Context objects for extracted modules (ws-auth.js, ws-history.js)
     this._historyCtx = {
       get clients() { return self.clients },
+      // #5563: index-maintaining active-session mutator for the post-auth
+      // restore path (ws-history.js sets activeSessionId once per connect).
+      setActiveSession: (client, sid) => self._clientManager.setActiveSession(client, sid),
+      // #5731 T5 / #5623 / #5613: current primary owner for a session, so
+      // sendSessionInfo can re-sync `session_role` on reconnect/tab-switch
+      // (otherwise the presence badge goes stale — the role is only ever
+      // broadcast on an actual primary change via _announcePrimary).
+      getPrimary: (sid) => self._clientManager.getPrimary(sid),
       get sessionManager() { return self.sessionManager },
       get cliSession() { return self.cliSession },
       get defaultSessionId() { return self.defaultSessionId },
@@ -520,6 +875,8 @@ export class WsServer {
       get latestVersion() { return self._latestVersion },
       get gitInfo() { return self._gitInfo },
       get encryptionEnabled() { return self._encryptionEnabled },
+      // #5536 — identity keypair for signing the eager exchange public key.
+      get serverIdentity() { return self._serverIdentity },
       get localhostBypass() { return self._localhostBypass },
       get keyExchangeTimeoutMs() { return self._keyExchangeTimeoutMs },
       protocolVersion: SERVER_PROTOCOL_VERSION,
@@ -535,6 +892,53 @@ export class WsServer {
       // after construction are reflected. #3905 adds the parallel hard-cap.
       get resultTimeoutMs() { return self.config?.resultTimeoutMs ?? null },
       get hardTimeoutMs() { return self.config?.hardTimeoutMs ?? null },
+      // #4477: effective stream-stall recovery window in ms. null = use
+      // BaseSession's DEFAULT_STREAM_STALL_TIMEOUT_MS (5min); 0 = operator
+      // explicitly disabled stall recovery (preserved as-is on the wire so
+      // the dashboard chip can hide instead of rendering against a
+      // disabled timer).
+      get streamStallTimeoutMs() { return self.config?.streamStallTimeoutMs ?? null },
+      // #5986 (epic #5982): whether the embedded user-shell terminal is enabled
+      // (userShell.enabled). Surfaced in auth_ok's capability map so the
+      // dashboard can show/hide the "New shell" affordance fail-closed (the
+      // user-shell provider is hidden from listProviders, so the picker can't
+      // advertise it). Late-bound getter so a test mutating self.config is seen.
+      get userShellEnabled() { return isUserShellEnabled(self.config) },
+      // #6006: whether the operator panic button (revoke_token) can fire — true
+      // iff a usable rotating TokenManager exists (i.e. auth is on). Mirrors the
+      // token-handlers availability check (`typeof revoke === 'function'`) so the
+      // capability never advertises a button that would only get REVOKE_UNAVAILABLE.
+      // Surfaced as the `tokenRevoke` capability, further gated to primary-token
+      // clients in ws-history so a paired device never sees the affordance.
+      get tokenRevocable() { return self._tokenManager != null && typeof self._tokenManager.revoke === 'function' },
+      // #4835: per-device active-session memory consulted during reconnect.
+      // sendPostAuthInfo treats this as optional, but production wiring
+      // always supplies the default disk-backed store from the WsServer
+      // constructor.
+      get devicePreferences() { return self._devicePreferences },
+      // #5356: exposure snapshot (non-loopback bind / public quick tunnel)
+      // surfaced in auth_ok so the dashboard can render a warning banner.
+      // null until start() has bound a socket.
+      get exposure() { return self.exposure },
+      // #5821: current billing-canary snapshot, seeded into auth_ok so a
+      // freshly-connected client renders the billing banner immediately. null
+      // until a provider is wired (server-cli sets it post-construct) — live
+      // changes still arrive via the `billing_canary` broadcast.
+      get billingCanary() {
+        try { return self._billingCanaryProvider ? self._billingCanaryProvider() : null }
+        catch { return null }
+      },
+      // #5555 (auth_bootstrap): file ops + provider agent dirs so the
+      // connect-time bootstrap burst can compute the slash-command / agent
+      // lists inline (same payloads the list_* request handlers produce),
+      // letting the client skip its 3-request connect-time round trip.
+      get fileOps() { return self._fileOps },
+      get userAgentsDirs() { return getProviderDataDirs().map(d => join(d, 'agents')) },
+      // #5555 (sub-item 7): the current public tunnel URL (wss://), folded into
+      // the auth_bootstrap burst so a reconnecting client always re-learns the
+      // live URL — the durable recovery path when a quick-tunnel rotation
+      // happened while the client was offline. null for LAN / no-tunnel.
+      get tunnelUrl() { return self._tunnelUrl },
     }
     this._authCtx = {
       get clients() { return self.clients },
@@ -543,6 +947,8 @@ export class WsServer {
       get authFailures() { return self._authFailures },
       get benignPairAttempts() { return self._benignPairAttempts },
       get pairingManager() { return self._pairingManager },
+      // #5536 — identity keypair for signing the discrete exchange public key.
+      get serverIdentity() { return self._serverIdentity },
       get activeSessionId() {
         // Linking-mode default: return null so paired tokens are NOT auto-bound
         // to a specific session. The QR shown by the dashboard is intended as a
@@ -571,6 +977,10 @@ export class WsServer {
       minProtocolVersion: MIN_PROTOCOL_VERSION,
       serverProtocolVersion: SERVER_PROTOCOL_VERSION,
       flushPostAuthQueue: (ws, queue) => self._flushPostAuthQueue(ws, queue),
+      // #5510: register the requester's still-open ws so a later approve/deny
+      // can reach it, and fan `pair_pending` out to host-level surfaces.
+      registerPairRequester: (requestId, ws) => self._pairRequesters.set(requestId, ws),
+      broadcastPairPending: (msg) => self._broadcastPairPending(msg),
     }
 
     this.pushManager = pushManager
@@ -615,8 +1025,25 @@ export class WsServer {
         } catch (err) {
           log.warn(`Failed to clear checkpoints for destroyed session ${sessionId}: ${err.message}`)
         }
-        for (const [key, sid] of this._permissionSessionMap) {
-          if (sid === sessionId) this._permissionSessionMap.delete(key)
+        // #5731 T7: auto-deny any pending HTTP-hook permission for this session
+        // BEFORE we drop its map entries below. Otherwise the hook's parked
+        // POST /permission blocks the tool call for the full 5-min timeout,
+        // then fires on a destroyed session, leaking the held response until
+        // then. drainSessionPermissions() resolves each as 'deny' (its shared
+        // cleanup also removes the requestId from _permissionSessionMap); the
+        // loop below then only mops up any orphaned mapping with no live
+        // pending entry.
+        try {
+          this._permissions?.drainSessionPermissions?.(sessionId)
+        } catch (err) {
+          log.warn(`Failed to drain pending permissions for destroyed session ${sessionId}: ${err.message}`)
+        }
+        // #5704: route the orphan sweep through _unregisterPermissionRoute so a
+        // destroyed session's permission-induced subscriptions are torn down,
+        // not just the map entry. Collect keys first to avoid mutating the map
+        // mid-iteration (_unregisterPermissionRoute deletes the entry).
+        for (const key of [...this._permissionSessionMap.keys()]) {
+          if (this._permissionSessionMap.get(key) === sessionId) this._unregisterPermissionRoute(key)
         }
         for (const [key, sid] of this._questionSessionMap) {
           if (sid === sessionId) this._questionSessionMap.delete(key)
@@ -694,7 +1121,28 @@ export class WsServer {
     }
 
     this.serverMode = 'cli'
-    this._normalizer = new EventNormalizer()
+    // #5516/#5562: hand the normalizer a subscriber-count resolver so it can
+    // tighten the fixed delta micro-batch window (16→8ms) when a session has a
+    // single subscriber — the common phone-on-LAN / single-dashboard case.
+    // Multi-client sessions keep the 16ms window (fan-out amortization). These
+    // are fixed micro-batch windows, not an adaptive throttle — the adaptive
+    // part is the client-side store-core EWMA (resolveDeltaFlushMs); #5562
+    // shrank the server window from 25/50ms so it no longer stacks on top of
+    // that EWMA. Legacy single-session mode (sessionId === null) reports null
+    // (unknown), which the normalizer treats as "keep the default window".
+    // #5578: also hand it a deflate-subscriber predicate so the window can
+    // widen (8/16 → 16/25ms) when any subscriber is on a deflate-negotiated
+    // (tunnel/cellular) socket, where each sub-1024B stream_delta ships
+    // uncompressed and the per-frame small-packet cost dominates. O(subscribers)
+    // via the #5575 reverse index — never an O(all-clients) scan on the
+    // per-token hot path. Legacy single-session mode (sessionId === null) can't
+    // resolve subscribers, so it reports false → keeps the LAN window.
+    this._normalizer = new EventNormalizer({
+      getSubscriberCount: (sessionId) =>
+        sessionId == null ? null : this._broadcaster._countSessionSubscribers(sessionId),
+      getHasDeflateSubscriber: (sessionId) =>
+        sessionId == null ? false : this._broadcaster._hasDeflateSubscriber(sessionId),
+    })
     this._gitInfo = getGitInfo()
     this._startedAt = Date.now()
     this._draining = false
@@ -710,31 +1158,88 @@ export class WsServer {
     // Wire PairingManager refresh events — broadcast pairing_refreshed to all
     // authenticated dashboard clients so they can auto-refresh the QR code (#2916).
     this._pairingRefreshedHandler = null
+    this._pendingRequestExpiredHandler = null
     if (this._pairingManager) {
       this._pairingRefreshedHandler = () => {
         this._broadcast({ type: 'pairing_refreshed' })
         log.debug('Broadcasted pairing_refreshed to all clients')
       }
       this._pairingManager.on('pairing_refreshed', this._pairingRefreshedHandler)
+
+      // #5510: a pending pair request hit its TTL while still unresolved. Tell
+      // the requester (its connection may still be open) and retract the banner
+      // on every host surface.
+      this._pendingRequestExpiredHandler = ({ requestId }) => {
+        this._resolvePairRequester(requestId, { ok: false, reason: 'expired' })
+        this._broadcastPairResolved(requestId, 'expired')
+      }
+      this._pairingManager.on('pending_request_expired', this._pendingRequestExpiredHandler)
     }
 
     // Wire TokenManager rotation events — broadcast new token to all clients
     this._tokenRotatedHandler = null
     if (this._tokenManager) {
-      this._tokenRotatedHandler = ({ newToken, expiresAt }) => {
+      this._tokenRotatedHandler = ({ newToken, expiresAt, reason }) => {
         // Update our reference so subsequent auth checks use the new token
         this.apiToken = newToken
+
+        if (reason === 'revoke') {
+          // #6006 panic button. The old token is compromised and we cannot tell
+          // an attacker's connection from a legitimate one — every connection
+          // authenticated with the same now-suspect token. So:
+          //   (a) sever every privileged user-shell session, and
+          //   (b) force EVERY connection to re-authenticate: clear
+          //       `authenticated` + `isPrimaryToken` so the dispatch gate
+          //       (_handleMessage) rejects all privileged ops — including a
+          //       re-create of the shell — until the connection re-auths with
+          //       the current token, obtained out-of-band (re-pair / re-scan).
+          // We deliberately do NOT push the new token to any client, even
+          // encrypted ones: handing it down a possibly-compromised connection
+          // would defeat the revoke. The token-less `token_rotated` already
+          // drives clients onto their "must re-authenticate" path.
+          let severed = 0
+          try {
+            severed = this.sessionManager?.destroyAllUserShellSessions('revoked') ?? 0
+          } catch (err) {
+            log.error(`Failed to sever user-shell sessions on revoke: ${err.message}`)
+          }
+          let forced = 0
+          for (const [ws, client] of this.clients) {
+            // Skip connections still mid-handshake (not yet authenticated): they
+            // hold no authority to strip and will fail their pending auth step
+            // against the now-current token on their own.
+            if (!client.authenticated || ws.readyState !== 1) continue
+            client.authenticated = false
+            client.isPrimaryToken = false
+            this._send(ws, { type: 'token_rotated', expiresAt, reason: 'revoke' })
+            forced++
+          }
+          log.warn(`Token REVOKED — severed ${severed} user-shell session(s), forced re-auth on ${forced} connection(s)`)
+          return
+        }
+
+        // Scheduled/periodic rotation — graceful re-key, live sessions survive.
         // Send the new token to encrypted clients (they need it for reconnection).
         // Unencrypted clients (e.g. localhost dashboard) get the event without the
         // raw token to avoid leaking credentials over plaintext connections.
         let encrypted = 0, unencrypted = 0
         for (const [ws, client] of this.clients) {
           if (!client.authenticated || ws.readyState !== 1) continue
+          // Carry `reason: 'scheduled'` so the wire is self-describing and
+          // matches the documented contract + TokenManager's event payload.
           if (client.encryptionState) {
-            this._send(ws, { type: 'token_rotated', token: newToken, expiresAt })
+            this._send(ws, { type: 'token_rotated', token: newToken, expiresAt, reason: 'scheduled' })
+            // #6012: this connection just received the new token, so refresh the
+            // token recorded at auth — an honest, still-connected encrypted
+            // primary can then open a NEW user-shell (#6004 gate) without a
+            // reconnect. Only on a SCHEDULED push: revoke never pushes the token
+            // and de-auths instead, so a compromised connection can't gain
+            // currency this way. Unencrypted clients get no token, so theirs
+            // stays stale (they must reconnect) — handled by the else branch.
+            client.authToken = newToken
             encrypted++
           } else {
-            this._send(ws, { type: 'token_rotated', expiresAt })
+            this._send(ws, { type: 'token_rotated', expiresAt, reason: 'scheduled' })
             unencrypted++
           }
         }
@@ -803,6 +1308,48 @@ export class WsServer {
       return false
     }
     return true
+  }
+
+  /**
+   * Validate that an HTTP request carries the PRIMARY token class — i.e. the
+   * static apiToken (or an active rotation/grace token), NOT a pairing-bound
+   * session token. Used by host-authority endpoints that a scoped, paired
+   * device must not be able to invoke (#5533): e.g. POST /pair-discord, which
+   * posts a fresh pairing link to a shared channel. Per
+   * docs/security/bearer-token-authority.md, pairing-bound tokens are scoped to
+   * one session and must never carry host-level authority.
+   *
+   * A token is primary iff it validates but is NOT a PairingManager-issued
+   * session token. Returns true on pass; writes a 403 and returns false
+   * otherwise.
+   */
+  _validatePrimaryBearerAuth(req, res) {
+    if (!this.authRequired) return true
+    const authHeader = req.headers['authorization'] || ''
+    const token = authHeader.startsWith('Bearer ') ? authHeader.slice(7) : null
+    if (!token || !this._isTokenValid(token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'unauthorized' }))
+      return false
+    }
+    // Reject pairing-bound (and any other PairingManager-issued) session tokens:
+    // they are valid, but scoped — not the host-authority primary token.
+    if (this._pairingManager && this._pairingManager.isSessionTokenValid(token)) {
+      res.writeHead(403, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ error: 'primary_token_required' }))
+      return false
+    }
+    return true
+  }
+
+  /**
+   * Post an approval-gated pairing link to the configured Discord webhook
+   * (#5513). Thin seam around discord-pair-delivery.postPairLinkToDiscord so
+   * http-routes can call it and tests can stub it. Never logs / returns the
+   * webhook URL.
+   */
+  async _postPairLinkToDiscord(link) {
+    return postPairLinkToDiscord(link)
   }
 
   /**
@@ -903,7 +1450,82 @@ export class WsServer {
     if (secret) this._hookSecrets.delete(secret)
   }
 
+  /**
+   * #5356: record whether the configured tunnel is a public quick
+   * (trycloudflare) tunnel. Called by server-cli before tunnel startup so the
+   * exposure snapshot in auth_ok reflects the public URL.
+   * @param {boolean} active
+   */
+  setQuickTunnelActive(active) {
+    this._quickTunnelActive = !!active
+  }
+
+  /**
+   * #5555 (sub-item 7): record the server's current public tunnel URL as a
+   * `wss://` endpoint. Called by server-cli once the tunnel is up (and on a
+   * URL rotation via broadcastTunnelUrlChanged). Surfaced in the
+   * auth_bootstrap burst so a reconnecting client always re-learns the live
+   * URL — the durable recovery path when a rotation happened while the client
+   * was offline. Pass `null` to clear (no tunnel).
+   * @param {string|null} wsUrl
+   */
+  setTunnelUrl(wsUrl) {
+    this._tunnelUrl = wsUrl || null
+  }
+
+  /** #5555 (sub-item 7): the current `wss://` tunnel URL, or null. */
+  get tunnelUrl() {
+    return this._tunnelUrl
+  }
+
+  /**
+   * #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL. Record
+   * the new URL (so reconnecting clients get it via auth_bootstrap) and push a
+   * `tunnel_url_changed` frame to every authenticated client so they can
+   * update the stored endpoint their reconnect path dials.
+   *
+   * BEST-EFFORT for tunnel-connected clients: they reach the server THROUGH
+   * the old tunnel, which has just died, so the push usually will not arrive —
+   * their durable recovery is the auth_bootstrap `tunnelUrl` on next connect.
+   * LAN-connected clients (localhost dashboard, LAN clients) keep their socket
+   * across the rotation and get the new URL immediately.
+   *
+   * SECURITY: the tunnel URL is connection metadata, not a secret (the QR code
+   * shares it), so it goes to ALL authenticated clients including
+   * pairing-bound ones — see docs/security/bearer-token-authority.md.
+   *
+   * @param {string} newWsUrl  the new `wss://` endpoint
+   * @param {string|null} [previousWsUrl]  the prior `wss://` endpoint, if known
+   */
+  broadcastTunnelUrlChanged(newWsUrl, previousWsUrl = null) {
+    if (!newWsUrl) return
+    this.setTunnelUrl(newWsUrl)
+    this._broadcast({
+      type: 'tunnel_url_changed',
+      url: newWsUrl,
+      ...(previousWsUrl ? { previousUrl: previousWsUrl } : {}),
+    })
+  }
+
+  /**
+   * #5356: exposure snapshot included in auth_ok (see sendPostAuthInfo).
+   * `null` until start() has bound a socket — test harnesses that never call
+   * start() simply omit the field from auth_ok.
+   * @returns {{ lanBind: boolean, bindHost: string, quickTunnel: boolean }|null}
+   */
+  get exposure() {
+    if (this._boundHost === undefined) return null
+    return {
+      lanBind: !isLoopbackHost(this._boundHost),
+      bindHost: this._boundHost,
+      quickTunnel: this._quickTunnelActive,
+    }
+  }
+
   start(host) {
+    // #5356: remember what we bound. `undefined` means the default
+    // all-interfaces bind — record it as 0.0.0.0 so exposure reads true.
+    this._boundHost = host ?? '0.0.0.0'
     // Create HTTP server — route handling extracted to http-routes.js
     this.httpServer = createServer(createHttpHandler(this))
 
@@ -911,6 +1533,13 @@ export class WsServer {
     this.wss = new WebSocketServer({
       noServer: true,
       maxPayload: this._maxPayload,
+      // #5516 (epic #5514): permessage-deflate is enabled here for ALL
+      // connections (tunnel bandwidth saving). It is then SKIPPED per-connection
+      // for local/LAN peers in the 'upgrade' handler below (strip the client's
+      // Sec-WebSocket-Extensions header before handleUpgrade) — local links
+      // aren't bandwidth-bound, so compressing every frame just adds CPU
+      // latency. Choosing skip-on-local over a blanket higher threshold keeps
+      // tunnel behavior byte-for-byte unchanged.
       perMessageDeflate: {
         zlibDeflateOptions: { level: 6 },
         zlibInflateOptions: { chunkSize: 16 * 1024 },
@@ -926,6 +1555,29 @@ export class WsServer {
         log.warn(`Pre-auth connection limit reached (${pendingCount}/${this._maxPendingConnections}), rejecting upgrade`)
         socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\n\r\n')
         return
+      }
+      // #5516 (epic #5514): skip permessage-deflate for local/LAN peers. On a
+      // fast local link compressing every message buys nothing (the link isn't
+      // the bottleneck) and just adds CPU latency on the dev machine. Tunnel
+      // connections KEEP deflate — that's where the WAN bandwidth saving is
+      // real. `ws` negotiates permessage-deflate from the client's
+      // Sec-WebSocket-Extensions request header, so deleting it for a local
+      // peer makes `handleUpgrade` complete WITHOUT compression for THIS socket
+      // only — the server-level config still applies to tunnel connections.
+      // Security: isLocalOrLanPeer keys off the unspoofable socket peer; a
+      // forged proxy header can only KEEP deflate (the safe default), never
+      // remove it. See connection-locality.js.
+      // #5578: stash the locality decision on `req` so the 'connection' handler
+      // can stamp a per-client `usesDeflate` flag without re-classifying. A
+      // LAN/loopback peer had its extension header stripped (no deflate); any
+      // other peer keeps the server-level permessage-deflate. The flag drives
+      // the deflate-aware delta-coalescing window (see EventNormalizer /
+      // ws-broadcaster `_hasDeflateSubscriber`). Keyed off the unspoofable
+      // socket peer, identical to the strip decision — they can never diverge.
+      const localPeer = isLocalOrLanPeer(req)
+      req._chroxyUsesDeflate = !localPeer
+      if (localPeer) {
+        delete req.headers['sec-websocket-extensions']
       }
       this.wss.handleUpgrade(req, socket, head, (ws) => {
         this.wss.emit('connection', ws, req)
@@ -948,15 +1600,39 @@ export class WsServer {
       const rateLimitKey = getRateLimitKey(socketIp, req)
       this._clientManager.addClient(ws, {
         id: clientId,
+        // #5563: stable back-reference to this client's socket so the
+        // sessionId→clients reverse index (which stores `client`) can resolve
+        // the `ws` for readyState + backpressure without a per-send Map lookup.
+        _ws: ws,
         authenticated: false,
+        // #5985b: a fresh client is never the primary token class until
+        // handleAuthMessage proves it. Initialized false (not left undefined) so
+        // the strict `=== true` user-shell gates fail closed even if a future
+        // code path reads the field before auth completes.
+        isPrimaryToken: false,
         mode: 'chat', // default to chat view
         activeSessionId: null,
         subscribedSessionIds: new Set(),
+        // #5835 Phase 1: sessions this client opted into LIVE TERMINAL output for
+        // (terminal_subscribe). Kept separate from subscribedSessionIds so a
+        // Chat-tab client subscribed to a session doesn't receive its raw PTY
+        // mirror bytes — only clients actually viewing the terminal do.
+        terminalSessionIds: new Set(),
         isAlive: true,
         deviceInfo: null,
         ip,
         socketIp,
         rateLimitKey,
+        // #5578: true for a non-LAN peer (tunnel / remote) that kept the
+        // server-level permessage-deflate; false for LAN/loopback peers whose
+        // extension header was stripped at upgrade. This is the upgrade-time
+        // LOCALITY decision, not the actual negotiated extension — a remote
+        // client that declines deflate in its handshake still reads true, which
+        // is the intended (and safe) direction: those links pay the same WAN
+        // per-frame cost. Drives the deflate-aware delta-coalescing window
+        // — see EventNormalizer._resolveFlushIntervalMs. Set from the
+        // unspoofable upgrade-time locality decision (req._chroxyUsesDeflate).
+        usesDeflate: req._chroxyUsesDeflate === true,
         // #3404: visible defaults to true; mobile flips to false on backgrounding
         // so completion push notifications fire instead of being suppressed by
         // a still-alive but invisible WS connection.
@@ -1044,6 +1720,13 @@ export class WsServer {
         // reason string ('encryption required') is diagnostic enough for a
         // legitimate misconfigured client.
         const client = this.clients.get(ws)
+        // #5555.6 — any inbound frame is proof of life. The client's 15s
+        // heartbeat ping is the dominant signal, but ANY decoded frame (input,
+        // subscribe, pong-as-message, …) resets the liveness flag so the 15s
+        // keepalive sweep never terminates a client that is actively talking.
+        // This is the "client ping IS liveness" half of #5555.6; the protocol
+        // `pong` listener on the socket covers the server-initiated ping.
+        if (client) client.isAlive = true
         if (client?.encryptionState) {
           if (msg.type !== 'encrypted') {
             log.error(`Plaintext frame from ${client.id} after encryption established (type=${msg?.type}); closing connection`)
@@ -1084,6 +1767,10 @@ export class WsServer {
         if (client?.authenticated) {
           this._handleClientDeparture(client)
         }
+        // #5510: if a pair requester (unauthenticated, connection-pending) drops
+        // before resolution, deny + drop its queue entry and retract the host
+        // banner so an abandoned request can't sit on a queue slot for its TTL.
+        this._cleanupPairRequesterOnDisconnect(ws)
         // Do not remove rate limiter entries on disconnect — the limiter keys by IP,
         // so removing on disconnect would reset the shared bucket for all connections
         // from the same real IP. The sliding window's natural expiry cleans up entries.
@@ -1126,6 +1813,18 @@ export class WsServer {
     // Broadcast structured log entries to dashboard clients.
     // Re-entrancy guard prevents infinite recursion when _broadcast() itself
     // logs (e.g. backpressure debug messages) and log level is set to debug.
+    //
+    // #4787 (P0 security): unscoped log entries (no entry.sessionId) MUST NOT
+    // fan out to bound clients (mobile pairings into a single per-task
+    // session) — pre-fix, server-side logs that lacked withSession() context
+    // leaked PTY hex dumps, toolUseIds, prompt sizes and attachment names from
+    // every session to every authenticated WS client. Most server logs are
+    // unscoped today (only a handful of call sites use withSession()), so the
+    // fall-through covered almost the entire log stream. Restrict unscoped
+    // entries to unbound clients (operator dashboards have boundSessionId ==
+    // null and legitimately want to see everything). The durable fix — a
+    // loggerForSession factory + lint to force per-call-site scoping — is
+    // tracked as a follow-up (#4792).
     let inLogBroadcast = false
     this._logListener = (entry) => {
       if (inLogBroadcast) return
@@ -1134,7 +1833,13 @@ export class WsServer {
         if (entry.sessionId) {
           this._broadcastToSession(entry.sessionId, { type: 'log_entry', ...entry })
         } else {
-          this._broadcast({ type: 'log_entry', ...entry })
+          // Use loose-equality null check so any non-null/undefined
+          // boundSessionId (including the unlikely empty string) is treated
+          // as bound — matches the comment above and the intent of #4787.
+          this._broadcast(
+            { type: 'log_entry', ...entry },
+            (client) => client.boundSessionId == null
+          )
         }
       } finally {
         inLogBroadcast = false
@@ -1148,31 +1853,32 @@ export class WsServer {
       sessionManager: this.sessionManager,
       cliSession: this.cliSession,
       devPreview: this._devPreview,
+      checkpointManager: this._checkpointManager,
       pushManager: this.pushManager,
       permissionSessionMap: this._permissionSessionMap,
       questionSessionMap: this._questionSessionMap,
+      // #4788 Wave 2: hand the question-route registration through a helper so
+      // dispatch and routing-guard stay symmetric. When a question is
+      // registered for session S, every currently-connected client that's
+      // permitted to see broadcasts for S gets auto-subscribed to S — this
+      // mirrors _broadcastToSession's recipient filter so the new
+      // input-handlers guard naturally passes for legitimate viewers without
+      // re-opening the cross-session hijack vector (unconnected / future
+      // clients are still unable to answer).
+      registerQuestionRoute: (toolUseId, sessionId) => this._registerQuestionRoute(toolUseId, sessionId),
+      // #4798: symmetry with registerQuestionRoute — auto-subscribe eligible
+      // clients to the permission's session at dispatch time so the
+      // settings-handlers subscription guard naturally passes for legitimate
+      // viewers (including the "view A → switch to B → respond" flow).
+      registerPermissionRoute: (requestId, sessionId) => this._registerPermissionRoute(requestId, sessionId),
       broadcast: (msg, filter) => this._broadcast(msg, filter),
       broadcastToSession: (sid, msg, filter) => this._broadcastToSession(sid, msg, filter),
-      broadcastSessionList: () => this._handlerCtx.broadcastSessionList(),
+      broadcastSessionList: () => this._handlerCtx.transport.broadcastSessionList(),
     })
 
-    // Ping all authenticated clients every 30s to keep connections alive through
-    // Cloudflare/mobile OS idle timeouts. Terminate unresponsive clients.
-    this._pingInterval = setInterval(() => {
-      for (const [ws, client] of this.clients) {
-        if (!client.authenticated) continue
-        if (ws.readyState !== 1) continue
-        if (!client.isAlive) {
-          log.info(`Client ${client.id} unresponsive, terminating`)
-          this._handleClientDeparture(client)
-          this._clientManager.removeClient(ws)
-          try { ws.terminate() } catch {}
-          continue
-        }
-        client.isAlive = false
-        try { ws.ping() } catch {}
-      }
-    }, 30_000)
+    // #5555.6 — sweep authenticated clients every KEEPALIVE_SWEEP_MS. See
+    // _keepaliveSweep for the liveness/eviction contract.
+    this._pingInterval = setInterval(() => this._keepaliveSweep(), KEEPALIVE_SWEEP_MS)
 
     // Prune stale auth failure entries every 60s
     this._authCleanupInterval = setInterval(() => {
@@ -1197,9 +1903,19 @@ export class WsServer {
     log.info(`Server listening on ${host || '0.0.0.0'}:${this.port} (${this.serverMode} mode)`)
   }
 
+  /**
+   * #5821: wire the billing-canary snapshot provider. server-cli calls this
+   * after constructing the monitor (which depends on this server's broadcast).
+   * The provider is read by the `_historyCtx.billingCanary` getter to seed
+   * `auth_ok`. `fn` returns the current snapshot or null.
+   */
+  setBillingCanaryProvider(fn) {
+    this._billingCanaryProvider = typeof fn === 'function' ? fn : null
+  }
+
   /** Delegates to ws-history.js */
   _sendPostAuthInfo(ws, extra) { sendPostAuthInfo(this._historyCtx, ws, extra) }
-  _replayHistory(ws, sessionId) { replayHistory(this._historyCtx, ws, sessionId) }
+  _replayHistory(ws, sessionId, opts) { replayHistory(this._historyCtx, ws, sessionId, opts) }
   _flushPostAuthQueue(ws, queue) { flushPostAuthQueue(this._historyCtx, ws, queue) }
   _sendSessionInfo(ws, sessionId) { sendSessionInfo(this._historyCtx, ws, sessionId) }
 
@@ -1215,6 +1931,11 @@ export class WsServer {
     if (!client.authenticated) {
       if (msg.type === 'pair') {
         handlePairMessage(this._authCtx, ws, msg)
+      } else if (msg.type === 'pair_request') {
+        // #5510: camera-less device requests pairing. Same exposure class as
+        // `pair` (unauthenticated, rate-limited, queue-capped). The connection
+        // stays OPEN — the requester waits for `pair_result`.
+        handlePairRequestMessage(this._authCtx, ws, msg)
       } else {
         handleAuthMessage(this._authCtx, ws, msg)
       }
@@ -1227,7 +1948,13 @@ export class WsServer {
 
     // Respond to client-side heartbeat pings immediately (even during drain)
     if (msg.type === 'ping') {
-      this._send(ws, { type: 'pong' })
+      // #5515 (epic #5514): stamp a wall-clock (ms epoch) serverTs so clients
+      // can split the ping/pong RTT into uplink (ping send → serverTs) and
+      // downlink (serverTs → pong recv) halves. Wall-clock — not the monotonic
+      // clock used by the #5414 watchdogs — because it crosses machines; the
+      // client treats it as skew-prone and derives one-way numbers from the
+      // RTT split, never from raw clock subtraction.
+      this._send(ws, { type: 'pong', serverTs: Date.now() })
       return
     }
 
@@ -1318,6 +2045,241 @@ export class WsServer {
     this._broadcaster._broadcastToSession(sessionId, message, filter)
   }
 
+  /**
+   * #5510: fan a `pair_pending` (or any pairing-approval surface event) out to
+   * HOST-LEVEL clients only — authenticated clients with no `boundSessionId`.
+   * A session-bound (share-a-session) token must NOT see host-wide pair
+   * requests, mirroring the `host_status_request` authority gate. The verify
+   * code in `msg` is server-generated; deviceName is attacker-controlled and is
+   * relayed verbatim as plain text (surfaces escape on render).
+   */
+  _broadcastPairPending(message) {
+    this._broadcast(message, (client) => !client.boundSessionId)
+  }
+
+  /** #5510: retract a resolved pending request from every host surface. */
+  _broadcastPairResolved(requestId, reason) {
+    this._broadcastPairPending({ type: 'pair_resolved', requestId, reason })
+  }
+
+  /**
+   * #5510: deliver a terminal `pair_result` to the requester's still-open
+   * connection (if present) and drop the tracking entry. On approve the result
+   * carries the issued token; on deny/expire/disconnect it carries a reason.
+   * If the requester's connection is gone, the entry is just dropped.
+   */
+  _resolvePairRequester(requestId, result) {
+    const ws = this._pairRequesters.get(requestId)
+    this._pairRequesters.delete(requestId)
+    if (!ws || ws.readyState !== 1) return
+    this._send(ws, { type: 'pair_result', requestId, ...result })
+  }
+
+  /**
+   * #5510: a requester's connection closed. If it had an outstanding pending
+   * request, remove it from the queue (freeing the slot) and retract the host
+   * banner. No `pair_result` is sent (the socket is gone).
+   */
+  _cleanupPairRequesterOnDisconnect(ws) {
+    if (this._pairRequesters.size === 0) return
+    for (const [requestId, reqWs] of this._pairRequesters) {
+      if (reqWs !== ws) continue
+      this._pairRequesters.delete(requestId)
+      if (this._pairingManager) this._pairingManager.denyPendingRequest(requestId)
+      this._broadcastPairResolved(requestId, 'disconnected')
+    }
+  }
+
+  /**
+   * #4788 Wave 2: register an AskUserQuestion route for `toolUseId` against
+   * `sessionId` AND auto-subscribe every currently-eligible authenticated
+   * client to `sessionId`. This keeps the input-handler's subscription guard
+   * (handlers/input-handlers.js — the "unbound client must be subscribed or
+   * active on the question's session" check) symmetric with
+   * `_broadcastToSession`'s default recipient filter: any client that was
+   * eligible to RECEIVE the question is now eligible to ANSWER it, even after
+   * a `switch_session` flips their `activeSessionId` away.
+   *
+   * Wave 1 closed a cross-session answer-hijack vector (#4788) by requiring
+   * unbound clients to be subscribed before routing a `user_question_response`.
+   * That broke the legitimate "view A → get question for A → switch to B →
+   * answer" flow because `switch_session` only adds the *new* target to
+   * `subscribedSessionIds`; the originating session A was in neither set.
+   * Auto-subscribing at dispatch time means the client that legitimately
+   * received the question keeps the membership it needs to answer it.
+   *
+   * Bound clients are filtered out so a client paired to session X can never
+   * be quietly subscribed to session Y. Unbound clients always get added —
+   * matching `_broadcastToSession`'s default filter (which only requires
+   * `activeSessionId === sessionId || subscribedSessionIds.has(sessionId)`,
+   * but auto-subscribe seeds the latter so the filter passes for everyone
+   * currently connected). Clients that connect AFTER dispatch are still
+   * unable to answer; that's the desired hijack-prevention property.
+   */
+  _registerQuestionRoute(toolUseId, sessionId) {
+    this._questionSessionMap.set(toolUseId, sessionId)
+    if (!sessionId) return
+    for (const [, client] of this.clients) {
+      if (!client.authenticated) continue
+      // Don't auto-subscribe a client bound to a *different* session — the
+      // bound binding is the security contract for that client.
+      if (client.boundSessionId && client.boundSessionId !== sessionId) continue
+      if (!client.subscribedSessionIds) continue
+      // #5563: route through the index-maintaining helper.
+      this._clientManager.subscribe(client, sessionId)
+    }
+  }
+
+  /**
+   * #4798 (P0 symmetry with #4788): register a permission route for
+   * `requestId` against `sessionId` AND auto-subscribe every currently-eligible
+   * authenticated client to `sessionId`. Mirrors `_registerQuestionRoute` — the
+   * settings-handler's permission_response subscription guard (the "unbound
+   * client must be subscribed or active on the permission's session" check)
+   * stays symmetric with `_broadcastToSession`'s default recipient filter:
+   * any client that was eligible to RECEIVE the permission request is now
+   * eligible to RESPOND to it, even after a `switch_session` flips their
+   * `activeSessionId` away.
+   *
+   * Without the auto-subscribe at dispatch, the Wave 1 guard would silently
+   * drop the legitimate "view A → get permission for A → switch to B →
+   * respond" flow because `switch_session` only adds the new target to
+   * `subscribedSessionIds`; the originating session A would be in neither
+   * set after the switch.
+   *
+   * Same bound-client filter as the question variant: clients paired to a
+   * different session never get quietly subscribed elsewhere. Clients that
+   * connect AFTER dispatch are still unable to respond — that's the desired
+   * hijack-prevention property.
+   */
+  _registerPermissionRoute(requestId, sessionId) {
+    // #5704: a route may be re-registered for the same requestId (e.g. the
+    // resend-on-reconnect path re-runs the dispatch). Don't double-count the
+    // refcount — only the FIRST registration of a requestId seeds the per-client
+    // permission-induced subscriptions. Subsequent re-registrations just re-seed
+    // subscribedSessionIds (idempotent) without re-incrementing.
+    const isNewRoute = !this._permissionSessionMap.has(requestId)
+    this._permissionSessionMap.set(requestId, sessionId)
+    if (!sessionId) return
+    for (const [, client] of this.clients) {
+      if (!client.authenticated) continue
+      if (client.boundSessionId && client.boundSessionId !== sessionId) continue
+      if (!client.subscribedSessionIds) continue
+      // #5704: decide whether THIS route's auto-subscribe is permission-induced
+      // (refcounted + torn-down) or rides on an existing EXPLICIT subscription
+      // (left untouched). A subscription is EXPLICIT iff the client is subscribed
+      // with NO permission refcount — an explicit switch_session/subscribe_sessions
+      // ADOPTS by zeroing the refcount. The ACTIVE session is deliberately NOT
+      // treated as ownership here: a client active on A at dispatch is exactly the
+      // #4798 "view A → switch to B → respond" case — it WILL switch away, and we
+      // must hold a refcount so the subscription is torn down after resolve. The
+      // teardown's own active-session guard still protects a client that stays
+      // active on the session. So:
+      //   - subscribed && refcount === 0   -> explicit ownership: don't count.
+      //   - refcount > 0                   -> already permission-owned: count up
+      //                                       (a second concurrent permission).
+      //   - otherwise                      -> permission-induced subscribe: count.
+      const existingRefcount = this._permissionSubs.get(client.id)?.get(sessionId) || 0
+      const explicitlyOwned = client.subscribedSessionIds.has(sessionId) && existingRefcount === 0
+      // #5563: route through the index-maintaining helper.
+      this._clientManager.subscribe(client, sessionId)
+      if (isNewRoute && !explicitlyOwned) {
+        this._incPermissionSub(client.id, sessionId)
+      }
+    }
+  }
+
+  /**
+   * #5704: tear down a permission route registered by `_registerPermissionRoute`.
+   * Called at EVERY resolve / expire / cleanup site (the WS + HTTP resolver, the
+   * HTTP-hook cleanup()/destroy(), the session-destroy sweep) so a permission-
+   * induced subscription never outlives its permission. Idempotent: deleting an
+   * already-gone requestId is a no-op (returns without touching refcounts).
+   *
+   * Decrements every connected client's permission-induced refcount for the
+   * route's session and, when a client's count reaches zero, removes the
+   * auto-subscription UNLESS the client is the active session or still
+   * explicitly subscribed (adoption — see _adoptPermissionSubscription). The
+   * #4798 cross-tab flow stays intact because teardown only fires AFTER the
+   * permission is resolved/expired; while it is live the refcount is > 0.
+   * @param {string} requestId
+   */
+  _unregisterPermissionRoute(requestId) {
+    if (!this._permissionSessionMap.has(requestId)) return
+    const sessionId = this._permissionSessionMap.get(requestId)
+    this._permissionSessionMap.delete(requestId)
+    if (!sessionId) return
+    // Decrement for every connected client that holds a permission-induced
+    // refcount on this session. We iterate this.clients (connected clients); a
+    // client that already disconnected had its refcount entry purged by
+    // _handleClientDeparture, so it's absent here and never double-decremented,
+    // and _decPermissionSub is a no-op for a client with no entry for sessionId.
+    for (const [, client] of this.clients) {
+      this._decPermissionSub(client, sessionId)
+    }
+  }
+
+  /**
+   * #5704: increment the permission-induced subscription refcount for
+   * (clientId, sessionId). Lazily creates the per-client Map.
+   * @private
+   */
+  _incPermissionSub(clientId, sessionId) {
+    let perSession = this._permissionSubs.get(clientId)
+    if (!perSession) {
+      perSession = new Map()
+      this._permissionSubs.set(clientId, perSession)
+    }
+    perSession.set(sessionId, (perSession.get(sessionId) || 0) + 1)
+  }
+
+  /**
+   * #5704: decrement the permission-induced subscription refcount for `client`
+   * on `sessionId`. When it hits zero, drop the bookkeeping entry and unsubscribe
+   * the client from the session — but ONLY if the client neither has it as its
+   * active session NOR is explicitly subscribed (adoption zeroes the refcount, so
+   * a still-counted entry here means no explicit subscribe happened). Never
+   * drives the count negative: a client with no counted entry is a no-op.
+   * @private
+   */
+  _decPermissionSub(client, sessionId) {
+    const perSession = this._permissionSubs.get(client.id)
+    if (!perSession) return
+    const count = perSession.get(sessionId)
+    if (!count) return
+    if (count > 1) {
+      perSession.set(sessionId, count - 1)
+      return
+    }
+    // Last permission-induced reference for this (client, session) is gone.
+    perSession.delete(sessionId)
+    if (perSession.size === 0) this._permissionSubs.delete(client.id)
+    // Don't tear down a subscription the client still actively views. An
+    // EXPLICIT subscribe would have adopted/zeroed the refcount, so reaching
+    // here (count was > 0) already means no explicit subscribe happened — only
+    // the transient active-session case still needs guarding before unsubscribe.
+    if (client.activeSessionId === sessionId) return
+    this._clientManager.unsubscribe(client, sessionId)
+  }
+
+  /**
+   * #5704: an explicit subscribe (switch_session / subscribe_sessions /
+   * session-create auto-subscribe) ADOPTS the subscription for (client,
+   * sessionId): it zeroes any permission-induced refcount so a later permission
+   * teardown can never unsubscribe a client that asked to watch the session.
+   * Wired into transport.subscribeClient so every explicit subscribe path runs
+   * it; the permission auto-subscribe goes straight through _clientManager and
+   * therefore does NOT trigger adoption of its own refcount.
+   * @private
+   */
+  _adoptPermissionSubscription(clientId, sessionId) {
+    const perSession = this._permissionSubs.get(clientId)
+    if (!perSession) return
+    if (perSession.delete(sessionId) && perSession.size === 0) {
+      this._permissionSubs.delete(clientId)
+    }
+  }
+
   /** Count unauthenticated connections for pre-auth limit enforcement */
   _countPendingConnections() {
     return this._clientManager.countPending()
@@ -1333,18 +2295,64 @@ export class WsServer {
     this._broadcaster._broadcastClientJoined(newClient, excludeWs)
   }
 
+  /** Broadcast client_left to all OTHER authenticated clients */
+  _broadcastClientLeft(departingClient) {
+    this._broadcaster._broadcastClientLeft(departingClient)
+  }
+
+  /**
+   * #5555.6 — one keepalive sweep over all authenticated clients.
+   *
+   * Liveness contract: `client.isAlive` is set true by ANY inbound frame
+   * (ws.on('message')) and by the protocol-level `pong` handler, so a client
+   * running its 15s heartbeat ping always reads alive at the 15s sweep. Each
+   * sweep clears the flag on live clients and pings them (to hold Cloudflare /
+   * mobile-OS idle timeouts open for peers that don't initiate). A client that
+   * goes truly silent fails the `!isAlive` check on the sweep AFTER the one that
+   * cleared its flag — detection in 15–30s, ~2× the client cadence (was up to
+   * ~60s with the old 30s sweep).
+   *
+   * Eviction goes through the sanctioned departure path so the
+   * sessionId→clients reverse index (WsClientManager) and any primary-client
+   * claim (#5589) are released atomically — the index lint rejects raw
+   * mutations. `_handleClientDeparture` runs first (it reads client state),
+   * then `removeClient` updates the index, then we terminate the socket.
+   */
+  _keepaliveSweep() {
+    for (const [ws, client] of this.clients) {
+      if (!client.authenticated) continue
+      if (ws.readyState !== 1) continue
+      if (!client.isAlive) {
+        log.info(`Client ${client.id} unresponsive, terminating`)
+        this._handleClientDeparture(client)
+        this._clientManager.removeClient(ws)
+        try { ws.terminate() } catch {}
+        continue
+      }
+      client.isAlive = false
+      try { ws.ping() } catch {}
+    }
+  }
+
   /** Handle cleanup when an authenticated client disconnects or is terminated */
   _handleClientDeparture(departingClient) {
-    // Clear primary for any sessions this client was primary on
-    for (const [sessionId, primaryClientId] of this._primaryClients) {
-      if (primaryClientId === departingClient.id) {
-        this._primaryClients.delete(sessionId)
-        this._broadcastToSession(sessionId, {
-          type: 'primary_changed',
-          sessionId,
-          clientId: null,
-        })
-      }
+    // #5563: vacate primary for every session this client owned. Promotion
+    // policy is NOBODY-UNTIL-CLAIM — we clear the slot (broadcast null) rather
+    // than auto-promote an observer, so a backgrounded viewer is never silently
+    // handed the session; the next claim_primary (or first input) takes over.
+    // This matches the pre-#5563 disconnect behaviour exactly.
+    for (const sessionId of this._clientManager.clearPrimaryForClient(departingClient.id)) {
+      this._announcePrimary(sessionId, null)
+    }
+
+    // #5837: this client's terminal subscriptions are gone. Clear them first (the
+    // client is still in `this.clients` until removeClient runs after departure),
+    // then re-sync each watched session's mirror so the coalescer stops when this
+    // was the last viewer.
+    if (departingClient.terminalSessionIds && departingClient.terminalSessionIds.size > 0) {
+      const watched = [...departingClient.terminalSessionIds]
+      departingClient.terminalSessionIds.clear()
+      for (const sessionId of watched) this._syncTerminalMirror(sessionId)
     }
 
     // Release this client's ownership of any push tokens it registered.
@@ -1366,25 +2374,101 @@ export class WsServer {
       departingClient._ownedPushTokens.clear()
     }
 
+    // #5704: drop this client's permission-induced subscription bookkeeping so
+    // a disconnected client never leaks a per-client Map entry (and can never be
+    // double-decremented by a later _unregisterPermissionRoute — the entry is
+    // gone). The reverse-index membership is purged separately by removeClient.
+    this._permissionSubs.delete(departingClient.id)
+
     // Broadcast client_left to remaining authenticated clients
-    const message = { type: 'client_left', clientId: departingClient.id }
-    for (const [ws, client] of this.clients) {
-      if (client.id !== departingClient.id && client.authenticated && ws.readyState === 1) {
-        this._send(ws, message)
-      }
-    }
+    this._broadcastClientLeft(departingClient)
   }
 
-  /** Update primary client for a session (last-writer-wins) */
+  /**
+   * Input adoption path (#5563). Called only for input that already PASSED the
+   * input_conflict gate — i.e. the session was idle, or the sender is already
+   * primary. Accepted input adopts primary (`force: true`): the server cannot
+   * distinguish "same user, second device" from "shared-session observer"
+   * without identity, and blocking adoption here strands a solo user's second
+   * device behind input_conflict for the rest of the run it just started. The
+   * mid-run steal is still prevented by the conflict gate itself; true
+   * observe-only enforcement is client-role work (#5281) built on the explicit
+   * `claim_primary` path below, which IS sticky (rejects without `force`).
+   * Broadcasts `primary_changed` (legacy) + `session_role` (new) only on an
+   * actual change.
+   */
   _updatePrimary(sessionId, clientId) {
     if (!sessionId) return
-    const current = this._primaryClients.get(sessionId)
-    if (current === clientId) return // already primary
-    this._primaryClients.set(sessionId, clientId)
+    const res = this._clientManager.claimPrimary(sessionId, clientId, { force: true })
+    if (res.changed) this._announcePrimary(sessionId, clientId)
+  }
+
+  /**
+   * Explicit claim / hand-off path (#5563). Returns the claim result so the
+   * handler can tell the requester whether it succeeded or was rejected
+   * (observe-only: another client already owns the session and no hand-off was
+   * authorised). `force` overrides an existing owner for an operator-driven
+   * hand-off. Broadcasts on an actual change.
+   * @returns {{ changed: boolean, rejected?: boolean, primaryClientId: string|undefined }}
+   */
+  _claimPrimary(sessionId, clientId, opts = {}) {
+    if (!sessionId) return { changed: false, primaryClientId: undefined }
+    const res = this._clientManager.claimPrimary(sessionId, clientId, opts)
+    if (res.changed) this._announcePrimary(sessionId, clientId)
+    return res
+  }
+
+  /** Clear the primary slot for a session and announce the vacancy (#5563). */
+  _clearPrimary(sessionId) {
+    if (!sessionId) return
+    const prev = this._clientManager.clearPrimary(sessionId)
+    if (prev !== undefined) this._announcePrimary(sessionId, null)
+  }
+
+  /**
+   * #5837: recompute whether ANY connected client is subscribed to a session's
+   * live terminal mirror, and toggle the session's coalescer accordingly. Called
+   * after every terminal-subscription change (subscribe / unsubscribe / client
+   * departure) so the mirror runs only while at least one viewer is watching.
+   * Only claude-tui sessions expose setTerminalMirrorActive; others have no PTY.
+   */
+  _syncTerminalMirror(sessionId) {
+    if (!sessionId) return
+    const entry = this.sessionManager.getSession?.(sessionId)
+    if (typeof entry?.session?.setTerminalMirrorActive !== 'function') return
+    let active = false
+    for (const client of this.clients.values()) {
+      // Count a client only if it would actually RECEIVE terminal_output — the
+      // SAME predicate ws-forwarding's terminalSubscriberFilter delivers on, so
+      // the coalescer gate and the delivery audience can never diverge (#5844
+      // review). Shared via terminalMirrorRecipient (audit P1-2).
+      if (terminalMirrorRecipient(client, sessionId)) {
+        active = true
+        break
+      }
+    }
+    entry.session.setTerminalMirrorActive(active)
+  }
+
+  /**
+   * Announce the current primary for a session to every subscriber (#5563).
+   * Emits BOTH the legacy `primary_changed` envelope (so existing clients keep
+   * working unchanged) AND the new `session_role` envelope that names the
+   * primary and lets a client compute its own role (primary iff
+   * primaryClientId === its own clientId, else observer; null === unclaimed).
+   * @param {string} sessionId
+   * @param {string|null} clientId - the new primary, or null when vacated
+   */
+  _announcePrimary(sessionId, clientId) {
     this._broadcastToSession(sessionId, {
       type: 'primary_changed',
       sessionId,
       clientId,
+    })
+    this._broadcastToSession(sessionId, {
+      type: 'session_role',
+      sessionId,
+      primaryClientId: clientId,
     })
   }
 
@@ -1440,7 +2524,10 @@ export class WsServer {
   /** Send JSON to a single client (delegates to extracted ws-client-sender) */
   _send(ws, message) {
     const client = this.clients.get(ws)
-    this._clientSend(ws, client, message)
+    // #5721: propagate the delivery boolean so callers gating crypto state on a
+    // frame reaching the wire (the eager handshake's auth_ok) can observe a
+    // swallowed send failure. Other callers ignore the return, unchanged.
+    return this._clientSend(ws, client, message)
   }
 
   /**
@@ -1469,11 +2556,16 @@ export class WsServer {
 
   /** Graceful shutdown */
   close() {
-    // Remove PairingManager listener to prevent post-shutdown broadcasts
+    // Remove PairingManager listeners to prevent post-shutdown broadcasts
     if (this._pairingManager && this._pairingRefreshedHandler) {
       this._pairingManager.off('pairing_refreshed', this._pairingRefreshedHandler)
       this._pairingRefreshedHandler = null
     }
+    if (this._pairingManager && this._pendingRequestExpiredHandler) {
+      this._pairingManager.off('pending_request_expired', this._pendingRequestExpiredHandler)
+      this._pendingRequestExpiredHandler = null
+    }
+    this._pairRequesters.clear()
 
     // Remove TokenManager listener to prevent post-shutdown broadcasts
     if (this._tokenManager && this._tokenRotatedHandler) {
@@ -1512,7 +2604,9 @@ export class WsServer {
     // Auto-deny all pending permission requests (both subsystems)
     this.clearAllPendingPermissions()
     this._questionSessionMap.clear()
-    this._primaryClients.clear()
+    // #5563: primary-ownership lives on the client manager now; clear it via
+    // its public API rather than reaching into the private `_primaryClients`.
+    this._clientManager.clearAllPrimary()
     this._normalizer.destroy()
 
     // Clean up all dev preview tunnels (fire-and-forget; close() is synchronous

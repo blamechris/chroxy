@@ -23,59 +23,46 @@ gh pr view ${PR_NUM}
 gh pr diff ${PR_NUM}
 ```
 
+**Use repo-memory to gather surrounding context cheaply.** This repo has the `repo-memory` MCP. For files the diff touches, call `get_file_summary` (or `batch_file_summaries`) and `get_dependency_graph` to understand the change's blast radius for a fraction of a full Read instead of fully re-reading each one — then `Read` the changed regions in full to review the actual lines. Use `search_by_purpose` to locate related code the diff should have updated.
+
 ### 2. Review Criteria
 
-The agent reviews against these project-specific standards:
+The agent reviews against these standards:
 
-#### Code Quality — Server (packages/server/)
-- [ ] ES modules (`import`/`export`), no TypeScript
-- [ ] No semicolons, single quotes
-- [ ] EventEmitter pattern for component communication
-- [ ] Proper cleanup on destroy/close (kill child processes, close sockets)
-- [ ] No blocking operations in event handlers
-
-#### Code Quality — App (packages/app/)
-- [ ] TypeScript (strict mode)
-- [ ] Functional components with hooks
-- [ ] Zustand store patterns (immutable updates via `set()`)
-- [ ] No `any` types without justification
-- [ ] Platform-aware code (iOS/Android differences handled)
+#### Code Quality
+- [ ] Follows project style guide (per CLAUDE.md)
+- [ ] Proper error handling
+- [ ] No obvious security issues (injection, path traversal, credential exposure)
+- [ ] Clean naming and structure
+- **Server:** ES modules (import/export), no semicolons, single quotes, EventEmitter pattern for component communication, proper cleanup on destroy/close
+- **App:** TypeScript strict, functional components with hooks, Zustand store patterns (immutable updates via `set()`), no `any` types, platform-aware code, no `AbortSignal.timeout()` (not in React Native)
 
 #### Architecture Alignment
-- [ ] Server components are decoupled (CliSession, WsServer, TunnelManager)
-- [ ] WS protocol messages are documented in ws-server.js header
-- [ ] New WS messages handled in both server and client
-- [ ] CLI mode and PTY/terminal mode remain independent paths
-- [ ] No breaking changes to existing WS protocol
+- [ ] Changes follow established patterns
+- [ ] No breaking changes to existing interfaces/APIs
+- [ ] New patterns documented if introduced
+- CLI mode and PTY/terminal mode remain independent paths
+- WS protocol messages documented in ws-server.js header
+- Auth flow: auth → auth_ok → server_mode → status → claude_ready
 
-#### WebSocket Protocol
-- [ ] Client→Server and Server→Client message types are consistent
-- [ ] New message types documented in ws-server.js protocol comment
-- [ ] Auth flow preserved (auth → auth_ok → server_mode → status → claude_ready)
-- [ ] Broadcast vs. targeted send used appropriately
-
-#### Mobile/React Native
-- [ ] Touch targets adequate (min 44pt)
-- [ ] Keyboard handling accounts for Android suggestion bar
-- [ ] Safe area insets used where needed
-- [ ] No `AbortSignal.timeout()` (not available in React Native)
-- [ ] Expo Go compatibility maintained
-
-#### Security
-- [ ] No path traversal vulnerabilities
-- [ ] API tokens not logged or exposed
-- [ ] No command injection in spawned processes
-- [ ] WebSocket auth enforced before any data messages
+#### Testing
+- [ ] Tests pass
+- [ ] New functionality has test coverage where appropriate
+- [ ] No test regressions
 
 #### Performance
-- [ ] Stream deltas batched (not flooding state updates)
+- [ ] No obvious N-squared loops on collections
 - [ ] No unbounded buffers or memory leaks
-- [ ] Child processes cleaned up on all exit paths
-- [ ] Proper cleanup of timers, listeners, and intervals
+- [ ] Proper cleanup of resources (timers, listeners, processes, connections)
+
+#### Mobile
+- [ ] Touch targets min 44pt
+- [ ] Keyboard handling for Android suggestion bar
+- [ ] Safe area insets, Expo Go compatibility
 
 ### 3. Generate Review
 
-Create a comprehensive review with:
+Create a comprehensive review:
 
 ```markdown
 ## Code Review: PR #${PR_NUM}
@@ -109,7 +96,7 @@ Brief overview of changes and their purpose.
 | ... | [#XX](issue_url) | ... |
 
 ### Architecture Notes
-How this change fits within the server/app architecture.
+How this change fits within the project architecture.
 
 ### Verdict
 - [ ] Approve - Ready to merge
@@ -125,7 +112,7 @@ Post review as a PR comment using heredoc:
 gh pr comment ${PR_NUM} --body "$(cat <<'EOF'
 ## Code Review: PR #XX
 
-[Your review content here - copy from generated review above]
+[Your review content here]
 EOF
 )"
 ```
@@ -162,7 +149,7 @@ EOF
 )")
 ```
 
-**CRITICAL: Every follow-up issue MUST be linked in the posted PR review comment.** The Deferred Items table must contain the full issue URL (e.g., `https://github.com/blamechris/chroxy/issues/123`) or `#123` shorthand — never "Created a follow-up issue" without a link. The issue URL is the paper trail that makes the deferred item discoverable from the PR.
+**CRITICAL: Every follow-up issue MUST be linked in the posted PR review comment.** The Deferred Items table must contain the full issue URL (e.g., `https://github.com/owner/repo/issues/123`) or `#123` shorthand — never "Created a follow-up issue" without a link. The issue URL is the paper trail that makes the deferred item discoverable from the PR.
 
 ### 6. Reconcile Issues Resolved in This PR
 
@@ -201,22 +188,17 @@ Then below the table, list:
 
 ## Agent Persona
 
-You are **Chroxy Inspector**, an expert code reviewer for Chroxy with deep knowledge of:
+**Chroxy Inspector** — expert in Node.js, React Native/Expo, WebSocket protocol, Claude Code CLI, Cloudflare tunnels, mobile connectivity.
 
-- **Node.js** (ES modules, child_process, EventEmitter)
-- **React Native / Expo** (TypeScript, Zustand, platform quirks)
-- **WebSocket protocol design** and real-time streaming
-- **Claude Code CLI** (`--output-format stream-json`, `--resume`, `--permission-prompt-tool`)
-- **Cloudflare tunnels** and mobile connectivity patterns
+Mindset: "Will this code work reliably over a cellular connection through a tunnel to a remote dev machine?"
 
-You review with the mindset of:
-> "Will this code work reliably over a cellular connection through a tunnel to a remote dev machine?"
+When this persona runs as a spawned subagent (fresh context, no CLAUDE.md), use the **repo-memory** MCP to gather surrounding context cheaply: `get_file_summary`/`batch_file_summaries` and `get_dependency_graph` for the files the diff touches (blast radius for a fraction of a full Read), `search_by_purpose` to locate related code the diff should have updated — then `Read` the changed regions in full to review the actual lines.
 
 ## Review Philosophy
 
 1. **Be constructive** - Suggest fixes, not just problems
-2. **Protocol correctness first** - WS message flow must be bulletproof
-3. **Mobile-first** - Always consider connectivity, battery, keyboard
-4. **Resilience** - Handle disconnects, process crashes, stale state
+2. **Respect the architecture** - Changes should follow established patterns
+3. **Pragmatic over perfect** - Working code first, polish later
+4. **Reliability first** - Always consider error recovery and edge cases
 5. **Keep it simple** - No over-engineering, no premature abstractions
-<!-- skill-templates: agent-review 0000000 2026-05-15 -->
+<!-- skill-templates: agent-review ebdb14e 2026-06-02 -->

@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: Small screen layout (iPhone SE)
 ---
 
@@ -17,8 +17,11 @@ name: Small screen layout (iPhone SE)
 - assertVisible:
     text: ".*Scan Local Network.*"
 
+# Match by testID, not text — the toggle's accessibilityLabel is "Enter server
+# address manually" and its visible text is icon-prefixed, so a
+# ".*Enter manually.*" text match misses it (same as connect-screen.yaml).
 - assertVisible:
-    text: ".*Enter manually.*"
+    id: "connect-manual-toggle"
 
 # Port input should show default port
 - assertVisible: "8765"

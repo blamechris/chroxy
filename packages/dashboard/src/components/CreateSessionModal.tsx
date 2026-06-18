@@ -21,6 +21,11 @@ export interface CreateSessionData {
   model?: string
   worktree?: boolean
   environmentId?: string
+  // #4208: spawn the claude TUI with --dangerously-skip-permissions and
+  // elide chroxy's permission hook entirely. Only the `claude-tui`
+  // provider honours this — the checkbox is hidden for other providers
+  // so users don't think they're configuring a flag that does nothing.
+  skipPermissions?: boolean
 }
 
 export interface CreateSessionModalProps {
@@ -66,24 +71,99 @@ function generateDefaultName(cwdPath: string, existingNames: string[]): string {
 const EMPTY_STRINGS: string[] = []
 const EMPTY_MODELS: ModelInfo[] = []
 
-/** Billing context per provider — helps users understand cost implications. */
-const PROVIDER_BILLING: Record<string, string> = {
-  'claude-sdk': 'Uses Anthropic API credits',
-  'claude-cli': 'Uses your Claude subscription',
-  'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
-  'docker-cli': 'Docker-isolated — uses your Claude subscription',
-  'docker-sdk': 'Docker-isolated — uses Anthropic API credits',
-  'codex': 'Uses OpenAI API credits',
-  'gemini': 'Uses Google API credits',
+// #5629: the programmatic-credit era boundary, MIRRORED from the server's
+// PROGRAMMATIC_CREDIT_ERA_START (packages/server/src/billing-class.js). The
+// server-driven `auth.detail` is always preferred; this constant only date-
+// gates the STATIC fallback copy below (shown before the live provider list
+// arrives). Keep the two boundaries in sync if this ever moves. 2026-06-15
+// 00:00:00 UTC — Date.UTC month arg is 0-indexed so `5` is June.
+const PROGRAMMATIC_CREDIT_ERA_START = Date.UTC(2026, 5, 15)
+
+/** Client-side mirror of the server's isProgrammaticCreditEra (injectable now). */
+function isProgrammaticCreditEra(now: number = Date.now()): boolean {
+  return now >= PROGRAMMATIC_CREDIT_ERA_START
+}
+
+/**
+ * Billing context per provider — helps users understand cost implications.
+ *
+ * Date-gated only for the HOST providers that flip from a flat subscription to
+ * the metered programmatic-credit pool on 2026-06-15 (claude-cli / claude-sdk).
+ * docker-cli / docker-sdk forward an ANTHROPIC_API_KEY into the container with
+ * no OAuth fallback, so they are always api-key (the host credit pool never
+ * applies inside the container) — NOT date-gated. This is only the STATIC
+ * fallback; the live server `auth.detail` (itself era-gated server-side) takes
+ * precedence at the render site below.
+ */
+function providerBillingFallback(provider: string, now: number = Date.now()): string | undefined {
+  const era = isProgrammaticCreditEra(now)
+  const STATIC: Record<string, string> = {
+    'claude-sdk': era
+      ? 'Programmatic credit pool — monthly metered credits'
+      : 'Uses your Claude subscription',
+    'claude-cli': era
+      ? 'Programmatic credit pool — monthly metered credits'
+      : 'Uses your Claude subscription',
+    'claude-tui': 'Uses your Claude subscription (interactive TUI — bypasses programmatic credit metering)',
+    'claude-byok': 'Direct Anthropic API — per-token billing with your own ANTHROPIC_API_KEY. No claude binary required.',
+    'docker-cli': 'Docker-isolated — Anthropic API (your ANTHROPIC_API_KEY forwarded to the container)',
+    'docker-sdk': 'Docker-isolated — Anthropic API (your ANTHROPIC_API_KEY forwarded to the container)',
+    // #5026: docker-byok runs the BYOK agent loop on the host (so chroxy talks
+    // to api.anthropic.com directly) while file/Bash tool execution happens
+    // inside an isolated Docker container. Trade-off vs. claude-byok: same
+    // billing (your ANTHROPIC_API_KEY), but tool side-effects are sandboxed.
+    'docker-byok': 'Direct Anthropic API (your ANTHROPIC_API_KEY) — tool execution sandboxed in a Docker container. Same billing as claude-byok, isolated filesystem.',
+    'codex': 'Uses OpenAI API credits',
+    'gemini': 'Uses Google API credits',
+  }
+  return STATIC[provider]
 }
 
 /** Short labels for capability badges. */
 const CAPABILITY_BADGES: [keyof import('../store/types').ProviderCapabilities, string][] = [
+  // #5026: containerized first so the most-distinctive capability of
+  // docker-* providers reads at a glance. Stays hidden for host-only
+  // providers (capabilities.containerized is falsy on those).
+  ['containerized', 'Containerized'],
   ['resume', 'Resume'],
   ['planMode', 'Plan'],
   ['permissions', 'Permissions'],
   ['terminal', 'Terminal'],
 ]
+
+/**
+ * Render a hint string with backtick-wrapped tokens promoted to `<code>` so
+ * snippets like `codex login` or `OPENAI_API_KEY` format as code rather
+ * than rendering as literal backticks (#4340). A pure helper so the parsed
+ * tree is easy to unit-test.
+ *
+ * Only single-backtick code spans are recognised — that's all the server
+ * hint strings use today. Backtick handling is intentionally tolerant: an
+ * unmatched trailing backtick falls back to literal text so an
+ * accidentally-malformed hint still renders.
+ */
+export function renderHintWithCode(hint: string): Array<string | { code: string }> {
+  if (!hint) return []
+  const out: Array<string | { code: string }> = []
+  let i = 0
+  while (i < hint.length) {
+    const start = hint.indexOf('`', i)
+    if (start === -1) {
+      out.push(hint.slice(i))
+      break
+    }
+    if (start > i) out.push(hint.slice(i, start))
+    const end = hint.indexOf('`', start + 1)
+    if (end === -1) {
+      // Unmatched backtick — fall back to literal text, including the tick.
+      out.push(hint.slice(start))
+      break
+    }
+    out.push({ code: hint.slice(start + 1, end) })
+    i = end + 1
+  }
+  return out
+}
 
 export function resolveCreateSessionModel(
   provider: string,
@@ -107,6 +187,11 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const availableModels = useConnectionStore(s => s.availableModels) || EMPTY_MODELS
   const availableModelsProvider = useConnectionStore(s => s.availableModelsProvider)
   const availableProviders = useConnectionStore(s => s.availableProviders)
+  // #4019: read the server's PERMISSION_MODES list (including the
+  // `description` field) so the picker + hint stay in lockstep with the
+  // server's source of truth. Pre-#4019 the modal hardcoded its own copy
+  // of the description strings as a ternary chain, which drifted.
+  const availablePermissionModes = useConnectionStore(s => s.availablePermissionModes)
   const [name, setName] = useState('')
   const [nameManuallyEdited, setNameManuallyEdited] = useState(false)
   const [cwd, setCwd] = useState('')
@@ -115,6 +200,17 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const [showAdvanced, setShowAdvanced] = useState(false)
   const [permissionMode, setPermissionMode] = useState('')
   const [worktree, setWorktree] = useState(false)
+  // #4208/#4244: TUI-only opt-in to spawn claude with
+  // --dangerously-skip-permissions. Tri-state (#4244) so the modal can
+  // submit an explicit `false` and override a server-wide
+  // `defaultSkipPermissions: true` (#4209) on a per-session basis:
+  //   - 'inherit' → emits undefined; server applies defaultSkipPermissions
+  //   - 'on'      → emits true; always skip prompts
+  //   - 'off'     → emits false; never skip prompts, even if server default is true
+  // Reset to 'inherit' whenever the modal re-opens (alongside permissionMode
+  // / worktree below) so a previous session's choice doesn't leak into the
+  // next create.
+  const [skipPermissions, setSkipPermissions] = useState<'inherit' | 'on' | 'off'>('inherit')
   const [environmentId, setEnvironmentId] = useState('')
   const environments = useConnectionStore(s => s.environments)
   const [showSuggestions, setShowSuggestions] = useState(false)
@@ -131,6 +227,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   const requestDirectoryListing = useConnectionStore(s => s.requestDirectoryListing)
   const setDirectoryListingCallback = useConnectionStore(s => s.setDirectoryListingCallback)
   const defaultCwd = useConnectionStore(s => s.defaultCwd)
+  // #5553: per-repo session preset disclosure. When the chosen cwd has an
+  // ACTIVE preset, surface a compact, expandable indicator so the operator can
+  // never be surprised by an invisibly-injected preamble. Pending presets are
+  // surfaced too (so the operator knows one is awaiting approval in the drawer).
+  const requestSessionPreset = useConnectionStore(s => s.requestSessionPreset)
+  const sessionPresetSnapshots = useConnectionStore(s => s.sessionPresetSnapshots)
+  const [presetExpanded, setPresetExpanded] = useState(false)
+  // Defensive: tests mock the store with a partial slice; treat a missing
+  // action/map as "feature unavailable" rather than crashing the modal.
+  const requestSessionPresetSafe = typeof requestSessionPreset === 'function' ? requestSessionPreset : undefined
 
   // Imperative refs for submit — React 19 resets controlled input DOM values
   // before the next event fires, so we can't read from the DOM in submit.
@@ -146,6 +252,22 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     const merged = [...new Set([...autocompleteSuggestions, ...known])]
     return merged.sort()
   }, [knownCwds, autocompleteSuggestions, cwd])
+
+  // #5553: debounced preset lookup for the chosen cwd. Requesting on every
+  // keystroke would spam the server, so wait 400ms after the cwd settles. The
+  // reply lands in `sessionPresetSnapshots[cwd]` and the disclosure below reads
+  // from there. Only fires when the modal is open and a cwd is present.
+  const trimmedCwd = cwd.trim()
+  useEffect(() => {
+    if (!open || !trimmedCwd || !requestSessionPresetSafe) return
+    const t = setTimeout(() => { requestSessionPresetSafe(trimmedCwd) }, 400)
+    return () => clearTimeout(t)
+  }, [open, trimmedCwd, requestSessionPresetSafe])
+
+  // The resolved preset for the current cwd (undefined = not fetched; null = no
+  // preset). Collapse the expanded preview whenever the cwd changes.
+  const currentPreset = trimmedCwd ? sessionPresetSnapshots?.[trimmedCwd] : undefined
+  useEffect(() => { setPresetExpanded(false) }, [trimmedCwd])
 
   const prevOpenRef = useRef(false)
   useEffect(() => {
@@ -171,6 +293,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     setShowAdvanced(false)
     setPermissionMode('')
     setWorktree(false)
+    setSkipPermissions('inherit')
     setShowSuggestions(false)
     setSelectedSuggestion(-1)
     setBrowsing(false)
@@ -196,15 +319,53 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
     }
   }, [open, availableProviders, provider])
 
+  // #4245: reset skipPermissions whenever the provider changes. The
+  // checkbox is hidden for non-TUI providers, but the underlying state
+  // survives a provider switch — so a user who ticks the box for
+  // claude-tui, tabs to claude-sdk, then tabs back to claude-tui would
+  // see the checkbox pre-checked with no fresh warning. Force a
+  // re-confirmation by clearing the state on every provider change. The
+  // submit-time guard (`provider === 'claude-tui' && skipPermissions`)
+  // still acts as belt + braces in case this reset races a submit.
+  useEffect(() => {
+    setSkipPermissions('inherit')
+  }, [provider])
+
+  // #4340: gate the Create button on the selected provider being ready.
+  // Pre-#4340 the dropdown disabled unready options so they couldn't be
+  // selected; now we let the user navigate to any provider to read its
+  // fix-hint, but still refuse to submit until auth.ready === true. We
+  // resolve `selectedProviderUnready` once and reuse it for the panel +
+  // submit gate + button disabled state.
+  const selectedProviderInfo = availableProviders.find(p => p.name === provider)
+  const selectedProviderUnready = selectedProviderInfo?.auth?.ready === false
+
   const submit = useCallback(() => {
     const trimmed = nameValRef.current.trim()
     if (!trimmed) {
       flushSync(() => setNameError('Session name is required'))
       return
     }
+    // #4340: refuse to create a session against an unready provider. The
+    // fix-hint panel tells the user what to do; the Create button is also
+    // visually disabled, but the click path checks here for defence in
+    // depth (e.g. keyboard activation racing a store update).
+    if (selectedProviderUnready) return
     const model = resolveCreateSessionModel(provider, defaultModel, availableModels, availableModelsProvider)
-    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined })
-  }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId])
+    // #4208/#4244: gate on the TUI provider at submit time as well as in the
+    // UI. The radio group is hidden for non-TUI providers, but a user who
+    // flips provider AFTER changing state would otherwise carry the stale
+    // value forward — and the server-side handler doesn't gate by provider
+    // (forwards via providerOpts; non-TUI providers ignore it). Belt +
+    // braces: undefined unless the active provider is `claude-tui`.
+    // Tri-state mapping: 'inherit' → undefined (server default wins), 'on'
+    // → true (force skip), 'off' → false (force require, overrides a server
+    // launched with --dangerously-skip-permissions).
+    const skipPermissionsOut: boolean | undefined = provider === 'claude-tui'
+      ? (skipPermissions === 'on' ? true : skipPermissions === 'off' ? false : undefined)
+      : undefined
+    onCreate({ name: trimmed, cwd: cwdValRef.current.trim(), provider, permissionMode: permissionMode || undefined, model, worktree: worktree || undefined, environmentId: environmentId || undefined, skipPermissions: skipPermissionsOut })
+  }, [onCreate, provider, permissionMode, defaultModel, availableModels, availableModelsProvider, worktree, environmentId, skipPermissions, selectedProviderUnready])
 
   const selectSuggestion = useCallback((path: string) => {
     setCwd(path)
@@ -343,7 +504,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
   }, [submit])
 
   return (
-    <Modal open={open} onClose={onClose} title="New Session">
+    <Modal open={open} onClose={onClose} title="New Session" closeOnBackdrop={false}>
       <input
         type="text"
         placeholder="Session name"
@@ -456,6 +617,45 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           {cwd && !suggestions.includes(cwd) && (
             <span className="cwd-hint">New directory — session will start here</span>
           )}
+          {currentPreset && (
+            <div className="repo-preset-disclosure" data-testid="repo-preset-disclosure">
+              <button
+                type="button"
+                className="repo-preset-summary"
+                data-testid="repo-preset-summary"
+                onClick={() => setPresetExpanded(v => !v)}
+                aria-expanded={presetExpanded}
+              >
+                {currentPreset.trustState === 'pending' ? (
+                  <span>Repo preset pending review — approve it in the repo drawer to apply</span>
+                ) : currentPreset.active ? (
+                  <span>
+                    Repo preset applies: preamble {currentPreset.preambleLength} chars
+                    {currentPreset.seedLength > 0 ? ` · seed ${currentPreset.seedLength} chars` : ' · no seed'}
+                    {currentPreset.capped ? ' · capped' : ''} — view
+                  </span>
+                ) : (
+                  <span>Repo preset present but disabled</span>
+                )}
+              </button>
+              {presetExpanded && (
+                <div className="repo-preset-detail" data-testid="repo-preset-detail">
+                  {currentPreset.preamble && (
+                    <div className="repo-preset-field">
+                      <div className="repo-preset-label">Preamble (system prompt, every turn)</div>
+                      <pre className="repo-preset-text" data-testid="repo-preset-preamble">{currentPreset.preamble}</pre>
+                    </div>
+                  )}
+                  {currentPreset.seed && (
+                    <div className="repo-preset-field">
+                      <div className="repo-preset-label">Seed (staged editable into the composer)</div>
+                      <pre className="repo-preset-text" data-testid="repo-preset-seed">{currentPreset.seed}</pre>
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          )}
         </>
       )}
       <div className="provider-section">
@@ -470,9 +670,29 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             {availableProviders.length > 0
               ? availableProviders.map(p => {
                   const unready = p.auth?.ready === false
+                  // #4340: keep <option> labels short. Pre-#4340 the full
+                  // auth.hint was inlined here ("Codex (CLI) — set
+                  // OPENAI_API_KEY or run `codex login`"); native <select>
+                  // rendering truncated long labels in some browser/OS
+                  // combos and backticks rendered as literal characters.
+                  // The hint now surfaces in the help panel below the
+                  // dropdown — see provider-fix-hint. We keep the option
+                  // enabled (vs the pre-#4340 disabled=true) so the user
+                  // can navigate to any provider to read its fix-hint;
+                  // submit is gated separately on auth.ready.
+                  const baseLabel = PROVIDER_LABELS[p.name] || p.name
+                  const optionLabel = unready ? `${baseLabel} (unavailable)` : baseLabel
+                  // Mirror the live detail via title= so desktop hover
+                  // tooltips still work for users who don't navigate to
+                  // the option. Mobile/touch users see the panel instead.
+                  const tooltip = unready ? (p.auth?.detail || p.auth?.hint || 'credentials missing') : undefined
                   return (
-                    <option key={p.name} value={p.name} disabled={unready}>
-                      {(PROVIDER_LABELS[p.name] || p.name) + (unready ? ' — credentials missing' : '')}
+                    <option
+                      key={p.name}
+                      value={p.name}
+                      title={tooltip}
+                    >
+                      {optionLabel}
                     </option>
                   )
                 })
@@ -483,11 +703,16 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             }
           </select>
           {/* Live auth detail from the server (#3404 audit F5) wins over the
-              static PROVIDER_BILLING fallback so the user sees the actual
-              billing identity, not a generic "uses API credits" hint. */}
-          {(() => {
+              static date-gated fallback so the user sees the actual billing
+              identity, not a generic "uses API credits" hint. The fallback
+              itself is era-gated client-side (#5629) so a client that renders
+              before the live provider list arrives still shows the right
+              subscription-vs-credit-pool copy. Suppressed when the selected
+              provider is unready — the fix-hint panel below replaces it so the
+              user isn't reading billing copy for a provider they can't launch. */}
+          {selectedProviderUnready ? null : (() => {
             const live = availableProviders.find(p => p.name === provider)?.auth
-            const text = live?.detail || PROVIDER_BILLING[provider]
+            const text = live?.detail || providerBillingFallback(provider)
             if (!text) return null
             return (
               <span
@@ -500,6 +725,44 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
             )
           })()}
         </div>
+        {/* #4340: richer fix-hint affordance for disabled providers. The
+            pre-#4340 inline `<option>` label couldn't render long hints
+            cleanly (truncation + literal backticks + hover-only title).
+            This panel appears under the dropdown when the selected
+            provider is unready, surfacing the full auth.detail / auth.hint
+            with backtick-wrapped tokens promoted to `<code>` so commands
+            like `codex login` look like commands. */}
+        {selectedProviderUnready && (() => {
+          const live = availableProviders.find(p => p.name === provider)?.auth
+          const hint = live?.hint || 'credentials missing'
+          const detail = live?.detail
+          return (
+            <div
+              className="provider-fix-hint"
+              data-testid="provider-fix-hint"
+              role="status"
+              aria-live="polite"
+            >
+              <span className="provider-fix-hint-label">How to enable:</span>{' '}
+              <span className="provider-fix-hint-body">
+                {renderHintWithCode(hint).map((part, i) =>
+                  typeof part === 'string'
+                    ? <span key={i}>{part}</span>
+                    : <code key={i}>{part.code}</code>,
+                )}
+              </span>
+              {detail && detail !== hint && (
+                <span className="provider-fix-hint-detail">
+                  {renderHintWithCode(detail).map((part, i) =>
+                    typeof part === 'string'
+                      ? <span key={i}>{part}</span>
+                      : <code key={i}>{part.code}</code>,
+                  )}
+                </span>
+              )}
+            </div>
+          )
+        })()}
         {availableProviders.length > 0 && (() => {
           const selected = availableProviders.find(p => p.name === provider)
           if (!selected?.capabilities) return null
@@ -507,12 +770,45 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
           if (badges.length === 0) return null
           return (
             <div className="provider-capabilities" data-testid="provider-capabilities">
-              {badges.map(([, label]) => (
-                <span key={label} className="capability-badge">{label}</span>
+              {badges.map(([key, label]) => (
+                // #5026: data-capability lets CSS pick out the
+                // containerized badge for a distinct chrome so the eye
+                // reads "this provider is sandboxed" at a glance,
+                // without changing how the other badges render.
+                <span
+                  key={label}
+                  className="capability-badge"
+                  data-capability={key}
+                >{label}</span>
               ))}
             </div>
           )
         })()}
+        {/* #5026: when a containerized provider is selected and the
+            user hasn't yet picked an environment, hint at the Environments
+            panel as the path for customising image / memory / cpu /
+            containerUser. The provider will fall back to its built-in
+            defaults (node:22-slim, 2g, 2 cpus, chroxy user) when launched
+            without an environmentId. Once an environment is selected we
+            hide the hint — the Environment dropdown's own form-hint
+            ("Connect to a persistent environment container") takes over
+            and tells the user what they'll get. (#5036 Copilot review:
+            without the !environmentId gate, the hint and the dropdown
+            both ended up describing the same thing.) */}
+        {availableProviders.length > 0 && selectedProviderInfo?.capabilities?.containerized && !selectedProviderUnready && !environmentId && (
+          <div
+            className="provider-container-hint"
+            data-testid="provider-container-hint"
+            role="note"
+          >
+            <span className="provider-container-hint-label">Container settings:</span>{' '}
+            <span className="provider-container-hint-body">
+              {environments.length > 0
+                ? 'Pick an Environment in Advanced to use its image / memory / CPU. Otherwise the provider defaults apply (node:22-slim, 2g RAM, 2 CPUs).'
+                : 'Uses the provider defaults (node:22-slim, 2g RAM, 2 CPUs). Open the Environments panel to create one with a custom image / memory / CPU / container user.'}
+            </span>
+          </div>
+        )}
       </div>
       <div className="advanced-toggle">
         <button
@@ -533,13 +829,49 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
               value={permissionMode}
               onChange={e => setPermissionMode(e.target.value)}
               aria-label="Permission mode"
+              aria-describedby="permission-mode-hint"
             >
               <option value="">Server default</option>
-              <option value="approve">Approve</option>
-              <option value="acceptEdits">Accept Edits</option>
-              <option value="auto">Auto (bypass)</option>
-              <option value="plan">Plan</option>
+              {/* #4019: options driven by availablePermissionModes from the
+                  store so the labels stay in sync with the server's
+                  PERMISSION_MODES table. Cold-start fallback labels match
+                  server PERMISSION_MODES (handler-utils.js:19-22) exactly
+                  — so the selected option text doesn't flicker mid-init
+                  when the available_permission_modes message lands.
+                  (#4211 Copilot review.) */}
+              {(availablePermissionModes.length > 0 ? availablePermissionModes : [
+                { id: 'approve', label: 'Approve' },
+                { id: 'acceptEdits', label: 'Accept Edits' },
+                { id: 'auto', label: 'Auto (skip all prompts)' },
+                { id: 'plan', label: 'Plan' },
+              ]).map((m) => (
+                <option key={m.id} value={m.id}>{m.label}</option>
+              ))}
             </select>
+            <span id="permission-mode-hint" className="form-hint">
+              {/* #4019: hint sourced from availablePermissionModes[].description
+                  (server's PERMISSION_MODES table). Falls back to the
+                  pre-#4019 hardcoded strings when the server didn't send a
+                  description for the selected mode (older server or empty
+                  selection). */}
+              {(() => {
+                const selected = availablePermissionModes.find((m) => m.id === permissionMode)
+                if (selected?.description) return selected.description
+                if (permissionMode === 'auto') {
+                  return 'Equivalent to `claude --dangerously-skip-permissions`. Every tool call auto-approves with no prompt.'
+                }
+                if (permissionMode === 'acceptEdits') {
+                  return 'Read/Write/Edit/Grep/Glob/NotebookEdit auto-approve. Bash, MCP, and other tools still gate on approval.'
+                }
+                if (permissionMode === 'plan') {
+                  return 'Claude is asked to plan before acting; each tool call still gates on your approval.'
+                }
+                if (permissionMode === 'approve') {
+                  return 'Default. Each tool call gates on your approval in the dashboard or mobile app.'
+                }
+                return 'Uses whatever the server’s --default-permission-mode was set to (usually Approve).'
+              })()}
+            </span>
           </div>
           <div className="form-field form-field--checkbox">
             <label className="checkbox-label">
@@ -559,6 +891,63 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 : 'Runs in an isolated git worktree — requires a git repo CWD'}
             </span>
           </div>
+          {/* #4208/#4244: TUI-only opt-in to spawn `claude --dangerously-skip-permissions`.
+              Hidden for non-TUI providers because:
+                - claude-sdk / claude-byok don't accept the flag (different bin)
+                - claude-cli already has its own `--dangerously-skip-permissions`
+                  wiring on `chroxy resume`, not on create_session
+                - docker-* and codex/gemini don't have a comparable concept
+              Tri-state radio group (#4244) so the user can submit an explicit
+              `false` to override a server launched with
+              `chroxy start --dangerously-skip-permissions` (server-wide
+              defaultSkipPermissions: true). The submit handler double-checks
+              the provider before forwarding the flag. */}
+          {provider === 'claude-tui' && (
+            <div className="form-field" data-testid="skip-permissions-field" role="radiogroup" aria-labelledby="skip-permissions-legend" aria-describedby="skip-permissions-hint">
+              <span id="skip-permissions-legend" className="form-field-label">
+                Permission prompts
+              </span>
+              <label className="radio-label">
+                <input
+                  type="radio"
+                  name="skip-permissions"
+                  data-testid="skip-permissions-radio-inherit"
+                  value="inherit"
+                  checked={skipPermissions === 'inherit'}
+                  onChange={() => setSkipPermissions('inherit')}
+                />
+                Use server default
+              </label>
+              <label className="radio-label">
+                <input
+                  type="radio"
+                  name="skip-permissions"
+                  data-testid="skip-permissions-radio-off"
+                  value="off"
+                  checked={skipPermissions === 'off'}
+                  onChange={() => setSkipPermissions('off')}
+                />
+                Require permission prompts (override server default)
+              </label>
+              <label className="radio-label">
+                <input
+                  type="radio"
+                  name="skip-permissions"
+                  data-testid="skip-permissions-radio-on"
+                  value="on"
+                  checked={skipPermissions === 'on'}
+                  onChange={() => setSkipPermissions('on')}
+                />
+                Skip permission prompts (dangerous)
+              </label>
+              <span id="skip-permissions-hint" className="form-hint form-hint--warning">
+                &ldquo;Skip&rdquo; spawns the claude TUI with <code>--dangerously-skip-permissions</code> and
+                disables chroxy&rsquo;s tool-call gate entirely. Every tool runs with no
+                prompt and no audit trail. Use only in trusted contexts (e.g. isolated
+                workspace, throwaway worktree, or container).
+              </span>
+            </div>
+          )}
           {environments.length > 0 && (
             <div className="form-field">
               <label htmlFor="env-select">Environment</label>
@@ -586,7 +975,13 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
         <button className="btn-modal-cancel" onClick={onClose} type="button">
           Cancel
         </button>
-        <button className="btn-modal-create" onClick={submit} type="button" disabled={isCreating}>
+        <button
+          className="btn-modal-create"
+          onClick={submit}
+          type="button"
+          disabled={isCreating || selectedProviderUnready}
+          title={selectedProviderUnready ? 'Selected provider is not configured — see fix-hint above' : undefined}
+        >
           {isCreating ? 'Creating...' : 'Create'}
         </button>
       </div>

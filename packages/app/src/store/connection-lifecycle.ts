@@ -26,8 +26,12 @@ const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
   disconnected: ['connecting'],
   connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting'],
   connected: ['disconnected', 'reconnecting', 'server_restarting'],
-  reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting'],
+  // #5698 — the reconnect ladder gives up → terminal 'server_down'.
+  reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting', 'server_down'],
   server_restarting: ['connecting', 'reconnecting', 'disconnected'],
+  // #5698 — terminal; only a user-initiated reconnect (→ connecting) or an
+  // explicit disconnect leaves it.
+  server_down: ['connecting', 'disconnected'],
 };
 
 interface ServerInfo {
@@ -37,8 +41,14 @@ interface ServerInfo {
   serverCommit?: string | null;
   serverProtocolVersion?: number | null;
   serverResultTimeoutMs?: number | null;
+  // #4497 / #4477 / #4766 — server-advertised stream-stall window in ms.
+  // See ConnectionLifecycleState.streamStallTimeoutMs for the rationale.
+  streamStallTimeoutMs?: number | null;
   sessionCwd?: string | null;
   isEncrypted?: boolean;
+  // #4560 — server-advertised capability map from auth_ok. See the
+  // doc comment on ConnectionLifecycleState.serverCapabilities below.
+  serverCapabilities?: Record<string, boolean>;
 }
 
 interface ConnectionLifecycleState {
@@ -63,13 +73,46 @@ interface ConnectionLifecycleState {
    * older server that doesn't broadcast the field.
    */
   serverResultTimeoutMs: number | null;
+  /**
+   * #4497 / #4477 / #4766 — effective server stream-stall window in ms, as
+   * advertised in auth_ok. Threaded to StreamStallChip so the headline can
+   * humanise to "No response for 5 minutes — retry?". Null when the server
+   * omits the field or advertises the protocol's `0` "disabled" sentinel,
+   * in which case the chip falls back to the generic phrase.
+   *
+   * Was silently dropped on mobile until #4766 unified the auth_ok parser
+   * — the dashboard already plumbed it through `streamStallTimeoutMs` on
+   * its connection store.
+   */
+  streamStallTimeoutMs: number | null;
   isEncrypted: boolean;
+
+  /**
+   * #4560 — server-advertised capability map from auth_ok. Keyed by feature
+   * name (e.g. `notificationPrefs`), value=boolean. Lets the app gate UI
+   * affordances on the server actually supporting the matching WS message —
+   * pre-#4541 servers omit `notificationPrefs` so the Notifications section
+   * in SettingsScreen renders an explicit "not supported" message instead
+   * of sitting on "Loading preferences…" forever. Empty `{}` on fresh
+   * connect, repopulated on every auth_ok; cleared on disconnect so a
+   * reconnect against an older server can't have stale flags left set.
+   */
+  serverCapabilities: Record<string, boolean>;
 
   // Connection quality
   latencyMs: number | null;
   connectionQuality: 'good' | 'fair' | 'poor' | null;
   connectionError: string | null;
   connectionRetryCount: number;
+
+  /**
+   * #5518 — which transport the current connection is using: `'lan'` for a
+   * direct `ws://` LAN socket, `'tunnel'` for the `wss://` Cloudflare path,
+   * `null` when not connected. Surfaced on the connection-quality badge so the
+   * user can see when the faster local path is active. Set by the endpoint
+   * selector at connect time; cleared on disconnect.
+   */
+  activePath: 'lan' | 'tunnel' | null;
 
   // Saved connection for quick reconnect
   savedConnection: SavedConnection | null;
@@ -82,6 +125,7 @@ interface ConnectionLifecycleState {
   setServerInfo: (info: ServerInfo) => void;
   setConnectionQuality: (latencyMs: number | null, quality: 'good' | 'fair' | 'poor' | null) => void;
   setConnectionError: (error: string | null, retryCount: number) => void;
+  setActivePath: (path: 'lan' | 'tunnel' | null) => void;
   setSavedConnection: (connection: SavedConnection | null) => void;
   setUserDisconnected: (disconnected: boolean) => void;
   reset: () => void;
@@ -98,11 +142,17 @@ const initialState = {
   serverCommit: null as string | null,
   serverProtocolVersion: null as number | null,
   serverResultTimeoutMs: null as number | null,
+  streamStallTimeoutMs: null as number | null,
   isEncrypted: false,
+  // #4560 — empty map until auth_ok lands; cleared on every disconnect via
+  // reset() so a reconnect against a different (or older) server can't have
+  // its UI gates left enabled by stale state. Empty = fail-closed.
+  serverCapabilities: {} as Record<string, boolean>,
   latencyMs: null as number | null,
   connectionQuality: null as 'good' | 'fair' | 'poor' | null,
   connectionError: null as string | null,
   connectionRetryCount: 0,
+  activePath: null as 'lan' | 'tunnel' | null,
   savedConnection: null as SavedConnection | null,
   userDisconnected: false,
 };
@@ -131,6 +181,8 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
   setConnectionQuality: (latencyMs, quality) => set({ latencyMs, connectionQuality: quality }),
 
   setConnectionError: (error, retryCount) => set({ connectionError: error, connectionRetryCount: retryCount }),
+
+  setActivePath: (path) => set({ activePath: path }),
 
   setSavedConnection: (connection) => set({ savedConnection: connection }),
 

@@ -21,12 +21,16 @@ type MockStore = {
   activeSessionId: string | null
   sessions: { sessionId: string; provider?: string }[]
   availableProviders: { name: string; capabilities?: { sessionRules?: boolean } }[]
+  connectionPhase: string
 }
 const DEFAULT_MOCK_STORE: MockStore = {
   resolvedPermissions: {},
   activeSessionId: 's1',
   sessions: [{ sessionId: 's1', provider: 'claude-sdk' }],
   availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } }],
+  // #5699 — answer buttons gate on connected; default the mock to connected so
+  // the existing button-interaction tests keep working.
+  connectionPhase: 'connected',
 }
 let mockStoreState: MockStore = { ...DEFAULT_MOCK_STORE }
 function resetMockStore() {
@@ -63,6 +67,31 @@ describe('PermissionPrompt', () => {
     vi.useRealTimers()
   })
 
+  // #5731 (a11y): the prompt auto-denies on timeout, so a screen-reader user
+  // must hear it the moment it appears — it's an assertive alertdialog with an
+  // accessible name + description association.
+  it('is an assertive alertdialog with an accessible name and description (#5731)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-a11y"
+        tool="Write"
+        description="write the file"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    const prompt = screen.getByTestId('permission-prompt')
+    expect(prompt).toHaveAttribute('role', 'alertdialog')
+    expect(prompt).toHaveAttribute('aria-live', 'assertive')
+    expect(prompt.getAttribute('aria-label')).toMatch(/permission request/i)
+    // The description is associated for SR context.
+    expect(prompt).toHaveAttribute('aria-describedby', 'perm-desc-req-a11y')
+    expect(document.getElementById('perm-desc-req-a11y')).toBeInTheDocument()
+    // The 1s countdown is muted so the assertive region announces the request
+    // ONCE on appearance, not re-announcing the ticking time every second.
+    expect(screen.getByTestId('perm-countdown')).toHaveAttribute('aria-live', 'off')
+  })
+
   it('renders tool name and description', () => {
     render(
       <PermissionPrompt
@@ -75,6 +104,35 @@ describe('PermissionPrompt', () => {
     )
     expect(screen.getByText('Write')).toBeInTheDocument()
     expect(screen.getByText(/Write to \/tmp\/file.txt/)).toBeInTheDocument()
+  })
+
+  it('renders the session-origin badge when sessionLabel is provided (#5667)', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="Run command"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+        sessionLabel="ltl · claude-cli"
+      />
+    )
+    const badge = screen.getByTestId('perm-session')
+    expect(badge).toHaveTextContent('ltl · claude-cli')
+    expect(badge).toHaveAttribute('title', 'Requested by ltl · claude-cli')
+  })
+
+  it('omits the session badge when no sessionLabel is provided', () => {
+    render(
+      <PermissionPrompt
+        requestId="req-1"
+        tool="Bash"
+        description="Run command"
+        remainingMs={60000}
+        onRespond={vi.fn()}
+      />
+    )
+    expect(screen.queryByTestId('perm-session')).not.toBeInTheDocument()
   })
 
   it('shows countdown timer', () => {
@@ -531,6 +589,65 @@ describe('PermissionPrompt', () => {
     if (allow) expect(allow.disabled).toBe(true)
     if (deny) expect(deny.disabled).toBe(true)
     if (allowSession) expect(allowSession.disabled).toBe(true)
+  })
+
+  // #5699 — when disconnected, answering is refused store-side; the buttons must
+  // disable + a hint must explain why, so a tap isn't a silent no-op.
+  it('disables the answer buttons and shows a hint when disconnected (#5699)', () => {
+    mockStoreState.connectionPhase = 'reconnecting'
+    const onRespond = vi.fn()
+    render(
+      <PermissionPrompt
+        requestId="req-disc"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    const allow = screen.getByText('Allow') as HTMLButtonElement
+    const deny = screen.getByText('Deny') as HTMLButtonElement
+    expect(allow.disabled).toBe(true)
+    expect(deny.disabled).toBe(true)
+    expect(screen.getByTestId('perm-disconnected-hint')).toBeInTheDocument()
+    // A click on the disabled button does not fire onRespond.
+    fireEvent.click(allow)
+    expect(onRespond).not.toHaveBeenCalled()
+  })
+
+  // #5699 (review): the keyboard shortcuts must ALSO be gated. A disconnected
+  // keypress that reached respond() would latch `submitting` and wedge the prompt
+  // permanently (submitting never resets), so it must be a complete no-op.
+  it('ignores keyboard shortcuts while disconnected and does not wedge the prompt (#5699)', () => {
+    mockStoreState.connectionPhase = 'reconnecting'
+    const onRespond = vi.fn()
+    const { rerender } = render(
+      <PermissionPrompt
+        requestId="req-kbd"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })   // Cmd+Y allow
+    fireEvent.keyDown(document, { key: 'Escape' })             // deny
+    expect(onRespond).not.toHaveBeenCalled()
+
+    // Reconnect: the prompt must still be actionable (not wedged on a latched
+    // `submitting`). A keypress now answers for real.
+    mockStoreState.connectionPhase = 'connected'
+    rerender(
+      <PermissionPrompt
+        requestId="req-kbd"
+        tool="Write"
+        description="test"
+        remainingMs={60000}
+        onRespond={onRespond}
+      />
+    )
+    fireEvent.keyDown(document, { key: 'y', metaKey: true })
+    expect(onRespond).toHaveBeenCalledWith('req-kbd', 'allow')
   })
 })
 

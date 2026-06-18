@@ -6,9 +6,9 @@
  */
 import { scanConversations as defaultScanConversations } from '../conversation-scanner.js'
 import { searchConversations as defaultSearchConversations } from '../conversation-search.js'
-import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, resolveSession, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError } from '../handler-utils.js'
 import { scopeConversationsToClient } from '../conversation-scope.js'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
@@ -18,15 +18,15 @@ async function handleListConversations(ws, client, msg, ctx) {
   try {
     // Pass provider-driven projectsDirs when available (#2965); falls back to
     // the scanner's default (~/.claude/projects) when not set.
-    const scanOpts = ctx.projectsDirs ? { projectsDirs: ctx.projectsDirs } : {}
+    const scanOpts = ctx.runtime.projectsDirs ? { projectsDirs: ctx.runtime.projectsDirs } : {}
     const all = await scan(scanOpts)
     // Adversary A8: scope results so a bound pairing-issued client
     // cannot enumerate conversations outside its session cwd.
     const conversations = scopeConversationsToClient(all, client, ctx)
-    ctx.send(ws, { type: 'conversations_list', conversations })
+    ctx.transport.send(ws, { type: 'conversations_list', conversations })
   } catch (err) {
     log.warn(`Failed to scan conversations: ${err.message}`)
-    ctx.send(ws, { type: 'conversations_list', conversations: [] })
+    ctx.transport.send(ws, { type: 'conversations_list', conversations: [] })
   }
 }
 
@@ -39,10 +39,10 @@ async function handleSearchConversations(ws, client, msg, ctx) {
     // cwd. Without this, a mobile client could substring-grep every
     // JSONL on disk for secrets-in-transcripts.
     const results = scopeConversationsToClient(all, client, ctx)
-    ctx.send(ws, { type: 'search_results', query, results })
+    ctx.transport.send(ws, { type: 'search_results', query, results })
   } catch (err) {
     log.warn(`Failed to search conversations: ${err.message}`)
-    ctx.send(ws, { type: 'search_results', query, results: [] })
+    ctx.transport.send(ws, { type: 'search_results', query, results: [] })
   }
 }
 
@@ -53,10 +53,10 @@ async function handleResumeConversation(ws, client, msg, ctx) {
     // actionable message instead of an opaque "Not authorized".
     // Issue #2912: shape is shared with every other SESSION_TOKEN_MISMATCH
     // emit site via buildSessionTokenMismatchPayload.
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
         message: 'Not authorized: client is bound to a specific session',
       }),
@@ -65,46 +65,47 @@ async function handleResumeConversation(ws, client, msg, ctx) {
   }
 
   // Check resume capability on the active session's provider
-  const activeEntry = client.activeSessionId && ctx.sessionManager.getSession(client.activeSessionId)
+  const activeEntry = client.activeSessionId && ctx.sessions.sessionManager.getSession(client.activeSessionId)
   if (activeEntry && !activeEntry.session.constructor.capabilities?.resume) {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support conversation resume' })
+    sendSessionError(ws, ctx, 'This provider does not support conversation resume')
     return
   }
   const { conversationId, cwd } = msg
   if (!conversationId || typeof conversationId !== 'string') {
-    ctx.send(ws, { type: 'session_error', message: 'Missing conversationId' })
+    sendSessionError(ws, ctx, 'Missing conversationId')
     return
   }
   // Validate conversationId is a UUID to prevent path traversal
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(conversationId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Invalid conversationId format' })
+    sendSessionError(ws, ctx, 'Invalid conversationId format')
     return
   }
   if (cwd) {
-    const cwdError = validateCwdAllowed(cwd, ctx.config)
+    const cwdError = validateCwdAllowed(cwd, ctx.services.config)
     if (cwdError) {
-      ctx.send(ws, { type: 'session_error', message: cwdError })
+      sendSessionError(ws, ctx, cwdError)
       return
     }
   }
   try {
     const name = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : 'Resumed'
-    const sessionId = ctx.sessionManager.createSession({
+    const sessionId = ctx.sessions.sessionManager.createSession({
       resumeSessionId: conversationId,
       cwd: cwd || undefined,
       name,
     })
-    client.activeSessionId = sessionId
-    client.subscribedSessionIds.add(sessionId)
-    const entry = ctx.sessionManager.getSession(sessionId)
-    ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-    ctx.sendSessionInfo(ws, sessionId)
-    ctx.replayHistory(ws, sessionId)
-    ctx.broadcastSessionList()
+    // #5563: index-maintaining helpers.
+    ctx.transport.setActiveSession(client, sessionId)
+    ctx.transport.subscribeClient(client, sessionId)
+    const entry = ctx.sessions.sessionManager.getSession(sessionId)
+    ctx.transport.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+    ctx.transport.sendSessionInfo(ws, sessionId)
+    ctx.transport.replayHistory(ws, sessionId)
+    ctx.transport.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: err.message })
+    sendSessionError(ws, ctx, err.message)
   }
 }
 
@@ -114,14 +115,14 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
     const message = msg.sessionId
       ? `Session not found: ${msg.sessionId}`
       : 'No active session'
-    ctx.send(ws, { type: 'session_error', message })
+    sendSessionError(ws, ctx, message)
     return
   }
-  const fullHistory = await ctx.sessionManager.getFullHistoryAsync(targetId)
-  ctx.send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
+  const fullHistory = await ctx.sessions.sessionManager.getFullHistoryAsync(targetId)
+  ctx.transport.send(ws, { type: 'history_replay_start', sessionId: targetId, fullHistory: true })
   for (const entry of fullHistory) {
     if (entry.type === 'user_input' || entry.type === 'response' || entry.type === 'tool_use') {
-      ctx.send(ws, {
+      ctx.transport.send(ws, {
         type: 'message',
         messageType: entry.type,
         content: entry.content,
@@ -130,25 +131,25 @@ async function handleRequestFullHistory(ws, client, msg, ctx) {
         sessionId: targetId,
       })
     } else {
-      ctx.send(ws, { ...entry, sessionId: targetId })
+      ctx.transport.send(ws, { ...entry, sessionId: targetId })
     }
   }
-  ctx.send(ws, { type: 'history_replay_end', sessionId: targetId })
+  ctx.transport.send(ws, { type: 'history_replay_end', sessionId: targetId })
 }
 
 async function handleRequestSessionContext(ws, client, msg, ctx) {
   const targetId = (typeof msg.sessionId === 'string' && msg.sessionId) || client.activeSessionId
   if (!targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    sendSessionError(ws, ctx, 'No active session')
     return
   }
 
   // Enforce session binding
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
@@ -156,33 +157,37 @@ async function handleRequestSessionContext(ws, client, msg, ctx) {
   }
 
   try {
-    const sessionCtx = await ctx.sessionManager.getSessionContext(targetId)
+    const sessionCtx = await ctx.sessions.sessionManager.getSessionContext(targetId)
     if (sessionCtx) {
-      ctx.send(ws, { type: 'session_context', ...sessionCtx })
+      ctx.transport.send(ws, { type: 'session_context', ...sessionCtx })
     } else {
-      ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+      sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     }
   } catch (err) {
-    log.warn(`Failed to read session context: ${err.message}`)
-    ctx.send(ws, { type: 'session_error', message: `Failed to read session context: ${err.message}` })
+    // #4828: session-scoped — `targetId` is the active session ID in
+    // scope. Legacy single-session callers may surface an empty value,
+    // so fall back to module-level `log` rather than throwing inside
+    // loggerForSession (same pattern as the settings-handlers sites).
+    ;(targetId ? loggerForSession('ws', targetId) : log).warn(`Failed to read session context: ${err.message}`)
+    sendSessionError(ws, ctx, `Failed to read session context: ${err.message}`)
   }
 }
 
 function handleRequestCostSummary(ws, client, msg, ctx) {
-  const costSessions = ctx.sessionManager.listSessions()
+  const costSessions = ctx.sessions.sessionManager.listSessions()
   const sessionCosts = costSessions.map(s => ({
     sessionId: s.sessionId,
     name: s.name,
-    cost: ctx.sessionManager.getSessionCost(s.sessionId),
+    cost: ctx.sessions.sessionManager.getSessionCost(s.sessionId),
     model: s.model || null,
   }))
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'cost_summary',
-    totalCost: ctx.sessionManager.getTotalCost(),
-    budget: ctx.sessionManager.getCostBudget(),
+    totalCost: ctx.sessions.sessionManager.getTotalCost(),
+    budget: ctx.sessions.sessionManager.getCostBudget(),
     sessions: sessionCosts,
-    costByModel: ctx.sessionManager.getCostByModel(),
-    spendRate: ctx.sessionManager.getSpendRate(),
+    costByModel: ctx.sessions.sessionManager.getCostByModel(),
+    spendRate: ctx.sessions.sessionManager.getSpendRate(),
   })
 }
 

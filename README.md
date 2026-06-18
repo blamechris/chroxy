@@ -24,7 +24,7 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 
 ## Why Chroxy?
 
-- **Works with Claude Code, Gemini, and Codex** — Pluggable providers let you pick `claude-sdk` (default), `claude-cli`, `gemini`, or `codex` per session. See [docs/providers.md](docs/providers.md).
+- **Works with Claude Code, Gemini, and Codex** — Pluggable providers let you pick `claude-tui` (default), `claude-sdk`, `claude-cli`, `gemini`, or `codex` per session. See [docs/providers.md](docs/providers.md).
 - **Provider flexibility** — If you're hitting your Claude programmatic credit cap, swap providers per session with `--provider codex` or `CHROXY_PROVIDER=gemini`. Codex and Gemini bill separately from Anthropic. See [Billing & API usage](#billing--api-usage) below.
 - **No tmux required** — CLI headless mode wraps your AI CLI directly (via the Agent SDK for Claude, or `gemini -p` / `codex exec` for the others). Just start and connect.
 - **Two views, one session** — Switch between a clean chat UI (markdown-rendered) and a full xterm.js terminal emulator.
@@ -32,13 +32,14 @@ Run a lightweight daemon on your dev machine, connect from your phone or desktop
 - **Phone + Desktop** — React Native mobile app and a Tauri desktop tray app with a web dashboard.
 - **Encrypted** — End-to-end encryption over Cloudflare tunnel. Your machine, your tunnel, no cloud middleman.
 - **Resilient** — Auto-reconnect on network drops, supervisor auto-restart on crash, push notifications for permission prompts.
+- **Discord notifications** — A live status embed per project that pings when a session is ready for input or needs approval — even for plain Claude Code sessions outside chroxy, via the `chroxy-hooks` installer. See [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md).
 - **Voice input** — Dictate messages with speech-to-text on mobile and macOS desktop.
 - **Docker isolation** — Run sessions in Docker containers with resource limits and security guards.
 - **Open source** — MIT licensed. Audit it, fork it, improve it.
 
 ## Billing & API usage
 
-Chroxy uses the Claude Agent SDK (or `claude -p`), which Anthropic classifies as **programmatic usage**. Starting **June 15, 2026**, programmatic usage on Claude subscriptions draws from a separate monthly credit pool — not the interactive Claude Code allowance:
+The default provider is `claude-tui` (see #5819), which drives the interactive `claude` TUI and bills against your subscription's interactive allowance today (a best-effort bet — see below). The Claude Agent SDK / `claude -p` providers (`claude-sdk`, `claude-cli`) instead use what Anthropic classifies as **programmatic usage**. Starting **June 15, 2026**, programmatic usage on Claude subscriptions draws from a separate monthly credit pool — not the interactive Claude Code allowance:
 
 | Plan | Programmatic credit / month |
 |---|---|
@@ -54,17 +55,19 @@ Credits reset each billing cycle and don't roll over. When the credit is exhaust
 
 **For heavy users:** set `ANTHROPIC_API_KEY` to bypass the subscription credit pool entirely and bill the raw Anthropic API account directly. Same SDK, predictable per-token pricing.
 
-**Or stay on the subscription:** the `claude-tui` provider drives the interactive `claude` TUI under a PTY instead of the SDK / `claude -p`, so each turn bills against your subscription's interactive allowance — the same pool `claude` uses when you run it locally — rather than the programmatic credit pool. Pick it per session with `--provider claude-tui` or `CHROXY_PROVIDER=claude-tui`. Trade-off: no live token streaming, no live model switch, no plan mode, no resume — see [docs/providers.md#claude-tui](docs/providers.md#claude-tui).
+**The default stays on the subscription (best-effort):** the `claude-tui` provider — the zero-config default (see #5819) — drives the interactive `claude` TUI under a PTY instead of the SDK / `claude -p`, so each turn **currently** bills against your subscription's interactive allowance — the same pool `claude` uses when you run it locally — rather than the programmatic credit pool. This is an unguaranteed bet, not a sanctioned path: Anthropic may reclassify or enforce against third-party automation of a subscription login, so treat it as best-effort and keep BYOK (`ANTHROPIC_API_KEY`) as a fallback. Switch to the SDK explicitly with `--provider claude-sdk` (or back with `--provider claude-tui` / `CHROXY_PROVIDER=claude-tui`). Trade-off: `claude-tui` has no live token streaming, no live model switch, no plan mode, no resume — see [docs/providers.md#claude-tui](docs/providers.md#claude-tui).
+
+A second subscription-billed path, `claude-channel`, is in **research preview**: it will drive Claude through Anthropic's first-party channels MCP protocol (`claude --channels`) rather than scraping the TUI, and — once the backend lands — will add live streaming plus a first-party permission relay. It is currently a scaffold whose session backend isn't runnable yet (the bridge lands in a follow-up); when it does run it will require `claude` ≥ 2.1.80 and the `--dangerously-load-development-channels` flag — see [docs/providers.md#claude-channel-research-preview](docs/providers.md#claude-channel-research-preview).
 
 Chroxy includes cost controls to help you stay within budget — see `CHROXY_COST_BUDGET` and `CHROXY_SESSION_TIMEOUT` in [packages/server/CONFIG.md](packages/server/CONFIG.md). Prompt caching is enabled by default and typically reduces credit burn 5–10x on long sessions.
 
 ## Features
 
 **Server:**
-CLI headless mode, multi-provider support (Claude Agent SDK, legacy `claude -p`, Gemini, Codex — see [docs/providers.md](docs/providers.md)), WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, multi-session management, model switching, plan mode detection, background agent tracking, web dashboard, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine, extensible provider/handler system, shared skills system (drop Markdown files in `~/.chroxy/skills/` — see [docs/skills.md](docs/skills.md))
+CLI headless mode, multi-provider support (Claude Agent SDK, legacy `claude -p`, Gemini, Codex, DeepSeek, Ollama, BYOK Anthropic API, any Anthropic-compatible endpoint — see [docs/providers.md](docs/providers.md)), WebSocket protocol with auth, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications, Discord status-embed notifications (see [docs/guides/discord-notifications.md](docs/guides/discord-notifications.md)), external-session event ingest via `@chroxy/claude-hooks`, multi-session management, model switching with a user-extensible model-metadata overlay (`~/.chroxy/models.json`) and graceful degradation for unknown models, plan mode detection, background agent tracking, web dashboard, per-session / per-repo system-prompt preambles (trust-gated `.chroxy/session.json` + daemon overrides), billing-class-aware cost tracking (BYOK / subscription / programmatic-credit) with a monthly programmatic-credit budget meter, persistent container environments (Docker Compose, DevContainer, snapshot/restore), Docker session providers, git worktree isolation, permission rule engine + per-session permission attribution, encrypted credentials at rest, extensible provider/handler system, shared skills system (drop Markdown files in `~/.chroxy/skills/` — see [docs/skills.md](docs/skills.md))
 
 **Desktop (Tauri):**
-System tray app, web dashboard with syntax highlighting (15+ languages), xterm.js terminal, session tabs, desktop notifications, voice-to-text (macOS SFSpeechRecognizer), command palette with keyboard shortcuts
+System tray app, web dashboard with syntax highlighting (15+ languages), xterm.js terminal, session tabs with per-tab status + pending-permission indicators, desktop notifications, voice-to-text (macOS SFSpeechRecognizer) with hold-Space push-to-talk dictation, sidebar token/credit-spend meter, command palette with keyboard shortcuts
 
 **Mobile (React Native / Expo):**
 QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation, plan approval UI, agent monitoring, voice-to-text input, biometric lock, conversation search, settings screen, auto-reconnect with ConnectionPhase state machine
@@ -247,6 +250,8 @@ source "$HOME/.cargo/env"
 
 # 2. Tauri's required system libraries
 # (Debian/Ubuntu — Fedora/Arch package names differ; see Tauri docs link below)
+# Maintainers: resync this list against https://v2.tauri.app/start/prerequisites/#linux
+# at each Tauri minor bump — upstream occasionally renames/adds packages.
 sudo apt update
 sudo apt install -y \
   build-essential curl wget file libssl-dev libxdo-dev \

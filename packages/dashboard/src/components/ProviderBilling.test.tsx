@@ -3,9 +3,14 @@
  *
  * Verifies billing context is shown below provider dropdown.
  */
-import { describe, it, expect, vi, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import { render, screen, cleanup, fireEvent } from '@testing-library/react'
 import { CreateSessionModal } from './CreateSessionModal'
+
+// The claude-cli/claude-sdk billing fallback is era-gated (subscription before
+// 2026-06-15, programmatic credit pool on/after). Pin the clock to a pre-era
+// instant so these assertions are deterministic regardless of the run date.
+const PRE_ERA = Date.UTC(2026, 5, 14) // 2026-06-14, before the boundary
 
 vi.mock('../store/connection', () => ({
   useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) => {
@@ -28,7 +33,14 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
   usePathAutocomplete: () => ({ suggestions: [] }),
 }))
 
-afterEach(cleanup)
+beforeEach(() => {
+  vi.useFakeTimers()
+  vi.setSystemTime(PRE_ERA)
+})
+afterEach(() => {
+  vi.useRealTimers()
+  cleanup()
+})
 
 describe('Provider billing hints (#1677)', () => {
   const defaultProps = {
@@ -42,11 +54,13 @@ describe('Provider billing hints (#1677)', () => {
     expect(screen.getByTestId('provider-billing-hint')).toHaveTextContent('Uses your Claude subscription')
   })
 
-  it('shows billing hint for SDK provider', () => {
+  it('shows billing hint for SDK provider (pre-era subscription copy)', () => {
     render(<CreateSessionModal {...defaultProps} />)
     const select = screen.getByLabelText('Select provider')
     fireEvent.change(select, { target: { value: 'claude-sdk' } })
-    expect(screen.getByTestId('provider-billing-hint')).toHaveTextContent('Uses Anthropic API credits')
+    // #5629: before 2026-06-15 the SDK's default OAuth path bills the
+    // subscription pool; on/after it flips to "programmatic credit pool".
+    expect(screen.getByTestId('provider-billing-hint')).toHaveTextContent('Uses your Claude subscription')
   })
 
   it('shows billing hint for Codex provider', () => {

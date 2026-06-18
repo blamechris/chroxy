@@ -59,7 +59,7 @@ function renderSidebar(props: Partial<SidebarProps> = {}) {
     filter: '',
     serverStatus: 'connected',
     tunnelUrl: null,
-    clientCount: 1,
+    connectedClients: [], activePrimaryClientId: null,
     onFilterChange: noop,
     onSessionClick: noop,
     onResumeSession: noop,

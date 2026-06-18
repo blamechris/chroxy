@@ -1,6 +1,7 @@
 import { describe, it, beforeEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { createClientSender } from '../src/ws-client-sender.js'
+import { metrics } from '../src/metrics.js'
 
 describe('ws-client-sender backpressure monitoring (#2205)', () => {
   let warnings
@@ -185,6 +186,61 @@ describe('ws-client-sender backpressure monitoring (#2205)', () => {
       assert.equal(warnings.length, 1)
       assert.match(warnings[0], /warning threshold/)
       assert.equal(ws._closed, false)
+    })
+  })
+
+  // #4804: the post-send path in ws-client-sender is a second, semantically
+  // distinct backpressure system from WsBroadcaster._sendOneWithBackpressure
+  // (which is pre-send). It catches slow clients on single-recipient sends
+  // that bypass the broadcaster entirely (pong, token_rotated, auth_fail,
+  // rate_limited, server_status, error, etc. — see ws-server.js _send call
+  // sites). Without metrics, evictions on those paths silently bypass the
+  // observability that #4775 was specifically trying to add.
+  describe('observability metrics (#4804)', () => {
+    beforeEach(() => {
+      metrics.reset()
+    })
+
+    it('increments backpressure.disconnects when evicting a slow client', () => {
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 500, warnThrottleMs: 0 })
+      const ws = makeWs(600) // above evict threshold
+      const client = makeClient()
+
+      send(ws, client, { type: 'test' })
+
+      assert.equal(ws._closed, true, 'sanity: client should be evicted')
+      assert.equal(metrics.get('backpressure.disconnects'), 1, 'eviction must fire the disconnects metric')
+    })
+
+    it('does not increment backpressure.disconnects on warn-only events', () => {
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 10000, warnThrottleMs: 0 })
+      const ws = makeWs(200) // above warn, below evict
+      const client = makeClient()
+
+      send(ws, client, { type: 'test' })
+
+      assert.equal(ws._closed, false, 'sanity: warn-only, no close')
+      assert.equal(metrics.get('backpressure.disconnects'), 0)
+    })
+
+    it('does not increment backpressure.disconnects when client is undefined', () => {
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 500, warnThrottleMs: 0 })
+      const ws = makeWs(600)
+
+      // No client to evict — should be a no-op for metrics too
+      send(ws, undefined, { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.disconnects'), 0)
+    })
+
+    it('does not increment on successful sends below warn threshold', () => {
+      send = createClientSender(log, { warnThreshold: 100, evictThreshold: 500, warnThrottleMs: 0 })
+      const ws = makeWs(50)
+      const client = makeClient()
+
+      send(ws, client, { type: 'test' })
+
+      assert.equal(metrics.get('backpressure.disconnects'), 0)
     })
   })
 })

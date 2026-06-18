@@ -1,0 +1,275 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Chroxy — Status &amp; Friction Report · 2026-06-13</title>
+<style>
+  :root {
+    --bg: #14121c; --panel: #1d1a28; --panel2: #232032; --line: #322c44;
+    --text: #e6e1f2; --muted: #a79fc4; --dim: #7d769c;
+    --purple: #8b7fd6; --green: #5fd6a0; --orange: #e0a458; --red: #d6685f; --blue: #6fb3e0;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text);
+    font: 15px/1.6 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; }
+  .wrap { max-width: 960px; margin: 0 auto; padding: 40px 28px 80px; }
+  header { border-bottom: 1px solid var(--line); padding-bottom: 22px; margin-bottom: 8px; }
+  h1 { font-size: 30px; margin: 0 0 6px; letter-spacing: -0.5px; }
+  h1 .v { color: var(--purple); font-weight: 600; }
+  .sub { color: var(--muted); font-size: 14px; }
+  h2 { font-size: 20px; margin: 38px 0 14px; padding-top: 14px; border-top: 1px solid var(--line); }
+  h2:first-of-type { border-top: none; }
+  h3 { font-size: 16px; margin: 20px 0 8px; color: var(--text); }
+  p { margin: 8px 0; color: var(--text); }
+  .muted { color: var(--muted); }
+  a { color: var(--blue); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  code { background: var(--panel2); padding: 1px 6px; border-radius: 5px; font-size: 13px;
+    font-family: "SF Mono", Menlo, monospace; color: #cfc8e8; }
+  .cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); gap: 12px; margin: 16px 0; }
+  .card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 16px; }
+  .card .n { font-size: 26px; font-weight: 700; }
+  .card .l { color: var(--muted); font-size: 12px; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+  .panel { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; padding: 4px 20px; margin: 14px 0; }
+  table { width: 100%; border-collapse: collapse; margin: 12px 0; font-size: 14px; }
+  th, td { text-align: left; padding: 9px 10px; border-bottom: 1px solid var(--line); vertical-align: top; }
+  th { color: var(--dim); font-weight: 600; font-size: 12px; text-transform: uppercase; letter-spacing: 0.4px; }
+  tr:last-child td { border-bottom: none; }
+  .pill { display: inline-block; padding: 1px 9px; border-radius: 20px; font-size: 12px; font-weight: 600; white-space: nowrap; }
+  .ok { background: rgba(95,214,160,.15); color: var(--green); }
+  .warn { background: rgba(224,164,88,.15); color: var(--orange); }
+  .bad { background: rgba(214,104,95,.15); color: var(--red); }
+  .info { background: rgba(111,179,224,.15); color: var(--blue); }
+  .neutral { background: rgba(167,159,196,.13); color: var(--muted); }
+  ul { margin: 8px 0; padding-left: 22px; }
+  li { margin: 5px 0; }
+  .callout { border-left: 3px solid var(--purple); background: var(--panel); padding: 12px 18px; border-radius: 0 10px 10px 0; margin: 14px 0; }
+  .callout.warn { border-left-color: var(--orange); }
+  .callout.good { border-left-color: var(--green); }
+  footer { margin-top: 50px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--dim); font-size: 13px; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+<header>
+  <h1>Chroxy — Status &amp; Friction Report <span class="v">v0.9.46</span></h1>
+  <div class="sub">Generated 2026-06-13 · remote terminal harness for Claude Code · monorepo (server · app · desktop · dashboard · protocol · store-core · claude-hooks)</div>
+</header>
+
+<div class="callout good">
+  <strong>✓ Closed out, re-baselined, and burned down — 2026-06-13.</strong> A 6-agent swarm audit (Skeptic · Builder · Guardian · Minimalist · Operator · Futurist) verified every backlog item below against current <code>main</code> (full results: <a href="audit-results/00-master-assessment.md"><code>audit-results/00-master-assessment.md</code></a>), the gaps were filed as issues, and the <strong>entire §3 friction + parity backlog was then cleared</strong> — 9 more PRs (28 total across the marathon), 10 issues resolved, the two genuine decision-forks brought to you. See <strong>§1.5 "the swarm-audit closeout"</strong> for the per-PR record. The §3 table below is now annotated with each item's resolution; §5 next-moves are the original snapshot, kept for provenance.
+</div>
+
+<div class="callout">
+  <strong>Backlog reconciliation (what's actually open).</strong>
+  <ul>
+    <li><span class="pill ok">closed</span> <strong>#5613</strong> — fixed in code by #5737, only orphaned-open by GitHub's comma-list closing-keyword quirk. Closed.</li>
+    <li><span class="pill warn">reopened</span> <strong>#5623</strong> — its literal ask (clear <code>sessionRole</code> on disconnect, both clients) was <em>never</em> implemented; #5737 only shipped the server re-emit, leaving a flash window + an a11y false-alarm. Scope expanded to both clients.</li>
+    <li><span class="pill neutral">already shipped</span> <strong>#5674</strong> stays closed (#5694). Residual mobile parity (per-tab pending-permission dot + assertive a11y announcement) filed as <strong>#5750</strong>.</li>
+    <li><span class="pill info">re-scoped</span> <strong>#5631</strong> — ~60% done by #5663; real remaining work is the dashboard pricing-table drift + the pricing-less wire schema, not UI-wide degradation (annotated on the issue).</li>
+    <li><span class="pill info">re-aimed</span> <strong>#5622</strong> — the fix must bound the <em>server</em> derivation throughput (the only backstop counts the wrong sockets), and it's not user-felt for a solo driver (annotated).</li>
+    <li><span class="pill bad">live bug</span> <strong>#5668</strong> — the desktop "surface voice failures" half is a concrete unfixed wiring gap (<code>voiceInput.error</code> captured but never rendered); the audit's top felt-friction win.</li>
+    <li><span class="pill info">new</span> <strong>#5751</strong> harness-preamble (Futurist-minimal design) · <strong>#5752</strong> <code>resume_budget</code> dead-button · <strong>#5753</strong> question-answer fail-closed <code>toolUseId</code> guard.</li>
+  </ul>
+  <p class="muted"><strong>Ship order (Tier A — cheap, high felt-friction):</strong> #5668 desktop voice-error surfacing → #5623 clear role on disconnect (both clients) → #5631 quick-win (opus→4-8 + dashboard labels). Then #5750 mobile parity, #5631 structural.</p>
+</div>
+
+<div class="cards">
+  <div class="card"><div class="n" style="color:var(--green)">28</div><div class="l">PRs merged across the marathon</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">Issues resolved in the closeout</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">cleared</div><div class="l">§3 friction backlog</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">green</div><div class="l">CI on main</div></div>
+</div>
+
+<h2>1 · Executive summary</h2>
+<p>The headline concern is <strong>friction, not capability</strong>: chroxy does a lot, but an accumulation of minor papercuts has kept it slower in practice than driving Claude Code straight from the terminal. This session closed the four user-reported papercuts and shipped one deferred feature; the remaining backlog is mostly small UX/perf nits and tech-debt cleanup rather than missing functionality.</p>
+<div class="callout good">
+  <strong>Mic fixed + redeployed.</strong> The desktop app was rebuilt from current <code>main</code> and reinstalled to <code>/Applications/Chroxy.app</code> (v0.9.46, fresh universal <code>speech-helper</code>, code-signed, same bundle id so existing permission grants carry over). It now carries both the June-3 RunLoop fix and this session's push-to-talk fix. <span class="muted">Pending your confirmation on next launch.</span>
+</div>
+
+<h2>1.5 · Autonomous durability marathon — continuation</h2>
+<p>Picking up the durability epic <a href="https://github.com/blamechris/chroxy/issues/5703">#5703</a> (parity with the Claude Code CLI — "don't let me break stuff, don't make me lose my place"). Run as orchestrator + delegated worktree-isolated review agents; every PR gated by adversarial review + full CI + resolved threads before a synchronous squash-merge. <strong>5 PRs merged; design decisions made on your behalf are recorded below.</strong></p>
+<div class="cards">
+  <div class="card"><div class="n" style="color:var(--green)">5</div><div class="l">Durability PRs merged</div></div>
+  <div class="card"><div class="n">3</div><div class="l">Decisions recorded</div></div>
+  <div class="card"><div class="n">2</div><div class="l">Follow-ups filed</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides</div></div>
+</div>
+<table>
+  <thead><tr><th>PR → issue</th><th>What it fixes (the friction)</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5722 → #5716</td><td>Roll back an optimistic permission-mode switch the server rejects (<code>PERMISSION_MODE_NOT_APPLIED</code>) — incl. the Shift+Tab toggle target (Copilot-caught) via compare-and-swap. No more phantom "auto"/bypass the session never entered.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5727 → #5710</td><td>Force escape hatch to delete a wedged/stuck-running session (server <code>force</code> bypass + dashboard "delete anyway?" confirm). Recovers the recoverability gap #5707 introduced — you can't get stuck unable to remove a dead tab.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5724 → #5698</td><td>Cap the reconnect ladder (10 rungs ≈ 59s) → terminal <code>server_down</code> state with a manual Reconnect + wake-recovery on tab-visible, instead of spinning "Reconnecting…" forever (FIX-2).</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5728 → #5699</td><td>Refuse permission answers on a disconnected/cached session (store + buttons + keyboard) instead of optimistically marking them "answered" and silently losing them. The "did it actually send?" footgun.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5729 → #5714</td><td>Surface <code>session_persist_failed</code> to clients (server forward + protocol + dashboard &amp; app banner): when a create/rename/destroy can't be flushed to disk it shows "couldn't save — may be lost on restart" instead of silently reverting on the next boot.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5697</td><td><code>handleStreamStart</code> response-reuse replay guard</td><td><span class="pill neutral">wontfix (decision below)</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">Every PR ran implement → worktree-isolated adversarial review (+ Copilot) → fix → full-suite + green CI → resolved threads → squash-merge. The reviews earned their keep every time: a cross-session toggle-target clobber (#5716), the <code>server_down</code> enum string leaking into the footer / server-picker / app-header (#5724, found across two rounds), and a permission-prompt that wedged <em>permanently</em> on a disconnected keypress (#5728). All caught and fixed before merge.</p>
+
+<h3>Design decisions taken on your behalf</h3>
+<div class="callout">
+  <strong>#5697 — closed wontfix, not "fixed for parity."</strong> The proposed guard (force a fresh response bubble whenever a live <code>stream_start</code> collides with a prior response id) defends a bug the swarm confirmed is <em>unreachable</em> (server response ids are monotonic + per-boot-prefixed). Implementing it (PR #5723) failed CI because both clients <em>intentionally</em> reuse a response bubble on a live same-id stream_start (the post-<code>stream_end</code> continuation path, encoded in <code>connection.test.ts</code>). Changing core streaming behavior to defend an impossible collision fails the "do no harm" bar — reverted and closed, trigger-to-revisit recorded.
+</div>
+<div class="callout">
+  <strong>#5698 reconnect — client cap first; server-lifecycle change deferred.</strong> The biggest call was whether the supervisor should park in a terminal "I'm down" standby (serving <code>{status:'down'}</code>) instead of <code>_exit(1)</code> on max-restarts — which changes process-exit semantics under launchd/the desktop app (real blast radius). <strong>Decision:</strong> ship the pure-client ladder cap first (zero server risk, fixes the core "spins forever" jank), defer the server-side positive-down signal (FIX-1) until the lifecycle question can be made deliberately. The client cap alone takes you from an infinite spinner to a clear "Server appears to be down — Reconnect."
+</div>
+<div class="callout">
+  <strong>Scope discipline.</strong> #5698 split: FIX-2 (client cap) shipped; FIX-1 (server signal), FIX-3 (per-session terminal flag), mobile wiring + resume/network clear are follow-ups (<a href="https://github.com/blamechris/chroxy/issues/5725">#5725</a> for mobile; FIX-1/FIX-3 under the open parent #5698). #5728 shipped the dangerous half of #5699 (permission answers); input stays legitimately queued and tab-switch stays allowed (cached nav re-syncs), so #5699's switch-gate + queued-count banner remain optional follow-ups. #5704 (subscription teardown) deferred per its own triage — invisible traffic only, medium mis-teardown risk.
+</div>
+
+<h3>Process lessons banked (project memory)</h3>
+<ul>
+  <li><strong>Review agents detach the orchestrator's HEAD via a case-folded duplicate workdir.</strong> A worktree-isolated agent <code>cd</code>'d into <code>/Users/blamechris/projects/chroxy</code> for node_modules — which on case-insensitive macOS is the <em>same</em> directory as the main checkout (<code>…/Projects/…</code>) — and ran git there, detaching HEAD mid-marathon. Recovered (all work was on origin); now re-assert the branch after every concurrent agent and forbid agents from <code>cd</code>-ing into either workdir path.</li>
+  <li><strong>Run the full package suite before pushing shared <code>store-core</code> changes</strong> — a targeted-file-green change went red on contract/integration tests in CI; the shared module ripples widely (two separate app message-handler files, a contract-fixture suite per client).</li>
+  <li><strong>A console-log-heavy test can flake CI at worker teardown</strong> — the reconnect-cycle integration test logged ~11× per run, racing vitest's <code>onUserConsoleLog</code> RPC at shutdown ("Closing rpc while … pending"). Silencing the test's console fixed a 3×-recurring red that was green locally.</li>
+</ul>
+
+<h3>Then: hardening swarm-audit (<a href="https://github.com/blamechris/chroxy/issues/5731">#5731</a>)</h3>
+<p>With the cleanly-scoped durability queue exhausted, ran the <code>/swarm-audit</code> you asked for — a 6-dimension read-only swarm (unknown/new-model defensibility, cross-provider quirks, UX determinism, swallowed errors, accessibility, race/failure-modes), each finding re-verified against current <code>main</code> (much of the seed issue #5631 was already fixed). The full triaged backlog is filed as <a href="https://github.com/blamechris/chroxy/issues/5731">#5731</a>; the top 3 findings shipped:</p>
+<table>
+  <thead><tr><th>PR</th><th>Audit finding → fix</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5732</td><td><strong>Provider/model defensibility</strong> — <code>handleSetModel</code> had no <code>modelSwitch</code> capability guard (its permission-mode sibling did), so a <code>set_model</code> on claude-tui broadcast a <code>model_changed</code> the PTY never adopted: a false "model changed" for every client. Added the parallel guard.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5733</td><td><strong>Accessibility</strong> — the permission prompt (which auto-<em>denies</em> on timeout) and the plan-approval prompt announced nothing to screen readers. Now <code>role="alertdialog"</code>/region + live-regions + control labels; the ticking countdown is muted so it announces once, not every second.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5734</td><td><strong>Swallowed errors</strong> — <code>checkpoint-manager._persist</code> swallowed write failures, so a checkpoint create/delete reported success but was lost (or reappeared) on restart. Now emits a per-session error banner — the #5714 silent-loss class on the rewind feature.</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<h3>Then: burning down the #5731 Tier-1 backlog</h3>
+<p>With T1–T3 shipped, kept working straight down the audit's Tier-1 list (HIGH, bounded). Each one followed the same gate: implement → worktree-isolated adversarial review + Copilot → fix → full package suite + green CI → resolve threads → synchronous squash-merge.</p>
+<table>
+  <thead><tr><th>PR</th><th>Tier-1 finding → fix</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5736</td><td><strong>T4 · Background streaming spinner sticks after a drop</strong> — the dashboard <code>onclose</code> cleared transient stream/plan/inactivity/clarify state for the <em>active</em> session only, so a background tab mid-stream kept a phantom "thinking" bubble that surfaced on tab switch. Now clears every session.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5737</td><td><strong>T5 · <code>session_role</code> stale across reconnect</strong> (#5623/#5613) — <code>sendSessionInfo</code> re-synced model/perm-mode/thinking on reconnect but never the primary-owner, so the presence badge (Observing / Take over / driver name) went stale. Now re-emits <code>session_role</code> on reconnect/tab-switch.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5738</td><td><strong>T6 · Fresh session vanishes with no reason</strong> — when a provider's async <code>start()</code> rejected (claude-tui PTY spawn failure), the fresh session was destroyed with only a bare <code>session_destroyed</code> after the client already got a create success. Now emits <code>session_create_failed</code> → a <code>session_error</code> toast before teardown.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5739</td><td><strong>T7 · Destroyed session leaves a hook permission wedged</strong> — the destroy handler cleared the permission session-maps but not the parked HTTP-hook <code>_pendingPermissions</code>, so the tool call blocked for the full 5-min auto-deny timeout (then fired on a dead session + leaked the held response). Now drains the session's pending permissions as <code>deny</code> on destroy.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5741</td><td><strong>T8 · Checkpoint restore rug-pulls a shared cwd</strong> (confirms deferred #5700) — restoring hard-resets the working tree at the checkpoint's cwd; if another non-worktree session shared that cwd and was mid-turn, the reset yanked files out from under its active work. Now refuses (naming the busy session) when another session is busy in the same cwd; idle co-located sessions aren't blocked; cwd comparison is realpath-normalized.</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<p class="muted"><strong>Tier-1 complete</strong> — all eight HIGH findings shipped.</p>
+
+<h3>Then: into the #5731 Tier-2 backlog</h3>
+<p>Continued straight into Tier-2 (MEDIUM), same gate. Picked the contained, lower-risk items first.</p>
+<table>
+  <thead><tr><th>PR</th><th>Tier-2 finding → fix</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5742</td><td><strong><code>setThinkingLevel</code> had no optimistic-update/revert</strong> — the last of the model (#5711) / permission-mode (#5716) siblings without it: the dropdown snapped back during the round-trip and stayed wrong on a server rejection. Now optimistic + a <code>THINKING_LEVEL_NOT_APPLIED</code> revert keyed by requestId (server echoes it on every rejection path).</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5743</td><td><strong><code>closePreview</code> faked a clean tunnel stop</strong> — swallowed a <code>tunnel.stop()</code> failure and still signalled "stopped", so the public tunnel (exposed port) could stay live while the user thought it was shut. Now surfaces a <code>DEV_PREVIEW_STOP_FAILED</code> session_error (multi-session + legacy CLI paths) so the user can verify / kill cloudflared.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5744</td><td><strong><code>handleRemoveRepo</code> swallowed a config-write failure</strong> — the read+write sat outside the try/catch, so a failed config write threw out with no client response and the removal silently failed. Now wrapped like <code>handleAddRepo</code>; a refresh-only failure reports distinctly from a removal failure.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5745</td><td><strong>Dashboard pricing table stale</strong> — <code>gemini-2.0-pro</code> is offered but had no pricing row → blank cost badge. Added it (2.5-pro proxy rate) and a deduped drift-warn so future unpriced-but-offered models surface in the console instead of silently blanking.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5747</td><td><strong>Mobile provider-capability gating</strong> — the app's <code>SettingsBar</code> showed model + permission-mode chips regardless of the provider's capabilities (the dashboard already gates these). A provider that can't switch mid-session (claude-tui) rendered interactive chips that did nothing on tap. Now mirrors the dashboard: a read-only "<code>model</code> · fixed" badge when <code>modelSwitch</code> is false, and the permission chips hidden when <code>permissionModeSwitch</code> is false.</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+
+<h3>Then: a Tier-3 hardening item + an audit re-verification</h3>
+<table>
+  <thead><tr><th>PR / finding</th><th>What</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5748</td><td><strong>Tier-3 · Supervisor double-fork on a crash-backoff race</strong> — a child crash schedules a backoff <code>startChild()</code>; a <code>restartChild()</code> landing in that window forked immediately <em>and</em> left the backoff timer pending → a second, orphaning fork. <code>startChild()</code> now clears any pending restart timer up front. Adversarial review focused on "can this ever stop the daemon restarting?" — confirmed no.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td><code>switchSession</code></td><td><strong>Re-verified — false positive, no fix needed.</strong> The audit flagged a "flat-slot bleed" (sessionRole/primaryClientId/thinkingLevel omitted from the optimistic switch mirror). Re-reading current <code>main</code>: all three are read <em>per-session</em> (<code>sessionStates[activeSessionId]</code> via <code>getActiveSessionState()</code> / <code>resolveActivePrimaryClientId</code>), so switching the active id already surfaces the right values — no bleed. The rollback half is marginal (the <code>SESSION_NOT_FOUND</code> banner already informs the user). Closed without a code change.</td><td><span class="pill neutral">no-op (verified)</span></td></tr>
+  </tbody>
+</table>
+<p class="muted"><strong>Remaining #5731 backlog (genuinely marginal / needs direction):</strong> <code>resume_budget</code> silent no-op when not paused (<em>a clean fix needs a new ack wire-type — reusing <code>budget_resumed</code> injects a false "session resumed" chat message; edge case</em>); standby <code>EADDRINUSE</code> give-up after ~10s of port contention (<em>niche lifecycle tweak — bump the retry cap</em>); and the question-answer stale-<code>toolUseId</code> fallback (<em>legacy single-session-mode subtlety; the audit notes it's mostly mitigated by per-provider waiting flags — risk &gt; value for unsupervised work</em>). The substantive backlog is done; these are the dregs.</p>
+
+<h3>Then: the swarm-audit closeout — burning down the friction &amp; parity backlog</h3>
+<p>Re-ran <code>/swarm-audit</code> focused on this report (6 agents; aggregate 3.1/5 on the forward plan — the §3/§5 sections were a start-of-marathon snapshot never re-baselined), recorded the results in <a href="audit-results/00-master-assessment.md"><code>audit-results/00-master-assessment.md</code></a>, filed the gaps as issues, then cleared the entire friction + parity backlog. Two of the three "marginal/needs-direction" dregs above got clean fixes (<code>resume_budget</code> #5752, stale <code>toolUseId</code> #5753); the standby <code>EADDRINUSE</code> retry-cap bump wasn't taken this pass. The two genuine forks (preamble, key-derivation approach) went to you for a decision. Same gate throughout: implement → worktree-isolated adversarial review + Copilot → fix → full package suite + green CI → resolve threads → synchronous squash-merge.</p>
+<table>
+  <thead><tr><th>PR → issue</th><th>What it fixes (the friction)</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5754</td><td><strong>Closeout</strong> — 6-agent swarm audit of this report, results recorded, backlog re-baselined and filed.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5755 → #5623</td><td><strong>Stale "Observing" flash on reconnect</strong> — clear <code>sessionRole</code>/<code>primaryClientId</code> on disconnect (both clients) so the presence badge doesn't survive a reconnect. The half #5737 left unimplemented.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5756 → #5668</td><td><strong>Mic fails silently</strong> — the dashboard captured <code>voiceInput.error</code> but never rendered it; now a <code>role="alert"</code> banner instead of a silent mic-off. The audit's top felt-friction win.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5757 → #5631</td><td><strong>Model pricing/labels (quick-win)</strong> — priced + correctly labelled current-gen Claude models in the dashboard pricing table (table hygiene; the structural half of #5631 stays open).</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5758 + #5760 → #5750</td><td><strong>Mobile permission-attribution parity</strong> — per-tab "needs your permission" indicator (#5758) + assertive screen-reader announcement of a new prompt (#5760). Dashboard parity from #5667. <em>#5760's review caught a cross-session ref-leak — fixed before merge.</em></td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5761 → #5759</td><td><strong>Pending-permission single source of truth</strong> — converged the live-prompt predicate + derivations into <code>@chroxy/store-core</code> so the rule can't drift between app and dashboard.</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5762 → #5753</td><td><strong>Question-answer fail-closed</strong> — a stale/unmapped <code>toolUseId</code> answer no longer routes to the active session (which could answer the wrong session's question); it's dropped. <em>Review hardened the legacy-cli null-route + empty-string cases.</em></td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5763 → #5752</td><td><strong><code>resume_budget</code> dead-button</strong> — the not-paused path was silent (notably a 2nd client in a shared session). New dedicated <code>budget_resume_ack</code> wire-type acks every click; <code>budget_resumed</code> (which injects a chat note) stays for actual un-pauses only. <em>Review added the inbound <code>requestId</code> cap.</em></td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5764 → #5622</td><td><strong>Reconnect-storm event-loop starvation</strong> — the #5590 eager X25519 fold ran N synchronous scalar-mults per poll phase, delaying the 15s keepalive sweep. Bounded to 8 derivations/event-loop-iteration; the overflow degrades to the (existing) discrete handshake. Auth-critical — adversarial review verified no path to "encryption required but not established."</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5751</td><td><strong>Global harness-preamble</strong> — fork resolved with you: <em>deferred / closed as low-value</em> (per-repo <code>sessionPreset.preamble</code> already covers ~95%; a global preamble is a permanent per-turn token tax).</td><td><span class="pill neutral">closed (your call)</span></td></tr>
+  </tbody>
+</table>
+<div class="callout">
+  <strong>Two decision-forks brought to you, not assumed.</strong> <strong>#5751</strong> (build a global preamble at all?) → deferred/closed. <strong>#5622</strong> approach (worker-pool offload vs. concurrency cap?) → you chose the <em>concurrency cap</em>; shipped as a per-event-loop-iteration budget (a classic async semaphore is a no-op for synchronous crypto — the correct analog bounds derivations per loop iteration, overflow falling back to the discrete handshake).</div>
+<p class="muted"><strong>Friction backlog cleared.</strong> Every §3 item below (#5631 quick-win, #5623, #5613, #5622, #5674→#5750, #5668) is now resolved or re-scoped to a tracked structural follow-up; the two forks are decided. Two real defects were caught in review and fixed before landing (#5760 cross-session ref-leak; #5763 stripped <code>requestId</code>).</p>
+
+<div class="cards">
+  <div class="card"><div class="n" style="color:var(--green)">28</div><div class="l">PRs merged (19 prior + 9 closeout)</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">10</div><div class="l">Issues resolved in the closeout</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">0</div><div class="l">Auto-merges / overrides / admin</div></div>
+  <div class="card"><div class="n" style="color:var(--green)">clean</div><div class="l">main · every PR gated + reviewed</div></div>
+</div>
+
+<h2>2 · Shipped this session</h2>
+<table>
+  <thead><tr><th>PR</th><th>What</th><th>Issue</th><th>Status</th></tr></thead>
+  <tbody>
+    <tr><td>#5672</td><td>Push-to-talk no longer corrupts fast typing or hijacks an active mic recording</td><td>#5666 · #5668 (code half)</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5673</td><td>Permission prompts attributed to the session that asked (server <code>sessionId</code> + per-prompt badge + per-tab indicator)</td><td>#5667</td><td><span class="pill ok">merged</span></td></tr>
+    <tr><td>#5678</td><td>Monthly programmatic-credit budget meter for CLI/SDK sessions</td><td>#5665</td><td><span class="pill ok">merged</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">Every PR ran implement → adversarial review (each caught a real defect: a navigation-key guard regression, a stuck pending-indicator on expiry, a dead warning path) → fix → green CI → Copilot-thread triage → approved squash-merge. No auto-merges.</p>
+
+<h3>Mic / voice — the nuance that mattered</h3>
+<p>#5668 had two causes. The <strong>code</strong> cause (a Space-hold hijacking a button recording) was fixed in #5672. The <strong>likely real-world</strong> cause was a stale installed <code>.app</code> bundling an older speech helper — which no code change can fix. That's why the rebuild-and-reinstall above is the operative fix; the issue stays open only for the "surface helper-spawn failures instead of a silent revert" nicety.</p>
+
+<h2>3 · Friction backlog — what actually slows daily use <span class="pill ok">cleared 2026-06-13</span></h2>
+<p>These were the open issues most directly tied to "it's faster to just use the CLI." All are now resolved (or re-scoped to a tracked structural follow-up) in the closeout above — see §1.5 "the swarm-audit closeout."</p>
+<table>
+  <thead><tr><th>Issue</th><th>Friction</th><th>Class</th><th>Resolution</th></tr></thead>
+  <tbody>
+    <tr><td>#5631</td><td>Model metadata hardcoded &amp; stale — unknown models (e.g. <code>claude-fable-5</code>) degrade across the UI</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">quick-win shipped (#5757)</span> · structural half stays tracked</td></tr>
+    <tr><td>#5623</td><td>Stale "Observing" banner flash on reconnect (app-side <code>sessionRole</code> not reset)</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">fixed (#5755)</span></td></tr>
+    <tr><td>#5613</td><td><code>session_role</code> not re-emitted on reconnect → former primary shows a stale "primary" badge</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">fixed (#5737, prior)</span></td></tr>
+    <tr><td>#5622</td><td>Reconnect-storm starves the server event loop (unbounded eager key derivations)</td><td><span class="pill bad">perf</span></td><td><span class="pill ok">fixed (#5764)</span></td></tr>
+    <tr><td>#5674 → #5750</td><td>Mobile: permission prompts don't show which session asked (dashboard parity from #5667)</td><td><span class="pill info">parity</span></td><td><span class="pill ok">fixed (#5758 + #5760)</span></td></tr>
+    <tr><td>#5668</td><td>Mic helper-spawn failures revert silently instead of surfacing an error</td><td><span class="pill warn">UX</span></td><td><span class="pill ok">fixed (#5756)</span></td></tr>
+  </tbody>
+</table>
+<p class="muted">Reconnect was a recurring theme (#5623 / #5613 / #5622) — the reconnection path is where the "phone/desktop feels janky vs the terminal" perception concentrated; that cluster is now closed.</p>
+
+<h3>Other open work (not friction)</h3>
+<ul>
+  <li><span class="pill neutral">cleanup</span> #5618 dispatch-table migration · #5620 collapse dual JSON-write paths · #5621 retry-ladder dedupe · #5617 claude-tui FormDriver injection · #5619 both-clients contract + lint</li>
+  <li><span class="pill info">security</span> #5616 identity-key rotation handoff · #5604 domain-separate identity-key signatures</li>
+  <li><span class="pill neutral">epic</span> #5530 Control Room environment/runtime control · #5681 surface repo-memory missed queries</li>
+</ul>
+
+<h2>4 · Harness "init instructions" — your question, answered</h2>
+<p>You asked whether chroxy can prepend/send initialization instructions to whichever model a session uses, telling the agent about the harness and how to leverage it. <strong>The plumbing already exists; the convenience layer doesn't.</strong></p>
+<div class="panel">
+  <h3 style="margin-top:14px">What exists today (system-prompt injection)</h3>
+  <ul>
+    <li><strong>Per-session preamble</strong> — <code>sessionPreamble</code> flows through <code>BaseSession._buildSystemPrompt()</code> into every provider's system-prompt channel: SDK <code>systemPrompt.append</code>, CLI <code>--append-system-prompt</code>, BYOK/DeepSeek/Ollama Anthropic <code>system</code> field, Codex/Gemini subprocess prepend.</li>
+    <li><strong>Per-repo presets</strong> — trust-gated <code>.chroxy/session.json</code> (<code>preamble</code> + operator-facing <code>seed</code>), with a pre-trusted daemon override in <code>~/.chroxy/config.json</code> under <code>repos[].sessionPreset</code>. 4000-char cap, repo+session folding.</li>
+    <li><strong>Runtime control</strong> — <code>set_session_preamble</code> wire message updates it live per session.</li>
+    <li>A small mobile-focused <code>CHROXY_CONTEXT_HINT_TEXT</code> exists but is ~50 words about screen size — not harness onboarding.</li>
+  </ul>
+  <h3>What's missing (the feature worth building)</h3>
+  <ul>
+    <li><strong>A global "harness onboarding" preamble</strong> — one config key (e.g. <code>billing</code>-style <code>harnessPreamble</code> in <code>~/.chroxy/config.json</code>) prepended to <em>every</em> session, explaining chroxy's capabilities and how best to use them (slash commands, MCP tools, plan mode, worktrees, etc.).</li>
+    <li><strong>Provider-specific capability notes</strong> — optionally tailor the onboarding per provider (SDK vs CLI vs BYOK have different affordances).</li>
+  </ul>
+  <p class="muted">Natural insertion: a new global preamble folded <em>before</em> the repo/session preamble in <code>session-manager.js</code> session creation, with precedence <code>global harness → repo → session → chroxy hint → skills</code>. This is also a friction lever — priming the model to use chroxy's strengths could make sessions feel more capable out of the box.</p>
+</div>
+
+<h2>5 · Recommended next moves</h2>
+<ol>
+  <li><strong>Confirm the mic</strong> on next desktop launch (the one open user-facing unknown).</li>
+  <li><strong>Reconnect-hardening sprint</strong> — bundle #5623 + #5613 + #5622; this is where perceived jank lives.</li>
+  <li><strong>Build the global harness preamble</strong> (#new) — small, high-leverage, directly improves the agent experience.</li>
+  <li><strong>Finish model-metadata cleanup</strong> (#5631) so new models stop degrading the UI.</li>
+  <li>Mobile permission-attribution parity (#5674) once the dashboard version has soaked.</li>
+</ol>
+
+<footer>
+  Chroxy v0.9.46 · report generated 2026-06-13 · source of truth: <code>gh issue list</code>, merged PRs #5662–#5678, and a read-only sweep of <code>packages/server/src</code>. CI green on <code>main</code> at generation time.
+</footer>
+
+</div>
+</body>
+</html>

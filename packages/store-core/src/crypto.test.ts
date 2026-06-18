@@ -13,6 +13,13 @@ import {
   decrypt,
   generateConnectionSalt,
   deriveConnectionKey,
+  createSigningKeyPair,
+  signExchangeKey,
+  verifyExchangeKeySignature,
+  EXCHANGE_KEY_SIG_DOMAIN_V1,
+  signIdentityRotation,
+  verifyIdentityRotation,
+  IDENTITY_ROTATION_DOMAIN_V1,
   DIRECTION_SERVER,
   DIRECTION_CLIENT,
 } from './crypto'
@@ -183,6 +190,16 @@ describe('encrypt / decrypt round-trip', () => {
 
     expect(() => decrypt(tampered, key, 0, DIRECTION_SERVER)).toThrow(
       'Decryption failed: message tampered or wrong key'
+    )
+  })
+
+  // audit P2-12: a MAC-valid frame whose plaintext is not JSON must throw on
+  // the documented `'Decryption failed: …'` contract, not leak a raw SyntaxError.
+  it('decrypt of authentic but non-JSON plaintext throws the documented error', () => {
+    const key = makeSharedKey()
+    const envelope = encrypt('this is not json{{{', key, 0, DIRECTION_SERVER)
+    expect(() => decrypt(envelope, key, 0, DIRECTION_SERVER)).toThrow(
+      'Decryption failed: plaintext is not valid JSON'
     )
   })
 
@@ -650,5 +667,228 @@ describe('deriveConnectionKey', () => {
     const envelope = encrypt(msg, clientKey, 0, DIRECTION_CLIENT)
     const decrypted = decrypt(envelope, serverKey, 0, DIRECTION_CLIENT)
     expect(decrypted).toEqual({ type: 'auth', token: 'secret' })
+  })
+})
+
+describe('server identity signing (#5536 — E2E key pinning)', () => {
+  it('signs and verifies an exchange key against the pinned identity', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair() // ephemeral X25519 key the server offers
+    const sig = signExchangeKey(exchange.publicKey, identity.secretKey)
+    expect(verifyExchangeKeySignature(exchange.publicKey, sig, identity.publicKey)).toBe(true)
+  })
+
+  it('rejects a signature from a DIFFERENT identity key (MITM key swap)', () => {
+    const realIdentity = createSigningKeyPair()
+    const attackerIdentity = createSigningKeyPair()
+    // Attacker swaps in their OWN exchange key + signs it with their own
+    // identity — but the client pinned the REAL identity, so verify fails.
+    const attackerExchange = createKeyPair()
+    const attackerSig = signExchangeKey(attackerExchange.publicKey, attackerIdentity.secretKey)
+    expect(
+      verifyExchangeKeySignature(attackerExchange.publicKey, attackerSig, realIdentity.publicKey),
+    ).toBe(false)
+  })
+
+  it('rejects a valid signature over a DIFFERENT exchange key (key substitution)', () => {
+    const identity = createSigningKeyPair()
+    const realExchange = createKeyPair()
+    const otherExchange = createKeyPair()
+    const sig = signExchangeKey(realExchange.publicKey, identity.secretKey)
+    // The signature is genuine, but it's over realExchange — verifying it
+    // against a substituted exchange key must fail.
+    expect(verifyExchangeKeySignature(otherExchange.publicKey, sig, identity.publicKey)).toBe(false)
+  })
+
+  it('returns false (never throws) for malformed / empty / missing inputs', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const sig = signExchangeKey(exchange.publicKey, identity.secretKey)
+    expect(verifyExchangeKeySignature(exchange.publicKey, '', identity.publicKey)).toBe(false)
+    expect(verifyExchangeKeySignature(exchange.publicKey, sig, '')).toBe(false)
+    expect(verifyExchangeKeySignature('', sig, identity.publicKey)).toBe(false)
+    expect(verifyExchangeKeySignature(exchange.publicKey, 'not-base64-@@@', identity.publicKey)).toBe(false)
+    expect(verifyExchangeKeySignature(exchange.publicKey, sig, 'tooShort')).toBe(false)
+    // @ts-expect-error — deliberately pass a non-string to assert no throw
+    expect(verifyExchangeKeySignature(undefined, sig, identity.publicKey)).toBe(false)
+  })
+
+  it('returns false for a wrong-length exchange key (not 32 bytes) even with a valid signature over it', () => {
+    // A signature over a non-32-byte "exchange key" is malformed input — this
+    // function only ever verifies X25519 exchange keys, so reject it as false
+    // rather than treating it as a genuine mismatch / passing it downstream.
+    const identity = createSigningKeyPair()
+    const notAnExchangeKey = encodeBase64(nacl.randomBytes(16)) // 16 bytes, wrong
+    const sigOver16 = signExchangeKey(notAnExchangeKey, identity.secretKey)
+    expect(verifyExchangeKeySignature(notAnExchangeKey, sigOver16, identity.publicKey)).toBe(false)
+  })
+
+  it('a tampered signature byte fails verification', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const sig = signExchangeKey(exchange.publicKey, identity.secretKey)
+    const bytes = decodeBase64(sig)
+    bytes[0] ^= 0xff
+    const tampered = encodeBase64(bytes)
+    expect(verifyExchangeKeySignature(exchange.publicKey, tampered, identity.publicKey)).toBe(false)
+  })
+
+  it('signExchangeKey throws on a wrong-length identity secret key', () => {
+    const exchange = createKeyPair()
+    expect(() => signExchangeKey(exchange.publicKey, new Uint8Array(32))).toThrow()
+  })
+
+  it('createSigningKeyPair yields a 32-byte public key and 64-byte secret', () => {
+    const identity = createSigningKeyPair()
+    expect(decodeBase64(identity.publicKey).length).toBe(nacl.sign.publicKeyLength)
+    expect(identity.secretKey.length).toBe(nacl.sign.secretKeyLength)
+  })
+})
+
+describe('exchange-key signature domain separation (#5604 compat ramp)', () => {
+  it('defaults to the bare form (unchanged wire format) when no opts are given', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const bare = signExchangeKey(exchange.publicKey, identity.secretKey)
+    const explicitBare = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: false })
+    // Deterministic Ed25519 detached signatures: the default and explicit-bare
+    // forms must be byte-identical, proving the default did not change.
+    expect(bare).toBe(explicitBare)
+  })
+
+  it('the domain-separated signature differs from the bare one over the same key', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const bare = signExchangeKey(exchange.publicKey, identity.secretKey)
+    const domain = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: true })
+    expect(domain).not.toBe(bare)
+  })
+
+  it('verify accepts the bare-form signature (today\'s signer)', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const bare = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: false })
+    expect(verifyExchangeKeySignature(exchange.publicKey, bare, identity.publicKey)).toBe(true)
+  })
+
+  it('verify accepts the domain-separated signature (future signer flip — no re-pair)', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const domain = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: true })
+    expect(verifyExchangeKeySignature(exchange.publicKey, domain, identity.publicKey)).toBe(true)
+  })
+
+  it('a domain-separated signature still fails against a DIFFERENT identity (no security loss)', () => {
+    const realIdentity = createSigningKeyPair()
+    const attackerIdentity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const domain = signExchangeKey(exchange.publicKey, attackerIdentity.secretKey, { domainSeparated: true })
+    expect(verifyExchangeKeySignature(exchange.publicKey, domain, realIdentity.publicKey)).toBe(false)
+  })
+
+  it('a domain-separated signature fails against a SUBSTITUTED exchange key', () => {
+    const identity = createSigningKeyPair()
+    const realExchange = createKeyPair()
+    const otherExchange = createKeyPair()
+    const domain = signExchangeKey(realExchange.publicKey, identity.secretKey, { domainSeparated: true })
+    expect(verifyExchangeKeySignature(otherExchange.publicKey, domain, identity.publicKey)).toBe(false)
+  })
+
+  it('a tampered domain-separated signature fails verification', () => {
+    const identity = createSigningKeyPair()
+    const exchange = createKeyPair()
+    const domain = signExchangeKey(exchange.publicKey, identity.secretKey, { domainSeparated: true })
+    const bytes = decodeBase64(domain)
+    bytes[0] ^= 0xff
+    const tampered = encodeBase64(bytes)
+    // The domain-separated branch must reject a corrupted signature just like
+    // the bare branch — accept-both widens the accepted MESSAGES, not forgeries.
+    expect(verifyExchangeKeySignature(exchange.publicKey, tampered, identity.publicKey)).toBe(false)
+  })
+
+  it('exposes a stable, versioned domain label', () => {
+    // Pin the exact label — changing it would silently break verification across
+    // a version skew, so a change must be deliberate (and bump the version).
+    expect(EXCHANGE_KEY_SIG_DOMAIN_V1).toBe('chroxy-exchange-key-v1:')
+  })
+})
+
+describe('identity-key rotation cert (#5616)', () => {
+  it('signs with the old identity and verifies the new identity against the old public key', () => {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const cert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    expect(verifyIdentityRotation(newIdentity.publicKey, cert, oldIdentity.publicKey)).toBe(true)
+  })
+
+  it('rejects a cert from a DIFFERENT old identity (forged rotation)', () => {
+    const realOld = createSigningKeyPair()
+    const attackerOld = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    // The attacker signs the new identity with THEIR key, but the client pinned
+    // the real old identity — so the cert fails against the pinned key.
+    const forged = signIdentityRotation(newIdentity.publicKey, attackerOld.secretKey)
+    expect(verifyIdentityRotation(newIdentity.publicKey, forged, realOld.publicKey)).toBe(false)
+  })
+
+  it('rejects a valid cert verified against a SUBSTITUTED new identity', () => {
+    const oldIdentity = createSigningKeyPair()
+    const realNew = createSigningKeyPair()
+    const otherNew = createSigningKeyPair()
+    const cert = signIdentityRotation(realNew.publicKey, oldIdentity.secretKey)
+    // The cert is genuine but blesses realNew; verifying it for a different new
+    // identity must fail (an attacker can't redirect the cert to their key).
+    expect(verifyIdentityRotation(otherNew.publicKey, cert, oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('an exchange-key signature is NOT accepted as a rotation cert (domain separation)', () => {
+    // Cross-protocol confusion guard: a signature the old identity produced over
+    // an exchange key must not verify as a rotation cert over those same bytes.
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    // Sign the new-identity bytes AS AN EXCHANGE KEY (bare + domain-separated),
+    // then try to pass each off as a rotation cert.
+    const asExchangeBare = signExchangeKey(newIdentity.publicKey, oldIdentity.secretKey)
+    const asExchangeDomain = signExchangeKey(newIdentity.publicKey, oldIdentity.secretKey, { domainSeparated: true })
+    expect(verifyIdentityRotation(newIdentity.publicKey, asExchangeBare, oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, asExchangeDomain, oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('a tampered cert byte fails verification', () => {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const cert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    const bytes = decodeBase64(cert)
+    bytes[0] ^= 0xff
+    expect(verifyIdentityRotation(newIdentity.publicKey, encodeBase64(bytes), oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('returns false (never throws) for malformed / empty / missing inputs', () => {
+    const oldIdentity = createSigningKeyPair()
+    const newIdentity = createSigningKeyPair()
+    const cert = signIdentityRotation(newIdentity.publicKey, oldIdentity.secretKey)
+    expect(verifyIdentityRotation(newIdentity.publicKey, '', oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, cert, '')).toBe(false)
+    expect(verifyIdentityRotation('', cert, oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, 'not-base64-@@@', oldIdentity.publicKey)).toBe(false)
+    expect(verifyIdentityRotation(newIdentity.publicKey, cert, 'tooShort')).toBe(false)
+    // @ts-expect-error — deliberately pass a non-string to assert no throw
+    expect(verifyIdentityRotation(undefined, cert, oldIdentity.publicKey)).toBe(false)
+  })
+
+  it('signIdentityRotation throws on a wrong-length old secret key', () => {
+    const newIdentity = createSigningKeyPair()
+    expect(() => signIdentityRotation(newIdentity.publicKey, new Uint8Array(32))).toThrow()
+  })
+
+  it('signIdentityRotation throws on a new identity key that is not 32 bytes', () => {
+    const oldIdentity = createSigningKeyPair()
+    const notAnIdentity = encodeBase64(nacl.randomBytes(16))
+    expect(() => signIdentityRotation(notAnIdentity, oldIdentity.secretKey)).toThrow()
+  })
+
+  it('exposes a stable, versioned domain label distinct from the exchange-key label', () => {
+    expect(IDENTITY_ROTATION_DOMAIN_V1).toBe('chroxy-identity-rotation-v1:')
+    expect(IDENTITY_ROTATION_DOMAIN_V1).not.toBe(EXCHANGE_KEY_SIG_DOMAIN_V1)
   })
 })

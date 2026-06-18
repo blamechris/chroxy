@@ -276,6 +276,161 @@ describe('DockerBackend.createComposeEnvironment()', () => {
     assert.ok(result.containerCliPath.includes('cli.js'))
   })
 
+  it('forwards opts.envFile as `docker compose --env-file <path>` before the subcommand (#5079)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) {
+        upArgs = [...args]
+        cb(null, '', '')
+        return
+      }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-envfile',
+      cwd: '/proj',
+      composeFile: '/proj/docker-compose.yml',
+      composeProject: 'chroxy-env-envfile',
+      containerUser: 'chroxy',
+      envFile: '/tmp/chroxy-byok-secret.env',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    // --env-file MUST come before the `up` subcommand to scope it to
+    // compose itself (Docker's CLI ignores --env-file after the
+    // subcommand for compose-level interpolation).
+    const envFileIdx = upArgs.indexOf('--env-file')
+    const upIdx = upArgs.indexOf('up')
+    assert.ok(envFileIdx >= 0, '--env-file must be present in compose up args')
+    assert.ok(envFileIdx < upIdx, '--env-file must precede the up subcommand')
+    assert.equal(upArgs[envFileIdx + 1], '/tmp/chroxy-byok-secret.env')
+  })
+
+  it('omits --env-file from docker compose up when opts.envFile is absent (#5079)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upArgs = [...args]; cb(null, '', ''); return }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-no-envfile',
+      cwd: '/proj',
+      composeFile: '/proj/docker-compose.yml',
+      composeProject: 'chroxy-env-no-envfile',
+      containerUser: 'chroxy',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    assert.equal(upArgs.indexOf('--env-file'), -1, '--env-file must be absent when not requested')
+  })
+
+  it('emits a `-f` flag per compose file in declared order when composeFile is an array (#5124)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upArgs = [...args]; cb(null, '', ''); return }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-overlay',
+      cwd: '/proj',
+      composeFile: ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'],
+      composeProject: 'chroxy-env-overlay',
+      containerUser: 'chroxy',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    // Each declared file becomes its own `-f <file>` token, and the base
+    // file MUST precede the override so compose's later-wins merge applies.
+    const fFlagFiles = upArgs.reduce((acc, tok, i) => {
+      if (tok === '-f') acc.push(upArgs[i + 1])
+      return acc
+    }, [])
+    assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'])
+  })
+
+  it('emits a single `-f` flag when composeFile is a lone string (backward-compat, #5124)', async () => {
+    let upArgs = null
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upArgs = [...args]; cb(null, '', ''); return }
+      if (args[0] === 'compose' && args.includes('ps')) {
+        cb(null, '{"ID":"ctr-1","Service":"app","State":"running"}\n', '')
+        return
+      }
+      if (args[0] === 'exec') { cb(null, '/usr/local\n', ''); return }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    await backend.createComposeEnvironment({
+      envId: 'env-single',
+      cwd: '/proj',
+      composeFile: '/proj/docker-compose.yml',
+      composeProject: 'chroxy-env-single',
+      containerUser: 'chroxy',
+    })
+
+    assert.ok(upArgs, 'compose up should have been called')
+    const fFlagFiles = upArgs.reduce((acc, tok, i) => {
+      if (tok === '-f') acc.push(upArgs[i + 1])
+      return acc
+    }, [])
+    assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml'])
+  })
+
+  it('fails fast with a clear error when composeFile normalises to an empty set (#5124)', async () => {
+    let upCalled = false
+    function mockExec(_cmd, args, opts, cb) {
+      if (typeof opts === 'function') { cb = opts; opts = {} }
+      if (args[0] === 'compose' && args.includes('up')) { upCalled = true }
+      cb(null, '', '')
+    }
+    mockExec.calls = []
+
+    const backend = new DockerBackend({ _execFile: mockExec })
+    // An array with no usable entries must not silently run `docker compose up`
+    // with zero `-f` flags (which would fall back to a default compose file).
+    await assert.rejects(
+      () => backend.createComposeEnvironment({
+        envId: 'env-empty',
+        cwd: '/proj',
+        composeFile: ['', null],
+        composeProject: 'chroxy-env-empty',
+        containerUser: 'chroxy',
+      }),
+      /requires at least one compose file/
+    )
+    assert.equal(upCalled, false, 'docker compose up must not run with an empty file set')
+  })
+
   it('calls compose down and re-throws when primary container not found', async () => {
     let downCalled = false
     function mockExec(_cmd, args, opts, cb) {
@@ -353,6 +508,26 @@ describe('DockerBackend.destroyComposeEnvironment()', () => {
     assert.ok(downCall, 'should call docker compose down')
     assert.ok(downCall.args.includes('--remove-orphans'))
     assert.ok(downCall.args.includes('chroxy-test-project'))
+  })
+
+  it('tears down with the SAME `-f` file set used to bring the stack up, in order (#5124)', async () => {
+    const mockExec = createMockExecFile()
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.destroyComposeEnvironment({
+      composeFile: ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'],
+      composeProject: 'chroxy-overlay-down',
+      cwd: '/proj',
+    })
+
+    const downCall = mockExec.calls.find(c => c.args[0] === 'compose' && c.args.includes('down'))
+    assert.ok(downCall, 'should call docker compose down')
+    const fFlagFiles = downCall.args.reduce((acc, tok, i) => {
+      if (tok === '-f') acc.push(downCall.args[i + 1])
+      return acc
+    }, [])
+    assert.deepEqual(fFlagFiles, ['/proj/docker-compose.yml', '/proj/docker-compose.override.yml'])
+    assert.ok(downCall.args.includes('--remove-orphans'))
   })
 
   it('resolves even when compose down fails (best-effort)', async () => {
@@ -846,6 +1021,59 @@ describe('DockerBackend.execInEnvironment()', () => {
     )
   })
 
+  it('#5067: attaches captured stdout AND stderr to the rejected Error', async () => {
+    // postCreateCommand failures often print the actually-useful
+    // diagnostic on stdout (npm install per-package errors, repo
+    // bootstrap script `echo "FATAL: ..."` lines, apt-get summary).
+    // Pre-#5067 the backend dropped stdout on the floor and the caller
+    // had to re-run by hand to see what went wrong.
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        const err = new Error('exit 1')
+        err.code = 1
+        cb(err, 'OUT: setup printed this on stdout\n', 'ERR: setup printed this on stderr\n')
+      },
+    })
+
+    let caught
+    try {
+      await backend.execInEnvironment('ctr-abc', { cmd: 'broken-setup.sh' })
+      assert.fail('expected execInEnvironment to reject')
+    } catch (err) {
+      caught = err
+    }
+
+    assert.equal(typeof caught.stdout, 'string', 'rejected error must carry stdout')
+    assert.equal(typeof caught.stderr, 'string', 'rejected error must carry stderr')
+    assert.match(caught.stdout, /OUT: setup printed this on stdout/)
+    assert.match(caught.stderr, /ERR: setup printed this on stderr/)
+    // The message stays stderr-first for log-line continuity with the
+    // pre-#5067 behaviour; stdout lives on the attached property.
+    assert.match(caught.message, /ERR: setup printed this on stderr/)
+  })
+
+  it('#5067: rejected Error has empty-string stdout/stderr fields when the streams are silent', async () => {
+    const backend = new DockerBackend({
+      _execFile(_cmd, _args, _opts, cb) {
+        cb(new Error('ETIMEDOUT'), '', '')
+      },
+    })
+
+    let caught
+    try {
+      await backend.execInEnvironment('ctr-abc', { cmd: 'hangs-forever' })
+      assert.fail('expected execInEnvironment to reject')
+    } catch (err) {
+      caught = err
+    }
+
+    assert.equal(caught.stdout, '', 'silent stdout normalised to empty string')
+    assert.equal(caught.stderr, '', 'silent stderr normalised to empty string')
+    // With no stderr to surface, the message falls back to err.message
+    // — matches the pre-#5067 shape used by log scrapers.
+    assert.equal(caught.message, 'ETIMEDOUT')
+  })
+
   it('filters out entries whose value is null', async () => {
     const mockExec = createMockExecFile({ results: { exec: '' } })
     const backend = new DockerBackend({ _execFile: mockExec })
@@ -959,6 +1187,366 @@ describe('DockerBackend.execInEnvironment()', () => {
     const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
     const joined = execCall.args.join(' ')
     assert.ok(!joined.includes('_TEST_EXEC_LEAK'), 'process.env must never be forwarded')
+  })
+
+  it('passes --env-file <path> when opts.envFile is set (#5079)', async () => {
+    const mockExec = createMockExecFile({ results: { exec: '' } })
+    const backend = new DockerBackend({ _execFile: mockExec })
+
+    await backend.execInEnvironment('ctr-abc', {
+      cmd: 'printenv',
+      envFile: '/tmp/chroxy-byok-secret.env',
+    })
+
+    const execCall = mockExec.calls.find(c => c.args[0] === 'exec')
+    const idx = execCall.args.indexOf('--env-file')
+    assert.ok(idx >= 0, '--env-file flag must be present when opts.envFile is set')
+    assert.equal(execCall.args[idx + 1], '/tmp/chroxy-byok-secret.env')
+    // Container ID must come after the flag — same ordering invariant as --env.
+    assert.ok(execCall.args.indexOf('ctr-abc') > idx + 1)
+  })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5069 — streaming path: when opts.onData is supplied, run via spawn and
+  // surface stdout/stderr incrementally while still buffering for the result
+  // and the failure tail (#5067).
+  // ───────────────────────────────────────────────────────────────────────
+
+  // Build a fake child + spawn spy. Tests drive child.stdout/stderr/exit
+  // by hand to simulate the docker exec process producing output over time.
+  function makeStreamingBackend() {
+    let lastSpawn = null
+    const fakeChild = new EventEmitter()
+    fakeChild.stdout = new PassThrough()
+    fakeChild.stderr = new PassThrough()
+    fakeChild.killed = false
+    fakeChild.kill = (sig) => { fakeChild.killed = true; fakeChild.lastSignal = sig }
+    function fakeSpawn(cmd, args, opts) {
+      lastSpawn = { cmd, args, opts }
+      return fakeChild
+    }
+    const backend = new DockerBackend({ _spawn: fakeSpawn })
+    return { backend, fakeChild, getLastSpawn: () => lastSpawn }
+  }
+
+  it('#5069: invokes onData with each chunk in arrival order and resolves with the full buffer', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const seen = []
+
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'npm install',
+      onData: (chunk, stream) => seen.push([stream, chunk]),
+    })
+
+    // Simulate output arriving over time, then a clean exit.
+    fakeChild.stdout.write('npm WARN foo\n')
+    fakeChild.stderr.write('fetching...\n')
+    fakeChild.stdout.write('added 42 packages\n')
+    // Let the stream 'data' events flush before closing.
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+
+    const result = await p
+    assert.deepEqual(seen, [
+      ['stdout', 'npm WARN foo\n'],
+      ['stderr', 'fetching...\n'],
+      ['stdout', 'added 42 packages\n'],
+    ], 'onData must fire per chunk in arrival order with the right stream tag')
+    assert.equal(result.stdout, 'npm WARN foo\nadded 42 packages\n', 'full stdout buffered')
+    assert.equal(result.stderr, 'fetching...\n', 'full stderr buffered')
+  })
+
+  it('#5069: uses spawn (not execFile) when onData is supplied', async () => {
+    const { backend, fakeChild, getLastSpawn } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'echo hi',
+      user: 'chroxy',
+      onData: () => {},
+    })
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+    await p
+
+    const spawnCall = getLastSpawn()
+    assert.ok(spawnCall, 'spawn must be used for the streaming path')
+    // Same argv shape as the buffered path: exec -u <user> ... bash -c <cmd>.
+    assert.deepEqual(spawnCall.args, ['exec', '-u', 'chroxy', 'ctr-abc', 'bash', '-c', 'echo hi'])
+  })
+
+  it('#5069: keeps the buffered execFile path when onData is absent (backward compat)', async () => {
+    const mockExec = createMockExecFile({ results: { exec: 'buffered\n' } })
+    const backend = new DockerBackend({
+      _execFile: mockExec,
+      _spawn: () => { throw new Error('spawn must NOT be called when onData is absent') },
+    })
+    const result = await backend.execInEnvironment('ctr-abc', { cmd: 'echo hi' })
+    assert.equal(result.stdout, 'buffered\n')
+    assert.ok(mockExec.calls.some(c => c.args[0] === 'exec'), 'execFile path must be used')
+  })
+
+  it('#5069: streamed failure still attaches the buffered stdout/stderr tail to the rejected Error', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const seen = []
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'broken-setup.sh',
+      onData: (chunk, stream) => seen.push([stream, chunk]),
+    })
+
+    fakeChild.stdout.write('OUT: building native module\n')
+    fakeChild.stderr.write('ERR: node-gyp rebuild failed\n')
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 1, null)
+
+    let caught
+    try {
+      await p
+      assert.fail('expected rejection on non-zero exit')
+    } catch (err) {
+      caught = err
+    }
+    // Streaming happened.
+    assert.equal(seen.length, 2)
+    // #5067 contract: both streams attached to the error.
+    assert.match(caught.stdout, /OUT: building native module/, 'stdout tail attached on failure')
+    assert.match(caught.stderr, /ERR: node-gyp rebuild failed/, 'stderr tail attached on failure')
+    // Message is stderr-first, mirroring the buffered path.
+    assert.match(caught.message, /ERR: node-gyp rebuild failed/)
+    assert.equal(caught.code, 1)
+  })
+
+  it('#5069: SIGTERMs the child and rejects on timeout (no leaked process)', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'hangs-forever',
+      timeout: 20,
+      onData: () => {},
+    })
+
+    let caught
+    try {
+      // The timer fires (20ms), SIGTERMs the child; the real docker exec
+      // would then close. Simulate that close after the kill.
+      await new Promise((r) => setTimeout(r, 40))
+      assert.ok(fakeChild.killed, 'child must be SIGTERM-killed on timeout')
+      assert.equal(fakeChild.lastSignal, 'SIGTERM')
+      fakeChild.emit('close', null, 'SIGTERM')
+      await p
+      assert.fail('expected rejection on timeout')
+    } catch (err) {
+      caught = err
+    }
+    assert.match(caught.message, /timed out after 20ms/)
+    assert.equal(caught.killed, true)
+  })
+
+  it('#5069: a throwing onData listener does not orphan the child or reject the run', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'echo hi',
+      onData: () => { throw new Error('listener boom') },
+    })
+    fakeChild.stdout.write('hello\n')
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+    // Listener throw is swallowed; the run still resolves with the buffer.
+    const result = await p
+    assert.equal(result.stdout, 'hello\n')
+  })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5126 — SIGKILL escalation when a child ignores SIGTERM on timeout.
+  // ───────────────────────────────────────────────────────────────────────
+
+  // A child that records every signal it receives and flips `killed=true` on
+  // the FIRST signal — matching real Node `ChildProcess.kill()` semantics,
+  // where `killed` means "a signal was delivered", NOT "the process exited".
+  // The process keeps running (never emits `close` on its own), simulating a
+  // stuck child that ignores SIGTERM. Because `killed` is true after SIGTERM,
+  // this stub would expose any escalation logic that (wrongly) gates SIGKILL
+  // on `!child.killed` — such logic would never fire SIGKILL.
+  function makeStubbornChild() {
+    const child = new EventEmitter()
+    child.stdout = new PassThrough()
+    child.stderr = new PassThrough()
+    child.killed = false
+    child.signals = []
+    child.kill = (sig) => {
+      child.signals.push(sig)
+      child.killed = true // Node sets this on signal delivery, not on exit.
+    }
+    return child
+  }
+
+  it('#5126: escalates to SIGKILL when the child ignores SIGTERM, and the promise rejects', async () => {
+    // Deterministic: stub setTimeout so the 5s grace timer runs synchronously.
+    const stubborn = makeStubbornChild()
+    const backend = new DockerBackend({ _spawn: () => stubborn })
+
+    const realSetTimeout = global.setTimeout
+    // Run the SHORTEST timer (the timeout) on a real micro-delay, but make the
+    // grace timer (the longer 5s one) fire immediately so we don't wait 5s.
+    global.setTimeout = (fn, ms, ...rest) => {
+      if (ms >= 1000) {
+        // The SIGKILL grace timer — fire on next tick instead of after 5s.
+        const t = realSetTimeout(fn, 0, ...rest)
+        if (t && typeof t.unref === 'function') t.unref()
+        return t
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }
+
+    let caught
+    try {
+      const p = backend.execInEnvironment('ctr-abc', {
+        cmd: 'hangs-forever',
+        timeout: 5,
+        onData: () => {},
+      })
+      // Let timeout fire (SIGTERM) then the (now-immediate) grace timer (SIGKILL).
+      await new Promise((r) => realSetTimeout(r, 30))
+      assert.deepEqual(
+        stubborn.signals,
+        ['SIGTERM', 'SIGKILL'],
+        'must SIGTERM first, then escalate to SIGKILL after grace',
+      )
+      // The real docker process would now close from the SIGKILL.
+      stubborn.emit('close', null, 'SIGKILL')
+      await p
+      assert.fail('expected rejection on timeout')
+    } catch (err) {
+      caught = err
+    } finally {
+      global.setTimeout = realSetTimeout
+    }
+    assert.match(caught.message, /timed out after 5ms/)
+    assert.equal(caught.killed, true)
+  })
+
+  it('#5126: grace timer is cleared on a prompt close (no SIGKILL on a child that honours SIGTERM)', async () => {
+    // Detect any attempt to arm a >=1s timer (the SIGKILL grace) and whether it
+    // ever fires. The grace is 5s in production; the child closes promptly after
+    // SIGTERM, so settle() must clear the armed grace timer before it fires.
+    const realSetTimeout = global.setTimeout
+    const realClearTimeout = global.clearTimeout
+    let graceFired = false
+    let graceArmed = false
+    let graceCleared = false
+    let graceHandle = null
+    global.setTimeout = (fn, ms, ...rest) => {
+      if (ms >= 1000) {
+        graceArmed = true
+        graceHandle = realSetTimeout(() => { graceFired = true; fn() }, ms, ...rest)
+        if (graceHandle && typeof graceHandle.unref === 'function') graceHandle.unref()
+        return graceHandle
+      }
+      return realSetTimeout(fn, ms, ...rest)
+    }
+    global.clearTimeout = (t) => {
+      if (t && t === graceHandle) graceCleared = true
+      return realClearTimeout(t)
+    }
+
+    const { backend, fakeChild } = makeStreamingBackend()
+    fakeChild.signals = []
+    const realKill = fakeChild.kill
+    fakeChild.kill = (sig) => { fakeChild.signals.push(sig); realKill(sig) }
+
+    let caught
+    try {
+      const p = backend.execInEnvironment('ctr-abc', {
+        cmd: 'hangs-then-dies',
+        timeout: 5,
+        onData: () => {},
+      })
+      // Timeout fires -> SIGTERM + grace armed. Child honours it and closes
+      // before the 5s grace fires, so settle() must clear the grace timer.
+      await new Promise((r) => realSetTimeout(r, 20))
+      assert.ok(fakeChild.signals.includes('SIGTERM'), 'SIGTERM sent on timeout')
+      assert.ok(graceArmed, 'grace timer must be armed after SIGTERM')
+      fakeChild.emit('close', null, 'SIGTERM')
+      await p
+      assert.fail('expected rejection on timeout')
+    } catch (err) {
+      caught = err
+    } finally {
+      global.setTimeout = realSetTimeout
+      global.clearTimeout = realClearTimeout
+    }
+    assert.match(caught.message, /timed out after 5ms/)
+    assert.ok(graceCleared, 'grace timer must be cleared once the child closes')
+    assert.ok(!graceFired, 'grace timer must not fire when the child closes promptly')
+    assert.ok(!fakeChild.signals.includes('SIGKILL'), 'no SIGKILL when SIGTERM is honoured')
+  })
+
+  // ───────────────────────────────────────────────────────────────────────
+  // #5127 — bounded retained buffer (maxBuffer parity). onData still fires
+  // for every chunk; only the accumulator is capped to a last-N tail.
+  // ───────────────────────────────────────────────────────────────────────
+
+  it('#5127: caps the retained stdout buffer while still delivering every chunk to onData', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const seen = []
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'spammy-setup.sh',
+      onData: (chunk, stream) => seen.push([stream, chunk]),
+    })
+
+    // The retained cap is 256 KiB. Emit well past it as many discrete chunks so
+    // we can assert (a) every chunk reached onData and (b) the resolved buffer
+    // is bounded to the tail.
+    const CAP = 256 * 1024
+    const chunk = 'x'.repeat(64 * 1024) // 64 KiB per chunk
+    const numChunks = 10 // 640 KiB total — 2.5x the cap
+    const tailMarker = 'TAIL-MARKER-END\n'
+    for (let i = 0; i < numChunks; i++) {
+      fakeChild.stdout.write(chunk)
+    }
+    fakeChild.stdout.write(tailMarker)
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 0, null)
+
+    const result = await p
+
+    // (a) Every emitted chunk reached onData — streaming is NOT truncated.
+    const stdoutChunks = seen.filter(([s]) => s === 'stdout')
+    assert.equal(stdoutChunks.length, numChunks + 1, 'onData fires for every chunk past the cap')
+    const totalStreamed = stdoutChunks.reduce((n, [, c]) => n + c.length, 0)
+    assert.equal(totalStreamed, numChunks * chunk.length + tailMarker.length, 'full bytes streamed via onData')
+
+    // (b) The retained buffer is bounded to the cap.
+    assert.ok(result.stdout.length <= CAP, `retained stdout (${result.stdout.length}) must be <= cap (${CAP})`)
+    assert.ok(result.stdout.length > 0, 'retained buffer is non-empty')
+    // (c) The TAIL is kept (diagnostic info lands at the end).
+    assert.ok(result.stdout.endsWith(tailMarker), 'the last bytes (the diagnostic tail) are retained')
+  })
+
+  it('#5127: failure tail is preserved off the bounded buffer on non-zero exit', async () => {
+    const { backend, fakeChild } = makeStreamingBackend()
+    const p = backend.execInEnvironment('ctr-abc', {
+      cmd: 'broken-spammy-setup.sh',
+      onData: () => {},
+    })
+
+    const filler = 'y'.repeat(64 * 1024)
+    for (let i = 0; i < 8; i++) {
+      fakeChild.stderr.write(filler) // 512 KiB of noise — past the 256 KiB cap
+    }
+    fakeChild.stderr.write('ERR: the actual failure line\n')
+    await new Promise((r) => setImmediate(r))
+    fakeChild.emit('close', 1, null)
+
+    let caught
+    try {
+      await p
+      assert.fail('expected rejection on non-zero exit')
+    } catch (err) {
+      caught = err
+    }
+    const CAP = 256 * 1024
+    assert.ok(caught.stderr.length <= CAP, 'failure stderr is bounded to the cap')
+    assert.match(caught.stderr, /ERR: the actual failure line/, 'failure tail survives the cap')
+    assert.match(caught.message, /ERR: the actual failure line/, 'message derives from the bounded tail')
+    assert.equal(caught.code, 1)
   })
 })
 

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { repoHandlers } from '../../src/handlers/repo-handlers.js'
-import { createSpy } from '../test-helpers.js'
+import { createSpy, nsCtx } from '../test-helpers.js'
 
 /**
  * Build a ctx with stubbed scanConversations / readReposFromConfig / writeReposToConfig
@@ -10,7 +10,7 @@ import { createSpy } from '../test-helpers.js'
 function makeCtx(overrides = {}) {
   const sent = []
   const repoStore = []
-  const ctx = {
+  const ctx = nsCtx({
     send: createSpy((ws, msg) => { sent.push(msg) }),
     scanConversations: createSpy(async () => []),
     readReposFromConfig: createSpy(() => repoStore.slice()),
@@ -21,7 +21,7 @@ function makeCtx(overrides = {}) {
     _sent: sent,
     _repoStore: repoStore,
     ...overrides,
-  }
+  })
   return ctx
 }
 
@@ -116,6 +116,56 @@ describe('repo-handlers', () => {
       // Existing entry preserved (target not in list)
       assert.equal(ctx._repoStore.length, 1)
       assert.equal(ctx._repoStore[0].path, '/tmp/keep')
+    })
+
+    // The config read+write used to sit outside the handler's try/catch, so a
+    // write failure threw out and the client got no response (silent failure).
+    it('sends session_error (not an uncaught throw) when the config write fails', async () => {
+      const ctx = makeCtx()
+      ctx._repoStore.push({ path: '/tmp/keep', name: 'keep' })
+      ctx.writeReposToConfig = createSpy(() => { throw new Error('EROFS: read-only file system') })
+
+      // Must not throw out of the handler.
+      await assert.doesNotReject(
+        repoHandlers.remove_repo(makeWs(), makeClient(), { path: '/tmp/keep' }, ctx),
+      )
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Failed to remove repo/)
+      assert.match(ctx._sent[0].message, /read-only file system/)
+    })
+
+    it('sends session_error when the config read fails', async () => {
+      const ctx = makeCtx()
+      ctx.readReposFromConfig = createSpy(() => { throw new Error('config parse error') })
+
+      await assert.doesNotReject(
+        repoHandlers.remove_repo(makeWs(), makeClient(), { path: '/tmp/keep' }, ctx),
+      )
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Failed to remove repo/)
+      assert.equal(ctx.writeReposToConfig.callCount, 0, 'no write attempted when the read failed')
+    })
+
+    // The removal persisted; only the follow-up list refresh failed. The message
+    // must NOT claim the removal failed (the repo IS gone from config).
+    it('reports a refresh-only failure distinctly after a successful write', async () => {
+      const ctx = makeCtx()
+      ctx._repoStore.push({ path: '/tmp/gone', name: 'gone' })
+      // buildRepoList scans conversations; make that throw AFTER the write lands.
+      ctx.scanConversations = createSpy(async () => { throw new Error('scanner offline') })
+
+      await assert.doesNotReject(
+        repoHandlers.remove_repo(makeWs(), makeClient(), { path: '/tmp/gone' }, ctx),
+      )
+
+      assert.equal(ctx.writeReposToConfig.callCount, 1, 'the write still persisted')
+      assert.equal(ctx._repoStore.length, 0, 'repo actually removed from config')
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /Repo removed/, 'message acknowledges the removal succeeded')
+      assert.doesNotMatch(ctx._sent[0].message, /Failed to remove repo/)
     })
   })
 })

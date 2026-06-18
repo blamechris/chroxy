@@ -33,41 +33,65 @@ export class SessionStatePersistence {
 
   /**
    * Serialize session state to disk.
+   *
+   * Write order (audited in #4908): rotate the current file to `.bak` FIRST,
+   * then call `writeFileRestricted(mainPath, data)` which atomically writes
+   * via its own internal `.tmp` + rename on POSIX (and direct `writeFileSync`
+   * on Windows — see {@link writeFileRestricted}).
+   *
+   * Why rotate-then-write (not write-then-rotate)? Both orders are crash-safe,
+   * but rotate-first lets us reuse the shared atomic-write helper rather than
+   * hand-rolling a second `.tmp` + rename layer (the bespoke wrapper that
+   * #4874 collapsed elsewhere — this file was deferred per the #4874 issue
+   * body and audited separately in #4908):
+   *   - If we crash AFTER rotate but BEFORE the write completes, `restoreState`
+   *     falls back to `.bak` (see {@link restoreState} — when the main file is
+   *     missing or unparseable it reads from `.bak`) which still holds the
+   *     prior generation.
+   *   - `writeFileRestricted` is atomic on POSIX (internal rename replaces the
+   *     destination), so a partial write of the new generation cannot leave
+   *     half-written bytes at `mainPath`.
+   *   - On Windows, `writeFileRestricted` also writes to a temp file then
+   *     `renameSync`s it into place (#4913) — the `renameSync` is the atomic
+   *     step (it depends on the OS), and the temp write itself uses
+   *     `writeFileSync` (no POSIX mode bits apply). Same temp+rename shape as
+   *     POSIX since #4913; only the mode handling differs.
+   *
+   * `_rotateToBak`'s Windows retry-and-restore-`.bak` flow stays intact under
+   * the new order: the snapshot-and-restore happens before the main write, so
+   * a failed rotation leaves `.bak` holding whichever generation it held
+   * before serialize ran. The Windows `unlinkSync(mainPath)` step (NTFS
+   * EEXIST workaround) is no longer needed — after rotation, `mainPath`
+   * either does not exist (rotate succeeded) or holds the same bytes as
+   * `.bak` (rotate failed). `writeFileSync` on Windows overwrites either way.
+   *
    * @param {object} state - The complete state object to write (version, timestamp, sessions, costs, etc.)
    * @returns {object} The state that was written
    */
   serializeState(state) {
     const dir = dirname(this._stateFilePath)
     if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
-    const tmpPath = this._stateFilePath + '.tmp'
     const bakPath = this._stateFilePath + '.bak'
-    writeFileRestricted(tmpPath, JSON.stringify(state, null, 2))
-    // Rotate the current file to .bak so one generation survives a crash
-    // or partial write during the rename below. Best-effort — a missing
+    // Rotate the current file to .bak BEFORE writing the new generation so
+    // one generation survives a crash mid-write. Best-effort — a missing
     // source file (first write) or rename failure must not block the new write.
     if (fs.existsSync(this._stateFilePath)) {
       this._rotateToBak(this._stateFilePath, bakPath)
     }
-    if (this._isWindows) {
-      try { fs.unlinkSync(this._stateFilePath) } catch (err) {
-        if (err && err.code !== 'ENOENT') {
-          log.error(`Failed to remove existing state file: ${err.message}`)
-        }
-      }
-    }
-    try {
-      fs.renameSync(tmpPath, this._stateFilePath)
-    } catch (err) {
-      // Clean up the orphaned .tmp file so it doesn't leak on disk across
-      // retries. Suppress ENOENT (nothing to clean up) and any secondary
-      // unlink error (we must re-throw the original rename failure).
-      try { fs.unlinkSync(tmpPath) } catch (cleanupErr) {
-        if (cleanupErr && cleanupErr.code !== 'ENOENT') {
-          log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
-        }
-      }
-      throw err
-    }
+    // writeFileRestricted does an atomic temp+rename on both POSIX and Windows
+    // (#4913); cleanup of the orphan temp on rename failure is handled inside.
+    // #5309 (WP-0.3) — pass a per-pid tmpSuffix so two processes writing the
+    // SAME state file (e.g. an accidental second `chroxy start` against
+    // ~/.chroxy/session-state.json, or a test runner + the daemon) don't race
+    // on a shared intermediate `.tmp` and clobber each other mid-write,
+    // corrupting the file. PIDs are unique among live processes, so the temp
+    // paths can't collide. Mirrors the models-cache precedent (models.js:488).
+    // Trade-off vs. the bare `.tmp`: the shared `.tmp` was self-healing (the
+    // next write O_TRUNC-reused it), whereas a per-pid temp orphaned by a
+    // hard-kill mid-write (between writeFileSync and renameSync) is never
+    // reused by a later process and no sweeper reclaims it. Accepted: such
+    // mid-write hard-kills are rare and the sidecar is tiny (matches models.js).
+    writeFileRestricted(this._stateFilePath, JSON.stringify(state, null, 2), { tmpSuffix: `.tmp-${process.pid}` })
     log.info(`Serialized ${state.sessions?.length ?? 0} session(s) to ${this._stateFilePath}`)
     return state
   }
@@ -174,17 +198,59 @@ export class SessionStatePersistence {
       return null
     }
 
-    // Reject stale state (older than TTL, default 24h)
-    if (state.timestamp && Date.now() - state.timestamp > this._stateTtlMs) {
-      log.info(`Session state is stale (>${Math.round(this._stateTtlMs / 60000)}min), starting fresh`)
+    // Reject stale sessions PER ENTRY (older than TTL, default 24h). A single
+    // whole-file `state.timestamp` check used to discard EVERY session + its
+    // history the moment the file aged past the TTL — a user returning after a
+    // weekend lost the entire list. Each entry already persists its own
+    // `lastActivityAt` (#5309), so filter individually and fall back to the
+    // file timestamp only for an entry that predates that field. (audit P2-12)
+    const now = Date.now()
+    const fresh = []
+    const dropped = []
+    for (const saved of state.sessions) {
+      const activityAt = (typeof saved.lastActivityAt === 'number' && saved.lastActivityAt > 0)
+        ? saved.lastActivityAt
+        : state.timestamp
+      if (activityAt && now - activityAt > this._stateTtlMs) {
+        dropped.push(saved.name || saved.id || '<unknown>')
+      } else {
+        fresh.push(saved)
+      }
+    }
+    if (dropped.length > 0) {
+      // Bound + escape the name list: session names are user-controlled
+      // (renameSession), so a newline-bearing name could inject log lines and
+      // a large drop could blow the line length. Cap to a small sample and
+      // JSON-stringify each so control chars are escaped. (Copilot review)
+      const MAX_NAMES = 10
+      const sample = dropped.slice(0, MAX_NAMES).map((n) => JSON.stringify(String(n)))
+      const more = dropped.length > MAX_NAMES ? `, …+${dropped.length - MAX_NAMES} more` : ''
+      log.warn(`Dropped ${dropped.length} stale session(s) (>${Math.round(this._stateTtlMs / 60000)}min since last activity): ${sample.join(', ')}${more}`)
+    }
+    if (fresh.length === 0) {
+      log.info('All restored sessions are stale, starting fresh')
       return null
     }
-
+    state.sessions = fresh
     return state
   }
 
   /**
    * Schedule a debounced persist. Multiple rapid calls reset the timer.
+   *
+   * #5309 (WP-0.3) — durability boundary, by design: this debounce backs
+   * high-frequency message-history appends only. Session-LIST mutations
+   * (create/destroy/rename) use flushPersist() and are never debounced, and
+   * every CLEAN exit path serializes immediately — SIGINT/SIGTERM (server-cli.js)
+   * and the supervised IPC shutdown + crash handlers (server-cli-child.js, #5308)
+   * all call serializeState() directly (followed by destroyAll(), which cancels
+   * this timer and no-ops any stray fire). So the only way to lose up to
+   * persistDebounceMs (2s) of
+   * message history is an abrupt kill that runs NO handler at all — SIGKILL,
+   * OOM-kill, or power loss. That window is accepted as best-effort: shrinking
+   * it trades constant write amplification on every token for protection against
+   * an unrecoverable kill we can't flush before anyway.
+   *
    * @param {() => void} serializeFn - Function to call when the debounce fires
    */
   schedulePersist(serializeFn) {
@@ -212,14 +278,23 @@ export class SessionStatePersistence {
    * Used for session-list mutations that must survive an abrupt shutdown —
    * callers include createSession / destroySession / renameSession, where
    * losing the write would erase a user's session from the sidebar.
+   *
+   * #5701: returns whether the write succeeded so callers can surface the
+   * failure instead of silently losing the mutation on disk-full / locked-file
+   * / read-only-home conditions. (The write itself is still atomic — see
+   * serializeState — so a failure leaves the prior good file intact; the risk
+   * being signalled is the lost mutation, not corruption.)
    * @param {() => void} serializeFn
+   * @returns {boolean} true if the write succeeded, false if it threw.
    */
   flushPersist(serializeFn) {
     this.cancelPersist()
     try {
       serializeFn()
+      return true
     } catch (err) {
       log.error(`Failed to flush session state: ${err?.stack || err}`)
+      return false
     }
   }
 

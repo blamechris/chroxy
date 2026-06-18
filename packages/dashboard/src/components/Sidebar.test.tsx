@@ -1,9 +1,11 @@
 /**
  * Sidebar component tests (#1102)
  */
+import type React from 'react'
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import { Sidebar, type SidebarProps, type RepoNode } from './Sidebar'
+import type { ConnectedClient } from '../store/types'
 
 // Mock the connection store (used by ServerPicker inside Sidebar)
 vi.mock('../store/connection', () => ({
@@ -23,6 +25,16 @@ vi.mock('../store/connection', () => ({
 afterEach(cleanup)
 
 const noop = vi.fn()
+
+function makeClients(n: number): ConnectedClient[] {
+  return Array.from({ length: n }, (_, i) => ({
+    clientId: `c${i}`,
+    deviceName: `Device ${i}`,
+    deviceType: 'desktop' as const,
+    platform: 'macos',
+    isSelf: i === 0,
+  }))
+}
 
 function makeRepos(overrides?: Partial<RepoNode>[]): RepoNode[] {
   const defaults: RepoNode[] = [
@@ -61,7 +73,8 @@ function renderSidebar(props: Partial<SidebarProps> = {}) {
     filter: '',
     serverStatus: 'connected',
     tunnelUrl: null,
-    clientCount: 1,
+    connectedClients: [],
+    activePrimaryClientId: null,
     onFilterChange: noop,
     onSessionClick: noop,
     onResumeSession: noop,
@@ -116,6 +129,20 @@ describe('Sidebar', () => {
     expect(onResumeSession).toHaveBeenCalledWith('c1')
   })
 
+  it('#5200: shows a Control Room launcher in the panel slot that calls onOpenControlRoom', () => {
+    const onOpenControlRoom = vi.fn()
+    renderSidebar({ onOpenControlRoom })
+    const launcher = screen.getByTestId('sidebar-panel-slot-launcher-control-room')
+    expect(launcher).toBeInTheDocument()
+    fireEvent.click(launcher)
+    expect(onOpenControlRoom).toHaveBeenCalledTimes(1)
+  })
+
+  it('#5200: no Control Room launcher when onOpenControlRoom is not provided', () => {
+    renderSidebar()
+    expect(screen.queryByTestId('sidebar-panel-slot-launcher-control-room')).toBeNull()
+  })
+
   it('calls onNewSession when new session button clicked', () => {
     const onNewSession = vi.fn()
     renderSidebar({ onNewSession })
@@ -162,9 +189,36 @@ describe('Sidebar', () => {
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('my-tunnel.trycloudflare.com')
   })
 
-  it('shows client count in footer', () => {
-    renderSidebar({ clientCount: 3 })
+  it('shows the shared-session viewer count in the footer', () => {
+    renderSidebar({ connectedClients: makeClients(3) })
+    // ≥2 devices → interactive chip showing the device count.
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('3')
+    expect(screen.getByTestId('viewers-indicator')).toBeInTheDocument()
+  })
+
+  // #5183 — the Running indicator is surfaced on the left projects/explorer
+  // header (in addition to the footer), reusing the serverStatus signal.
+  it('shows Running indicator on the projects header when connected', () => {
+    renderSidebar({ serverStatus: 'connected' })
+    const header = screen.getByTestId('sidebar-projects-header')
+    expect(header).toHaveTextContent('Running')
+    const dot = screen.getByTestId('sidebar-projects-status-dot')
+    expect(dot).toHaveClass('connected')
+  })
+
+  it('shows Reconnecting on the projects header when reconnecting', () => {
+    renderSidebar({ serverStatus: 'reconnecting' })
+    const header = screen.getByTestId('sidebar-projects-header')
+    expect(header).toHaveTextContent('Reconnecting')
+    expect(screen.getByTestId('sidebar-projects-status-dot')).toHaveClass('reconnecting')
+  })
+
+  it('shows Stopped on the projects header when disconnected', () => {
+    renderSidebar({ serverStatus: 'disconnected' })
+    const header = screen.getByTestId('sidebar-projects-header')
+    expect(header).toHaveTextContent('Stopped')
+    expect(header).not.toHaveTextContent('Running')
+    expect(screen.getByTestId('sidebar-projects-status-dot')).toHaveClass('disconnected')
   })
 
   it('renders collapsed state when isOpen is false', () => {
@@ -276,7 +330,8 @@ describe('Sidebar', () => {
       filter: 'Backend',
       serverStatus: 'connected',
       tunnelUrl: null,
-      clientCount: 1,
+      connectedClients: [],
+      activePrimaryClientId: null,
       onFilterChange: noop,
       onSessionClick: noop,
       onResumeSession: noop,
@@ -292,14 +347,15 @@ describe('Sidebar', () => {
     expect(screen.queryByText('Backend')).not.toBeInTheDocument()
   })
 
-  it('hides client count when server is disconnected', () => {
-    renderSidebar({ serverStatus: 'disconnected', clientCount: 2 })
-    expect(screen.queryByTestId('sidebar-footer')).not.toHaveTextContent('client')
+  it('hides the viewer indicator when server is disconnected', () => {
+    renderSidebar({ serverStatus: 'disconnected', connectedClients: makeClients(2) })
+    expect(screen.queryByTestId('viewers-indicator')).not.toBeInTheDocument()
+    expect(screen.queryByTestId('viewers-indicator-solo')).not.toBeInTheDocument()
   })
 
-  it('shows client count when server is connected', () => {
-    renderSidebar({ serverStatus: 'connected', clientCount: 2 })
-    expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('2 clients')
+  it('shows the solo client count when only one device is connected', () => {
+    renderSidebar({ serverStatus: 'connected', connectedClients: makeClients(1) })
+    expect(screen.getByTestId('viewers-indicator-solo')).toHaveTextContent('1 client')
   })
 
   it('shows Stopped label when server is disconnected', () => {
@@ -310,6 +366,215 @@ describe('Sidebar', () => {
   it('shows Running label when server is connected', () => {
     renderSidebar({ serverStatus: 'connected' })
     expect(screen.getByTestId('sidebar-footer')).toHaveTextContent('Running')
+  })
+
+  // #4372: a11y — focus the right-clicked sidebar row before opening the
+  // SessionContextMenu so unmount focus-restoration lands back on the row
+  // (a right-click does not move focus by default).
+  describe('right-click focus on sidebar rows (#4372)', () => {
+    it('renders session rows with tabIndex (focusable)', () => {
+      renderSidebar()
+      // The active session row owns tabIndex=0; others sit at -1 (roving
+      // tabindex). What matters for #4372 is that the row is *focusable*
+      // (tabIndex is set, not absent), so the App handler's .focus() call
+      // can actually move focus to it.
+      const row = screen.getByTestId('session-item-s1')
+      expect(row).toHaveAttribute('tabindex')
+      expect(Number(row.getAttribute('tabindex'))).toBeGreaterThanOrEqual(-1)
+    })
+
+    it('renders repo header rows with tabIndex (focusable)', () => {
+      renderSidebar()
+      const repoTreeitem = screen
+        .getByTestId('repo-header-/home/user/projects/api')
+        .closest('[role="treeitem"]')
+      expect(repoTreeitem).not.toBeNull()
+      expect(repoTreeitem).toHaveAttribute('tabindex')
+    })
+
+    it('renders resumable rows with tabIndex (focusable)', () => {
+      renderSidebar()
+      const row = screen.getByTestId('resumable-item-c1')
+      expect(row).toHaveAttribute('tabindex')
+    })
+
+    it('passes the right-clicked row as event.currentTarget to onContextMenu', () => {
+      // The App-level handler will call event.currentTarget.focus() before
+      // opening the menu. We assert that the event handed to onContextMenu
+      // has the *row* (the element bound to the listener) as currentTarget,
+      // not some descendant — otherwise focusing currentTarget would target
+      // an unfocusable child. NB: React pools the event after the handler
+      // returns, so we must read currentTarget synchronously inside the
+      // listener.
+      let observed: EventTarget | null = null
+      const onContextMenu = vi.fn((_target, event: React.MouseEvent) => {
+        observed = event.currentTarget
+      })
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.contextMenu(row)
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(observed).toBe(row)
+    })
+
+    it('focuses the row when the App-style handler runs on right-click', () => {
+      // Simulates the App-side handler (`event.currentTarget.focus()`) and
+      // verifies it actually moves document.activeElement to the row. This
+      // is the regression guard for #4372: if the row drops tabIndex, this
+      // .focus() call becomes a no-op.
+      const onContextMenu = vi.fn((_target, event: React.MouseEvent) => {
+        if (event.currentTarget instanceof HTMLElement) {
+          event.currentTarget.focus()
+        }
+      })
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      // Sanity: row is not focused before the right-click.
+      expect(document.activeElement).not.toBe(row)
+      fireEvent.contextMenu(row)
+      expect(document.activeElement).toBe(row)
+    })
+
+    // Repo headers are the case the original PR missed: the onContextMenu
+    // listener used to be bound to the inner `.sidebar-repo-header` div
+    // (no tabIndex, no role) — so event.currentTarget.focus() was a no-op
+    // and document.activeElement stayed on <body>. The fix moves the
+    // listener up to the outer `.sidebar-repo` treeitem wrapper, which
+    // owns the roving tabIndex. This test asserts:
+    //   (a) onContextMenu receives the outer treeitem as currentTarget
+    //       even when the right-click originates on the inner header,
+    //   (b) the App-style `currentTarget.focus()` actually lands focus
+    //       on the outer treeitem.
+    it('focuses the outer treeitem when the user right-clicks a repo header', () => {
+      const observed: { currentTarget: EventTarget | null } = { currentTarget: null }
+      const onContextMenu = vi.fn((_target, event: React.MouseEvent) => {
+        observed.currentTarget = event.currentTarget
+        if (event.currentTarget instanceof HTMLElement) {
+          event.currentTarget.focus()
+        }
+      })
+      renderSidebar({ onContextMenu })
+      const header = screen.getByTestId('repo-header-/home/user/projects/api')
+      const treeitem = header.closest('[role="treeitem"]') as HTMLElement | null
+      expect(treeitem).not.toBeNull()
+      // Sanity: nothing focused yet.
+      expect(document.activeElement).not.toBe(treeitem)
+      // Right-click on the inner header — bubbles to the outer treeitem,
+      // which is where the listener now lives. currentTarget should be the
+      // outer treeitem (not the header), and focus() should land there.
+      fireEvent.contextMenu(header)
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(observed.currentTarget).toBe(treeitem)
+      expect(document.activeElement).toBe(treeitem)
+    })
+  })
+
+  // #4392: a11y — invoke the sidebar context menu via keyboard. PR #4369
+  // added keyboard nav WITHIN the open menu, #4372 added focus restoration
+  // on close. The missing third leg: arrow-key users navigating the
+  // sidebar can't OPEN the menu without a mouse. ContextMenu key + Shift+F10
+  // (the two platform-standard shortcuts) bound on each treeitem row fix
+  // this.
+  describe('keyboard invocation of context menu (#4392)', () => {
+    // Helper — stub getBoundingClientRect so the synthesized position is
+    // deterministic. jsdom returns all-zero rects by default, which is fine
+    // for asserting "non-zero / right-edge math is applied" but we want a
+    // concrete check that the math used the rect we set.
+    function stubRect(el: Element, rect: { left: number; top: number; width: number; height: number }) {
+      ;(el as HTMLElement).getBoundingClientRect = () => ({
+        left: rect.left,
+        top: rect.top,
+        width: rect.width,
+        height: rect.height,
+        right: rect.left + rect.width,
+        bottom: rect.top + rect.height,
+        x: rect.left,
+        y: rect.top,
+        toJSON: () => ({}),
+      })
+    }
+
+    it('opens the menu when ContextMenu key is pressed on a session row', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      stubRect(row, { left: 10, top: 40, width: 200, height: 24 })
+      fireEvent.keyDown(row, { key: 'ContextMenu' })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(onContextMenu).toHaveBeenCalledWith(
+        { type: 'session', sessionId: 's1' },
+        expect.objectContaining({
+          // right-edge center: x = rect.right - 10, y = rect.top + height/2
+          clientX: 200,
+          clientY: 52,
+        }),
+      )
+    })
+
+    it('opens the menu when Shift+F10 is pressed on the outer repo treeitem', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const treeitem = screen
+        .getByTestId('repo-header-/home/user/projects/api')
+        .closest('[role="treeitem"]') as HTMLElement
+      stubRect(treeitem, { left: 0, top: 0, width: 240, height: 30 })
+      fireEvent.keyDown(treeitem, { key: 'F10', shiftKey: true })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(onContextMenu).toHaveBeenCalledWith(
+        { type: 'repo', path: '/home/user/projects/api' },
+        expect.objectContaining({
+          clientX: 230,
+          clientY: 15,
+        }),
+      )
+    })
+
+    it('opens the menu when Shift+F10 is pressed on a resumable row', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('resumable-item-c1')
+      stubRect(row, { left: 0, top: 100, width: 240, height: 24 })
+      fireEvent.keyDown(row, { key: 'F10', shiftKey: true })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      expect(onContextMenu).toHaveBeenCalledWith(
+        { type: 'resumable', conversationId: 'c1' },
+        expect.objectContaining({
+          clientX: 230,
+          clientY: 112,
+        }),
+      )
+    })
+
+    it('does not open the menu on plain F10 (without Shift)', () => {
+      const onContextMenu = vi.fn()
+      renderSidebar({ onContextMenu })
+      const row = screen.getByTestId('session-item-s1')
+      fireEvent.keyDown(row, { key: 'F10' })
+      expect(onContextMenu).not.toHaveBeenCalled()
+    })
+
+    it('does not also fire the tree-level React keydown handler (handleTreeKeyDown)', () => {
+      // The row handler calls stopPropagation() so handleTreeKeyDown
+      // (bound on the .sidebar-tree wrapper) does not also process the
+      // event. We assert this behavior end-to-end by pressing one of the
+      // keys handleTreeKeyDown DOES handle — `Enter` — first as a control
+      // (no row handler interception → onSessionClick fires via the tree
+      // handler's `focused.click()`), then by establishing the keyboard
+      // shortcut path. The contract we encode here: pressing ContextMenu
+      // on a focused row invokes onContextMenu exactly once and does not
+      // trigger onSessionClick (which would happen if Enter leaked).
+      const onContextMenu = vi.fn()
+      const onSessionClick = vi.fn()
+      renderSidebar({ onContextMenu, onSessionClick })
+      const row = screen.getByTestId('session-item-s1') as HTMLElement
+      row.focus()
+      fireEvent.keyDown(row, { key: 'ContextMenu' })
+      expect(onContextMenu).toHaveBeenCalledTimes(1)
+      // The tree handler does not handle ContextMenu today, so this is
+      // belt-and-suspenders, but: if a future change adds ContextMenu to
+      // the tree switch and forgets stopPropagation, this fails.
+      expect(onSessionClick).not.toHaveBeenCalled()
+    })
   })
 
   describe('stdin forwarding disabled badge (#3567)', () => {

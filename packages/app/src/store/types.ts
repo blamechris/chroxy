@@ -38,6 +38,10 @@ export type {
   Checkpoint,
   BaseSessionState,
   PendingPermissionConfirm,
+  // #4213: typed permission-mode shape — `description` flows through to the
+  // mobile SettingsBar so the chips share one source of truth with the server
+  // (matches the dashboard #4019 plumbing).
+  PermissionMode,
   // Re-export shared git result element types (#3132). Local definitions
   // are now redundant; canonical types live in @chroxy/store-core.
   GitFileStatus,
@@ -51,6 +55,8 @@ export type {
 import type {
   AgentInfo,
   BaseSessionState,
+  // #5630/#5629: era-aware billing class union.
+  BillingClass,
   ChatMessage,
   Checkpoint,
   ConnectedClient,
@@ -66,6 +72,10 @@ import type {
   MessageAttachment,
   ModelInfo,
   PendingPermissionConfirm,
+  SavedConnection,
+  // #4213: typed permission-mode shape used by the
+  // ModelsAndPermissionsData slice below.
+  PermissionMode,
   SearchResult,
   ServerError,
   SessionContext,
@@ -161,6 +171,12 @@ export interface ProviderCapabilities {
   inProcessPermissions?: boolean;
   modelSwitch?: boolean;
   permissionModeSwitch?: boolean;
+  // #5609: true when switching to 'auto' mid-turn interrupts the running turn
+  // (CLI respawns its `claude -p` subprocess — the #3729 panic-button). The
+  // app renders the server-provided `confirm_permission_mode` warning verbatim,
+  // so this flag is informational on the app side; the server derives the
+  // warning copy from it.
+  interruptsTurnOnAutoSwitch?: boolean;
   planMode?: boolean;
   resume?: boolean;
   terminal?: boolean;
@@ -170,6 +186,11 @@ export interface ProviderCapabilities {
   // method existence — only providers whose session class implements
   // setPermissionRules report this as true (#3072).
   sessionRules?: boolean;
+  // #5791 — claude-tui only: true when the daemon will reinject a single
+  // multi-select AskUserQuestion answer (CHROXY_TUI_MULTISELECT_REINJECT).
+  // Gates the multi-select checkbox affordance so the client doesn't offer a
+  // form the server refuses.
+  multiSelectReinject?: boolean;
 }
 
 // #3404 audit (F1+F5): per-provider auth state for grey-out + billing detail.
@@ -180,6 +201,10 @@ export interface ProviderAuth {
   envVars: string[];
   hint: string;
   detail: string;
+  // #5630/#5629: era-aware billing class. Optional — older servers omit it.
+  // The app's mapProviderList passes auth through verbatim (no strict Zod
+  // strip), so an unknown key was never rejected — this just types it.
+  billingClass?: BillingClass;
 }
 
 export interface ProviderInfo {
@@ -208,10 +233,17 @@ export interface SessionNotification {
 
 /**
  * Group 1 — Connection & socket. Lifecycle phase/URL/token live in
- * `useConnectionLifecycleStore`; this interface holds only the live socket.
+ * `useConnectionLifecycleStore`; this interface holds the live socket plus the
+ * reactive mirror of the outgoing-queue depth (see `queuedMessageCount`).
  */
 export interface ConnectionSocketData {
   socket: WebSocket | null;
+  // #5699 — reactive mirror of the number of queued *user input* messages (the
+  // queue itself lives in message-handler's module context, which is
+  // non-reactive). Counts only `input`, not ephemeral `interrupt` control
+  // signals. Surfaced so the reconnect banner can show "N queued" and the
+  // manual-disconnect path can warn before discarding unsent messages.
+  queuedMessageCount: number;
 }
 
 /**
@@ -240,8 +272,12 @@ export interface ModelsAndPermissionsData {
   availableModels: ModelInfo[];
   // Server-reported default model short id (from SDK)
   defaultModelId: string | null;
-  // Available permission modes from server (CLI mode)
-  availablePermissionModes: { id: string; label: string }[];
+  // Available permission modes from server (CLI mode).
+  // #4213: typed PermissionMode from store-core; the optional `description`
+  // field flows through to the SettingsBar hint so the mobile picker shares
+  // one source of truth with the server's PERMISSION_MODES table (matches
+  // the dashboard #4019 plumbing).
+  availablePermissionModes: PermissionMode[];
   // Available providers from server (for session creation UI)
   availableProviders: ProviderInfo[];
   // Pending auto permission mode confirmation from server
@@ -273,6 +309,36 @@ export interface ServerNotificationData {
   restartingSince: number | null;
   // Session timeout warning (from server session_warning event)
   timeoutWarning: { sessionId: string; sessionName: string; remainingMs: number; receivedAt: number } | null;
+  // #4542: per-category notification preferences. Mirrors the latest
+  // `notification_prefs` snapshot received from the server. `null` until
+  // the first snapshot arrives. Server is the single source of truth —
+  // ~/.chroxy/notification-prefs.json on the host.
+  //
+  // #4544 extends the shape with `timezone` on the quiet-hours window, a
+  // globally-applied `bypassCategories` list (defaults to
+  // permission + activity_error — categories that fire even at 3am), and
+  // optional per-device overrides for quietHours / bypassCategories.
+  // Per-device REPLACES the global value entirely (see
+  // packages/server/src/notification-prefs.js for the precedence
+  // rationale).
+  notificationPrefs: {
+    categories: Record<string, boolean>;
+    devices: Record<string, {
+      categories?: Record<string, boolean>;
+      quietHours?: { start: string; end: string; timezone: string } | null;
+      bypassCategories?: string[];
+    }>;
+    quietHours: { start: string; end: string; timezone: string } | null;
+    bypassCategories?: string[];
+  } | null;
+  // #4543: registered Expo push token for THIS device. Used as the key
+  // into `notificationPrefs.devices` so the SettingsScreen can patch a
+  // per-device override that survives across reconnects. Set once by
+  // `registerPushToken` in message-handler.ts after a successful
+  // `register_push_token` ack, cleared on disconnect so a fresh connect
+  // cycle re-fetches. Null when the device has no push capability (e.g.
+  // simulator) — the per-device UI hides itself in that case.
+  pushToken: string | null;
 }
 
 /**
@@ -324,8 +390,29 @@ export interface UIViewData {
  * start.
  */
 export interface ConnectionActions {
-  connect: (url: string, token: string, options?: { silent?: boolean; _retryCount?: number }) => void;
+  connect: (
+    url: string,
+    token: string,
+    // #5555 — `healthPrecheck` carries connectAuto's fresh `/health` result so
+    // connect() can skip its own redundant probe (one connect == one probe).
+    options?: { silent?: boolean; _retryCount?: number; healthPrecheck?: { ts: number; status: 'ok' } },
+  ) => void;
+  /**
+   * #5518 — auto-select the best endpoint for a saved connection (races a
+   * `/health` probe against the verified LAN candidate, else tunnel) then
+   * connects. Auto-reconnect paths use this; manual flows call `connect()`.
+   */
+  connectAuto: (
+    saved: SavedConnection,
+    // #5633 — `force` skips connectAuto's "already connected to this URL" no-op
+    // guard so the resume zombie-socket path can force a fresh reconnect even
+    // when the socket still claims OPEN on an unchanged tunnel URL.
+    options?: { silent?: boolean; preferTunnel?: boolean; force?: boolean },
+  ) => Promise<void>;
   disconnect: () => void;
+  // #5725 (#5698) — user-initiated retry from the terminal `server_down` state:
+  // resets the reconnect ladder, then reconnects to the saved connection.
+  retryConnection: () => void;
   loadSavedConnection: () => Promise<void>;
   clearSavedConnection: () => Promise<void>;
 }
@@ -359,6 +446,12 @@ export interface CreateSessionOptions {
  */
 export interface MultiClientSessionActions {
   switchSession: (sessionId: string, options?: { serverNotify?: boolean; haptic?: boolean }) => void;
+  /**
+   * #5589 / #5281 — request primary (driver) ownership of a shared session.
+   * `force` overrides the current owner (operator-driven take-over). The
+   * resulting `session_role` broadcast is the authoritative role update.
+   */
+  claimPrimary: (sessionId: string, options?: { force?: boolean }) => void;
   createSession: (opts: CreateSessionOptions) => void;
   destroySession: (sessionId: string) => void;
   renameSession: (sessionId: string, name: string) => void;
@@ -378,8 +471,35 @@ export interface MessageInputActions {
   sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
-  sendUserQuestionResponse: (answer: string, toolUseId?: string) => 'sent' | 'queued' | false;
+  /**
+   * Send a `user_question_response` answer to the server.
+   *
+   * Accepts three answer shapes:
+   * - `string` — legacy single-question / free-text path. Wire shape stays
+   *   `{ type, answer, toolUseId? }` so older servers keep working.
+   * - `Record<string, string | string[]>` — multi-question form path
+   *   (#4604 / #4621 / #4735 / #4761). Populates the `answers` field per
+   *   `UserQuestionResponseSchema` and a flattened string `answer` summary.
+   * - `{ otherLabel, freeformText }` — single-question Other / freeform
+   *   path (#4755, mobile parity with dashboard #4651). Wire payload is
+   *   `{answer: <otherLabel>, freeformText: <typed text>}` so the server
+   *   drives the two-stage TUI write (Other digit → text-input prompt →
+   *   freeform text + Enter).
+   */
+  sendUserQuestionResponse: (
+    answer: string | Record<string, string | string[]> | { otherLabel: string; freeformText: string },
+    toolUseId?: string,
+  ) => 'sent' | 'queued' | false;
   markPromptAnswered: (messageId: string, answer: string) => void;
+  /**
+   * #4973 — record a multi-question form submission: stores the
+   * comma-joined summary in `answered` and the structured per-question
+   * answers map in `answeredAnswers`.
+   */
+  markPromptAnsweredMulti: (
+    messageId: string,
+    answers: Record<string, string | string[]>,
+  ) => void;
   markPromptAnsweredByRequestId: (requestId: string, answer: string) => void;
 }
 
@@ -467,6 +587,53 @@ export interface ServerNotificationActions {
   dismissServerError: (id: string) => void;
   dismissSessionNotification: (id: string) => void;
   dismissTimeoutWarning: () => void;
+  // #4542: notification-prefs round-trip. `refresh` sends
+  // `notification_prefs_get`; `setCategory` sends `notification_prefs_set`
+  // with a single-category patch (server shallow-merges so other toggles
+  // are preserved).
+  //
+  // #4559: each action returns a boolean indicating whether the WS message
+  // actually went on the wire. `true` = sent; `false` = socket was closed
+  // and the write was a no-op. Pre-#4559 the silent-drop made the toggle
+  // look unresponsive; SettingsScreen now surfaces an inline error so the
+  // user knows to retry after reconnect.
+  refreshNotificationPrefs: () => boolean;
+  setNotificationPrefsCategory: (category: string, enabled: boolean) => boolean;
+  // #4543: patch a per-device category override. Sends a single
+  // `notification_prefs_set` with `{ devices: { [deviceKey]: { categories:
+  // { [category]: enabled } } } }`. Server shallow-merges so other device
+  // entries — and other categories under THIS device — survive. `enabled =
+  // false` mutes the category on this device only; `true` is the
+  // explicit-unmute path that overrides a `false` global default. No-op
+  // when deviceKey is empty or the socket is closed.
+  //
+  // #4559: returns `true` when sent, `false` for both no-op branches
+  // (empty deviceKey OR closed socket).
+  setNotificationPrefsDevice: (deviceKey: string, category: string, enabled: boolean) => boolean;
+  // #4564: drop an entire per-device override entry. Sends
+  // `notification_prefs_set` with `{ devices: { [deviceKey]: null } }`, the
+  // server interprets the null sentinel as "remove this token from the
+  // persisted devices map". Used by the per-row "Clear" button in the
+  // known-devices section to drain orphans left when an Expo push token
+  // refreshes, an app is reinstalled, or a browser tab loses its
+  // localStorage device id — without this surface the on-disk file
+  // accumulates dead entries forever.
+  //
+  // Returns `true` when the WS message was sent, `false` for both no-op
+  // branches (empty deviceKey OR closed socket).
+  deleteNotificationPrefsDevice: (deviceKey: string) => boolean;
+  // #4544: patch the global quiet-hours window. `null` clears the window;
+  // a window object (with `timezone`) sets it. Server broadcasts the
+  // merged snapshot so all clients update in lockstep.
+  //
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null) => boolean;
+  // #4544: replace the global bypass-category list wholesale. An empty
+  // array means "nothing bypasses, not even errors" — the UI should
+  // always send the desired final list.
+  //
+  // #4559: returns `false` when the socket is closed.
+  setNotificationPrefsBypassCategories: (categories: string[]) => boolean;
 }
 
 /**
@@ -495,6 +662,15 @@ export interface UIViewActions {
   clearTerminalBuffer: () => void;
   setTerminalWriteCallback: (cb: ((data: string) => void) | null) => void;
   resize: (cols: number, rows: number) => void;
+  // #5835 / #5987 — live PTY mirror channel (read-only on mobile in PR1).
+  // Opt in/out of a session's terminal_output stream and report the viewer's
+  // grid size. Used by user-shell sessions; claude-tui keeps its legacy 'raw'
+  // + `resize` path. Interactive stdin (terminal_input) is deferred — see #6003.
+  subscribeTerminalMirror: (sessionId: string) => void;
+  unsubscribeTerminalMirror: (sessionId: string) => void;
+  sendTerminalResize: (sessionId: string, cols: number, rows: number) => void;
+  /** #6003 — forward keystrokes from an interactive (user-shell) terminal to the PTY (chunked under the 100k cap). */
+  sendTerminalInput: (sessionId: string, data: string) => void;
 }
 
 /**

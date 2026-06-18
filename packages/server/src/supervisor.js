@@ -62,6 +62,7 @@ export class Supervisor extends EventEmitter {
     this._restartCount = 0
     this._standbyServer = null
     this._standbyRetries = 0
+    this._standbyRetryTimer = null
     this._shuttingDown = false
     this._draining = false
     this._childReady = false
@@ -72,6 +73,10 @@ export class Supervisor extends EventEmitter {
     this._restartScheduledAt = null
     this._restartDelayMs = null
     this._restartTimer = null
+    // #6027: deploy-window reset timer. Instance-scoped (was a startChild-local
+    // closure var) so shutdown()/teardown can clear it — otherwise a child that
+    // goes ready but never exits leaves a ~DEPLOY_CRASH_WINDOW timer pending.
+    this._deployResetTimer = null
     this._log = createLogger('supervisor')
 
     // Deploy rollback tracking
@@ -118,6 +123,36 @@ export class Supervisor extends EventEmitter {
     })
   }
 
+  /**
+   * #5314 (WP-1.4) — last-resort handler for an uncaught error in the supervisor
+   * process. Logs it; stays alive so the child keeps being supervised (killing
+   * the supervisor would take down the whole service). Exits only if a shutdown
+   * is already underway. Extracted so tests can drive it without real signals.
+   */
+  _onProcessError(kind, err) {
+    // Reflect the actual action: during a deliberate shutdown we exit(1); the
+    // rest of the time we stay alive and keep supervising.
+    const action = this._shuttingDown ? 'exiting — shutdown in progress' : 'staying alive'
+    this._log.error(`Supervisor ${kind} (${action}): ${err?.stack || err}`)
+    if (this._shuttingDown) this._exit(1)
+  }
+
+  /**
+   * #5314 (WP-1.4) — single cleanup path for a boot failure that occurs after
+   * cloudflared has started but before the child is forked. Stops cloudflared so
+   * it doesn't leak as an orphan, then exits(1). Best-effort stop — we're exiting
+   * regardless.
+   */
+  async _failBoot(err) {
+    this._log.error(`Supervisor boot failed before the child started: ${err?.message || err}`)
+    try {
+      await this._tunnel.stop()
+    } catch (stopErr) {
+      this._log.error(`Failed to stop cloudflared after boot failure: ${stopErr?.message || stopErr}`)
+    }
+    this._exit(1)
+  }
+
   /** Override point: exit the process */
   _exit(code) {
     process.exit(code)
@@ -128,8 +163,37 @@ export class Supervisor extends EventEmitter {
     // Create a fresh PushManager each time to reload tokens from disk.
     // The child process writes tokens after clients connect, so the supervisor
     // must re-read the file to pick up any tokens registered since startup.
-    const push = new PushManager({ storagePath: this._pushStoragePath })
-    await push.send(category, title, body)
+    //
+    // #5430: plumb the `notifications.discord` config block through, mirroring
+    // server-cli.js — otherwise the Discord sink runs with default botName/
+    // colors/throttle and a supervisor-emitted embed update ("Chroxy server is
+    // down") looks different from every other update. The statePath default
+    // matches the child server's so both processes converge on the same
+    // status message; the sink persists that state atomically (temp+rename).
+    //
+    // prefsPath mirrors server-cli.js too: without it the per-send manager
+    // falls back to default prefs, so supervisor-sent notifications would
+    // ignore the operator's category mutes / quiet hours (both sinks gate on
+    // prefs) while the child server honors them. Read-only here — the
+    // supervisor never calls setPrefs/registerToken — and fresh-per-send
+    // picks up prefs the child persisted after startup, same as the tokens.
+    const push = new PushManager({
+      storagePath: this._pushStoragePath,
+      prefsPath: join(homedir(), '.chroxy', 'notification-prefs.json'),
+      discord: {
+        statePath: join(homedir(), '.chroxy', 'discord-webhook-state.json'),
+        ...(this.config.notifications?.discord || {}),
+      },
+    })
+    try {
+      await push.send(category, title, body)
+    } finally {
+      // #5413: release sink resources (the Discord heartbeat interval) —
+      // these per-send managers are short-lived by design, and without the
+      // destroy a configured Discord sink would leak one live interval per
+      // supervisor notification.
+      push.destroy()
+    }
   }
 
   /** Override point: display QR code */
@@ -162,6 +226,14 @@ export class Supervisor extends EventEmitter {
 
     process.on('SIGINT', () => this.shutdown('SIGINT'))
     process.on('SIGTERM', () => this.shutdown('SIGTERM'))
+
+    // #5314 (WP-1.4) — the supervisor had no uncaughtException/unhandledRejection
+    // handler, so a stray fault (e.g. the routine tunnel-DNS-settle rejection from
+    // an async tunnel_recovered handler) silently killed the supervisor and
+    // orphaned the child. Its job is uptime: log loudly and KEEP SUPERVISING.
+    // Only let the process exit if we're already in a deliberate shutdown.
+    process.on('uncaughtException', (err) => this._onProcessError('uncaughtException', err))
+    process.on('unhandledRejection', (err) => this._onProcessError('unhandledRejection', err))
   }
 
   async start() {
@@ -190,6 +262,10 @@ export class Supervisor extends EventEmitter {
     this._modeLabel = tunnelArg ? `cloudflare:${tunnelArg.mode}` : this._tunnelMode
 
     this._tunnel.on('tunnel_recovered', async ({ httpUrl: newHttpUrl, wsUrl: newWsUrl, attempt }) => {
+      // #5314 (WP-1.4) — this is an ASYNC event listener; an unhandled rejection
+      // here (waitForTunnel throws on a routine DNS-settle failure) would crash
+      // the supervisor. Contain it: log and let the next tunnel_recovered retry.
+      try {
       this._log.info(`Tunnel recovered after ${attempt} attempt(s)`)
       await this._waitForTunnel(newHttpUrl)
 
@@ -206,6 +282,7 @@ export class Supervisor extends EventEmitter {
         writeConnectionInfo({
           wsUrl: newWsUrl,
           httpUrl: newHttpUrl,
+          port: this._port, // #5683 — local loopback port for the CLI
           apiToken: this._apiToken,
           connectionUrl,
           tunnelMode: this._modeLabel,
@@ -213,38 +290,57 @@ export class Supervisor extends EventEmitter {
           pid: process.pid,
         })
       }
+      } catch (err) {
+        this._log.error(`tunnel_recovered handler failed (will retry on next recovery): ${err?.message || err}`)
+      }
     })
 
     this._tunnel.on('tunnel_failed', ({ message }) => {
       this._log.error(message)
     })
 
-    // 2. Wait for tunnel to be routable
-    await this._waitForTunnel(httpUrl)
+    // 2-3. Wait for the tunnel to be routable, then display + persist connection
+    // info. #5314 (WP-1.4) — every step here runs while cloudflared is already
+    // up (this._tunnel.start() above) but BEFORE the child is forked, so ANY
+    // throw must stop cloudflared first or it leaks as an orphan. waitForTunnel
+    // THROWS on a routine DNS-settle failure; _displayQr (QR encode) and
+    // writeConnectionInfo (disk) can also throw. _failBoot() is the single
+    // cleanup path. (The PID write below has its own non-fatal guard, and the
+    // child fork is past the no-leak boundary.)
+    try {
+      await this._waitForTunnel(httpUrl)
 
-    // 3. Display connection info
-    const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
+      // 3. Display connection info
+      const connectionUrl = `chroxy://${wsUrl.replace('wss://', '')}?token=${this._apiToken}`
 
-    this._log.info(`${this._modeLabel} ready`)
-    process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
-    await this._displayQr(connectionUrl)
-    process.stdout.write('\nOr connect manually:\n')
-    process.stdout.write(`   URL:   ${wsUrl}\n`)
-    process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
-    const dashboardBase = httpUrl || `http://localhost:${this._port}`
-    process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
-    process.stdout.write('\n')
+      this._log.info(`${this._modeLabel} ready`)
+      process.stdout.write('📱 Scan this QR code with the Chroxy app:\n\n')
+      await this._displayQr(connectionUrl)
+      process.stdout.write('\nOr connect manually:\n')
+      process.stdout.write(`   URL:   ${wsUrl}\n`)
+      process.stdout.write(`   Token: ${maskToken(this._apiToken)}\n`)
+      const dashboardBase = httpUrl || `http://localhost:${this._port}`
+      process.stdout.write(`   Dashboard: ${dashboardBase.replace(/\/+$/, '')}/dashboard\n`)
+      process.stdout.write('\n')
 
-    // 3b. Write connection info file for programmatic access
-    writeConnectionInfo({
-      wsUrl,
-      httpUrl,
-      apiToken: this._apiToken,
-      connectionUrl,
-      tunnelMode: this._modeLabel,
-      startedAt: new Date().toISOString(),
-      pid: process.pid,
-    })
+      // 3b. Write connection info file for programmatic access
+      writeConnectionInfo({
+        wsUrl,
+        httpUrl,
+        // #5683: the LOCAL listen port, so loopback CLIs (chroxy publish / pages)
+        // hit the right port even in tunnel mode, where httpUrl is the public
+        // trycloudflare URL with no :port to parse.
+        port: this._port,
+        apiToken: this._apiToken,
+        connectionUrl,
+        tunnelMode: this._modeLabel,
+        startedAt: new Date().toISOString(),
+        pid: process.pid,
+      })
+    } catch (err) {
+      await this._failBoot(err)
+      return
+    }
 
     // 4. Write PID file
     try {
@@ -273,6 +369,32 @@ export class Supervisor extends EventEmitter {
 
   startChild() {
     if (this._shuttingDown) return
+
+    // Defensive: cancel any pending crash-backoff restart so two startChild()
+    // calls can't fork two children. A child crash schedules
+    // `_restartTimer = setTimeout(startChild, backoff)`; if a restartChild()
+    // lands during that backoff window its `!this._child` branch calls
+    // startChild() immediately — without this, the still-pending backoff timer
+    // would later fire a SECOND startChild() and orphan the first child. The
+    // SIGUSR2 `_childReady` guard makes the race rare, but a direct/extra caller
+    // would otherwise double-fork. Clearing an already-fired timer is a no-op,
+    // so the normal timer-driven restart path is unaffected.
+    if (this._restartTimer) {
+      clearTimeout(this._restartTimer)
+      this._restartTimer = null
+    }
+
+    // Free the port BEFORE forking the replacement child. After a crash the
+    // exit handler starts a standby health server bound to `this._port`; if it
+    // is still listening when the new child forks, the child's own `listen()`
+    // fails with EADDRINUSE and it exits before sending `ready` — so the
+    // `_stopStandbyServer()` on `ready` (below) never runs, the standby stays
+    // up, and every restart attempt hits the same EADDRINUSE until the restart
+    // cap, silently bricking the daemon on the first crash. Stopping standby
+    // here (idempotent when none is running, e.g. the first start) guarantees
+    // the port is available for the child to bind. `close()` releases the
+    // listening socket; the standby has no keep-alive clients to drain.
+    this._stopStandbyServer()
 
     const childScript = resolve(__dirname, 'server-cli-child.js')
     const childEnv = {
@@ -308,7 +430,6 @@ export class Supervisor extends EventEmitter {
       })
     }
 
-    let deployResetTimer = null
     this._child.on('message', (msg) => {
       if (msg.type === 'ready') {
         this._log.info('Server child is ready')
@@ -324,7 +445,8 @@ export class Supervisor extends EventEmitter {
         if (this._lastDeployTimestamp > 0 && this._deployFailureCount > 0) {
           const remaining = DEPLOY_CRASH_WINDOW - (Date.now() - this._lastDeployTimestamp)
           if (remaining > 0) {
-            deployResetTimer = setTimeout(() => {
+            this._deployResetTimer = setTimeout(() => {
+              this._deployResetTimer = null
               this._deployFailureCount = 0
               this._log.info('Deploy crash window passed, resetting failure count')
             }, remaining)
@@ -348,7 +470,7 @@ export class Supervisor extends EventEmitter {
       void (async () => {
         stdoutRl?.close()
         stderrRl?.close()
-        if (deployResetTimer) { clearTimeout(deployResetTimer); deployResetTimer = null }
+        if (this._deployResetTimer) { clearTimeout(this._deployResetTimer); this._deployResetTimer = null }
         const childUptimeMs = this._metrics.childStartedAt ? Date.now() - this._metrics.childStartedAt : 0
         this._child = null
         this._childReady = false
@@ -479,7 +601,8 @@ export class Supervisor extends EventEmitter {
     this._standbyServer.on('error', (err) => {
       if (err.code === 'EADDRINUSE') {
         this._standbyRetries++
-        setTimeout(() => {
+        this._standbyRetryTimer = setTimeout(() => {
+          this._standbyRetryTimer = null
           if (this._standbyServer) {
             this._standbyServer.close()
             this._standbyServer = null
@@ -498,6 +621,10 @@ export class Supervisor extends EventEmitter {
   }
 
   _stopStandbyServer() {
+    if (this._standbyRetryTimer) {
+      clearTimeout(this._standbyRetryTimer)
+      this._standbyRetryTimer = null
+    }
     if (this._standbyServer) {
       this._standbyServer.close()
       this._standbyServer = null
@@ -530,6 +657,10 @@ export class Supervisor extends EventEmitter {
         try { this._child.kill('SIGTERM') } catch {}
       }
     }, DRAIN_TIMEOUT)
+    // #6043: fire-and-forget drain safety net — never gate process exit on it.
+    // The supervisor stays alive via its own listening handles during a drain;
+    // this timer is only the fallback SIGTERM if the child ignores drain.
+    if (typeof drainTimer.unref === 'function') drainTimer.unref()
 
     if (this._child) {
       this._child.once('exit', () => clearTimeout(drainTimer))
@@ -645,6 +776,7 @@ export class Supervisor extends EventEmitter {
     this._shuttingDown = true
     if (this._heartbeatInterval) clearInterval(this._heartbeatInterval)
     if (this._restartTimer) clearTimeout(this._restartTimer)
+    if (this._deployResetTimer) { clearTimeout(this._deployResetTimer); this._deployResetTimer = null }
     this._log.info(`${signal} received, shutting down...`)
 
     // Remove PID file
@@ -660,6 +792,12 @@ export class Supervisor extends EventEmitter {
         this._log.info('Force-killing child after 5s timeout')
         try { forceKill(childRef) } catch {}
       }, 5000)
+      // #6043: fire-and-forget shutdown safety net — never gate process exit on
+      // it. During shutdown the supervisor is held alive by the awaited
+      // tunnel.stop() and remaining handles; the goal of this path is exit, so
+      // if the loop is otherwise idle the process should exit, not be pinned for
+      // 5s. The child is in this process group and is reaped on full exit.
+      if (typeof forceKillTimer.unref === 'function') forceKillTimer.unref()
 
       childRef.once('exit', () => clearTimeout(forceKillTimer))
 

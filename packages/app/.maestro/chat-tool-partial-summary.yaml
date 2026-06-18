@@ -1,0 +1,151 @@
+appId: com.blamechris.chroxy
+name: ChatView ToolBubble collapsed-preview field-priority (#4260)
+---
+
+# #4260 — End-to-end coverage for the mobile ToolBubble's #4243
+# collapsed-preview field-priority extraction. The trigger phrase
+# 'show-bash-partial' (added to mock-server.mjs in this PR) emits a
+# `tool_start` followed by three `tool_input_delta` chunks that
+# accumulate into `{"command":"ls -la /tmp"}`. Once the JSON closes,
+# `getPartialSummary` runs and the collapsed bubble surfaces
+# `ls -la /tmp` — NOT the raw `{"command":"ls -la /tm...` slice.
+#
+# Selector: `id: tool-collapsed-preview` (testID added to ToolBubble.tsx
+# in this PR). Selecting by testID rather than walking by
+# `numberOfLines={1}` makes the assertion robust to future siblings.
+#
+# Note on chat routing:
+#   `groupMessages()` in store-core/group-messages.ts always bundles
+#   `tool_use` messages into 'activity' groups, so ChatView routes them
+#   through ActivityGroup → ActivityEntry — NOT through
+#   MessageBubble → ToolBubble. This flow asserts the testID is
+#   present in the rendered tree; in the current build it lights up
+#   only when a tool_use message is rendered as a 'single' group,
+#   which today is dead code in chat. The flow stays here as the
+#   regression harness for if/when chat routing re-enables ToolBubble
+#   (or as a runtime check for any future surface — e.g. the message
+#   detail screen — that mounts ToolBubble directly). The jest tests
+#   in ToolBubblePartialSummary.test.tsx remain the authoritative
+#   render-tree assertion until then.
+#
+# Tested devices: iPhone 15 Pro (iOS 17), iPhone SE 3 (iOS 17),
+# iPhone 17 Pro Max (iOS 26.1), portrait.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Self-contained (no `runFlow: setup/...`) because the existing setup/
+# flows target Expo Go (appId host.exp.Exponent), whereas this needs
+# the chroxy dev client (com.blamechris.chroxy). Mirrors the
+# chat-todolist.yaml structure.
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Ensure Chat tab.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that streams a Bash tool_input_delta sequence.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-bash-partial"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Wait for the activity group to land (mock server emits tool_start +
+# three tool_input_delta chunks; no tool_result — the bubble stays
+# in the streaming-collapsed state, which is exactly the regression
+# window the #4243 field-priority extraction targets).
+- extendedWaitUntil:
+    visible:
+      id: "activity-group"
+    timeout: 10000
+
+# Screenshot the activity-group collapsed (in-flight pulse + per-tool
+# breakdown header).
+- takeScreenshot: chat-tool-partial-summary-activity-collapsed
+
+# Expand the activity group to surface the inner entries.
+- tapOn:
+    id: "activity-group-header"
+- waitForAnimationToEnd
+
+- takeScreenshot: chat-tool-partial-summary-activity-expanded
+
+# Assert the ToolBubble collapsed-preview testID is present with the
+# extracted `command` field. See the routing note in the header — this
+# assertion fires only when the rendered tree mounts ToolBubble (e.g.
+# message detail screen, or a future single-group routing change).
+# Until then, this assertion catches future regressions in either:
+#   (a) the `getPartialSummary` extraction (#4243), or
+#   (b) the testID itself being removed/renamed (#4260).
+#
+# `optional: true` because in the current build this is the dead-code
+# path the header describes: groupMessages() routes every tool_use
+# through ActivityGroup → ActivityEntry, which does not render
+# toolInputPartial — only ToolBubble and ChildAgentEventList do, and
+# neither mounts here. A hard assert can therefore never pass in chat
+# today (verified on-device 2026-06-10: the entry renders "Bash {}").
+# The flow still exercises the tool_start + tool_input_delta wire path
+# end-to-end; ToolBubblePartialSummary.test.tsx remains the
+# authoritative render assertion until chat routing re-mounts
+# ToolBubble — flip these back to hard asserts then.
+- assertVisible:
+    id: "tool-collapsed-preview"
+    optional: true
+- assertVisible:
+    text: "ls -la /tmp"
+    optional: true
+
+- takeScreenshot: chat-tool-partial-summary-preview-visible

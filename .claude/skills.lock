@@ -1,0 +1,107 @@
+{
+  "registry": "blamechris/skill-templates",
+  "skills": {
+    "agent-review": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "agentic-audit": {
+      "hash": "3f616c3",
+      "installed": "2026-06-06"
+    },
+    "autonomous-dev-flow": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "batch-merge": {
+      "hash": "0a76684",
+      "installed": "2026-06-03"
+    },
+    "bug-hunt": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "check-pr": {
+      "hash": "cc062bc",
+      "installed": "2026-06-03"
+    },
+    "create-issue": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "create-pr": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "decompose-issue": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "fix-ci": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "full-review": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "learn": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "manual-testing-mode": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "merge": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "parallel-dev": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "project-audit": {
+      "hash": "aae4d65",
+      "installed": "2026-06-06"
+    },
+    "recon": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "skill": {
+      "hash": "21fe7c3",
+      "installed": "2026-06-14",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
+    },
+    "smoke-form": {
+      "hash": "3cd93cc",
+      "installed": "2026-06-11",
+      "profileHash": "57b5312"
+    },
+    "smoke-test": {
+      "hash": "21fa678",
+      "installed": "2026-06-03"
+    },
+    "start-working": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "swarm-audit": {
+      "hash": "ebdb14e",
+      "installed": "2026-06-02"
+    },
+    "tackle-issues": {
+      "hash": "21fa678",
+      "installed": "2026-06-03"
+    },
+    "visual-brief": {
+      "hash": "a4c08cb",
+      "installed": "2026-06-10",
+      "profileHash": "57b5312"
+    }
+  }
+}

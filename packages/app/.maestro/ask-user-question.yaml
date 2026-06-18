@@ -1,0 +1,164 @@
+appId: com.blamechris.chroxy
+name: ChatView AskUserQuestion approve flow (#4697)
+---
+
+# #4697 — End-to-end coverage for the AskUserQuestion approve path on
+# the mobile app. This is the *exact surface* of the v0.9.x prompt-
+# delivery wedges (#4668 / #4679 / #4687 / #4648 / #4669) that
+# consumed ~2 weeks of debugging — server-side regression coverage is
+# locked in, but the mobile app had zero E2E coverage for the
+# approve/deny round-trip until this flow.
+#
+# Trigger: 'show-ask-user-question' user input → mock-server.mjs
+# emits a `user_question` envelope (single question with Approve / Deny
+# options). The fixture seeding pattern is documented in CLAUDE.md →
+# "Fixture Seeding for Structured Renderers".
+#
+# Selectors:
+#   id: approval-card-<message.id>     — bubble anchor (every MessageBubble)
+#   id: approval-question-0            — prompt header (per #4697)
+#   id: approval-button-approve        — Approve option (value-based)
+#   id: approval-button-deny           — Deny option (value-based)
+#
+# Regression coverage:
+#   - Pins the wire→app render path for `user_question`: server emits
+#     → store-core handleUserQuestion normalizes → MessageBubble
+#     renders the prompt bubble with options.
+#   - Pins the approve tap: TouchableOpacity onPress → SessionScreen
+#     handleSelectOption → sendUserQuestionResponse → wire `user_question_response`
+#     → markPromptAnswered flips the bubble into the answered state.
+#   - A regression in any of these layers (lost testID, broken
+#     handler dispatch, missing answered state propagation) breaks
+#     this flow.
+#
+# Tested devices: portrait iPhone (iOS 17+). Mirrors chat-todolist /
+# chat-tool-partial-summary / stream-stall-chip flows.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+#
+# Self-contained (no `runFlow: setup/...`) because the existing setup/
+# flows target Expo Go (appId host.exp.Exponent), whereas this needs
+# the chroxy dev client (com.blamechris.chroxy).
+
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# If we landed on ConnectScreen, fill the manual-entry form.
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro"
+
+      - hideKeyboard
+
+      - tapOn:
+          id: "connect-submit"
+
+      - extendedWaitUntil:
+          visible: "Chat"
+          timeout: 10000
+
+# Ensure Chat tab.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Type the trigger phrase that makes the mock server emit a
+# `user_question` with Approve / Deny options.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-ask-user-question"
+
+- tapOn:
+    id: "chat-send-button"
+
+# Drop the keyboard so the prompt bubble + option buttons aren't
+# covered by the input area.
+- hideKeyboard
+
+# Wait for the prompt bubble header to render. `approval-question-0`
+# is the canonical multi-question-friendly selector — for a single-
+# question form, Q[0] IS the prompt.
+- extendedWaitUntil:
+    visible:
+      id: "approval-question-0"
+    timeout: 10000
+
+# Screenshot the rendered prompt (orange "Action Required" header,
+# question text, two option buttons).
+- takeScreenshot: ask-user-question-prompt-rendered
+
+# Assert both option buttons are visible by their value-based testIDs
+# (regression for the wire normalization that maps option labels to
+# value === label — see handleUserQuestion).
+- assertVisible:
+    id: "approval-button-approve"
+- assertVisible:
+    id: "approval-button-deny"
+
+# Also assert the question text rendered — pins the wire→render path
+# for the question string field (a regression in handleUserQuestion's
+# normalizeQuestion drops this). Wildcard match: the approval card is
+# an accessible container that flattens to "Action Required, Should I
+# run the deploy script?, approve, deny, Other" in the a11y tree, so
+# an exact text match finds no element.
+- assertVisible:
+    text: ".*Should I run the deploy script\\?.*"
+
+# Tap Approve. SessionScreen.handleSelectOption fires
+# sendUserQuestionResponse → wire `user_question_response` → mock
+# logs the answer. Locally, markPromptAnswered flips
+# `message.answered`, which:
+#   (a) disables the option buttons (styles.promptOptionDisabled),
+#   (b) renders the chosen option with promptOptionChosen styling,
+#   (c) hides the option set entirely if the bubble is a permission
+#       request with requestId (NOT our case — user_question has
+#       toolUseId only).
+- tapOn:
+    id: "approval-button-approve"
+- waitForAnimationToEnd
+
+# Screenshot the answered state — chosen option highlighted, other
+# disabled. Tags this PR as the visual baseline for the answered
+# render.
+- takeScreenshot: ask-user-question-approved
+
+# The buttons remain in the tree (only their interactivity changes),
+# so the testIDs are still visible — assert they're present to pin
+# that the answered state doesn't unmount the option row.
+- assertVisible:
+    id: "approval-button-approve"
+- assertVisible:
+    id: "approval-button-deny"

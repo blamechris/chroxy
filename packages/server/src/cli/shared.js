@@ -8,7 +8,7 @@ import { existsSync, readFileSync } from 'fs'
 import { join } from 'path'
 import { homedir } from 'os'
 import readline from 'readline'
-import { validateConfig, mergeConfig } from '../config.js'
+import { validateConfig, mergeConfig, isFatalConfigWarning } from '../config.js'
 
 export const CONFIG_DIR = join(homedir(), '.chroxy')
 export const CONFIG_FILE = join(CONFIG_DIR, 'config.json')
@@ -36,6 +36,7 @@ export function prompt(question) {
 export function addServerOptions(cmd) {
   return cmd
     .option('-c, --config <path>', 'Path to config file', CONFIG_FILE)
+    .option('--host <address>', 'Bind address (default: 0.0.0.0; use 127.0.0.1 for loopback-only). Auth stays enabled.')
     .option('--cwd <path>', 'Working directory for Claude')
     .option('--model <model>', 'Model to use')
     .option('--allowed-tools <tools>', 'Comma-separated tools to auto-approve')
@@ -51,8 +52,10 @@ export function addServerOptions(cmd) {
     .option('--session-timeout <duration>', 'Idle session timeout (e.g. 2h, 30m). Disabled by default')
     .option('--cost-budget <dollars>', 'Per-session cost budget in dollars (e.g., 5.00)')
     .option('--log-format <format>', 'Log output format: text (default) or json')
+    .option('--dangerously-skip-permissions', 'TUI provider only: spawn claude with --dangerously-skip-permissions and disable chroxy permission gating (mirrors `chroxy resume` flag)')
     .option('-v, --verbose', 'Show detailed config sources and validation info')
     .option('--environments', 'Enable environment isolation providers (e.g. docker)')
+    .option('--environment-backend <backend>', 'Environment backend: docker (default), k8s, or rancher')
 }
 
 /**
@@ -112,6 +115,7 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   validateConfig(fileConfig, options.verbose)
 
   const cliOverrides = { ...extraOverrides }
+  if (options.host !== undefined) cliOverrides.host = options.host
   if (options.cwd !== undefined) cliOverrides.cwd = options.cwd
   if (options.model !== undefined) cliOverrides.model = options.model
   if (options.allowedTools !== undefined) {
@@ -126,7 +130,35 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
   if (options.legacyCli) cliOverrides.legacyCli = true
   if (options.provider !== undefined) cliOverrides.provider = options.provider
   if (options.logFormat !== undefined) cliOverrides.logFormat = options.logFormat
-  if (options.environments) cliOverrides.environments = { enabled: true }
+  // #5144: the `environments` key is an object whose sub-blocks (k8s, rancher,
+  // workspace) normally live in the config file. mergeConfig replaces a whole
+  // top-level key on CLI override, so a naive `cliOverrides.environments =
+  // { enabled: true }` would WIPE a file-configured k8s/rancher block. Layer
+  // the CLI-supplied environment sub-fields over a shallow copy of the file's
+  // block instead, so `--environments` / `--environment-backend` compose with
+  // file config rather than clobbering it.
+  const fileEnv = (fileConfig.environments && typeof fileConfig.environments === 'object' && !Array.isArray(fileConfig.environments))
+    ? fileConfig.environments
+    : {}
+  let envOverride = null
+  if (options.environments) {
+    envOverride = { ...fileEnv, enabled: true }
+  }
+  if (options.environmentBackend !== undefined) {
+    envOverride = { ...(envOverride || fileEnv), backend: options.environmentBackend }
+  }
+  if (envOverride) cliOverrides.environments = envOverride
+  // #4209 / #4246: only forward when the flag was explicitly passed.
+  // Commander sets the property to `true` when present and leaves it
+  // `undefined` when absent, so we never write a coerced `false` that
+  // would mask a pre-existing `dangerouslySkipPermissions: true` (or
+  // legacy `skipPermissions: true`) in the on-disk config file.
+  //
+  // #4246 — forward as the canonical `dangerouslySkipPermissions`
+  // key. The legacy `skipPermissions` key is still read by
+  // `resolveSkipPermissions()` for backwards compatibility with
+  // existing config.json files.
+  if (options.dangerouslySkipPermissions) cliOverrides.dangerouslySkipPermissions = true
 
   const defaults = {
     port: 8765,
@@ -142,7 +174,9 @@ export function loadAndMergeConfig(options, extraOverrides = {}) {
 
   const validation = validateConfig(config, options.verbose)
   if (!validation.valid) {
-    const typeErrors = validation.warnings.filter(w => w.startsWith('Invalid type'))
+    // Fatality comes from the single policy in config.js (isFatalConfigWarning),
+    // not an inlined string match here — see audit P1-9.
+    const typeErrors = validation.warnings.filter(isFatalConfigWarning)
     if (typeErrors.length > 0) {
       console.error('❌ Configuration has type errors:')
       for (const err of typeErrors) {

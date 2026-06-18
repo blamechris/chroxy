@@ -8,6 +8,8 @@ import { Alert } from 'react-native';
 import {
   _testMessageHandler,
   setStore,
+  sendIfOpen,
+  _testResetStore,
   CLIENT_PROTOCOL_VERSION,
   SUBSCRIBE_SESSIONS_CHUNK_SIZE,
   clearPermissionSplits,
@@ -15,6 +17,7 @@ import {
   resetReplayFlags,
   registerPendingPermissionModeRequest,
   _testClearPendingPermissionModeRequests,
+  setDeltaFlushIntervalOverride,
 } from '../../store/message-handler';
 import { createEmptySessionState } from '../../store/utils';
 import { clearPersistedSession } from '../../store/persistence';
@@ -160,6 +163,372 @@ describe('session_error SESSION_TOKEN_MISMATCH UX', () => {
     });
 
     expect(alertSpy).toHaveBeenCalledWith('Session Error', 'Not authorized: client is bound to a specific session');
+  });
+});
+
+// #5589 / #5281 — explicit primary-ownership. The server names the primary
+// (`primaryClientId`); the app derives THIS device's role (vs the canonical
+// myClientId in useMultiClientStore) and stores it per-session on sessionRole.
+describe('session_role handler (#5589 / #5281)', () => {
+  beforeEach(() => {
+    useMultiClientStore.getState().reset();
+  });
+
+  it('derives observer when another device holds primary', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: 'other' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.sessionRole).toBe('observer');
+    expect(ss.primaryClientId).toBe('other');
+  });
+
+  it('derives primary when THIS device holds primary', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: 'me' });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.sessionRole).toBe('primary');
+    expect(ss.primaryClientId).toBe('me');
+  });
+
+  it('derives unclaimed when the slot is vacated (nobody-until-claim)', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), sessionRole: 'observer', primaryClientId: 'other' } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 's1', primaryClientId: null });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.sessionRole).toBe('unclaimed');
+    expect(ss.primaryClientId).toBeNull();
+  });
+
+  it('ignores a session_role for a session not in the local store', () => {
+    useMultiClientStore.getState().setMyClientId('me');
+    const store = createMockStore({ activeSessionId: null, sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_role', sessionId: 'ghost', primaryClientId: 'other' });
+
+    expect(store.getState().sessionStates.ghost).toBeUndefined();
+  });
+});
+
+// #5589 / #5281 — input_conflict (incl. a PRIMARY_HELD claim rejection) is an
+// expected shared-session event, NOT a failure: it must surface a calm inline
+// system notice rather than the loud generic Alert, and drop the stranded
+// optimistic send.
+describe('session_error input_conflict handler (#5589 / #5281)', () => {
+  it('appends a calm system notice and drops the rejected optimistic send (no Alert)', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: {
+          ...createEmptySessionState(),
+          messages: [
+            { id: 'older', type: 'user_input', content: 'earlier', timestamp: 0 } as any,
+            { id: 'user-123', type: 'user_input', content: 'hi', timestamp: 1 } as any,
+            { id: 'thinking', type: 'thinking', content: '', timestamp: 2 } as any,
+          ],
+          streamingMessageId: 'pending',
+        },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const reason = 'Session is already processing input from another device. Wait for it to finish or interrupt first.';
+    _testMessageHandler.handle({
+      type: 'session_error',
+      category: 'input_conflict',
+      sessionId: 's1',
+      clientMessageId: 'user-123',
+      message: reason,
+    });
+
+    // No loud modal — the calm path was taken.
+    expect(alertSpy).not.toHaveBeenCalled();
+    const ss = store.getState().sessionStates.s1;
+    // Stranded optimistic send + spinner gone; prior real message untouched.
+    expect(ss.messages.find((m: any) => m.id === 'user-123')).toBeUndefined();
+    expect(ss.messages.find((m: any) => m.type === 'thinking')).toBeUndefined();
+    expect(ss.messages.find((m: any) => m.id === 'older')).toBeDefined();
+    expect(ss.streamingMessageId).toBeNull();
+    // A calm system notice carrying the server's reason was appended.
+    const notice = ss.messages.find((m: any) => m.type === 'system' && m.content === reason);
+    expect(notice).toBeDefined();
+  });
+
+  it('surfaces a PRIMARY_HELD claim rejection as the same calm notice', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const reason = 'Another device is the primary for this session. Request a hand-off or wait for it to release.';
+    _testMessageHandler.handle({
+      type: 'session_error',
+      category: 'input_conflict',
+      sessionId: 's1',
+      code: 'PRIMARY_HELD',
+      primaryClientId: 'other',
+      message: reason,
+    });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.messages.find((m: any) => m.type === 'system' && m.content === reason)).toBeDefined();
+  });
+});
+
+// #4879: quiet "user-initiated Stop" confirmation. The wire path (CliSession
+// → SessionManager → ws-forwarding → ServerSessionStoppedSchema) was wired
+// in #4868; this branch surfaces it to the mobile UX as a subtle status
+// strip rather than an Alert.
+describe('session_stopped handler (#4879)', () => {
+  it('sets stoppedAt + stoppedCode on the explicit target session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: createEmptySessionState(),
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const before = Date.now();
+    _testMessageHandler.handle({ type: 'session_stopped', sessionId: 's2', code: 143 });
+    const after = Date.now();
+
+    const state = store.getState();
+    // s1 (active) is untouched — the message targeted s2 explicitly.
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+    // s2 carries the marker + the reported exit code.
+    expect(state.sessionStates.s2.stoppedCode).toBe(143);
+    const stoppedAt = state.sessionStates.s2.stoppedAt as number;
+    expect(typeof stoppedAt).toBe('number');
+    expect(stoppedAt).toBeGreaterThanOrEqual(before);
+    expect(stoppedAt).toBeLessThanOrEqual(after);
+  });
+
+  it('falls back to the active session when sessionId is omitted (legacy-cli)', () => {
+    // Legacy-cli broadcasts omit sessionId (ServerSessionStoppedSchema makes
+    // it optional). The handler must still surface the marker on the user's
+    // current session so the inline banner lights up.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped', code: 0 });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedCode).toBe(0);
+    expect(state.sessionStates.s1.stoppedAt).not.toBeNull();
+  });
+
+  it('handles missing code (future in-process providers per #4756 follow-up)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).not.toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+  });
+
+  it('does NOT show an Alert (confirmation is intentionally inline, not modal)', () => {
+    const alertSpy = Alert.alert as jest.Mock;
+    alertSpy.mockClear();
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped', sessionId: 's1', code: 0 });
+
+    expect(alertSpy).not.toHaveBeenCalled();
+  });
+
+  it('ignores messages targeting an unknown sessionId (defensive — server may race a destroy)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'session_stopped', sessionId: 'unknown-session', code: 0 });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates).not.toHaveProperty('unknown-session');
+  });
+
+  it('claude_ready clears the stopped marker so the inline strip auto-dismisses', () => {
+    // The cleanup path: operator taps Stop, sees the strip, sends another
+    // message, server restarts the child, claude_ready arrives, the strip
+    // disappears. Verifies the handleClaudeReady patch shape — both
+    // fields must collapse to null on the same patch object the case
+    // branch applies, otherwise the strip would linger forever.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), stoppedAt: 123, stoppedCode: 0 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'claude_ready' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+    expect(state.sessionStates.s1.claudeReady).toBe(true);
+  });
+});
+
+// #4909: the `session_stopped` event is transient and NOT recorded into
+// per-session history (#4868 wire path), so it isn't replayed on reconnect.
+// However, the client-side `stoppedAt`/`stoppedCode` derived state survives
+// the WebSocket teardown in Zustand store memory — the strip flashes back
+// into view until activity resumes. `history_replay_start` is the canonical
+// "reconnect handshake" event and clears the stale marker for the same
+// reason it clears `activeAgents`/`isPlanPending`.
+describe('history_replay_start clears stale session_stopped marker (#4909)', () => {
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('clears stoppedAt + stoppedCode on history_replay_start for the target session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: {
+        s1: { ...createEmptySessionState(), stoppedAt: 1700000000000, stoppedCode: 143 },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+    expect(state.sessionStates.s1.stoppedCode).toBeNull();
+  });
+
+  it('clears stoppedAt for a background (non-active) session reconnecting', () => {
+    // The strip can flash on an inactive session too — `history_replay_start`
+    // targets `replayTargetId` (per-session) rather than activeSessionId so
+    // a background session reconnecting also sheds its stale marker.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [
+        { sessionId: 's1', name: 'S1' } as any,
+        { sessionId: 's2', name: 'S2' } as any,
+      ],
+      sessionStates: {
+        s1: createEmptySessionState(),
+        s2: { ...createEmptySessionState(), stoppedAt: 1700000000000, stoppedCode: 0 },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
+
+    const state = store.getState();
+    expect(state.sessionStates.s2.stoppedAt).toBeNull();
+    expect(state.sessionStates.s2.stoppedCode).toBeNull();
+    // s1 (active, not the replay target) is untouched.
+    expect(state.sessionStates.s1.stoppedAt).toBeNull();
+  });
+
+  it('no-op when neither field is set (avoids unnecessary state churn)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const sessionStatesBefore = store.getState().sessionStates;
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    const sessionStatesAfter = store.getState().sessionStates;
+
+    // The empty patch optimization in updateSession should leave the
+    // sessionStates map reference unchanged when there's nothing to clear.
+    expect(sessionStatesAfter.s1.stoppedAt).toBeNull();
+    expect(sessionStatesAfter.s1.stoppedCode).toBeNull();
+    expect(sessionStatesAfter).toBe(sessionStatesBefore);
+  });
+
+  it('handles unknown session id without throwing (defensive — server may race)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() =>
+      _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'unknown-id' }),
+    ).not.toThrow();
+
+    expect(store.getState().sessionStates).not.toHaveProperty('unknown-id');
   });
 });
 
@@ -1662,6 +2031,63 @@ describe('stream_delta handler', () => {
     expect(msg?.content).toBe('Hello world');
   });
 
+  // #5516 (epic #5514): the delta flush is scheduled on an ADAPTIVE timer
+  // (was a fixed 100ms). With the constant override pinned, the first delta
+  // must schedule a setTimeout at exactly that interval — proving the override
+  // is honored and the call site reads it. Default (no override) is covered by
+  // resolveDeltaFlushMs's own unit tests in store-core.
+  it('schedules the delta flush at the overridden interval (#5516)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const setTimeoutSpy = jest.spyOn(global, 'setTimeout');
+    try {
+      setDeltaFlushIntervalOverride(16);
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1' });
+      _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hi' });
+
+      // The flush timer must have been scheduled at the pinned 16ms.
+      const flushCall = setTimeoutSpy.mock.calls.find((c) => c[1] === 16);
+      expect(flushCall).toBeDefined();
+
+      jest.runAllTimers();
+      const ss = store.getState().sessionStates.s1;
+      expect(ss.messages.find((m) => m.id === 'msg-1')?.content).toBe('Hi');
+    } finally {
+      setDeltaFlushIntervalOverride(null);
+      setTimeoutSpy.mockRestore();
+    }
+  });
+
+  // #5515 (epic #5514): the latency instrumentation reads the optional
+  // serverTs off the delta and a serverTs off the pong; neither may perturb the
+  // existing hot path. Content must still accumulate and render exactly, and a
+  // stamped pong must be consumed without throwing.
+  it('renders delta content unchanged when serverTs is present (#5515)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'msg-1', sessionId: 's1', serverTs: 1_700_000_000_000 });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: 'Hello', serverTs: 1_700_000_000_010 });
+    _testMessageHandler.handle({ type: 'stream_delta', messageId: 'msg-1', sessionId: 's1', delta: ' world', serverTs: 1_700_000_000_020 });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.messages.find((m) => m.id === 'msg-1')?.content).toBe('Hello world');
+    // A stamped pong must not throw (RTT split is best-effort, dev-log only).
+    expect(() => _testMessageHandler.handle({ type: 'pong', serverTs: 1_700_000_000_030 })).not.toThrow();
+  });
+
   it('ID collision: routes deltas to suffixed response ID', () => {
     const toolMsg = { id: 'msg-1', type: 'tool_use' as const, content: 'ls', timestamp: 1 };
     const store = createMockStore({
@@ -1784,6 +2210,996 @@ describe('stream_delta handler', () => {
     const orphan = ss.messages.find((m) => m.id === 'msg-orphan');
     expect(orphan?.type).toBe('response');
     expect(orphan?.content).toBe('After tool response');
+  });
+});
+
+// #4922 — mirror of dashboard PR #4919 (#4889) for the mobile message handler.
+// When an assistant turn streams text -> tool -> text -> tool -> text, the
+// server reuses ONE messageId for the entire response. The defensive remap
+// above only fires when the slot is non-response; post-tool text chunks still
+// concatenate into the same response.content with no separator -- producing
+// `...before filing.Filing now.Filed:` and losing paragraph breaks.
+//
+// Fix: when a delta arrives for a non-empty response that already has a
+// tool_use appended after it, materialize a fresh continuation slot at the
+// end of the messages array (suffixed id `-cont-<ts>`). The remap is written
+// against the ORIGINAL incoming messageId (single-hop) so successive splits
+// overwrite the entry instead of building a chain -- `_deltaIdRemaps` stays
+// bounded and `handleStreamEnd`'s `_deltaIdRemaps.delete(originalId)` cleans
+// up completely.
+describe('post-tool text chunks split into continuation slots (#4922 / #4889)', () => {
+  beforeEach(() => {
+    clearDeltaBuffers();
+    clearPermissionSplits();
+    // The replay-guard test below sets `s1` into _ctx.replayingSessions and
+    // never receives a `history_replay_end` to clear it. Without this reset,
+    // any subsequent test in the block that uses session id `s1` and expects
+    // the post-tool split to fire would silently skip the split (replay
+    // sessions are guarded out). #4975 added such tests after the replay
+    // case; reset here so test order is irrelevant.
+    resetReplayFlags();
+    jest.useFakeTimers();
+  });
+
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('creates a new response slot when delta arrives for a response with tool_use appended after it', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // text-A -> tool -> text-B -> tool -> text-C, all sharing messageId 'resp-1'
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Let me check chroxy before filing.',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_a',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_a',
+      input: { command: 'gh issue list' },
+    });
+    _testMessageHandler.handle({
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'toolu_a',
+      result: 'ok',
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Filing now.',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_b',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_b',
+      input: { command: 'gh issue create' },
+    });
+    _testMessageHandler.handle({
+      type: 'tool_result',
+      sessionId: 's1',
+      toolUseId: 'toolu_b',
+      result: 'https://...',
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Filed: https://github.com/...',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responses = ss.messages.filter((m) => m.type === 'response');
+    const tools = ss.messages.filter((m) => m.type === 'tool_use');
+    expect(responses).toHaveLength(3);
+    expect(tools).toHaveLength(2);
+    expect(responses[0].content).toBe('Let me check chroxy before filing.');
+    expect(responses[1].content).toBe('Filing now.');
+    expect(responses[2].content).toBe('Filed: https://github.com/...');
+    // No `.X` (period followed by capital with no space) across boundaries --
+    // the join in formatTranscript inserts `\n\n` so the concatenation is safe.
+    const joined = responses.map((r) => r.content).join('\n\n');
+    expect(joined).not.toMatch(/\.[A-Z]/);
+  });
+
+  it('places each continuation slot AFTER the preceding tool_use (#4297 ordering preserved)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    // Sentence-terminated fixtures so #4975 mid-word peel doesn't kick in --
+    // the prior delta ends with `.` (non-word char) and the continuation
+    // starts with a capital, matching a real paragraph break.
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'preamble.',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_a',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_a',
+      input: { command: 'ls' },
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'Summary.',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    // [response('preamble.'), tool, response('Summary.')]
+    expect(ss.messages).toHaveLength(3);
+    expect(ss.messages[0].type).toBe('response');
+    expect(ss.messages[0].content).toBe('preamble.');
+    expect(ss.messages[1].type).toBe('tool_use');
+    expect(ss.messages[1].id).toBe('toolu_a');
+    expect(ss.messages[2].type).toBe('response');
+    expect(ss.messages[2].content).toBe('Summary.');
+  });
+
+  it('does not split when consecutive deltas arrive without an intervening tool', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'hello ',
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'world',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    // No tool ran -- single response slot with concatenated deltas
+    expect(ss.messages).toHaveLength(1);
+    expect(ss.messages[0].type).toBe('response');
+    expect(ss.messages[0].content).toBe('hello world');
+  });
+
+  it('handles three or more post-tool continuation chunks via single-hop remap (no chain)', () => {
+    // Successive continuation splits must overwrite the remap entry against
+    // the ORIGINAL incoming messageId so the map stays bounded. If the remap
+    // were instead chained (A -> A-cont-1 -> A-cont-2 -> A-cont-3), this
+    // case would either drop deltas or require a transitive lookup.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    // Sentence-terminated fixtures so #4975 mid-word peel doesn't fire --
+    // each delta ends with `.` so the prior slot terminates cleanly.
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'A.',
+    });
+    jest.runAllTimers();
+    for (let i = 0; i < 3; i++) {
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: `toolu_${i}`,
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: `toolu_${i}`,
+        input: { command: `cmd-${i}` },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: `Cont-${i}.`,
+      });
+      jest.runAllTimers();
+    }
+
+    const ss = store.getState().sessionStates.s1;
+    const responses = ss.messages.filter((m) => m.type === 'response');
+    expect(responses).toHaveLength(4);
+    expect(responses.map((r) => r.content)).toEqual(['A.', 'Cont-0.', 'Cont-1.', 'Cont-2.']);
+  });
+
+  it('does NOT split during replay -- server-reassembled history must stay intact', () => {
+    // History is reassembled server-side: a single `stream_delta` carries the
+    // entire post-tool tail in one chunk against the original messageId. If
+    // the client split it again, replayed history would gain a phantom
+    // continuation slot that never existed in the live turn. The guard at
+    // `_ctx.replayingSessions.has(...)` skips the split for replaying sessions
+    // -- this test pins that behavior so it can't silently regress.
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Enter replay mode for s1 -- mirrors the live wire sequence: server emits
+    // `history_replay_start` before streaming the cached transcript.
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+
+    // Replay the same shape as the FIX test above (text -> tool -> text),
+    // sharing one messageId. Without the replay guard, the second delta would
+    // create a continuation slot.
+    _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'preamble',
+    });
+    jest.runAllTimers();
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'toolu_a',
+      sessionId: 's1',
+      tool: 'Bash',
+      toolUseId: 'toolu_a',
+      input: { command: 'ls' },
+    });
+    _testMessageHandler.handle({
+      type: 'stream_delta',
+      messageId: 'resp-1',
+      sessionId: 's1',
+      delta: 'summary',
+    });
+    jest.runAllTimers();
+
+    const ss = store.getState().sessionStates.s1;
+    const responses = ss.messages.filter((m) => m.type === 'response');
+    // ONE response slot whose content is both deltas concatenated -- no
+    // continuation slot was created because the session is replaying.
+    expect(responses).toHaveLength(1);
+    expect(responses[0].id).toBe('resp-1');
+    expect(responses[0].content).toBe('preamblesummary');
+  });
+
+  // #4975 -- mid-word peel. When the LLM interrupts a text content block
+  // to call a tool, the boundary can land inside a word (e.g. "Del"
+  // before the tool, "egating" after). Without intervention the user
+  // sees "Del" in one bubble, the tool bubble, then "egating..." in
+  // another -- visually fragmented mid-word. The handler peels the
+  // trailing partial word off the prior slot and seeds the continuation
+  // buffer with it so the word reassembles in the post-tool bubble.
+  //
+  // #4999 follow-up -- the mid-sentence gate added on the post-#4889
+  // split now coalesces these cases into a single bubble before the peel
+  // runs, so the trailing-word and whitespace-led tests below now assert
+  // the coalesced shape. The peel stays as defense-in-depth for the
+  // sentence-boundary path (prior ends in `.` but the next word continues
+  // mid-word, like `PR #3.Del` -> tool -> `egating`).
+  describe('mid-word peel across tool boundary (#4975)', () => {
+    it('coalesces mid-word splits into a single bubble (post-#4999 -- peel no longer needed for mid-word inside a sentence)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      // text "Starting Phase 1 — agent-review on PR #3.Del" -> tool ->
+      // "egating...". The pre-tool content ends with `l` (mid-sentence),
+      // so the mid-sentence gate from #4999 routes the post-tool delta
+      // to the existing slot -- one bubble, no mid-word artifact possible.
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Starting Phase 1 — agent-review on PR #3.Del',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Task',
+        toolUseId: 'toolu_a',
+        input: { description: 'agent-review' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'egating the deep review to an independent reviewer agent.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      // One coalesced bubble -- the word "Delegating" reads cleanly.
+      expect(responses).toHaveLength(1);
+      expect(responses[0].content).toBe(
+        'Starting Phase 1 — agent-review on PR #3.Delegating the deep review to an independent reviewer agent.',
+      );
+    });
+
+    it('coalesces mid-word splits even when prior content is still buffered (delta not yet flushed)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      // Skip jest.runAllTimers() so "PR #3.Del" stays in pendingDeltas
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'PR #3.Del',
+      });
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Task',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'egating now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      // Mid-sentence gate sees the buffered "PR #3.Del" ending in `l`
+      // and routes the post-tool delta to the same bubble.
+      expect(responses).toHaveLength(1);
+      expect(responses[0].content).toBe('PR #3.Delegating now.');
+    });
+
+    it('does NOT peel when prior content ends at a sentence boundary (clean break)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Let me check chroxy before filing.',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: { command: 'gh issue list' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Filing now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('Let me check chroxy before filing.');
+      expect(responses[1].content).toBe('Filing now.');
+    });
+
+    it('coalesces when prior ends mid-sentence and incoming delta starts with whitespace (post-#4999)', () => {
+      // Pre-#4999: this case (prior ends in word char `Running`, incoming
+      // starts with whitespace) split into two bubbles to avoid moving a
+      // complete word across the tool boundary. Post-#4999: the
+      // mid-sentence gate sees `Running` is not a sentence terminator and
+      // coalesces into one bubble -- the LLM emitted a single sentence
+      // interrupted by a tool.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      // Prior delta ends with `Running` (word char `g`).
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Starting Phase 1 — agent-review on PR #3 is up. Running',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Task',
+        toolUseId: 'toolu_a',
+        input: { description: 'agent-review' },
+      });
+      // Incoming delta starts with a space -- a normal word boundary but
+      // mid-sentence (no terminator before the tool).
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: ' /full-review then /batch-merge.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      // One bubble -- the sentence "Running /full-review..." reads cleanly.
+      expect(responses).toHaveLength(1);
+      expect(responses[0].content).toBe(
+        'Starting Phase 1 — agent-review on PR #3 is up. Running /full-review then /batch-merge.',
+      );
+    });
+
+    it('coalesces when prior ends mid-sentence and incoming delta starts with non-terminator punctuation (post-#4999)', () => {
+      // Mirror of the whitespace case -- `,`, `(`, `:` etc. are NOT
+      // sentence terminators on the prior side, so the mid-sentence gate
+      // coalesces. Note: a sentence terminator (`.`) on the INCOMING side
+      // does not affect the gate; only the prior bubble's tail matters.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Fetched PR',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      // Incoming starts with `.` then a new sentence -- but the prior
+      // bubble itself ends mid-sentence (`R` is a word char), so coalesce.
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '. Next step: review.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(1);
+      expect(responses[0].content).toBe('Fetched PR. Next step: review.');
+    });
+  });
+
+  // #4999 -- mirror of dashboard tests. The mid-sentence gate prevents the
+  // post-#4889 continuation split when the prior bubble's content doesn't
+  // end at a sentence boundary, so a single sentence interrupted by a tool
+  // call renders as ONE bubble (followed by the tool) rather than two
+  // timestamped bubbles around the tool.
+  describe('no split when prior bubble ends mid-sentence (#4999)', () => {
+    it('coalesces text into a single bubble when prior content ends in a word char with whitespace-led continuation', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      // Repro from #4999.
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Now the keyboard handler + render need updates (overlay + className + CSS',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Read',
+        toolUseId: 'toolu_a',
+        input: { file_path: '/x' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: ' vars).',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      const tools = ss.messages.filter((m) => m.type === 'tool_use');
+      expect(responses).toHaveLength(1);
+      expect(tools).toHaveLength(1);
+      expect(responses[0].content).toBe(
+        'Now the keyboard handler + render need updates (overlay + className + CSS vars).',
+      );
+    });
+
+    it('STILL splits when prior content ends at a sentence boundary (paragraph break preserved, #4889)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Let me check chroxy before filing.',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: { command: 'gh issue list' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Filing now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('Let me check chroxy before filing.');
+      expect(responses[1].content).toBe('Filing now.');
+    });
+
+    it('coalesces when prior ends in an open paren and incoming starts mid-sentence', () => {
+      // Defensive: punctuation that isn't a sentence terminator (open paren,
+      // colon, comma) also indicates the sentence continues.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'See the helper (',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Read',
+        toolUseId: 'toolu_a',
+        input: { file_path: '/x' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'utils.ts).',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(1);
+      expect(responses[0].content).toBe('See the helper (utils.ts).');
+    });
+
+    it('STILL splits when prior ends in a question mark', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'What is the state of the PR?',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'It looks open.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('What is the state of the PR?');
+      expect(responses[1].content).toBe('It looks open.');
+    });
+
+    it('STILL splits when prior ends in a sentence terminator wrapped in closing punctuation/quotes', () => {
+      // Copilot review of #5011 -- a completed sentence followed by closing
+      // punctuation (`.")`, `."`, `!'`, `?)`) was being treated as
+      // mid-sentence because the gate only inspected the very last char.
+      // Strip trailing closers before evaluating the terminator so the
+      // #4889 paragraph split still fires.
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'He said "the build is done."',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Filing the report now.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('He said "the build is done."');
+      expect(responses[1].content).toBe('Filing the report now.');
+    });
+
+    it('STILL splits when prior ends in a terminator wrapped in a closing paren', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '(see the docs for more.)',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Read',
+        toolUseId: 'toolu_a',
+        input: { file_path: '/x' },
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'Continuing with the next section.',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('(see the docs for more.)');
+      expect(responses[1].content).toBe('Continuing with the next section.');
+    });
+
+    // #5014 -- unicode sentence terminators (CJK fullwidth + ideographic
+    // full stop) must also satisfy the gate so paragraph splits are
+    // preserved across a tool boundary in non-ASCII assistant output.
+    it('STILL splits when prior ends in a fullwidth full stop (U+FF0E)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'ファイルを確認します．',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '次の段落です．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('ファイルを確認します．');
+      expect(responses[1].content).toBe('次の段落です．');
+    });
+
+    it('STILL splits when prior ends in a fullwidth exclamation mark (U+FF01)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'やった！',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '続行します．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('やった！');
+      expect(responses[1].content).toBe('続行します．');
+    });
+
+    it('STILL splits when prior ends in a fullwidth question mark (U+FF1F)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: 'これは正しいですか？',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '確認しました．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('これは正しいですか？');
+      expect(responses[1].content).toBe('確認しました．');
+    });
+
+    it('STILL splits when prior ends in an ideographic full stop (U+3002)', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '准备检查文件。',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '现在归档。',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('准备检查文件。');
+      expect(responses[1].content).toBe('现在归档。');
+    });
+
+    // #5033 review -- composition: CJK terminator wrapped in a CJK closing
+    // bracket must still satisfy the gate. The strip set drops `」` so the
+    // gate sees `。` and the split fires.
+    it('STILL splits when prior ends in a CJK terminator wrapped in a CJK closing bracket', () => {
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: { ...createEmptySessionState(), messages: [] } },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({ type: 'stream_start', messageId: 'resp-1', sessionId: 's1' });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '「ファイルを確認します。」',
+      });
+      jest.runAllTimers();
+      _testMessageHandler.handle({
+        type: 'tool_start',
+        messageId: 'toolu_a',
+        sessionId: 's1',
+        tool: 'Bash',
+        toolUseId: 'toolu_a',
+        input: {},
+      });
+      _testMessageHandler.handle({
+        type: 'stream_delta',
+        messageId: 'resp-1',
+        sessionId: 's1',
+        delta: '次の段落です．',
+      });
+      jest.runAllTimers();
+
+      const ss = store.getState().sessionStates.s1;
+      const responses = ss.messages.filter((m) => m.type === 'response');
+      expect(responses).toHaveLength(2);
+      expect(responses[0].content).toBe('「ファイルを確認します。」');
+      expect(responses[1].content).toBe('次の段落です．');
+    });
   });
 });
 
@@ -2304,6 +3720,46 @@ describe('permission_request message handler', () => {
 
     const msgs = store.getState().sessionStates.s1.messages;
     expect(msgs[0].options!.map((o: any) => o.value)).toEqual(['allow', 'deny']);
+  });
+
+  it('creates the owning session state and routes the prompt there when that session is NOT loaded (#5693)', () => {
+    // 's-bg' asks while 's-active' is focused and 's-bg' has no hydrated state.
+    // Containment fix: the handler creates s-bg's (tab-invisible) state and
+    // routes the prompt there — the app previously dropped it or routed to the
+    // active session. The active session must stay clean.
+    const store = createMockStore({
+      activeSessionId: 's-active',
+      sessions: [
+        { sessionId: 's-active', name: 'A', provider: 'claude-sdk' } as any,
+        { sessionId: 's-bg', name: 'B', provider: 'claude-sdk' } as any,
+      ],
+      sessionStates: { 's-active': createEmptySessionState() }, // NO s-bg
+      availableProviders: [{ name: 'claude-sdk', capabilities: { sessionRules: true } } as any],
+      sessionNotifications: [],
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    clearPermissionSplits();
+
+    _testMessageHandler.handle({
+      type: 'permission_request',
+      sessionId: 's-bg',
+      requestId: 'perm-unloaded',
+      tool: 'Bash',
+      input: { command: 'rm -rf /tmp/x' },
+      remainingMs: 300000,
+    });
+
+    const state = store.getState();
+    expect(state.sessionStates['s-bg']).toBeDefined();
+    const bgPrompt = state.sessionStates['s-bg'].messages.find((m: any) => m.type === 'prompt');
+    expect(bgPrompt).toBeDefined();
+    expect(bgPrompt!.originSessionId).toBe('s-bg');
+    // The focused tab must NOT have received the background session's prompt.
+    expect(state.sessionStates['s-active'].messages.find((m: any) => m.type === 'prompt')).toBeUndefined();
+    // Tab-invisibility: ensuring s-bg's state must not register a phantom tab —
+    // tabs derive from `sessions` (unchanged), not the `sessionStates` keys.
+    expect(state.sessions).toHaveLength(2);
   });
 
   it('sets expiresAt from remainingMs', () => {
@@ -2833,6 +4289,95 @@ describe('error handler', () => {
 
     expect(Alert.alert).toHaveBeenCalledWith('Server Error', 'An unexpected server error occurred');
   });
+
+  // #5039 — PR #5037 added optional `usage` + `cost` to the server's error
+  // envelope when the failed turn folded any parent + Task subagent rounds
+  // before erroring out. The mobile Alert must append the pre-formatted
+  // partial-cost sub-line to the body so the user sees what the failed turn
+  // cost; the dashboard surfaces the same line under its error toast.
+  describe('partial-cost sub-line (#5039)', () => {
+    it('appends the partial-cost line to the Alert body when cost+usage present', () => {
+      const alertSpy = Alert.alert as jest.Mock;
+      alertSpy.mockClear();
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: null,
+        code: 'STREAM_ERROR',
+        message: 'stream failed',
+        cost: 0.0875,
+        usage: {
+          input_tokens: 1234,
+          output_tokens: 3400,
+          cache_read_input_tokens: 0,
+          cache_creation_input_tokens: 0,
+        },
+      });
+
+      // Sub-line is appended on a blank line so the cost stands out from
+      // the headline error message. Pre-formatted via the shared
+      // `formatPartialCostLine` helper, so the mobile alert and the
+      // dashboard toast sub-line stay byte-identical.
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Server Error',
+        'stream failed\n\nThis turn cost $0.087 (1.2K in · 3.4K out)',
+      );
+    });
+
+    it('renders the cost-only line when usage is missing (subscription provider)', () => {
+      const alertSpy = Alert.alert as jest.Mock;
+      alertSpy.mockClear();
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: null,
+        code: 'ABORT',
+        message: 'cancelled',
+        cost: 0.05,
+      });
+      expect(alertSpy).toHaveBeenCalledWith(
+        'Server Error',
+        'cancelled\n\nThis turn cost $0.050',
+      );
+    });
+
+    it('does NOT append a sub-line when the wire shape has no partials (pre-#5037)', () => {
+      // Pre-PR #5037 servers don't carry partials; the Alert body must
+      // remain the bare error message — no trailing newlines, no
+      // empty cost line.
+      const alertSpy = Alert.alert as jest.Mock;
+      alertSpy.mockClear();
+      const store = createMockStore({
+        activeSessionId: 's1',
+        sessions: [{ sessionId: 's1', name: 'S1' } as any],
+        sessionStates: { s1: createEmptySessionState() },
+      });
+      setStore(store as any);
+      _testMessageHandler.setContext(createMockContext() as any);
+
+      _testMessageHandler.handle({
+        type: 'error',
+        requestId: null,
+        code: 'STREAM_ERROR',
+        message: 'no partials here',
+      });
+      expect(alertSpy).toHaveBeenCalledWith('Server Error', 'no partials here');
+    });
+  });
 });
 
 // Issue #2944: web_task_error with SESSION_TOKEN_MISMATCH + boundSessionName should
@@ -3175,6 +4720,258 @@ describe('set_permission_mode CAPABILITY_NOT_SUPPORTED rejection', () => {
   });
 });
 
+// #4492: switching tabs sends `switch_session`, which causes the server to
+// dispatch history_replay_start → all past events → history_replay_end.
+// Pre-fix, the mobile pre-handler logic at message-handler.ts ran the
+// lastClientActivityAt bump (#3758) and inactivityWarning dismiss (#3899) for
+// EVERY replayed event. Visible symptoms mirror the dashboard's #4466:
+// "Working… last activity Ns ago" reset to 1s and the "Agent quiet for
+// Nm Ns" chip disappeared. The fix gates the pre-handler bump on the same
+// per-connection `_ctx.receivingHistoryReplay` flag used elsewhere in this
+// handler — mobile's equivalent of the dashboard's module-level
+// `_receivingHistoryReplay`.
+describe('history replay must not reset activity timers (#4492)', () => {
+  function seedSession(extra: Partial<ReturnType<typeof createEmptySessionState>> = {}) {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: { ...createEmptySessionState(), ...extra } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    return store;
+  }
+
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('does not bump lastClientActivityAt for replayed activity events', () => {
+    const store = seedSession({ lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    // tool_start is in ACTIVITY_EVENT_TYPES — pre-fix this bumped to Date.now().
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-1',
+      tool: 'Bash',
+      toolUseId: 'tu-1',
+      input: { command: 'ls' },
+      sessionId: 's1',
+    });
+    // The pre-seeded "stale" 100ms timestamp must survive — replay is NOT
+    // fresh activity. Without this guard, every tab switch resets the
+    // "last activity Ns ago" pill to "1s ago" no matter how long the
+    // session has actually been idle.
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBe(100);
+  });
+
+  it('does not dismiss inactivityWarning for replayed activity events', () => {
+    // "Agent quiet for 46m 32s · Status update?" chip is mid-display when
+    // the user switches back to this session. Pre-fix, the first replayed
+    // tool_start / message / result wiped it (the activity-bump path also
+    // clears inactivityWarning). User loses the chip with no chance to act.
+    const warning = { idleMs: 2_792_000, prefab: 'Status update?', receivedAt: 200 };
+    const store = seedSession({ inactivityWarning: warning } as any);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    _testMessageHandler.handle({
+      type: 'result', sessionId: 's1', usage: {}, cost: 0, duration: 0,
+    });
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.inactivityWarning).toEqual(warning);
+  });
+
+  it('live activity AFTER history_replay_end still bumps lastClientActivityAt', () => {
+    // Regression guard: the replay flag is cleared on history_replay_end,
+    // so the next genuine live event must resume bumping the timestamp —
+    // otherwise the gate would freeze activity tracking forever after the
+    // first replay.
+    const store = seedSession({ lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's1' });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 's1' });
+    // Live activity event after replay closes — must bump.
+    _testMessageHandler.handle({
+      type: 'tool_start', messageId: 't', tool: 'Bash', toolUseId: 'tu-2', sessionId: 's1',
+    });
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(100);
+  });
+});
+
+// #4512 — the replay flag must be scoped per-session (mirror of dashboard
+// #4493). Pre-fix it was a per-connection boolean (`_ctx.receivingHistoryReplay`):
+// once `history_replay_start` fired for session A, every interleaved live event
+// from session B was treated as replay and dropped its activity bump. The
+// server's `replayHistory()` chunks over `setImmediate`, so live broadcasts
+// from other sessions land between chunks of A's replay.
+describe('replay flag is per-session (#4512)', () => {
+  function seedTwoSessions(
+    sA: Partial<ReturnType<typeof createEmptySessionState>> = {},
+    sB: Partial<ReturnType<typeof createEmptySessionState>> = {},
+  ) {
+    const store = createMockStore({
+      activeSessionId: 'sA',
+      sessions: [
+        { sessionId: 'sA', name: 'A' } as any,
+        { sessionId: 'sB', name: 'B' } as any,
+      ],
+      sessionStates: {
+        sA: { ...createEmptySessionState(), ...sA },
+        sB: { ...createEmptySessionState(), ...sB },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    return store;
+  }
+
+  afterEach(() => {
+    resetReplayFlags();
+  });
+
+  it('live tool_start for session B bumps B during session A replay', () => {
+    // Session A is mid-replay; an interleaved live tool_start for B must
+    // still bump B.lastClientActivityAt. Pre-fix the per-connection flag was
+    // true (for A) so B's bump was suppressed.
+    const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-b-1',
+      tool: 'Bash',
+      toolUseId: 'tu-b-1',
+      input: { command: 'echo hi' },
+      sessionId: 'sB',
+    });
+    const ssB = store.getState().sessionStates.sB;
+    expect(ssB.lastClientActivityAt).toBeGreaterThan(100);
+  });
+
+  it('history_replay_end for A clears only A from the replaying set', () => {
+    // With two sessions concurrently replaying, ending one must not
+    // un-gate the other — B's replayed tool_start must still NOT bump.
+    const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sB' });
+    _testMessageHandler.handle({ type: 'history_replay_end', sessionId: 'sA' });
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-b-1',
+      tool: 'Bash',
+      toolUseId: 'tu-b-1',
+      input: { command: 'sleep' },
+      sessionId: 'sB',
+    });
+    const ssB = store.getState().sessionStates.sB;
+    expect(ssB.lastClientActivityAt).toBe(100);
+  });
+
+  it('auth_ok clears all session-replay flags (reconnect scenario)', () => {
+    // After a reconnect, fresh auth means clean slate — any stale entries
+    // in the replaying set must be wiped so future live events aren't
+    // wrongly gated against a session that no longer thinks it's replaying.
+    const store = seedTwoSessions({ lastClientActivityAt: 100 }, { lastClientActivityAt: 100 });
+    // Reconnect context preserves session state through auth_ok.
+    _testMessageHandler.setContext({ ...createMockContext(), isReconnect: true } as any);
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sB' });
+    // Reconnect: auth_ok must drop both entries.
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      sessionToken: 'tok',
+      clientId: 'client-1',
+      connectedClients: [],
+    });
+    // A subsequent live tool_start for either session must bump.
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-a-1',
+      tool: 'Bash',
+      toolUseId: 'tu-a-1',
+      input: { command: 'ls' },
+      sessionId: 'sA',
+    });
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: 'tool-b-1',
+      tool: 'Bash',
+      toolUseId: 'tu-b-1',
+      input: { command: 'ls' },
+      sessionId: 'sB',
+    });
+    const stateAfter = store.getState();
+    expect(stateAfter.sessionStates.sA.lastClientActivityAt).toBeGreaterThan(100);
+    expect(stateAfter.sessionStates.sB.lastClientActivityAt).toBeGreaterThan(100);
+  });
+
+  it('tool_start dedup gate uses target session flag, not any session flag', () => {
+    // Per-session dedup gate. Pre-fix: a single per-connection boolean meant
+    // that whenever ANY session was replaying, every interleaved tool_start
+    // (regardless of which session it belongs to) was treated as replay.
+    // Symptom: session B's pre-existing cached tool_use message at the same
+    // id would cause B's live tool_start to be dropped — even though B is
+    // not the one replaying.
+    const sharedToolId = 'tool-shared-id';
+    const store = createMockStore({
+      activeSessionId: 'sA',
+      sessions: [
+        { sessionId: 'sA', name: 'A' } as any,
+        { sessionId: 'sB', name: 'B' } as any,
+      ],
+      sessionStates: {
+        sA: createEmptySessionState(),
+        sB: {
+          ...createEmptySessionState(),
+          // B already has a cached tool message at this id. A live duplicate
+          // tool_start arriving for B would normally append (no replay), but
+          // with a per-connection boolean it gets wrongly dedup-suppressed
+          // while A is replaying.
+          messages: [
+            { id: sharedToolId, type: 'tool_use', content: 'cached', tool: 'Bash', timestamp: 1 } as any,
+          ],
+        },
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Session A starts replay. Session B is NOT replaying.
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 'sA' });
+
+    // Live tool_start for B at the cached id — B is NOT replaying, so the
+    // dedup gate must not fire and the new message must be appended.
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: sharedToolId,
+      tool: 'Bash',
+      toolUseId: 'tu-b-live',
+      input: { command: 'live' },
+      sessionId: 'sB',
+    });
+    const msgsB = store.getState().sessionStates.sB.messages;
+    expect(msgsB.length).toBeGreaterThanOrEqual(2);
+
+    // And a replayed tool_start for A still dedups against A's cache (sanity:
+    // the per-session gate must still suppress replay duplicates).
+    // Pre-seed an A message at a new id and replay it.
+    const aId = 'tool-a-cached';
+    store.getState().sessionStates.sA.messages.push(
+      { id: aId, type: 'tool_use', content: 'cached', tool: 'Bash', timestamp: 1 } as any,
+    );
+    const lenBefore = store.getState().sessionStates.sA.messages.length;
+    _testMessageHandler.handle({
+      type: 'tool_start',
+      messageId: aId,
+      tool: 'Bash',
+      toolUseId: 'tu-a-replay',
+      input: { command: 'replay' },
+      sessionId: 'sA',
+    });
+    const lenAfter = store.getState().sessionStates.sA.messages.length;
+    expect(lenAfter).toBe(lenBefore);
+  });
+});
+
 // #3141: scoped routing for session-tagged server_error messages on the app
 // (dashboard parity).
 describe('server_error session-scoped routing (#3141)', () => {
@@ -3252,5 +5049,353 @@ describe('server_error session-scoped routing (#3141)', () => {
     const errs = store.getState().serverErrors;
     expect(errs.length).toBe(1);
     expect(errs[0].message).toContain('pre-session oops');
+  });
+});
+
+// #4764 — mobile dispatch for the chroxy multi-question intervention event.
+// Mirrors the dashboard's #4758 handler: append to `interventions`, dedup by
+// toolUseId, push a one-time system ChatMessage on the very first intervention
+// per session so the chat surface narrates what just happened.
+describe('multi_question_intervention handler (#4764)', () => {
+  it('appends to interventions for the targeted session', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_a',
+      questionCount: 3,
+      reason: 'multi_question',
+      timestamp: 1_700_000_000_000,
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(1);
+    expect(ss.interventions[0]).toEqual({
+      kind: 'multi_question',
+      toolUseId: 'toolu_a',
+      count: 3,
+      timestamp: 1_700_000_000_000,
+    });
+  });
+
+  it('pushes a one-time system ChatMessage on the first intervention only', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_a',
+      questionCount: 3,
+      reason: 'multi_question',
+      timestamp: 1,
+    });
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_b',
+      questionCount: 4,
+      reason: 'multi_question',
+      timestamp: 2,
+    });
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(2);
+    const systemMsgs = ss.messages.filter((m) => m.type === 'system');
+    expect(systemMsgs).toHaveLength(1);
+    expect(systemMsgs[0].content).toContain('chroxy intercepted');
+  });
+
+  it('dedups by toolUseId — stuck-model re-emit must not double-count', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    const payload = {
+      type: 'multi_question_intervention' as const,
+      sessionId: 's1',
+      toolUseId: 'toolu_dup',
+      questionCount: 3,
+      reason: 'multi_question' as const,
+      timestamp: 1,
+    };
+    _testMessageHandler.handle(payload);
+    _testMessageHandler.handle(payload);
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(1);
+    // System message must still fire exactly once across the duplicate.
+    expect(ss.messages.filter((m) => m.type === 'system')).toHaveLength(1);
+  });
+
+  it('drops malformed payloads (missing toolUseId or questionCount)', () => {
+    const store = createMockStore({
+      activeSessionId: 's1',
+      sessions: [{ sessionId: 's1', name: 'S1' } as any],
+      sessionStates: { s1: createEmptySessionState() },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      // toolUseId omitted
+      questionCount: 3,
+      reason: 'multi_question',
+    } as any);
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 's1',
+      toolUseId: 'toolu_x',
+      // questionCount omitted
+      reason: 'multi_question',
+    } as any);
+
+    const ss = store.getState().sessionStates.s1;
+    expect(ss.interventions).toHaveLength(0);
+    expect(ss.messages.filter((m) => m.type === 'system')).toHaveLength(0);
+  });
+
+  it('routes to the session named on the message when not active', () => {
+    const store = createMockStore({
+      activeSessionId: 'sA',
+      sessions: [
+        { sessionId: 'sA', name: 'A' } as any,
+        { sessionId: 'sB', name: 'B' } as any,
+      ],
+      sessionStates: {
+        sA: createEmptySessionState(),
+        sB: createEmptySessionState(),
+      },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'multi_question_intervention',
+      sessionId: 'sB',
+      toolUseId: 'toolu_b',
+      questionCount: 3,
+      reason: 'multi_question',
+      timestamp: 1,
+    });
+
+    const sA = store.getState().sessionStates.sA;
+    const sB = store.getState().sessionStates.sB;
+    expect(sA.interventions).toHaveLength(0);
+    expect(sB.interventions).toHaveLength(1);
+    expect(sB.interventions[0].toolUseId).toBe('toolu_b');
+  });
+});
+
+// #5555 (auth_bootstrap) — the server folds the permission-mode enum into
+// auth_ok and, when it advertises capabilities.authBootstrap, pushes an
+// auth_bootstrap burst with the provider/slash/agent lists. The client then
+// SKIPS the 3 connect-time list requests; against an old server (no flag) it
+// requests them as before. The list_* refresh paths stay live.
+describe('auth_bootstrap (#5555)', () => {
+  function sentTypes(ctx: ReturnType<typeof createMockContext>) {
+    return (ctx.socket.send as jest.Mock).mock.calls.map((c) => JSON.parse(c[0]).type);
+  }
+
+  it('skips the 3 connect-time list requests when capabilities.authBootstrap is set', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    const ctx = createMockContext();
+    _testMessageHandler.setContext(ctx as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+      capabilities: { authBootstrap: true },
+    });
+
+    const types = sentTypes(ctx);
+    expect(types).not.toContain('list_providers');
+    expect(types).not.toContain('list_slash_commands');
+    expect(types).not.toContain('list_agents');
+  });
+
+  it('requests the 3 lists when authBootstrap is absent (old server)', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    const ctx = createMockContext();
+    _testMessageHandler.setContext(ctx as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+    });
+
+    const types = sentTypes(ctx);
+    expect(types).toContain('list_providers');
+    expect(types).toContain('list_slash_commands');
+    expect(types).toContain('list_agents');
+  });
+
+  it('folds availablePermissionModes from auth_ok into the store', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+      availablePermissionModes: [{ id: 'approve', label: 'Approve' }],
+    });
+
+    expect(store.getState().availablePermissionModes).toEqual([{ id: 'approve', label: 'Approve' }]);
+  });
+
+  it('applies a subsequent auth_bootstrap burst to the provider/slash/agent stores', () => {
+    const store = createMockStore({ sessionStates: {}, activeSessionId: null });
+    setStore(store as any);
+    const ctx = createMockContext();
+    _testMessageHandler.setContext(ctx as any);
+
+    _testMessageHandler.handle({
+      type: 'auth_ok',
+      clientId: 'client-1',
+      connectedClients: [],
+      capabilities: { authBootstrap: true },
+    });
+    _testMessageHandler.handle({
+      type: 'auth_bootstrap',
+      providers: [{ name: 'anthropic' }],
+      slashCommands: [{ name: 'clear', source: 'builtin' }],
+      agents: [{ name: 'reviewer', source: 'project' }],
+    });
+
+    expect(store.getState().availableProviders).toEqual([{ name: 'anthropic' }]);
+    expect(store.getState().slashCommands).toEqual([{ name: 'clear', source: 'builtin' }]);
+    expect(store.getState().customAgents).toEqual([{ name: 'reviewer', source: 'project' }]);
+  });
+
+  it('#5555 (sub-item 7): an auth_bootstrap burst with tunnelUrl re-learns the rotated URL', () => {
+    const store = createMockStore({ sessionStates: {}, activeSessionId: null });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: 'wss://old.trycloudflare.com',
+      token: 'tok',
+      tunnelUrl: 'wss://old.trycloudflare.com',
+    });
+
+    _testMessageHandler.handle({
+      type: 'auth_bootstrap',
+      providers: [],
+      slashCommands: [],
+      agents: [],
+      tunnelUrl: 'wss://new.trycloudflare.com',
+    });
+
+    expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
+      'wss://new.trycloudflare.com',
+    );
+  });
+});
+
+// #5555 (sub-item 7) — live tunnel-url rotation push.
+describe('tunnel_url_changed (#5555 sub-item 7)', () => {
+  afterEach(() => {
+    useConnectionLifecycleStore.getState().reset();
+    useConnectionLifecycleStore.getState().setSavedConnection(null);
+  });
+
+  it('repoints the persisted tunnelUrl when the push arrives', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: 'wss://old.trycloudflare.com',
+      token: 'tok',
+      tunnelUrl: 'wss://old.trycloudflare.com',
+    });
+
+    _testMessageHandler.handle({
+      type: 'tunnel_url_changed',
+      url: 'wss://new.trycloudflare.com',
+      previousUrl: 'wss://old.trycloudflare.com',
+    });
+
+    expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
+      'wss://new.trycloudflare.com',
+    );
+  });
+
+  it('ignores a malformed push (no url) without throwing', () => {
+    const store = createMockStore({ sessionStates: {} });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+    useConnectionLifecycleStore.getState().setSavedConnection({
+      url: 'wss://old.trycloudflare.com',
+      token: 'tok',
+      tunnelUrl: 'wss://old.trycloudflare.com',
+    });
+
+    expect(() => _testMessageHandler.handle({ type: 'tunnel_url_changed' })).not.toThrow();
+    expect(useConnectionLifecycleStore.getState().savedConnection?.tunnelUrl).toBe(
+      'wss://old.trycloudflare.com',
+    );
+  });
+});
+
+// #5657: sendIfOpen must not throw when the store hasn't been wired yet.
+// file-operations.ts imports sendIfOpen directly, so it can be called before
+// setStore() runs (e.g. during module initialisation or early mount).
+describe('sendIfOpen — uninitialized store guard (#5657)', () => {
+  afterEach(() => {
+    // Restore module-level _store reference so later tests aren't affected.
+    _testResetStore();
+  });
+
+  it('returns false and does NOT throw before setStore() is called', () => {
+    _testResetStore(); // ensure clean slate
+    let result: boolean | undefined;
+    expect(() => {
+      result = sendIfOpen({ type: 'ping' });
+    }).not.toThrow();
+    expect(result).toBe(false);
+  });
+
+  it('returns false when store is set but socket is null', () => {
+    const store = createMockStore({ socket: null });
+    setStore(store as any);
+    expect(sendIfOpen({ type: 'ping' })).toBe(false);
+  });
+
+  it('returns false when store is set but socket is not OPEN (CONNECTING)', () => {
+    const store = createMockStore({ socket: { readyState: WebSocket.CONNECTING, send: jest.fn() } as any });
+    setStore(store as any);
+    expect(sendIfOpen({ type: 'ping' })).toBe(false);
+  });
+
+  it('returns true and calls wsSend when store is set and socket is OPEN', () => {
+    const sendMock = jest.fn();
+    const store = createMockStore({ socket: { readyState: WebSocket.OPEN, send: sendMock } as any });
+    setStore(store as any);
+    const result = sendIfOpen({ type: 'ping' });
+    expect(result).toBe(true);
+    expect(sendMock).toHaveBeenCalledTimes(1);
   });
 });

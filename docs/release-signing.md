@@ -13,6 +13,10 @@ Used by both macOS and Windows desktop jobs to sign the auto-update artifacts (`
 
 Both must be set and non-empty for signing to run. If either is missing, the workflow passes `-c '{"bundle":{"createUpdaterArtifacts":false}}'` to `cargo tauri build` to suppress the updater bundle entirely. The MSI / DMG / `.app` still build and upload; the `.sig` / `latest.json` outputs do not. The committed `plugins.updater.pubkey` in `tauri.conf.json` remains untouched — only the runtime artifact generation is skipped.
 
+### Cross-platform feed assembly
+
+The `desktop-macos` and `desktop-windows` jobs each emit their own `latest.json` containing only the platform entries they built. The `github-release` job then downloads both artifacts and runs `scripts/merge-updater-feeds.mjs` to combine them into a single `artifacts/updater/latest.json` whose `platforms` map covers `darwin-aarch64`, `darwin-x86_64`, and `windows-x86_64`. The merged file is what gets attached to the GitHub Release and consumed by the auto-updater endpoint configured in `tauri.conf.json`. If updater signing is disabled for one of the jobs (e.g. signing secrets are only configured for macOS), the merge step still publishes the surviving platform; if neither job produced a feed, no `latest.json` is attached and installed clients keep their existing update endpoint until the next release.
+
 ### Generating a new key
 
 ```bash
@@ -78,6 +82,84 @@ gh secret set APPLE_SIGNING_IDENTITY --body 'Developer ID Application: Your Name
 gh secret set APPLE_CERTIFICATE < <(base64 -i ~/path/to/cert.p12)
 gh secret set APPLE_CERTIFICATE_PASSWORD --body 'your-p12-password'
 ```
+
+## Windows Authenticode code signing (SmartScreen)
+
+Used by the `desktop-windows` job to Authenticode-sign the standalone `.msi` so a
+first-time install no longer trips the Windows SmartScreen "Windows protected your
+PC" dialog (#3808). This is **separate from Tauri updater signing** above: the
+updater secrets minisign the auto-update payload (`.msi.zip.sig`), while these
+secrets Authenticode-sign the installer that Windows itself trusts.
+
+We use [Azure Trusted Signing](https://learn.microsoft.com/azure/trusted-signing/)
+(~$10/mo, key managed by Azure — no cert files or HSM to handle) via the official
+`azure/trusted-signing-action`.
+
+| Secret | Required? | Notes |
+|--------|-----------|-------|
+| `AZURE_TENANT_ID` | Yes | Directory (tenant) ID of the Entra ID tenant holding the signing App Registration |
+| `AZURE_CLIENT_ID` | Yes | Application (client) ID of that App Registration |
+| `AZURE_CLIENT_SECRET` | Yes | A client secret generated for the App Registration |
+| `TRUSTED_SIGNING_ENDPOINT` | Yes | Region endpoint of the Trusted Signing account, e.g. `https://eus.codesigning.azure.net` |
+| `TRUSTED_SIGNING_ACCOUNT` | Yes | The Trusted Signing **account** name |
+| `TRUSTED_SIGNING_CERT_PROFILE` | Yes | The **certificate profile** name within that account |
+
+**All six must be set and non-empty for signing to run.** If any is missing, the
+`Detect Authenticode signing` step sets `SIGN_ENABLED=false` and the `Sign MSI`
+step is skipped — the MSI still builds and uploads, just unsigned (SmartScreen
+warning persists, as it does today). No partial state.
+
+> **Known gap:** only the standalone `.msi` (the installer users download) is
+> Authenticode-signed. The auto-updater payload (`.msi.zip`) is zipped during the
+> Tauri build step *before* the signing step runs, so its embedded MSI carries the
+> minisign updater signature only, not an Authenticode one. First-install — the
+> SmartScreen pain point #3808 targets — is covered; signing the updater payload
+> too would require moving signing into Tauri's `bundle.windows.signCommand` so it
+> happens pre-zip. Tracked as a follow-up.
+
+### One-time Azure setup
+
+1. Create a **Trusted Signing account** in the Azure portal (Trusted Signing →
+   Create), choosing the region nearest your CI. Note the account name and the
+   account endpoint shown on the overview page.
+2. Complete **identity validation** (Public Trust → add an Identity Validation
+   request). This is the gate that takes time — an organization validation can
+   take a few business days. SmartScreen reputation only applies once validation
+   is approved.
+3. Create a **Certificate Profile** (Public Trust type) under the account. Note
+   its name.
+4. Create an **App Registration** in Entra ID, generate a **client secret**, and
+   note the tenant ID + client ID.
+5. Grant that App Registration the **Trusted Signing Certificate Profile Signer**
+   role on the Trusted Signing account (Access control (IAM) → Add role
+   assignment), so it's allowed to sign with the profile.
+
+### Setting the secrets
+
+```bash
+gh secret set AZURE_TENANT_ID --body '00000000-0000-0000-0000-000000000000'
+gh secret set AZURE_CLIENT_ID --body '00000000-0000-0000-0000-000000000000'
+gh secret set AZURE_CLIENT_SECRET --body 'your-client-secret'
+gh secret set TRUSTED_SIGNING_ENDPOINT --body 'https://eus.codesigning.azure.net'
+gh secret set TRUSTED_SIGNING_ACCOUNT --body 'your-signing-account'
+gh secret set TRUSTED_SIGNING_CERT_PROFILE --body 'your-cert-profile'
+```
+
+### Rotating the cert / credentials
+
+The certificate itself is managed and auto-renewed by Azure — there is no `.p12`
+or HSM key to rotate. What expires is the **App Registration client secret**: when
+it lapses, regenerate it in Entra ID and re-run `gh secret set AZURE_CLIENT_SECRET`.
+Nothing in the repo changes.
+
+### Verifying
+
+After approval + secrets are set, dispatch a release and confirm the
+`Detect Authenticode signing` step logs `signing enabled`. On a clean Windows 11
+box, download the released `.msi` and confirm it installs without the SmartScreen
+"Windows protected your PC" dialog; `signtool verify /pa chroxy_*.msi` (or
+right-click → Properties → Digital Signatures) should show a valid Microsoft ID
+Verified CS chain.
 
 ## Discord notifications (optional)
 

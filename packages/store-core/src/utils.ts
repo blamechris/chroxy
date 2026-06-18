@@ -74,20 +74,54 @@ export function createEmptyBaseSessionState(): BaseSessionState {
     lastResultCost: null,
     lastResultDuration: null,
     sessionCost: null,
+    cumulativeUsage: null,
+    costThresholdWarning: null,
     isIdle: true,
     lastClientActivityAt: null,
     health: 'healthy',
+    // #4879: null = session not in stopped state. Set to Date.now() when
+    // session_stopped wire message arrives; cleared on next claude_ready.
+    stoppedAt: null,
+    stoppedCode: null,
     activeAgents: [],
+    activeTools: [],
+    // #4307: empty until the first background_work_changed event or
+    // session_list snapshot arrives; null would force every renderer to
+    // .length-check against null, so an empty array is the safer default.
+    pendingBackgroundShells: [],
+    // #5431: transcript-derived outstanding work — empty/null until an
+    // enriched claude_ready arrives.
+    transcriptBackgroundTasks: [],
+    scheduledWakeup: null,
     isPlanPending: false,
     planAllowedPrompts: [],
     primaryClientId: null,
+    // #5589 / #5281: null until the first session_role for this session arrives
+    // (the UI treats null as unclaimed).
+    sessionRole: null,
     conversationId: null,
     sessionContext: null,
     mcpServers: [],
     devPreviews: [],
     inactivityWarning: null,
+    // #4653: empty ring for chroxy-side interventions. Never null so the
+    // dashboard's `.length`/`map` call sites don't need a guard.
+    interventions: [],
+    // #5937: empty outgoing-message queue. Never null so renderers' .length/.map
+    // are guard-free; populated by message_queued / optimistic enqueue.
+    queuedMessages: [],
   };
 }
+
+/**
+ * #4653 — cap on the per-session intervention ring buffer. The dashboard
+ * counter only ever shows a number + a list of "recent" entries, so we don't
+ * need to keep more than this — a sustained intervention storm (e.g. a model
+ * fighting the multi-question deny) would otherwise bloat the in-memory state
+ * indefinitely. Chosen at 50 to comfortably show "the last batch" without
+ * imposing a UX cliff if the user is mid-debug-session.
+ */
+export const MAX_SESSION_INTERVENTIONS = 50
 
 /**
  * WS message types that count as agent activity for the
@@ -108,6 +142,12 @@ export const ACTIVITY_EVENT_TYPES: ReadonlySet<string> = new Set([
   'stream_delta',
   'stream_end',
   'tool_start',
+  // #4081: long tool inputs (e.g. Bash `command`) stream as a long run
+  // of `tool_input_delta` events between `tool_start` and `tool_result`.
+  // Without this entry, the "Working… last activity Ns ago" indicator
+  // would falsely report the agent as stalled mid-assembly of a large
+  // tool input. Mirrors the rationale for including `stream_delta`.
+  'tool_input_delta',
   'tool_result',
   'message',
   'result',

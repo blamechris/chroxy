@@ -66,6 +66,16 @@ export function SlashCommandPicker({
           >
             <div className="slash-picker-name">/{cmd.name}</div>
             <div className="slash-picker-desc">{cmd.description}</div>
+            {/*
+              #3856 — surface a chip on each row so users can tell a
+              provider built-in (locked, can't be shadowed) apart from a
+              user/project markdown skill (their own file, safe to edit).
+              `project` is the implicit default and stays badgeless to keep
+              the row chrome quiet for the most common case.
+            */}
+            {cmd.source === 'builtin' && (
+              <span className="slash-picker-badge slash-picker-badge-builtin">built-in</span>
+            )}
             {cmd.source === 'user' && (
               <span className="slash-picker-badge">user</span>
             )}

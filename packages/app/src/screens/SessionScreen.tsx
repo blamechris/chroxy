@@ -5,7 +5,7 @@ import {
   TextInput,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
+  FlatList,
   Platform,
   Keyboard,
   Share,
@@ -13,30 +13,41 @@ import {
   Modal,
   Pressable,
   LayoutAnimation,
+  ActivityIndicator as RNActivityIndicator,
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview, stripAnsi, nextMessageId } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, stripAnsi, nextMessageId } from '../store/connection';
+import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
+import type { SessionIntervention } from '@chroxy/store-core';
+// #4875: shared typed predicate for the AskUserQuestion freeform shape.
+// Replaces the looser 2-condition inline check (`'otherLabel' in &&
+// 'freeformText' in`) with the same 5-condition guard the store layer
+// uses, so widening `SelectOptionValue` to a third object shape can't
+// silently misroute it as freeform.
+import { isFreeformAnswer, providerSupportsMultiQuestion, providerSupportsSingleMultiSelect } from '@chroxy/store-core';
+import { USER_SHELL_PROVIDER } from '@chroxy/protocol';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { SessionPicker } from '../components/SessionPicker';
 import { CreateSessionModal } from '../components/CreateSessionModal';
 import { ChatView } from '../components/ChatView';
+import type { SelectOptionValue } from '../components/chat/MessageBubble';
 import { TerminalView, TerminalHandle } from '../components/TerminalView';
 import { SettingsBar } from '../components/SettingsBar';
 import { WebTasksPanel } from '../components/WebTasksPanel';
-import { InputBar } from '../components/InputBar';
+import { InputBar, type InputBarHandle } from '../components/InputBar';
 import { ActivityIndicator } from '../components/ActivityIndicator';
 import { CheckInChip } from '../components/CheckInChip';
 import { FileBrowser } from '../components/FileBrowser';
-import { DiffViewer } from '../components/DiffViewer';
-import { CheckpointView } from '../components/CheckpointView';
-import { GitView } from '../components/GitView';
+import { SessionPanels } from '../components/SessionPanels';
 import { ErrorBoundary } from '../components/ErrorBoundary';
 import { SessionNotificationBanner } from '../components/SessionNotificationBanner';
 import { BackgroundSessionProgress } from '../components/BackgroundSessionProgress';
 import { DevPreviewBanner } from '../components/DevPreviewBanner';
 import { SessionTimeoutBanner } from '../components/SessionTimeoutBanner';
 import { StdinDisabledBanner } from '../components/StdinDisabledBanner';
+import { CostThresholdBanner } from '../components/CostThresholdBanner';
+import { ObserverBanner } from '../components/ObserverBanner';
 import { SessionOverview } from '../components/SessionOverview';
 import { useNavigation } from '@react-navigation/native';
 import { NativeStackNavigationProp } from '@react-navigation/native-stack';
@@ -44,11 +55,13 @@ import type { RootStackParamList } from '../App';
 import { Icon } from '../components/Icon';
 import { COLORS } from '../constants/colors';
 import { useLayout } from '../hooks/useLayout';
+import { useSessionViewState } from '../hooks/useSessionViewState';
 import { useSpeechRecognition } from '../hooks/useSpeechRecognition';
+import { useDictationComposer } from '../hooks/useDictationComposer';
 import { useAndroidSessionNotification } from '../hooks/useAndroidSessionNotification';
 import { pickFromCamera, pickFromGallery, pickDocument, toWireAttachments, MAX_ATTACHMENTS } from '../utils/attachments';
 import type { Attachment } from '../utils/attachments';
-import { shouldCollapsePaste, formatPasteMarker, expandPasteMarkers, detectPasteFromDiff } from '@chroxy/store-core';
+import { formatPasteMarker, expandPasteMarkers } from '@chroxy/store-core';
 import { PastedTextModal } from '../components/PastedTextModal';
 
 
@@ -57,6 +70,7 @@ const EMPTY_AGENTS: AgentInfo[] = [];
 const EMPTY_MCP_SERVERS: McpServer[] = [];
 const EMPTY_DEV_PREVIEWS: DevPreview[] = [];
 const EMPTY_PROMPTS: { tool: string; prompt: string }[] = [];
+const EMPTY_INTERVENTIONS: SessionIntervention[] = [];
 
 // Message sent when user taps "Approve" on a plan approval card
 const PLAN_APPROVAL_MESSAGE = 'Go ahead with the plan';
@@ -109,10 +123,15 @@ export function formatTranscript(selected: ChatMessage[]): string {
 
 export function SessionScreen() {
   const navigation = useNavigation<NativeStackNavigationProp<RootStackParamList>>();
-  const [inputText, setInputText] = useState('');
+  // #5556 — the composer draft now lives inside InputBar (see `inputRef`
+  // below). SessionScreen no longer holds it in render-scope state, which is
+  // what decouples typing from streaming-message re-renders.
   const [pendingAttachments, setPendingAttachments] = useState<Attachment[]>([]);
   const [showAttachSheet, setShowAttachSheet] = useState(false);
-  const scrollViewRef = useRef<ScrollView>(null);
+  // #5517: ChatView's transcript is a virtualized FlatList. SessionScreen
+  // only forwards this ref (never calls imperative methods on it); typed as
+  // FlatList<unknown> to match ChatView's prop without naming the row type.
+  const scrollViewRef = useRef<FlatList<unknown>>(null);
   const terminalRef = useRef<TerminalHandle>(null);
   const insets = useSafeAreaInsets();
   const keyboardHeight = useKeyboardHeight();
@@ -138,17 +157,22 @@ export function SessionScreen() {
   const lastResultDuration = useConnectionStore(selectLastResultDuration);
   const activeSessionId = useConnectionStore((s) => s.activeSessionId);
 
-  // Chat filter: 'all' shows everything, 'compact' hides tool_use and thinking
-  const [chatFilterCompact, setChatFilterCompact] = useState(false);
-
-  // Reset compact filter when switching sessions
-  const prevSessionRef = React.useRef(activeSessionId);
-  React.useEffect(() => {
-    if (activeSessionId !== prevSessionRef.current) {
-      prevSessionRef.current = activeSessionId;
-      setChatFilterCompact(false);
-    }
-  }, [activeSessionId]);
+  // #5654 — view-mode / panel-visibility state (chat compact filter and the
+  // three modal panels) is owned by useSessionViewState. The compact-filter
+  // reset-on-session-switch effect lives inside the hook.
+  const {
+    chatFilterCompact,
+    setChatFilterCompact,
+    showDiffViewer,
+    setShowDiffViewer,
+    showCheckpoints,
+    setShowCheckpoints,
+    showGitView,
+    setShowGitView,
+    closeDiffViewer,
+    closeCheckpoints,
+    closeGitView,
+  } = useSessionViewState({ activeSessionId });
 
   // Filter messages: exclude system (separate tab) and optionally tool_use/thinking (compact mode)
   const chatMessages = useMemo(
@@ -200,6 +224,11 @@ export function SessionScreen() {
   const sendInput = useConnectionStore((s) => s.sendInput);
   const sendInterrupt = useConnectionStore((s) => s.sendInterrupt);
   const disconnect = useConnectionStore((s) => s.disconnect);
+  // #5699 — reactive count of queued (unsent) messages, surfaced in the
+  // reconnect banner and used to warn before a manual disconnect discards them.
+  const queuedMessageCount = useConnectionStore((s) => s.queuedMessageCount);
+  // #5725 (#5698) — manual retry from the terminal `server_down` banner.
+  const retryConnection = useConnectionStore((s) => s.retryConnection);
   const clearTerminalBuffer = useConnectionStore((s) => s.clearTerminalBuffer);
   const addUserMessage = useConnectionStore((s) => s.addUserMessage);
   const updateInputSettings = useConnectionStore((s) => s.updateInputSettings);
@@ -210,12 +239,54 @@ export function SessionScreen() {
   const sendPermissionResponse = useConnectionStore((s) => s.sendPermissionResponse);
   const sendUserQuestionResponse = useConnectionStore((s) => s.sendUserQuestionResponse);
   const markPromptAnswered = useConnectionStore((s) => s.markPromptAnswered);
+  const markPromptAnsweredMulti = useConnectionStore((s) => s.markPromptAnsweredMulti);
 
   const sessions = useConnectionStore((s) => s.sessions);
+  // #4973 / #4735 — allow the interactive multi-question form only for
+  // SDK-mode sessions. TUI / CLI sessions (`claude-tui` / `claude-cli`)
+  // leave it off because the permission-hook (#4648) denies combined
+  // multi-question tool_uses there and answers would misroute through
+  // `_pendingUserAnswer`; SDK / BYOK / Codex / Gemini sessions accept
+  // per-question answers natively (#4731). Mirrors the dashboard's
+  // `allowMultiQuestionForm` (App.tsx).
+  const activeSessionProvider = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id ? s.sessions.find((sess) => sess.sessionId === id)?.provider ?? null : null;
+  });
+  // #5731 — gate the SettingsBar model/permission chips on the active provider's
+  // capabilities, mirroring the dashboard's dropdownFlags. Default to supported
+  // (true) unless the provider explicitly reports the capability as false, so a
+  // provider that can't switch (e.g. claude-tui — model fixed at boot) doesn't
+  // render chips that silently do nothing on tap.
+  const availableProviders = useConnectionStore((s) => s.availableProviders);
+  const providerCaps = useMemo(() => {
+    const caps = availableProviders.find((p) => p.name === activeSessionProvider)?.capabilities;
+    return {
+      modelSwitchSupported: caps?.modelSwitch !== false,
+      permissionModeSwitchSupported: caps?.permissionModeSwitch !== false,
+    };
+  }, [availableProviders, activeSessionProvider]);
+  // #5795 — provider capability lives in @chroxy/store-core (single source of
+  // truth, keyed off the registered provider `type`), shared with the
+  // dashboard so the two clients can't drift. Multi-QUESTION forms need a
+  // structured answersMap (SDK family); a single multiSelect also renders for
+  // claude-tui via the #5776 reinject path. The plain CLI providers
+  // (claude-cli, docker-cli) are excluded — single text answer, no answersMap.
+  const allowMultiQuestion = useMemo(
+    () => providerSupportsMultiQuestion(activeSessionProvider),
+    [activeSessionProvider],
+  );
+  // #5791 — claude-tui's single multiSelect is gated on the server-advertised
+  // `multiSelectReinject` capability (the CHROXY_TUI_MULTISELECT_REINJECT flag),
+  // not just the provider name, so the client doesn't offer a form the server
+  // would refuse. Pass the active provider's raw capabilities to the predicate.
+  const allowSingleMultiSelect = useMemo(() => {
+    const caps = availableProviders.find((p) => p.name === activeSessionProvider)?.capabilities;
+    return providerSupportsSingleMultiSelect(activeSessionProvider, caps);
+  }, [activeSessionProvider, availableProviders]);
   const viewingCachedSession = useConnectionStore((s) => s.viewingCachedSession);
   const exitCachedSession = useConnectionStore((s) => s.exitCachedSession);
   const savedConnection = useConnectionLifecycleStore((s) => s.savedConnection);
-  const connect = useConnectionStore((s) => s.connect);
   const isIdle = useConnectionStore(selectIsIdle);
   const activeAgents = useConnectionStore((s) => {
     const id = s.activeSessionId;
@@ -224,6 +295,18 @@ export function SessionScreen() {
   const activeSessionHealth = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
+  });
+  // #4879: quiet user-initiated Stop marker. Set by the `session_stopped`
+  // handler (sharedSessionStopped); cleared on next claude_ready. Drives
+  // the subtle "Session stopped." status strip below — distinct from the
+  // loud red crashed banner reserved for unexpected exits.
+  const activeSessionStoppedAt = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].stoppedAt : null;
+  });
+  const activeSessionStoppedCode = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].stoppedCode : null;
   });
   const isPlanPending = useConnectionStore((s) => {
     const id = s.activeSessionId;
@@ -253,7 +336,37 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].sessionCost : null;
   });
+  // #4074: per-session cumulative tokens + cost. Drives the SettingsBar
+  // cost badge + tap-to-expand breakdown sheet.
+  const cumulativeUsage = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].cumulativeUsage : null;
+  });
+  // #4075: soft cost-threshold warning. Banner stays visible until the
+  // user dismisses (we set dismissedAt to flip the gate).
+  const costThresholdWarning = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].costThresholdWarning : null;
+  });
   const costBudget = useConnectionStore((s) => s.costBudget);
+  // #5589 / #5281 — this device's shared-session role + the current driver, for
+  // the observer banner. Both are per-session.
+  const sessionRole = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].sessionRole : null;
+  });
+  const activePrimaryClientId = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].primaryClientId : null;
+  });
+  const claimPrimary = useConnectionStore((s) => s.claimPrimary);
+  // #4764 — chroxy-side intervention ring for the active session. Drives the
+  // session-header counter badge and the tap-to-expand recent-interventions
+  // sheet (mirrors the dashboard's FooterBar surface from #4758).
+  const interventions = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id] ? s.sessionStates[id].interventions : EMPTY_INTERVENTIONS;
+  });
   const devPreviews = useConnectionStore((s) => {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].devPreviews : EMPTY_DEV_PREVIEWS;
@@ -269,9 +382,14 @@ export function SessionScreen() {
   const teleportWebTask = useConnectionStore((s) => s.teleportWebTask);
   const destroySession = useConnectionStore((s) => s.destroySession);
   const createSession = useConnectionStore((s) => s.createSession);
+  // #5987 — only surface the "New Shell" affordance when the server advertises
+  // the user-shell capability; when absent, render nothing (mirrors the
+  // notificationPrefs capability gate in SettingsScreen).
+  const userShellSupported = useConnectionLifecycleStore((s) => !!s.serverCapabilities?.userShell);
   const switchSession = useConnectionStore((s) => s.switchSession);
   const latencyMs = useConnectionLifecycleStore((s) => s.latencyMs);
   const connectionQuality = useConnectionLifecycleStore((s) => s.connectionQuality);
+  const activePath = useConnectionLifecycleStore((s) => s.activePath);
   const connectionError = useConnectionLifecycleStore((s) => s.connectionError);
   const connectionRetryCount = useConnectionLifecycleStore((s) => s.connectionRetryCount);
   const shutdownReason = useConnectionStore((s) => s.shutdownReason);
@@ -282,9 +400,9 @@ export function SessionScreen() {
   const setTerminalWriteCallback = useConnectionStore((s) => s.setTerminalWriteCallback);
   const isCliMode = serverMode === 'cli';
   const [showCreateModal, setShowCreateModal] = useState(false);
-  const [showDiffViewer, setShowDiffViewer] = useState(false);
-  const [showCheckpoints, setShowCheckpoints] = useState(false);
-  const [showGitView, setShowGitView] = useState(false);
+  // #5654 — showDiffViewer / showCheckpoints / showGitView and chatFilterCompact
+  // come from useSessionViewState. The layout-chrome toggles (showMoreTools,
+  // showSessionOverview, settingsExpanded) are plain local useState here.
   const [showMoreTools, setShowMoreTools] = useState(false);
   const [showSessionOverview, setShowSessionOverview] = useState(false);
   const [settingsExpanded, setSettingsExpanded] = useState(false);
@@ -296,10 +414,12 @@ export function SessionScreen() {
   const searchInputRef = useRef<TextInput>(null);
   const searchFocusTimerRef = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  // Speech recognition
-  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition();
-  const dictationStartRef = useRef(inputText.length);
-  const usedVoiceRef = useRef(false);
+  // Speech recognition — wire mode from inputSettings.voiceInputMode (#4807).
+  // Mobile defaults to `'continuous'` in the store so users get click-to-stop
+  // semantics matching the dashboard.
+  const { isRecognizing, transcript, isAvailable: speechAvailable, startListening, stopListening, error: speechError } = useSpeechRecognition({
+    mode: inputSettings.voiceInputMode,
+  });
 
   // Surface speech recognition errors to the user
   useEffect(() => {
@@ -396,7 +516,21 @@ export function SessionScreen() {
 
   // Determine if the active session has a terminal (PTY sessions do, CLI sessions don't)
   const activeSession = sessions.find((s) => s.sessionId === activeSessionId);
-  const hasTerminal = !isCliMode || (activeSession?.hasTerminal ?? false);
+  // #5987 — a user-shell ($SHELL PTY) session is terminal-only and drives the
+  // #5835 mirror channel (terminal_subscribe / terminal_output / terminal_resize)
+  // instead of claude-tui's legacy 'raw' + `resize` path. isPtyMirror gates the
+  // mirror subscribe/resize so claude-tui behavior stays exactly as before.
+  // Reuses the reactive `activeSessionProvider` selector declared above.
+  const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER;
+  const isPtyMirror = isUserShell;
+  // #6003 — a user-shell terminal is interactive (drivable) only when this client
+  // may drive it: the server's userShell capability is gated on the primary token
+  // (+ userShell.enabled), matching the terminal_input authority gate. claude-tui
+  // mirrors stay read-only. Enables xterm stdin + keystroke forwarding below.
+  const terminalInteractive = isUserShell && userShellSupported;
+  // A user-shell session is terminal-only, so it always has a terminal even
+  // though it isn't a claude-tui PTY.
+  const hasTerminal = isUserShell || !isCliMode || (activeSession?.hasTerminal ?? false);
 
   // Wire up terminal write callback when terminal view is visible (including split view)
   const terminalVisible = (viewMode === 'terminal' || (layout.isSplitView && viewMode !== 'files' && viewMode !== 'system')) && hasTerminal;
@@ -413,6 +547,30 @@ export function SessionScreen() {
     };
   }, [terminalVisible, activeSessionId, setTerminalWriteCallback]);
 
+  // #5835 / #5987 — opt into the live PTY mirror for a user-shell session while
+  // its terminal is visible, and opt out on leave / session switch. Only
+  // user-shell sessions use this channel (isPtyMirror); claude-tui stays on the
+  // legacy 'raw' stream and is unaffected. Mirrors the dashboard's subscribe
+  // effect — best-effort, the store actions no-op when the socket isn't open.
+  useEffect(() => {
+    if (!terminalVisible || !isPtyMirror || !activeSessionId) return;
+    const sessionId = activeSessionId;
+    useConnectionStore.getState().subscribeTerminalMirror(sessionId);
+    return () => {
+      useConnectionStore.getState().unsubscribeTerminalMirror(sessionId);
+    };
+  }, [terminalVisible, isPtyMirror, activeSessionId]);
+
+  // #5987 — a user-shell session is terminal-only, so snap the view to the
+  // terminal when one becomes active while sitting on the chat default. Only
+  // flips away from 'chat' (the default) so it never fights a user who has
+  // intentionally opened Files/System for the shell session.
+  useEffect(() => {
+    if (isUserShell && viewMode === 'chat') {
+      setViewMode('terminal');
+    }
+  }, [isUserShell, viewMode, setViewMode]);
+
   // Replay raw buffer into xterm.js when it becomes ready (initial mount, view switch, or crash recovery)
   const handleTerminalReady = useCallback(() => {
     terminalRef.current?.clear();
@@ -422,9 +580,32 @@ export function SessionScreen() {
     }
   }, []);
 
-  // Forward terminal dimensions to server for PTY resize
+  // Forward terminal dimensions to server for PTY resize. A user-shell session
+  // drives the #5835 mirror resize (terminal_resize, per-sessionId); claude-tui
+  // keeps the legacy `resize` (active-session) path. Reads provider fresh from
+  // the store so the callback can stay stable (empty deps) without going stale.
   const handleTerminalResize = useCallback((cols: number, rows: number) => {
-    useConnectionStore.getState().resize(cols, rows);
+    const store = useConnectionStore.getState();
+    const { activeSessionId: sid, sessions: sess } = store;
+    const provider = sess.find((s) => s.sessionId === sid)?.provider;
+    if (sid && provider === USER_SHELL_PROVIDER) {
+      store.sendTerminalResize(sid, cols, rows);
+    } else {
+      store.resize(cols, rows);
+    }
+  }, []);
+
+  // #6003 — forward keystrokes/paste from an interactive user-shell terminal to
+  // the PTY (terminal_input, chunked under the 100k cap). Reads the session
+  // fresh from the store so the callback stays stable; only sends for a
+  // user-shell (the read-only mirror's xterm never emits onData anyway).
+  const handleTerminalInput = useCallback((data: string) => {
+    const store = useConnectionStore.getState();
+    const { activeSessionId: sid, sessions: sess } = store;
+    const provider = sess.find((s) => s.sessionId === sid)?.provider;
+    if (sid && provider === USER_SHELL_PROVIDER) {
+      store.sendTerminalInput(sid, data);
+    }
   }, []);
 
   // #3595: dedicated restart handler for the StdinDisabledBanner. Creates a
@@ -462,8 +643,12 @@ export function SessionScreen() {
   const isSelectingRef = useRef(false);
   isSelectingRef.current = isSelecting;
 
-  // Ref for focusing the input bar when user taps "Give Feedback" on plan approval
-  const inputRef = useRef<TextInput>(null);
+  // #5556 — InputBar now owns its draft internally and exposes an imperative
+  // handle (focus/getValue/setValue/clear). SessionScreen reads/writes the
+  // composer draft through this ref for the send path, voice-transcript merge,
+  // seed prompts, and pasted-text marker stripping — so streaming re-renders no
+  // longer churn the TextInput on every delta.
+  const inputRef = useRef<InputBarHandle>(null);
 
   const toggleSelection = useCallback((id: string) => {
     setSelectedIds((prev) => {
@@ -510,16 +695,23 @@ export function SessionScreen() {
     }
   }, [messages, selectedIds, clearSelection]);
 
-  const handleSend = () => {
+  // #5556 — `handleSend` closes over fast-changing state (pendingAttachments,
+  // streamingMessageId, pastedTextBlocks, viewMode, …), so a useCallback dep
+  // array would re-create it on every streaming delta and defeat InputBar's
+  // React.memo. Instead we keep the live implementation in a ref (refreshed
+  // each render) behind a single stable wrapper passed to InputBar.
+  const handleSendImpl = () => {
     const hasAttachments = pendingAttachments.length > 0;
-    if ((!inputText.trim() && !hasAttachments) || streamingMessageId) return;
+    // #5556 — read the draft from the InputBar ref (it owns the value now).
+    const draft = inputRef.current?.getValue() ?? '';
+    if ((!draft.trim() && !hasAttachments) || streamingMessageId) return;
     // Expand any collapsed-paste markers back to their original content
     // before send (#3797). Trim happens AFTER expansion so an expanded
     // payload with surrounding whitespace still sends cleanly.
     const blockMap = new Map(pastedTextBlocks.map(b => [b.id, b.content]));
-    const expanded = blockMap.size > 0 ? expandPasteMarkers(inputText, blockMap) : inputText;
+    const expanded = blockMap.size > 0 ? expandPasteMarkers(draft, blockMap) : draft;
     const text = expanded.trim();
-    setInputText('');
+    inputRef.current?.clear();
     // Clear paste state alongside the input — neither persists across sends.
     setPastedTextBlocks([]);
     pastedTextNextIdRef.current = 0;
@@ -577,8 +769,7 @@ export function SessionScreen() {
 
     // PTY sessions: append CR so text + submit arrive as a single atomic write.
     // CLI sessions: the server handles the full message directly (no CR needed).
-    const isVoice = usedVoiceRef.current;
-    usedVoiceRef.current = false;
+    const isVoice = consumeUsedVoice();
     const result = sendInput(hasTerminal ? (text || '') + '\r' : (text || ''), wire, { isVoice, clientMessageId });
     if (result === 'queued') {
       const { addMessage } = useConnectionStore.getState();
@@ -590,6 +781,10 @@ export function SessionScreen() {
       });
     }
   };
+  // Refresh the live implementation each render, then expose a stable wrapper.
+  const handleSendRef = useRef(handleSendImpl);
+  handleSendRef.current = handleSendImpl;
+  const handleSend = useCallback(() => handleSendRef.current(), []);
 
   const addAttachment = useCallback(async (picker: () => Promise<Attachment | null>) => {
     if (pendingAttachments.length >= MAX_ATTACHMENTS) {
@@ -623,7 +818,7 @@ export function SessionScreen() {
     setPendingAttachments((prev) => prev.filter((a) => a.id !== id));
   }, []);
 
-  const handleKeyPress = (key: string) => {
+  const handleKeyPress = useCallback((key: string) => {
     const keyMap: Record<string, string> = {
       'Enter': '\r',
       'Tab': '\t',
@@ -640,20 +835,81 @@ export function SessionScreen() {
     if (keyMap[key]) {
       sendInput(keyMap[key]);
     }
-  };
+  }, [sendInput]);
+
+  // #5556 — stable handlers for InputBar so React.memo isn't defeated by
+  // fresh inline arrows on each streaming re-render.
+  const handleClearTerminal = useCallback(() => {
+    clearTerminalBuffer();
+    terminalRef.current?.clear();
+  }, [clearTerminalBuffer]);
+  const handleToggleEnterMode = useCallback(() => {
+    const key = viewMode === 'terminal' ? 'terminalEnterToSend' : 'chatEnterToSend';
+    updateInputSettings({ [key]: !inputSettings[key] });
+  }, [viewMode, inputSettings, updateInputSettings]);
 
   // Handle tapping a prompt option
-  const handleSelectOption = (value: string, messageId: string, requestId?: string, toolUseId?: string) => {
+  // #4755 — `value` widened to `SelectOptionValue` to carry the
+  // single-question Other / freeform payload (`{otherLabel, freeformText}`).
+  // We forward the object shape directly to `sendUserQuestionResponse` so
+  // the wire layer can emit `{answer: <otherLabel>, freeformText}` for the
+  // server's two-stage TUI write (Other digit → text-input prompt →
+  // freeform text + Enter). The local `markPromptAnswered` summary stores
+  // the typed text — not the literal "Other" label — matching the
+  // post-answer UX of the free-text-only path (#1245) so the chat bubble
+  // shows what the user actually wrote. Mirrors dashboard App.tsx +
+  // `formatQuestionAnswerSummary` for the freeform shape (#4651).
+  const handleSelectOption = (
+    value: SelectOptionValue,
+    messageId: string,
+    requestId?: string,
+    toolUseId?: string,
+  ) => {
+    // #4875: shared `isFreeformAnswer` guard from @chroxy/store-core
+    // narrows `value` to `OtherFreeformAnswer` in the true branch, so the
+    // string-branch arms can drop the `as string` cast in favour of plain
+    // assignment. The previous inline 2-condition check (`'otherLabel' in
+    // && 'freeformText' in`) was looser than the store-layer detector and
+    // would have silently misrouted a future third object shape; the
+    // shared guard keeps both call sites in lockstep.
+    const freeform = isFreeformAnswer(value);
     let sent: 'sent' | 'queued' | false = false;
     if (toolUseId) {
       sent = sendUserQuestionResponse(value, toolUseId);
     } else if (requestId) {
-      sent = sendPermissionResponse(requestId, value);
+      // Permission responses are decision strings ('allow' / 'deny' / etc.)
+      // and never carry an Other / freeform payload — the freeform branch
+      // is defence-in-depth only; in practice this site sees `string`.
+      sent = sendPermissionResponse(requestId, freeform ? value.freeformText : value);
     } else {
-      sent = sendInput(hasTerminal ? value + '\r' : value);
+      const literal = freeform ? value.freeformText : value;
+      sent = sendInput(hasTerminal ? literal + '\r' : literal);
     }
     if (sent === 'sent') {
-      markPromptAnswered(messageId, value);
+      // For the freeform shape, store the typed text (not the label) so
+      // the answered-state UI renders the user's actual answer.
+      const summary = freeform ? value.freeformText : value;
+      markPromptAnswered(messageId, summary);
+    }
+  };
+
+  // #4973 — submit handler for the multi-question AskUserQuestion form.
+  // Forwards the per-question answers map (`Record<string, string |
+  // string[]>`) to `sendUserQuestionResponse` (widened in #4761), which
+  // serializes the `answers` map + a comma-joined `answer` summary on the
+  // wire. On success we record the structured map via
+  // `markPromptAnsweredMulti` so the post-answer summary chip can map
+  // chosen values back to option labels. Mirrors the dashboard's
+  // App.tsx + `formatQuestionAnswerSummary` multi-question path (#4760).
+  const handleSubmitMultiQuestion = (
+    answersMap: Record<string, string | string[]>,
+    messageId: string,
+    toolUseId?: string,
+  ) => {
+    if (!toolUseId) return;
+    const sent = sendUserQuestionResponse(answersMap, toolUseId);
+    if (sent === 'sent') {
+      markPromptAnsweredMulti(messageId, answersMap);
     }
   };
 
@@ -670,13 +926,29 @@ export function SessionScreen() {
     inputRef.current?.focus();
   }, []);
 
+  // #5699 — manual disconnect during a reconnect discards the outgoing queue
+  // (disconnect() calls clearMessageQueue). Warn first when there are unsent
+  // messages so the user doesn't silently lose typed input by giving up.
+  const handleStopReconnecting = useCallback(() => {
+    if (queuedMessageCount > 0) {
+      const n = queuedMessageCount;
+      Alert.alert(
+        'Discard unsent messages?',
+        `You have ${n} unsent message${n === 1 ? '' : 's'} waiting to send. Disconnecting will discard ${n === 1 ? 'it' : 'them'}.`,
+        [
+          { text: 'Keep waiting', style: 'cancel' },
+          { text: 'Disconnect', style: 'destructive', onPress: disconnect },
+        ],
+      );
+      return;
+    }
+    disconnect();
+  }, [queuedMessageCount, disconnect]);
+
   const handleInvokeAgent = useCallback((agentName: string) => {
-    setInputText(`@${agentName} `);
+    inputRef.current?.setValue(`@${agentName} `);
     inputRef.current?.focus();
   }, []);
-
-  // Track whether the latest inputText change came from dictation (vs manual edit)
-  const isDictationUpdateRef = useRef(false);
 
   // Pasted-text-block storage for the composer (#3797). React Native
   // `TextInput` has no native paste event, so we detect large pastes by
@@ -688,72 +960,51 @@ export function SessionScreen() {
   const pastedTextNextIdRef = useRef(0);
   const [inspectedPastedTextId, setInspectedPastedTextId] = useState<number | null>(null);
 
-  // Wrap setInputText to detect manual edits during dictation AND to
-  // collapse oversized pastes (#3797).
-  const handleChangeText = useCallback((text: string) => {
-    if (!isDictationUpdateRef.current && isRecognizing) {
-      // User manually edited text during dictation — update anchor point
-      dictationStartRef.current = text.length;
-    }
-    isDictationUpdateRef.current = false;
+  // #5556 — InputBar owns the draft and has already applied the user's
+  // keystroke before calling this; we only react to the diff. On a paste
+  // collapse we assign the id, format the marker, record the original content,
+  // and push the marker-substituted value BACK into InputBar via setValue.
+  // The previous implementation short-circuited on a char-only fast-path which
+  // missed multi-line pastes that fell below 1500 chars but crossed the 20-line
+  // threshold (#3798 review, #3799); `detectPasteFromDiff` on every grow (inside
+  // the hook) keeps both clients honouring the same criteria.
+  const handlePasteCollapsed = useCallback((inserted: string, prefix: string, suffix: string) => {
+    const nextId = pastedTextNextIdRef.current + 1;
+    pastedTextNextIdRef.current = nextId;
+    const marker = formatPasteMarker(nextId, inserted);
+    setPastedTextBlocks(prevBlocks => [...prevBlocks, { id: nextId, content: inserted }]);
+    inputRef.current?.setValue(prefix + marker + suffix);
+  }, []);
 
-    // Paste detection — RN `TextInput` has no native paste event, so we
-    // detect by diffing prev→next on each `onChangeText` and feeding the
-    // inserted span through the shared `shouldCollapsePaste` predicate
-    // (covers both the char and the line thresholds). The previous
-    // implementation short-circuited on a char-only fast-path which
-    // missed multi-line pastes that fell below 1500 chars but crossed
-    // the 20-line threshold (#3798 review, #3799). Running
-    // `detectPasteFromDiff` on every grow keeps both clients honouring
-    // the same criteria.
-    const prev = inputText;
-    if (text.length > prev.length) {
-      const diff = detectPasteFromDiff(prev, text);
-      if (diff && shouldCollapsePaste(diff.inserted)) {
-        const nextId = pastedTextNextIdRef.current + 1;
-        pastedTextNextIdRef.current = nextId;
-        const marker = formatPasteMarker(nextId, diff.inserted);
-        setPastedTextBlocks(prev => [...prev, { id: nextId, content: diff.inserted }]);
-        setInputText(diff.prefix + marker + diff.suffix);
-        return;
-      }
-    }
-
-    setInputText(text);
-  }, [isRecognizing, inputText]);
+  // #5573 — dictation + composer-change bookkeeping (the voice refs, the
+  // change/mic handlers, and the transcript-merge effect) lives in a dedicated
+  // hook. Since `setValue` is silent (#5566), every `onChangeText` during
+  // recognition is a real user keystroke, so the hook re-anchors unconditionally
+  // on each one — a mid-recognition manual edit is preserved and the next
+  // transcript appends after it instead of overwriting it.
+  const { handleChangeText, handleMicPress, consumeUsedVoice } = useDictationComposer({
+    inputRef,
+    isRecognizing,
+    transcript,
+    startListening,
+    stopListening,
+    onPasteCollapsed: handlePasteCollapsed,
+  });
 
   const handleRemovePastedText = useCallback((id: number) => {
     setPastedTextBlocks(prev => prev.filter(b => b.id !== id));
     // Strip this block's marker from the input. Per-id regex so we only
-    // touch the matching marker, not unrelated ones.
+    // touch the matching marker, not unrelated ones. #5556 — read/write the
+    // draft through the InputBar ref instead of a functional setState.
     const markerRe = new RegExp(`\\[Pasted text #${id} \\+\\d+ (?:lines|chars)\\]`, 'g');
-    setInputText(prev => prev.replace(markerRe, ''));
+    const current = inputRef.current?.getValue() ?? '';
+    inputRef.current?.setValue(current.replace(markerRe, ''));
     setInspectedPastedTextId(curr => (curr === id ? null : curr));
   }, []);
 
   const handleInspectPastedText = useCallback((id: number) => {
     setInspectedPastedTextId(id);
   }, []);
-
-  // Voice input: toggle start/stop and merge transcript into input text
-  const handleMicPress = useCallback(() => {
-    if (isRecognizing) {
-      stopListening();
-    } else {
-      dictationStartRef.current = inputText.length;
-      startListening();
-    }
-  }, [isRecognizing, inputText.length, startListening, stopListening]);
-
-  useEffect(() => {
-    if (isRecognizing && transcript) {
-      const prefix = inputText.slice(0, dictationStartRef.current);
-      const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : '';
-      isDictationUpdateRef.current = true;
-      usedVoiceRef.current = true;
-      setInputText(prefix + separator + transcript);
-    }
-  }, [transcript]); // eslint-disable-line react-hooks/exhaustive-deps -- only react to transcript changes
 
   // Check if Enter key should send based on current mode and settings
   const enterToSend = viewMode === 'terminal'
@@ -778,6 +1029,21 @@ export function SessionScreen() {
           <View style={styles.sessionPickerWrapper}>
             <SessionPicker onCreatePress={() => setShowCreateModal(true)} />
           </View>
+          {/* #5987 — "New Shell" spins up a user-shell ($SHELL PTY) session.
+              Gated on the server's userShell capability; renders nothing when
+              the server doesn't advertise it. */}
+          {userShellSupported && (
+            <TouchableOpacity
+              testID="new-shell-button"
+              style={styles.overviewButton}
+              onPress={() => createSession({ name: 'Shell', provider: USER_SHELL_PROVIDER })}
+              hitSlop={{ top: 6, bottom: 6, left: 6, right: 6 }}
+              accessibilityRole="button"
+              accessibilityLabel="New shell session"
+            >
+              <Text style={styles.overviewButtonText}>{'>_'}</Text>
+            </TouchableOpacity>
+          )}
           <TouchableOpacity
             style={styles.overviewButton}
             onPress={() => setShowSessionOverview(!showSessionOverview)}
@@ -818,22 +1084,29 @@ export function SessionScreen() {
         </View>
       ) : (
         <View style={styles.modeToggle}>
-          <TouchableOpacity
-            style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
-            onPress={() => setViewMode('chat')}
-            accessibilityRole="button"
-            accessibilityLabel="Chat"
-          >
-            <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
-              Chat
-            </Text>
-          </TouchableOpacity>
-          {viewMode === 'chat' && (
+          {/* #5987 — a user-shell session is terminal-only; hide the Chat toggle
+              so there's no empty chat view to switch into. */}
+          {!isUserShell && (
+            <TouchableOpacity
+              style={[styles.modeButton, viewMode === 'chat' && styles.modeButtonActive]}
+              onPress={() => setViewMode('chat')}
+              accessibilityRole="button"
+              accessibilityLabel="Chat"
+              accessibilityState={{ selected: viewMode === 'chat' }}
+            >
+              <Text style={[styles.modeButtonText, viewMode === 'chat' && styles.modeButtonTextActive]}>
+                Chat
+              </Text>
+            </TouchableOpacity>
+          )}
+          {!isUserShell && viewMode === 'chat' && (
             <TouchableOpacity
               style={[styles.modeButton, chatFilterCompact && styles.modeButtonActive]}
               onPress={() => { setChatFilterCompact((v) => !v); clearSelection(); }}
               accessibilityRole="button"
-              accessibilityLabel={chatFilterCompact ? 'Show all messages' : 'Show chat only'}
+              accessibilityLabel={chatFilterCompact ? 'Compact messages' : 'All messages'}
+              accessibilityHint={chatFilterCompact ? 'Show all messages' : 'Show compact messages only'}
+              accessibilityState={{ selected: chatFilterCompact }}
             >
               <Text style={[styles.modeButtonText, chatFilterCompact && styles.modeButtonTextActive]}>
                 {chatFilterCompact ? 'Compact' : 'All'}
@@ -842,10 +1115,12 @@ export function SessionScreen() {
           )}
           {hasTerminal && (
             <TouchableOpacity
+              testID="terminal-mode-button"
               style={[styles.modeButton, viewMode === 'terminal' && styles.modeButtonActive]}
               onPress={() => setViewMode('terminal')}
               accessibilityRole="button"
               accessibilityLabel="Terminal"
+              accessibilityState={{ selected: viewMode === 'terminal' }}
             >
               <Text style={[styles.modeButtonText, viewMode === 'terminal' && styles.modeButtonTextActive]}>
                 Term
@@ -857,6 +1132,7 @@ export function SessionScreen() {
             onPress={() => setViewMode('files')}
             accessibilityRole="button"
             accessibilityLabel="Files"
+            accessibilityState={{ selected: viewMode === 'files' }}
           >
             <Text style={[styles.modeButtonText, viewMode === 'files' && styles.modeButtonTextActive]}>
               Files
@@ -965,12 +1241,14 @@ export function SessionScreen() {
           lastResultCost={lastResultCost}
           lastResultDuration={lastResultDuration}
           sessionCost={sessionCost}
+          cumulativeUsage={cumulativeUsage}
           costBudget={costBudget}
           contextUsage={contextUsage}
           sessionCwd={sessionCwd}
           serverMode={serverMode}
           isIdle={isIdle}
           activeAgents={activeAgents}
+          interventions={interventions}
           connectedClients={connectedClients}
           customAgents={customAgents}
           mcpServers={mcpServers}
@@ -984,6 +1262,13 @@ export function SessionScreen() {
           sessionContext={sessionContext}
           latencyMs={latencyMs}
           connectionQuality={connectionQuality}
+          activePath={activePath}
+          // #5424: provider drives context-window resolution — for providers
+          // that legitimately report no window (ollama) the usage meter shows
+          // the raw token count instead of a percentage against 200k.
+          provider={activeSessionProvider}
+          modelSwitchSupported={providerCaps.modelSwitchSupported}
+          permissionModeSwitchSupported={providerCaps.permissionModeSwitchSupported}
         />
       )}
 
@@ -997,7 +1282,8 @@ export function SessionScreen() {
                 <TouchableOpacity
                   onPress={() => {
                     exitCachedSession();
-                    connect(savedConnection.url, savedConnection.token);
+                    // #5518 — re-select LAN vs tunnel for the saved record.
+                    void useConnectionStore.getState().connectAuto(savedConnection);
                   }}
                   style={styles.cachedReconnectButton}
                   accessibilityRole="button"
@@ -1020,23 +1306,42 @@ export function SessionScreen() {
       )}
 
       {/* Reconnecting / restarting banner */}
-      {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting') && (
-        <View style={styles.reconnectingBanner}>
+      {(connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting' || connectionPhase === 'server_down') && (
+        <View testID="reconnect-banner" style={styles.reconnectingBanner}>
           <View style={styles.reconnectingRow}>
+            {/* #5725 (#5698) — server_down is terminal: no indefinite spinner. */}
+            {connectionPhase !== 'server_down' && (
+              <RNActivityIndicator
+                testID="reconnect-spinner"
+                size="small"
+                color={COLORS.accentBlue}
+                style={styles.reconnectingSpinner}
+              />
+            )}
             <Text style={[styles.reconnectingText, { flex: 1 }]}>
-              {connectionPhase === 'server_restarting'
-                ? shutdownReason === 'shutdown'
-                  ? 'Server shut down'
-                  : restartCountdown != null && restartCountdown > 0
-                    ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
-                    : 'Server restarting...'
-                : connectionRetryCount > 0
-                  ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
-                  : 'Reconnecting...'}
+              {connectionPhase === 'server_down'
+                ? 'Server appears to be down'
+                : connectionPhase === 'server_restarting'
+                  ? shutdownReason === 'shutdown'
+                    ? 'Server shut down'
+                    : restartCountdown != null && restartCountdown > 0
+                      ? `Server restarting... ~${Math.floor(restartCountdown / 60)}:${String(restartCountdown % 60).padStart(2, '0')}`
+                      : 'Server restarting...'
+                  : connectionRetryCount > 0
+                    ? `Reconnecting (attempt ${connectionRetryCount + 1})...`
+                    : 'Reconnecting...'}
             </Text>
-            <TouchableOpacity onPress={disconnect} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
-              <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
-            </TouchableOpacity>
+            {/* #5725 (#5698) — server_down offers a manual Reconnect (resets the
+                ladder + re-dials); the live states keep the Disconnect affordance. */}
+            {connectionPhase === 'server_down' ? (
+              <TouchableOpacity testID="server-down-reconnect" onPress={retryConnection} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Reconnect">
+                <Text style={styles.reconnectDisconnectText}>Reconnect</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity onPress={handleStopReconnecting} style={styles.reconnectDisconnect} accessibilityRole="button" accessibilityLabel="Stop reconnecting">
+                <Text style={styles.reconnectDisconnectText}>Disconnect</Text>
+              </TouchableOpacity>
+            )}
           </View>
           {connectionPhase === 'server_restarting' && shutdownReason === 'restart' && (
             <Text style={styles.reconnectingDetail}>Graceful restart</Text>
@@ -1046,6 +1351,13 @@ export function SessionScreen() {
           )}
           {connectionPhase === 'reconnecting' && connectionError && (
             <Text style={styles.reconnectingDetail}>{connectionError}</Text>
+          )}
+          {/* #5699 — surface unsent queued messages so the user knows they're
+              held (and at risk if they disconnect), rather than silently lost. */}
+          {queuedMessageCount > 0 && (
+            <Text testID="reconnect-queued-count" style={styles.reconnectingDetail}>
+              {queuedMessageCount} unsent message{queuedMessageCount === 1 ? '' : 's'} queued
+            </Text>
           )}
         </View>
       )}
@@ -1082,6 +1394,35 @@ export function SessionScreen() {
             >
               <Icon name="close" size={14} color={COLORS.accentRed} />
             </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+      {/* #4879: Quiet stopped status strip for active session — surfaced
+          when the server confirms a user-initiated Stop (session_stopped
+          wire message, wired in #4868). Intentionally informational
+          rather than error-styled: this is positive feedback that the
+          Stop tap landed. Suppressed when health === 'crashed' so the
+          loud red crash banner above isn't doubled up on the unlikely
+          race where both arrive (defensive — the server only emits
+          stopped for clean exits per CliSession._handleChildClose). The
+          strip auto-clears on the next `claude_ready` (typically when
+          the operator sends another message). */}
+      {activeSessionHealth !== 'crashed' && activeSessionStoppedAt !== null && (
+        <View
+          testID="session-stopped-banner"
+          style={[styles.reconnectingBanner, styles.stoppedBanner]}
+        >
+          <View style={styles.errorBannerContent}>
+            <Text
+              testID="session-stopped-banner-text"
+              style={styles.stoppedBannerText}
+              numberOfLines={1}
+            >
+              {activeSessionStoppedCode !== null && activeSessionStoppedCode !== 0
+                ? `Session stopped. (exit ${activeSessionStoppedCode})`
+                : 'Session stopped.'}
+            </Text>
           </View>
         </View>
       )}
@@ -1143,6 +1484,43 @@ export function SessionScreen() {
         onRestart={handleRestartStdinSession}
       />
 
+      {/* #5589 / #5281: observer role banner. Shows only when ANOTHER device is
+          the primary (driver) for the active session; names it (when the roster
+          resolves the id) and offers an explicit force take-over. */}
+      <ObserverBanner
+        visible={sessionRole === 'observer'}
+        sessionId={activeSessionId}
+        driverName={
+          connectedClients.find((c) => c.clientId === activePrimaryClientId)?.deviceName ?? null
+        }
+        onTakeOver={(sid) => claimPrimary(sid, { force: true })}
+      />
+
+      {/* #4075: cost-threshold soft warning banner. Server fires once per
+          session via `session_cost_threshold_crossed`; user dismissal
+          flips `dismissedAt` so the banner stays hidden for this session's
+          lifetime even though the record persists. */}
+      <CostThresholdBanner
+        visible={!!costThresholdWarning && costThresholdWarning.dismissedAt == null}
+        costUsd={costThresholdWarning?.costUsd ?? 0}
+        thresholdUsd={costThresholdWarning?.thresholdUsd ?? 0}
+        onDismiss={() => {
+          if (!activeSessionId || !costThresholdWarning) return;
+          const { sessionStates } = useConnectionStore.getState();
+          const ss = sessionStates[activeSessionId];
+          if (!ss?.costThresholdWarning) return;
+          useConnectionStore.setState({
+            sessionStates: {
+              ...sessionStates,
+              [activeSessionId]: {
+                ...ss,
+                costThresholdWarning: { ...ss.costThresholdWarning, dismissedAt: Date.now() },
+              },
+            },
+          });
+        }}
+      />
+
       {/* Session timeout warning banner */}
       {timeoutWarning && (
         <SessionTimeoutBanner
@@ -1178,6 +1556,9 @@ export function SessionScreen() {
                   scrollViewRef={scrollViewRef}
                   claudeReady={claudeReady}
                   onSelectOption={handleSelectOption}
+                  onSubmitMultiQuestion={handleSubmitMultiQuestion}
+                  allowMultiQuestion={allowMultiQuestion}
+              allowSingleMultiSelect={allowSingleMultiSelect}
                   isCliMode={isCliMode}
                   selectedIds={selectedIds}
                   isSelecting={isSelecting}
@@ -1198,7 +1579,7 @@ export function SessionScreen() {
             <View style={styles.splitDivider} />
             <View style={styles.splitPane}>
               <ErrorBoundary fallbackTitle="Terminal error">
-                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} />
               </ErrorBoundary>
             </View>
           </View>
@@ -1209,6 +1590,9 @@ export function SessionScreen() {
               scrollViewRef={scrollViewRef}
               claudeReady={claudeReady}
               onSelectOption={handleSelectOption}
+              onSubmitMultiQuestion={handleSubmitMultiQuestion}
+              allowMultiQuestion={allowMultiQuestion}
+              allowSingleMultiSelect={allowSingleMultiSelect}
               isCliMode={isCliMode}
               selectedIds={selectedIds}
               isSelecting={isSelecting}
@@ -1234,6 +1618,9 @@ export function SessionScreen() {
               scrollViewRef={scrollViewRef}
               claudeReady={claudeReady}
               onSelectOption={handleSelectOption}
+              onSubmitMultiQuestion={handleSubmitMultiQuestion}
+              allowMultiQuestion={allowMultiQuestion}
+              allowSingleMultiSelect={allowSingleMultiSelect}
               isCliMode={isCliMode}
               selectedIds={selectedIds}
               isSelecting={isSelecting}
@@ -1247,8 +1634,11 @@ export function SessionScreen() {
             />
           </ErrorBoundary>
         ) : (
+          // #6003 — interactive for a user-shell PTY (xterm stdin + terminal_input);
+          // read-only mirror for claude-tui (terminal_output renders via the
+          // write-callback path, onData stays disabled so no input is forwarded).
           <ErrorBoundary fallbackTitle="Terminal error">
-            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} />
           </ErrorBoundary>
         )
       )}
@@ -1269,17 +1659,13 @@ export function SessionScreen() {
       {/* Input area */}
       <InputBar
         ref={inputRef}
-        inputText={inputText}
         onChangeText={handleChangeText}
         onSend={handleSend}
         onInterrupt={sendInterrupt}
-        onClearTerminal={() => { clearTerminalBuffer(); terminalRef.current?.clear(); }}
+        onClearTerminal={handleClearTerminal}
         onKeyPress={handleKeyPress}
         enterToSend={enterToSend}
-        onToggleEnterMode={() => {
-          const key = viewMode === 'terminal' ? 'terminalEnterToSend' : 'chatEnterToSend';
-          updateInputSettings({ [key]: !inputSettings[key] });
-        }}
+        onToggleEnterMode={handleToggleEnterMode}
         isStreaming={!!streamingMessageId}
         claudeReady={claudeReady}
         viewMode={viewMode}
@@ -1315,22 +1701,14 @@ export function SessionScreen() {
         onClose={() => setShowCreateModal(false)}
       />
 
-      {/* Diff viewer modal */}
-      <DiffViewer
-        visible={showDiffViewer}
-        onClose={() => setShowDiffViewer(false)}
-      />
-
-      {/* Checkpoint timeline modal */}
-      <CheckpointView
-        visible={showCheckpoints}
-        onClose={() => setShowCheckpoints(false)}
-      />
-
-      {/* Git view modal */}
-      <GitView
-        visible={showGitView}
-        onClose={() => setShowGitView(false)}
+      {/* Secondary modal panels (#5654): diff viewer, checkpoints, git view */}
+      <SessionPanels
+        showDiffViewer={showDiffViewer}
+        onCloseDiffViewer={closeDiffViewer}
+        showCheckpoints={showCheckpoints}
+        onCloseCheckpoints={closeCheckpoints}
+        showGitView={showGitView}
+        onCloseGitView={closeGitView}
       />
 
       {/* Attachment picker bottom sheet */}
@@ -1428,7 +1806,10 @@ const styles = StyleSheet.create({
     flex: 0,
     paddingHorizontal: 16,
     paddingVertical: 8,
+    // #5634 — 44pt minimum touch target for the primary view-mode tabs.
+    minHeight: 44,
     alignItems: 'center',
+    justifyContent: 'center',
     borderRadius: 8,
   },
   modeButtonActive: {
@@ -1584,6 +1965,9 @@ const styles = StyleSheet.create({
     alignItems: 'center' as const,
     gap: 8,
   },
+  reconnectingSpinner: {
+    marginRight: 4,
+  },
   reconnectDisconnect: {
     paddingHorizontal: 10,
     paddingVertical: 4,
@@ -1623,6 +2007,18 @@ const styles = StyleSheet.create({
     color: COLORS.accentRed,
     fontSize: 12,
     fontWeight: '600',
+  },
+  // #4879: subtle "Session stopped." status strip. Uses the muted
+  // backgroundCard surface (greyed out, NOT the red/orange accent banners
+  // reserved for crashes / warnings) and textMuted copy so the operator
+  // reads it as a calm confirmation rather than an error.
+  stoppedBanner: {
+    backgroundColor: COLORS.backgroundCard,
+  },
+  stoppedBannerText: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    fontWeight: '500',
   },
   sheetOverlay: {
     flex: 1,

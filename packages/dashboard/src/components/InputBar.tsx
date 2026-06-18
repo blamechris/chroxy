@@ -5,15 +5,16 @@
  * Supports file picker (@ trigger), attachment chips, slash command picker (/ trigger),
  * image paste/drag-drop (#1288), and image preview thumbnails (#1289).
  */
-import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent } from 'react'
+import { useState, useEffect, useMemo, useId, useRef, useCallback, type KeyboardEvent, type ChangeEvent, type ClipboardEvent, type DragEvent, type UIEvent } from 'react'
 import { FilePicker, type FilePickerItem } from './FilePicker'
 import { AttachmentChip } from './AttachmentChip'
 import { SlashCommandPicker } from './SlashCommandPicker'
 import { ImageThumbnail } from './ImageThumbnail'
 import type { SlashCommand, EvaluatorResultPayload } from '../store/types'
 import { filterImageFiles } from '../utils/image-utils'
-import { shouldCollapsePaste } from '@chroxy/store-core'
+import { shouldCollapsePaste, findActiveMarkerIds } from '@chroxy/store-core'
 import { PastedTextChip } from './PastedTextChip'
+import { tokenizeThinkingKeywords } from './thinking-keyword-tokens'
 
 /**
  * Convert a clipboard HTML payload to plain text. Used as a fallback when
@@ -86,6 +87,11 @@ export interface InputBarProps {
     isRecording: boolean
     isAvailable: boolean
     transcript: string
+    /** #5668 — last recognition/helper error (e.g. mic permission denied,
+     * helper spawn failure). Captured by `useVoiceInput` but previously
+     * never surfaced, so a failed recording flipped the mic off silently.
+     * Cleared on the next `start()`. */
+    error: string | null
     start: () => void
     stop: () => void
   }
@@ -106,6 +112,44 @@ export interface InputBarProps {
   onInspectPastedText?: (id: number) => void
   /** #3797 — × handler that removes the chip and strips the inline marker. */
   onRemovePastedText?: (id: number) => void
+  /**
+   * #3698 — terminal-style Up/Down history. **Oldest-first** list of the
+   * user's previously sent message texts in the current session (i.e. the
+   * natural array order from `messages.filter(m => m.type === 'user_input')`).
+   * Up at caret==0 (or at caret==value.length with the caret collapsed)
+   * recalls the most recent message; further Ups walk further back; Down
+   * walks forward toward the most recent; Down past the newest restores the
+   * in-progress draft.
+   *
+   * The component treats index `length-1` as the newest entry and `0` as the
+   * oldest — this matches how App.tsx already orders messages by arrival, so
+   * the caller can pass the filtered array verbatim without a reverse() copy.
+   *
+   * History is per-session: pass a fresh array reference when the active
+   * session changes (App.tsx already does this since `messages` comes
+   * from `getActiveSessionState()`). The component resets its cycling
+   * index whenever this prop's array identity changes — so a fresh
+   * session, a newly sent message (history grows), or any other reason
+   * the parent rebuilds the array will start the next Up at the newest
+   * entry rather than continuing from a stale index.
+   *
+   * Omit the prop (or pass `undefined`) to disable history navigation
+   * entirely — Up/Down then revert to plain cursor movement.
+   */
+  userMessageHistory?: string[]
+  /**
+   * #4306 — when true, render the inline "thinking keyword" highlight
+   * overlay (matches `ultrathink`, `megathink`, `think harder`, `think hard`,
+   * `think` case-insensitively at word boundaries). Caller MUST gate this
+   * on whether the active session's provider actually supports the
+   * server-side escalation — currently the SDK provider only. Highlighting
+   * on a provider that ignores the keyword would imply an escalation the
+   * server does not perform; see #4306's "do not lie to the user" gate.
+   *
+   * When omitted / false, the overlay renders nothing and the textarea
+   * behaves exactly as before (plain visible text, no transparency hack).
+   */
+  highlightThinkingKeywords?: boolean
 }
 
 type EvaluatorState =
@@ -114,11 +158,51 @@ type EvaluatorState =
   | { kind: 'result', result: EvaluatorResultPayload }
   | { kind: 'error', message: string }
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText }: InputBarProps) {
+// #5610 — push-to-talk hold threshold. Space must be held for at least this
+// long (with no other keys pressed) before voice capture begins; a quicker
+// tap types a normal space. 300ms matches Claude Code's affordance and is
+// long enough to feel deliberate without lagging a fast typist.
+const PTT_HOLD_MS = 300
+
+// #5666 — typing-cadence guard. If the user pressed a non-Space key within this
+// window, the next Space is treated as ordinary inter-word typing and takes the
+// native path (no suppress/arm). Push-to-talk only makes sense from an idle
+// hold; a typist tapping Space mid-sentence should never trigger the
+// suppress-then-reinsert path that races fast keystrokes. 250ms comfortably
+// covers fast typing (sub-200ms inter-key) while still letting a deliberate
+// Space-hold from a pause arm dictation.
+const PTT_TYPING_GUARD_MS = 250
+
+// #5610 — internal push-to-talk arming state, tracked on a ref so the
+// repeated keydown events that fire while a key is held don't restart the
+// arm timer or re-suppress characters incorrectly.
+//   - 'idle'      : nothing happening (the common case)
+//   - 'arming'    : Space is down, its character has been suppressed, and the
+//                   hold timer is counting toward PTT_HOLD_MS
+//   - 'recording' : the timer fired while still held → voice capture is live
+type PttState = 'idle' | 'arming' | 'recording'
+
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
   const dictationStartRef = useRef(0)
+  // #5610 — text that sat *after* the dictation anchor when capture began.
+  // The transcript is spliced between the prefix and this suffix so caret-
+  // anchored dictation (push-to-talk mid-draft) doesn't truncate everything
+  // past the caret. For the mic button the anchor is the end of the value, so
+  // the suffix is empty and behaviour is unchanged.
+  const dictationSuffixRef = useRef('')
+  // #5610 — push-to-talk (hold Space). `pttStateRef` tracks arming/recording
+  // so repeated keydown events (browser key-repeat while Space is held) don't
+  // re-arm or restart the timer. `pttTimerRef` holds the pending hold timer
+  // so we can cancel it on early release or on any disqualifying keypress.
+  const pttStateRef = useRef<PttState>('idle')
+  const pttTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // #5666 — timestamp (performance.now()) of the last non-Space keydown, used
+  // by the typing-cadence guard above. Initialised to -Infinity so the very
+  // first Space (no prior typing) is free to arm PTT.
+  const lastNonSpaceKeyAtRef = useRef(-Infinity)
   const [filePickerOpen, setFilePickerOpen] = useState(false)
   const [fileSelectedIndex, setFileSelectedIndex] = useState(0)
   const [pickerOpen, setPickerOpen] = useState(false)
@@ -126,9 +210,50 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
   const shortcutsId = useId()
   const textareaRef = useRef<HTMLTextAreaElement>(null)
 
+  // #4306 — thinking-keyword highlight overlay. Mirror div behind a
+  // transparent-text textarea; identical box metrics in CSS (font, padding,
+  // line-height, white-space) so the overlay's <span>-wrapped keywords line
+  // up pixel-perfect with the user's literal text.
+  //
+  // We hold an overlayRef and `useLayoutEffect`-sync `scrollTop` from the
+  // textarea so multi-line drafts scroll the highlight along with the cursor.
+  // (No `useState` for scrollTop — we'd re-render on every keystroke for a
+  // value the DOM owns.)
+  const overlayRef = useRef<HTMLDivElement>(null)
+  const tokens = useMemo(
+    () => highlightThinkingKeywords ? tokenizeThinkingKeywords(value) : null,
+    [value, highlightThinkingKeywords]
+  )
+
   // #3068 — manual prompt evaluator state machine. Lives in InputBar because
   // applying a rewrite has to swap the textarea value and re-focus it.
   const [evaluatorState, setEvaluatorState] = useState<EvaluatorState>({ kind: 'idle' })
+
+  // #3698 — terminal-style Up/Down history cycling. `historyIndex === null`
+  // means we're not currently cycling (so the next Up may stash the in-
+  // progress draft and step to the newest entry). A non-null index walks
+  // newest → oldest as the user presses Up; Down steps back toward newest,
+  // and Down past index 0 exits cycling and restores the stashed draft.
+  //
+  // Both pieces of state are intentionally ephemeral — they live in the
+  // component (not the Zustand store) because they're pure UI state with no
+  // persistence requirement. See the prop JSDoc above for the per-session
+  // reset behaviour driven by `userMessageHistory` array identity.
+  const [historyIndex, setHistoryIndex] = useState<number | null>(null)
+  const [draftBeforeCycle, setDraftBeforeCycle] = useState<string>('')
+
+  // Reset the cycling state whenever the history array reference changes.
+  // This covers two natural triggers:
+  //   1. The user sends a message → App.tsx pushes a new user_input entry,
+  //      which rebuilds the filtered history array → identity changes → reset.
+  //   2. The user switches sessions → activeSessionId flips →
+  //      getActiveSessionState() returns a different messages array → reset.
+  // We intentionally key only on the array reference, not its contents, so we
+  // don't pay a deep-compare cost on every render.
+  useEffect(() => {
+    setHistoryIndex(null)
+    setDraftBeforeCycle('')
+  }, [userMessageHistory])
 
   const handleEvaluate = useCallback(async () => {
     if (!onEvaluate) return
@@ -213,10 +338,42 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     })
   }, [attachments])
 
+  // #3903 — `canSubmit` mirrors every input mode that send() (or the parent's
+  // handleSend) would actually dispatch: text, file attachments, image
+  // attachments, or collapsed-paste blocks. Used both as the busy-state Send-
+  // visibility gate (replaces the old `value.trim()`-only check, which hid
+  // Send for attachment-only follow-ups while a turn was in flight) and as
+  // a defensive guard inside send() itself. Images and pasted-text live in
+  // App-state, not in InputBar's send() body, but they ride along on the
+  // wire (App.tsx:1008) — so the button must light up for them too.
+  //
+  // #3984 — pasted blocks are *only* dispatched when their `[Pasted text #N]`
+  // marker appears in `value` (App.tsx calls expandPasteMarkers(text, blocks),
+  // which is a regex sweep over `text`). If the user deletes the marker but
+  // the chip persists, treating `pastedTextBlocks.length > 0` as dispatchable
+  // makes Send fire `onSend('')` and silently drop the paste. Gate paste
+  // contribution to canSubmit on whether at least one block id is actually
+  // referenced by an in-text marker.
+  const hasReferencedPaste = useMemo(() => {
+    if (!pastedTextBlocks || pastedTextBlocks.length === 0) return false
+    const active = findActiveMarkerIds(value)
+    if (active.size === 0) return false
+    for (const blk of pastedTextBlocks) {
+      if (active.has(blk.id)) return true
+    }
+    return false
+  }, [value, pastedTextBlocks])
+  const canSubmit = useMemo(() => {
+    const hasText = value.trim().length > 0
+    const hasAtts = (dedupedAttachments?.length ?? 0) > 0
+    const hasImgs = (imageAttachments?.length ?? 0) > 0
+    return hasText || hasAtts || hasImgs || hasReferencedPaste
+  }, [value, dedupedAttachments, imageAttachments, hasReferencedPaste])
+
   const send = useCallback(() => {
     const trimmed = value.trim()
     const hasAtts = dedupedAttachments && dedupedAttachments.length > 0
-    if (!trimmed && !hasAtts) return
+    if (!canSubmit) return
     if (hasAtts) {
       onSend(trimmed, dedupedAttachments)
     } else {
@@ -230,10 +387,16 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     // #3068: drop any visible evaluator panel — its draft has been sent so the
     // result no longer applies to the current input value.
     setEvaluatorState({ kind: 'idle' })
+    // #3698: sending exits cycling mode. The userMessageHistory effect already
+    // resets when the parent rebuilds the array, but doing it here too makes
+    // the local state consistent immediately (before the parent re-render
+    // pushes the new history through).
+    setHistoryIndex(null)
+    setDraftBeforeCycle('')
     if (textareaRef.current) {
       textareaRef.current.style.height = 'auto'
     }
-  }, [value, onSend, dedupedAttachments])
+  }, [value, onSend, dedupedAttachments, canSubmit])
 
   const selectCommand = useCallback((name: string) => {
     setValue(`/${name} `)
@@ -283,7 +446,220 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     return true
   }, [value, attachments, imageAttachments, pastedTextBlocks, onRemoveAttachment, onRemoveImage, onRemovePastedText, setValue])
 
+  // #3698 — recall a history entry by depth (0 = newest, 1 = one back, …).
+  // Walks the textarea value through the parent's setValue (so controlled
+  // mode stays in sync) and parks the caret at the end on the next animation
+  // frame so the user can immediately edit at the tail of the recalled text —
+  // matches shell `up-arrow` UX. The array is oldest-first, so depth maps to
+  // `length - 1 - depth`.
+  const recallHistoryAtDepth = useCallback((depth: number) => {
+    const entries = userMessageHistory
+    if (!entries || entries.length === 0) return
+    const arrayIdx = entries.length - 1 - depth
+    if (arrayIdx < 0 || arrayIdx >= entries.length) return
+    const entry = entries[arrayIdx]
+    if (entry === undefined) return
+    setValue(entry)
+    setHistoryIndex(depth)
+    // Park the caret at the end on the next frame, after React applies the
+    // controlled-value update. Without rAF the setSelectionRange runs before
+    // the new value is reflected in textarea.value, so the caret ends up at
+    // the wrong spot.
+    requestAnimationFrame(() => {
+      const t = textareaRef.current
+      if (!t) return
+      const end = t.value.length
+      t.setSelectionRange(end, end)
+    })
+  }, [userMessageHistory, setValue])
+
+  // #5610 — push-to-talk helpers.
+  //
+  // Disambiguation approach: on the first Space keydown we *suppress* the
+  // native space character (preventDefault) and arm a PTT_HOLD_MS timer.
+  //   - released before the timer fires → it was a tap → re-insert the single
+  //     space we suppressed (so quick taps still type a space).
+  //   - timer fires while still held → start voice capture; the space stays
+  //     suppressed and subsequent key-repeat keydowns are also suppressed so
+  //     the field is not flooded with spaces while recording.
+  // Suppress-then-reinsert (rather than insert-then-delete) avoids any race
+  // where a dropped or doubled character could slip through under React's
+  // controlled value.
+
+  // Insert a literal space at the current caret (used when a hold turns out to
+  // be a tap). Splices into the controlled value and restores the caret just
+  // past the inserted space on the next frame.
+  const insertSpaceAtCaret = useCallback(() => {
+    const el = textareaRef.current
+    // #5666 — read the LIVE value and caret off the DOM element, not the
+    // closure `value`/captured caret. In controlled mode `setValue` is a plain
+    // string callback (no functional updater), so the closure `value` lags the
+    // DOM whenever subsequent keystrokes are still flushing through React — the
+    // splice would then run against stale text and clobber the caret the user
+    // has already moved past. The textarea's own `.value`/`.selectionStart`
+    // always reflect the freshest committed state.
+    const live = el?.value ?? value
+    const start = el?.selectionStart ?? live.length
+    const end = el?.selectionEnd ?? live.length
+    const next = live.slice(0, start) + ' ' + live.slice(end)
+    setValue(next)
+    const caret = start + 1
+    requestAnimationFrame(() => {
+      const t = textareaRef.current
+      if (!t) return
+      t.setSelectionRange(caret, caret)
+    })
+  }, [value, setValue])
+
+  // Cancel a pending arm timer (no-op if none is pending).
+  const clearPttTimer = useCallback(() => {
+    if (pttTimerRef.current !== null) {
+      clearTimeout(pttTimerRef.current)
+      pttTimerRef.current = null
+    }
+  }, [])
+
+  // Space keydown — the arming path. Returns true if the event was handled as
+  // a PTT trigger (caller should not fall through to normal Space handling).
+  const handlePttKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>): boolean => {
+    if (e.key !== ' ' && e.key !== 'Spacebar') return false
+    // Only plain Space (no modifiers) and only when voice is actually wired
+    // and usable arms PTT. With a modifier the Space is a shortcut, not text.
+    if (!voiceInput?.isAvailable || disabled) return false
+    if (e.metaKey || e.ctrlKey || e.altKey) return false
+
+    // Already armed or recording → swallow key-repeat so the field isn't
+    // flooded with spaces while the key is held.
+    if (pttStateRef.current !== 'idle') {
+      e.preventDefault()
+      return true
+    }
+
+    // #5666 — typing-cadence guard. If the user pressed another key very
+    // recently they're typing words, not holding to dictate. Take the native
+    // space path (no suppress, no arm) so fast typing never hits the deferred
+    // re-insert race that reorders characters around spaces.
+    if (performance.now() - lastNonSpaceKeyAtRef.current < PTT_TYPING_GUARD_MS) {
+      return false
+    }
+
+    // #5668 — a recording is already live (e.g. the mic button was clicked).
+    // Don't arm PTT on top of it: arming would let a later release call
+    // voiceInput.stop() and kill a recording PTT never started. Treat Space as
+    // an ordinary character instead.
+    if (voiceInput.isRecording) return false
+
+    // First Space down: suppress the native character, remember the caret as
+    // the dictation anchor, and start the hold timer.
+    e.preventDefault()
+    const el = textareaRef.current
+    const anchor = el?.selectionStart ?? value.length
+    dictationStartRef.current = anchor
+    // Capture the text after the caret so the transcript splices in place when
+    // recording starts (rather than truncating the rest of the draft).
+    dictationSuffixRef.current = value.slice(el?.selectionEnd ?? anchor)
+    pttStateRef.current = 'arming'
+    clearPttTimer()
+    pttTimerRef.current = setTimeout(() => {
+      pttTimerRef.current = null
+      // Still arming (not cancelled by release / another key) → go live.
+      if (pttStateRef.current === 'arming') {
+        pttStateRef.current = 'recording'
+        voiceInput?.start()
+      }
+    }, PTT_HOLD_MS)
+    return true
+  }, [voiceInput, disabled, value, clearPttTimer])
+
+  // Cancel an in-progress arm because the user pressed some *other* key — they
+  // were typing, not holding to talk. Re-inserts the space we suppressed so no
+  // character is lost. No-op once recording has started (a different key while
+  // recording does not abort capture — release of Space ends it).
+  const cancelPttArmOnOtherKey = useCallback(() => {
+    if (pttStateRef.current === 'arming') {
+      clearPttTimer()
+      pttStateRef.current = 'idle'
+      insertSpaceAtCaret()
+    }
+  }, [clearPttTimer, insertSpaceAtCaret])
+
+  // Space keyup — the release path.
+  const handlePttKeyUp = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    if (e.key !== ' ' && e.key !== 'Spacebar') return
+    if (pttStateRef.current === 'arming') {
+      // Released before the threshold → it was a tap. Re-insert the space.
+      clearPttTimer()
+      pttStateRef.current = 'idle'
+      insertSpaceAtCaret()
+    } else if (pttStateRef.current === 'recording') {
+      // Released while live → stop capture; the transcript-merge effect
+      // splices the result in at dictationStartRef.
+      pttStateRef.current = 'idle'
+      voiceInput?.stop()
+    }
+  }, [clearPttTimer, insertSpaceAtCaret, voiceInput])
+
+  // Blur — if focus leaves mid-arm or mid-record, clean up so the mic doesn't
+  // stay open. We do NOT re-insert a space on blur-while-arming: the user has
+  // navigated away, and silently appending a space to a draft they've left is
+  // more surprising than dropping the still-suppressed tap.
+  const handlePttBlur = useCallback(() => {
+    if (pttStateRef.current === 'arming') {
+      clearPttTimer()
+      pttStateRef.current = 'idle'
+    } else if (pttStateRef.current === 'recording') {
+      pttStateRef.current = 'idle'
+      voiceInput?.stop()
+    }
+  }, [clearPttTimer, voiceInput])
+
+  // #5610 — keep the live `stop` in a ref so the unmount cleanup below (which
+  // runs only on true unmount, hence the empty deps) doesn't fire a stale
+  // closure. `useVoiceInput` re-memoises start/stop when the engine is selected
+  // after mount, so a cleanup pinned to the first render would otherwise call
+  // the engine==='none' no-op stop and leave the mic open.
+  const voiceStopRef = useRef<(() => void) | undefined>(undefined)
+  voiceStopRef.current = voiceInput?.stop
+
+  // Unmount cleanup — never leave a timer or an open mic behind.
+  useEffect(() => {
+    return () => {
+      if (pttTimerRef.current !== null) {
+        clearTimeout(pttTimerRef.current)
+        pttTimerRef.current = null
+      }
+      if (pttStateRef.current === 'recording') {
+        voiceStopRef.current?.()
+      }
+      pttStateRef.current = 'idle'
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
+
   const handleKeyDown = useCallback((e: KeyboardEvent<HTMLTextAreaElement>) => {
+    // #5610 — push-to-talk. Space (no modifiers) arms voice capture on hold;
+    // any other key while arming means the user is typing, so cancel the arm
+    // and re-insert the suppressed space. Run this before the pickers so the
+    // arming Space isn't consumed by another handler. The pickers don't bind
+    // Space, so there's no conflict; we still guard the arm path on voice
+    // availability inside handlePttKeyDown.
+    if (e.key === ' ' || e.key === 'Spacebar') {
+      if (handlePttKeyDown(e)) return
+    } else {
+      // #5666 — record typing activity so a Space arriving right after this key
+      // takes the native path instead of arming PTT (see PTT_TYPING_GUARD_MS).
+      // Only *text-producing* keys count as typing: a single-character key with
+      // no command modifier (letters, digits, punctuation). Navigation/editing
+      // keys (Arrow, Backspace, Enter, Escape, Tab) and bare modifiers (Shift)
+      // must NOT poison the guard — otherwise arrowing the caret into place and
+      // then holding Space to dictate mid-draft (the caret-anchored dictation
+      // gesture) would be wrongly blocked.
+      if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
+        lastNonSpaceKeyAtRef.current = performance.now()
+      }
+      cancelPttArmOnOtherKey()
+    }
+
     // Slash command picker keyboard handling
     if (pickerOpen) {
       if (e.key === 'Escape') {
@@ -292,12 +668,17 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         return
       }
       if (e.key === 'Enter' && !e.metaKey && !e.ctrlKey) {
-        e.preventDefault()
         if (filteredCommands.length > 0) {
+          e.preventDefault()
           const idx = Math.min(selectedIndex, filteredCommands.length - 1)
           selectCommand(filteredCommands[idx]!.name)
+          return
         }
-        return
+        // #4342 — empty filtered list ("No commands found"). Close the picker
+        // and fall through to the normal Enter handling below (sendOnEnter,
+        // modifier checks, newline). Pre-fix this branch always
+        // preventDefault'd + return'd, trapping the user with no way to send.
+        closePicker()
       }
       if (e.key === 'ArrowDown') {
         e.preventDefault()
@@ -338,6 +719,66 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       }
     }
 
+    // #3698 — terminal-style Up/Down history. Only fires when:
+    //   - both pickers are closed (handled above, which return early),
+    //   - history exists,
+    //   - selection is collapsed (no text selected — preserves shift-select),
+    //   - and the caret is at a textarea boundary (start for Up, end for Down,
+    //     mirroring the "first line / last line" heuristic).
+    // We use absolute caret positions (`selectionStart === 0` for Up,
+    // `selectionStart === value.length` for Down) so a multi-line draft only
+    // recalls history when the user is *already* at the very top or bottom —
+    // line-up / line-down movement inside the textarea still works normally.
+    if ((e.key === 'ArrowUp' || e.key === 'ArrowDown') && userMessageHistory && userMessageHistory.length > 0) {
+      const ta = e.currentTarget
+      const start = ta.selectionStart
+      const end = ta.selectionEnd
+      const collapsed = start === end
+      const atStart = start === 0
+      const atEnd = start === value.length
+      if (collapsed) {
+        if (e.key === 'ArrowUp' && (atStart || atEnd)) {
+          // `historyIndex` is a depth: 0 = newest, length-1 = oldest. Up walks
+          // deeper into history; we silently swallow Up at the oldest entry
+          // rather than wrapping (matches bash/zsh).
+          if (historyIndex === null) {
+            e.preventDefault()
+            setDraftBeforeCycle(value)
+            recallHistoryAtDepth(0)
+            return
+          }
+          if (historyIndex < userMessageHistory.length - 1) {
+            e.preventDefault()
+            recallHistoryAtDepth(historyIndex + 1)
+            return
+          }
+          // At the oldest entry — preventDefault so the caret doesn't jump out
+          // of the textarea, but don't update value.
+          e.preventDefault()
+          return
+        }
+        if (e.key === 'ArrowDown' && atEnd && historyIndex !== null) {
+          e.preventDefault()
+          if (historyIndex > 0) {
+            recallHistoryAtDepth(historyIndex - 1)
+          } else {
+            // Down past the newest entry → exit cycling, restore draft.
+            setValue(draftBeforeCycle)
+            setHistoryIndex(null)
+            // Mirror recallHistoryAtDepth's caret-at-end policy so the user
+            // can immediately edit the restored draft without re-positioning.
+            requestAnimationFrame(() => {
+              const t = textareaRef.current
+              if (!t) return
+              const endPos = t.value.length
+              t.setSelectionRange(endPos, endPos)
+            })
+          }
+          return
+        }
+      }
+    }
+
     if (e.key === 'Enter') {
       if (sendOnEnter && !e.shiftKey) {
         e.preventDefault()
@@ -347,6 +788,21 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         send()
       }
     } else if (e.key === 'Escape') {
+      // #3698 — while cycling history, Escape exits cycling and restores the
+      // stashed draft instead of firing the interrupt. Once cycling is reset,
+      // Escape resumes its original behaviour (`onInterrupt`).
+      if (historyIndex !== null) {
+        e.preventDefault()
+        setValue(draftBeforeCycle)
+        setHistoryIndex(null)
+        requestAnimationFrame(() => {
+          const t = textareaRef.current
+          if (!t) return
+          const endPos = t.value.length
+          t.setSelectionRange(endPos, endPos)
+        })
+        return
+      }
       e.preventDefault()
       onInterrupt()
     } else if ((e.key === 'l' || e.key === 'L') && (e.metaKey || e.ctrlKey) && !e.altKey && !e.shiftKey) {
@@ -358,11 +814,27 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
         e.preventDefault()
       }
     }
-  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer])
+  }, [pickerOpen, filePickerOpen, filteredFiles, fileSelectedIndex, selectFile, send, onInterrupt, closePicker, selectCommand, filteredCommands, selectedIndex, sendOnEnter, clearComposer, userMessageHistory, value, historyIndex, draftBeforeCycle, recallHistoryAtDepth, setValue, handlePttKeyDown, cancelPttArmOnOtherKey])
 
   const handleChange = useCallback((e: ChangeEvent<HTMLTextAreaElement>) => {
     const newValue = e.target.value
     setValue(newValue)
+
+    // #3698 — any direct user edit exits cycling. We only reset when the new
+    // value isn't the one we just recalled (recallHistoryAtDepth's setValue()
+    // flows through the parent and re-renders, but onChange itself doesn't
+    // fire for controlled updates). The cheap guard is "did `historyIndex`
+    // get set?" — programmatic recall sets it; real user typing leaves it
+    // untouched before this handler runs. The recalled-text equality check
+    // covers the edge case where the user retypes the recalled string
+    // verbatim (rare).
+    if (historyIndex !== null && userMessageHistory) {
+      const recalled = userMessageHistory[userMessageHistory.length - 1 - historyIndex]
+      if (newValue !== recalled) {
+        setHistoryIndex(null)
+        setDraftBeforeCycle('')
+      }
+    }
 
     // Slash command detection: "/" at start of input
     if (slashCommands && newValue.startsWith('/')) {
@@ -417,7 +889,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       ? outerHeight
       : outerHeight - paddingY - borderY
     el.style.height = assignedHeight + 'px'
-  }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger])
+  }, [slashCommands, pickerOpen, closePicker, onSlashTrigger, filePickerFiles, filePickerOpen, onFileTrigger, historyIndex, userMessageHistory, setValue])
 
   // Merge voice transcript into input value via effect (not during render)
   const prevTranscriptRef = useRef('')
@@ -426,7 +898,11 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       prevTranscriptRef.current = voiceInput.transcript
       const prefix = value.slice(0, dictationStartRef.current)
       const separator = prefix.length > 0 && !prefix.endsWith(' ') ? ' ' : ''
-      setValue(prefix + separator + voiceInput.transcript)
+      // #5610 — preserve any text that followed the anchor so caret-anchored
+      // dictation splices in place instead of truncating the rest of the draft.
+      const suffix = dictationSuffixRef.current
+      const trailing = suffix.length > 0 && !suffix.startsWith(' ') ? ' ' : ''
+      setValue(prefix + separator + voiceInput.transcript + trailing + suffix)
     }
     if (!voiceInput?.isRecording && prevTranscriptRef.current) {
       prevTranscriptRef.current = ''
@@ -439,6 +915,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       voiceInput.stop()
     } else {
       dictationStartRef.current = value.length
+      dictationSuffixRef.current = ''
       voiceInput.start()
     }
   }, [voiceInput, value.length])
@@ -524,6 +1001,15 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
       onImageDrop(imageFiles)
     }
   }, [disabled, onImageDrop])
+
+  // #4403 — keep the overlay scroll-sync handler referentially stable so
+  // every keystroke (while the highlight overlay is on) doesn't allocate a
+  // fresh function. Only `overlayRef` is read, which is a ref, so this has
+  // no closure deps.
+  const handleOverlayScrollSync = useCallback((e: UIEvent<HTMLTextAreaElement>) => {
+    const ov = overlayRef.current
+    if (ov) ov.scrollTop = e.currentTarget.scrollTop
+  }, [])
 
   const hasImages = imageAttachments && imageAttachments.length > 0
 
@@ -618,18 +1104,64 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
           onDismiss={dismissEvaluator}
         />
       )}
-      <textarea
-        ref={textareaRef}
-        value={value}
-        onChange={handleChange}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        disabled={disabled}
-        placeholder={isBusy ? 'Type to send follow-up...' : placeholder}
-        aria-label="Message input"
-        aria-describedby={shortcutsId}
-        rows={1}
-      />
+      {/* #5668 — surface voice recognition/helper failures instead of
+          flipping the mic off silently. `voiceInput.error` is cleared on the
+          next start(), so retrying dismisses it. role="alert" announces it to
+          screen readers (the failure is otherwise invisible). */}
+      {voiceInput?.error && (
+        <div className="voice-error" data-testid="voice-error" role="alert">
+          <span className="voice-error-icon" aria-hidden="true">⚠</span>
+          <span className="voice-error-text">{voiceInput.error}</span>
+        </div>
+      )}
+      <div className={`input-bar-textarea-wrap${tokens ? ' has-overlay' : ''}`}>
+        {tokens && (
+          // Mirror div behind the textarea (#4306). Identical box metrics
+          // (font, padding, line-height, white-space) are enforced in CSS
+          // via the .input-bar-textarea-wrap.has-overlay selector pair so
+          // the overlay characters land in the same x/y as the textarea's
+          // own characters. aria-hidden because the textarea is the
+          // authoritative input — the overlay is purely visual.
+          <div
+            ref={overlayRef}
+            className="input-bar-textarea-overlay"
+            aria-hidden="true"
+            data-testid="thinking-keyword-overlay"
+          >
+            {tokens.map((tok, i) => (
+              tok.kind === 'keyword'
+                ? <span key={i} className="thinking-keyword" data-testid="thinking-keyword">{tok.text}</span>
+                : <span key={i}>{tok.text}</span>
+            ))}
+            {/* Trailing whitespace handling: a trailing newline at the end
+                of the textarea content doesn't create a new line in a
+                contenteditable-style div without an explicit terminator.
+                Append a zero-width space inside a span so the overlay's
+                height matches the textarea's when the user ends with `\n`. */}
+            {value.endsWith('\n') && <span>{'​'}</span>}
+          </div>
+        )}
+        <textarea
+          ref={textareaRef}
+          value={value}
+          onChange={handleChange}
+          onKeyDown={handleKeyDown}
+          onKeyUp={handlePttKeyUp}
+          onBlur={handlePttBlur}
+          onPaste={handlePaste}
+          // Scroll-sync the overlay to the textarea so multi-line drafts
+          // keep keyword highlights aligned as the user scrolls within the
+          // textarea. Direct DOM write (not state) — same reason as the
+          // auto-resize logic in handleChange. Handler is memoised (#4403)
+          // so it doesn't churn a fresh function per keystroke.
+          onScroll={tokens ? handleOverlayScrollSync : undefined}
+          disabled={disabled}
+          placeholder={isBusy ? 'Type to send follow-up...' : placeholder}
+          aria-label="Message input"
+          aria-describedby={shortcutsId}
+          rows={1}
+        />
+      </div>
       <div className="input-bar-actions">
         {voiceInput?.isAvailable && (
           <button
@@ -676,7 +1208,13 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
             busy states. */}
         {(isStreaming || isBusy) ? (
           <>
-            {value.trim() && (
+            {/* #3903 — gate on `canSubmit` (mirrors send()) so the Send
+                button surfaces for attachment-only follow-ups (file picks,
+                images, collapsed pastes) — not just typed text. Pre-fix,
+                dragging a file in while a turn was in flight showed only
+                Stop; the queue affordance was unreachable until the user
+                typed a character or waited for the turn to end. */}
+            {canSubmit && (
               <button
                 data-testid="send-button"
                 className="btn-send"

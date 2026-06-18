@@ -12,7 +12,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 vi.mock('./crypto', () => ({
   createKeyPair: vi.fn(() => ({ publicKey: 'mock-pub', secretKey: 'mock-sec' })),
   deriveSharedKey: vi.fn(),
-  encrypt: vi.fn(),
+  // #5555 — return a parseable envelope so the eager-path burst (which is
+  // encrypted once encryptionState is active) serialises to valid JSON.
+  encrypt: vi.fn((_json: string, _key: unknown, n: number) => ({ type: 'encrypted', d: 'cipher', n })),
   decrypt: vi.fn(),
   generateConnectionSalt: vi.fn(() => 'mock-salt'),
   deriveConnectionKey: vi.fn(() => new Uint8Array(32)),
@@ -30,8 +32,10 @@ import {
   setConnectionContext,
   clearDeltaBuffers,
   stopHeartbeat,
+  prepareEagerKeyExchange,
+  setPendingKeyPair,
 } from './message-handler'
-import { createKeyPair } from './crypto'
+import { createKeyPair, deriveSharedKey, deriveConnectionKey } from './crypto'
 import type { ConnectionState } from './types'
 
 // ---------------------------------------------------------------------------
@@ -94,6 +98,9 @@ describe('auth_ok handler', () => {
     vi.clearAllMocks()
     localStorage.clear()
     clearDeltaBuffers()
+    // #5555 — reset the module-level eager keypair so a prior test's
+    // prepareEagerKeyExchange() doesn't bleed into the discrete-fallback cases.
+    setPendingKeyPair(null)
 
     mockSocket = createMockSocket()
     store = createMockStore({
@@ -181,6 +188,34 @@ describe('auth_ok handler', () => {
       }
     })
 
+    // #4497 / #4477 — server advertises its configured stream-stall
+    // inactivity window so the chip can humanise the headline copy
+    // ("No response for 5 minutes — retry?") instead of a generic phrase.
+    it('stores streamStallTimeoutMs when present', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ streamStallTimeoutMs: 5 * 60 * 1000 }), ctx as any)
+
+      expect(store.getState().streamStallTimeoutMs).toBe(5 * 60 * 1000)
+    })
+
+    it('leaves streamStallTimeoutMs null when older server omits the field', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any)
+
+      expect(store.getState().streamStallTimeoutMs).toBeNull()
+    })
+
+    it('ignores malformed streamStallTimeoutMs values (incl. 0 "disabled" sentinel)', () => {
+      // 0 is the protocol's explicit "stall timer disabled" sentinel —
+      // treat it the same as absent so the chip falls back to the static
+      // phrase rather than rendering "No response for 0 seconds".
+      for (const bad of [0, -1, NaN, Infinity, -Infinity, '5m', null]) {
+        const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+        handleMessage(createAuthOkMessage({ streamStallTimeoutMs: bad }), ctx as any)
+        expect(store.getState().streamStallTimeoutMs).toBeNull()
+      }
+    })
+
     it('clears connection error and retry count', () => {
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
       handleMessage(createAuthOkMessage(), ctx as any)
@@ -251,6 +286,136 @@ describe('auth_ok handler', () => {
       )
       const keyExchange = sends.find((s: Record<string, unknown>) => s.type === 'key_exchange')
       expect(keyExchange).toEqual({ type: 'key_exchange', publicKey: 'mock-pub', salt: 'mock-salt' })
+    })
+  })
+
+  // #5555 (auth_bootstrap) — when the server advertises capabilities.authBootstrap
+  // it pushes the provider/slash/agent lists in an auth_bootstrap burst, so the
+  // client skips the 3 connect-time list requests. Without the flag (old server)
+  // it requests them as before. Both folded permission modes and the skip apply.
+  describe('auth_bootstrap (#5555)', () => {
+    function typesFrom(socket: WebSocket) {
+      return (socket.send as ReturnType<typeof vi.fn>).mock.calls
+        .map((c: unknown[]) => JSON.parse(c[0] as string).type)
+    }
+
+    it('skips the 3 list requests when capabilities.authBootstrap is set (unencrypted)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ capabilities: { authBootstrap: true } }), ctx as any)
+
+      const types = typesFrom(mockSocket)
+      expect(types).not.toContain('list_providers')
+      expect(types).not.toContain('list_slash_commands')
+      expect(types).not.toContain('list_agents')
+    })
+
+    it('still requests the 3 lists when authBootstrap is absent (old server)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage(), ctx as any)
+
+      const types = typesFrom(mockSocket)
+      expect(types).toContain('list_providers')
+      expect(types).toContain('list_slash_commands')
+      expect(types).toContain('list_agents')
+    })
+
+    it('folds availablePermissionModes from auth_ok into the store', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({ availablePermissionModes: [{ id: 'approve', label: 'Approve' }] }),
+        ctx as any,
+      )
+      expect(store.getState().availablePermissionModes).toEqual([{ id: 'approve', label: 'Approve' }])
+    })
+
+    it('applies a subsequent auth_bootstrap burst to the provider/slash/agent stores', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ capabilities: { authBootstrap: true } }), ctx as any)
+      handleMessage(
+        {
+          type: 'auth_bootstrap',
+          providers: [{ name: 'anthropic' }],
+          slashCommands: [{ name: 'clear', source: 'builtin' }],
+          agents: [{ name: 'reviewer', source: 'project' }],
+        },
+        ctx as any,
+      )
+      expect(store.getState().availableProviders).toEqual([{ name: 'anthropic' }])
+      expect(store.getState().slashCommands).toEqual([{ name: 'clear', source: 'builtin' }])
+      expect(store.getState().customAgents).toEqual([{ name: 'reviewer', source: 'project' }])
+    })
+  })
+
+  // #5555 (eager key exchange) — when onopen prepared the keypair eagerly and
+  // the server returns serverPublicKey in auth_ok, the client derives the
+  // shared key inline and sends the post-auth burst immediately (no discrete
+  // key_exchange RTT). When the server omits serverPublicKey (old server), the
+  // client falls back to the discrete handshake.
+  describe('eager key exchange (#5555)', () => {
+    function sendsFrom(socket: WebSocket) {
+      return (socket.send as ReturnType<typeof vi.fn>).mock.calls.map(
+        (c: unknown[]) => JSON.parse(c[0] as string),
+      )
+    }
+
+    it('derives the shared key inline and sends the burst when serverPublicKey is present', () => {
+      // Simulate onopen having prepared the eager keypair.
+      prepareEagerKeyExchange()
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({ encryption: 'required', serverPublicKey: 'server-pub-key' }),
+        ctx as any,
+      )
+
+      // Eager path derives from the server's public key + our stashed secret.
+      expect(deriveSharedKey).toHaveBeenCalledWith('server-pub-key', 'mock-sec')
+      expect(deriveConnectionKey).toHaveBeenCalled()
+
+      const types = sendsFrom(mockSocket).map((s) => s.type)
+      // No discrete key_exchange frame — the burst flows immediately. The
+      // post-auth burst (list_providers/list_slash_commands/list_agents) goes
+      // out as encrypted envelopes because encryptionState is now active, so
+      // we see 'encrypted' frames, not plaintext list_* types.
+      expect(types).not.toContain('key_exchange')
+      expect(types).not.toContain('list_providers') // encrypted now
+      expect(types.filter((t) => t === 'encrypted').length).toBeGreaterThanOrEqual(3)
+    })
+
+    it('falls back to the discrete key_exchange when serverPublicKey is absent (old server)', () => {
+      prepareEagerKeyExchange()
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      // encryption required but NO serverPublicKey → old server.
+      handleMessage(createAuthOkMessage({ encryption: 'required' }), ctx as any)
+
+      const types = sendsFrom(mockSocket).map((s) => s.type)
+      expect(types).toContain('key_exchange')
+      expect(types).not.toContain('list_providers')
+      // Did not derive eagerly.
+      expect(deriveSharedKey).not.toHaveBeenCalled()
+    })
+
+    // #5555 follow-up (hardening) — a non-empty MALFORMED serverPublicKey passes
+    // the shared-parser's empty/non-string filter but makes deriveSharedKey
+    // throw. The eager derivation must be wrapped so the throw degrades to the
+    // discrete handshake instead of tearing the connection down.
+    it('falls back to the discrete key_exchange when eager deriveSharedKey throws (malformed key)', () => {
+      ;(deriveSharedKey as ReturnType<typeof vi.fn>).mockImplementationOnce(() => {
+        throw new Error('Invalid peer public key: expected length 32, got 5')
+      })
+      prepareEagerKeyExchange()
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({ encryption: 'required', serverPublicKey: 'bogus' }),
+        ctx as any,
+      )
+
+      const types = sendsFrom(mockSocket).map((s) => s.type)
+      // Degraded to the discrete handshake — connection NOT torn down.
+      expect(types).toContain('key_exchange')
+      // Burst not sent in plaintext (still gated behind the discrete exchange).
+      expect(types).not.toContain('list_providers')
+      // Socket stays open (no close on a recoverable eager failure).
+      expect(mockSocket.close).not.toHaveBeenCalled()
     })
   })
 
@@ -327,16 +492,18 @@ describe('auth_ok handler', () => {
       expect(store.getState().serverMode).toBe('cli')
     })
 
-    it('sets serverMode to terminal when serverMode is terminal', () => {
-      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
-      handleMessage(createAuthOkMessage({ serverMode: 'terminal' }), ctx as any)
-
-      expect(store.getState().serverMode).toBe('terminal')
-    })
-
     it('sets serverMode to null for unknown mode', () => {
+      // #4810: the wire protocol only emits 'cli'; 'terminal' and other
+      // values are treated as unknown (previously 'terminal' was accepted).
       const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
       handleMessage(createAuthOkMessage({ serverMode: 'unknown_mode' }), ctx as any)
+
+      expect(store.getState().serverMode).toBeNull()
+    })
+
+    it('sets serverMode to null when serverMode is terminal (dead branch, #4810)', () => {
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(createAuthOkMessage({ serverMode: 'terminal' }), ctx as any)
 
       expect(store.getState().serverMode).toBeNull()
     })

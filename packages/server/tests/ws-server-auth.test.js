@@ -299,6 +299,66 @@ describe('WsServer GET /version auth', () => {
   })
 })
 
+describe('WsServer POST /pair-discord primary-class auth (#5513)', () => {
+  let server
+  let pm
+
+  afterEach(() => {
+    if (server) { server.close(); server = null }
+    if (pm) { pm.destroy(); pm = null }
+  })
+
+  async function startWithPairing() {
+    const { PairingManager } = await import('../src/pairing.js')
+    pm = new PairingManager({ wsUrl: 'wss://example.com' })
+    server = new WsServer({
+      port: 0,
+      apiToken: 'primary-tok',
+      cliSession: createMockSession(),
+      authRequired: true,
+      pairingManager: pm,
+    })
+    // Stub the actual Discord post so the test never touches the network.
+    server._postPairLinkToDiscord = async (link) => ({ posted: true, expiresInSeconds: 60, _link: link })
+    const port = await startServerAndGetPort(server)
+    return port
+  }
+
+  it('accepts the primary token and posts a fresh gated link', async () => {
+    const port = await startWithPairing()
+    const res = await fetch(`http://127.0.0.1:${port}/pair-discord`, {
+      method: 'POST',
+      headers: { 'Authorization': 'Bearer primary-tok' },
+    })
+    assert.equal(res.status, 200)
+    const body = await res.json()
+    assert.equal(body.posted, true)
+    assert.ok(Number.isFinite(body.expiresInSeconds))
+  })
+
+  it('rejects a pairing-bound session token (#5533)', async () => {
+    const port = await startWithPairing()
+    // Mint a real pairing-bound session token via the linking-mode pairing.
+    const { sessionToken } = pm.validatePairing(pm.currentPairingId)
+    assert.ok(sessionToken, 'sanity: pairing issued a session token')
+    assert.equal(pm.isSessionTokenValid(sessionToken), true)
+
+    const res = await fetch(`http://127.0.0.1:${port}/pair-discord`, {
+      method: 'POST',
+      headers: { 'Authorization': `Bearer ${sessionToken}` },
+    })
+    assert.equal(res.status, 403, 'a scoped session token must not trigger a Discord post')
+    const body = await res.json()
+    assert.equal(body.error, 'primary_token_required')
+  })
+
+  it('rejects an unauthenticated request', async () => {
+    const port = await startWithPairing()
+    const res = await fetch(`http://127.0.0.1:${port}/pair-discord`, { method: 'POST' })
+    assert.equal(res.status, 403)
+  })
+})
+
 describe('WsServer with authRequired: true (default behavior)', () => {
   let server
 
@@ -1222,6 +1282,170 @@ describe('WsServer with TokenManager', () => {
     assert.ok(typeof rotated.expiresAt === 'number' || rotated.expiresAt === null)
 
     ws.close()
+    tokenManager.destroy()
+  })
+
+  it('revoke severs user-shells + forces re-auth, sending a token-less token_rotated (#6006)', async () => {
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'initial-token', graceMs: 5000 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'initial-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+    // Inject a sessionManager spy AFTER start() (start wires forwarding via
+    // sessionManager.on) — the revoke handler reads this.sessionManager lazily
+    // and reaches destroyAllUserShellSessions via optional chaining.
+    let severCalls = []
+    server.sessionManager = { destroyAllUserShellSessions: (reason) => { severCalls.push(reason); return 1 } }
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'initial-token' })
+    await waitForMessage(messages, 'auth_ok')
+
+    // REVOKE (not a scheduled rotation)
+    tokenManager.revoke()
+
+    const rotated = await waitForMessage(messages, 'token_rotated')
+    assert.equal(rotated.reason, 'revoke', 'revoke is flagged so the client takes the re-auth path')
+    assert.equal(rotated.token, undefined, 'the new token is NEVER pushed on a revoke')
+
+    // Shells were severed with the audit reason 'revoked'
+    assert.deepEqual(severCalls, ['revoked'], 'destroyAllUserShellSessions called once with reason')
+
+    // Every server-side connection is de-authed → privileged ops now require
+    // re-auth (the dispatch gate in _handleMessage rejects until authenticated).
+    const stillAuthed = [...server.clients.values()].some(c => c.authenticated)
+    assert.equal(stillAuthed, false, 'all connections forced back to unauthenticated')
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
+  it('after revoke, the de-authed socket cannot regain authority by replaying the old token (#6006)', async () => {
+    // End-to-end proof of the bypass closure: once revoke de-auths the socket,
+    // the dispatch gate (_handleMessage) routes every message back through auth,
+    // so a privileged op (e.g. create_session for a user-shell) is unreachable
+    // until re-auth — and re-auth with the OLD token fails (no grace), so the
+    // attacker cannot regain authority on the still-open socket. (Re-auth with
+    // the CURRENT token is covered by the new-token test below.)
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'initial-token', graceMs: 5000 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'initial-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+    // No sessionManager override: the revoke handler tolerates a null
+    // sessionManager via optional chaining (sever count 0). This test is about
+    // the re-auth gate, not the sever path (covered by the test above).
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'initial-token' })
+    await waitForMessage(messages, 'auth_ok')
+
+    tokenManager.revoke()
+    await waitForMessage(messages, 'token_rotated')
+    messages.length = 0 // discard the initial auth_ok + the revoke notice
+
+    // Re-auth with the OLD (revoked) token must FAIL — no grace replay.
+    send(ws, { type: 'auth', token: 'initial-token' })
+    const fail = await waitForMessage(messages, 'auth_fail')
+    assert.ok(fail, 'old token is rejected immediately after revoke')
+    // The socket is still unauthenticated, so it cannot issue privileged ops.
+    assert.equal([...server.clients.values()].some(c => c.authenticated), false)
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
+  it('scheduled rotation does NOT sever shells or force re-auth (#6006)', async () => {
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'initial-token', graceMs: 5000 })
+
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'initial-token',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    const port = await startServerAndGetPort(server)
+    let severCalls = []
+    server.sessionManager = { destroyAllUserShellSessions: (reason) => { severCalls.push(reason); return 0 } }
+
+    const { ws, messages } = await createClient(port, false)
+    send(ws, { type: 'auth', token: 'initial-token' })
+    await waitForMessage(messages, 'auth_ok')
+
+    // Default rotate() → reason 'scheduled'
+    tokenManager.rotate()
+    await waitForMessage(messages, 'token_rotated')
+
+    assert.deepEqual(severCalls, [], 'a scheduled rotation must NOT sever shells')
+    const stillAuthed = [...server.clients.values()].every(c => c.authenticated)
+    assert.equal(stillAuthed, true, 'green-path clients stay authenticated through a re-key')
+
+    ws.close()
+    tokenManager.destroy()
+  })
+
+  it('scheduled rotation refreshes authToken for encrypted clients only; revoke does not (#6012)', async () => {
+    // #6012 — on a scheduled push the encrypted client receives the new token, so
+    // its recorded authToken is refreshed → it can open a NEW shell (#6004 gate)
+    // without reconnecting. Unencrypted clients get no token (authToken stays
+    // stale → must reconnect). Revoke must NEVER refresh authToken (it de-auths
+    // and pushes no token), so a compromised connection can't gain currency.
+    const { TokenManager } = await import('../src/token-manager.js')
+    const tokenManager = new TokenManager({ token: 'tok-0', graceMs: 5000 })
+    const mockSession = createMockSession()
+    server = new WsServer({
+      port: 0,
+      apiToken: 'tok-0',
+      cliSession: mockSession,
+      authRequired: true,
+      tokenManager,
+    })
+    await startServerAndGetPort(server)
+    server.sessionManager = { destroyAllUserShellSessions: () => 0 }
+    // Skip real encryption/serialization — we only assert server-side authToken.
+    server._send = () => {}
+
+    const encWs = { readyState: 1, close: () => {}, terminate: () => {} }
+    const plainWs = { readyState: 1, close: () => {}, terminate: () => {} }
+    server.clients.set(encWs, { id: 'e', authenticated: true, isPrimaryToken: true, encryptionState: { sharedKey: 'k' }, authToken: 'tok-0' })
+    server.clients.set(plainWs, { id: 'p', authenticated: true, isPrimaryToken: true, encryptionState: null, authToken: 'tok-0' })
+
+    // Scheduled rotation
+    const tok1 = tokenManager.rotate()
+    assert.equal(server.clients.get(encWs).authToken, tok1, 'encrypted client authToken refreshed to current')
+    assert.equal(server.clients.get(plainWs).authToken, 'tok-0', 'unencrypted client NOT refreshed — must reconnect')
+
+    // Linkage to the #6004 create gate (real TokenManager): the refreshed
+    // encrypted client's token now satisfies isCurrentToken → it can open a NEW
+    // shell without reconnecting; the stale unencrypted client still fails it.
+    assert.equal(tokenManager.isCurrentToken(server.clients.get(encWs).authToken), true,
+      'refreshed encrypted client passes the #6004 current-token gate')
+    assert.equal(tokenManager.isCurrentToken(server.clients.get(plainWs).authToken), false,
+      'stale unencrypted client still fails the #6004 gate (must reconnect)')
+
+    // Revoke must NOT refresh authToken (and de-auths instead)
+    const tok2 = tokenManager.revoke()
+    assert.equal(server.clients.get(encWs).authToken, tok1, 'revoke leaves authToken stale (no currency granted)')
+    assert.notEqual(server.clients.get(encWs).authToken, tok2)
+    assert.equal(server.clients.get(encWs).authenticated, false, 'revoke de-auths the connection')
+
     tokenManager.destroy()
   })
 

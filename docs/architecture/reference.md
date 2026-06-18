@@ -10,7 +10,9 @@ For essential dev workflow, see [CLAUDE.md](/CLAUDE.md).
 | BaseSession | `src/base-session.js` | Shared session logic (model, permissions, lifecycle) |
 | BaseTunnelAdapter | `src/tunnel/base.js` | Base class with shared recovery logic (backoff, events) |
 | CheckpointManager | `src/checkpoint-manager.js` | Checkpoint creation/restore with git state |
+| ChroxyChannelServer | `src/channels/chroxy-channel-server.js` | Stdio MCP channel server (`claude --channels` prototype, #3952) — research preview |
 | CLI | `src/cli.js` | `init`, `start`, `config`, `tunnel setup` commands |
+| ClaudeChannelSession | `src/claude-channel-session.js` | `claude --channels` MCP-transport provider (research preview, #3953 scaffold — `start()` throws until #3954 bridge) |
 | CliSession | `src/cli-session.js` | Claude Code headless executor (stream-json) |
 | CloudflareTunnelAdapter | `src/tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | Config | `src/config.js` | Schema validation + merge (CLI > ENV > file > defaults) |
@@ -284,8 +286,10 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `session_error` | Session operation error |
 | `session_list` | All available sessions |
 | `session_switched` | Switched to active session |
+| `session_cost_threshold_crossed` | Soft warning when cumulative cost crosses a configured threshold (default $5); fires once per session |
 | `session_timeout` | Session destroyed due to idle timeout |
 | `session_updated` | Session metadata changed (e.g., rename) |
+| `session_usage` | Per-session cumulative token + cost totals (inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled) emitted after each priced `result` event |
 | `session_warning` | Session about to timeout (with remainingMs) |
 | `slash_commands` | Available slash command definitions |
 | `status` | Connection status (connected: true/false) |
@@ -319,7 +323,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 - `agent_spawned` fires when the Task tool is detected (description truncated to 200 chars); `agent_completed` fires per-agent when the turn's `result` arrives or on process crash/destroy
 - `plan_started` fires on `EnterPlanMode` tool; `plan_ready` fires on `ExitPlanMode`, includes `allowedPrompts` payload — both are transient events (not recorded in history or replayed)
 - `key_exchange` implements ECDH key exchange for end-to-end encryption; after `auth_ok`, client and server exchange public keys, derive a shared secret, and encrypt all subsequent messages; `auth_ok` includes `encryption: 'required'` when encryption is enabled or `encryption: 'disabled'` when turned off; disable with `--no-encrypt`
-- `session_list` includes `provider` (provider name) and `capabilities` (feature flags from the provider adapter interface) per session
+- `session_list` includes `provider` (provider name) and `capabilities` (feature flags from the provider adapter interface) per session. Also carries an optional `cumulativeUsage` snapshot per entry (#4091 / #4072) — same six-field shape as the `session_usage` event payload — so a reconnecting client sees the running cost without waiting for the next live event.
 - `auth` accepts optional `deviceInfo: { deviceId, deviceName, deviceType, platform }` for multi-client awareness
 - `auth_ok` includes `clientId` (assigned ID) and `connectedClients` (list of all connected clients)
 - `client_joined` broadcasts when a new client authenticates; `client_left` on disconnect
@@ -327,6 +331,8 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 - `set_permission_mode` accepts optional `confirmed: true` (required for `auto` mode); without it, server responds with `confirm_permission_mode` challenge containing a `warning` string
 - `set_permission_rules` accepts `{ rules: [{ tool, decision }], sessionId? }` where `tool` must be one of the eligible tools (`Read`, `Write`, `Edit`, `NotebookEdit`, `Glob`, `Grep`) and `decision` is `'allow'` or `'deny'`; tools in `NEVER_AUTO_ALLOW` (`Bash`, `Task`, `WebFetch`, `WebSearch`) are rejected; sending an empty array clears all rules; server broadcasts `permission_rules_updated` with the current rules to all session clients
 - `cost_update` sent after each query with `{ sessionCost, totalCost, budget }` where budget is null if no cost budget configured
+- `session_usage` (#4072) sent after each priced `result` event with `{ sessionId, cumulativeUsage: { inputTokens, outputTokens, cacheReadTokens, cacheCreationTokens, costUsd, turnsBilled } }`; drives the dashboard sidebar cost badge (#4073) and mobile session-header badge (#4074); subscription-billed providers (cost: null) do not emit
+- `session_cost_threshold_crossed` (#4075) fires ONCE per session when cumulativeUsage.costUsd >= the configured `costThresholdUsd` (default $5; set to 0 to disable); payload `{ sessionId, costUsd, thresholdUsd }`; dashboard renders a dismissible toast and mobile renders a CostThresholdBanner
 - `budget_warning` sent when session cost exceeds 80% of budget; `budget_exceeded` when budget is hit (session paused); `resume_budget` from client to unpause; `budget_resumed` broadcast by server after successful resume
 - `session_updated` payload: `{ type: 'session_updated', sessionId, name }` — broadcast globally when a session is renamed (user-initiated or auto-label)
 - `session_warning` sent before session timeout with `{ sessionId, name, reason, message, remainingMs }`; `session_timeout` when session is destroyed
@@ -352,7 +358,9 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | File | Purpose |
 |------|---------|
 | `base-session.js` | Shared session logic (model, permissions, lifecycle) |
+| `channels/chroxy-channel-server.js` | Stdio MCP channel server (`claude --channels` prototype, #3952) — research preview |
 | `checkpoint-manager.js` | Checkpoint creation/restore with git state |
+| `claude-channel-session.js` | `claude --channels` MCP-transport provider (research-preview scaffold, #3953) |
 | `cli.js` | CLI commands (init, start, config, tunnel setup) |
 | `cli-session.js` | Claude Code headless executor (stream-json) |
 | `config.js` | Config schema validation + merge precedence |
@@ -469,7 +477,9 @@ The web dashboard is a React + Vite SPA served by the Node.js server. It shares 
 | `src/components/InputBar.tsx` | Text input with slash commands, file attachments |
 | `src/components/TerminalView.tsx` | xterm.js terminal emulator |
 | `src/components/MultiTerminalView.tsx` | Multi-tab terminal container |
-| `src/components/Sidebar.tsx` | Session list, navigation, resize |
+| `src/components/Sidebar.tsx` | Session list, navigation, resize; hosts the pluggable bottom panel slot |
+| `src/components/SidebarPanelSlot.tsx` | Pluggable bottom-panel slot (tab strip, collapse, drag/keyboard resize) — see "Sidebar panel slot" below |
+| `src/components/SidebarTokenView.tsx` | First slot occupant: token-usage view (aggregate totals, cache-hit ratio, per-provider + per-session breakdown) |
 | `src/components/SessionBar.tsx` | Session tab strip |
 | `src/components/StatusBar.tsx` | Connection status, cost, model info |
 | `src/components/FooterBar.tsx` | Bottom bar with actions |
@@ -530,6 +540,38 @@ The web dashboard is a React + Vite SPA served by the Node.js server. It shares 
 | **Theme** | |
 | `src/theme/tokens.ts` | Generated design tokens (colors, spacing) |
 
+#### Sidebar panel slot (#4303)
+
+The left sidebar is split into two stacked sections: the existing session tree
+on top and a **pluggable panel slot** (`SidebarPanelSlot`) below it. The slot
+manages the tab strip, collapse toggle, collapsed-header live metric, and
+drag/keyboard resize so individual views don't have to.
+
+Views are registered **declaratively** — adding one is a one-entry append to the
+`panelViews` array in `Sidebar.tsx`, with no changes to slot code. Each view is a
+`SidebarPanelView`:
+
+```ts
+interface SidebarPanelView {
+  id: string                                 // stable id, used for persistence + selection
+  label: string                              // tab strip label
+  render: () => ReactNode                    // body, rendered only when selected
+  collapsedHeaderMetric?: () => ReactNode    // one live metric shown when the panel is collapsed
+}
+```
+
+Slot state — selected view id, collapsed flag, and height — is persisted through
+the existing scoped-persistence layer (`chroxy_persist_sidebar_panel_{view,collapsed,height}`)
+so it survives reload. A stale `selectedViewId` (e.g. a view removed in a later
+build) falls back to the first registered view rather than rendering empty.
+
+The **token-usage view** (`SidebarTokenView`) is the first occupant: it reads the
+in-memory `cumulativeUsage` carried on each `SessionInfo` (no new wire/event work)
+and renders aggregate totals, a cache-hit ratio, a per-provider breakdown, and a
+click-to-activate per-session breakdown. claude-tui sessions surface `—` with a
+tooltip since their PTY interface exposes no token counts. Future occupants (MCP
+status, skills registry, slash-command palette, etc.) slot in the same way.
+
 ### Store Core (`packages/store-core/`)
 
 Shared store logic extracted for reuse between mobile app and dashboard.
@@ -564,6 +606,9 @@ Tauri tray application wrapping the web dashboard with native integrations.
 |------|---------|
 | `CLAUDE.md` | Essential dev workflow and conventions |
 | `docs/architecture/reference.md` | This file — detailed component/protocol reference |
+| `docs/architecture/claude-channels-provider-spike.md` | Spike findings + go/no-go for the proposed `claude-channel` provider (#3951) |
+| `packages/server/src/channels/PACKAGING.md` | Plugin-packaging plan for `chroxy-channel` (marketplace path that removes the dev flag, #3956) |
+| `docs/providers.md` | Per-provider setup, capability matrix, and known limits (incl. `claude-channel` research preview) |
 | `docs/named-tunnel-guide.md` | Named tunnel setup guide |
 | `docs/self-hosting-guide.md` | Self-hosting requirements and deployment |
 | `docs/guides/container-isolation.md` | Container isolation guide (sandbox, Docker, combined) |

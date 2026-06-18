@@ -573,7 +573,7 @@ HighlightedCode.displayName = 'HighlightedCode';
  *
  *  `messageTextStyle` is threaded through to FormattedTextBlock so the
  *  parent can control the base text appearance. */
-export function FormattedResponse({ content, messageTextStyle }: { content: string; messageTextStyle: StyleProp<TextStyle> }) {
+function FormattedResponseImpl({ content, messageTextStyle }: { content: string; messageTextStyle: StyleProp<TextStyle> }) {
   const blocks = useMemo(() => splitContentBlocks(content.trim()), [content]);
 
   if (blocks.length === 0) return null;
@@ -594,6 +594,19 @@ export function FormattedResponse({ content, messageTextStyle }: { content: stri
     </View>
   );
 }
+
+/**
+ * #5516 (epic #5514): memoize the whole markdown render so a parent re-render
+ * that DOESN'T change `content` skips the block split + per-line markdown parse
+ * (`FormattedTextBlock`, which is otherwise un-memoized). `messageTextStyle` is
+ * a stable StyleSheet ref at every call site, so a shallow prop compare is
+ * exact. The primary defence against re-parse is MessageBubble's own memo
+ * (non-tail bubbles never re-render); this is belt-and-suspenders for the cases
+ * where the bubble itself must re-render (selection toggle, expiry tick) but
+ * the markdown body is unchanged.
+ */
+export const FormattedResponse = React.memo(FormattedResponseImpl);
+FormattedResponse.displayName = 'FormattedResponse';
 
 export const md = StyleSheet.create({
   container: {

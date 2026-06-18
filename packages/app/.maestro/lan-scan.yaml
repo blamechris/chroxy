@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: LAN scan flow
 ---
 
@@ -12,16 +12,35 @@ name: LAN scan flow
 - tapOn:
     text: ".*Scan Local Network.*"
 
-# Verify scanning indicator appears
-- assertVisible:
-    text: ".*Scanning.*"
+# The scan can finish almost instantly (e.g. a chroxy server answers on the
+# first probe), so the transient "Scanning... NN%" text is racy to assert on
+# its own. Accept any of: the in-progress indicator, the results header
+# ("Found N server(s) on LAN", uppercased via textTransform), or the empty
+# result ("No servers found on port ...").
+- extendedWaitUntil:
+    visible:
+      text: ".*(Scanning|[Ff]ound|FOUND).*"
+    timeout: 5000
 
-# Take screenshot during scan
+# Take screenshot during/just after the scan
 - takeScreenshot: lan-scan-active
 
-# Wait for scan to make progress
-- waitForAnimationToEnd:
-    timeout: 8000
+# Wait for the scan to reach a terminal state (results, empty, or error).
+# "No servers found" and "Scan failed" both appear as testIDs so we use those
+# anchors rather than fragile text regexes. Fall back to id: checks in order:
+#   lan-scan-error-title  — scan threw (error path)
+#   lan-scan-empty-title  — no servers found (empty path)
+# One of the two must become visible; happy-path (servers listed) is also
+# covered because the discovered-servers section appears before these views.
+- extendedWaitUntil:
+    anyOf:
+      - visible:
+          id: "lan-scan-error-title"
+      - visible:
+          id: "lan-scan-empty-title"
+      - visible:
+          text: ".*([Ff]ound|FOUND).*"
+    timeout: 30000
 
 # Take screenshot of results (may show servers or empty)
 - takeScreenshot: lan-scan-results

@@ -8,13 +8,21 @@
 import { statSync, realpathSync, readFileSync } from 'fs'
 import { homedir } from 'os'
 import { resolve, relative, sep } from 'path'
+import { createLogger } from './logger.js'
+
+const log = createLogger('handler-utils')
 
 // -- Permission modes --
+// `description` is a short, plain-English sentence the dashboard
+// surfaces as a tooltip / inline hint (#4013). Keep terse — the picker
+// space is limited and screen readers re-narrate the whole string.
+// The auto-mode description deliberately names `--dangerously-skip-permissions`
+// so users searching for that Claude CLI flag find the chroxy equivalent.
 export const PERMISSION_MODES = [
-  { id: 'approve', label: 'Approve' },
-  { id: 'acceptEdits', label: 'Accept Edits' },
-  { id: 'auto', label: 'Auto (bypass)' },
-  { id: 'plan', label: 'Plan' },
+  { id: 'approve', label: 'Approve', description: 'Default. Every tool call gates on your approval in the dashboard or mobile app.' },
+  { id: 'acceptEdits', label: 'Accept Edits', description: 'Auto-approve Read/Write/Edit/NotebookEdit/Glob/Grep. Bash, MCP, and other tools still gate on approval.' },
+  { id: 'auto', label: 'Auto (skip all prompts)', description: 'Auto-approve every tool call without prompting. Equivalent to `claude --dangerously-skip-permissions`.' },
+  { id: 'plan', label: 'Plan', description: 'Plan mode — Claude is asked to plan before acting; each tool call still gates on approval.' },
 ]
 export const ALLOWED_PERMISSION_MODE_IDS = new Set(PERMISSION_MODES.map((m) => m.id))
 
@@ -194,6 +202,51 @@ const FORBIDDEN_HOME_SUBDIRS = new Set([
  * trailing separator first to normalize. Found by Copilot review on
  * PR #2808.
  */
+// #5835: a client "views" a session iff it's its active session or in its
+// subscribed set — the SAME viewing clause ws-forwarding's terminalSubscriberFilter
+// uses to scope terminal_output/terminal_size broadcasts. Every PTY-touching
+// terminal handler (terminal_size send, terminal_resize, terminal_input) gates on
+// this so a client that merely knows a session id — but isn't watching it — can't
+// drive or leak its terminal (#5840 review; extended to terminal_input in #5842).
+// Shared here so the session-handlers and input-handlers copies can't drift.
+//
+// #6030: this is ALSO the single source of truth for the answer-authorization
+// invariant "who may ANSWER a permission/question == who could have RECEIVED it".
+// The broadcaster's recipient predicate (_matchesSession), the unbound
+// AskUserQuestion answer guard (input-handlers.js, #4788), and the unbound
+// permission-response guard (settings-handlers.js, #4798) all route through this
+// SAME function — so if the receiver set is ever widened (a new viewer class, the
+// LAN shared-session epic), the answer guards follow automatically and cannot
+// drift back into the cross-session answer-hijack vector #4788/#4798 closed.
+export function isSessionViewer(client, sid) {
+  return client.activeSessionId === sid ||
+    Boolean(client.subscribedSessionIds && client.subscribedSessionIds.has(sid))
+}
+
+// #5985b (epic #5982): is this session entry a general-purpose user shell? The
+// session-scoped viewer/primary-claim gates that suffice for the claude-tui
+// mirror are NOT enough for a root shell — terminal_subscribe (output exfil),
+// terminal_resize, and terminal_input must additionally require the PRIMARY
+// token class (swarm-audit findings C1/C4). Reads the positive `isUserShell`
+// class discriminator (false on every existing session type), so the gates that
+// call this are inert until the UserShellSession provider lands (#5983).
+export function isUserShellSession(entry) {
+  return entry?.session?.constructor?.isUserShell === true
+}
+
+// #5835 / audit P1-2: the single predicate for who RECEIVES a session's live
+// terminal mirror — opted into the terminal (`terminalSessionIds`) AND a viewer
+// of the session (`isSessionViewer`). The delivery filter
+// (ws-forwarding's terminalSubscriberFilter) and the coalescer gate
+// (ws-server's _syncTerminalMirror) MUST use the SAME predicate: gate-true /
+// filter-false wastes the coalescer on nobody, and gate-false / filter-true is
+// a black terminal for a real viewer. Both inlined it before and could drift;
+// shared here so they can't.
+export function terminalMirrorRecipient(client, sid) {
+  return Boolean(client.terminalSessionIds && client.terminalSessionIds.has(sid)) &&
+    isSessionViewer(client, sid)
+}
+
 export function isPathWithin(absPath, baseDir) {
   if (absPath === baseDir) return true
   // Normalize: strip a trailing separator so filesystem root and
@@ -347,7 +400,7 @@ export function clientHasCapability(ws, capability) {
 
 /** Broadcast client_focus_changed to other clients when a client's active session changes */
 export function broadcastFocusChanged(client, sessionId, ctx) {
-  ctx.broadcast(
+  ctx.transport.broadcast(
     { type: 'client_focus_changed', clientId: client.id, sessionId, timestamp: Date.now() },
     (c) => c.id !== client.id
   )
@@ -359,9 +412,20 @@ export function broadcastFocusChanged(client, sessionId, ctx) {
  * (dashboard, other mobile clients, etc.) without requiring explicit subscribe_sessions.
  */
 export function autoSubscribeOtherClients(sessionId, excludeWs, ctx) {
-  for (const [clientWs, c] of ctx.clients) {
+  for (const [clientWs, c] of ctx.transport.clients) {
     if (c.authenticated && clientWs !== excludeWs) {
-      c.subscribedSessionIds.add(sessionId)
+      // #5563: route through the index-maintaining helper so the
+      // sessionId→clients reverse index stays in sync. Falls back to a bare
+      // add for fixtures whose ctx predates the helper.
+      if (typeof ctx.transport.subscribeClient === 'function') {
+        ctx.transport.subscribeClient(c, sessionId)
+      } else {
+        // lint-ignore-ws-index-mutation: guarded fixture fallback. This
+        // else-branch only runs for legacy test fixtures whose ctx predates the
+        // #5563 index-maintaining subscribeClient helper; production always takes
+        // the helper path above, so this bare add can't drift the reverse index.
+        c.subscribedSessionIds.add(sessionId)
+      }
     }
   }
 }
@@ -390,7 +454,99 @@ export function resolveSession(ctx, msg, client) {
 
   // Delegate to sessionManager — its getSession handles null/undefined sid
   // (real SessionManager returns null, cliSession adapter returns default entry).
-  return ctx.sessionManager?.getSession(sid) ?? null
+  return ctx.sessions?.sessionManager?.getSession(sid) ?? null
+}
+
+/**
+ * Send a `session_error` envelope to a WebSocket client (#4773, #4809).
+ *
+ * All `ctx.transport.send(ws, { type: 'session_error', message })` sites across the
+ * handler modules build the same two-field payload by hand. Centralising the
+ * shape here means a future schema tweak (adding `code`, `recoverable`,
+ * `sessionId`, etc.) lands in one place instead of being scattered across
+ * every handler. As of #4809 only ~11 deliberate-soft-fallback sites remain
+ * in src/handlers/ — every one of them carries an extra field beyond
+ * `message` (the `input_conflict` category, the SESSION_TOKEN_MISMATCH
+ * `buildSessionTokenMismatchPayload` spread, or the create-session `code`
+ * field) so they cannot use this helper without extending its signature.
+ *
+ * Routed through `ctx.transport.send` rather than `ws.send` so it stays compatible
+ * with the existing handler tests (which monkey-patch `ctx.transport.send` and
+ * inspect the captured payloads). In production both surfaces ultimately
+ * call `ws.send(JSON.stringify(msg))` via WsServer._send, so behaviour is
+ * identical.
+ *
+ * @param {WebSocket} ws - Target WebSocket connection
+ * @param {object} ctx - Handler context with `send(ws, msg)`
+ * @param {string} message - Human-readable, user-facing error message
+ */
+export function sendSessionError(ws, ctx, message) {
+  if (!ws || !ctx || typeof ctx.transport?.send !== 'function') return
+  ctx.transport.send(ws, { type: 'session_error', message })
+}
+
+/**
+ * Resolve a session and emit a canonical "No active session" error on miss (#4773).
+ *
+ * Wraps the 13-times-verbatim handler pattern:
+ *
+ *   const entry = resolveSession(ctx, msg, client)
+ *   if (!entry) {
+ *     ctx.transport.send(ws, { type: 'session_error', message: 'No active session' })
+ *     return
+ *   }
+ *
+ * Returning `null` on miss (after emitting the envelope) preserves the
+ * existing call-site idiom — callers stay `if (!entry) return`. On a hit
+ * the helper is a pure pass-through to `resolveSession`, including its
+ * session-token-binding enforcement (a bound client asking for a different
+ * session resolves to `null` and triggers the same error envelope, matching
+ * the pre-refactor behaviour).
+ *
+ * @param {WebSocket} ws - Target WebSocket connection for the error envelope
+ * @param {object} ctx - Handler context with sessionManager + send
+ * @param {object} msg - Incoming WebSocket message
+ * @param {object} client - Connected client state
+ * @returns {object|null} Session entry on hit, null after emitting on miss
+ */
+export function resolveSessionOrError(ws, ctx, msg, client) {
+  const entry = resolveSession(ctx, msg, client)
+  if (!entry) {
+    sendSessionError(ws, ctx, 'No active session')
+    return null
+  }
+  return entry
+}
+
+/**
+ * Capability-gate the bound session's provider before invoking a method (#4773).
+ *
+ * Wraps the 6-times-repeated handler pattern:
+ *
+ *   if (typeof entry.session.setX !== 'function') {
+ *     ctx.transport.send(ws, { type: 'session_error',
+ *       message: 'This provider does not support X' })
+ *     return
+ *   }
+ *
+ * Returns `true` when the method is callable so the caller can proceed,
+ * `false` (after emitting the `session_error` envelope) otherwise. The
+ * helper also defends against a missing `entry` / `entry.session` so call
+ * sites don't need a second null-check before reaching the gate.
+ *
+ * @param {WebSocket} ws - Target WebSocket connection for the error envelope
+ * @param {object} ctx - Handler context with `send(ws, msg)`
+ * @param {object|null} entry - Session entry from resolveSession[OrError]
+ * @param {string} method - Method name to probe on entry.session
+ * @param {string} message - Human-readable capability-gate error message
+ * @returns {boolean} true if method is callable, false after emitting on miss
+ */
+export function requireSessionMethod(ws, ctx, entry, method, message) {
+  if (!entry || !entry.session || typeof entry.session[method] !== 'function') {
+    sendSessionError(ws, ctx, message)
+    return false
+  }
+  return true
 }
 
 /**
@@ -406,13 +562,27 @@ export function resolveSession(ctx, msg, client) {
  * `data` keys named `type`/`requestId`/`code`/`message` are ignored, so a
  * misbehaving caller cannot spoof the wire shape.
  *
+ * #5632: routes through the encryption-aware transport when a handler `ctx`
+ * is supplied. `sendError` emits a plaintext `{ type: 'error' }` frame, and the
+ * client's post-handshake plaintext guard (connection.ts) closes the socket on
+ * any non-`encrypted` frame that isn't a handshake frame once E2E encryption is
+ * established. Passing `ctx` makes the error go out through `ctx.transport.send`
+ * (→ WsServer._send → the per-client encrypting sender), so a post-handshake
+ * error is encrypted (the client decrypts it normally) and a pre-handshake one
+ * stays cleartext (the client's guard is inactive while encState is null —
+ * correct). When `ctx` is absent (pre-auth call sites with no handler context,
+ * e.g. pairing rejectIfBound) we fall back to the raw `ws.send`; those paths run
+ * before encryption is established, so cleartext is correct there too.
+ *
  * @param {WebSocket} ws - Target WebSocket connection
  * @param {string|null} requestId - Correlating request ID (may be null)
  * @param {string} code - Machine-readable error code (e.g. 'HANDLER_ERROR')
  * @param {string} message - Human-readable error description
  * @param {object} [data] - Optional structured fields merged into the payload
+ * @param {object} [ctx] - Handler context; when present routes via
+ *   `ctx.transport.send` so the frame is encrypted for post-handshake clients
  */
-export function sendError(ws, requestId, code, message, data) {
+export function sendError(ws, requestId, code, message, data, ctx) {
   if (!ws || ws.readyState !== 1) return
   const payload = { type: 'error', requestId: requestId ?? null, code, message }
   if (data && typeof data === 'object' && !Array.isArray(data)) {
@@ -427,7 +597,26 @@ export function sendError(ws, requestId, code, message, data) {
       payload[key] = value
     }
   }
-  ws.send(JSON.stringify(payload))
+  // #5632: prefer the encryption-aware transport so post-handshake errors are
+  // encrypted; fall back to raw send for pre-auth call sites without a ctx.
+  // #5702 (8a): guard both sends. A throw here (e.g. a torn-down socket) would
+  // otherwise escape an error-reporting path — which often runs from a catch
+  // block — and could mask the original failure or take down the caller. The
+  // error frame failing to reach a half-open client is itself non-fatal, so we
+  // log and move on rather than rethrow.
+  if (ctx && typeof ctx.transport?.send === 'function') {
+    try {
+      ctx.transport.send(ws, payload)
+    } catch (err) {
+      log.warn(`sendError: transport send failed for ${payload.code || 'error'}: ${String(err?.message || err)}`)
+    }
+    return
+  }
+  try {
+    ws.send(JSON.stringify(payload))
+  } catch (err) {
+    log.warn(`sendError: raw send failed for ${payload.code || 'error'}: ${String(err?.message || err)}`)
+  }
 }
 
 // Issue #2912: every handler that rejects with SESSION_TOKEN_MISMATCH used to

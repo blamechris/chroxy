@@ -7,6 +7,8 @@ import {
   SetModelSchema,
   SetPermissionModeSchema,
   SetPromptEvaluatorSchema,
+  SetChroxyContextHintSchema,
+  SetSessionPreambleSchema,
   PermissionResponseSchema,
   ListSessionsSchema,
   SwitchSessionSchema,
@@ -14,6 +16,9 @@ import {
   DestroySessionSchema,
   RenameSessionSchema,
   RegisterPushTokenSchema,
+  NotificationPrefsGetSchema,
+  NotificationPrefsSetSchema,
+  ServerNotificationPrefsSchema,
   UserQuestionResponseSchema,
   ListDirectorySchema,
   BrowseFilesSchema,
@@ -51,6 +56,8 @@ import {
   ServerModelChangedSchema,
   ServerPermissionModeChangedSchema,
   ServerPromptEvaluatorChangedSchema,
+  ServerChroxyContextHintChangedSchema,
+  ServerSessionPreambleChangedSchema,
   ServerPermissionRequestSchema,
   ServerUserQuestionSchema,
   ServerAgentBusySchema,
@@ -58,6 +65,8 @@ import {
   ServerAgentSpawnedSchema,
   ServerAgentCompletedSchema,
   ServerClientFocusChangedSchema,
+  ServerMessageQueuedSchema,
+  ServerMessageDequeuedSchema,
   ServerPlanStartedSchema,
   ServerPlanReadySchema,
   ServerSessionListSchema,
@@ -307,6 +316,26 @@ describe('ClientMessageSchema', () => {
     assert.equal(result2.data.type, 'permission_response')
   })
 
+  // #4660: per-session preamble — both standalone schema and dispatch
+  // through the discriminated union. The wire cap is 4096 chars (slightly
+  // above the server-side SESSION_PREAMBLE_MAX_LENGTH of 4000 so a tiny
+  // client/server drift doesn't reject submissions).
+  it('SetSessionPreambleSchema (#4660) accepts string value', () => {
+    assert.ok(SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 'hello' }).success)
+    assert.ok(SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: '', sessionId: 'sess-1' }).success)
+    assert.ok(SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 'a'.repeat(4096) }).success)
+    // Over the wire cap → reject.
+    assert.ok(!SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 'a'.repeat(4097) }).success)
+    // Non-string → reject.
+    assert.ok(!SetSessionPreambleSchema.safeParse({ type: 'set_session_preamble', value: 123 }).success)
+  })
+
+  it('ClientMessageSchema dispatches set_session_preamble (#4660)', () => {
+    const result = ClientMessageSchema.safeParse({ type: 'set_session_preamble', value: 'hello' })
+    assert.ok(result.success)
+    assert.equal(result.data.type, 'set_session_preamble')
+  })
+
   it('rejects unknown types and missing type field', () => {
     assert.ok(!ClientMessageSchema.safeParse({ type: 'unknown_type' }).success)
     assert.ok(!ClientMessageSchema.safeParse({ type: 'switch_session' }).success)
@@ -426,6 +455,8 @@ describe('simple server schemas', () => {
     ['ServerModelChangedSchema', ServerModelChangedSchema, { type: 'model_changed', model: null }],
     ['ServerPermissionModeChangedSchema', ServerPermissionModeChangedSchema, { type: 'permission_mode_changed', mode: 'approve' }],
     ['ServerPromptEvaluatorChangedSchema (#3244)', ServerPromptEvaluatorChangedSchema, { type: 'prompt_evaluator_changed', sessionId: 'sess-1', value: true }],
+    ['ServerChroxyContextHintChangedSchema (#3805)', ServerChroxyContextHintChangedSchema, { type: 'chroxy_context_hint_changed', sessionId: 'sess-1', value: true }],
+    ['ServerSessionPreambleChangedSchema (#4660)', ServerSessionPreambleChangedSchema, { type: 'session_preamble_changed', sessionId: 'sess-1', value: 'always bullet points' }],
     ['ServerPermissionRequestSchema', ServerPermissionRequestSchema, { type: 'permission_request', requestId: 'req-1', tool: 'Bash', input: 'ls -la' }],
     ['ServerUserQuestionSchema', ServerUserQuestionSchema, { type: 'user_question', toolUseId: 'tu1', questions: [{ question: 'Which?', options: ['A', 'B'] }] }],
     ['ServerAgentBusySchema', ServerAgentBusySchema, { type: 'agent_busy' }],
@@ -433,6 +464,8 @@ describe('simple server schemas', () => {
     ['ServerAgentSpawnedSchema', ServerAgentSpawnedSchema, { type: 'agent_spawned', toolUseId: 'tu1', description: 'Explore', startedAt: Date.now() }],
     ['ServerAgentCompletedSchema', ServerAgentCompletedSchema, { type: 'agent_completed', toolUseId: 'tu1' }],
     ['ServerClientFocusChangedSchema', ServerClientFocusChangedSchema, { type: 'client_focus_changed', clientId: 'c1', sessionId: 'sess-a', timestamp: 1709100000000 }],
+    ['ServerMessageQueuedSchema (#5936)', ServerMessageQueuedSchema, { type: 'message_queued', sessionId: 'sess-1', clientMessageId: 'uin-1', text: 'follow-up', queueLength: 1 }],
+    ['ServerMessageDequeuedSchema (#5936)', ServerMessageDequeuedSchema, { type: 'message_dequeued', sessionId: 'sess-1', queueLength: 0, reason: 'flush' }],
     ['ServerPlanStartedSchema', ServerPlanStartedSchema, { type: 'plan_started' }],
     ['ServerPlanReadySchema', ServerPlanReadySchema, { type: 'plan_ready', allowedPrompts: [{ tool: 'Bash', prompt: 'run tests' }] }],
     ['ServerSessionListSchema', ServerSessionListSchema, { type: 'session_list', sessions: [{ sessionId: 's1', name: 'Test', isBusy: false }] }],
@@ -637,6 +670,223 @@ describe('server web task schemas', () => {
 })
 
 // ============================================================
+// Notification preferences (#4541)
+// ============================================================
+
+describe('NotificationPrefsGetSchema (#4541)', () => {
+  it('accepts minimal get message', () => {
+    assert.ok(NotificationPrefsGetSchema.safeParse({ type: 'notification_prefs_get' }).success)
+  })
+
+  it('accepts get with requestId', () => {
+    const result = NotificationPrefsGetSchema.safeParse({ type: 'notification_prefs_get', requestId: 'r1' })
+    assert.ok(result.success)
+    assert.equal(result.data.requestId, 'r1')
+  })
+
+  it('rejects wrong type literal', () => {
+    assert.ok(!NotificationPrefsGetSchema.safeParse({ type: 'notification_prefs_fetch' }).success)
+  })
+
+  it('routes through ClientMessageSchema', () => {
+    assert.ok(ClientMessageSchema.safeParse({ type: 'notification_prefs_get' }).success)
+  })
+})
+
+describe('NotificationPrefsSetSchema (#4541)', () => {
+  it('accepts a category-only patch', () => {
+    const result = NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { categories: { result: false } },
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.prefs.categories.result, false)
+  })
+
+  it('accepts a per-device patch', () => {
+    const result = NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices: { 'ExponentPushToken[abc]': { categories: { result: false } } } },
+    })
+    assert.ok(result.success)
+  })
+
+  it('accepts a quietHours patch', () => {
+    // #4544 tightened the window shape — `timezone` is now required
+    // when a window is present (an unconfigured zone can't be evaluated
+    // by the gate, so refuse the half-shape at the schema boundary).
+    const result = NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' } },
+    })
+    assert.ok(result.success)
+  })
+
+  it('rejects a quietHours patch missing timezone (#4544)', () => {
+    // The pre-#4544 two-field shape is now refused — the gate can't
+    // evaluate a window without an IANA zone and the loader would drop
+    // it anyway, so the wire schema rejects it up front.
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: { start: '22:00', end: '07:00' } },
+    }).success)
+  })
+
+  it('accepts a bypassCategories patch (#4544)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { bypassCategories: ['permission', 'activity_error'] },
+    }).success)
+  })
+
+  it('accepts an empty bypassCategories patch (silence everything, even errors)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { bypassCategories: [] },
+    }).success)
+  })
+
+  it('accepts per-device quietHours + bypassCategories (#4544)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: {
+        devices: {
+          'ExponentPushToken[abc]': {
+            quietHours: { start: '23:00', end: '06:00', timezone: 'America/Los_Angeles' },
+            bypassCategories: ['permission'],
+          },
+        },
+      },
+    }).success)
+  })
+
+  it('accepts null quietHours to clear the window', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: null },
+    }).success)
+  })
+
+  it('rejects malformed quietHours times', () => {
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { quietHours: { start: '10pm', end: '07:00' } },
+    }).success)
+  })
+
+  it('rejects missing prefs object', () => {
+    assert.ok(!NotificationPrefsSetSchema.safeParse({ type: 'notification_prefs_set' }).success)
+  })
+
+  it('rejects non-boolean category value', () => {
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { categories: { result: 'no' } },
+    }).success)
+  })
+
+  it('rejects more than 1000 device entries (DoS guard)', () => {
+    const devices = {}
+    for (let i = 0; i <= 1000; i++) devices[`token-${i}`] = { categories: {} }
+    assert.ok(!NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices },
+    }).success)
+  })
+
+  it('accepts up to 1000 device entries', () => {
+    const devices = {}
+    for (let i = 0; i < 1000; i++) devices[`token-${i}`] = { categories: {} }
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices },
+    }).success)
+  })
+
+  // #4564: per-device entries accept `null` as a delete sentinel so the UI
+  // can drain orphan tokens left behind by Expo refresh, app reinstall, or
+  // browser-storage wipe. The server-side `setPrefs` interprets the sentinel
+  // and removes the matching device key from the persisted map.
+  it('accepts a null device entry to signal deletion (#4564)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { devices: { 'ExponentPushToken[old]': null } },
+    }).success)
+  })
+
+  it('accepts a mixed add + delete devices patch (#4564)', () => {
+    assert.ok(NotificationPrefsSetSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: {
+        devices: {
+          'old-tok': null,
+          'new-tok': { categories: { result: false } },
+        },
+      },
+    }).success)
+  })
+
+  it('routes through ClientMessageSchema', () => {
+    assert.ok(ClientMessageSchema.safeParse({
+      type: 'notification_prefs_set',
+      prefs: { categories: { result: false } },
+    }).success)
+  })
+})
+
+describe('ServerNotificationPrefsSchema (#4541)', () => {
+  it('accepts a fully populated snapshot', () => {
+    // #4544: timezone is required on the wire — see NotificationPrefsSetSchema
+    // companion test for the rationale (gate can't evaluate without it).
+    const result = ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      requestId: 'r1',
+      prefs: {
+        categories: { result: true, permission: false },
+        devices: { 'token-a': { categories: { result: false } } },
+        quietHours: { start: '22:00', end: '07:00', timezone: 'America/Los_Angeles' },
+        bypassCategories: ['permission', 'activity_error'],
+      },
+    })
+    assert.ok(result.success)
+    assert.equal(result.data.prefs.categories.permission, false)
+  })
+
+  it('accepts a snapshot that omits bypassCategories (#4544 — older server compat)', () => {
+    // Older servers (pre-#4544) don't emit the field at all — clients
+    // should fall back to documented defaults. The schema must accept
+    // the absence to stay backward-compatible.
+    assert.ok(ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      prefs: {
+        categories: { result: true },
+        devices: {},
+        quietHours: null,
+      },
+    }).success)
+  })
+
+  it('accepts a snapshot with null quietHours and empty devices', () => {
+    assert.ok(ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      prefs: { categories: { result: true }, devices: {}, quietHours: null },
+    }).success)
+  })
+
+  it('rejects missing prefs', () => {
+    assert.ok(!ServerNotificationPrefsSchema.safeParse({ type: 'notification_prefs' }).success)
+  })
+
+  it('accepts requestId as null (broadcast variant after set)', () => {
+    assert.ok(ServerNotificationPrefsSchema.safeParse({
+      type: 'notification_prefs',
+      requestId: null,
+      prefs: { categories: {}, devices: {}, quietHours: null },
+    }).success)
+  })
+})
+
+// ============================================================
 // Max-length constraints (#2694) — OOM DoS prevention
 // ============================================================
 
@@ -749,6 +999,94 @@ describe('dead code removal', () => {
     const mkAnswers = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`k${i}`, 'v']))
     assert.equal(UserQuestionResponseSchema.safeParse({ type: 'user_question_response', answer: 'a', answers: mkAnswers(100) }).success, true)
     assert.equal(UserQuestionResponseSchema.safeParse({ type: 'user_question_response', answer: 'a', answers: mkAnswers(101) }).success, false)
+  })
+
+  // #4621 — `answers` values widen to `string | string[]` so multi-select
+  // questions can ship native arrays instead of JSON-stringified strings.
+  it('UserQuestionResponseSchema accepts string[] values for multi-select answers (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    // String values (legacy single-select / free-text) still accepted.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'Yes',
+      answers: { 'Pick one?': 'A' },
+    }).success, true)
+    // String[] values (native multi-select).
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'App, Tests',
+      answers: { 'Which areas?': ['App', 'Tests'] },
+    }).success, true)
+    // Mixed string + string[] values in the same map.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'summary',
+      answers: { 'Q1?': 'A', 'Q2?': ['x', 'y'] },
+    }).success, true)
+    // Empty array is allowed (multi-select with zero selections).
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: '',
+      answers: { 'Q?': [] },
+    }).success, true)
+  })
+
+  it('UserQuestionResponseSchema rejects array values longer than 100 entries (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    const mkArr = (n) => Array.from({ length: n }, (_, i) => `v${i}`)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': mkArr(100) },
+    }).success, true)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': mkArr(101) },
+    }).success, false)
+  })
+
+  it('UserQuestionResponseSchema rejects non-string array members (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    // Numbers / objects in the array must be rejected — only string[].
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': ['a', 42] },
+    }).success, false)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': ['a', { obj: 1 }] },
+    }).success, false)
+  })
+
+  // #4621 (Copilot review): per-array-item cap is 10_000 chars to bound
+  // total per-answer cost. Labels are short by construction; the
+  // legacy 100_000-char string cap is preserved only on the
+  // back-compat string branch (JSON-stringified arrays from older
+  // dashboards).
+  it('UserQuestionResponseSchema rejects array members longer than 10_000 chars (#4621)', async () => {
+    const { UserQuestionResponseSchema } = await import('../src/ws-schemas.js')
+    const ok = 'x'.repeat(10_000)
+    const tooBig = 'x'.repeat(10_001)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': [ok] },
+    }).success, true)
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': [tooBig] },
+    }).success, false)
+    // The string branch keeps the 100_000-char cap for legacy
+    // JSON-stringified-array payloads from pre-#4621 dashboards.
+    assert.equal(UserQuestionResponseSchema.safeParse({
+      type: 'user_question_response',
+      answer: 'x',
+      answers: { 'Q?': 'x'.repeat(100_000) },
+    }).success, true)
   })
 
   it('SandboxSchema rejects arrays larger than 256', async () => {

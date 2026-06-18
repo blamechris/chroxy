@@ -4,25 +4,27 @@
  * Handles: list_sessions, switch_session, create_session, destroy_session,
  *          rename_session, subscribe_sessions, unsubscribe_sessions
  */
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
+import { auditShellCreate } from '../shell-audit.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
 
 function handleListSessions(ws, client, _msg, ctx) {
-  let sessions = ctx.sessionManager.listSessions()
+  let sessions = ctx.sessions.sessionManager.listSessions()
   if (client.boundSessionId) {
     sessions = sessions.filter(s => s.sessionId === client.boundSessionId)
   }
-  ctx.send(ws, { type: 'session_list', sessions })
+  ctx.transport.send(ws, { type: 'session_list', sessions })
 }
 
 function handleSwitchSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (!targetId) {
-    ctx.send(ws, { type: 'session_error', message: 'sessionId is required' })
+    sendSessionError(ws, ctx, 'sessionId is required')
     return
   }
 
@@ -30,34 +32,54 @@ function handleSwitchSession(ws, client, msg, ctx) {
   // pairing-issued session token that was bound to a specific session,
   // prevent them from switching to any other session.
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    log.warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
-    ctx.send(ws, {
+    // #4828: session-scoped to the bound session — the binding-mismatch
+    // warn belongs to the OWNER of `boundSessionId`, not the request target.
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} attempted to switch to session ${targetId} but is bound to ${client.boundSessionId}`)
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
     return
   }
 
-  const entry = ctx.sessionManager.getSession(targetId)
+  const entry = ctx.sessions.sessionManager.getSession(targetId)
   if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+    sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
-  client.activeSessionId = targetId
-  client.subscribedSessionIds.add(targetId)
-  log.info(`Client ${client.id} switched to session ${targetId}`)
-  ctx.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-  ctx.sendSessionInfo(ws, targetId)
-  ctx.replayHistory(ws, targetId)
+  // #5563: route active-session + subscription through the index-maintaining
+  // helpers so the sessionId→clients reverse index stays in sync.
+  ctx.transport.setActiveSession(client, targetId)
+  ctx.transport.subscribeClient(client, targetId)
+  // #4835: persist the chosen session for this device so the next reconnect
+  // restores it instead of snapping back to defaultSessionId. Bound
+  // clients are excluded — their activeSessionId is locked to
+  // boundSessionId, so writing it would just churn the file without
+  // affecting behaviour. devicePreferences is optional on ctx so tests
+  // that don't wire it through (and pre-#4835 callers in general)
+  // continue to work.
+  if (ctx.services.devicePreferences && !client.boundSessionId && client.deviceInfo?.deviceId) {
+    ctx.services.devicePreferences.setActiveSessionId(client.deviceInfo.deviceId, targetId)
+  }
+  // #4828: session-scoped — the switch is into `targetId`.
+  loggerForSession('ws', targetId).info(`Client ${client.id} switched to session ${targetId}`)
+  ctx.transport.send(ws, { type: 'session_switched', sessionId: targetId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+  ctx.transport.sendSessionInfo(ws, targetId)
+  // #5555.3 — forceFull: a session SWITCH gets the authoritative full rebuild,
+  // not a cursor delta. Background sessions accumulate live broadcasts in the
+  // client's per-session message list while viewed elsewhere, so the replay
+  // cursor lags and a delta would re-send/duplicate them. The connect handshake
+  // (not this path) is where the cursor delta-replay win applies.
+  ctx.transport.replayHistory(ws, targetId, { forceFull: true })
   // Re-send provider-scoped available_models so clients that switch from a
   // Claude session to a Codex/Gemini session (or vice-versa) update their
   // model dropdown immediately (#2956).
   const switchProvider = entry.provider || null
   const switchRegistry = getRegistryForProvider(switchProvider)
-  ctx.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
+  ctx.transport.send(ws, { type: 'available_models', models: switchRegistry.getModels(), defaultModel: switchRegistry.getDefaultModelId(), provider: switchProvider })
   broadcastFocusChanged(client, targetId, ctx)
 }
 
@@ -70,10 +92,10 @@ function handleCreateSession(ws, client, msg, ctx) {
     // call sites via buildSessionTokenMismatchPayload — every send site produces
     // `{code, message, boundSessionId, boundSessionName}` so clients never see
     // divergent shapes while branching on the code.
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
         message: 'Not authorized: client is bound to a specific session',
       }),
@@ -91,18 +113,72 @@ function handleCreateSession(ws, client, msg, ctx) {
   const worktree = msg.worktree === true ? true : undefined
   const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
   const environmentId = (typeof msg.environmentId === 'string' && msg.environmentId.trim()) ? msg.environmentId.trim() : undefined
+  // #4208: opt-in TUI flag — preserve strict booleans so an explicit `false`
+  // can override a server-wide `defaultSkipPermissions: true` on a per-session
+  // basis. Anything non-boolean (undefined, null, string, etc.) falls through
+  // to the SessionManager default rather than overriding it. Server-side this
+  // is a no-op for non-TUI providers (ClaudeTuiSession is the only constructor
+  // that honours it); we don't gate by provider here — the SessionManager
+  // forwards via providerOpts and non-TUI providers ignore the unknown key.
+  const skipPermissions = typeof msg.skipPermissions === 'boolean' ? msg.skipPermissions : undefined
+  // Mailbox: optional AGENT_COMM_ID to auto-register for this session (#5914
+  // follow-up). Trim here; SessionManager.registerAgentCommId (reached via
+  // createSession) is the authoritative validator — it re-trims and no-ops on a
+  // control-char / over-200-char id, so a bad value silently skips registration
+  // rather than failing the create.
+  const agentCommId = (typeof msg.agentCommId === 'string' && msg.agentCommId.trim()) ? msg.agentCommId.trim() : undefined
   // Note: isolation is accepted in the schema but always derived server-side
   // from the actual session state (provider capabilities, worktree, sandbox).
 
   if (worktree && !cwd) {
-    ctx.send(ws, { type: 'session_error', message: 'Worktree requires an explicit CWD' })
+    sendSessionError(ws, ctx, 'Worktree requires an explicit CWD')
     return
   }
 
   if (cwd) {
-    const cwdError = validateCwdAllowed(cwd, ctx.config)
+    const cwdError = validateCwdAllowed(cwd, ctx.services.config)
     if (cwdError) {
-      ctx.send(ws, { type: 'session_error', message: cwdError })
+      sendSessionError(ws, ctx, cwdError)
+      return
+    }
+  }
+
+  // #5985b (epic #5982): a user-shell session spawns the operator's $SHELL
+  // (arbitrary host code execution). Require the PRIMARY token class — strictly
+  // NOT any pairing-issued token (an unbound linking-mode pairing token is
+  // host-authority for ordinary ops but must NOT reach a root shell; swarm-audit
+  // finding C1). The `userShell.enabled` flag is separately enforced as the
+  // authoritative gate in SessionManager.createSession (covers every spawn
+  // path); this is the token-class half, surfaced early with a clean code.
+  if (provider === USER_SHELL_PROVIDER && client.isPrimaryToken !== true) {
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      code: 'PRIMARY_TOKEN_REQUIRED',
+      message: 'A user-shell session requires the primary token. Pairing-issued tokens (paired devices) cannot create a shell.',
+    })
+    return
+  }
+
+  // #6004 (epic #5982): require the CURRENT token, not a grace/previous one.
+  // After a scheduled rotation the old primary token stays valid through the
+  // grace window, and a connection authed with it keeps isPrimaryToken===true —
+  // so without this check it could create a NEW user-shell with that grace token,
+  // re-establishing shell access the rotation was meant to wind down. (Scheduled
+  // rotation keeps live shells; only revoke severs them — and revoke also
+  // de-auths the connection, so this gate is specifically the scheduled-rotation
+  // residual.) Gate on the connection's auth token still being the current token.
+  // Skipped when no TokenManager exists (--no-auth: local trust, the create
+  // proceeds). The method guard tolerates test ctx mocks that stub
+  // services.tokenManager.
+  if (provider === USER_SHELL_PROVIDER) {
+    const tokenManager = ctx.services?.tokenManager
+    if (tokenManager && typeof tokenManager.isCurrentToken === 'function' &&
+        !tokenManager.isCurrentToken(client.authToken)) {
+      ctx.transport.send(ws, {
+        type: 'session_error',
+        code: 'CURRENT_TOKEN_REQUIRED',
+        message: 'A user-shell session requires the current token. The token was rotated — reconnect with the new token to open a shell.',
+      })
       return
     }
   }
@@ -110,12 +186,12 @@ function handleCreateSession(ws, client, msg, ctx) {
   // Resolve environment container details if environmentId is specified
   let envOpts = {}
   if (environmentId) {
-    if (!ctx.environmentManager) {
-      ctx.send(ws, { type: 'session_error', message: 'Environment management is not enabled' })
+    if (!ctx.services.environmentManager) {
+      sendSessionError(ws, ctx, 'Environment management is not enabled')
       return
     }
     try {
-      const info = ctx.environmentManager.getContainerInfo(environmentId)
+      const info = ctx.services.environmentManager.getContainerInfo(environmentId)
       envOpts = {
         provider: 'docker-sdk',
         containerId: info.containerId,
@@ -123,19 +199,49 @@ function handleCreateSession(ws, client, msg, ctx) {
         containerCliPath: info.containerCliPath,
       }
     } catch (err) {
-      ctx.send(ws, { type: 'session_error', message: err.message })
+      sendSessionError(ws, ctx, err.message)
       return
     }
   }
 
   try {
-    const sessionId = ctx.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, ...envOpts })
-    client.activeSessionId = sessionId
-    client.subscribedSessionIds.add(sessionId)
-    const entry = ctx.sessionManager.getSession(sessionId)
-    ctx.send(ws, { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-    ctx.sendSessionInfo(ws, sessionId)
-    ctx.broadcastSessionList()
+    const sessionId = ctx.sessions.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, agentCommId, ...envOpts })
+    // #5563: index-maintaining helpers.
+    ctx.transport.setActiveSession(client, sessionId)
+    ctx.transport.subscribeClient(client, sessionId)
+    const entry = ctx.sessions.sessionManager.getSession(sessionId)
+    // #5985 audit — a user-shell spawn is host code execution; record who
+    // opened it (token class + client id/device), where, and which shell, so
+    // shell usage is traceable. Only the create path here knows the token
+    // class; the matching destroy entry is emitted by SessionManager.
+    if (provider === USER_SHELL_PROVIDER) {
+      auditShellCreate({
+        sessionId,
+        clientId: client.id,
+        // Always 'primary' today — the gate above rejects every non-primary
+        // class before we reach here. The ternary is future-proofing for if the
+        // authz ever widens; 'pairing' (the only non-primary class) is currently
+        // unreachable.
+        tokenClass: client.isPrimaryToken === true ? 'primary' : 'pairing',
+        cwd: entry?.cwd,
+        shell: entry?.session?._shellPath,
+        deviceName: client.deviceInfo?.deviceName,
+      })
+    }
+    // #5553: disclose the resolved per-repo session preset on the create
+    // confirmation so the client can (a) show the "repo preset applied" badge
+    // and (b) stage the seed EDITABLE into the new session's composer (never
+    // auto-sent). The preamble TEXT is never sent — it's already folded into
+    // the prompt server-side; only its length + the seed + trust metadata
+    // cross the wire. Omitted entirely when the session has no preset.
+    const sessionSwitched = { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null }
+    const preset = typeof ctx.sessions.sessionManager.getSessionPreset === 'function'
+      ? ctx.sessions.sessionManager.getSessionPreset(sessionId)
+      : null
+    if (preset) sessionSwitched.sessionPreset = preset
+    ctx.transport.send(ws, sessionSwitched)
+    ctx.transport.sendSessionInfo(ws, sessionId)
+    ctx.transport.broadcastSessionList()
     autoSubscribeOtherClients(sessionId, ws, ctx)
     broadcastFocusChanged(client, sessionId, ctx)
   } catch (err) {
@@ -144,7 +250,7 @@ function handleCreateSession(ws, client, msg, ctx) {
     // hint instead of an opaque message. See #2962.
     const payload = { type: 'session_error', message: err.message }
     if (err.code) payload.code = err.code
-    ctx.send(ws, payload)
+    ctx.transport.send(ws, payload)
   }
 }
 
@@ -152,65 +258,88 @@ async function handleDestroySession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
     return
   }
 
-  if (!ctx.sessionManager.getSession(targetId)) {
-    ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+  const targetEntry = ctx.sessions.sessionManager.getSession(targetId)
+  if (!targetEntry) {
+    sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     return
   }
 
-  if (ctx.sessionManager.listSessions().length <= 1) {
-    ctx.send(ws, { type: 'session_error', message: 'Cannot destroy the last session' })
+  if (ctx.sessions.sessionManager.listSessions().length <= 1) {
+    sendSessionError(ws, ctx, 'Cannot destroy the last session')
     return
   }
 
-  if (ctx.sessionManager.isSessionLocked?.(targetId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Session is being modified by another operation' })
+  if (ctx.sessions.sessionManager.isSessionLocked?.(targetId)) {
+    sendSessionError(ws, ctx, 'Session is being modified by another operation')
     return
   }
 
-  if (typeof ctx.sessionManager.destroySessionLocked === 'function') {
-    await ctx.sessionManager.destroySessionLocked(targetId)
+  // #5695: never tear down a session (which also deletes its worktree) while it
+  // is actively streaming or has pending background shells — that orphans the
+  // in-flight turn and can lose uncommitted worktree work. The CLI won't delete
+  // the session you're running in either. Interrupt first, then delete.
+  if (targetEntry.session?.isRunning) {
+    // #5710: force escape hatch. A wedged session whose `isRunning` is stuck true
+    // (a crashed provider that never emits turn-end, or a leaked background-shell
+    // tracker entry) could otherwise NEVER be deleted from any client. When the
+    // client sends `force: true` (gated behind an explicit "delete anyway?"
+    // confirm), bypass the guard and proceed — logged loudly so a forced teardown
+    // of a genuinely-running session is auditable.
+    if (msg.force === true) {
+      log.warn(`Force-destroying session ${targetId} while isRunning=true (client ${client.id}) — bypassing #5695 busy guard`)
+    } else {
+      sendSessionError(ws, ctx, 'Cannot destroy a session while it is running — interrupt it first, then delete.')
+      return
+    }
+  }
+
+  if (typeof ctx.sessions.sessionManager.destroySessionLocked === 'function') {
+    await ctx.sessions.sessionManager.destroySessionLocked(targetId)
   } else {
-    ctx.sessionManager.destroySession(targetId)
+    ctx.sessions.sessionManager.destroySession(targetId)
   }
-  ctx.primaryClients.delete(targetId)
+  ctx.transport.clearPrimary(targetId)
 
-  const firstId = ctx.sessionManager.firstSessionId
-  for (const [clientWs, c] of ctx.clients) {
-    c.subscribedSessionIds?.delete(targetId)
+  const firstId = ctx.sessions.sessionManager.firstSessionId
+  for (const [clientWs, c] of ctx.transport.clients) {
+    // #5563: index-maintaining helpers — unsubscribe every client from the
+    // destroyed session, and re-home any client that was actively viewing it.
+    ctx.transport.unsubscribeClient(c, targetId)
     if (c.authenticated && c.activeSessionId === targetId) {
-      c.activeSessionId = firstId
-      const entry = ctx.sessionManager.getSession(firstId)
+      ctx.transport.setActiveSession(c, firstId)
+      const entry = ctx.sessions.sessionManager.getSession(firstId)
       if (entry) {
-        ctx.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
-        ctx.sendSessionInfo(clientWs, firstId)
-        ctx.replayHistory(clientWs, firstId)
+        ctx.transport.send(clientWs, { type: 'session_switched', sessionId: firstId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null })
+        ctx.transport.sendSessionInfo(clientWs, firstId)
+        // #5555.3 — forced re-home after a destroy: authoritative full rebuild.
+        ctx.transport.replayHistory(clientWs, firstId, { forceFull: true })
       }
       broadcastFocusChanged(c, firstId, ctx)
     }
   }
 
-  ctx.broadcast({ type: 'session_destroyed', sessionId: targetId })
-  ctx.broadcastSessionList()
+  ctx.transport.broadcast({ type: 'session_destroyed', sessionId: targetId })
+  ctx.transport.broadcastSessionList()
 }
 
 function handleRenameSession(ws, client, msg, ctx) {
   const targetId = msg.sessionId
 
   if (client.boundSessionId && client.boundSessionId !== targetId) {
-    ctx.send(ws, {
+    ctx.transport.send(ws, {
       type: 'session_error',
       ...buildSessionTokenMismatchPayload({
-        sessionManager: ctx.sessionManager,
+        sessionManager: ctx.sessions.sessionManager,
         boundSessionId: client.boundSessionId,
       }),
     })
@@ -219,26 +348,26 @@ function handleRenameSession(ws, client, msg, ctx) {
 
   const newName = (typeof msg.name === 'string' && msg.name.trim()) ? msg.name.trim() : null
   if (!newName) {
-    ctx.send(ws, { type: 'session_error', message: 'Name is required' })
+    sendSessionError(ws, ctx, 'Name is required')
     return
   }
-  if (ctx.sessionManager.isSessionLocked?.(targetId)) {
-    ctx.send(ws, { type: 'session_error', message: 'Session is being modified by another operation' })
+  if (ctx.sessions.sessionManager.isSessionLocked?.(targetId)) {
+    sendSessionError(ws, ctx, 'Session is being modified by another operation')
     return
   }
 
-  const doRename = typeof ctx.sessionManager.renameSessionLocked === 'function'
-    ? () => ctx.sessionManager.renameSessionLocked(targetId, newName)
-    : async () => ctx.sessionManager.renameSession(targetId, newName)
+  const doRename = typeof ctx.sessions.sessionManager.renameSessionLocked === 'function'
+    ? () => ctx.sessions.sessionManager.renameSessionLocked(targetId, newName)
+    : async () => ctx.sessions.sessionManager.renameSession(targetId, newName)
 
   doRename().then(success => {
     if (success) {
-      ctx.broadcastSessionList()
+      ctx.transport.broadcastSessionList()
     } else {
-      ctx.send(ws, { type: 'session_error', message: `Session not found: ${targetId}` })
+      sendSessionError(ws, ctx, `Session not found: ${targetId}`)
     }
   }).catch(err => {
-    ctx.send(ws, { type: 'session_error', message: err.message })
+    sendSessionError(ws, ctx, err.message)
   })
 }
 
@@ -247,33 +376,111 @@ function handleSubscribeSessions(ws, client, msg, ctx) {
   for (const sid of msg.sessionIds) {
     // Bound clients can only subscribe to their bound session
     if (client.boundSessionId && client.boundSessionId !== sid) continue
-    if (ctx.sessionManager.getSession(sid)) {
+    if (ctx.sessions.sessionManager.getSession(sid)) {
       if (!client.subscribedSessionIds.has(sid)) {
         newlySubscribed.push(sid)
       }
-      client.subscribedSessionIds.add(sid)
+      // #5563: index-maintaining helper.
+      ctx.transport.subscribeClient(client, sid)
     }
   }
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'subscriptions_updated',
     subscribedSessionIds: [...client.subscribedSessionIds],
   })
   for (const sid of newlySubscribed) {
-    ctx.sendSessionInfo(ws, sid)
-    ctx.replayHistory(ws, sid)
+    ctx.transport.sendSessionInfo(ws, sid)
+    // #5555.3 — new subscription: authoritative full rebuild (the client may
+    // hold stale cached state for this session; cursor delta is connect-only).
+    ctx.transport.replayHistory(ws, sid, { forceFull: true })
   }
 }
 
 function handleUnsubscribeSessions(ws, client, msg, ctx) {
   for (const sid of msg.sessionIds) {
     if (sid !== client.activeSessionId) {
-      client.subscribedSessionIds.delete(sid)
+      // #5563: index-maintaining helper. (The guard keeps the active session
+      // subscribed; the helper would also keep it indexed via activeSessionId,
+      // but preserving the explicit subscription matches prior behaviour.)
+      ctx.transport.unsubscribeClient(client, sid)
     }
   }
-  ctx.send(ws, {
+  ctx.transport.send(ws, {
     type: 'subscriptions_updated',
     subscribedSessionIds: [...client.subscribedSessionIds],
   })
+}
+
+// #5835 Phase 1: opt the client IN to a session's live PTY mirror. Only clients
+// in `terminalSessionIds` receive `terminal_output` (ws-forwarding's filter), so
+// a Chat-tab client never pays for raw bytes it isn't rendering. A bound client
+// may only watch its own session, mirroring handleSubscribeSessions.
+function handleTerminalSubscribe(ws, client, msg, ctx) {
+  const sid = msg.sessionId
+  if (client.boundSessionId && client.boundSessionId !== sid) return
+  // Parity with handleSubscribeSessions: only track a REAL session, so a client
+  // can't grow terminalSessionIds unboundedly with junk ids.
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
+  // #5985b (epic #5982): subscribing to a user-shell PTY streams raw shell
+  // output (live exfil of whatever the operator types/sees), so it requires the
+  // PRIMARY token class — not merely the session-scoped viewer check (audit C4).
+  // Silent reject, consistent with the other observer rejections here.
+  if (isUserShellSession(entry) && client.isPrimaryToken !== true) return
+  if (!client.terminalSessionIds) client.terminalSessionIds = new Set()
+  const alreadySubscribed = client.terminalSessionIds.has(sid)
+  client.terminalSessionIds.add(sid)
+  // #5837: re-evaluate the coalescer gate only on an ACTUAL new subscription
+  // (symmetric with terminal_unsubscribe, which syncs only when it removed one) —
+  // a re-subscribe is a no-op for the gate. This may be the first viewer → ON.
+  if (!alreadySubscribed) ctx?.transport?.syncTerminalMirror?.(sid)
+  // #5835 Phase 2: tell the new subscriber the authoritative PTY size up front so
+  // it can letterbox to the right grid immediately (the size may already differ
+  // from the default if another viewer resized it). Gate on the same viewing
+  // scope as the broadcast (#5840 review) — opting into a terminal you aren't
+  // viewing must not leak its size / that it's a claude-tui session. Only
+  // claude-tui sessions have a live PTY / getTerminalSize; others don't send this.
+  if (isSessionViewer(client, sid) && typeof entry.session?.getTerminalSize === 'function') {
+    const size = entry.session.getTerminalSize()
+    ctx.transport.send(ws, { type: 'terminal_size', sessionId: sid, cols: size.cols, rows: size.rows })
+  }
+}
+
+// #5835 Phase 2: request a resize of a session's live PTY (the remote-viewer
+// mirror). The PTY has ONE size, so only the session's primary owner may drive
+// it — observers ride along and re-letterbox to the `terminal_size` the server
+// broadcasts back (an unclaimed session is open to its first/only viewer, which
+// is the single-operator dashboard case). resizeTerminal clamps + records the
+// size and emits terminal_resize, which ws-forwarding broadcasts to every
+// terminal subscriber. Silent reject: an observer simply doesn't drive the size.
+function handleTerminalResize(ws, client, msg, ctx) {
+  const sid = msg.sessionId
+  if (client.boundSessionId && client.boundSessionId !== sid) return
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
+  // #5985b (epic #5982): resizing a user-shell PTY requires the PRIMARY token
+  // class (audit C4) — a paired device must not drive a root shell's grid.
+  if (isUserShellSession(entry) && client.isPrimaryToken !== true) return
+  // Must be viewing the session to mutate its shared PTY (#5840 review): a
+  // non-viewer who merely knows the id must not be able to resize the grid or
+  // spam terminal_size at real viewers, even when the session is unclaimed.
+  if (!isSessionViewer(client, sid)) return
+  const primary = ctx.transport.getPrimary?.(sid)
+  if (primary && primary !== client.id) return
+  if (typeof entry.session?.resizeTerminal !== 'function') return
+  // Return value unused: resizeTerminal emits terminal_resize, which
+  // ws-forwarding broadcasts back as terminal_size. A no-op (unchanged size)
+  // returns null and simply emits nothing — nothing for the handler to do.
+  entry.session.resizeTerminal(msg.cols, msg.rows)
+}
+
+// #5835 Phase 1: opt the client OUT of a session's live PTY mirror (e.g. the
+// dashboard leaving the Output tab). Idempotent.
+function handleTerminalUnsubscribe(ws, client, msg, ctx) {
+  if (!client.terminalSessionIds) return
+  if (!client.terminalSessionIds.delete(msg.sessionId)) return
+  // #5837: this may have been the LAST subscriber — turn the coalescer off if so.
+  ctx?.transport?.syncTerminalMirror?.(msg.sessionId)
 }
 
 // #3404: mobile app sends this when foreground/background state changes so
@@ -285,6 +492,71 @@ function handleClientVisible(ws, client, msg) {
   client.visible = msg.visible !== false
 }
 
+// #5563 (blocker for #5281 shared-session join): explicit primary claim /
+// hand-off. v1 ownership semantics:
+//   - First client to claim an UNCLAIMED session becomes its primary; every
+//     other subscriber stays an observer (read-only — the input_conflict gate
+//     rejects observer input while the session is running).
+//   - A claim against a session ANOTHER client already owns is REJECTED unless
+//     `force: true` — an explicit operator-driven hand-off / take-over. This is
+//     the observe-only guarantee that lets N>2 clients share a session safely.
+//   - On the primary disconnecting, the slot is cleared (nobody-until-claim) by
+//     the departure path, NOT auto-promoted to an observer.
+// The actual mutation + role broadcast (`session_role` + legacy
+// `primary_changed`) happens in ws-server's _claimPrimary; this handler only
+// validates binding and turns a rejection into a client-facing error.
+function handleClaimPrimary(ws, client, msg, ctx) {
+  const targetId = msg.sessionId
+  if (!targetId) {
+    sendSessionError(ws, ctx, 'sessionId is required')
+    return
+  }
+
+  // Bound clients (paired to a single session) may only claim that session.
+  if (client.boundSessionId && client.boundSessionId !== targetId) {
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} attempted to claim primary on session ${targetId} but is bound to ${client.boundSessionId}`)
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions.sessionManager,
+        boundSessionId: client.boundSessionId,
+      }),
+    })
+    return
+  }
+
+  if (!ctx.sessions.sessionManager.getSession(targetId)) {
+    sendSessionError(ws, ctx, `Session not found: ${targetId}`)
+    return
+  }
+
+  const force = msg.force === true
+  const res = ctx.transport.claimPrimary(targetId, client.id, { force })
+  if (res.rejected) {
+    // Another client owns the session and this was not a forced hand-off.
+    // Surface as an input_conflict so existing dashboards render the same
+    // calm "another device is driving" notice they already show for the
+    // in-flight cross-device send conflict (#5281 ①.3).
+    ctx.transport.send(ws, {
+      type: 'session_error',
+      category: 'input_conflict',
+      sessionId: targetId,
+      message: 'Another device is the primary for this session. Request a hand-off or wait for it to release.',
+      code: 'PRIMARY_HELD',
+      primaryClientId: res.primaryClientId,
+    })
+    return
+  }
+  // Success (claimed/handed-off) or no-op (already primary). In both cases tell
+  // THIS client its authoritative role so a no-op claim still resolves any
+  // optimistic local "am I primary?" state.
+  ctx.transport.send(ws, {
+    type: 'session_role',
+    sessionId: targetId,
+    primaryClientId: ctx.transport.getPrimary(targetId) ?? null,
+  })
+}
+
 export const sessionHandlers = {
   list_sessions: handleListSessions,
   switch_session: handleSwitchSession,
@@ -293,5 +565,9 @@ export const sessionHandlers = {
   rename_session: handleRenameSession,
   subscribe_sessions: handleSubscribeSessions,
   unsubscribe_sessions: handleUnsubscribeSessions,
+  terminal_subscribe: handleTerminalSubscribe,
+  terminal_unsubscribe: handleTerminalUnsubscribe,
+  terminal_resize: handleTerminalResize,
   client_visible: handleClientVisible,
+  claim_primary: handleClaimPrimary,
 }

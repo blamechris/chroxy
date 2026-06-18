@@ -127,6 +127,48 @@ describe('TokenManager', () => {
     assert.equal(emitted.newToken, newToken)
   })
 
+  // #6006 — revoke is the panic button: it must NOT keep the old token valid
+  // (no grace) and must mark the event so WsServer severs sessions + forces
+  // re-auth. A scheduled rotation keeps today's graceful grace-window behavior.
+  it('rotate carries reason "scheduled" by default', () => {
+    manager = new TokenManager({ token: 'abc-123' })
+    let emitted = null
+    manager.on('token_rotated', (data) => { emitted = data })
+    manager.rotate()
+    assert.equal(emitted.reason, 'scheduled')
+  })
+
+  it('revoke generates a new token and carries reason "revoke"', () => {
+    manager = new TokenManager({ token: 'abc-123' })
+    let emitted = null
+    manager.on('token_rotated', (data) => { emitted = data })
+    const newToken = manager.revoke()
+    assert.notEqual(newToken, 'abc-123')
+    assert.equal(manager.currentToken, newToken)
+    assert.equal(manager.validate(newToken), true)
+    assert.equal(emitted.reason, 'revoke')
+    assert.equal(emitted.oldToken, 'abc-123')
+    assert.equal(emitted.newToken, newToken)
+  })
+
+  it('revoke invalidates the old token immediately (no grace)', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 60_000 })
+    const newToken = manager.revoke()
+    // Unlike rotate(), the old token must be rejected at once.
+    assert.equal(manager.validate('abc-123'), false)
+    assert.equal(manager.validate(newToken), true)
+  })
+
+  it('revoke tears down an in-flight grace window from a prior rotation', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 60_000 })
+    const second = manager.rotate() // 'abc-123' now in grace
+    assert.equal(manager.validate('abc-123'), true)
+    const third = manager.revoke() // panic — kill everything but current
+    assert.equal(manager.validate('abc-123'), false)
+    assert.equal(manager.validate(second), false)
+    assert.equal(manager.validate(third), true)
+  })
+
   it('rotate calls onPersist callback', async () => {
     let persisted = null
     manager = new TokenManager({
@@ -147,6 +189,28 @@ describe('TokenManager', () => {
     assert.equal(manager.validate('first'), false)
     assert.equal(manager.validate(second), true)
     assert.equal(manager.validate(third), true)
+  })
+
+  // #6004 — isCurrentToken accepts ONLY the current token, never the grace
+  // (previous) token. Gates user-shell create so a just-rotated token can't
+  // re-create a severed shell within its grace window.
+  it('isCurrentToken accepts the current token but rejects grace + bogus tokens', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 5000 })
+    const newToken = manager.rotate() // 'abc-123' is now the grace/previous token
+    assert.equal(manager.isCurrentToken(newToken), true, 'current token accepted')
+    // validate() still honors the grace token, but isCurrentToken must NOT.
+    assert.equal(manager.validate('abc-123'), true, 'grace token is still valid for auth')
+    assert.equal(manager.isCurrentToken('abc-123'), false, 'grace token is NOT the current token')
+    assert.equal(manager.isCurrentToken('bogus'), false)
+    assert.equal(manager.isCurrentToken(''), false)
+    assert.equal(manager.isCurrentToken(null), false)
+  })
+
+  it('revoke makes the old token fail isCurrentToken immediately', () => {
+    manager = new TokenManager({ token: 'abc-123', graceMs: 5000 })
+    const newToken = manager.revoke()
+    assert.equal(manager.isCurrentToken('abc-123'), false)
+    assert.equal(manager.isCurrentToken(newToken), true)
   })
 
   it('destroy clears timers and listeners', () => {

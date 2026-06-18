@@ -1,16 +1,18 @@
-import React, { useState, useRef, useEffect, useMemo } from 'react';
+import React, { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
+  FlatList,
   Platform,
   NativeSyntheticEvent,
   NativeScrollEvent,
   AccessibilityInfo,
+  ListRenderItemInfo,
 } from 'react-native';
-import { ChatMessage, ToolResultImage } from '../store/connection';
+import type { ChatMessage, ToolResultImage } from '../store/connection';
+import type { DisplayGroup } from '@chroxy/store-core';
 import { ImageViewer } from './ImageViewer';
 import { AnimatedMessage } from './AnimatedMessage';
 import { ICON_CHEVRON_RIGHT } from '../constants/icons';
@@ -19,15 +21,54 @@ import { COLORS } from '../constants/colors';
 import { ActivityGroup } from './chat/ActivityGroup';
 import { ToolDetailModal } from './chat/ToolDetailModal';
 import { MessageBubble } from './chat/MessageBubble';
-import { groupMessages, applyStreamingOverlay } from '@chroxy/store-core';
+import type { SelectOptionValue } from './chat/MessageBubble';
+import type { MultiQuestionAnswersMap } from './chat/MultiQuestionForm';
+import { buildChatViewMessages, isRetryableAskUserQuestionError } from '@chroxy/store-core';
+import { useConnectionStore } from '../store/connection';
+import { usePermissionAnnouncer } from '../hooks/usePermissionAnnouncer';
 
 // -- Props --
 
 export interface ChatViewProps {
   messages: ChatMessage[];
-  scrollViewRef: React.RefObject<ScrollView | null>;
+  /**
+   * #5517: the chat list is now a virtualized FlatList. SessionScreen owns
+   * the ref and only passes it through (it never calls methods on it) — all
+   * imperative scrolling happens inside ChatView. Typed as FlatList; the
+   * `<unknown>` data param keeps SessionScreen's `useRef<FlatList>` simple.
+   */
+  scrollViewRef: React.RefObject<FlatList<unknown> | null>;
   claudeReady: boolean;
-  onSelectOption: (value: string, messageId: string, requestId?: string, toolUseId?: string) => void;
+  /**
+   * #4755 — `value` is `string` for regular option taps + zero-options
+   * free-text answers, or `{otherLabel, freeformText}` (`OtherFreeformAnswer`)
+   * when the user picked the synthesized "Other" option and typed
+   * freeform text. The widened shape rides through to
+   * `sendUserQuestionResponse`, which serializes the wire payload
+   * (`answer: <otherLabel>, freeformText`). See
+   * `MessageBubble.SelectOptionValue` for the union type.
+   */
+  onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
+  /**
+   * #4973 — submit handler for the multi-question AskUserQuestion form.
+   * Fires with the per-question answers map; SessionScreen forwards it to
+   * `sendUserQuestionResponse` and records the structured summary.
+   */
+  onSubmitMultiQuestion?: (answersMap: MultiQuestionAnswersMap, messageId: string, toolUseId?: string) => void;
+  /**
+   * #4973 / #4735 — when true, multi-question AskUserQuestion payloads
+   * render the interactive `MultiQuestionForm`. SDK-mode sessions only;
+   * TUI / CLI sessions leave this false (permission-hook denies combined
+   * multi-question tool_uses). Mirrors the dashboard's
+   * `allowMultiQuestionForm` gate.
+   */
+  allowMultiQuestion?: boolean;
+  /**
+   * #5776 — opt-in to render a SINGLE-question multiSelect as a checkbox form
+   * (passed through to MessageBubble). True for the SDK family and claude-tui
+   * (multi-select reinject); off for claude-cli.
+   */
+  allowSingleMultiSelect?: boolean;
   isCliMode: boolean;
   selectedIds: Set<string>;
   isSelecting: boolean;
@@ -60,10 +101,10 @@ function PlanApprovalCard({
   onFeedback: () => void;
 }) {
   return (
-    <View style={styles.planCard}>
+    <View style={styles.planCard} testID="plan-approval-card">
       <Text style={styles.planCardHeader}>Plan Ready for Review</Text>
       {allowedPrompts.length > 0 && (
-        <View style={styles.planPromptsList}>
+        <View style={styles.planPromptsList} testID="plan-content">
           <Text style={styles.planPromptsLabel}>Permissions needed:</Text>
           {allowedPrompts.map((p, i) => (
             <Text key={i} style={styles.planPromptItem}>
@@ -78,6 +119,7 @@ function PlanApprovalCard({
           onPress={onApprove}
           accessibilityRole="button"
           accessibilityLabel="Approve plan"
+          testID="plan-approve-button"
         >
           <Text style={styles.planApproveText}>Approve</Text>
         </TouchableOpacity>
@@ -86,6 +128,7 @@ function PlanApprovalCard({
           onPress={onFeedback}
           accessibilityRole="button"
           accessibilityLabel="Give feedback on plan"
+          testID="plan-deny-button"
         >
           <Text style={styles.planFeedbackText}>Give Feedback</Text>
         </TouchableOpacity>
@@ -101,6 +144,9 @@ export function ChatView({
   scrollViewRef,
   claudeReady,
   onSelectOption,
+  onSubmitMultiQuestion,
+  allowMultiQuestion,
+  allowSingleMultiSelect,
   isCliMode,
   selectedIds,
   isSelecting,
@@ -122,6 +168,35 @@ export function ChatView({
   const [toolDetail, setToolDetail] = useState<{ toolName: string; content: string; toolResult?: string; toolResultTruncated?: boolean; toolResultImages?: ToolResultImage[]; serverName?: string } | null>(null);
   const [viewerUri, setViewerUri] = useState<string | null>(null);
 
+  // #5750 (item 2) — assertively announce a newly-arrived permission prompt to
+  // screen readers (the prompt auto-denies on timeout, so silence loses the
+  // user an action they might have allowed). Mirrors the dashboard's #5733
+  // assertive treatment; fires once per prompt and stays silent for a prompt
+  // already present at mount OR in the session we just switched to (the hook
+  // re-seeds on activeSessionId change — ChatView isn't remounted per switch).
+  const announcerSessionId = useConnectionStore((s) => s.activeSessionId);
+  usePermissionAnnouncer(messages, announcerSessionId);
+
+  // #5517: row expand/collapse registry, keyed by message id / activity
+  // group key. The list is now a virtualized FlatList, so an off-screen tool
+  // bubble / activity group / answered-permission pill can unmount and remount
+  // as the user scrolls. Holding the expanded flags HERE — outside the
+  // recyclable row — means a recycled row reopens to the user's last choice
+  // instead of snapping back to collapsed. Rows seed from this map on mount
+  // (`getInitialExpanded`) and write back on toggle (`handleExpandedChange`).
+  // A ref (not state) keeps writes off the render hot path — recycled rows
+  // re-read it on their own mount, so ChatView never needs to re-render to
+  // surface a persisted flag.
+  const expandedIdsRef = useRef<Map<string, boolean>>(new Map());
+  const getInitialExpanded = useCallback(
+    (id: string) => expandedIdsRef.current.get(id) ?? false,
+    [],
+  );
+  const handleExpandedChange = useCallback((id: string, expanded: boolean) => {
+    if (expanded) expandedIdsRef.current.set(id, true);
+    else expandedIdsRef.current.delete(id);
+  }, []);
+
   // Animation: only animate messages arriving after initial mount
   const mountTimeRef = useRef(Date.now());
   const [reduceMotion, setReduceMotion] = useState(true);
@@ -131,15 +206,25 @@ export function ChatView({
     return () => listener.remove();
   }, []);
 
-  // Track message layout positions for search scroll-to-match
-  const messageLayoutsRef = useRef<Map<string, number>>(new Map());
+  // #5517: search scroll-to-match. The pre-virtualization ScrollView tracked
+  // each row's pixel y via onLayout and called `scrollTo({ y })`. A FlatList
+  // can't scroll to an arbitrary pixel offset for an off-screen (unmeasured)
+  // row, so we scroll to the row's INDEX instead. `groupIndexByMessageId`
+  // maps every message id (including each message inside an activity group)
+  // to its row index; `scrollToIndex` with `viewPosition: 0` lands the match
+  // near the top of the viewport (mirroring the old `y - 80` headroom).
+  const groupIndexByMessageIdRef = useRef<Map<string, number>>(new Map());
 
   // Scroll to the current search match when it changes
   useEffect(() => {
     if (!currentMatchId) return;
-    const y = messageLayoutsRef.current.get(currentMatchId);
-    if (y != null) {
-      scrollViewRef.current?.scrollTo({ y: Math.max(0, y - 80), animated: true });
+    const index = groupIndexByMessageIdRef.current.get(currentMatchId);
+    if (index != null) {
+      scrollViewRef.current?.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0,
+      });
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps -- scrollViewRef is a stable ref
   }, [currentMatchId]);
@@ -191,14 +276,50 @@ export function ChatView({
     setToolDetail({ toolName, content, toolResult, toolResultTruncated, toolResultImages, serverName });
   };
 
-  // Structural grouping — only re-runs when messages change (not on streaming deltas)
-  const baseGroups = useMemo(() => groupMessages(messages), [messages]);
-
-  // Overlay streaming isActive flag — cheap to recompute on every delta
-  const displayGroups = useMemo(
-    () => applyStreamingOverlay(baseGroups, messages, streamingMessageId),
-    [baseGroups, streamingMessageId, messages],
+  // #4806: shared ChatView message pipeline (lifted from dashboard's
+  // `useChatMessages`). Single source of truth for filter + group +
+  // overlay + tail-id + stalledPromptIds — both dashboard and mobile
+  // derive identically. The mobile renderer below consumes
+  // `displayGroups` (groups, not flattened rows) so it can keep using
+  // ActivityGroup / MessageBubble; `chatTailMessageId` and
+  // `stalledPromptIds` (#4615) flow straight through.
+  const {
+    displayGroups,
+    chatTailMessageId,
+    stalledPromptIds,
+  } = useMemo(
+    () => buildChatViewMessages(messages, streamingMessageId),
+    [messages, streamingMessageId],
   );
+
+  // #5517: map every message id (and each id inside an activity group) to its
+  // FlatList row index so search-match scroll can target a row by index. Kept
+  // in a ref synced from this memo — the search effect reads it imperatively.
+  useMemo(() => {
+    const map = new Map<string, number>();
+    displayGroups.forEach((group, index) => {
+      if (group.type === 'activity') {
+        for (const m of group.messages) map.set(m.id, index);
+      } else {
+        map.set(group.message.id, index);
+      }
+    });
+    groupIndexByMessageIdRef.current = map;
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- ref write, no render dependency
+  }, [displayGroups]);
+
+  // #4496: last user input — used to gate the stream-stall chip's Retry
+  // button. Mirrors the dashboard's `isTail` check (only the most recent
+  // stall retry-button-wires; historical replayed stalls render chip
+  // text only). Walking messages once here is cheaper than recomputing
+  // per bubble.
+  const sendInput = useConnectionStore((s) => s.sendInput);
+  const lastUserInputContent = useMemo(() => {
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].type === 'user_input') return messages[i].content;
+    }
+    return null;
+  }, [messages]);
 
   const handleScroll = (event: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
@@ -215,109 +336,209 @@ export function ChatView({
   };
 
   const scrollToTop = () => {
-    scrollViewRef.current?.scrollTo({ y: 0, animated: true });
+    scrollViewRef.current?.scrollToOffset({ offset: 0, animated: true });
   };
 
   const scrollToBottom = () => {
     scrollViewRef.current?.scrollToEnd({ animated: true });
   };
 
+  // #5517: stable per-row key. Activity groups carry a synthetic
+  // `activity-<firstId>` key (so a group never collapses onto a member id);
+  // single rows key by their message id. Identity-stable keys are what let
+  // the #5516 MessageBubble memo skip reconciliation on a streaming flush —
+  // the FlatList must not key by array index.
+  const keyExtractor = useCallback(
+    (group: DisplayGroup) => (group.type === 'activity' ? group.key : group.message.id),
+    [],
+  );
+
+  // #5517: FlatList row renderer — the body of the old `displayGroups.map`,
+  // lifted out so FlatList can mount/unmount rows on demand. Behaviour is
+  // otherwise identical: ActivityGroup for grouped tool/thinking runs,
+  // MessageBubble for single rows, with the #4615 stalled-prompt suppression
+  // and the #4496 tail-only stream-stall retry wiring preserved.
+  const renderItem = useCallback(
+    ({ item: group }: ListRenderItemInfo<DisplayGroup>) => {
+      if (group.type === 'activity') {
+        const firstMsg = group.messages[0];
+        return (
+          <AnimatedMessage
+            type={firstMsg.type}
+            timestamp={firstMsg.timestamp}
+            mountTime={mountTimeRef.current}
+            reduceMotion={reduceMotion}
+          >
+            <ActivityGroup
+              messages={group.messages}
+              isActive={group.isActive}
+              isSelecting={isSelecting}
+              selectedIds={selectedIds}
+              onToggleSelection={onToggleSelection}
+              searchMatchIds={searchMatchIds}
+              groupKey={group.key}
+              getInitialExpanded={getInitialExpanded}
+              onExpandedChange={handleExpandedChange}
+            />
+          </AnimatedMessage>
+        );
+      }
+      const msg = group.message;
+      // #4615 (mobile parity via #4806): suppress unanswered prompts
+      // invalidated by a subsequent ASK_USER_QUESTION_STALL. The pending
+      // prompt has already been discarded server-side; the stall-chip
+      // rendered for the error bubble carries the retry affordance.
+      if (
+        msg.type === 'prompt' &&
+        msg.options &&
+        !msg.requestId &&
+        stalledPromptIds.has(msg.id)
+      ) {
+        return null;
+      }
+      const isSearchMatch = searchMatchIds?.has(msg.id) ?? false;
+      const isCurrentMatch = currentMatchId === msg.id;
+      return (
+        <View
+          style={isSearchMatch ? (isCurrentMatch ? styles.searchMatchCurrent : styles.searchMatch) : undefined}
+        >
+          <AnimatedMessage
+            type={msg.type}
+            timestamp={msg.timestamp}
+            mountTime={mountTimeRef.current}
+            reduceMotion={reduceMotion}
+          >
+            <MessageBubble
+              allowSingleMultiSelect={allowSingleMultiSelect}
+              message={msg}
+              onSelectOption={onSelectOption}
+              onSubmitMultiQuestion={onSubmitMultiQuestion}
+              allowMultiQuestion={allowMultiQuestion}
+              isSelected={selectedIds.has(msg.id)}
+              isSelecting={isSelecting}
+              onLongPress={() => onToggleSelection(msg.id)}
+              onPress={() => onToggleSelection(msg.id)}
+              onOpenDetail={handleOpenDetail}
+              onImagePress={setViewerUri}
+              getInitialExpanded={getInitialExpanded}
+              onExpandedChange={handleExpandedChange}
+              onRetryStreamStall={
+                // #4496 / #5793: only wire retry when this stall/teardown is
+                // the tail bubble AND there's a user_input to resend. Covers
+                // stream_stall plus the retryable AskUserQuestion codes
+                // (ASK_USER_QUESTION_STALL + the MULTISELECT/MULTI_QUESTION
+                // teardown codes) so all of them get the resend affordance.
+                msg.type === 'error' &&
+                (msg.code === 'stream_stall' || isRetryableAskUserQuestionError(msg.code)) &&
+                msg.id === chatTailMessageId &&
+                lastUserInputContent != null
+                  ? () => sendInput(lastUserInputContent)
+                  : undefined
+              }
+            />
+          </AnimatedMessage>
+        </View>
+      );
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- mountTimeRef/getInitialExpanded/handleExpandedChange are stable; the rest are render-affecting and intentionally tracked
+    [
+      reduceMotion,
+      isSelecting,
+      selectedIds,
+      onToggleSelection,
+      searchMatchIds,
+      currentMatchId,
+      stalledPromptIds,
+      onSelectOption,
+      onSubmitMultiQuestion,
+      allowMultiQuestion,
+      allowSingleMultiSelect,
+      chatTailMessageId,
+      lastUserInputContent,
+      sendInput,
+    ],
+  );
+
   return (
     <View style={styles.chatContainer}>
-      <ScrollView
-        ref={scrollViewRef}
+      <FlatList
+        ref={scrollViewRef as React.RefObject<FlatList<DisplayGroup>>}
         style={styles.scrollView}
         contentContainerStyle={styles.chatContent}
+        data={displayGroups}
+        keyExtractor={keyExtractor}
+        renderItem={renderItem}
+        // #5517: auto-scroll-to-bottom on new content (sticky streaming).
+        //
+        // The pre-virtualization ScrollView called scrollToEnd on every
+        // onContentSizeChange (gated only by selecting / unanswered-prompt).
+        // That was safe because a ScrollView's content size changed ONLY when
+        // real content did. A FlatList also fires onContentSizeChange as rows
+        // mount/unmount during scroll (windowing) — a literal port would yank
+        // a user who scrolled up back to the bottom mid-read. To preserve the
+        // observable UX (sticky to bottom while at the bottom; never yank a
+        // scrolled-up reader) we additionally gate on `showScrollToBottomRef`
+        // — the same "is the user near the bottom?" signal the keyboard and
+        // prompt auto-scroll effects already honour.
         onContentSizeChange={() => {
-          if (!isSelectingRef.current && !hasUnansweredPrompt) scrollViewRef.current?.scrollToEnd();
+          if (
+            !isSelectingRef.current &&
+            !hasUnansweredPrompt &&
+            !showScrollToBottomRef.current
+          ) {
+            scrollViewRef.current?.scrollToEnd();
+          }
         }}
         onScroll={handleScroll}
         scrollEventThrottle={16}
         keyboardDismissMode="on-drag"
         keyboardShouldPersistTaps="handled"
-      >
-      {messages.length === 0 ? (
-        <View style={styles.emptyState}>
-          <Text style={styles.emptyStateText}>
-            {claudeReady
-              ? 'Connected. Send a message to Claude!'
-              : isCliMode
-                ? 'Connecting...'
-                : 'Starting Claude Code...'}
-          </Text>
-        </View>
-      ) : (
-        displayGroups.map((group) => {
-          if (group.type === 'activity') {
-            const firstMsg = group.messages[0];
-            return (
-              <View
-                key={group.key}
-                onLayout={(e) => {
-                  const y = e.nativeEvent.layout.y;
-                  for (const m of group.messages) {
-                    messageLayoutsRef.current.set(m.id, y);
-                  }
-                }}
-              >
-                <AnimatedMessage
-                  type={firstMsg.type}
-                  timestamp={firstMsg.timestamp}
-                  mountTime={mountTimeRef.current}
-                  reduceMotion={reduceMotion}
-                >
-                  <ActivityGroup
-                    messages={group.messages}
-                    isActive={group.isActive}
-                    isSelecting={isSelecting}
-                    selectedIds={selectedIds}
-                    onToggleSelection={onToggleSelection}
-                    searchMatchIds={searchMatchIds}
-                  />
-                </AnimatedMessage>
-              </View>
-            );
-          }
-          const msg = group.message;
-          const isSearchMatch = searchMatchIds?.has(msg.id) ?? false;
-          const isCurrentMatch = currentMatchId === msg.id;
-          return (
-            <View
-              key={msg.id}
-              style={isSearchMatch ? (isCurrentMatch ? styles.searchMatchCurrent : styles.searchMatch) : undefined}
-              onLayout={(e) => {
-                messageLayoutsRef.current.set(msg.id, e.nativeEvent.layout.y);
-              }}
-            >
-              <AnimatedMessage
-                type={msg.type}
-                timestamp={msg.timestamp}
-                mountTime={mountTimeRef.current}
-                reduceMotion={reduceMotion}
-              >
-                <MessageBubble
-                  message={msg}
-                  onSelectOption={onSelectOption}
-                  isSelected={selectedIds.has(msg.id)}
-                  isSelecting={isSelecting}
-                  onLongPress={() => onToggleSelection(msg.id)}
-                  onPress={() => onToggleSelection(msg.id)}
-                  onOpenDetail={handleOpenDetail}
-                  onImagePress={setViewerUri}
-                />
-              </AnimatedMessage>
-            </View>
-          );
-        })
-      )}
-      {isPlanPending && onApprovePlan && onFocusInput && (
-        <PlanApprovalCard
-          allowedPrompts={planAllowedPrompts || []}
-          onApprove={onApprovePlan}
-          onFeedback={onFocusInput}
-        />
-      )}
-      </ScrollView>
+        // #5517: search match scroll uses scrollToIndex; rows are variable-
+        // height and unmeasured until laid out, so RN throws when the target
+        // is past `highestMeasuredFrameIndex`. Recover with the RN-recommended
+        // two-step: first `scrollToOffset` to the target's *estimated* offset
+        // (`index * averageItemLength`) — this mounts/measures the rows in
+        // between — then retry `scrollToIndex` on the next frame to land
+        // precisely. Bare-retrying scrollToIndex (the old path) could re-throw
+        // repeatedly when the row is still far off-screen.
+        onScrollToIndexFailed={(info) => {
+          scrollViewRef.current?.scrollToOffset({
+            offset: info.index * info.averageItemLength,
+            animated: true,
+          });
+          setTimeout(() => {
+            scrollViewRef.current?.scrollToIndex({
+              index: info.index,
+              animated: true,
+              viewPosition: 0,
+            });
+          }, 100);
+        }}
+        // #5517: keep a couple screens of rows mounted so near-viewport
+        // expand state and scroll feel native; recycle the rest.
+        windowSize={11}
+        removeClippedSubviews={Platform.OS === 'android'}
+        ListEmptyComponent={
+          <View style={styles.emptyState}>
+            <Text style={styles.emptyStateText}>
+              {claudeReady
+                ? 'Connected. Send a message to Claude!'
+                : isCliMode
+                  ? 'Connecting...'
+                  : 'Starting Claude Code...'}
+            </Text>
+          </View>
+        }
+        ListFooterComponent={
+          isPlanPending && onApprovePlan && onFocusInput ? (
+            <PlanApprovalCard
+              allowedPrompts={planAllowedPrompts || []}
+              onApprove={onApprovePlan}
+              onFeedback={onFocusInput}
+            />
+          ) : null
+        }
+      />
 
       {/* Scroll navigation buttons */}
       {showScrollToTop && (

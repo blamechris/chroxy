@@ -1,4 +1,4 @@
-appId: host.exp.Exponent
+appId: com.blamechris.chroxy
 name: All E2E flows
 ---
 
@@ -34,3 +34,82 @@ name: All E2E flows
 
 # Flow 8: Send message and receive response
 - runFlow: session-messages.yaml
+
+# Flow 9: Chat TodoList renderer (#4195) — end-to-end exercise of the
+# #4180 mobile TodoList via mock-server tool_start + tool_result.
+- runFlow: chat-todolist.yaml
+
+# Flow 10: ToolBubble collapsed-preview field-priority (#4260) —
+# exercises the #4243 partial-summary extraction via mock-server
+# 'show-bash-partial' trigger (tool_start + streaming tool_input_delta).
+- runFlow: chat-tool-partial-summary.yaml
+
+# Flow 11: StreamStallChip render + retry (#4507) — exercises the
+# #4496 mobile chip adoption of the server's `error{code:'stream_stall'}`
+# wire signal via mock-server 'show-stream-stall' trigger.
+- runFlow: stream-stall-chip.yaml
+
+# Flow 12: PlanApprovalCard approve path (#4696) — exercises the
+# plan_ready → PlanApprovalCard mount → Approve → canonical
+# PLAN_APPROVAL_MESSAGE send + clearPlanState chain via mock-server
+# 'show-plan-approval' trigger.
+- runFlow: plan-approval.yaml
+
+# Flow 13: PlanApprovalCard deny/feedback path (#4696) — sibling that
+# verifies the Give Feedback button focuses the input without
+# dismissing the card, and that sending a rebuttal afterwards clears
+# plan state.
+- runFlow: plan-approval-deny.yaml
+
+# Flow 14: TerminalView render (#4701) — exercises the Terminal mode
+# toggle and the WebView mount on the chroxy dev client via
+# mock-server 'show-terminal' trigger.
+- runFlow: terminal-view.yaml
+
+# Flow 15: Reconnect after tunnel drop (#4701) — exercises the
+# ConnectionPhase `connected → reconnecting → connected` transition
+# via mock-server 'simulate-disconnect' trigger and pins recovery to
+# a usable SessionScreen (input placeholder flips back). The banner /
+# spinner mount is unit-test territory — its visibility window is
+# shorter than Maestro's iOS hierarchy poll (see the flow's note).
+- runFlow: reconnect.yaml
+
+# Flow 16: AskUserQuestion approve path (#4697) — pins the wire→render
+# → tap-approve → answered-state round-trip for the single-question
+# `user_question` envelope. Targets the *exact surface* of the v0.9.x
+# prompt-delivery wedges (#4668 / #4679 / #4687 / #4648 / #4669);
+# server-side regression coverage is locked in but mobile had zero
+# E2E pin for the approve round-trip until this flow.
+- runFlow: ask-user-question.yaml
+
+# Flow 17: AskUserQuestion deny path (#4697) — companion to the
+# approve flow; same fixture, taps Deny. Pins the deny tap against
+# the post-deny wedge regressions (#4648 / #4668 / #4679).
+- runFlow: ask-user-question-deny.yaml
+
+# Flow 18: AskUserQuestion multi-question form (#4697 / #4604 Chunk B)
+# — exercises the 4-question wire shape #4604 pinned at the server
+# level, on the landed multi-question renderer: asserts every
+# question's `question-multi-option-*` testIDs, answers all four,
+# submits, and pins the post-answer summary chip.
+- runFlow: ask-user-question-multi.yaml
+
+# Flow 19: AskUserQuestion Other → freeform send-path (#4877 / #4755)
+# — exercises the third (deferred) acceptance criterion of #4755:
+# tapping the synthesized Other sentinel, typing a freeform answer,
+# and pressing Send. Pins the PR #4864 mobile parity with the
+# dashboard's `{answer:<otherLabel>, freeformText, toolUseId}` wire
+# shape end-to-end on a real RN runtime (anchored on the
+# `approval-freetext-send` testID + the input's placeholder — the
+# empty TextInput's testID isn't exposed in the iOS a11y tree).
+- runFlow: ask-question-other-freeform.yaml
+
+# Flow 20: ChatView mixed multi-question form (#4762) — sibling to
+# ask-user-question-multi.yaml that exercises the *mixed* wire shape
+# (single-select + multi-select + with-Other) the dashboard's
+# MultiQuestionForm (#4735 / #4760) handles. Asserts every question's
+# render (single-select radio, multi-select checkbox, model-supplied
+# 'Other' on Q[0]), answers them all, submits via
+# `question-multi-submit`, and pins the summary chip including the
+# multi-select answer list ("app, server").
+- runFlow: chat-multi-question.yaml

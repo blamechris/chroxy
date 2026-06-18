@@ -7,11 +7,17 @@ import { XTERM_CSS, XTERM_JS, FIT_ADDON_JS } from './xterm-bundle.generated';
  * xterm.js + FitAddon are bundled locally (inlined from node_modules via
  * scripts/bundle-xterm.js) so the terminal works offline without CDN access.
  *
- * The terminal is display-only (disableStdin: true) — input goes through InputBar.
+ * The terminal starts display-only (disableStdin: true). For a chat session,
+ * input goes through InputBar. For an interactive user-shell PTY (#6003), RN
+ * sends {type:'set-interactive', enabled:true} to enable stdin; xterm's onData
+ * then streams keystrokes back to RN as {type:'input', data} → terminal_input.
  *
  * Bridge protocol:
- *   RN → WebView (postMessage): {type:'write', data:string}, {type:'clear'}, {type:'reset'}
- *   WebView → RN (postMessage): {type:'ready', cols:number, rows:number}, {type:'resize', cols:number, rows:number}
+ *   RN → WebView (postMessage): {type:'write', data:string}, {type:'clear'}, {type:'reset'},
+ *                               {type:'set-interactive', enabled:boolean}, {type:'focus'}
+ *   WebView → RN (postMessage): {type:'ready', cols:number, rows:number},
+ *                               {type:'resize', cols:number, rows:number},
+ *                               {type:'input', data:string}  (interactive only)
  */
 export function buildXtermHtml(): string {
   return `<!DOCTYPE html>
@@ -67,6 +73,25 @@ export function buildXtermHtml(): string {
   term.loadAddon(fitAddon);
   term.open(document.getElementById('terminal'));
 
+  // #6003: stream keystrokes to RN. onData only fires while stdin is enabled
+  // (set-interactive below), so this is inert for read-only chat/mirror
+  // terminals. Covers typed keys, pasted text (bracketed paste — one onData),
+  // and xterm-synthesized control sequences.
+  term.onData(function(data) {
+    // Read-only safety belt: onData should only fire while stdin is enabled, but
+    // enforce it here too so a future xterm version that emits onData for
+    // programmatic writes can never leak input from a read-only terminal.
+    if (term.options.disableStdin) return;
+    window.ReactNativeWebView.postMessage(JSON.stringify({ type: 'input', data: data }));
+  });
+
+  // #6003: tapping an interactive terminal focuses xterm's hidden textarea,
+  // which summons the soft keyboard (the focus must happen inside the user
+  // gesture for iOS to show the keyboard). No-op while read-only.
+  document.getElementById('terminal').addEventListener('click', function() {
+    if (!term.options.disableStdin) { try { term.focus(); } catch(e) {} }
+  });
+
   // Debounced resize notification (250ms) — avoids flooding during animations/rotations
   var _resizeTimer = null;
   function notifyResize() {
@@ -103,6 +128,11 @@ export function buildXtermHtml(): string {
     handleMsg(e);
   });
 
+  // Handles RN -> WebView messages delivered via webViewRef.postMessage(...).
+  // e.data is the raw string RN sent; we JSON.parse it back to the bridge
+  // message. This makes terminal writes round-trip byte-identical (quotes,
+  // backticks, backslashes, ANSI escapes, emoji/UTF-16 surrogates) without the
+  // string-eval escaping hazards injectJavaScript invited (#5519).
   function handleMsg(e) {
     try {
       var msg = JSON.parse(e.data);
@@ -116,14 +146,20 @@ export function buildXtermHtml(): string {
         case 'reset':
           term.reset();
           break;
+        case 'set-interactive':
+          // #6003: toggle stdin for an interactive user-shell PTY. When enabling,
+          // focus so onData starts flowing (and the keyboard can appear).
+          term.options.disableStdin = !msg.enabled;
+          if (msg.enabled) { try { term.focus(); } catch(e) {} }
+          break;
+        case 'focus':
+          try { term.focus(); } catch(e) {}
+          break;
       }
     } catch(err) {
       // Ignore malformed messages
     }
   }
-
-  // Expose handleMsg globally so injectJavaScript can call it from RN
-  window.handleMsg = handleMsg;
 })();
 <\/script>
 </body>

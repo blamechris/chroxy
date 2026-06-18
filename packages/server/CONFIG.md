@@ -17,7 +17,8 @@ Configuration values are resolved in the following order (highest priority first
 |-----|------|----------|---------------------|-------------|
 | `apiToken` | string | - | `API_TOKEN` | Authentication token for clients |
 | `port` | number | - | `PORT` | Local WebSocket port (default: 8765) |
-| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `claude-tui`, `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
+| `host` | string | `--host <address>` | `CHROXY_HOST` | Bind address for the server socket. Unset binds `0.0.0.0` (all interfaces) so the mobile app / LAN clients can reach it. Set to `127.0.0.1` for a loopback-only bind that keeps auth enabled — opt-in defence-in-depth for single-device setups. `--no-auth` always forces loopback regardless of this key. When bound to loopback the mDNS `_chroxy._tcp` advertisement is suppressed (the server is not LAN-reachable). |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Default session backend. Allowed values: `claude-sdk` (default), `claude-cli`, `claude-tui`, `claude-channel` (research preview), `gemini`, `codex`, plus `docker-sdk` / `docker-cli` when Docker environments are enabled. See [../../docs/providers.md](../../docs/providers.md) for per-provider setup and env var requirements. |
 | `shell` | string | - | `SHELL_CMD` | Shell to use (default: `$SHELL` or `/bin/zsh`) |
 | `cwd` | string | `--cwd <path>` | `CHROXY_CWD` | Working directory (CLI mode) |
 | `model` | string | `--model <name>` | `CHROXY_MODEL` | Model to use. Provider-specific — e.g. `claude-sonnet-4`/`haiku` for Claude, `gemini-2.5-pro` for Gemini, `gpt-5.4` for Codex. |
@@ -25,14 +26,18 @@ Configuration values are resolved in the following order (highest priority first
 | `resume` | boolean | `--resume` / `-r` | `CHROXY_RESUME` | Resume existing session |
 | `noAuth` | boolean | `--no-auth` | `CHROXY_NO_AUTH` | Disable authentication (localhost only) |
 | `costBudget` | number | `--cost-budget <dollars>` | `CHROXY_COST_BUDGET` | Per-session cost budget in dollars. Applied independently to each session (not a shared pool across sessions). Warns at 80%, pauses the session at 100%. |
-| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `claude-tui`, `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. |
+| `provider` | string | `--provider <name>` | `CHROXY_PROVIDER` | Session provider (default `claude-sdk`). Built-in: `claude-sdk`, `claude-cli`, `claude-tui`, `claude-channel` (research preview), `codex`, `gemini`. See [docs/providers.md](../../docs/providers.md) for setup, env vars (e.g., `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`), and capability matrix. The `claude-channel` provider is a research-preview scaffold whose `start()` currently throws — selectable for `chroxy doctor` / registry inspection, but not yet runnable (bridge lands in #3954). See [`claude-channel`](#claude-channel-research-preview) below. |
+| `providers` | array \| object | - | `CHROXY_PROVIDERS` | Two forms. **Array** (legacy, written by `chroxy init`): informational list of provider ids the user opted into. **Object** (#5419): `providers.anthropicCompatible` is an array of config-driven Anthropic-compatible endpoint entries (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom) — each entry `{ id, label?, baseUrl, apiKeyEnv?, credentialsKey?, defaultModel, models?, pricing?, contextWindow? }` registers a first-class provider at startup, selectable via `provider` / `--provider <id>`. API keys are **never** inlined: `apiKeyEnv` names an env var, `credentialsKey` names a `~/.chroxy/credentials.json` field (mode `0600`); entries carrying literal secrets are rejected. Invalid entries are warned about and skipped; valid siblings still register. See [Anthropic-compatible endpoints](../../docs/providers.md#anthropic-compatible-endpoints-config-driven). |
 | `promptEvaluatorSkipPattern` | string | - | - | Per-session regex source (case-insensitive) extending the default skip list used by the prompt evaluator's trivial-message heuristic. See [Prompt evaluator skip heuristic](#prompt-evaluator-skip-heuristic) below. |
 | `maxSkillBytes` | number | - | - | Per-skill byte cap. Skills exceeding this size are rejected with a sanitised log warning. Default `32768` (32KB). Set to `0` to disable the per-skill cap. |
 | `maxTotalSkillBytes` | number | - | - | Global skills-context budget. When a session's merged active-skill set exceeds this size, lower-priority skills are dropped first (frontmatter `priority` defaults to 100; ties broken alphabetically). Default `262144` (256KB). Set to `0` to disable the global cap. |
 | `providerSkillAllowlist` | object | - | - | Per-provider skill allowlist. Object keyed by provider id (e.g. `codex`, `gemini`); each value is an array of skill names that may load for that provider. See [Per-provider skill allowlist](#per-provider-skill-allowlist) below. |
 | `trustMismatchMode` | string | - | - | One of `warn` or `block`. When set, the server records a SHA-256 hash of every loaded skill on first activation and compares it on every subsequent load. See [Skill content-hash trust](#skill-content-hash-trust) below. Disabled (no hashing) when omitted. |
+| `dangerouslySkipPermissions` | boolean | `--dangerously-skip-permissions` | `CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` | Server-wide default for the per-session skip-permissions flag (#4246, #4384). Honoured only by the `claude-tui` provider — spawns claude with `--dangerously-skip-permissions` and elides chroxy's permission hook. Off by default. Legacy alias `skipPermissions` (config key) and `CHROXY_SKIP_PERMISSIONS` (env var) are still honoured for one deprecation window and emit a warning at boot — rename to the canonical key. See [Skip permissions (TUI provider)](#skip-permissions-tui-provider) below. |
 | `resultTimeoutMs` | number | - | `CHROXY_RESULT_TIMEOUT_MS` | Per-session **soft-warning** inactivity window in milliseconds. When no SDK / CLI event arrives within this window, the server emits an `inactivity_warning` event (#3899) so clients can render a check-in chip and surface a push notification — the session stays alive. The kill path is `hardTimeoutMs` (below). See [Inactivity safety net](#inactivity-safety-net). Default `1800000` (30 min); range `30000`–`86400000` (30 s – 24 h). |
 | `hardTimeoutMs` | number | - | `CHROXY_HARD_TIMEOUT_MS` | Per-session **hard-kill** inactivity window in milliseconds. When `resultTimeoutMs` has already fired and silence continues to this longer threshold, the server emits `permission_expired` for every outstanding permission prompt, force-clears busy state, and emits a generic `error` event with `"Response timed out after <duration> of inactivity"` (#3899). Default `7200000` (2 h); range `30000`–`86400000` (30 s – 24 h). Must be ≥ `resultTimeoutMs` or the soft warning never fires — validator warns. |
+| `backgroundShellHardQuiesceMs` | number | - | `CHROXY_BACKGROUND_SHELL_HARD_QUIESCE_MS` | How long a background shell (`Bash` with `run_in_background: true`) may go with **no new output** before the server treats it as finished and **reaps** its liveness tracking, so a finished-but-never-polled command stops pinning the session `running` forever (#5265). Default `14400000` (4 h); range `60000`–`86400000` (60 s – 24 h), or **`0` to disable** hard-reaping (advisory-only, the #5247 behaviour). **Tradeoff:** a genuinely long-running compute that emits no output for hours (and is never polled via `BashOutput`) could have its tracking reaped and the session become idle-timeout-eligible. A noisy long-runner (e.g. a dev server logging within the window) keeps its output-file mtime fresh and is never reaped. Operators running long silent computes should raise this (e.g. 6–8 h) or set `0`. |
+| _(env-only)_ | number | - | `CHROXY_DIAGNOSTICS_RATE_LIMIT` | Per-source-IP request cap on `GET /diagnostics` over a 60 s sliding window (#3737). The endpoint reads the on-disk log tail and iterates every session per call, so it is rate-limited to protect against a stolen-token tight loop. Default `12` requests/min with a 4-request burst. Set the env var to an **integer ≥ 1** to override `maxMessages`; the burst auto-derives as `max(1, floor(N/3))`. Invalid values (non-integer, < 1, NaN) silently fall through to the default — including sub-integer values like `0.5`, which are rejected outright (truncating to `0` would otherwise raise the limit via RateLimiter's `||` fallback). No `config.json` key is exposed; this setting is intentionally env-only. Overshoot returns `429` with a `Retry-After` header and a JSON body `{ "error": "rate limited", "retryAfterMs": <ms> }`. |
 
 ### Prompt evaluator skip heuristic
 
@@ -138,6 +143,82 @@ directly. Format:
 A corrupted or missing trust file is treated as empty (fail-open) so a single
 bad write can't lock every skill out of every session.
 
+### Skip permissions (TUI provider)
+
+`dangerouslySkipPermissions` is a **TUI-only** opt-out from chroxy's permission
+gate. When enabled, sessions on the `claude-tui` provider (the legacy CLI
+session backend that drives the real `claude` TUI through a PTY) are spawned
+with the `--dangerously-skip-permissions` flag and the chroxy permission hook
+is elided entirely. Other providers (`claude-sdk`, `claude-cli`,
+`docker-sdk`/`docker-cli`, `codex`, `gemini`) ignore the flag harmlessly —
+they have their own permission paths and chroxy does not pass this through.
+
+**What enabling it actually does:**
+
+- Spawns the TUI `claude` binary with `--dangerously-skip-permissions`, so
+  Claude itself stops prompting for tool approvals.
+- Skips wiring chroxy's permission hook into the TUI session, so chroxy's own
+  permission rule engine never sees a request to gate.
+- Logs a loud `[security]` warning at startup identifying which config key
+  surfaced the setting (see below).
+
+**Sources, in precedence order** (highest priority first):
+
+1. CLI flag: `chroxy start --dangerously-skip-permissions`
+2. Config key: `dangerouslySkipPermissions` (canonical, mirrors the CLI flag name)
+3. Config key: `skipPermissions` (legacy alias — see "Deprecation" below)
+4. Default: `false`
+
+Operators running headless deploys can pin the setting in `config.json`:
+
+```jsonc
+{
+  "dangerouslySkipPermissions": true
+}
+```
+
+At boot, when the resolved value is `true`, the server emits:
+
+```
+[security] dangerouslySkipPermissions=true (source: config.dangerouslySkipPermissions) — claude-tui sessions will spawn with --dangerously-skip-permissions and chroxy's permission gate is BYPASSED for those sessions
+```
+
+**Deprecation: the legacy `skipPermissions` key.**
+
+Prior to #4246 the config-file key was `skipPermissions`. That spelling is
+still honoured for one deprecation window so existing config files keep
+working, but the server logs a warning at startup nudging operators to rename
+the key:
+
+```
+[security] config key 'skipPermissions' is deprecated — rename it to 'dangerouslySkipPermissions' to match the CLI flag name. Both keys are honoured for now; the legacy key will be removed in a future release.
+```
+
+If both keys are present the canonical `dangerouslySkipPermissions` wins as
+the value source, but the deprecation warning is still emitted to nudge
+cleanup of the stale duplicate.
+
+**Config-key vs wire-field distinction.**
+
+This config key is the **server-wide default** applied to every new session
+that does not specify the setting explicitly. It is distinct from the
+per-session `skipPermissions` field on the WebSocket `create_session`
+message (see `packages/protocol/src/schemas/client.ts`), which lets a single
+session opt in at creation time — for example via the dashboard's TUI-only
+checkbox. The per-session wire field is also `skipPermissions` (matching the
+session-creation API surface) rather than `dangerouslySkipPermissions`; that
+naming is intentional and does not carry the config-file deprecation.
+
+When the per-session wire field is omitted, the session inherits the
+server-wide default resolved from this config key. As with the config-file
+flag, the wire field is honoured only by the `claude-tui` provider.
+
+**Env var.** The matching environment variable is
+`CHROXY_DANGEROUSLY_SKIP_PERMISSIONS` (canonical) with the deprecated alias
+`CHROXY_SKIP_PERMISSIONS` honoured for the same deprecation window as the
+config-file alias (#4384). Both follow the same precedence as their config-key
+counterparts.
+
 ### Inactivity safety net
 
 A session is protected by a two-stage timer pair (#3899, #3901): a soft
@@ -184,11 +265,282 @@ The `provider` key picks which AI CLI backs a session by default:
 |-------|----------------------|--------------|
 | `claude-sdk` (default) | `@anthropic-ai/claude-agent-sdk` | Claude Code login or `ANTHROPIC_API_KEY` |
 | `claude-cli` | `claude -p` (Claude Code CLI) | Claude Code login (CLI intentionally strips `ANTHROPIC_API_KEY` from its environment) |
+| `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | Claude Code subscription login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 |
 | `gemini` | `gemini -p` CLI | `GEMINI_API_KEY` |
 | `codex` | `codex exec` CLI | `OPENAI_API_KEY` |
 | `docker-sdk` / `docker-cli` | Claude SDK/CLI inside a Docker container | Requires `environments.enabled=true` + Docker |
 
 Clients can override the default per-session by passing `provider` in a `create_session` WebSocket message. See [../../docs/providers.md](../../docs/providers.md) for capability differences (plan mode, permission handling, resume, attachments) and troubleshooting.
+
+### `claude-channel` (research preview)
+
+`claude-channel` drives Claude through Anthropic's first-party **channels MCP
+protocol** (`claude --channels`) instead of scraping the interactive TUI
+(`claude-tui`) or calling the SDK / `claude -p` (`claude-sdk` / `claude-cli`).
+A *channel* is a stdio MCP server that **pushes** events into a running
+interactive `claude` session; chroxy bridges those events onto its normal
+WebSocket/event pipeline. It bills the same way `claude-tui` does — against your
+Claude subscription's **interactive allowance**, bypassing the programmatic
+credit pool — because the events arrive in a real interactive session, not a
+`claude -p` subprocess.
+
+> **Status — scaffold only.** As of this writing the provider is a registered
+> scaffold (#3953): it is listed by the registry and runs its `chroxy doctor`
+> preflight, but `start()` throws "not yet implemented". The live bridge
+> (spawn + IPC round-trip) lands in #3954. Selecting `claude-channel` today
+> fails fast with a clear error rather than spawning anything.
+
+**When to pick it over `claude-tui` / `claude-sdk`:**
+
+- Over **`claude-tui`**: once the bridge lands, the channel transport replaces
+  the fragile ANSI-scrape + PTY-keystroke approach with a documented MCP
+  contract, and adds **live streaming** plus a **first-party permission relay**
+  (Anthropic's `claude/channel/permission`, instead of the sidecar
+  `permission-hook.sh`). Same subscription billing surface.
+- Over **`claude-sdk` / `claude-cli`**: pick the channel path (like
+  `claude-tui`) only when you want sessions to bill against your Claude.ai Pro /
+  Max / Team **subscription** rather than the programmatic credit pool. The SDK
+  remains the default and most-featured backend for programmatic billing.
+- It is **not a strict superset of `claude-tui`**: the channel surface does
+  **not** expose model switching or permission-mode switching (those stay the
+  same gap `claude-tui` has), and resume / plan mode / thinking-level are not in
+  the channel contract.
+
+**Requirements and caveats:**
+
+- **`claude` ≥ 2.1.80.** The `--channels` transport ships from this version
+  (the locally-installed CLI used for the spike was v2.1.163). Permission relay
+  additionally needs ≥ 2.1.81, but that surface lands with #3955; the scaffold
+  preflight gates on the 2.1.80 channel-transport floor only. The dashboard
+  picker should disable the option with an explanatory tooltip below 2.1.80
+  (deferred — see [`docs/providers.md`](../../docs/providers.md#claude-channel-research-preview)).
+- **`--dangerously-load-development-channels` is required during the preview.**
+  Custom (non-allowlisted) channels are not on Anthropic's approved channels
+  allowlist, so chroxy must pass this flag to load `chroxy-channel`. The flag
+  bypasses **only** the channel allowlist, not org policy. A
+  marketplace-approved `chroxy-channel` plugin removes the need for it — see
+  [`packages/server/src/channels/PACKAGING.md`](src/channels/PACKAGING.md).
+- **Protocol instability (preview).** Anthropic documents the channels contract
+  as a research preview that "may change based on feedback". Treat each Claude
+  Code minor bump as a smoke-test trigger for this provider; `claude-tui`
+  remains the stable subscription-billed fallback.
+- **Org / platform gating.** Channels are **not** available on Bedrock / Vertex
+  / Foundry, and Team/Enterprise orgs must enable `channelsEnabled` in managed
+  settings. `chroxy doctor` surfaces the binary + version preflight; org-policy
+  failures surface at session start.
+
+For the verified protocol contract, the capability matrix, and the go/no-go
+rationale, see the spike:
+[`docs/architecture/claude-channels-provider-spike.md`](../../docs/architecture/claude-channels-provider-spike.md).
+
+### Kubernetes workspace PVC (`environments.k8s.workspace`)
+
+When the K8s environment backend is active on a **multi-node** cluster, the
+default `hostPath` workspace mount only works for Pods scheduled on the node
+that owns the host directory — on every other node the Pod silently mounts an
+empty `DirectoryOrCreate` and the workload sees no workspace. To make the
+workspace cluster-wide, K8sBackend supports mounting a pre-provisioned
+`PersistentVolumeClaim` instead (`#3385` / `#4547`).
+
+The PVC strategy is **operator-side configuration**: the claim, mount path, and
+read-only flag are cluster-ops concerns that don't vary per project, per
+session, or per user. Set the block once in `~/.chroxy/config.json` and every
+environment created on the K8s backend picks it up automatically (`#4556`).
+
+```json
+{
+  "environments": {
+    "enabled": true,
+    "k8s": {
+      "workspace": {
+        "claimName": "chroxy-workspace-pvc",
+        "mountPath": "/workspace",
+        "readOnly": false
+      }
+    }
+  }
+}
+```
+
+| Field | Type | Required | Default | Notes |
+|-------|------|----------|---------|-------|
+| `claimName` | string | yes | — | Name of a pre-provisioned PVC in the target namespace. Must be a non-empty string. |
+| `mountPath` | string | no | `/workspace` | Pod-side mount path. |
+| `readOnly` | boolean | no | `false` | Mount the PVC read-only. |
+
+The block shape is validated at config-load time — a typo (missing `claimName`,
+wrong type) surfaces at startup, not at the first environment-creation call.
+Docker and other non-K8s backends silently ignore the block, so it's safe to
+leave in config when switching backends.
+
+Per-create callers (a future dashboard or CLI flag) can pass an explicit
+`workspacePVC` opt to override the configured default for a single environment;
+the per-call value always wins. With no caller override and no config block,
+the manager omits the field entirely and the K8s backend falls back to the
+`hostPath` strategy (single-node clusters).
+
+### Kubernetes resource quotas (CPU / memory requests & limits)
+
+When the K8s environment backend is active, every Pod it creates carries CPU and
+memory **requests** (what the scheduler reserves and the pod is guaranteed) and
+**limits** (the hard ceiling enforced by the kernel/cgroup). This keeps a single
+runaway session from starving the node (`#3195`).
+
+If a `createEnvironment` call does not specify resources, the backend applies
+these built-in defaults:
+
+| Dimension | Request | Limit |
+|-----------|---------|-------|
+| CPU       | `500m`  | `2`   |
+| Memory    | `512Mi` | `4Gi` |
+
+All values are standard [Kubernetes resource quantities](https://kubernetes.io/docs/concepts/configuration/manage-resources-containers/):
+CPU as a decimal number or milli-cpu (`500m`, `1`, `2`), memory as a binary-SI
+quantity (`512Mi`, `2Gi`) or bytes. Docker-style memory suffixes (`512m`, `2g`)
+are normalised to their binary-SI equivalents (`512Mi`, `2Gi`). Malformed
+quantities are rejected before any Pod or Secret is created.
+
+Per-create callers can override any field via the structured `resources` opt:
+
+```js
+await environmentManager.create({
+  name: 'big-build',
+  cwd: '/path/to/project',
+  resources: {
+    cpu: '1',          // requests.cpu
+    memory: '1Gi',     // requests.memory
+    cpuLimit: '4',     // limits.cpu
+    memoryLimit: '8Gi' // limits.memory
+  },
+})
+```
+
+Unset fields fall back to the legacy flat `memoryLimit`/`cpuLimit` opts (applied
+to both the request and the limit for that dimension) and then to the defaults
+above. The structured `resources` opt always wins where both are present.
+
+Docker and other non-K8s backends ignore the `resources` opt entirely.
+
+Operators can also change the cluster-wide defaults when constructing the
+backend: pass `defaultResources` as a partial `{ cpu, memory, cpuLimit,
+memoryLimit }` object (merged over the built-ins) to raise/lower them, or
+`defaultResources: null` to disable defaults so only explicit per-call values
+produce a `resources` block.
+
+### Kubernetes per-tenant namespace caps (`ResourceQuota` / `LimitRange`)
+
+The pod-level `resources` block above limits each individual Pod. Now that the
+K8s backend gives every tenant their own namespace (`#3194`), you can also set
+**namespace-level** guardrails that apply to the tenant as a whole (`#5142`).
+Both are **opt-in**; when unset the namespace-ensure path is unchanged. They are
+only applied to per-tenant namespaces — never to the static default namespace.
+
+**`environments.k8s.namespaceQuota`** ensures an idempotent `ResourceQuota` that
+caps the AGGREGATE resources a tenant may consume across ALL their Pods:
+
+```json
+{
+  "environments": {
+    "backend": "k8s",
+    "k8s": {
+      "namespaceQuota": {
+        "cpu": "8",          // aggregate requests.cpu cap
+        "memory": "16Gi",    // aggregate requests.memory cap
+        "cpuLimit": "16",    // aggregate limits.cpu cap
+        "memoryLimit": "32Gi", // aggregate limits.memory cap
+        "pods": 10           // max Pods in the namespace
+      }
+    }
+  }
+}
+```
+
+At least one field is required. `cpu`/`memory` map to the aggregate `requests.*`
+keys, `cpuLimit`/`memoryLimit` to the aggregate `limits.*` keys, and `pods` to
+the object-count quota. With a quota in place, Pods that lack their own
+requests/limits will be REJECTED by the cluster — pair it with a `LimitRange`
+(below) or the backend's own `defaultResources` so every Pod carries values.
+
+**`environments.k8s.namespaceLimitRange`** ensures an idempotent `LimitRange`
+that supplies cluster-level DEFAULT requests/limits, so Pods created without
+explicit resources inherit namespace defaults (defence-in-depth on top of the
+backend's own `defaultResources`):
+
+```json
+{
+  "environments": {
+    "k8s": {
+      "namespaceLimitRange": {
+        "cpu": "250m",       // defaultRequest.cpu
+        "memory": "256Mi",   // defaultRequest.memory
+        "cpuLimit": "1",     // default.cpu (the limit)
+        "memoryLimit": "1Gi" // default.memory (the limit)
+      }
+    }
+  }
+}
+```
+
+At least one field is required. `cpu`/`memory` become the LimitRange
+`defaultRequest`, while `cpuLimit`/`memoryLimit` become the `default` (limit).
+
+Both blocks accept the same quantity grammar as the per-pod `resources` opt
+(CPU as a decimal/milli-cpu string, memory as a binary-SI quantity; Docker-style
+suffixes are normalised). Malformed quantities are rejected at startup. Each
+configured object's ensure is idempotent (read-or-create, already-exists
+swallowed) and cached per process, so it adds one read (plus a create if the
+object is missing) per configured object the first time a tenant namespace is
+used, and nothing on subsequent calls for that namespace.
+
+### Discord notifications (`notifications.discord`)
+
+The Discord webhook sink (#5413 Phase 2) maintains one status-embed message
+per project in a Discord channel, alongside (or instead of) Expo push. It is
+**off by default** — it activates only when a webhook URL is present.
+
+The webhook URL is a **secret** (anyone holding it can post to the channel)
+and is therefore NOT a config key. Provide it via either:
+
+- `CHROXY_DISCORD_WEBHOOK_URL` environment variable, or
+- `~/.chroxy/credentials.json` (must be mode `0600`):
+  `{ "discordWebhookUrl": "https://discord.com/api/webhooks/<id>/<token>" }`
+
+The non-secret knobs live under `notifications.discord` in `config.json`:
+
+```json
+{
+  "notifications": {
+    "discord": {
+      "botName": "Chroxy",
+      "colors": { "chroxy": 1752220, "my-other-project": 10181046 },
+      "defaultColor": 5793266,
+      "permissionColor": 16753920,
+      "errorColor": 15158332,
+      "updateThrottleMs": 15000,
+      "heartbeatIntervalMs": 300000,
+      "pruneAfterMs": 86400000,
+      "billingAlerts": true
+    }
+  }
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `botName` | string | Webhook display name + embed footer label (default `Chroxy`) |
+| `colors` | object | Per-project embed sidebar colors, project name → decimal 24-bit RGB (`0`–`16777215`) |
+| `defaultColor` | number | Sidebar color for projects without an override (default `5793266`, Discord blurple) |
+| `permissionColor` | number | Sidebar color for the needs-approval state (default `16753920`, orange) |
+| `errorColor` | number | Sidebar color for the session-error state (default `15158332`, red) |
+| `updateThrottleMs` | number | Minimum interval between same-state routine embed updates per project (default `15000`; state changes always go out) |
+| `heartbeatIntervalMs` | number | Elapsed-time footer refresh interval for live embeds — offline embeds are final and never re-PATCHed (default `300000`; `0` disables; minimum `10000`) |
+| `pruneAfterMs` | number | Retention for state-store entries: entries untouched longer than this are dropped on load (default `86400000` / 24h; `0` disables; minimum `60000` / 60s — smaller values fall back to the default, since a retention shorter than the gap between events prunes the tracked message id in between and turns the embed into message-per-event spam; the last Discord message is kept). Heartbeat refreshes don't reset the clock — only real pipeline events do |
+| `billingAlerts` | boolean | Kill-switch for the daemon-global billing-alert message (the 2026-06-15 billing canary). Default `true` when a webhook is configured; `false` keeps billing alerts off Discord while the per-project status embed stays on |
+
+Status-message state (message ids, current state per project) persists in
+`~/.chroxy/discord-webhook-state.json`; the billing-alert message tracks its own
+id in `~/.chroxy/discord-billing-state.json`. Full setup walkthrough:
+[docs/guides/discord-notifications.md](../../docs/guides/discord-notifications.md).
 
 ## Examples
 

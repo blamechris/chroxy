@@ -7,10 +7,11 @@ Composes `/autonomous-dev-flow` logic internally but adds multi-wave retry with 
 ## Arguments
 
 - `$ARGUMENTS` - Issue source and options. Same as `/autonomous-dev-flow` plus marathon-specific options:
-  - `label:ready-to-build` (all open issues with this label)
+  - `label:from-review` (all open issues with this label)
+  - `label:enhancement` (all open issues with this label)
   - `milestone:"v1.2"` (all open issues in milestone)
   - `#12 #15 #18` or `12 15 18` (specific issues by number)
-  - `label:ready-to-build max:10 sort:created-asc` (with options)
+  - `label:from-review max:10 sort:created-asc` (with options)
   - If empty, auto-detect: scan open issues sorted by complexity (low first, then medium, skip high)
   - Options: `max:N` (default 20, hard cap 30), `sort:created-asc` (default) or `sort:created-desc`
   - `waves:N` (default 3, max 4) — maximum retry waves
@@ -42,6 +43,8 @@ REPO_NAME=$(basename "$REPO")
 SESSION_START=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
 
 BRANCH_PREFIX="feat/"
+
+BRANCH_PREFIX_RE="^(feat|fix|refactor|test)/"
 ```
 
 Parse `$ARGUMENTS` — same as `/autonomous-dev-flow` but with higher defaults:
@@ -66,8 +69,8 @@ Display the marathon queue:
 | # | Issue | Labels | Action |
 |---|-------|--------|--------|
 | 1 | #12 — Add retry logic | enhancement | Implement |
-| 2 | #15 — Add leaderboard | complexity:high | Decompose → sub-issues |
-| 3 | #18 — Auth integration tests | testing | Implement |
+| 2 | #15 — Add leaderboard | from-review | Decompose → sub-issues |
+| 3 | #18 — Auth integration tests | enhancement | Implement |
 | — | #16 — Refactor auth module | enhancement | Assigned to @user (skipped) |
 
 **Mode:** Unattended marathon (up to {W} waves)
@@ -101,7 +104,7 @@ For each issue in the current wave's queue, run the full `/autonomous-dev-flow` 
 
 - **Two fix attempts per issue per wave** (same as original). If still failing after 2 attempts, mark as `retry` instead of just `flagged`.
 - **Track the failure reason** in `MASTER_LOG` — this informs the retry strategy in later waves.
-- **High-complexity decomposition** happens in Wave 1 only. Sub-issues created during decomposition are added to the current wave's queue (not deferred to Wave 2). If decomposition would push the global unique issue count past the hard cap (30), truncate to the cap and list deferred sub-issues in the morning summary.
+- **High-complexity decomposition** happens in Wave 1 only. Sub-issues created during decomposition are added to the current wave's queue (not deferred to Wave 2).
 
 After each issue, output the wave progress table:
 
@@ -152,30 +155,26 @@ Add new unassigned issues to the queue if they match the original filter criteri
 
 ```bash
 gh pr list --state merged --json number,headRefName,mergedAt --limit 30 \
-  | jq --arg start "$SESSION_START" --arg prefix "$BRANCH_PREFIX" \
-    '[.[] | select(.mergedAt > $start) | select(.headRefName | startswith($prefix))]'
+  | jq --arg start "$SESSION_START" --arg prefix "$BRANCH_PREFIX_RE" \
+    '[.[] | select(.mergedAt > $start) | select(.headRefName | test($prefix))]'
 ```
 
 Note merged PRs. If a merged PR's issue is in the retry queue, remove it — the user handled it.
 
 #### 2d. Clean Up Failed Branches
 
-For issues entering Wave 2+, capture the diff for retry context, then clean up:
+For issues entering Wave 2+, delete the stale branch and PR from the previous attempt:
 
 ```bash
 # For each retry candidate:
-# 1. Capture the diff from the closed PR (available via GitHub API even after branch deletion)
-#    Store in MASTER_LOG for retry strategy reference
-gh pr diff ${OLD_PR_NUM} > /tmp/wave${WAVE_NUM}_issue${ISSUE_NUM}.patch
-
-# 2. Close the old PR (it had issues)
+# Close the old PR (it had issues)
 gh pr close ${OLD_PR_NUM} --comment "Closing for retry in Wave ${NEXT_WAVE} — previous attempt had: ${FAILURE_REASON}"
 
-# 3. Delete the old remote branch
+# Delete the old remote branch
 git push origin --delete ${OLD_BRANCH}
 ```
 
-This ensures each retry starts completely fresh — new branch from latest main, no stale code. The captured diff is available for retry strategy analysis in later waves.
+This ensures each retry starts completely fresh — new branch from latest main, no stale code.
 
 #### 2e. Build Next Wave Queue
 
@@ -185,8 +184,6 @@ Combine:
 3. Remaining issues not yet attempted (if queue was large)
 
 Cap at `max` setting. Retry candidates go first (they have the most context built up).
-
-**Global unique issue cap:** Track all unique issues ever attempted across all waves (including sub-issues from decomposition). If replenishment would push the global count past 30, stop adding new issues and list deferred candidates in the morning summary. Retries of previously attempted issues do NOT count against this cap (they're already tracked).
 
 If the next wave queue is empty, skip to Morning Summary.
 
@@ -199,7 +196,7 @@ Each wave uses an escalating strategy for issues that failed in prior waves:
 For issues that failed in Wave 1:
 1. **Re-read the issue** completely — don't rely on Wave 1 understanding
 2. **Read the failed PR's review comments** — understand what went wrong
-3. **Read the diff from the failed attempt** (from the closed PR via `gh pr diff` or the captured patch from Phase 2d) to understand what was tried
+3. **Read the diff from the failed attempt** (before branch deletion) to understand what was tried
 4. **Start fresh** — new branch from latest main, new implementation
 5. **Address the specific failure** — if tests failed, focus on why; if review found issues, incorporate feedback
 6. Same TDD cycle, same review process
@@ -334,7 +331,7 @@ These issues could not be implemented after {W} waves. Each has a detailed comme
 
 ### Decomposition Log
 
-- **#15** (complexity:high) → #20, #21, #22 — all completed in W1
+- **#15** (large scope) → #20, #21, #22 — all completed in W1
 
 ### Wave-by-Wave Summary
 
@@ -358,7 +355,7 @@ This skill uses **GitHub state** for resume — no local state files. Same as `/
 
 If a marathon session is interrupted (crash, timeout, user stops it), re-running with the same arguments will:
 
-1. Query GitHub for existing session branches (matching `BRANCH_PREFIX`) and PRs referencing each issue
+1. Query GitHub for existing session branches (matching `BRANCH_PREFIX_RE`) and PRs referencing each issue
 2. Detect which wave the session was in by counting attempts per issue
 3. Skip issues that already have merged or clean open PRs
 4. Resume from the first unfinished issue in the current wave
@@ -390,14 +387,4 @@ This makes the skill **idempotent** — safe to re-run without duplicating work.
 15. **Pre-Skill Checkpoint** — Re-read CLAUDE.md and skill files before running `/full-review` in every wave.
 16. **Sync before every branch** — Always `git checkout main && git pull` before starting each issue in each wave.
 17. **Morning summary is mandatory** — Even if interrupted, output the best summary possible with data collected so far.
-
-## Customization Points
-
-The following values are hardcoded for this repo (matching `/autonomous-dev-flow`):
-
-- **Branch prefix:** `feat/` (line 41)
-- **Hard cap:** 30 issues (line 10, `max` default 20)
-- **Skip labels:** `blocked`, `wontfix`
-
-When adapting for another repo, update these values and the test/lint commands referenced in the `/autonomous-dev-flow` phases.
-<!-- skill-templates: tackle-issues 87ae770 2026-03-06 -->
+<!-- skill-templates: tackle-issues 21fa678 2026-06-03 -->

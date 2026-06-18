@@ -30,6 +30,9 @@ export declare const AuthSchema: z.ZodObject<{
         platform: z.ZodOptional<z.ZodString>;
     }, z.core.$loose>>;
     capabilities: z.ZodDefault<z.ZodCatch<z.ZodOptional<z.ZodArray<z.ZodString>>>>;
+    eagerPublicKey: z.ZodOptional<z.ZodString>;
+    eagerSalt: z.ZodOptional<z.ZodString>;
+    historyCursors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodNumber>>;
 }, z.core.$loose>;
 export declare const PairSchema: z.ZodObject<{
     type: z.ZodLiteral<"pair">;
@@ -47,6 +50,20 @@ export declare const PairSchema: z.ZodObject<{
         platform: z.ZodOptional<z.ZodString>;
     }, z.core.$loose>>;
     capabilities: z.ZodDefault<z.ZodCatch<z.ZodOptional<z.ZodArray<z.ZodString>>>>;
+}, z.core.$loose>;
+export declare const PairRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_request">;
+    deviceName: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodString;
+    protocolVersion: z.ZodOptional<z.ZodNumber>;
+}, z.core.$loose>;
+export declare const PairApproveSchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_approve">;
+    requestId: z.ZodString;
+}, z.core.$loose>;
+export declare const PairDenySchema: z.ZodObject<{
+    type: z.ZodLiteral<"pair_deny">;
+    requestId: z.ZodString;
 }, z.core.$loose>;
 export declare const InputSchema: z.ZodObject<{
     type: z.ZodLiteral<"input">;
@@ -68,6 +85,17 @@ export declare const InputSchema: z.ZodObject<{
 }, z.core.$loose>;
 export declare const InterruptSchema: z.ZodObject<{
     type: z.ZodLiteral<"interrupt">;
+}, z.core.$loose>;
+export declare const CancelActivitySchema: z.ZodObject<{
+    type: z.ZodLiteral<"cancel_activity">;
+    activityId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+export declare const CancelQueuedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"cancel_queued">;
+    clientMessageId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const SetModelSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_model">;
@@ -99,6 +127,66 @@ export declare const PermissionRuleSchema: z.ZodObject<{
         deny: "deny";
     }>;
 }, z.core.$strip>;
+/**
+ * Request the current BYOK credentials status. Server replies with a
+ * byok_credentials_status server message containing the masked preview.
+ */
+export declare const ByokGetCredentialsStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Persist a new Anthropic API key to ~/.chroxy/credentials.json (mode 0600).
+ * The server validates that the key starts with `sk-ant-`.
+ */
+export declare const ByokSetCredentialsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_set_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+    anthropicApiKey: z.ZodString;
+}, z.core.$loose>;
+/**
+ * Remove the credentials file. No-op if no file is present.
+ */
+export declare const ByokClearCredentialsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_clear_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Request the masked status for every known provider credential. Server replies
+ * with a `credentials_status` server message.
+ */
+export declare const GetCredentialsStatusSchema: z.ZodObject<{
+    type: z.ZodLiteral<"get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Persist a credential value. `key` must be one of the server's known
+ * credential keys (validated server-side against credential-store.js); `value`
+ * is the raw secret. No upper length bound — provider key formats evolve.
+ */
+export declare const SetCredentialSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+    value: z.ZodString;
+}, z.core.$loose>;
+/**
+ * Remove a single stored credential. No-op if not present.
+ */
+export declare const DeleteCredentialSchema: z.ZodObject<{
+    type: z.ZodLiteral<"delete_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>;
+/**
+ * Lightweight credential ping. Server resolves the value (env > store), makes a
+ * minimal provider API call, and replies with `credential_test_result`.
+ */
+export declare const TestCredentialSchema: z.ZodObject<{
+    type: z.ZodLiteral<"test_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>;
 export declare const SetPermissionRulesSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_permission_rules">;
     rules: z.ZodArray<z.ZodObject<{
@@ -118,6 +206,16 @@ export declare const SetPromptEvaluatorSchema: z.ZodObject<{
 export declare const SetPromptEvaluatorSkipPatternSchema: z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator_skip_pattern">;
     value: z.ZodUnion<readonly [z.ZodString, z.ZodNull]>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SetChroxyContextHintSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_chroxy_context_hint">;
+    value: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SetSessionPreambleSchema: z.ZodObject<{
+    type: z.ZodLiteral<"set_session_preamble">;
+    value: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const SkillActivateSchema: z.ZodObject<{
@@ -216,10 +314,13 @@ export declare const CreateSessionSchema: z.ZodObject<{
         container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
+    skipPermissions: z.ZodOptional<z.ZodBoolean>;
+    agentCommId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const DestroySessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
     sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const RenameSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"rename_session">;
@@ -230,11 +331,85 @@ export declare const RegisterPushTokenSchema: z.ZodObject<{
     type: z.ZodLiteral<"register_push_token">;
     token: z.ZodString;
 }, z.core.$strip>;
+/**
+ * Patch shape accepted by `notification_prefs_set`. Every top-level field
+ * is optional — the server shallow-merges, so an inbound patch that only
+ * mentions `categories.result` will not wipe `categories.permission`.
+ *
+ * The device map is bounded at 1000 entries to keep a malicious client
+ * from bloating the on-disk file; in practice users have at most a
+ * handful of devices.
+ *
+ * #4564: per-device entries also accept `null` as a sentinel meaning
+ * "delete this device entry". The "Clear" buttons in Settings emit
+ * `devices: { [token]: null }` to drain orphan entries left behind by
+ * push-token refresh, app reinstall, or browser-storage wipe. Server-side
+ * `setPrefs` interprets the null sentinel and removes the key from the
+ * persisted devices map.
+ */
+export declare const NotificationPrefsPatchSchema: z.ZodObject<{
+    categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+    devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodObject<{
+        categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+            timezone: z.ZodString;
+        }, z.core.$strip>]>>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+        lastSeenAt: z.ZodOptional<z.ZodNumber>;
+        platform: z.ZodOptional<z.ZodString>;
+    }, z.core.$loose>, z.ZodNull]>>>;
+    quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+        start: z.ZodString;
+        end: z.ZodString;
+        timezone: z.ZodString;
+    }, z.core.$strip>]>>;
+    bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+}, z.core.$strip>;
+/**
+ * Request the current notification preferences. Server replies with a
+ * `notification_prefs` snapshot. `requestId` is optional for correlation.
+ */
+export declare const NotificationPrefsGetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_get">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+/**
+ * Patch the notification preferences and re-emit the resulting snapshot.
+ * The server shallow-merges over the existing prefs and persists the
+ * merged result atomically (temp+rename) to ~/.chroxy/notification-prefs.json.
+ */
+export declare const NotificationPrefsSetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_set">;
+    requestId: z.ZodOptional<z.ZodString>;
+    prefs: z.ZodObject<{
+        categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodObject<{
+            categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+            quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+                start: z.ZodString;
+                end: z.ZodString;
+                timezone: z.ZodString;
+            }, z.core.$strip>]>>;
+            bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            lastSeenAt: z.ZodOptional<z.ZodNumber>;
+            platform: z.ZodOptional<z.ZodString>;
+        }, z.core.$loose>, z.ZodNull]>>>;
+        quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+            timezone: z.ZodString;
+        }, z.core.$strip>]>>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    }, z.core.$strip>;
+}, z.core.$loose>;
 export declare const UserQuestionResponseSchema: z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
+    freeformText: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ListDirectorySchema: z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
@@ -303,7 +478,8 @@ export declare const GitCommitSchema: z.ZodObject<{
 export declare const ResumeBudgetSchema: z.ZodObject<{
     type: z.ZodLiteral<"resume_budget">;
     sessionId: z.ZodOptional<z.ZodString>;
-}, z.core.$strip>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const ListCheckpointsSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_checkpoints">;
 }, z.core.$strip>;
@@ -362,9 +538,33 @@ export declare const UnsubscribeSessionsSchema: z.ZodObject<{
     type: z.ZodLiteral<"unsubscribe_sessions">;
     sessionIds: z.ZodArray<z.ZodString>;
 }, z.core.$strip>;
+export declare const TerminalSubscribeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_subscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>;
+export declare const TerminalUnsubscribeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_unsubscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>;
+export declare const TerminalResizeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_resize">;
+    sessionId: z.ZodString;
+    cols: z.ZodNumber;
+    rows: z.ZodNumber;
+}, z.core.$strip>;
+export declare const TerminalInputSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_input">;
+    sessionId: z.ZodString;
+    data: z.ZodString;
+}, z.core.$strip>;
 export declare const ClientVisibleSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;
+}, z.core.$strip>;
+export declare const ClaimPrimarySchema: z.ZodObject<{
+    type: z.ZodLiteral<"claim_primary">;
+    sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>;
 export declare const ListProvidersSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
@@ -383,6 +583,35 @@ export declare const AddRepoSchema: z.ZodObject<{
 export declare const RemoveRepoSchema: z.ZodObject<{
     type: z.ZodLiteral<"remove_repo">;
     path: z.ZodString;
+}, z.core.$strip>;
+export declare const SessionPresetGetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_get">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPresetSetSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_set">;
+    cwd: z.ZodString;
+    preset: z.ZodNullable<z.ZodObject<{
+        preamble: z.ZodOptional<z.ZodString>;
+        seed: z.ZodOptional<z.ZodString>;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPresetApproveSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_approve">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SessionPresetRevokeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_revoke">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const RevokeTokenSchema: z.ZodObject<{
+    type: z.ZodLiteral<"revoke_token">;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
 export declare const ExtensionMessageSchema: z.ZodObject<{
     type: z.ZodLiteral<"extension_message">;
@@ -416,6 +645,41 @@ export declare const EvaluateDraftSchema: z.ZodObject<{
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const HostStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"host_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const MailboxStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"mailbox_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const RunnerStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"runner_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const IntegrationStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"integration_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const SkillsInventoryRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"skills_inventory_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const IntegrationActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"integration_action">;
+    action: z.ZodEnum<{
+        repo_memory_reindex: "repo_memory_reindex";
+        repo_relay_rerun: "repo_relay_rerun";
+    }>;
+    repoPath: z.ZodString;
+    runId: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+export declare const SummarizeSessionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"summarize_session">;
+    sessionId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const EncryptedEnvelopeSchema: z.ZodObject<{
     type: z.ZodLiteral<"encrypted">;
     d: z.ZodString;
@@ -440,6 +704,15 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     isVoice: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"interrupt">;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"cancel_activity">;
+    activityId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"cancel_queued">;
+    clientMessageId: z.ZodString;
+    sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"set_model">;
     model: z.ZodString;
@@ -477,6 +750,14 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"set_prompt_evaluator_skip_pattern">;
     value: z.ZodUnion<readonly [z.ZodString, z.ZodNull]>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_chroxy_context_hint">;
+    value: z.ZodBoolean;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"set_session_preamble">;
+    value: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"skill_activate">;
@@ -544,9 +825,12 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         container: "container";
     }>>;
     environmentId: z.ZodOptional<z.ZodString>;
+    skipPermissions: z.ZodOptional<z.ZodBoolean>;
+    agentCommId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"destroy_session">;
     sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"rename_session">;
     sessionId: z.ZodString;
@@ -555,10 +839,37 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"register_push_token">;
     token: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_get">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"notification_prefs_set">;
+    requestId: z.ZodOptional<z.ZodString>;
+    prefs: z.ZodObject<{
+        categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+        devices: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodObject<{
+            categories: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodBoolean>>;
+            quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+                start: z.ZodString;
+                end: z.ZodString;
+                timezone: z.ZodString;
+            }, z.core.$strip>]>>;
+            bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+            lastSeenAt: z.ZodOptional<z.ZodNumber>;
+            platform: z.ZodOptional<z.ZodString>;
+        }, z.core.$loose>, z.ZodNull]>>>;
+        quietHours: z.ZodOptional<z.ZodUnion<readonly [z.ZodNull, z.ZodObject<{
+            start: z.ZodString;
+            end: z.ZodString;
+            timezone: z.ZodString;
+        }, z.core.$strip>]>>;
+        bypassCategories: z.ZodOptional<z.ZodArray<z.ZodString>>;
+    }, z.core.$strip>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"user_question_response">;
     answer: z.ZodString;
-    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodString>>;
+    answers: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodArray<z.ZodString>]>>>;
     toolUseId: z.ZodOptional<z.ZodString>;
+    freeformText: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_directory">;
     path: z.ZodOptional<z.ZodString>;
@@ -603,7 +914,8 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"resume_budget">;
     sessionId: z.ZodOptional<z.ZodString>;
-}, z.core.$strip>, z.ZodObject<{
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_checkpoints">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"restore_checkpoint">;
@@ -648,11 +960,56 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"unsubscribe_sessions">;
     sessionIds: z.ZodArray<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_subscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_unsubscribe">;
+    sessionId: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_resize">;
+    sessionId: z.ZodString;
+    cols: z.ZodNumber;
+    rows: z.ZodNumber;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_input">;
+    sessionId: z.ZodString;
+    data: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"claim_primary">;
+    sessionId: z.ZodString;
+    force: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_providers">;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_set_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+    anthropicApiKey: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_clear_credentials">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"get_credentials_status">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"set_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+    value: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"delete_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"test_credential">;
+    requestId: z.ZodOptional<z.ZodString>;
+    key: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_skills">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_repos">;
@@ -663,6 +1020,30 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"remove_repo">;
     path: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_get">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_set">;
+    cwd: z.ZodString;
+    preset: z.ZodNullable<z.ZodObject<{
+        preamble: z.ZodOptional<z.ZodString>;
+        seed: z.ZodOptional<z.ZodString>;
+        enabled: z.ZodOptional<z.ZodBoolean>;
+    }, z.core.$strip>>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_approve">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"session_preset_revoke">;
+    cwd: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"revoke_token">;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"query_permission_audit">;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -698,15 +1079,66 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     draft: z.ZodString;
     sessionId: z.ZodOptional<z.ZodString>;
     requestId: z.ZodOptional<z.ZodString>;
-}, z.core.$strip>], "type">;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"host_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"runner_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"integration_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"skills_inventory_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"mailbox_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"integration_action">;
+    action: z.ZodEnum<{
+        repo_memory_reindex: "repo_memory_reindex";
+        repo_relay_rerun: "repo_relay_rerun";
+    }>;
+    repoPath: z.ZodString;
+    runId: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"summarize_session">;
+    sessionId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"pair_approve">;
+    requestId: z.ZodString;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"pair_deny">;
+    requestId: z.ZodString;
+}, z.core.$loose>], "type">;
 export type AuthMessage = z.infer<typeof AuthSchema>;
 export type PairMessage = z.infer<typeof PairSchema>;
+export type PairRequestMessage = z.infer<typeof PairRequestSchema>;
+export type PairApproveMessage = z.infer<typeof PairApproveSchema>;
+export type PairDenyMessage = z.infer<typeof PairDenySchema>;
 export type InputMessage = z.infer<typeof InputSchema>;
 export type InterruptMessage = z.infer<typeof InterruptSchema>;
+export type CancelActivityMessage = z.infer<typeof CancelActivitySchema>;
+export type CancelQueuedMessage = z.infer<typeof CancelQueuedSchema>;
 export type SetModelMessage = z.infer<typeof SetModelSchema>;
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>;
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>;
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>;
+export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>;
+export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>;
+export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
+export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
+export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
+export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
+export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
+export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
+export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;
+export type SessionPresetApproveMessage = z.infer<typeof SessionPresetApproveSchema>;
+export type SessionPresetRevokeMessage = z.infer<typeof SessionPresetRevokeSchema>;
+export type ClaimPrimaryMessage = z.infer<typeof ClaimPrimarySchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;

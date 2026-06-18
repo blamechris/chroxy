@@ -24,13 +24,15 @@ describe('SessionPicker pill chip — provider hint badge (#3940)', () => {
     expect(pillSection).toMatch(/getProviderInfo\(session\.provider\)/);
   });
 
-  it("only renders the provider hint when the session's provider is not the claude-sdk default", () => {
+  it("only renders the provider hint when the session's provider is not the default", () => {
     // Same gate as the long-press alert title from #3937 — gate on
-    // "session.provider && session.provider !== 'claude-sdk'" so the
-    // default SDK pill stays clean and only variant providers (claude-tui,
-    // codex, gemini, docker-cli, ...) get a badge.
+    // "session.provider && session.provider !== DEFAULT_PROVIDER" so the
+    // default pill stays clean and only non-default providers (claude-sdk,
+    // codex, gemini, docker-cli, ...) get a badge. Keyed on the shared
+    // DEFAULT_PROVIDER constant (#5823) so a default flip can't reintroduce
+    // the stale-literal drift.
     expect(pillSection).toMatch(
-      /session\.provider\s*&&\s*session\.provider\s*!==\s*['"]claude-sdk['"]/,
+      /session\.provider\s*&&\s*session\.provider\s*!==\s*DEFAULT_PROVIDER/,
     );
   });
 

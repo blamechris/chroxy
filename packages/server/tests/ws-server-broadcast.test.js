@@ -451,7 +451,9 @@ describe('user_question_response forwarding (single-session)', () => {
 
     // Spy records calls — no manual tracking needed
     assert.equal(mockSession.respondToQuestion.callCount, 1, 'respondToQuestion should be called once')
-    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['Option A', undefined], 'Answer should be forwarded to cliSession')
+    // #4668: handler now forwards msg.toolUseId as the third arg (undefined here — not in the wire message).
+    // #4651: 4th positional arg is opts ({freeformText}); undefined when no freeformText on the wire.
+    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['Option A', undefined, undefined, undefined], 'Answer should be forwarded to cliSession')
 
     ws.close()
   })
@@ -476,7 +478,9 @@ describe('user_question_response forwarding (single-session)', () => {
     await waitFor(() => mockSession.respondToQuestion.callCount >= 1, { label: 'respondToQuestion called' })
 
     assert.equal(mockSession.respondToQuestion.callCount, 1, 'respondToQuestion should be called once')
-    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['yes', answersMap], 'Both answer and answers map should be forwarded')
+    // #4668: handler forwards msg.toolUseId as the third arg (undefined — not in this wire message).
+    // #4651: 4th positional arg is opts ({freeformText}); undefined when no freeformText on the wire.
+    assert.deepStrictEqual(mockSession.respondToQuestion.lastCall, ['yes', answersMap, undefined, undefined], 'Both answer and answers map should be forwarded')
 
     ws.close()
   })

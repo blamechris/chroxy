@@ -1,13 +1,19 @@
-mod config;
-mod node;
-mod platform;
-mod qrcode;
-mod server;
-mod settings;
-mod setup;
+// Modules are `pub` (not private) so the `tests/command_integration.rs`
+// integration suite can exercise their public functions directly without a
+// running Tauri app. The crate is an internal binary support library — no
+// external consumer depends on this surface, so exposing it for testing
+// carries no API stability cost.
+pub mod config;
+pub mod discovery;
+pub mod node;
+pub mod platform;
+pub mod qrcode;
+pub mod server;
+pub mod settings;
+pub mod setup;
 #[cfg(target_os = "macos")]
-mod speech;
-mod window;
+pub mod speech;
+pub mod window;
 
 use server::{ServerManager, ServerStatus};
 use settings::DesktopSettings;
@@ -15,7 +21,9 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Mutex, MutexGuard};
 
 /// Lock a Mutex, recovering from poisoning instead of panicking.
-pub(crate) fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
+/// `pub` so integration tests can drive the same lock-recovery semantics
+/// as the production command bodies (see `tests/command_integration.rs`).
+pub fn lock_or_recover<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(|e| e.into_inner())
 }
 
@@ -49,6 +57,27 @@ struct TrayMenuItems {
     tunnel_none: CheckMenuItem<tauri::Wry>,
 }
 
+/// #4942 — App-menu (macOS menu bar) item handles. Kept separate from
+/// `TrayMenuItems` so the two surfaces stay decoupled; only the radio
+/// items (tunnel mode) and the server-state-gated entries (Shell items)
+/// need cross-menu state sync, and we touch both menus together when a
+/// tunnel-mode change OR a server-status change fans out.
+#[cfg(target_os = "macos")]
+struct AppMenuItems {
+    /// Shell submenu entries. Enabled state mirrors the tray menu's
+    /// Start/Stop/Restart/Console gating (see `update_menu_state`).
+    shell_start: MenuItem<tauri::Wry>,
+    shell_stop: MenuItem<tauri::Wry>,
+    shell_restart: MenuItem<tauri::Wry>,
+    shell_open_console: MenuItem<tauri::Wry>,
+    /// Tunnel radios — kept in lockstep with the tray's tunnel radios
+    /// via `handle_set_tunnel_mode` so toggling from either surface
+    /// updates the other.
+    tunnel_quick: CheckMenuItem<tauri::Wry>,
+    tunnel_named: CheckMenuItem<tauri::Wry>,
+    tunnel_none: CheckMenuItem<tauri::Wry>,
+}
+
 // ── Tauri IPC commands ──────────────────────────────────────────────
 
 #[tauri::command]
@@ -68,6 +97,19 @@ fn get_server_info(
 #[tauri::command]
 fn start_server(app: tauri::AppHandle) {
     handle_start(&app);
+}
+
+/// #5281 ③ — browse the LAN for chroxy daemons advertising `_chroxy._tcp` and
+/// return them for the dashboard ServerPicker's "Discover on LAN" list. Runs
+/// the blocking mDNS browse off the UI thread; an mDNS failure surfaces as an
+/// error string (the picker falls back to manual entry).
+#[tauri::command]
+async fn discover_lan_servers() -> Result<Vec<discovery::DiscoveredServer>, String> {
+    tauri::async_runtime::spawn_blocking(|| {
+        discovery::browse_lan(std::time::Duration::from_millis(2000))
+    })
+    .await
+    .map_err(|e| format!("discovery task failed: {e}"))?
 }
 
 #[tauri::command]
@@ -272,6 +314,120 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
         let _ = items.tunnel_named.set_checked(mode == "named");
         let _ = items.tunnel_none.set_checked(mode == "none");
     }
+    // #4942 — also sync the macOS app-menu radios so a dashboard-driven
+    // tunnel-mode change keeps both menu surfaces consistent.
+    #[cfg(target_os = "macos")]
+    if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.tunnel_quick.set_checked(mode == "quick");
+        let _ = items.tunnel_named.set_checked(mode == "named");
+        let _ = items.tunnel_none.set_checked(mode == "none");
+    }
+
+    Ok(())
+}
+
+/// #5356 — current "expose on LAN" setting. False (loopback-only) is the
+/// default and the safe posture for the control socket.
+#[tauri::command]
+fn get_expose_on_lan(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> bool {
+    lock_or_recover(&settings_state).expose_on_lan
+}
+
+/// #5356 — toggle whether the embedded server binds all interfaces (LAN) or
+/// loopback-only. Persisted; applied on the next server start/restart (the bind
+/// address is fixed at spawn, so the dashboard prompts for a restart).
+#[tauri::command]
+fn set_expose_on_lan(app: tauri::AppHandle, expose: bool) -> Result<(), String> {
+    if let Some(settings_state) = app.try_state::<Mutex<DesktopSettings>>() {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.expose_on_lan = expose;
+        settings
+            .save()
+            .map_err(|e| format!("Failed to save settings: {}", e))?;
+    }
+
+    // Update ServerManager so the next start/restart picks up the new bind host.
+    if let Some(mgr_state) = app.try_state::<Mutex<ServerManager>>() {
+        let mut mgr = lock_or_recover(&mgr_state);
+        mgr.set_expose_on_lan(expose);
+    }
+
+    Ok(())
+}
+
+/// #5294 — read the configured summon hotkey accelerator. Returns `None` when
+/// unset or blank (i.e. disabled), matching `effective_summon_hotkey()`.
+#[tauri::command]
+fn get_summon_hotkey(settings_state: tauri::State<'_, Mutex<DesktopSettings>>) -> Option<String> {
+    lock_or_recover(&settings_state).effective_summon_hotkey()
+}
+
+/// #5294 — set (or clear) the global summon hotkey at runtime and re-register
+/// it immediately, so the change takes effect with no restart. Passing `None`
+/// or a blank/whitespace string clears the hotkey. A malformed or
+/// OS-conflicting accelerator is returned as an error (with the previous
+/// binding left intact) instead of being silently swallowed.
+#[tauri::command]
+fn set_summon_hotkey(app: tauri::AppHandle, accelerator: Option<String>) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+
+    // Normalize blank/whitespace to None (disabled), mirroring
+    // effective_summon_hotkey()'s treatment so the two never disagree.
+    let new_accel = accelerator
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+
+    let settings_state = app
+        .try_state::<Mutex<DesktopSettings>>()
+        .ok_or("Settings state unavailable")?;
+
+    // The accelerator currently registered (what we must unregister first).
+    let old_accel = lock_or_recover(&settings_state).effective_summon_hotkey();
+
+    // Unregister the previously-registered accelerator, if any. Best-effort:
+    // if it was never actually registered (e.g. it had failed at startup), the
+    // unregister error is irrelevant to the new registration.
+    if let Some(ref old) = old_accel {
+        let _ = app.global_shortcut().unregister(old.as_str());
+    }
+
+    // Register the new accelerator. On failure, restore the old binding so a
+    // typo doesn't leave the user with no hotkey, and surface the error.
+    if let Some(ref acc) = new_accel {
+        if let Err(e) = register_summon_hotkey(&app, acc) {
+            if let Some(ref old) = old_accel {
+                let _ = register_summon_hotkey(&app, old);
+            }
+            return Err(format!("{} — the previous hotkey is unchanged.", e));
+        }
+    }
+
+    // Persist only after a successful (un)register. If the write fails, roll
+    // back BOTH the in-memory setting and the registration so disk, memory, and
+    // the live shortcut stay consistent — otherwise the new hotkey would work
+    // this session but the next restart would load the old, persisted value
+    // (and register that), a silent drift Copilot flagged on #5294.
+    {
+        let mut settings = lock_or_recover(&settings_state);
+        settings.summon_hotkey = new_accel.clone();
+        if let Err(e) = settings.save() {
+            settings.summon_hotkey = old_accel.clone();
+            drop(settings);
+            if let Some(ref acc) = new_accel {
+                let _ = app.global_shortcut().unregister(acc.as_str());
+            }
+            if let Some(ref old) = old_accel {
+                let _ = register_summon_hotkey(&app, old);
+            }
+            return Err(format!(
+                "Failed to save settings: {} — the previous hotkey is unchanged.",
+                e
+            ));
+        }
+    }
 
     Ok(())
 }
@@ -314,7 +470,9 @@ fn set_allow_auto_permission_mode(value: bool) -> Result<(), String> {
 
 /// Helper that does the actual file read/merge/write, parameterised on path
 /// so unit tests can target a temp file instead of `~/.chroxy/config.json`.
-fn set_allow_auto_permission_mode_at(
+/// `pub` so the integration test suite can drive it directly without a
+/// running Tauri app (see `tests/command_integration.rs`).
+pub fn set_allow_auto_permission_mode_at(
     path: &std::path::Path,
     value: bool,
 ) -> Result<(), String> {
@@ -423,6 +581,81 @@ fn tile_window(window: tauri::Window, direction: String) -> Result<(), String> {
     Ok(())
 }
 
+/// Reveal a path in the OS file manager (Finder on macOS, Explorer on
+/// Windows, the default xdg handler on Linux). Used by the sidebar
+/// right-click context menu (#4045) to jump to a session's cwd.
+///
+/// Selects the path itself (rather than opening its parent and leaving the
+/// item unselected) on macOS and Windows; Linux's xdg-open does not have a
+/// standard "select item" affordance, so we open the directory directly —
+/// if the path is a file, we fall back to its parent dir so xdg doesn't
+/// launch the default app for that file type.
+///
+/// Restricted to the `main` window via `require_main_window` so the
+/// `dashboard` / `qr_popup` capability surface can't silently shell out to
+/// `open` / `explorer` / `xdg-open` (#4045 review).
+#[tauri::command]
+fn reveal_in_finder(window: tauri::Window, path: String) -> Result<(), String> {
+    use std::path::Path;
+    use std::process::Command;
+
+    require_main_window(&window)?;
+
+    if path.is_empty() {
+        return Err("path is empty".into());
+    }
+    if !Path::new(&path).exists() {
+        return Err(format!("path does not exist: {}", path));
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        Command::new("open")
+            .args(["-R", &path])
+            .spawn()
+            .map_err(|e| format!("failed to spawn open: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(target_os = "windows")]
+    {
+        // `explorer /select,<path>` is parsed by explorer.exe itself, NOT
+        // by CommandLineToArgvW — Rust's normal arg quoting would wrap the
+        // whole `/select,...` string in quotes and break the parser. Use
+        // `raw_arg` to bypass quoting and wrap only the path in inner
+        // quotes so paths containing spaces (e.g. `C:\Program Files\...`)
+        // are selected as a single item. See #4045 review.
+        use std::os::windows::process::CommandExt;
+        Command::new("explorer")
+            .raw_arg(format!("/select,\"{}\"", path.replace('"', "")))
+            .spawn()
+            .map_err(|e| format!("failed to spawn explorer: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let target = if Path::new(&path).is_dir() {
+            path.clone()
+        } else {
+            Path::new(&path)
+                .parent()
+                .map(|p| p.to_string_lossy().to_string())
+                .unwrap_or(path.clone())
+        };
+        Command::new("xdg-open")
+            .arg(&target)
+            .spawn()
+            .map_err(|e| format!("failed to spawn xdg-open: {}", e))?;
+        return Ok(());
+    }
+
+    #[cfg(not(any(target_os = "macos", target_os = "windows", unix)))]
+    {
+        Err("reveal_in_finder is not supported on this platform".into())
+    }
+}
+
 /// Reject an IPC call that did not originate from the `main` window.
 ///
 /// Used by commands that access privileged resources (microphone, clipboard
@@ -465,6 +698,49 @@ fn stop_voice_input(
     require_main_window(&window)?;
     let s = lock_or_recover(&state);
     speech::stop(&s);
+    Ok(())
+}
+
+/// #4956 — reset macOS TCC permissions for Microphone + Speech Recognition
+/// so a user upgrading past a codesign-hash change (e.g. v0.9.40 shipped
+/// the helper-entitlement fix from #4954, but the macOS TCC database
+/// remembered the entitlement-less hash) doesn't have to know `tccutil`
+/// exists. Surfaced in Settings → Voice Input as a button.
+///
+/// Runs both `tccutil reset Microphone com.chroxy.desktop` and
+/// `tccutil reset SpeechRecognition com.chroxy.desktop`. Either failing
+/// individually still returns Err so the UI surfaces the real problem
+/// (most likely: macOS prompted for admin elevation and the user
+/// cancelled). On success the dashboard surfaces a one-shot confirmation
+/// reminding the user to re-grant on the next mic click.
+#[cfg(target_os = "macos")]
+#[tauri::command]
+fn reset_speech_permissions(window: tauri::Window) -> Result<(), String> {
+    require_main_window(&window)?;
+    // The bundle id is fixed at compile-time in tauri.conf.json; keeping it
+    // hard-coded here matches verify-entitlements.sh and the troubleshooting
+    // docs so the three references stay aligned by sight.
+    const BUNDLE_ID: &str = "com.chroxy.desktop";
+
+    for service in ["Microphone", "SpeechRecognition"] {
+        let output = std::process::Command::new("tccutil")
+            .args(["reset", service, BUNDLE_ID])
+            .output()
+            .map_err(|e| format!("Failed to invoke tccutil for {service}: {e}"))?;
+        if !output.status.success() {
+            // Some tccutil failures only write diagnostics to stdout (or
+            // stderr is empty); include both so the UI never shows a blank
+            // error string when the exit status is non-zero (#4998 review).
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            return Err(format!(
+                "tccutil reset {service} {BUNDLE_ID} exited with status {}: stderr={} stdout={}",
+                output.status.code().unwrap_or(-1),
+                stderr.trim(),
+                stdout.trim()
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -531,12 +807,9 @@ pub fn run() {
     {
         builder = builder.plugin(single_instance_init(
             |app: &tauri::AppHandle, _args, _cwd| {
-                // Second instance launched: focus the existing main window.
-                if let Some(win) = app.get_webview_window("main") {
-                    let _ = win.unminimize();
-                    let _ = win.show();
-                    let _ = win.set_focus();
-                }
+                // Second instance launched: bring the existing main window
+                // forward. Shares the one summon path so the two can't drift.
+                window::show_window(app);
             },
         ));
     }
@@ -553,6 +826,19 @@ pub fn run() {
         .plugin(tauri_plugin_updater::Builder::new().build())
         .plugin(tauri_plugin_process::init())
         .plugin(tauri_plugin_window_state::Builder::default().build())
+        // #5281 ② — global "summon" shortcut. Any registered shortcut (we only
+        // ever register the one summon accelerator) brings the main window
+        // forward. Registration is opt-in via DesktopSettings.summon_hotkey,
+        // done in setup() below.
+        .plugin(
+            tauri_plugin_global_shortcut::Builder::new()
+                .with_handler(|app, _shortcut, event| {
+                    if event.state() == tauri_plugin_global_shortcut::ShortcutState::Pressed {
+                        window::show_window(app);
+                    }
+                })
+                .build(),
+        )
         .invoke_handler(tauri::generate_handler![
             get_server_info,
             get_server_logs,
@@ -560,6 +846,7 @@ pub fn run() {
             start_server,
             stop_server,
             restart_server,
+            discover_lan_servers,
             get_qr_code_svg,
             pick_directory,
             check_dependencies,
@@ -567,6 +854,10 @@ pub fn run() {
             save_setup_config,
             get_tunnel_mode,
             set_tunnel_mode,
+            get_expose_on_lan,
+            set_expose_on_lan,
+            get_summon_hotkey,
+            set_summon_hotkey,
             get_allow_auto_permission_mode,
             set_allow_auto_permission_mode,
             #[cfg(target_os = "macos")]
@@ -575,8 +866,11 @@ pub fn run() {
             start_voice_input,
             #[cfg(target_os = "macos")]
             stop_voice_input,
+            #[cfg(target_os = "macos")]
+            reset_speech_permissions,
             tile_window,
             read_clipboard_image,
+            reveal_in_finder,
         ])
         .manage(Mutex::new(ServerManager::new()))
         .manage(Mutex::new(DesktopSettings::load()))
@@ -586,6 +880,107 @@ pub fn run() {
             #[cfg(not(target_os = "macos"))]
             { Mutex::new(()) }
         })
+        .on_menu_event(|app, event| {
+            // #4695 / #4942 — app-menu (macOS menu bar) item dispatch.
+            // Tray menu events are handled by their own builder-scoped
+            // closure (`on_menu_event` in build_tray_menu). The two
+            // surfaces intentionally use disjoint id namespaces:
+            //   - tray:    "start", "stop", "dashboard", …
+            //   - app-menu: "app_menu:<action>" (this match)
+            // The `app_menu:` prefix means stray cross-fires would
+            // simply no-op rather than accidentally invoke the wrong
+            // tray handler.
+            //
+            // Two routing classes:
+            //   1. Server-control / tunnel / Help-browser actions —
+            //      call the existing tray handlers directly. No
+            //      dashboard round-trip is needed; the tray handlers
+            //      already know how to keep both menus' state in sync.
+            //   2. Dashboard-state actions (new session, sidebar
+            //      toggle, plan mode, etc.) — emit `menu://<action>`
+            //      so the dashboard's `useTauriMenuEvents` hook can
+            //      route to a React-side callback supplied by App.tsx.
+            //      Whether that callback is shared with another UI
+            //      affordance (button, palette entry, …) is decided
+            //      by App.tsx, not here.
+            let id = event.id().as_ref();
+            if let Some(action) = id.strip_prefix("app_menu:") {
+                // The app-menu surface emitting these ids is itself
+                // macOS-only today (see the menu builder block below),
+                // so gate the arms that call macOS-only helpers to
+                // match.
+                #[cfg(target_os = "macos")]
+                {
+                    match action {
+                        "shell-start" => { handle_start(app); return; }
+                        "shell-stop" => { handle_stop(app); return; }
+                        "shell-restart" => { handle_restart(app); return; }
+                        "shell-open-in-finder" => {
+                            handle_open_config_in_finder(app);
+                            return;
+                        }
+                        "shell-open-console" => { handle_console(app); return; }
+                        "tunnel-quick" => {
+                            handle_set_tunnel_mode(app, "quick");
+                            return;
+                        }
+                        "tunnel-named" => {
+                            handle_set_tunnel_mode(app, "named");
+                            return;
+                        }
+                        "tunnel-none" => {
+                            handle_set_tunnel_mode(app, "none");
+                            return;
+                        }
+                        "help-documentation" => {
+                            handle_open_url(
+                                app,
+                                "https://github.com/blamechris/chroxy#readme",
+                            );
+                            return;
+                        }
+                        "help-report-issue" => {
+                            handle_open_url(
+                                app,
+                                "https://github.com/blamechris/chroxy/issues/new",
+                            );
+                            return;
+                        }
+                        "help-check-updates" => {
+                            handle_check_updates(app);
+                            return;
+                        }
+                        // #4942 — Window > Bring All to Front. Handled
+                        // Rust-side because the dashboard has no state
+                        // to mutate AND because the unconditional
+                        // `window::show_window(app)` below only raises
+                        // the `main` webview — it misses secondary
+                        // windows like `qr_popup` (built by
+                        // `handle_show_qr`). Iterate every webview
+                        // window and call `show()` + `set_focus()` so
+                        // a click here actually brings ALL Chroxy
+                        // windows forward.
+                        "window-bring-all-to-front" => {
+                            handle_bring_all_to_front(app);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+                // Default route: emit `menu://<action>` for the
+                // dashboard's `useTauriMenuEvents` hook to consume.
+                // Covers File > New Session, File > Connect to Server…,
+                // File > Disconnect, View > *, Tunnel > Settings…,
+                // Chroxy > Preferences…, etc.
+                let event_name = format!("menu://{}", action);
+                let _ = app.emit(&event_name, ());
+                // Make sure the main window is foregrounded so the
+                // user sees the dashboard react (otherwise a menu
+                // click with the window minimized would silently
+                // no-op).
+                window::show_window(app);
+            }
+        })
         .setup(|app| {
             // App menu bar — required for macOS Sequoia window tiling keyboard shortcuts.
             // macOS routes fn+ctrl+arrow through the Window menu's "Move & Resize" items.
@@ -593,10 +988,57 @@ pub fn run() {
             #[cfg(target_os = "macos")]
             {
                 use tauri::menu::AboutMetadata;
+                // #4942 — "Preferences…" appended to the Chroxy
+                // submenu so ⌘, opens the dashboard SettingsPanel from
+                // the menu bar (the dashboard already binds ⌘, via
+                // `settings.open`; macOS will route the chord through
+                // the menu bar first once an item with that accelerator
+                // is installed).
+                let preferences_item = MenuItemBuilder::with_id(
+                    "app_menu:preferences",
+                    "Preferences…",
+                )
+                .accelerator("CmdOrCtrl+,")
+                .build(app)?;
                 let app_menu = SubmenuBuilder::new(app, "Chroxy")
                     .about(Some(AboutMetadata::default()))
                     .separator()
+                    .item(&preferences_item)
+                    .separator()
                     .quit()
+                    .build()?;
+                // #4695 — File menu. v1 ships with a single item ("New
+                // Session") so the most-used action has a menu-bar entry
+                // matching Terminal.app / iTerm / VS Code muscle memory.
+                // The accelerator is `Cmd+N`, matching the dashboard's
+                // `session.new` shortcut definition; macOS routes the
+                // chord through the menu bar first when one is
+                // installed, so this entry also serves as the system-
+                // level Cmd+N hint.
+                let new_session_item = MenuItemBuilder::with_id("app_menu:new-session", "New Session")
+                    .accelerator("CmdOrCtrl+N")
+                    .build(app)?;
+                // #4942 — Connect to Server… / Disconnect siblings.
+                // Cmd+O matches "open a connection" muscle memory from
+                // Terminal.app / iTerm; Shift+Cmd+D mirrors Apple's HIG
+                // for disconnect actions.
+                let connect_item = MenuItemBuilder::with_id(
+                    "app_menu:connect-to-server",
+                    "Connect to Server…",
+                )
+                .accelerator("CmdOrCtrl+O")
+                .build(app)?;
+                let disconnect_item = MenuItemBuilder::with_id(
+                    "app_menu:disconnect",
+                    "Disconnect",
+                )
+                .accelerator("Shift+CmdOrCtrl+D")
+                .build(app)?;
+                let file_menu = SubmenuBuilder::new(app, "File")
+                    .item(&new_session_item)
+                    .separator()
+                    .item(&connect_item)
+                    .item(&disconnect_item)
                     .build()?;
                 let edit_menu = SubmenuBuilder::new(app, "Edit")
                     .undo()
@@ -607,16 +1049,196 @@ pub fn run() {
                     .paste()
                     .select_all()
                     .build()?;
+                // #4942 — Shell submenu. Items mirror tray entries
+                // (Start / Stop / Restart / Open Console). "Open in
+                // Finder" reveals ~/.chroxy/ so the user can inspect
+                // server config / logs without leaving the app. All
+                // five items dispatch to existing handlers in
+                // `on_menu_event` (no dashboard round-trip).
+                let shell_start = MenuItemBuilder::with_id(
+                    "app_menu:shell-start",
+                    "Start Server",
+                )
+                .build(app)?;
+                let shell_stop = MenuItemBuilder::with_id(
+                    "app_menu:shell-stop",
+                    "Stop Server",
+                )
+                .build(app)?;
+                let shell_restart = MenuItemBuilder::with_id(
+                    "app_menu:shell-restart",
+                    "Restart Server",
+                )
+                .build(app)?;
+                let shell_open_in_finder = MenuItemBuilder::with_id(
+                    "app_menu:shell-open-in-finder",
+                    "Open in Finder",
+                )
+                .build(app)?;
+                let shell_open_console = MenuItemBuilder::with_id(
+                    "app_menu:shell-open-console",
+                    "Open Console",
+                )
+                .build(app)?;
+                let shell_menu = SubmenuBuilder::new(app, "Shell")
+                    .item(&shell_start)
+                    .item(&shell_stop)
+                    .item(&shell_restart)
+                    .separator()
+                    .item(&shell_open_in_finder)
+                    .item(&shell_open_console)
+                    .build()?;
+                // #4942 — View submenu. Items dispatch to the
+                // dashboard (the toggles all live in App-level React
+                // state). The accelerators intentionally match the
+                // dashboard shortcut registry defaults so the menu-
+                // bar entry serves as the canonical key-binding hint:
+                //   - Toggle Sidebar:    ⌘B  (`sidebar.toggle`)
+                //   - Toggle Plan Mode:  ⇧⌥P (the registry default is
+                //     Shift+Tab, which macOS menus can't represent;
+                //     the menu surface picks a non-colliding chord)
+                //   - Show QR:           ⇧⌘Q
+                //   - Reload:            ⌘R  (Tauri webview reload)
+                // Cmd+\ ("cycle split") from the proposal collides
+                // with the existing `view.cycleSplit` registry binding
+                // and is not duplicated here — the dashboard already
+                // handles that chord via the registry.
+                let view_toggle_sidebar = MenuItemBuilder::with_id(
+                    "app_menu:view-toggle-sidebar",
+                    "Toggle Sidebar",
+                )
+                .accelerator("CmdOrCtrl+B")
+                .build(app)?;
+                let view_toggle_plan_mode = MenuItemBuilder::with_id(
+                    "app_menu:view-toggle-plan-mode",
+                    "Toggle Plan Mode",
+                )
+                .accelerator("Shift+Alt+P")
+                .build(app)?;
+                let view_show_qr = MenuItemBuilder::with_id(
+                    "app_menu:view-show-qr",
+                    "Show QR Code",
+                )
+                .accelerator("Shift+CmdOrCtrl+Q")
+                .build(app)?;
+                let view_reload = MenuItemBuilder::with_id(
+                    "app_menu:view-reload",
+                    "Reload",
+                )
+                .accelerator("CmdOrCtrl+R")
+                .build(app)?;
+                let view_menu = SubmenuBuilder::new(app, "View")
+                    .item(&view_toggle_sidebar)
+                    .item(&view_toggle_plan_mode)
+                    .separator()
+                    .item(&view_show_qr)
+                    .item(&view_reload)
+                    .build()?;
+                // #4942 — Tunnel submenu. Radios mirror the tray
+                // menu's tunnel-mode submenu (`tunnel_quick` /
+                // `tunnel_named` / `tunnel_none`) and dispatch to the
+                // same Rust handler (`handle_set_tunnel_mode`), which
+                // keeps both menus' checked state in sync. "Tunnel
+                // Settings…" routes to the dashboard so it can open
+                // the Settings panel.
+                let current_tunnel = {
+                    let s = app.state::<Mutex<DesktopSettings>>();
+                    let g = lock_or_recover(&s);
+                    g.tunnel_mode.clone()
+                };
+                let tunnel_quick_app = CheckMenuItemBuilder::with_id(
+                    "app_menu:tunnel-quick",
+                    "Quick Tunnel",
+                )
+                .checked(current_tunnel == "quick")
+                .build(app)?;
+                let tunnel_named_app = CheckMenuItemBuilder::with_id(
+                    "app_menu:tunnel-named",
+                    "Named Tunnel",
+                )
+                .checked(current_tunnel == "named")
+                .build(app)?;
+                let tunnel_none_app = CheckMenuItemBuilder::with_id(
+                    "app_menu:tunnel-none",
+                    "No Tunnel",
+                )
+                .checked(current_tunnel == "none")
+                .build(app)?;
+                let tunnel_settings_item = MenuItemBuilder::with_id(
+                    "app_menu:tunnel-settings",
+                    "Tunnel Settings…",
+                )
+                .build(app)?;
+                let tunnel_menu = SubmenuBuilder::new(app, "Tunnel")
+                    .item(&tunnel_quick_app)
+                    .item(&tunnel_named_app)
+                    .item(&tunnel_none_app)
+                    .separator()
+                    .item(&tunnel_settings_item)
+                    .build()?;
+                // #4942 — Window submenu. Append "Bring All to Front"
+                // as a custom item — Tauri's SubmenuBuilder doesn't
+                // expose a predefined `bring_all_to_front()` today.
+                let bring_all_to_front = MenuItemBuilder::with_id(
+                    "app_menu:window-bring-all-to-front",
+                    "Bring All to Front",
+                )
+                .build(app)?;
                 let window_menu = SubmenuBuilder::new(app, "Window")
                     .minimize()
                     .close_window()
+                    .separator()
+                    .item(&bring_all_to_front)
+                    .build()?;
+                // #4942 — Help submenu. Documentation / Report Issue
+                // open browser URLs Rust-side; Check for Updates
+                // reuses the tray's `handle_check_updates`.
+                let help_documentation = MenuItemBuilder::with_id(
+                    "app_menu:help-documentation",
+                    "Documentation",
+                )
+                .build(app)?;
+                let help_report_issue = MenuItemBuilder::with_id(
+                    "app_menu:help-report-issue",
+                    "Report Issue",
+                )
+                .build(app)?;
+                let help_check_updates = MenuItemBuilder::with_id(
+                    "app_menu:help-check-updates",
+                    "Check for Updates",
+                )
+                .build(app)?;
+                let help_menu = SubmenuBuilder::new(app, "Help")
+                    .item(&help_documentation)
+                    .item(&help_report_issue)
+                    .separator()
+                    .item(&help_check_updates)
                     .build()?;
                 let menu = MenuBuilder::new(app)
                     .item(&app_menu)
+                    .item(&file_menu)
                     .item(&edit_menu)
+                    .item(&shell_menu)
+                    .item(&view_menu)
+                    .item(&tunnel_menu)
                     .item(&window_menu)
+                    .item(&help_menu)
                     .build()?;
                 app.set_menu(menu)?;
+
+                // #4942 — Track app-menu item handles so we can keep
+                // the Shell submenu's enabled state in sync with the
+                // server status (via `update_menu_state`) and the
+                // Tunnel radios in sync with `handle_set_tunnel_mode`.
+                app.manage(Mutex::new(AppMenuItems {
+                    shell_start: shell_start.clone(),
+                    shell_stop: shell_stop.clone(),
+                    shell_restart: shell_restart.clone(),
+                    shell_open_console: shell_open_console.clone(),
+                    tunnel_quick: tunnel_quick_app.clone(),
+                    tunnel_named: tunnel_named_app.clone(),
+                    tunnel_none: tunnel_none_app.clone(),
+                }));
 
                 // Workaround for Tauri bug #13605: Tauri's SubmenuBuilder doesn't
                 // register the Window submenu with NSApp.windowsMenu, so macOS
@@ -710,6 +1332,20 @@ pub fn run() {
 
             setup_tray(app)?;
 
+            // #5281 ② — register the opt-in global summon hotkey, if configured.
+            {
+                let settings = app.state::<Mutex<DesktopSettings>>();
+                let settings_guard = lock_or_recover(&settings);
+                let accel = settings_guard.effective_summon_hotkey();
+                drop(settings_guard);
+                if let Some(accel) = accel {
+                    match register_summon_hotkey(app.handle(), &accel) {
+                        Ok(()) => eprintln!("[hotkey] summon shortcut registered: {}", accel),
+                        Err(e) => eprintln!("[hotkey] {}", e),
+                    }
+                }
+            }
+
             // Auto-start server on launch if configured (skip on first run — wizard handles it)
             if !is_first_run {
                 let settings = app.state::<Mutex<DesktopSettings>>();
@@ -765,11 +1401,49 @@ pub fn run() {
                 app.exit(0);
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app_handle, event| {
+            // Catch all app-exit paths (Cmd+Q, app menu Quit, AppleScript
+            // `tell application "Chroxy" to quit`, etc.) so the spawned Node
+            // server child gets a graceful SIGTERM and releases port 8765
+            // before Tauri tears down. Without this, the child gets
+            // reparented to launchd on macOS and holds the port, blocking
+            // the next launch with "Port 8765 is already in use" (#3696).
+            //
+            // The WindowEvent::CloseRequested handler above already covers
+            // window-close-driven exits, but those events do not fire for
+            // tray-only quit paths. Routing through ExitRequested gives us
+            // a single chokepoint that ServerManager::stop() — which already
+            // implements SIGTERM + 5s grace + SIGKILL fallback — can use to
+            // flush session-state.json before the process dies.
+            if let tauri::RunEvent::ExitRequested { .. } = event {
+                if let Some(mgr) = app_handle.try_state::<Mutex<ServerManager>>() {
+                    let mut mgr = lock_or_recover(&mgr);
+                    mgr.stop();
+                }
+            }
+        });
+}
+
+/// Register the opt-in global summon shortcut, returning any registration
+/// error (malformed accelerator or OS-level conflict) so the caller can decide
+/// how to handle it: surface it to the user for a runtime change
+/// (`set_summon_hotkey`), or just log it for the best-effort startup
+/// registration — the tray "Show Chroxy" item is always available as a
+/// fallback. (#5281 ②, #5294)
+fn register_summon_hotkey(app: &tauri::AppHandle, accelerator: &str) -> Result<(), String> {
+    use tauri_plugin_global_shortcut::GlobalShortcutExt;
+    app.global_shortcut()
+        .register(accelerator)
+        .map_err(|e| format!("failed to register summon shortcut '{}': {}", accelerator, e))
 }
 
 fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
+    // #5281 ② — always-available "summon" affordance: bring the main window
+    // forward from the tray, regardless of server state or any global hotkey.
+    let show_window_item =
+        MenuItemBuilder::with_id("show_window", "Show Chroxy").build(app)?;
     let start = MenuItemBuilder::with_id("start", "Start Server").build(app)?;
     let stop = MenuItemBuilder::with_id("stop", "Stop Server")
         .enabled(false)
@@ -826,6 +1500,8 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
     let quit = MenuItemBuilder::with_id("quit", "Quit Chroxy").build(app)?;
 
     let menu = MenuBuilder::new(app)
+        .items(&[&show_window_item])
+        .separator()
         .items(&[&start, &stop, &restart])
         .separator()
         .items(&[&dashboard, &console, &show_qr])
@@ -871,6 +1547,7 @@ fn setup_tray(app: &tauri::App) -> Result<(), Box<dyn std::error::Error>> {
         .on_menu_event(move |app, event| {
             let id = event.id().as_ref();
             match id {
+                "show_window" => window::show_window(app),
                 "start" => handle_start(app),
                 "stop" => handle_stop(app),
                 "restart" => handle_restart(app),
@@ -940,6 +1617,34 @@ fn update_menu_state(app: &tauri::AppHandle, state: MenuState) {
             }
         }
     }
+    // #4942 — mirror the gating on the macOS app-menu Shell submenu so
+    // the menu-bar entries reflect server status the same way the tray
+    // items do. The "Open in Finder" item is intentionally always
+    // enabled (it just reveals ~/.chroxy/), so it's omitted here.
+    #[cfg(target_os = "macos")]
+    if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+        let items = lock_or_recover(&items);
+        match state {
+            MenuState::Running => {
+                let _ = items.shell_start.set_enabled(false);
+                let _ = items.shell_stop.set_enabled(true);
+                let _ = items.shell_restart.set_enabled(true);
+                let _ = items.shell_open_console.set_enabled(true);
+            }
+            MenuState::Stopped => {
+                let _ = items.shell_start.set_enabled(true);
+                let _ = items.shell_stop.set_enabled(false);
+                let _ = items.shell_restart.set_enabled(false);
+                let _ = items.shell_open_console.set_enabled(false);
+            }
+            MenuState::Restarting => {
+                let _ = items.shell_start.set_enabled(false);
+                let _ = items.shell_stop.set_enabled(false);
+                let _ = items.shell_restart.set_enabled(false);
+                let _ = items.shell_open_console.set_enabled(false);
+            }
+        }
+    }
 }
 
 /// Whether `monitor_startup` is watching an initial start or a restart.
@@ -965,6 +1670,19 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
     for _ in 0..60 {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let state = app.state::<Mutex<ServerManager>>();
+
+        // Child-exit fast path (issue #5492): if the spawned server process
+        // died before health ever succeeded (e.g. EADDRINUSE because another
+        // chroxy owns the port), fail immediately with a classified cause
+        // instead of spinning — a foreign healthy server on the same port
+        // can answer the health poll and mask the death entirely.
+        if let Some(msg) = lock_or_recover(&state).check_startup_child_exit() {
+            update_menu_state(app, MenuState::Stopped);
+            window::emit_server_error(app, &msg);
+            send_notification(app, error_title, &msg);
+            return false;
+        }
+
         let status = lock_or_recover(&state).status();
         match status {
             ServerStatus::Running => {
@@ -996,14 +1714,21 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
 }
 
 fn handle_start(app: &tauri::AppHandle) {
-    // Read settings and apply to server manager
-    let (tunnel_mode, node_path) = app
+    // Read settings and apply to server manager. #5356 — also carry the
+    // expose-on-LAN flag so the embedded server is pinned to loopback unless
+    // the user explicitly opted in; defaults to false (loopback) when settings
+    // state is unavailable.
+    let (tunnel_mode, node_path, expose_on_lan) = app
         .try_state::<Mutex<DesktopSettings>>()
         .map(|s| {
             let settings = lock_or_recover(&s);
-            (settings.tunnel_mode.clone(), settings.node_path.clone())
+            (
+                settings.tunnel_mode.clone(),
+                settings.node_path.clone(),
+                settings.expose_on_lan,
+            )
         })
-        .unwrap_or_else(|| ("quick".to_string(), None));
+        .unwrap_or_else(|| ("quick".to_string(), None, false));
 
     // Validate cloudflared for tunnel modes
     if tunnel_mode != "none" && !ServerManager::check_cloudflared() {
@@ -1026,6 +1751,7 @@ fn handle_start(app: &tauri::AppHandle) {
         };
         mgr.set_tunnel_mode(effective_mode);
         mgr.set_node_path(node_path.as_deref());
+        mgr.set_expose_on_lan(expose_on_lan);
         mgr.start()
     };
 
@@ -1330,12 +2056,21 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
             "cloudflared not found. Install with: brew install cloudflared",
         );
         // Revert the checkbox to current mode
+        let current = app
+            .try_state::<Mutex<DesktopSettings>>()
+            .map(|s| lock_or_recover(&s).tunnel_mode.clone())
+            .unwrap_or_else(|| "quick".to_string());
         if let Some(items) = app.try_state::<Mutex<TrayMenuItems>>() {
             let items = lock_or_recover(&items);
-            let current = app
-                .try_state::<Mutex<DesktopSettings>>()
-                .map(|s| lock_or_recover(&s).tunnel_mode.clone())
-                .unwrap_or_else(|| "quick".to_string());
+            let _ = items.tunnel_quick.set_checked(current == "quick");
+            let _ = items.tunnel_named.set_checked(current == "named");
+            let _ = items.tunnel_none.set_checked(current == "none");
+        }
+        // #4942 — also revert the app-menu radios so a click on either
+        // surface leaves both consistent when cloudflared is missing.
+        #[cfg(target_os = "macos")]
+        if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+            let items = lock_or_recover(&items);
             let _ = items.tunnel_quick.set_checked(current == "quick");
             let _ = items.tunnel_named.set_checked(current == "named");
             let _ = items.tunnel_none.set_checked(current == "none");
@@ -1357,6 +2092,15 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
         let _ = items.tunnel_named.set_checked(mode == "named");
         let _ = items.tunnel_none.set_checked(mode == "none");
     }
+    // #4942 — keep the app-menu Tunnel radios in lockstep with the tray
+    // radios so toggling from either surface updates the other.
+    #[cfg(target_os = "macos")]
+    if let Some(items) = app.try_state::<Mutex<AppMenuItems>>() {
+        let items = lock_or_recover(&items);
+        let _ = items.tunnel_quick.set_checked(mode == "quick");
+        let _ = items.tunnel_named.set_checked(mode == "named");
+        let _ = items.tunnel_none.set_checked(mode == "none");
+    }
 
     send_notification(
         app,
@@ -1371,6 +2115,61 @@ fn handle_set_tunnel_mode(app: &tauri::AppHandle, mode: &str) {
             }
         ),
     );
+}
+
+/// #4942 — Open `~/.chroxy/` in Finder so the user can inspect server
+/// config / logs without leaving the app. macOS-only: gated alongside
+/// the app-menu Shell submenu (which is only built on macOS today).
+#[cfg(target_os = "macos")]
+fn handle_open_config_in_finder(app: &tauri::AppHandle) {
+    let Some(config_path) = config::config_path() else {
+        send_notification(
+            app,
+            "Open in Finder",
+            "Could not determine ~/.chroxy/ location.",
+        );
+        return;
+    };
+    // Reveal the parent directory, not the file itself; on first run
+    // the config file may not exist yet but the directory should.
+    let target = match config_path.parent() {
+        Some(p) => p.to_path_buf(),
+        None => config_path.clone(),
+    };
+    if !target.exists() {
+        let _ = std::fs::create_dir_all(&target);
+    }
+    let _ = std::process::Command::new("open").arg(&target).spawn();
+}
+
+/// #4942 — Open an arbitrary URL in the user's default browser. Used
+/// by the Help submenu (Documentation / Report Issue). We avoid pulling
+/// in `tauri-plugin-opener` and instead shell out to `open(1)` — keeps
+/// the new surface footprint zero new dependencies / zero new tauri
+/// commands. macOS-only.
+#[cfg(target_os = "macos")]
+fn handle_open_url(_app: &tauri::AppHandle, url: &str) {
+    let _ = std::process::Command::new("open").arg(url).spawn();
+}
+
+/// #4942 — Window > Bring All to Front. Iterates every Tauri webview
+/// window (today: `main`, plus `qr_popup` when `handle_show_qr` has
+/// opened it) and brings each one forward. macOS classically defines
+/// "Bring All to Front" as "raise all of the application's windows
+/// above other apps' windows" — `window::show_window` alone only
+/// targets `main`, so the QR popup would stay hidden behind the active
+/// app. We also call `set_focus()` after the iteration to ensure the
+/// main window ends up the key window. macOS-only.
+#[cfg(target_os = "macos")]
+fn handle_bring_all_to_front(app: &tauri::AppHandle) {
+    use tauri::Manager;
+    for (_label, win) in app.webview_windows() {
+        let _ = win.show();
+        let _ = win.set_focus();
+    }
+    // Land focus on `main` last so the user keeps interacting with the
+    // dashboard rather than a secondary window like `qr_popup`.
+    window::show_window(app);
 }
 
 fn handle_check_updates(app: &tauri::AppHandle) {

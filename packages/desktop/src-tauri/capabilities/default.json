@@ -24,6 +24,7 @@
     "allow-start-server",
     "allow-stop-server",
     "allow-restart-server",
+    "allow-discover-lan-servers",
     "allow-get-qr-code-svg",
     "allow-pick-directory",
     "allow-check-dependencies",
@@ -31,12 +32,18 @@
     "allow-save-setup-config",
     "allow-get-tunnel-mode",
     "allow-set-tunnel-mode",
+    "allow-get-expose-on-lan",
+    "allow-set-expose-on-lan",
+    "allow-get-summon-hotkey",
+    "allow-set-summon-hotkey",
     "allow-get-allow-auto-permission-mode",
     "allow-set-allow-auto-permission-mode",
     "allow-voice-available",
     "allow-start-voice-input",
     "allow-stop-voice-input",
+    "allow-reset-speech-permissions",
     "allow-tile-window",
-    "allow-read-clipboard-image"
+    "allow-read-clipboard-image",
+    "allow-reveal-in-finder"
   ]
 }

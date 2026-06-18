@@ -212,3 +212,63 @@ describe('stdin error listener', () => {
     )
   })
 })
+
+describe('stdout/stderr stream error listeners (#5361)', () => {
+  // Follow-up to #5324 (which covered the jsonl-subprocess path): a stream-level
+  // 'error' on child.stdout/child.stderr with NO user listener throws as an
+  // unhandled error and crashes the whole daemon. cli-session only wired stdin.
+
+  // CLAUDE is resolved at module load (resolveBinary) and these tests inject
+  // mock children rather than spawn the real binary, so the wiring is guarded
+  // by source-introspection — the same approach the stdin-listener test above
+  // uses. A behavioural emit on a mock stream would only re-prove EventEmitter
+  // semantics (the listener it attaches is the test's own, not the source's),
+  // so it is deliberately omitted as false coverage.
+  // Since audit P2-9 the stdout/stderr error guard lives in the shared
+  // child-stream-guard.js (guardChildStreams), invoked from each provider's
+  // spawn path. The wiring is still source-introspected (mock children only
+  // re-prove EventEmitter semantics), split across the helper + the call site.
+  it('shared guardChildStreams wires both streams, _destroying-guarded', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = dirname(fileURLToPath(import.meta.url))
+    const guard = readFileSync(join(dir, '../src/child-stream-guard.js'), 'utf-8')
+
+    // Covers BOTH streams — without the guard a stream 'error' is unhandled and
+    // crashes the whole daemon (the regression #5324/#5361 closed).
+    assert.ok(/\['stdout',\s*'stderr'\]/.test(guard),
+      'child-stream-guard.js must iterate both stdout and stderr')
+    assert.ok(guard.includes(".on('error'"),
+      'child-stream-guard.js must register an error listener')
+    // The listener must short-circuit while tearing down — the destroying()
+    // getter is read lazily because the flag flips after attach.
+    const m = guard.match(/\.on\('error',[\s\S]{0,200}?\}\)/)
+    assert.ok(m, "the .on('error', ...) block should be parseable")
+    assert.ok(m[0].includes('destroying'),
+      'the error listener must be guarded by the destroying() getter')
+  })
+
+  it('cli-session invokes guardChildStreams in the spawn path with the _destroying getter', async () => {
+    const { readFileSync } = await import('node:fs')
+    const { dirname, join } = await import('node:path')
+    const { fileURLToPath } = await import('node:url')
+    const dir = dirname(fileURLToPath(import.meta.url))
+    const source = readFileSync(join(dir, '../src/cli-session.js'), 'utf-8')
+
+    // The call must pass a _destroying getter (lazy read), not a snapshot.
+    // Slice by index rather than a regex — the inner `() => this._destroying`
+    // arrow's parens would otherwise truncate a non-greedy `\)` match early.
+    const callIdx = source.indexOf('guardChildStreams(child,')
+    assert.ok(callIdx >= 0, 'cli-session.js must call guardChildStreams(child, ...)')
+    assert.ok(source.slice(callIdx, callIdx + 160).includes('this._destroying'),
+      'the guard must be wired to this._destroying')
+
+    // Must run after the single `const child = spawn(...)` so EVERY (re)spawn
+    // gets the guard.
+    const spawnIdx = source.indexOf('const child = spawn(')
+    assert.ok(spawnIdx >= 0, 'cli-session.js should spawn the child via spawn()')
+    assert.ok(source.indexOf('guardChildStreams(child,') > spawnIdx,
+      'guardChildStreams must be invoked on the spawned child')
+  })
+})

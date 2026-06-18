@@ -191,6 +191,74 @@ describe('NotificationBanners', () => {
   })
 })
 
+describe('NotificationBanners — read/unread filtering (#4890)', () => {
+  // Regression coverage for the #4890 widget behaviour change: NotificationBanners
+  // now filters out notifications with `readAt !== undefined` so the transient
+  // banner stack matches "outstanding interventions" while the widget retains
+  // the full history. Without this filter the banners would keep pulsing for
+  // alerts the operator has already acknowledged via the widget.
+  it('renders nothing when every notification has been marked read', () => {
+    const { container } = render(
+      <NotificationBanners
+        notifications={[
+          makeNotification({ id: 'n-1', readAt: 1 }),
+          makeNotification({ id: 'n-2', requestId: 'req-other', readAt: 2 }),
+        ]}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onDismiss={vi.fn()}
+        onSwitchSession={vi.fn()}
+      />
+    )
+    expect(container.querySelector('.notification-banners')).not.toBeInTheDocument()
+  })
+
+  it('renders only the unread subset alongside read entries', () => {
+    render(
+      <NotificationBanners
+        notifications={[
+          makeNotification({ id: 'n-read', sessionName: 'Read Session', readAt: 1 }),
+          makeNotification({ id: 'n-unread', sessionName: 'Unread Session', requestId: 'req-unread' }),
+        ]}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onDismiss={vi.fn()}
+        onSwitchSession={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Unread Session')).toBeInTheDocument()
+    expect(screen.queryByText('Read Session')).not.toBeInTheDocument()
+  })
+
+  it('computes overflow count from the unread subset, not the total list', () => {
+    // Total of 5 notifications but only 4 are unread → expect 3 visible
+    // banners + "+1 more" overflow (NOT "+2 more", which would be the
+    // pre-#4890 overflow had read entries also been counted).
+    const notifications: SessionNotification[] = [
+      makeNotification({ id: 'n-1', sessionName: 'Session 1', requestId: 'req-1' }),
+      makeNotification({ id: 'n-2', sessionName: 'Session 2', requestId: 'req-2' }),
+      makeNotification({ id: 'n-3', sessionName: 'Session 3', requestId: 'req-3' }),
+      makeNotification({ id: 'n-4', sessionName: 'Session 4', requestId: 'req-4' }),
+      makeNotification({ id: 'n-already-read', sessionName: 'Already Read', requestId: 'req-r', readAt: 1 }),
+    ]
+    render(
+      <NotificationBanners
+        notifications={notifications}
+        onApprove={vi.fn()}
+        onDeny={vi.fn()}
+        onDismiss={vi.fn()}
+        onSwitchSession={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Session 1')).toBeInTheDocument()
+    expect(screen.getByText('Session 2')).toBeInTheDocument()
+    expect(screen.getByText('Session 3')).toBeInTheDocument()
+    expect(screen.queryByText('Session 4')).not.toBeInTheDocument()
+    expect(screen.queryByText('Already Read')).not.toBeInTheDocument()
+    expect(screen.getByText(/\+1 more/)).toBeInTheDocument()
+  })
+})
+
 describe('NotificationBanners source analysis', () => {
   const typesSource = fs.readFileSync(
     path.resolve(__dirname, '../store/types.ts'),

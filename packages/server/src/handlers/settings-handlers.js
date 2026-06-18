@@ -5,25 +5,32 @@
  *          query_permission_audit, list_providers, set_permission_rules
  */
 import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
-import { ALLOWED_PERMISSION_MODE_IDS, resolveSession, sendError, buildSessionTokenMismatchPayload } from '../handler-utils.js'
+import {
+  ALLOWED_PERMISSION_MODE_IDS,
+  resolveSession,
+  resolveSessionOrError,
+  requireSessionMethod,
+  sendError,
+  sendSessionError,
+  buildSessionTokenMismatchPayload,
+  isSessionViewer,
+} from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
-import { loadActiveSkillsLayered, findRepoSkillsDir, findSkillForRetrust, DEFAULT_SKILLS_DIR, _isCommunityNamespace } from '../skills-loader.js'
-import { realpathSync, readdirSync, statSync } from 'fs'
-import { createLogger } from '../logger.js'
+import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
+// Credential + skills handlers were split into sibling modules (audit P2-4);
+// their maps are composed into settingsHandlers below.
+import { credentialHandlers } from './credential-handlers.js'
+import { skillsHandlers } from './skills-handlers.js'
+import {
+  PER_SESSION_SETTINGS,
+  buildPerSessionSettingHandler,
+} from '../per-session-settings.js'
+import { createPermissionResolver, resolveOriginSessionId } from '../permission-resolver.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
 // These are safe file-operation tools that don't execute code or make network requests.
 const ELIGIBLE_TOOLS = new Set(['Read', 'Write', 'Edit', 'NotebookEdit', 'Glob', 'Grep'])
 
-// #3250: strict ISO-8601 datetime gate matching the shape z.string().datetime()
-// accepts. Used by handleListSkills to drop malformed timestamps from a
-// hand-edited trust ledger before forwarding — see comment in handleListSkills
-// for context. Date.parse is intentionally NOT used here: it accepts forms
-// like "2026-03-18 10:00:00" (space separator) that the wire schema rejects.
-const ISO_DATETIME_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d+)?(?:Z|[+-]\d{2}:?\d{2})$/
-function _isIsoDatetime(s) {
-  return typeof s === 'string' && ISO_DATETIME_RE.test(s)
-}
 
 // Tools that must never be auto-allowed regardless of user rules.
 const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
@@ -31,20 +38,34 @@ const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'])
 const log = createLogger('ws')
 
 /**
- * Resolve the allowed model IDs for a specific provider — #2946.
+ * Sentinel: the provider opted OUT of static model validation entirely
+ * (#5418 — ollama's `getAllowedModels()` returns null because valid models
+ * are whatever the local daemon has pulled; a static list would reject
+ * them all). Distinct from the legacy "no per-provider list" fallback,
+ * which routes to the global Claude allowlist and would wrongly reject
+ * every non-Claude id.
+ */
+const PROVIDER_MODELS_UNRESTRICTED = Symbol('provider-models-unrestricted')
+
+/**
+ * Resolve the allowed model IDs for a specific provider — #2946 / #5418.
  *
  * Providers opt in to per-provider validation by exposing a static
  * `getAllowedModels()` returning an array of accepted IDs. Providers that
- * don't (claude-sdk/claude-cli/docker-*) fall back to the dynamic global
+ * don't have the method at all (docker-* wrappers and any pre-#2946
+ * embedder-registered class) fall back to the dynamic global
  * `ALLOWED_MODEL_IDS`, which is fed by the Claude Agent SDK's supported-
  * models list and is the historical source of truth for Claude sessions.
  *
- * Returning `null` means "no per-provider list available — use the global
- * allowlist." Returning an array means the provider has opted in and the
- * array is authoritative.
+ * Tri-state return:
+ *   - `string[]` — provider opted in; the array is authoritative.
+ *   - `PROVIDER_MODELS_UNRESTRICTED` — the method exists and returned a
+ *     non-array (#5418 ollama): accept any non-empty model id verbatim.
+ *   - `null` — no method / unknown provider / method threw: use the
+ *     global allowlist (conservative legacy behaviour).
  *
  * @param {string|undefined} providerName - Session's registered provider name
- * @returns {string[]|null}
+ * @returns {string[]|typeof PROVIDER_MODELS_UNRESTRICTED|null}
  */
 function getProviderAllowedModels(providerName) {
   if (!providerName) return null
@@ -58,7 +79,8 @@ function getProviderAllowedModels(providerName) {
   if (typeof ProviderClass.getAllowedModels !== 'function') return null
   try {
     const list = ProviderClass.getAllowedModels()
-    return Array.isArray(list) ? list : null
+    if (Array.isArray(list)) return list
+    return PROVIDER_MODELS_UNRESTRICTED
   } catch {
     return null
   }
@@ -67,12 +89,39 @@ function getProviderAllowedModels(providerName) {
 function handleSetModel(ws, client, msg, ctx) {
   if (typeof msg.model !== 'string') {
     log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
-    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+    sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`, undefined, ctx)
     return
   }
 
   const modelSessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
+
+  // #5731 (T1): reject set_model on a provider that can't switch models, mirroring
+  // the permissionModeSwitch guard in handleSetPermissionMode below. Without this,
+  // a provider whose setModel is a no-op (e.g. claude-tui, modelSwitch:false) still
+  // updates BaseSession.model and broadcasts `model_changed` while the running
+  // session keeps its original model — so every client (incl. the ungated mobile
+  // picker) shows a switch that never happened.
+  if (entry && entry.provider) {
+    let ModelProviderClass
+    try {
+      ModelProviderClass = getProvider(entry.provider)
+    } catch {
+      // Unknown provider — allow through (fail open for forward-compat).
+    }
+    if (ModelProviderClass && ModelProviderClass.capabilities?.modelSwitch === false) {
+      ;sessionLogger(modelSessionId).warn(`Rejected set_model on ${entry.provider} session ${modelSessionId} from ${client.id}: provider does not support modelSwitch`)
+      sendError(
+        ws,
+        msg?.requestId,
+        'CAPABILITY_NOT_SUPPORTED',
+        `The active provider '${entry.provider}' does not support model switching.`,
+        undefined,
+        ctx,
+      )
+      return
+    }
+  }
 
   // Per-provider allowlist: the global ALLOWED_MODEL_IDS is Claude-only, so
   // accepting any Claude model ID on a Gemini/Codex session and forwarding
@@ -80,24 +129,64 @@ function handleSetModel(ws, client, msg, ctx) {
   // crash opaquely (see issue #2946). Consult the session's provider first.
   if (entry) {
     const providerAllowed = getProviderAllowedModels(entry.provider)
+    if (providerAllowed === PROVIDER_MODELS_UNRESTRICTED) {
+      // #5418: the provider validates nothing statically (ollama — any
+      // locally pulled model id is valid; an unknown id surfaces as the
+      // backend's own error on the next message). Pass the id through
+      // verbatim after a minimal non-empty guard — without this branch the
+      // null fell through to the global Claude allowlist, which rejected
+      // every Ollama model and accepted Claude ids that 404 at the local
+      // daemon.
+      const model = msg.model.trim()
+      if (model.length === 0) {
+        log.warn(`Rejected empty model id on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`, undefined, ctx)
+        return
+      }
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${model}`)
+      // #5696: setModel() returns false when the session is busy (mid-turn) or
+      // the model is unchanged (no-op). Mirror the permission-mode guard
+      // (#3729) below — only broadcast model_changed when the change actually
+      // landed, else clients show a model the session never switched to.
+      if (!entry.session.setModel(model)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${model}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${model}' was not applied (session busy or already on that model).`, undefined, ctx)
+        return
+      }
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(model) })
+      return
+    }
     if (providerAllowed) {
       if (!providerAllowed.includes(msg.model)) {
-        log.warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
+        // #4828: session-scoped — modelSessionId identifies the affected
+        // session. Legacy single-session adapters may surface an empty
+        // sessionId, so fall back to the module-level `log` rather than
+        // throwing inside loggerForSession (matches the input-handlers
+        // pattern from #4823).
+        ;sessionLogger(modelSessionId).warn(`Rejected model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}`)
         sendError(
           ws,
           msg?.requestId,
           'MODEL_NOT_SUPPORTED_BY_PROVIDER',
           `Model '${msg.model}' is not supported by the active provider '${entry.provider}'. Supported models: ${providerAllowed.join(', ')}`,
+          undefined,
+          ctx,
         )
         return
       }
-      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-      entry.session.setModel(msg.model)
+      // #4828: session-scoped (single-session fallback as above).
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      // #5696: only broadcast when setModel() reports the change landed.
+      if (!entry.session.setModel(msg.model)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
+        return
+      }
       // Non-Claude providers use opaque model IDs (e.g. 'gemini-2.5-pro') —
       // broadcast them verbatim. toShortModelId() is a Claude-specific
       // alias collapse (claude-sonnet-4-6 → sonnet) and returns the input
       // unchanged for non-Claude IDs, so applying it uniformly is safe.
-      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
       return
     }
     // Fall through to the legacy global allowlist when the provider hasn't
@@ -106,15 +195,21 @@ function handleSetModel(ws, client, msg, ctx) {
 
   if (ALLOWED_MODEL_IDS.has(msg.model)) {
     if (entry) {
-      log.info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
-      entry.session.setModel(msg.model)
-      ctx.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
+      // #4828: session-scoped (single-session fallback).
+      ;sessionLogger(modelSessionId).info(`Model change from ${client.id} on session ${modelSessionId}: ${msg.model}`)
+      // #5696: only broadcast when setModel() reports the change landed.
+      if (!entry.session.setModel(msg.model)) {
+        ;sessionLogger(modelSessionId).warn(`set_model rejected (session busy or no-op): requested ${msg.model}`)
+        sendError(ws, msg?.requestId, 'MODEL_NOT_APPLIED', `Model change to '${msg.model}' was not applied (session busy or already on that model).`, undefined, ctx)
+        return
+      }
+      ctx.transport.broadcastToSession(modelSessionId, { type: 'model_changed', model: toShortModelId(msg.model) })
     }
     return
   }
 
   log.warn(`Rejected invalid model from ${client.id}: ${JSON.stringify(msg.model)}`)
-  sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`)
+  sendError(ws, msg?.requestId, 'INVALID_MODEL', `Invalid or unsupported model: ${msg.model}`, undefined, ctx)
 }
 
 function handleSetPermissionMode(ws, client, msg, ctx) {
@@ -137,19 +232,22 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
           // Unknown provider — allow through (fail open for forward-compat).
         }
         if (ProviderClass && ProviderClass.capabilities?.permissionModeSwitch === false) {
-          log.warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
+          // #4828: session-scoped (single-session fallback).
+          ;sessionLogger(permModeSessionId).warn(`Rejected set_permission_mode on ${entry.provider} session ${permModeSessionId} from ${client.id}: provider does not support permissionModeSwitch`)
           sendError(
             ws,
             msg?.requestId,
             'CAPABILITY_NOT_SUPPORTED',
             `The active provider '${entry.provider}' does not support permission mode switching.`,
+            undefined,
+            ctx,
           )
           return
         }
       }
 
       if (msg.mode === 'plan' && !entry.session.constructor.capabilities?.planMode) {
-        ctx.send(ws, { type: 'session_error', message: 'This provider does not support plan mode' })
+        sendSessionError(ws, ctx, 'This provider does not support plan mode')
         return
       }
       // Auto permission mode is the ultimate privilege escalation in
@@ -180,31 +278,50 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
       //    escalate. Only the primary API token can flip to auto.
       if (msg.mode === 'auto') {
         if (client.boundSessionId) {
-          log.warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
+          // #4828: session-scoped to the bound session — that's the
+          // session the rejection belongs to.
+          loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to flip to auto permission mode — rejected`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_FORBIDDEN_BOUND_CLIENT',
-            'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.')
+            'Pairing-issued session tokens cannot enable auto permission mode. Use the primary API token from a device with physical access to this machine.',
+            undefined, ctx)
           return
         }
-        if (ctx.config?.allowAutoPermissionMode !== true) {
-          log.warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
+        if (ctx.services.config?.allowAutoPermissionMode !== true) {
+          // #4828: session-scoped (single-session fallback).
+          ;sessionLogger(permModeSessionId).warn(`Client ${client.id} attempted to flip to auto permission mode but allowAutoPermissionMode is not enabled in server config`)
           sendError(ws, msg?.requestId, 'AUTO_MODE_DISABLED_BY_CONFIG',
-            'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.')
+            'Auto permission mode is disabled on this server. To enable, set allowAutoPermissionMode:true in the server config file (requires local filesystem access). Default is disabled for security.',
+            undefined, ctx)
           return
         }
       }
       if (msg.mode === 'auto' && !msg.confirmed) {
-        log.info(`Auto mode requested by ${client.id}, awaiting confirmation`)
-        ctx.send(ws, {
+        // #4828: session-scoped (single-session fallback).
+        ;sessionLogger(permModeSessionId).info(`Auto mode requested by ${client.id}, awaiting confirmation`)
+        // #5609: on providers where the auto-switch is destructive (CLI —
+        // _onPermissionModeChanged respawns the `claude -p` subprocess, the
+        // #3729 panic-button) AND a turn is currently in flight, name the
+        // consequence so the user isn't surprised by a dropped response. SDK
+        // and TUI apply the switch in-place and keep the turn running, so they
+        // keep the plain warning. The warning string is rendered verbatim by
+        // the mobile app's confirm Alert (SettingsBar.tsx).
+        const interruptsTurn = !!entry.session.constructor.capabilities?.interruptsTurnOnAutoSwitch
+        const warning = interruptsTurn && entry.session._isBusy
+          ? 'This session is mid-response. Switching to Auto will INTERRUPT the running turn and restart the session — the in-flight response will be dropped. Tools will then run without asking for permission.'
+          : 'Auto mode bypasses all permission checks. Claude will execute tools without asking.'
+        ctx.transport.send(ws, {
           type: 'confirm_permission_mode',
           mode: 'auto',
-          warning: 'Auto mode bypasses all permission checks. Claude will execute tools without asking.',
+          warning,
         })
       } else {
         const previousMode = entry.session.permissionMode || 'unknown'
+        // #4828: session-scoped (single-session fallback).
+        const _pmLog = sessionLogger(permModeSessionId)
         if (msg.mode === 'auto') {
-          log.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
+          _pmLog.info(`Auto permission mode CONFIRMED by ${client.id} at ${new Date().toISOString()} (was: ${previousMode})`)
         } else {
-          log.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
+          _pmLog.info(`Permission mode change from ${client.id} on session ${permModeSessionId}: ${previousMode} → ${msg.mode} at ${new Date().toISOString()}`)
         }
         // BaseSession exposes the mode on the public `permissionMode` field.
         // The earlier `_permissionMode` read was a typo that always resolved
@@ -221,25 +338,27 @@ function handleSetPermissionMode(ws, client, msg, ctx) {
         // leaving the user staring at fresh prompts in supposed bypass mode.
         const actualMode = entry.session.permissionMode
         if (actualMode !== msg.mode) {
-          log.warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
+          // #4828: session-scoped (single-session fallback).
+          ;sessionLogger(permModeSessionId).warn(`set_permission_mode rejected (session busy or no-op): requested ${msg.mode}, still ${actualMode}`)
           sendError(ws, msg?.requestId, 'PERMISSION_MODE_NOT_APPLIED',
-            `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`)
+            `Permission mode change to '${msg.mode}' was not applied (session busy or already in that mode).`,
+            undefined, ctx)
           return
         }
-        if (ctx.permissionAudit) {
-          ctx.permissionAudit.logModeChange({
+        if (ctx.permissions.permissionAudit) {
+          ctx.permissions.permissionAudit.logModeChange({
             clientId: client.id,
             sessionId: permModeSessionId,
             previousMode,
             newMode: msg.mode,
           })
         }
-        ctx.broadcastToSession(permModeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
+        ctx.transport.broadcastToSession(permModeSessionId, { type: 'permission_mode_changed', mode: msg.mode })
       }
     }
   } else {
     log.warn(`Rejected invalid permission mode from ${client.id}: ${JSON.stringify(msg.mode)}`)
-    sendError(ws, msg?.requestId, 'INVALID_PERMISSION_MODE', `Invalid permission mode: ${msg.mode}`)
+    sendError(ws, msg?.requestId, 'INVALID_PERMISSION_MODE', `Invalid permission mode: ${msg.mode}`, undefined, ctx)
   }
 }
 
@@ -247,127 +366,114 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   const { requestId, decision } = msg
   if (!requestId || !decision) return
 
-  // Resolve the origin session of this permission request. The
-  // authoritative source is permissionSessionMap (populated at request
-  // creation). The fallback to client.activeSessionId exists only for
-  // legacy code paths where the map wasn't populated; it must NOT be
-  // used to bypass the binding check for a bound client, because for a
-  // bound client `activeSessionId === boundSessionId`, which would
-  // short-circuit the check below.
-  const mappedSessionId = ctx.permissionSessionMap.get(requestId)
-  const originSessionId = mappedSessionId || client.activeSessionId
+  // #5373: the binding check + SDK-vs-legacy dispatch + audit are delegated to
+  // the shared permission-resolver (also used by the HTTP handler in
+  // ws-permissions.js), so the binding rule lives in ONE place. Two things stay
+  // HERE because they have no HTTP analog / are transport-specific:
+  //   - the WS-ONLY unbound-subscription guard (#4798, invariant G), which runs
+  //     BEFORE the resolver, and
+  //   - the elaborate binding-mismatch forensic log (#2832) + the per-transport
+  //     error / permission_expired / permission_resolved messages.
+  //
+  // `mappedSessionId` is the raw mapping; `originSessionId` adds the WS-only
+  // legacy `client.activeSessionId` fallback. That fallback is passed to the
+  // resolver as `dispatchFallbackSessionId` (used ONLY to pick the dispatch
+  // session, NEVER for the binding check — invariant B / the #2806 residual).
+  // #6030: computed via resolveOriginSessionId (the SAME helper the resolver
+  // uses), so the session this handler authorizes against is byte-identical to
+  // the one the resolver dispatches to — closing the prior `||` (here) vs `??`
+  // (resolver) split that disagreed on empty-string / 0-ish mapped ids.
+  const mappedSessionId = ctx.permissions.permissionSessionMap.get(requestId)
+  const originSessionId = resolveOriginSessionId(mappedSessionId, client.activeSessionId)
 
-  // Enforce session binding: if this client authenticated with a
-  // pairing-issued session token that was bound to a specific session,
-  // prevent them from approving/denying a permission request belonging
-  // to any OTHER session — including legacy pendingPermissions entries
-  // that have no mapping.
-  //
-  // For a BOUND client, the request MUST have an explicit mapping in
-  // permissionSessionMap AND that mapping must equal boundSessionId.
-  // Without this, agent-review on PR #2806 found a residual bypass:
-  // when the requestId was not in the map, originSessionId would fall
-  // back to client.activeSessionId, which equals boundSessionId, the
-  // check would pass, and execution would fall through to the legacy
-  // pendingPermissions resolver — which has no session check at all.
-  //
-  // Discovered in the 2026-04-11 production readiness audit (blocker 5).
-  // The 616aeaf62 / 2c0ac7d2d commits claimed to enforce binding across
-  // all session-scoped handlers but missed this one + the HTTP fallback.
-  if (client.boundSessionId) {
-    if (!mappedSessionId || mappedSessionId !== client.boundSessionId) {
-      // Correlate with the [session-binding-create] log at the same
-      // requestId to recover the original creating client's bound session
-      // and createdAt. Reproduction steps: see issue #2832.
-      const permData = (mappedSessionId && ctx.sessionManager)
-        ? ctx.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
-        : ctx.pendingPermissions?.get(requestId)?.data
-      const createdAt = permData?.createdAt ?? null
-      const ageMs = createdAt ? Date.now() - createdAt : null
-      const clientConnectedAt = client.authTime ?? null
-      const likelyPostReconnect = Boolean(
-        (ageMs !== null && ageMs > 30_000) ||
-        (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
-      )
-      log.warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
-        requestId,
-        decision,
-        clientId: client.id,
-        activeSessionId: client.activeSessionId ?? null,
-        boundSessionId: client.boundSessionId ?? null,
-        mappedSessionId: mappedSessionId ?? null,
-        requestCreatedAt: createdAt,
-        clientConnectedAt,
-        requestAgeMs: ageMs,
-        likelyPostReconnect,
-      })}`)
-      // Don't consume the permissionSessionMap entry — let the legitimate
-      // client still respond to it.
-      // Issue #2912: payload shape matches every other SESSION_TOKEN_MISMATCH
-      // emit site so the client can branch on `code` alone without worrying
-      // about which transport surface (type: 'error' vs 'session_error' vs
-      // 'web_task_error') produced it.
-      ctx.send(ws, {
-        type: 'error',
-        requestId: requestId ?? null,
-        ...buildSessionTokenMismatchPayload({
-          sessionManager: ctx.sessionManager,
-          boundSessionId: client.boundSessionId,
-          message: 'Not authorized to respond to this permission request',
-        }),
-      })
+  // #4798 (audit P0 symmetry with #4788): for UNBOUND clients, require the
+  // originSessionId to match the client's active or subscribed sessions before
+  // routing the decision. Without this, an unbound dashboard tab could
+  // approve/deny a permission for any session by replaying a known requestId —
+  // arguably MORE dangerous than the question hijack vector (#4788) because
+  // permission decisions gate file writes / shell exec. Routes through
+  // isSessionViewer (#6030) — the SAME predicate _broadcastToSession uses to pick
+  // recipients (ws-broadcaster.js _matchesSession) — so "who may answer == who
+  // could receive" can never drift. Leaves the mapping intact so the legitimate
+  // subscribed client can still respond. WS-ONLY by design: a primary HTTP caller
+  // has full session authority (§3), so the HTTP path has no analog and must not
+  // inherit this restriction.
+  if (!client.boundSessionId && originSessionId) {
+    if (!isSessionViewer(client, originSessionId)) {
+      sessionLogger(originSessionId).warn(`[permission-response-reject] unbound client ${client.id} attempted to respond to ${requestId} (originSessionId=${originSessionId}, activeSessionId=${client.activeSessionId ?? 'none'}, subscribed=false) — dropped`)
       return
     }
   }
 
-  ctx.permissionSessionMap.delete(requestId)
+  const resolver = createPermissionResolver({
+    permissionSessionMap: ctx.permissions.permissionSessionMap,
+    pendingPermissions: ctx.permissions.pendingPermissions,
+    getSessionManager: () => ctx.sessions.sessionManager,
+    resolveLegacyPermission: (rid, dec) => ctx.permissions.permissions.resolvePermission(rid, dec),
+    getPermissionAudit: () => ctx.permissions.permissionAudit,
+    // #5704: route the map delete through the WsServer teardown so resolving a
+    // permission over WS also drops its permission-induced subscription refcount.
+    onRouteTeardown: ctx.permissions.unregisterPermissionRoute,
+  })
+  const result = resolver.resolve(requestId, decision, client.boundSessionId, {
+    clientId: client.id,
+    dispatchFallbackSessionId: client.activeSessionId,
+  })
 
-  let resolved = false
-
-  if (originSessionId && ctx.sessionManager) {
-    const entry = ctx.sessionManager.getSession(originSessionId)
-    if (entry && typeof entry.session.respondToPermission === 'function') {
-      const hasPending = entry.session._pendingPermissions?.has(requestId)
-      if (hasPending !== false) {
-        entry.session.respondToPermission(requestId, decision)
-        resolved = true
-      } else {
-        ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
-      }
-      if (!resolved) return
-    }
-  }
-
-  if (!resolved && ctx.pendingPermissions.has(requestId)) {
-    ctx.permissions.resolvePermission(requestId, decision)
-    resolved = true
-  }
-
-  if (!resolved) {
-    ctx.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
-  }
-
-  // Audit trail for permission decisions. Auto-deny paths
-  // (timeout/aborted/cleared) are audited from the unified pipeline in
-  // ws-server.js (#3057) — this branch only fires for user-initiated WS
-  // responses, hence reason: 'user'.
-  if (resolved && ctx.permissionAudit) {
-    ctx.permissionAudit.logDecision({
-      clientId: client.id,
-      sessionId: originSessionId,
+  if (result.kind === 'binding_mismatch') {
+    // Correlate with the [session-binding-create] log at the same requestId to
+    // recover the original creating client's bound session + createdAt (#2832).
+    const permData = (mappedSessionId && ctx.sessions.sessionManager)
+      ? ctx.sessions.sessionManager.getSession(mappedSessionId)?.session?._lastPermissionData?.get(requestId)
+      : ctx.permissions.pendingPermissions?.get(requestId)?.data
+    const createdAt = permData?.createdAt ?? null
+    const ageMs = createdAt ? Date.now() - createdAt : null
+    const clientConnectedAt = client.authTime ?? null
+    const likelyPostReconnect = Boolean(
+      (ageMs !== null && ageMs > 30_000) ||
+      (createdAt && clientConnectedAt && clientConnectedAt > createdAt)
+    )
+    // #4828: session-scoped to the bound session — the reject belongs to the
+    // OWNER of `boundSessionId`, not the mismatched mapped session.
+    loggerForSession('ws', result.boundSessionId).warn(`[session-binding-reject] permission_response rejected ${JSON.stringify({
       requestId,
       decision,
-      reason: 'user',
+      clientId: client.id,
+      activeSessionId: client.activeSessionId ?? null,
+      boundSessionId: client.boundSessionId ?? null,
+      mappedSessionId: mappedSessionId ?? null,
+      requestCreatedAt: createdAt,
+      clientConnectedAt,
+      requestAgeMs: ageMs,
+      likelyPostReconnect,
+    })}`)
+    // The resolver does NOT consume the map entry on a mismatch — the
+    // legitimate client can still respond. Issue #2912: payload shape matches
+    // every other SESSION_TOKEN_MISMATCH emit site.
+    ctx.transport.send(ws, {
+      type: 'error',
+      requestId: requestId ?? null,
+      ...buildSessionTokenMismatchPayload({
+        sessionManager: ctx.sessions.sessionManager,
+        boundSessionId: result.boundSessionId,
+        message: 'Not authorized to respond to this permission request',
+      }),
     })
+    return
   }
 
-  // #3048: SDK-session broadcasts now go through the unified pipeline
-  // (PermissionManager.emit → SdkSession.emit → SessionManager session_event
-  // → EventNormalizer → broadcast). Legacy non-SDK sessions resolved via
-  // ctx.permissions.resolvePermission have no PermissionManager to wire
-  // through, so keep an inline broadcast for that branch only.
-  if (resolved && !originSessionId) {
-    ctx.broadcast(
+  if (result.kind === 'expired' || result.kind === 'not_found') {
+    ctx.transport.send(ws, { type: 'permission_expired', requestId, sessionId: originSessionId, message: 'This permission request has expired or was already handled' })
+    return
+  }
+
+  // result.kind === 'resolved' — the resolver dispatched (sdk|legacy) + audited.
+  // #3048: SDK-session broadcasts go through the unified pipeline
+  // (PermissionManager → SdkSession → SessionManager → EventNormalizer →
+  // broadcast). Legacy non-SDK sessions (no PermissionManager) keep an inline
+  // broadcast for the unmapped case only — mirrors the prior `!originSessionId`.
+  if (!result.sessionId) {
+    ctx.transport.broadcast(
       { type: 'permission_resolved', requestId, decision },
       (c) => c.id !== client.id
     )
@@ -375,727 +481,59 @@ function handlePermissionResponse(ws, client, msg, ctx) {
 }
 
 function handleQueryPermissionAudit(ws, client, msg, ctx) {
-  if (ctx.permissionAudit) {
-    const entries = ctx.permissionAudit.query({
+  if (ctx.permissions.permissionAudit) {
+    const entries = ctx.permissions.permissionAudit.query({
       sessionId: msg.sessionId,
       type: msg.auditType,
       since: msg.since,
       limit: msg.limit,
     })
-    ctx.send(ws, { type: 'permission_audit_result', entries })
+    ctx.transport.send(ws, { type: 'permission_audit_result', entries })
   } else {
-    ctx.send(ws, { type: 'permission_audit_result', entries: [] })
+    ctx.transport.send(ws, { type: 'permission_audit_result', entries: [] })
   }
 }
 
 function handleListProviders(ws, client, msg, ctx) {
-  ctx.send(ws, { type: 'provider_list', providers: listProviders() })
-}
-
-/**
- * Return the active skills the running session is using.
- *
- * v1 (#2957) sourced skills only from `~/.chroxy/skills/`. v2 (#3067) layers a
- * repo-scoped overlay on top: walk up from the active session's cwd looking
- * for `.chroxy/skills/`, and let any repo file override a global file with the
- * same name. The payload includes a `source` ("global" or "repo") per skill so
- * clients can show which tier each one came from.
- *
- * The session loaded skills at construction with whatever `globalDir`/`repoDir`
- * it was given (including test overrides), so when an active session resolves
- * we mirror its loaded set instead of re-scanning disk — that keeps the WS
- * payload aligned with what's actually being injected and respects test-only
- * skillsDir overrides. The disk scan is the fallback used only when no session
- * is bound or it doesn't expose a skills accessor (e.g. mock sessions).
- *
- * Disabling a skill remains a filesystem rename (`*.disabled.md`); there's no
- * enable/disable UI in v2 either.
- */
-function handleListSkills(ws, client, msg, ctx) {
-  const entry = resolveSession(ctx, msg, client)
-
-  // #3209: emit the full activation context so the dashboard can
-  // render manual-skill toggles. For a bound session, run a fresh
-  // layered scan with `includeInactive: true` against that session's
-  // active set — the session's cached `_skills` only contains active
-  // entries (manual ones are filtered at construction).
-  // #3252: prefer the public getter so future BaseSession internal
-  // refactors don't silently turn this into "no active skills" without
-  // a type error or test failure. Optional-chaining the getter keeps
-  // mock sessions (which don't define the method) compatible.
-  const activeSetCandidate = entry?.session?.getActiveManualSkillsRaw?.()
-  const activeSet = activeSetCandidate instanceof Set ? activeSetCandidate : new Set()
-  // #3205: prefer the session's resolved skill dirs when available so
-  // the response matches what the session is actually injecting. This
-  // matters when the session was constructed with `skillsDir` /
-  // `repoSkillsDir` overrides (tests pin temp dirs; future wiring may
-  // override per-session). Fall back to the defaults / cwd-walk only
-  // when the session doesn't expose these — typically because no
-  // session is bound (the no-session path scans the global tier).
-  const sessionSkillsDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
-  const sessionRepoDir = entry?.session
-    ? (entry.session._repoSkillsDir !== undefined
-      ? entry.session._repoSkillsDir
-      : (entry.session.cwd ? findRepoSkillsDir(entry.session.cwd) : null))
-    : null
-  const provider = entry?.provider || null
-  // #3205: trust store powers the hash + last-activated metadata in
-  // the response. When the session has no trust store wired (operator
-  // didn't opt into 'warn' / 'block' modes), those fields are simply
-  // omitted — the dashboard renders the panel without those columns
-  // rather than showing fake data.
-  // #3252: same getter pattern as activeSet — keeps mock sessions
-  // working without forcing every test to add the method.
-  const trustStore = entry?.session?.getTrustStore?.() ?? null
-
-  // #3226 (review): forward the bound session's `providerSkillAllowlist`
-  // (if any) so the per-session listing reflects what the prompt builder
-  // would actually inject. Without this, on Codex/Gemini sessions with
-  // an allowlist configured, the dashboard would still show toggles for
-  // skills the runtime drops at prompt-build time. Skipped entirely
-  // when `includeAllProviders` is true (#3226's no-session path).
-  const sessionAllowlist = entry?.session?._providerSkillAllowlist || null
-
-  const skills = loadActiveSkillsLayered({
-    globalDir: sessionSkillsDir,
-    repoDir: sessionRepoDir,
-    provider,
-    activeManualSkills: activeSet,
-    providerSkillAllowlist: sessionAllowlist,
-    includeInactive: true,
-    // #3226: when no provider is bound (no session, or a session
-    // that doesn't expose one), bypass the provider-scoping gate
-    // and the per-provider allowlist so the dashboard's "browse
-    // all installed skills" listing doesn't silently drop scoped
-    // entries. Per-session listings keep `provider` set, so the
-    // current session's filtered view is unchanged.
-    includeAllProviders: provider == null,
-  }).map((s) => {
-    // `metadata.activation` is the authoritative source — keep
-    // anything else as `auto` to match the loader's defaults.
-    const rawActivation = typeof s.metadata?.activation === 'string'
-      ? s.metadata.activation.trim().toLowerCase()
-      : null
-    const activation = rawActivation === 'manual' ? 'manual' : 'auto'
-
-    const out = {
-      name: s.name,
-      description: s.description,
-      source: s.source || 'global',
-      activation,
-      // For `auto` skills, `active` is always true (they always load).
-      // For `manual` skills, reflect the loader's per-skill flag —
-      // already set from the activeManualSkills membership.
-      active: activation === 'auto' ? true : !!s.active,
-    }
-
-    // #3205: optional metadata fields — `version` from the YAML
-    // frontmatter, `hashPrefix` + `lastVerified` from the trust store.
-    // All optional so older clients keep parsing this response, and a
-    // trust-disabled session still gets a useful panel (just without
-    // the audit columns).
-    const version = typeof s.metadata?.version === 'string' ? s.metadata.version.trim() : null
-    if (version) out.version = version
-
-    if (trustStore && typeof trustStore.getRecord === 'function' && typeof s.path === 'string') {
-      const record = trustStore.getRecord(s.path)
-      if (record) {
-        // 8-char hash prefix matches the sanitised log + skill_changed
-        // wire format from #3215 / #3234. The full SHA never leaves
-        // the server.
-        out.hashPrefix = record.sha256.slice(0, 8)
-        // #3250: producer-side ISO-8601 validation. The wire schema
-        // (ServerSkillsListSchema) tightened these to z.string().datetime();
-        // a hand-edited or corrupted ~/.chroxy/skills-trust.json could
-        // otherwise emit a non-ISO string that fails the WHOLE
-        // skills_list payload at the dashboard parser. Drop the
-        // offending field instead — the dashboard renders the panel
-        // without that column rather than rejecting the response.
-        //
-        // Date.parse is too permissive (accepts e.g. "2026-03-18 10:00:00"
-        // which z.string().datetime() rejects). Match Zod's strict
-        // ISO-8601 shape: T separator + Z or numeric offset.
-        if (typeof record.lastVerified === 'string'
-            && _isIsoDatetime(record.lastVerified)) {
-          out.lastVerified = record.lastVerified
-        }
-        if (typeof record.firstSeen === 'string'
-            && _isIsoDatetime(record.firstSeen)) {
-          out.firstSeen = record.firstSeen
-        }
-      }
-    }
-
-    return out
-  })
-
-  ctx.send(ws, { type: 'skills_list', skills })
-}
-
-/**
- * #3209: activate a manual skill at runtime. The dashboard sends this
- * when a user checks a manual-skill toggle. The session's active set
- * is mutated, the skills list is reloaded so the next prompt picks
- * up the new skill, and a `skill_activated` broadcast lets other
- * clients on the same session refresh their UI.
- */
-function handleSkillActivate(ws, client, msg, ctx) {
-  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_activate requires a non-empty `skillName`' })
-    return
-  }
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-  if (typeof entry.session.activateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill activation' })
-    return
-  }
-  // #3246: subprocess providers (CliSession, CodexSession,
-  // GeminiSession) snapshot the skills text at session start —
-  // mutating in-memory state mid-session does not propagate to the
-  // running model. Refuse the toggle with a distinct error code so
-  // the dashboard can surface "this provider doesn't support runtime
-  // toggle" UX instead of silently flipping a checkbox that does
-  // nothing on the wire.
-  if (typeof entry.session.supportsRuntimeSkillToggle === 'function'
-    && !entry.session.supportsRuntimeSkillToggle()) {
-    sendError(
-      ws,
-      msg?.requestId,
-      'SKILL_TOGGLE_UNSUPPORTED',
-      `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session with the skill in 'activeManualSkills' instead.`,
-    )
-    return
-  }
-
-  const changed = entry.session.activateSkill(msg.skillName)
-  if (!changed) return // already active or invalid name — no-op, no broadcast
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'skill_activated',
-    sessionId,
-    skillName: msg.skillName,
-  })
-}
-
-/**
- * #3209: deactivate a manual skill at runtime. Mirror of
- * `handleSkillActivate`.
- */
-function handleSkillDeactivate(ws, client, msg, ctx) {
-  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_deactivate requires a non-empty `skillName`' })
-    return
-  }
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-  if (typeof entry.session.deactivateSkill !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support skill toggling' })
-    return
-  }
-  // #3246: same capability gate as activate — subprocess providers
-  // can't honour a mid-session deactivate either.
-  if (typeof entry.session.supportsRuntimeSkillToggle === 'function'
-    && !entry.session.supportsRuntimeSkillToggle()) {
-    sendError(
-      ws,
-      msg?.requestId,
-      'SKILL_TOGGLE_UNSUPPORTED',
-      `Provider '${entry.provider}' does not support runtime skill toggling. Restart the session without the skill in 'activeManualSkills' instead.`,
-    )
-    return
-  }
-
-  const changed = entry.session.deactivateSkill(msg.skillName)
-  if (!changed) return // wasn't active — no-op, no broadcast
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'skill_deactivated',
-    sessionId,
-    skillName: msg.skillName,
-  })
-}
-
-/**
- * #3235: operator-facing accept-hash surface for SkillsTrustStore. After
- * a content-hash mismatch fires (`skill_changed` event), the operator
- * needs a way to re-trust the new content without manually editing
- * `~/.chroxy/skills-trust.json`. This handler:
- *
- *   1. Validates the inbound `skillName`.
- *   2. Looks up the skill on the bound session (via `_getSkills()`) so
- *      we use the exact post-frontmatter `body` and `path` the loader
- *      already validated.
- *   3. Calls `trustStore.acceptHash(realPath, body)` to overwrite the
- *      stored hash with the current content's digest.
- *   4. Flushes the ledger so the new hash survives a crash.
- *   5. Broadcasts `skill_trust_accepted` so the dashboard can clear any
- *      mismatch badge — pairs with the `skill_changed` event from #3234.
- *
- * Error envelope:
- *   - `INVALID_SKILL_NAME` (session_error envelope) — missing/empty.
- *   - `No active session` (session_error envelope) — no bound session.
- *   - `TRUST_NOT_ENABLED` — bound session has no trust store wired.
- *   - `SKILL_NOT_FOUND` — name doesn't match any currently-loaded skill.
- *
- * The handler does NOT trigger a session reload — the new hash takes
- * effect on the NEXT load. In `block` mode, that's exactly what the
- * operator wants: re-trust now, the skill loads on next session start.
- */
-function handleSkillTrustAccept(ws, client, msg, ctx) {
-  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    ctx.send(ws, { type: 'session_error', message: 'skill_trust_accept requires a non-empty `skillName`' })
-    return
-  }
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  // #3252: getter-with-optional-chaining keeps mock sessions (which
-  // don't define the method) compatible while still surfacing TRUST_NOT_ENABLED
-  // for legitimate trust-disabled sessions.
-  const trustStore = entry?.session?.getTrustStore?.() ?? null
-  if (!trustStore || typeof trustStore.acceptHash !== 'function') {
-    sendError(
-      ws,
-      msg?.requestId,
-      'TRUST_NOT_ENABLED',
-      'This session has no skills trust store wired (operator did not opt into warn/block mode).',
-    )
-    return
-  }
-
-  // Find the skill. We CAN'T use `_getSkills()` here: in `block` mode,
-  // a hash-mismatched skill is filtered out at load time, which means
-  // the very skills the operator is trying to re-trust are absent from
-  // the loaded list. Fall back to a direct filesystem lookup that
-  // bypasses the trust gate (#3235 review).
-  let resolvedPath = null
-  let resolvedBody = null
-
-  // First try the session's already-loaded list — covers the warn-mode
-  // case where the skill stays in `_skills` even after a mismatch.
-  // Using the loaded entry's body+path is preferable when available
-  // because the body has already been validated by the same loader pass
-  // that recorded the trust hash.
-  const loadedSkills = typeof entry.session._getSkills === 'function'
-    ? entry.session._getSkills()
-    : []
-  const loaded = Array.isArray(loadedSkills)
-    ? loadedSkills.find((s) => s && s.name === msg.skillName)
-    : null
-  if (loaded && typeof loaded.path === 'string' && typeof loaded.body === 'string') {
-    resolvedPath = loaded.path
-    resolvedBody = loaded.body
-  } else {
-    // Block-mode recovery path: scan the session's skill dirs directly.
-    const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
-    const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
-      ? entry.session._repoSkillsDir
-      : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)
-    const found = findSkillForRetrust({
-      skillName: msg.skillName,
-      globalDir: sessionGlobalDir,
-      repoDir: sessionRepoDir,
-    })
-    if (found) {
-      resolvedPath = found.realPath
-      resolvedBody = found.body
-    }
-  }
-
-  if (resolvedPath === null || resolvedBody === null) {
-    sendError(
-      ws,
-      msg?.requestId,
-      'SKILL_NOT_FOUND',
-      `No skill named '${msg.skillName}' found in the session's skill directories.`,
-    )
-    return
-  }
-
-  trustStore.acceptHash(resolvedPath, resolvedBody)
-
-  // #3235 review: persist BEFORE broadcasting. If flush fails, the
-  // dashboard mustn't clear the mismatch indicator on a hash that
-  // never reached disk — the next restart would re-flag the skill.
-  // Surface the error to the caller so they can retry.
-  if (typeof trustStore.flush === 'function') {
-    try {
-      trustStore.flush()
-    } catch (err) {
-      log.warn(`skill_trust_accept: flush failed (${err && err.message ? err.message : err})`)
-      sendError(
-        ws,
-        msg?.requestId,
-        'TRUST_FLUSH_FAILED',
-        'Accepted in memory but the trust ledger could not be persisted. Retry; the next restart may re-flag this skill.',
-      )
-      return
-    }
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'skill_trust_accepted',
-    sessionId,
-    skillName: msg.skillName,
-  })
-}
-
-// #3500: shallow scan of community/*/<skillName>.{md,markdown} across the
-// configured skills roots. Returns the first author (other than `claimedAuthor`)
-// that actually owns the skill on disk, or null if no such author exists.
-//
-// Bounded cost: one readdirSync per skills root + one statSync per author dir
-// per extension. Only invoked on the SKILL_NOT_FOUND error path after the
-// per-author realpath lookup has already missed — never on the happy path.
-//
-// Each candidate is gated through `_isCommunityNamespace` against the root's
-// realpath, mirroring the security check the per-author loop applies. That
-// rejects hidden author dirs (.foo), symlinks that escape the root, and any
-// segment shape that doesn't fit `community/<author>/<file>`.
-function _scanCommunityForSkillName(skillsRoots, skillName, claimedAuthor) {
-  for (const root of skillsRoots) {
-    let rootReal
-    try {
-      rootReal = realpathSync(root)
-    } catch {
-      continue
-    }
-    let authorEntries
-    try {
-      authorEntries = readdirSync(`${rootReal}/community`, { withFileTypes: true })
-    } catch {
-      // No community/ dir under this root — skip.
-      continue
-    }
-    // #3549: readdir order is filesystem/platform-dependent. Sort by name so
-    // that when multiple community authors expose a skill with the same name,
-    // the suggested `actualAuthor` is deterministic (matches the alphabetical
-    // ordering used by the skills loader's community walk).
-    authorEntries.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
-    for (const ent of authorEntries) {
-      const authorName = ent.name
-      // Mirror _isCommunityNamespace's hidden-author guard. We also need the
-      // entry to be a directory (or a symlink to one) — readdir's withFileTypes
-      // gives us .isDirectory() / .isSymbolicLink() checks without an extra stat
-      // for the common case.
-      if (!authorName || authorName === '.' || authorName === '..' || authorName.startsWith('.')) continue
-      if (!ent.isDirectory() && !ent.isSymbolicLink()) continue
-      if (authorName === claimedAuthor) continue
-      for (const ext of ['md', 'markdown']) {
-        const candidatePath = `${rootReal}/community/${authorName}/${skillName}.${ext}`
-        let candidateReal
-        try {
-          candidateReal = realpathSync(candidatePath)
-        } catch {
-          continue
-        }
-        // Confirm the resolved path is regular and under community/<author>/.
-        try {
-          const st = statSync(candidateReal)
-          if (!st.isFile()) continue
-        } catch {
-          continue
-        }
-        const { isCommunity, author: actualAuthor } = _isCommunityNamespace(candidateReal, rootReal)
-        if (!isCommunity) continue
-        if (!actualAuthor || actualAuthor === claimedAuthor) continue
-        return actualAuthor
-      }
-    }
-  }
-  return null
-}
-
-/**
- * #3297: grant community trust for a given author/skill. Fired when the
- * dashboard operator accepts the first-activation prompt for a community
- * skill. Unlike `skill_trust_accept` (hash mismatch recovery), this
- * handler:
- *
- *   1. Validates `skillName` and `author` from the payload.
- *   2. Resolves the skill's realpath from the session's skills dirs
- *      (falling back to a direct community/<author>/<name>.md scan
- *      because community skills are absent from `_getSkills()` while
- *      pending trust).
- *   3. Applies a security gate: verifies the resolved path is genuinely
- *      under `community/<author>/` via `_isCommunityNamespace`, and that
- *      the directory author matches the claimed `author`.
- *   4. Calls `trustStore.grantCommunityTrust(author, { realPath })` to
- *      write both the byAuthor and byPath indexes and flush synchronously.
- *   5. Calls `session._loadSkills()` so the just-trusted skill is active
- *      for the CURRENT session immediately (no restart required).
- *   6. Broadcasts `skill_trust_granted` to all session clients and sends
- *      `skill_trust_grant_ok` ack to the requesting client.
- *
- * Error codes:
- *   - `INVALID_SKILL_NAME` — missing/empty skillName
- *   - `INVALID_AUTHOR` — missing/empty author, OR (#3307) the skill resolves
- *      on disk under a different `community/<author>/` namespace than the
- *      caller claims (e.g. via a symlink that crosses author dirs), OR (#3500)
- *      a shallow scan of `community/<author>/` finds the skillName under a different
- *      author when the per-author lookup misses (the common no-symlink case).
- *      For the cross-author cases the response carries `actualAuthor` as a
- *      structured field (#3538) — clients can branch on `code` and read
- *      `actualAuthor` directly to render "did you mean alice?" without
- *      regex-parsing the human-readable `message`. The empty-author
- *      validation case does NOT carry `actualAuthor` (no real author known).
- *   - `No active session` (session_error) — no bound session
- *   - `TRUST_NOT_ENABLED` — session has no trust store
- *   - `SKILL_NOT_FOUND` — can't find the skill on disk under any author
- *   - `TRUST_FLUSH_FAILED` — granted in memory but the trust ledger could not be persisted
- */
-function handleSkillTrustGrant(ws, client, msg, ctx) {
-  if (typeof msg.skillName !== 'string' || msg.skillName === '') {
-    sendError(ws, msg?.requestId, 'INVALID_SKILL_NAME', 'skill_trust_grant requires a non-empty `skillName`')
-    return
-  }
-  if (typeof msg.author !== 'string' || msg.author === '') {
-    sendError(ws, msg?.requestId, 'INVALID_AUTHOR', 'skill_trust_grant requires a non-empty `author`')
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  const trustStore = entry?.session?.getTrustStore?.() ?? null
-  if (!trustStore || typeof trustStore.grantCommunityTrust !== 'function') {
-    sendError(ws, msg?.requestId, 'TRUST_NOT_ENABLED', 'This session has no skills trust store wired.')
-    return
-  }
-
-  // Resolve the skill path. Community skills are absent from _getSkills()
-  // while pending trust, so we scan the community dirs directly.
-  const sessionGlobalDir = entry?.session?._skillsDir || DEFAULT_SKILLS_DIR
-  const sessionRepoDir = entry?.session?._repoSkillsDir !== undefined
-    ? entry.session._repoSkillsDir
-    : (entry?.session?.cwd ? findRepoSkillsDir(entry.session.cwd) : null)
-
-  // Collect all skills roots to search
-  const skillsRoots = [sessionGlobalDir]
-  if (sessionRepoDir) skillsRoots.push(sessionRepoDir)
-
-  let resolvedPath = null
-  let dirReal = null
-  // #3307: track when the lookup resolves to a real file but lands under a
-  // different community author than the caller claims. Distinguishes
-  // "skill missing entirely" (SKILL_NOT_FOUND) from "skill exists under
-  // a different namespace" (INVALID_AUTHOR) so clients can guide the
-  // operator toward the correct author.
-  let namespaceMismatchDetected = false
-  // #3538: capture the real author of the cross-namespace resolve so we can
-  // surface it as a structured field on INVALID_AUTHOR (no regex on message).
-  let mismatchActualAuthor = null
-
-  for (const root of skillsRoots) {
-    let rootReal
-    try {
-      rootReal = realpathSync(root)
-    } catch {
-      continue
-    }
-    // Try community/<author>/<skillName> with each allowed extension (.md, .markdown)
-    let candidateReal = null
-    for (const ext of ['md', 'markdown']) {
-      const candidatePath = `${root}/community/${msg.author}/${msg.skillName}.${ext}`
-      try {
-        candidateReal = realpathSync(candidatePath)
-        break
-      } catch {
-        // not found with this extension — try next
-      }
-    }
-    if (!candidateReal) continue
-    // Security gate: verify the resolved path is under community/<author>/
-    const { isCommunity, author: actualAuthor } = _isCommunityNamespace(candidateReal, rootReal)
-    if (!isCommunity) continue
-    if (actualAuthor !== msg.author) {
-      // Skill exists on disk but the realpath belongs to a different community
-      // author (e.g. via a symlink). Flag it so we can surface INVALID_AUTHOR
-      // after the loop instead of the misleading SKILL_NOT_FOUND.
-      namespaceMismatchDetected = true
-      // Remember the real author so the error response can carry it
-      // structurally (#3538). Keep the first hit — additional roots are
-      // unlikely to disagree but if they do, the first match is what the
-      // per-author lookup would have resolved to.
-      if (mismatchActualAuthor === null) mismatchActualAuthor = actualAuthor
-      continue
-    }
-    resolvedPath = candidateReal
-    dirReal = rootReal
-    break
-  }
-
-  if (!resolvedPath) {
-    if (namespaceMismatchDetected) {
-      sendError(
-        ws,
-        msg?.requestId,
-        'INVALID_AUTHOR',
-        `Community skill '${msg.skillName}' resolves to a different author than '${msg.author}'.`,
-        // #3538: structured field for client suggestions ("did you mean X?").
-        { actualAuthor: mismatchActualAuthor },
-      )
-      return
-    }
-    // #3500: per-author realpath lookup missed. Before declaring SKILL_NOT_FOUND,
-    // scan community/*/ for the skillName — the common operator path is
-    // `community/alice/foo.md` exists with NO symlink under `community/<msg.author>/`,
-    // and we want to surface "wrong author" rather than "missing".
-    const actualAuthor = _scanCommunityForSkillName(skillsRoots, msg.skillName, msg.author)
-    if (actualAuthor) {
-      sendError(
-        ws,
-        msg?.requestId,
-        'INVALID_AUTHOR',
-        `Community skill '${msg.skillName}' is owned by '${actualAuthor}', not '${msg.author}'.`,
-        // #3538: structured field for client suggestions ("did you mean X?").
-        { actualAuthor },
-      )
-      return
-    }
-    sendError(ws, msg?.requestId, 'SKILL_NOT_FOUND', `No community skill '${msg.skillName}' found for author '${msg.author}'.`)
-    return
-  }
-
-  try {
-    trustStore.grantCommunityTrust(msg.author, { realPath: resolvedPath })
-  } catch (err) {
-    log.warn(`skill_trust_grant: flush failed (${err && err.message ? err.message : err})`)
-    sendError(
-      ws,
-      msg?.requestId,
-      'TRUST_FLUSH_FAILED',
-      'Granted in memory but the trust ledger could not be persisted. Retry; the next restart may re-prompt for trust.',
-    )
-    return
-  }
-
-  // Reload skills immediately so the just-trusted skill is active in this session.
-  if (typeof entry.session._loadSkills === 'function') {
-    entry.session._loadSkills()
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'skill_trust_granted',
-    sessionId,
-    skillName: msg.skillName,
-    author: msg.author,
-  })
-
-  ctx.send(ws, {
-    type: 'skill_trust_grant_ok',
-    requestId: msg?.requestId ?? null,
-    sessionId,
-    skillName: msg.skillName,
-    author: msg.author,
-  })
+  ctx.transport.send(ws, { type: 'provider_list', providers: listProviders() })
 }
 
 const VALID_THINKING_LEVELS = new Set(['default', 'high', 'max'])
 
 async function handleSetThinkingLevel(ws, client, msg, ctx) {
+  // #5731 T9: every rejection path echoes the client's requestId with a single
+  // THINKING_LEVEL_NOT_APPLIED code so the dashboard rolls back its optimistic
+  // dropdown update (mirrors set_model's MODEL_NOT_APPLIED and
+  // set_permission_mode's PERMISSION_MODE_NOT_APPLIED). The capability check is
+  // inlined (rather than routed through requireSessionMethod) so the
+  // unsupported-provider rejection carries the requestId + code too — otherwise
+  // a no-op on a provider without thinking-level control would leave the
+  // dropdown stuck on a level the session never entered. requestId is optional
+  // (older clients omit it); sendError tolerates null.
+  const requestId = msg?.requestId
   const level = typeof msg.level === 'string' ? msg.level.trim() : ''
   if (!VALID_THINKING_LEVELS.has(level)) {
-    ctx.send(ws, { type: 'session_error', message: `Invalid thinking level: ${level}` })
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Invalid thinking level: ${level}`, undefined, ctx)
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
   const entry = resolveSession(ctx, msg, client)
   if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', 'No active session', undefined, ctx)
     return
   }
 
-  if (typeof entry.session.setThinkingLevel !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support thinking level control' })
+  if (!entry.session || typeof entry.session.setThinkingLevel !== 'function') {
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', 'This provider does not support thinking level control', undefined, ctx)
     return
   }
 
   try {
     await entry.session.setThinkingLevel(level)
-    ctx.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
+    ctx.transport.broadcastToSession(sessionId, { type: 'thinking_level_changed', level })
   } catch (err) {
-    ctx.send(ws, { type: 'session_error', message: `Failed to set thinking level: ${err.message}` })
-  }
-}
-
-/**
- * #3185 — toggle the per-session promptEvaluator flag. Strict-boolean
- * payload validation, idempotent (no-op when value unchanged so the
- * dashboard can re-send the current value without churning state-file
- * writes), and broadcast on actual change so multi-client UIs stay in
- * sync.
- *
- * Persistence is an immediate `serializeState()` flush rather than the
- * debounced `schedulePersist` other handlers use. Toggles are operator
- * actions — rare enough that the synchronous write is free, and a crash
- * within the debounce window would otherwise silently lose the change.
- */
-function handleSetPromptEvaluator(ws, client, msg, ctx) {
-  if (typeof msg.value !== 'boolean') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_prompt_evaluator requires a boolean `value`',
-    })
-    return
-  }
-
-  const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
-
-  if (typeof entry.session.setPromptEvaluator !== 'function') {
-    // Defensive — every shipping provider extends BaseSession which adds
-    // the setter. A custom provider that bypasses BaseSession would land
-    // here; refuse rather than silently dropping the toggle.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluator toggling' })
-    return
-  }
-
-  const changed = entry.session.setPromptEvaluator(msg.value)
-  if (!changed) {
-    // Either invalid input (already validated above so unreachable) or
-    // a redundant set. Either way: no broadcast, no persist — the
-    // dashboard already shows the current value.
-    return
-  }
-
-  ctx.broadcastToSession(sessionId, {
-    type: 'prompt_evaluator_changed',
-    sessionId,
-    value: entry.session.promptEvaluator,
-  })
-
-  // Persist immediately rather than waiting for the debounced
-  // schedulePersist — toggles are rare enough that the extra write is
-  // free, and a crash within the debounce window would otherwise
-  // silently lose the change. Keep best-effort: failures here log but
-  // don't surface to the client (the in-memory state is correct).
-  try {
-    ctx.sessionManager?.serializeState?.()
-  } catch (err) {
-    log.warn(`Failed to persist promptEvaluator toggle for ${sessionId}: ${err?.message || err}`)
+    sendError(ws, requestId, 'THINKING_LEVEL_NOT_APPLIED', `Failed to set thinking level: ${err.message}`, undefined, ctx)
   }
 }
 
@@ -1119,23 +557,16 @@ function handleSetPromptEvaluator(ws, client, msg, ctx) {
 function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // Accept string or null. Anything else is a malformed payload.
   if (msg.value !== null && typeof msg.value !== 'string') {
-    ctx.send(ws, {
-      type: 'session_error',
-      message: 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)',
-    })
+    sendSessionError(ws, ctx, 'set_prompt_evaluator_skip_pattern requires a string `value` (or null/empty to clear)')
     return
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setPromptEvaluatorSkipPattern !== 'function') {
+  if (!requireSessionMethod(ws, ctx, entry, 'setPromptEvaluatorSkipPattern', 'This provider does not support promptEvaluatorSkipPattern')) {
     // Defensive — mirrors the parallel path in handleSetPromptEvaluator.
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support promptEvaluatorSkipPattern' })
     return
   }
 
@@ -1147,10 +578,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
     try {
       new RegExp(msg.value, 'i')
     } catch (err) {
-      ctx.send(ws, {
-        type: 'session_error',
-        message: `Invalid pattern: ${err.message || 'malformed regex'}`,
-      })
+      sendSessionError(ws, ctx, `Invalid pattern: ${err.message || 'malformed regex'}`)
       return
     }
   }
@@ -1164,7 +592,7 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // The setter normalises empty string → null. Surface the stored value
   // (not the raw payload) so subscribed clients see a stable shape.
   const storedValue = entry.session.promptEvaluatorSkipPattern
-  ctx.broadcastToSession(sessionId, {
+  ctx.transport.broadcastToSession(sessionId, {
     type: 'prompt_evaluator_skip_pattern_changed',
     sessionId,
     value: storedValue,
@@ -1174,19 +602,35 @@ function handleSetPromptEvaluatorSkipPattern(ws, client, msg, ctx) {
   // pattern updates are rare operator actions and the sync flush avoids
   // losing the change to a crash inside the debounce window.
   try {
-    ctx.sessionManager?.serializeState?.()
+    ctx.sessions.sessionManager?.serializeState?.()
   } catch (err) {
-    log.warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
+    // #4828: session-scoped.
+    loggerForSession('ws', sessionId).warn(`Failed to persist promptEvaluatorSkipPattern for ${sessionId}: ${err?.message || err}`)
   }
 }
 
 function handleSetPermissionRules(ws, client, msg, ctx) {
+  // Bound (pairing-issued) session tokens are scoped to USE existing
+  // permissions, never to escalate — the same principle that blocks them from
+  // flipping to auto mode in handleSetPermissionMode. Permission rules can
+  // auto-allow execution-capable tools (Write, Edit, …), so letting a bound
+  // (share-a-session) client set them is exactly that escalation. The gate is
+  // host-authority = an UNBOUND client (no boundSessionId — the primary token,
+  // or an unbound linking-mode pairing token), mirroring rejectCredentialWriteIfBound.
+  if (client.boundSessionId) {
+    loggerForSession('ws', client.boundSessionId).warn(`Client ${client.id} (bound to ${client.boundSessionId}) attempted to set permission rules — rejected`)
+    sendError(ws, msg?.requestId, 'PERMISSION_RULES_FORBIDDEN_BOUND_CLIENT',
+      'Pairing-issued session tokens cannot modify permission rules. Use the primary API token from a device with physical access to this machine.',
+      undefined, ctx)
+    return
+  }
+
   const rules = msg.rules
 
   // Validate: must be an array
   if (!Array.isArray(rules)) {
     log.warn(`Rejected invalid permission rules from ${client.id}: not an array`)
-    ctx.send(ws, { type: 'session_error', message: 'rules must be an array' })
+    sendSessionError(ws, ctx, 'rules must be an array')
     return
   }
 
@@ -1194,44 +638,40 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
   for (let i = 0; i < rules.length; i++) {
     const rule = rules[i]
     if (!rule || typeof rule !== 'object') {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: not an object` })
+      sendSessionError(ws, ctx, `rules[${i}]: not an object`)
       return
     }
     if (typeof rule.tool !== 'string' || !rule.tool.trim()) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: missing tool name` })
+      sendSessionError(ws, ctx, `rules[${i}]: missing tool name`)
       return
     }
     if (rule.decision !== 'allow' && rule.decision !== 'deny') {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: decision must be 'allow' or 'deny'` })
+      sendSessionError(ws, ctx, `rules[${i}]: decision must be 'allow' or 'deny'`)
       return
     }
     if (NEVER_AUTO_ALLOW.has(rule.tool)) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed` })
+      sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' cannot be auto-allowed`)
       return
     }
     if (!ELIGIBLE_TOOLS.has(rule.tool)) {
-      ctx.send(ws, { type: 'session_error', message: `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules` })
+      sendSessionError(ws, ctx, `rules[${i}]: tool '${rule.tool}' is not eligible for permission rules`)
       return
     }
   }
 
   const sessionId = msg.sessionId || client.activeSessionId
-  const entry = resolveSession(ctx, msg, client)
-  if (!entry) {
-    ctx.send(ws, { type: 'session_error', message: 'No active session' })
-    return
-  }
+  const entry = resolveSessionOrError(ws, ctx, msg, client)
+  if (!entry) return
 
-  if (typeof entry.session.setPermissionRules !== 'function') {
-    ctx.send(ws, { type: 'session_error', message: 'This provider does not support permission rules' })
+  if (!requireSessionMethod(ws, ctx, entry, 'setPermissionRules', 'This provider does not support permission rules')) {
     return
   }
 
   entry.session.setPermissionRules(rules)
 
   // Audit the whitelist change
-  if (ctx.permissionAudit) {
-    ctx.permissionAudit.logWhitelistChange({
+  if (ctx.permissions.permissionAudit) {
+    ctx.permissions.permissionAudit.logWhitelistChange({
       clientId: client.id,
       sessionId,
       rules,
@@ -1240,8 +680,21 @@ function handleSetPermissionRules(ws, client, msg, ctx) {
 
   // Broadcast updated rules to all session clients
   const currentRules = entry.session.getPermissionRules ? entry.session.getPermissionRules() : rules
-  ctx.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
-  log.info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+  ctx.transport.broadcastToSession(sessionId, { type: 'permission_rules_updated', rules: currentRules, sessionId })
+  // #4828: session-scoped.
+  loggerForSession('ws', sessionId).info(`Permission rules updated by ${client.id} on session ${sessionId}: ${rules.length} rule(s)`)
+}
+
+// #4664: assemble the per-session-setting WS handlers from the registry.
+// Each setting's `requestType` (e.g. `'set_prompt_evaluator'`) is the
+// message-type key the dispatcher looks up; the factory-built handler
+// covers payload validation, session resolution, setter invocation,
+// broadcast, and immediate persist with the same shape every existing
+// hand-written handler used. Adding a new setting means appending one
+// entry to PER_SESSION_SETTINGS — no new handler boilerplate.
+const perSessionSettingHandlers = {}
+for (const settingDef of PER_SESSION_SETTINGS) {
+  perSessionSettingHandlers[settingDef.requestType] = buildPerSessionSettingHandler(settingDef)
 }
 
 export const settingsHandlers = {
@@ -1250,15 +703,18 @@ export const settingsHandlers = {
   permission_response: handlePermissionResponse,
   query_permission_audit: handleQueryPermissionAudit,
   list_providers: handleListProviders,
-  list_skills: handleListSkills,
   set_thinking_level: handleSetThinkingLevel,
   set_permission_rules: handleSetPermissionRules,
-  set_prompt_evaluator: handleSetPromptEvaluator,
+  // promptEvaluatorSkipPattern keeps its bespoke handler because the
+  // payload shape (string-or-null + pre-validation regex compile to
+  // surface a distinct error code) doesn't fit the boolean/string
+  // factory. The other three per-session settings come from the
+  // registry above.
   set_prompt_evaluator_skip_pattern: handleSetPromptEvaluatorSkipPattern,
-  skill_activate: handleSkillActivate,
-  skill_deactivate: handleSkillDeactivate,
-  skill_trust_accept: handleSkillTrustAccept,
-  skill_trust_grant: handleSkillTrustGrant,
+  ...perSessionSettingHandlers,
+  // Skills + credential handlers split into sibling modules (audit P2-4).
+  ...skillsHandlers,
+  ...credentialHandlers,
 }
 
 export { ELIGIBLE_TOOLS, NEVER_AUTO_ALLOW }

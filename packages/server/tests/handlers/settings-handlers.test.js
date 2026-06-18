@@ -5,15 +5,26 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
-import { createSpy, createMockSession } from '../test-helpers.js'
+import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
 function makeCtx(sessions = new Map(), overrides = {}) {
   const sent = []
   const broadcasts = []
   const sessionBroadcasts = []
 
-  return {
-    send: createSpy((_ws, msg) => { sent.push(msg) }),
+  // #5632: sendError now routes through ctx.transport.send (the encryption-aware
+  // path) instead of a raw ws.send. To keep the existing `ws._messages` wire-shape
+  // assertions valid, the mock transport mirrors the real WsServer._send → ws.send
+  // step: it records the frame on `ctx._sent` AND delivers it to the target ws so
+  // `ws._messages` still observes error frames. (Production encrypts first; the
+  // wire-shape assertions here only care about the decrypted payload.)
+  return nsCtx({
+    send: createSpy((_ws, msg) => {
+      sent.push(msg)
+      if (_ws && typeof _ws.send === 'function' && _ws.readyState === 1) {
+        _ws.send(JSON.stringify(msg))
+      }
+    }),
     broadcast: createSpy((msg) => { broadcasts.push(msg) }),
     broadcastToSession: createSpy((sessionId, msg) => { sessionBroadcasts.push({ sessionId, msg }) }),
     sessionManager: {
@@ -27,7 +38,7 @@ function makeCtx(sessions = new Map(), overrides = {}) {
     _broadcasts: broadcasts,
     _sessionBroadcasts: sessionBroadcasts,
     ...overrides,
-  }
+  })
 }
 
 function makeClient(overrides = {}) {
@@ -70,11 +81,32 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
 
-      settingsHandlers.set_model(makeWs(), client, { model: 'sonnet' }, ctx)
+      // Use a model that differs from the mock's default ('claude-sonnet-4-6')
+      // even once aliases are resolved, so this exercises the change-applied
+      // (broadcast) path rather than a same-model no-op.
+      settingsHandlers.set_model(makeWs(), client, { model: 'haiku' }, ctx)
 
-      assert.equal(ctx.broadcastToSession.callCount, 1)
-      const [, msg] = ctx.broadcastToSession.lastCall
+      assert.equal(ctx.transport.broadcastToSession.callCount, 1)
+      const [, msg] = ctx.transport.broadcastToSession.lastCall
       assert.equal(msg.type, 'model_changed')
+    })
+
+    it('does not broadcast model_changed when the session rejects the change (busy)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session._isBusy = true // setModel() returns false mid-turn
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+      const ws = makeWs()
+
+      settingsHandlers.set_model(ws, client, { model: 'haiku', requestId: 'r-busy' }, ctx)
+
+      assert.equal(session.setModel.callCount, 1)
+      assert.equal(ctx.transport.broadcastToSession.callCount, 0, 'must not broadcast a change that did not land')
+      assert.equal(ws._messages.length, 1)
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'MODEL_NOT_APPLIED')
     })
 
     it('ignores invalid model ids', () => {
@@ -84,10 +116,15 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
 
-      settingsHandlers.set_model(makeWs(), client, { model: 'gpt-4' }, ctx)
+      const ws = makeWs()
+      settingsHandlers.set_model(ws, client, { model: 'gpt-4', requestId: 'r-gpt4' }, ctx)
 
       assert.equal(session.setModel.callCount, 0)
-      assert.equal(ctx.send.callCount, 0)
+      // #5632: the INVALID_MODEL rejection now routes through the encryption-aware
+      // transport (ctx.transport.send → ws), not a raw ws.send.
+      assert.equal(ws._messages.length, 1)
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'INVALID_MODEL')
     })
 
     // #2946 — set_model must consult the session's provider, not a global
@@ -125,7 +162,7 @@ describe('settings-handlers', () => {
 
         assert.equal(session.setModel.callCount, 1)
         assert.equal(session.setModel.lastCall[0], 'gemini-2.5-pro')
-        assert.equal(ctx.broadcastToSession.callCount, 1)
+        assert.equal(ctx.transport.broadcastToSession.callCount, 1)
       })
 
       it('rejects a Gemini model on a Codex session', () => {
@@ -314,6 +351,67 @@ describe('settings-handlers', () => {
       assert.equal(session.setPermissionMode.callCount, 0)
     })
 
+    // #5609: the confirm_permission_mode warning must name the interrupt
+    // consequence when (a) the provider interrupts the turn on auto-switch
+    // (CLI panic-button) AND (b) a turn is in flight. SDK/TUI and idle CLI
+    // keep the plain bypass warning.
+    describe('confirm warning copy (#5609)', () => {
+      function sessionWithCaps(caps, isBusy) {
+        const session = createMockSession()
+        // Override constructor so `session.constructor.capabilities` is
+        // read by the handler (mirrors the real static-getter contract).
+        Object.defineProperty(session, 'constructor', {
+          value: { capabilities: caps },
+          configurable: true,
+        })
+        session._isBusy = isBusy
+        return session
+      }
+
+      it('warns about interrupting the turn for an interrupting provider mid-turn (CLI)', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true }, true)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-cli' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent.length, 1)
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.match(ctx._sent[0].warning, /INTERRUPT/)
+        assert.match(ctx._sent[0].warning, /restart the session/)
+      })
+
+      it('keeps the plain warning for an interrupting provider when idle (CLI, no turn)', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: true }, false)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-cli' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.doesNotMatch(ctx._sent[0].warning, /INTERRUPT/)
+        assert.match(ctx._sent[0].warning, /bypasses all permission checks/)
+      })
+
+      it('keeps the plain warning for a non-interrupting provider mid-turn (SDK/TUI)', () => {
+        const sessions = new Map()
+        const session = sessionWithCaps({ interruptsTurnOnAutoSwitch: false }, true)
+        sessions.set('s1', { session, name: 'S', cwd: '/tmp', provider: 'claude-sdk' })
+        const ctx = makeCtx(sessions, { config: { allowAutoPermissionMode: true } })
+        const client = makeClient({ activeSessionId: 's1' })
+
+        settingsHandlers.set_permission_mode(makeWs(), client, { mode: 'auto' }, ctx)
+
+        assert.equal(ctx._sent[0].type, 'confirm_permission_mode')
+        assert.doesNotMatch(ctx._sent[0].warning, /INTERRUPT/)
+        assert.match(ctx._sent[0].warning, /bypasses all permission checks/)
+      })
+    })
+
     it('sets auto mode when confirmed', () => {
       const sessions = new Map()
       const session = createMockSession()
@@ -365,7 +463,7 @@ describe('settings-handlers', () => {
 
     it('queries permissionAudit when available', () => {
       const ctx = makeCtx()
-      ctx.permissionAudit = {
+      ctx.permissions.permissionAudit = {
         query: createSpy(() => [{ id: 1 }]),
       }
 
@@ -394,7 +492,7 @@ describe('settings-handlers', () => {
       session._pendingPermissions = new Map([['req-1', true]])
       sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
       const ctx = makeCtx(sessions)
-      ctx.permissionSessionMap.set('req-1', 's1')
+      ctx.permissions.permissionSessionMap.set('req-1', 's1')
       const client = makeClient({ activeSessionId: 's1' })
 
       settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-1', decision: 'allow' }, ctx)
@@ -414,7 +512,7 @@ describe('settings-handlers', () => {
         ['bound-1', { session: createMockSession(), name: 'BoundOne', cwd: '/tmp' }],
       ])
       const ctx = makeCtx(sessions)
-      ctx.permissionSessionMap.set('req-mismatch', 'other-session')
+      ctx.permissions.permissionSessionMap.set('req-mismatch', 'other-session')
       const client = makeClient({
         id: 'client-1',
         activeSessionId: 'bound-1',
@@ -464,7 +562,7 @@ describe('settings-handlers', () => {
         sessions.set('s-other', { session, name: 'O', cwd: '/tmp' })
 
         const ctx = makeCtx(sessions)
-        ctx.permissionSessionMap.set('req-mismatch', 's-other')
+        ctx.permissions.permissionSessionMap.set('req-mismatch', 's-other')
 
         const client = makeClient({
           id: 'client-android',
@@ -531,6 +629,229 @@ describe('settings-handlers', () => {
         assert.match(rejectLog.message, /"mappedSessionId":null/)
         assert.match(rejectLog.message, /"likelyPostReconnect":false/)
         assert.match(rejectLog.message, /"decision":"deny"/)
+      })
+    })
+
+    // #4798 (audit P0 symmetry with #4788): UNBOUND clients (boundSessionId
+    // === null) must be subscribed to or actively viewing the session that
+    // owns the permission requestId before the handler routes their
+    // decision. Without this guard, an unbound dashboard tab can
+    // approve/deny a permission for any session by replaying a leaked
+    // requestId — arguably MORE dangerous than the question hijack vector
+    // because permission decisions gate file writes / shell exec. Mirrors
+    // the default filter in _broadcastToSession (ws-broadcaster.js:106)
+    // and the user_question_response guard added in #4788.
+    describe('subscription guard for unbound clients (#4798)', () => {
+      it('drops an unbound client\'s permission_response when originSessionId is neither active nor subscribed', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-leak', true]])
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // The leaked requestId belongs to session s1.
+        ctx.permissions.permissionSessionMap.set('perm-leak', 's1')
+        // Attacker tab: unbound, actively viewing s2, NOT subscribed to s1.
+        const attacker = makeClient({
+          id: 'attacker',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), attacker, {
+          requestId: 'perm-leak',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 0,
+          'unbound client without subscription/active match must NOT route the decision')
+        assert.equal(sessionB.respondToPermission.callCount, 0,
+          'and must not bleed onto the attacker\'s own session either')
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-leak'), 's1',
+          'mapping must stay intact so the legitimate client can still respond')
+      })
+
+      it('routes the decision when the unbound client\'s activeSessionId matches the originSessionId', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-ok-active', true]])
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.permissions.permissionSessionMap.set('perm-ok-active', 's1')
+        const client = makeClient({
+          id: 'legit-active',
+          boundSessionId: null,
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(),
+        })
+
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-ok-active',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 1,
+          'unbound client with matching activeSessionId must route normally')
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow'])
+        assert.equal(ctx.permissions.permissionSessionMap.has('perm-ok-active'), false,
+          'mapping must be consumed when the decision is routed')
+      })
+
+      it('routes the decision when the unbound client is subscribed to the originSessionId (even if active session differs)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-ok-sub', true]])
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        ctx.permissions.permissionSessionMap.set('perm-ok-sub', 's1')
+        // Multi-session dashboard pattern: active tab is s2, but s1 is
+        // subscribed (sidebar / background tab keeping the wire open).
+        const client = makeClient({
+          id: 'legit-subscribed',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-ok-sub',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 1,
+          'subscribed unbound client must route normally — matches _broadcastToSession filter')
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow'])
+      })
+
+      it('leaves the bound-client guard unchanged (different code path)', () => {
+        // The existing bound-client guard already early-returns when the
+        // bound session doesn't match the originSessionId. This test pins
+        // that the new subscription guard doesn't accidentally relax it.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-x', true]])
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.permissions.permissionSessionMap.set('perm-x', 's1')
+        const boundElsewhere = makeClient({
+          id: 'bound-other',
+          boundSessionId: 's2',
+          activeSessionId: 's1',
+          subscribedSessionIds: new Set(['s1']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), boundElsewhere, {
+          requestId: 'perm-x',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 0,
+          'bound-client guard takes precedence — boundSessionId mismatch always wins')
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-x'), 's1',
+          'mapping preserved when the bound-elsewhere client is rejected')
+      })
+
+      // #4798 Wave 2 regression: mirrors the ws-server-permissions integration
+      // test for the legitimate "view A → get permission for A → switch to B →
+      // respond" flow. In production, the WsServer-side _registerPermissionRoute
+      // helper auto-subscribes the originating viewer to the permission's
+      // session at dispatch time, so the unbound subscription guard above
+      // still passes after the client switches activeSessionId away.
+      it('routes the decision after switch_session when dispatch auto-subscribed the client to the originating session (#4798 Wave 2)', () => {
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-after-switch', true]])
+        const sessionB = createMockSession()
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        sessions.set('s2', { session: sessionB, name: 'B', cwd: '/b' })
+        const ctx = makeCtx(sessions)
+        // Production: when the permission for s1 dispatched, the WsServer-side
+        // helper called permissionSessionMap.set('perm-after-switch', 's1')
+        // AND subscribedSessionIds.add('s1') for this client.
+        ctx.permissions.permissionSessionMap.set('perm-after-switch', 's1')
+        // The user then tapped "switch to session B" — session-handlers.js
+        // adds 's2' to subscribedSessionIds and sets activeSessionId='s2',
+        // but leaves the prior 's1' subscription intact.
+        const client = makeClient({
+          id: 'viewer-after-switch',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s1', 's2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-after-switch',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 1,
+          'after-switch decision must route to the originating session A')
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow'])
+        assert.equal(sessionB.respondToPermission.callCount, 0,
+          'must not bleed onto the now-active session B')
+        assert.equal(ctx.permissions.permissionSessionMap.has('perm-after-switch'), false,
+          'mapping consumed on successful route')
+      })
+
+      it('tolerates a missing subscribedSessionIds set (defensive — old client shapes)', () => {
+        // The handler must not throw if subscribedSessionIds is undefined
+        // (e.g. a test fixture or legacy client struct). It should fall
+        // through to the activeSessionId check.
+        const sessions = new Map()
+        const sessionA = createMockSession()
+        sessionA._pendingPermissions = new Map([['perm-y', true]])
+        sessions.set('s1', { session: sessionA, name: 'A', cwd: '/a' })
+        const ctx = makeCtx(sessions)
+        ctx.permissions.permissionSessionMap.set('perm-y', 's1')
+        const client = makeClient({
+          id: 'no-subscribed-set',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          // subscribedSessionIds intentionally omitted
+        })
+
+        // Should not throw, and should drop the decision (no match).
+        settingsHandlers.permission_response(makeWs(), client, {
+          requestId: 'perm-y',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(sessionA.respondToPermission.callCount, 0,
+          'undefined subscribedSessionIds + non-matching active must drop')
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-y'), 's1',
+          'mapping preserved on guard rejection')
+      })
+
+      it('drops legacy pendingPermissions path too when unbound client is not subscribed', () => {
+        // The handler falls through to ctx.permissions.pendingPermissions when the SDK
+        // path doesn't resolve. The subscription guard must apply BEFORE
+        // that fallback so the legacy path can't be used to bypass the
+        // session check.
+        const ctx = makeCtx()
+        ctx.permissions.pendingPermissions = new Map([['perm-legacy-leak', { resolve: () => {} }]])
+        ctx.permissions.permissions = { resolvePermission: createSpy() }
+        ctx.permissions.permissionSessionMap.set('perm-legacy-leak', 's1')
+
+        const attacker = makeClient({
+          id: 'attacker-legacy',
+          boundSessionId: null,
+          activeSessionId: 's2',
+          subscribedSessionIds: new Set(['s2']),
+        })
+
+        settingsHandlers.permission_response(makeWs(), attacker, {
+          requestId: 'perm-legacy-leak',
+          decision: 'allow',
+        }, ctx)
+
+        assert.equal(ctx.permissions.permissions.resolvePermission.callCount, 0,
+          'legacy pendingPermissions resolver must not be invoked on the hijack path')
+        assert.equal(ctx.permissions.permissionSessionMap.get('perm-legacy-leak'), 's1',
+          'mapping preserved on guard rejection — legitimate client can still respond')
       })
     })
   })
@@ -677,6 +998,182 @@ describe('settings-handlers', () => {
 
       assert.equal(ctx._sent[0].type, 'session_error')
       assert.match(ctx._sent[0].message, /does not support promptEvaluator/)
+    })
+  })
+
+  // #3805: per-session Chroxy context hint toggle. Mirrors the #3185
+  // pattern — strict-boolean payload validation, broadcast on actual
+  // change, immediate persist. Default OFF so existing users see no
+  // observable behaviour change.
+  describe('set_chroxy_context_hint (#3805)', () => {
+    it('rejects non-boolean values with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: 'true' }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /boolean/)
+      assert.equal(session.setChroxyContextHint.callCount, 0)
+    })
+
+    it('rejects when no active session', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('toggles to true and broadcasts chroxy_context_hint_changed', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(session.setChroxyContextHint.callCount, 1)
+      assert.equal(session.setChroxyContextHint.lastCall[0], true)
+      assert.equal(session.chroxyContextHint, true)
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'chroxy_context_hint_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, true)
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('idempotent on no-op (already false — default OFF)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: false }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('rejects when the session does not implement setChroxyContextHint', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      delete session.setChroxyContextHint
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_chroxy_context_hint(makeWs(), client, { value: true }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /does not support chroxyContextHint/)
+    })
+  })
+
+  // #4660: per-session preamble. Mirrors set_chroxy_context_hint —
+  // string-typed payload validation, idempotent (handler relies on the
+  // setter's trim+cap comparison), broadcast + immediate persist on
+  // actual change. Default empty so existing users see no behaviour
+  // change.
+  describe('set_session_preamble (#4660)', () => {
+    it('rejects non-string values with session_error', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: 123 }, ctx)
+
+      assert.equal(ctx._sent.length, 1)
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /string/)
+      assert.equal(session.setSessionPreamble.callCount, 0)
+    })
+
+    it('rejects when no active session', () => {
+      const ctx = makeCtx()
+      const client = makeClient()
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: 'hello' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /No active session/)
+    })
+
+    it('sets and broadcasts session_preamble_changed with the trimmed stored value', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      // Send with leading/trailing whitespace; broadcast must carry the
+      // trimmed value the server actually injects, not the raw input.
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: '  hello world  ' }, ctx)
+
+      assert.equal(session.setSessionPreamble.callCount, 1)
+      assert.equal(session.setSessionPreamble.lastCall[0], '  hello world  ')
+      assert.equal(session.sessionPreamble, 'hello world')
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].sessionId, 's1')
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'session_preamble_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.value, 'hello world')
+      assert.equal(serializeSpy.callCount, 1)
+    })
+
+    it('idempotent on no-op (already empty)', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: '' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('idempotent when whitespace differences trim to the same stored value', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.sessionPreamble = 'pinned'
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const serializeSpy = createSpy()
+      const ctx = makeCtx(sessions, { sessionManager: { getSession: (id) => sessions.get(id), serializeState: serializeSpy } })
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: '   pinned   ' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 0)
+      assert.equal(serializeSpy.callCount, 0)
+    })
+
+    it('rejects when the session does not implement setSessionPreamble', () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      delete session.setSessionPreamble
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      settingsHandlers.set_session_preamble(makeWs(), client, { value: 'hello' }, ctx)
+
+      assert.equal(ctx._sent[0].type, 'session_error')
+      assert.match(ctx._sent[0].message, /does not support sessionPreamble/)
     })
   })
 
@@ -872,7 +1369,7 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(sessions)
       const client = makeClient({ activeSessionId: 's1' })
       // sendError() writes directly to ws.send() rather than going via
-      // ctx.send(). The mock captures the JSON-parsed payload on
+      // ctx.transport.send(). The mock captures the JSON-parsed payload on
       // ws._messages so we can assert on the wire shape.
       const ws = makeWs()
 
@@ -1190,9 +1687,52 @@ describe('settings-handlers', () => {
       const ctx = makeCtx(new Map())
       const ws = makeWs()
       settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: null }), { skillName: 'foo', author: 'alice' }, ctx)
-      // session_error goes through ctx.send, not ws.send directly
+      // session_error goes through ctx.transport.send, not ws.send directly
       const err = ctx._sent.find(m => m.type === 'session_error')
       assert.ok(err, 'expected session_error for missing session')
+    })
+
+    // #5857: skill trust whitelists host-executable code — a bound (pairing)
+    // token must not be able to grant it. Guard runs first, before any mutation.
+    it('rejects a bound (pairing) client with SKILL_TRUST_FORBIDDEN_BOUND_CLIENT and grants nothing', () => {
+      const sessions = new Map()
+      const trustStore = makeCommunityTrustStore()
+      const session = createMockSession()
+      session.getTrustStore = () => trustStore
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: 's1', boundSessionId: 's1' }), { type: 'skill_trust_grant', skillName: 'foo', author: 'alice' }, ctx)
+      assert.ok(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), 'expected bound rejection')
+      assert.equal(trustStore.grants.length, 0, 'bound client must not grant trust')
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
+    })
+
+    it('still allows an unbound (primary) client to reach the grant path', () => {
+      const ctx = makeCtx(new Map())
+      const ws = makeWs()
+      // No bound id → passes the guard; falls through to the no-session error,
+      // proving the guard did NOT short-circuit an unbound client.
+      settingsHandlers.skill_trust_grant(ws, makeClient({ activeSessionId: null }), { skillName: 'foo', author: 'alice' }, ctx)
+      assert.equal(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), undefined, 'unbound client must not be rejected by the bound guard')
+    })
+
+    it('rejects a bound client on skill_trust_accept too (no acceptHash, no broadcast)', () => {
+      // Full happy-path setup (session + trust store + loaded skill) so that,
+      // absent the guard, acceptHash WOULD run — proving the guard blocks the
+      // re-trust mutation, not just that an unrelated error fires first.
+      const accepts = []
+      const trustStore = { acceptHash: (p, b) => accepts.push({ p, b }), flush() {} }
+      const session = createMockSession()
+      session.getTrustStore = () => trustStore
+      session._getSkills = () => [{ name: 'foo', body: 'B', path: '/p/foo.md' }]
+      const sessions = new Map([['s1', { session, name: 'S', cwd: '/tmp' }]])
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      settingsHandlers.skill_trust_accept(ws, makeClient({ activeSessionId: 's1', boundSessionId: 's1' }), { type: 'skill_trust_accept', skillName: 'foo' }, ctx)
+      assert.ok(ws._messages.find(m => m.code === 'SKILL_TRUST_FORBIDDEN_BOUND_CLIENT'), 'expected bound rejection on accept')
+      assert.equal(accepts.length, 0, 'bound client must not re-trust (acceptHash) a skill hash')
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
     })
 
     it('returns TRUST_NOT_ENABLED when session has no trust store', () => {
@@ -1520,7 +2060,7 @@ describe('settings-handlers', () => {
         assert.equal(ctx._sessionBroadcasts[0].msg.skillName, 'foo')
         assert.equal(ctx._sessionBroadcasts[0].msg.author, 'alice')
 
-        // ack goes through ctx.send
+        // ack goes through ctx.transport.send
         const ack = ctx._sent.find(m => m.type === 'skill_trust_grant_ok')
         assert.ok(ack, 'expected skill_trust_grant_ok ack')
         assert.equal(ack.skillName, 'foo')
@@ -1843,6 +2383,80 @@ describe('settings-handlers', () => {
       } finally {
         if (repoRoot) rmSync(repoRoot, { recursive: true, force: true })
       }
+    })
+  })
+
+  // #5731 T9 — set_thinking_level is applied optimistically client-side; every
+  // rejection path must echo the requestId with THINKING_LEVEL_NOT_APPLIED so the
+  // dashboard rolls the dropdown back (mirrors set_model's MODEL_NOT_APPLIED).
+  describe('set_thinking_level', () => {
+    function sessionWithThinking(supported = true) {
+      const session = createMockSession()
+      if (supported) {
+        session.setThinkingLevel = createSpy(async () => {})
+      } else {
+        delete session.setThinkingLevel
+      }
+      return session
+    }
+
+    it('calls session.setThinkingLevel and broadcasts thinking_level_changed on success', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(makeWs(), client, { level: 'high', requestId: 'r1' }, ctx)
+
+      assert.equal(ctx._sessionBroadcasts.length, 1)
+      assert.equal(ctx._sessionBroadcasts[0].msg.type, 'thinking_level_changed')
+      assert.equal(ctx._sessionBroadcasts[0].msg.level, 'high')
+      assert.equal(ctx._sent.filter((m) => m.type === 'error').length, 0)
+    })
+
+    it('rejects an invalid level with THINKING_LEVEL_NOT_APPLIED echoing the requestId', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: sessionWithThinking(true), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(ws, client, { level: 'bogus', requestId: 'r-bad' }, ctx)
+
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      assert.equal(ws._messages[0].requestId, 'r-bad')
+    })
+
+    it('rejects an unsupported provider with THINKING_LEVEL_NOT_APPLIED + requestId (revert-correlatable)', async () => {
+      const sessions = new Map()
+      sessions.set('s1', { session: sessionWithThinking(false), name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(ws, client, { level: 'high', requestId: 'r-unsup' }, ctx)
+
+      assert.equal(ws._messages[0].type, 'error')
+      assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      assert.equal(ws._messages[0].requestId, 'r-unsup')
+      assert.equal(ctx._sessionBroadcasts.length, 0, 'no broadcast on rejection')
+    })
+
+    it('surfaces a setThinkingLevel throw as THINKING_LEVEL_NOT_APPLIED + requestId', async () => {
+      const sessions = new Map()
+      const session = createMockSession()
+      session.setThinkingLevel = createSpy(async () => { throw new Error('pty gone') })
+      sessions.set('s1', { session, name: 'S', cwd: '/tmp' })
+      const ctx = makeCtx(sessions)
+      const ws = makeWs()
+      const client = makeClient({ activeSessionId: 's1' })
+
+      await settingsHandlers.set_thinking_level(ws, client, { level: 'max', requestId: 'r-throw' }, ctx)
+
+      assert.equal(ws._messages[0].code, 'THINKING_LEVEL_NOT_APPLIED')
+      assert.equal(ws._messages[0].requestId, 'r-throw')
+      assert.match(ws._messages[0].message, /pty gone/)
     })
   })
 })

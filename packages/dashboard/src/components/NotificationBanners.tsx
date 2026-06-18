@@ -4,6 +4,15 @@
  * Renders stacked banners above the content area for background session events.
  * Permission notifications get inline Approve/Deny buttons for quick action
  * without switching sessions. Max 3 visible + overflow count.
+ *
+ * #4890 — Banners now only render notifications with `readAt === undefined`.
+ * The NotificationsWidget owns the full read+unread history list; once the
+ * operator acknowledges an alert (via the widget, via switchSession, or via
+ * "Mark all read"), the banner stack drops it but the widget retains the
+ * entry as part of the durable history. Pre-#4890 the banners filtered the
+ * target session out on switch; the new model achieves the same visual
+ * outcome — banners vanish for the active session — while keeping the
+ * widget's history populated.
  */
 import type { SessionNotification } from '../store/types'
 
@@ -31,10 +40,12 @@ export function NotificationBanners({
   onDismiss,
   onSwitchSession,
 }: NotificationBannersProps) {
-  if (notifications.length === 0) return null
+  // #4890 — render unread only; read history lives in the widget.
+  const unread = notifications.filter((n) => n.readAt === undefined)
+  if (unread.length === 0) return null
 
-  const visible = notifications.slice(0, MAX_VISIBLE)
-  const overflow = notifications.length - MAX_VISIBLE
+  const visible = unread.slice(0, MAX_VISIBLE)
+  const overflow = unread.length - MAX_VISIBLE
 
   return (
     <div className="notification-banners" role="log" aria-label="Background session notifications">

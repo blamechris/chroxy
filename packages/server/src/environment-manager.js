@@ -1,12 +1,17 @@
 import { EventEmitter } from 'events'
 import { randomBytes } from 'crypto'
 import { execFile } from 'child_process'
-import { existsSync, readFileSync, mkdirSync, renameSync, unlinkSync } from 'fs'
-import { dirname, join, resolve } from 'path'
+import { existsSync, readFileSync, mkdirSync } from 'fs'
+import { dirname, join } from 'path'
 import { homedir } from 'os'
-import { isWindows, writeFileRestricted } from './platform.js'
+import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
 import { DockerBackend } from './environments/backends/docker.js'
+import {
+  parseDevContainer,
+  validateMounts,
+  sanitizeContainerEnv,
+} from './devcontainer-config.js'
 
 const log = createLogger('environment-manager')
 
@@ -17,7 +22,6 @@ const DEFAULT_CPU_LIMIT = '2'
 const DEFAULT_CONTAINER_USER = 'chroxy'
 
 const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
-const VALID_ENV_KEY_RE = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 // Re-export `UNREACHABLE_STATUSES` from the dedicated constants module so
 // existing importers (tests, future consumers) continue to work. The
@@ -37,7 +41,22 @@ export { UNREACHABLE_STATUSES } from './environment-statuses.js'
  * creating sessions with an environmentId.
  */
 export class EnvironmentManager extends EventEmitter {
-  constructor({ statePath, _execFile, backend } = {}) {
+  /**
+   * @param {Object}  [opts]
+   * @param {string}  [opts.statePath] - On-disk path for environments.json
+   * @param {Function} [opts._execFile] - Injected execFile (testing seam)
+   * @param {Object}  [opts.backend]   - Pluggable backend (defaults to DockerBackend)
+   * @param {Object}  [opts.workspacePVCDefault] - #4556: operator-configured
+   *   PVC workspace strategy applied to every `create()` call that doesn't pass
+   *   an explicit `opts.workspacePVC`. Wires the chroxy-config
+   *   `environments.k8s.workspace` block into the manager. Shape mirrors
+   *   `K8sBackend.validateWorkspacePVC()`: `{ claimName, mountPath?, readOnly? }`.
+   *   Forwarded verbatim to the backend; non-K8s backends ignore it. Shape
+   *   validation lives in `validateConfig()` at load-time and (defensively
+   *   again) in `K8sBackend.validateWorkspacePVC()` at create-time — the
+   *   manager performs no validation of its own.
+   */
+  constructor({ statePath, _execFile, backend, workspacePVCDefault } = {}) {
     super()
     this._statePath = statePath || DEFAULT_STATE_PATH
     this._environments = new Map()
@@ -50,6 +69,10 @@ export class EnvironmentManager extends EventEmitter {
     // Pluggable backend — defaults to DockerBackend with the same _execFile
     // so the existing _execFile test seam still reaches Docker shellouts.
     this._backend = backend || new DockerBackend({ _execFile: this._execFile })
+    // #4556: configured PVC workspace default (operator surface). When set,
+    // every create() that doesn't pass workspacePVC falls back to this value.
+    // null when no `environments.k8s.workspace` block is configured.
+    this._workspacePVCDefault = workspacePVCDefault ?? null
   }
 
   /**
@@ -82,17 +105,37 @@ export class EnvironmentManager extends EventEmitter {
    * @param {string} [opts.image] - Docker image (default: node:22-slim)
    * @param {string} [opts.memoryLimit] - Memory limit (default: 2g)
    * @param {string} [opts.cpuLimit] - CPU limit (default: 2)
+   * @param {Object} [opts.resources] - K8s-only: structured resource requests/limits
+   *   `{ cpu, memory, cpuLimit, memoryLimit }` (#3195). Forwarded verbatim to the backend;
+   *   only K8sBackend acts on it (DockerBackend and others ignore it). On K8s these values
+   *   take precedence over the flat `memoryLimit`/`cpuLimit` above; unset fields fall back to
+   *   the backend's configured defaults.
    * @param {string} [opts.containerUser] - Non-root user (default: chroxy)
+   * @param {Object} [opts.workspacePVC] - K8s-only: mount a pre-provisioned
+   *   PersistentVolumeClaim as the workspace instead of the host `cwd` directory.
+   *   See `K8sBackend.createEnvironment` (#3385) for the full shape and semantics
+   *   (`{ claimName, mountPath?, readOnly? }`). Forwarded verbatim to the backend;
+   *   DockerBackend and other non-K8s backends ignore it. Mutually exclusive with
+   *   `opts.cwd`-as-hostPath on K8sBackend — the backend validates and throws.
+   *
+   *   #4556 — when the operator has configured `environments.k8s.workspace` in
+   *   chroxy config (wired via the constructor's `workspacePVCDefault` option),
+   *   a `create()` call that omits this field falls back to the configured
+   *   default. An explicit value here always wins (per-call override surface
+   *   for any future dashboard/CLI input).
    * @returns {Promise<Object>} The created environment object
    */
-  async create({ name, cwd, image, memoryLimit, cpuLimit, containerUser, compose, primaryService, devcontainer } = {}) {
+  async create({ name, cwd, image, memoryLimit, cpuLimit, resources, containerUser, compose, primaryService, devcontainer, workspacePVC } = {}) {
     if (!name?.trim()) throw new Error('Environment name is required')
     if (!cwd?.trim()) throw new Error('Environment cwd is required')
 
-    // Merge devcontainer.json when requested (explicit opts win)
+    // Merge devcontainer.json when requested (explicit opts win).
+    // Parsing/validation logic lives in `devcontainer-config.js` so the
+    // persistent-environment path here and the per-session DockerByokSession
+    // path share one source of truth (#5077).
     let dcConfig = {}
     if (devcontainer) {
-      dcConfig = this._parseDevContainer(cwd)
+      dcConfig = parseDevContainer(cwd, { logger: log })
     }
 
     const user = containerUser || dcConfig.remoteUser || DEFAULT_CONTAINER_USER
@@ -113,9 +156,16 @@ export class EnvironmentManager extends EventEmitter {
 
     log.info(`Creating environment "${name}" (id: ${id}, image: ${resolvedImage})`)
 
-    // Validate devcontainer mounts and env before passing to Docker
-    const validatedMounts = this._validateMounts(dcConfig.mounts, cwd)
-    const validatedEnv = this._sanitizeContainerEnv(dcConfig.containerEnv)
+    // Validate devcontainer mounts and env before passing to Docker.
+    // Shared helpers from `devcontainer-config.js` (#5077).
+    const validatedMounts = validateMounts(dcConfig.mounts, cwd, { logger: log })
+    const validatedEnv = sanitizeContainerEnv(dcConfig.containerEnv, { logger: log })
+
+    // #4556: caller-supplied workspacePVC wins; otherwise fall back to the
+    // configured default (when the operator has set `environments.k8s.workspace`
+    // in chroxy config). Resolved here so the backend always sees the final
+    // effective value and the manager remains the single wiring point.
+    const effectiveWorkspacePVC = workspacePVC !== undefined ? workspacePVC : (this._workspacePVCDefault ?? undefined)
 
     const { containerId, containerCliPath } = await this._backend.createEnvironment({
       envId: id,
@@ -123,11 +173,20 @@ export class EnvironmentManager extends EventEmitter {
       image: resolvedImage,
       memoryLimit: resolvedMemory,
       cpuLimit: resolvedCpu,
+      // #3195: structured K8s resource requests/limits, forwarded verbatim.
+      // Only K8sBackend acts on it; the manager does no shape validation
+      // (that lives in K8sBackend.buildResourceBlock). undefined → backend defaults.
+      resources,
       containerUser: user,
       containerEnv: validatedEnv,
       forwardPorts: dcConfig.forwardPorts,
       mounts: validatedMounts,
       postCreateCommand: dcConfig.postCreateCommand,
+      // #4548: forward verbatim — only K8sBackend acts on this. Manager does no
+      // shape validation; that lives in K8sBackend.validateWorkspacePVC().
+      // #4556: `effectiveWorkspacePVC` resolves the caller-vs-config-default
+      // precedence so the backend sees a single value.
+      workspacePVC: effectiveWorkspacePVC,
     })
 
     const env = {
@@ -566,152 +625,13 @@ export class EnvironmentManager extends EventEmitter {
 
   // ──────────────────────────────────────────────────────────────────────────
   // DevContainer support
+  //
+  // Parsing and validation helpers live in `devcontainer-config.js` as pure
+  // functions so the persistent-environment `create()` path here and the
+  // per-session DockerByokSession path share one source of truth (#5077).
+  // Call sites: `parseDevContainer` / `validateMounts` / `sanitizeContainerEnv`
+  // are invoked from `create()` above.
   // ──────────────────────────────────────────────────────────────────────────
-
-  /**
-   * Parse a devcontainer.json from the given cwd.
-   * Looks for `.devcontainer/devcontainer.json` first, then `.devcontainer.json`.
-   * Returns an object with supported fields. Logs warnings for unrecognized fields.
-   */
-  _parseDevContainer(cwd) {
-    const candidates = [
-      join(cwd, '.devcontainer', 'devcontainer.json'),
-      join(cwd, '.devcontainer.json'),
-    ]
-
-    let filePath
-    for (const candidate of candidates) {
-      if (existsSync(candidate)) {
-        filePath = candidate
-        break
-      }
-    }
-
-    if (!filePath) {
-      log.info('No devcontainer.json found, using defaults')
-      return {}
-    }
-
-    let raw
-    try {
-      raw = JSON.parse(readFileSync(filePath, 'utf-8'))
-    } catch (err) {
-      log.warn(`Failed to parse ${filePath}: ${err.message}`)
-      return {}
-    }
-
-    log.info(`Parsed devcontainer.json from ${filePath}`)
-
-    const SUPPORTED_FIELDS = new Set([
-      'image', 'forwardPorts', 'containerEnv', 'mounts',
-      'remoteUser', 'postCreateCommand',
-    ])
-
-    for (const key of Object.keys(raw)) {
-      if (!SUPPORTED_FIELDS.has(key)) {
-        log.warn(`devcontainer.json: unsupported field "${key}" (ignored)`)
-      }
-    }
-
-    const config = {}
-    if (typeof raw.image === 'string' && raw.image.trim()) config.image = raw.image.trim()
-    if (typeof raw.remoteUser === 'string' && raw.remoteUser.trim()) config.remoteUser = raw.remoteUser.trim()
-    if (typeof raw.postCreateCommand === 'string' && raw.postCreateCommand.trim()) config.postCreateCommand = raw.postCreateCommand.trim()
-    if (raw.containerEnv && typeof raw.containerEnv === 'object' && !Array.isArray(raw.containerEnv)) config.containerEnv = raw.containerEnv
-    if (Array.isArray(raw.forwardPorts)) config.forwardPorts = raw.forwardPorts.filter(p => typeof p === 'number' || typeof p === 'string')
-    if (Array.isArray(raw.mounts)) config.mounts = raw.mounts.filter(m => typeof m === 'string')
-
-    return config
-  }
-
-  /**
-   * Validate mount source paths. Only mounts whose source is inside the
-   * project directory (cwd) are allowed. Mounts outside cwd or targeting
-   * sensitive paths (~/.ssh, ~/.aws, /etc, etc.) are rejected and logged.
-   *
-   * Supports both short-form (`source:target`) and long-form
-   * (`source=...,target=...,type=bind`) mount strings.
-   *
-   * @param {string[]|undefined} mounts - Raw mount strings from devcontainer.json
-   * @param {string} cwd - Project directory (allowlist root)
-   * @returns {string[]} Filtered array of safe mounts
-   */
-  _validateMounts(mounts, cwd) {
-    if (!Array.isArray(mounts) || mounts.length === 0) return undefined
-
-    const resolvedCwd = cwd.endsWith('/') ? cwd : cwd + '/'
-    const home = homedir()
-
-    const allowed = []
-    for (const mount of mounts) {
-      const source = this._extractMountSource(mount)
-      if (!source) {
-        log.warn(`devcontainer mount rejected (unparseable): ${mount}`)
-        continue
-      }
-
-      // Expand ~ to home directory for comparison
-      const expandedSource = source.startsWith('~/')
-        ? join(home, source.slice(2))
-        : source.startsWith('~')
-          ? home
-          : source
-
-      // Normalize to resolve any .. segments (path traversal defense)
-      const normalizedSource = resolve(expandedSource)
-
-      // Source must be an absolute path inside the project directory
-      if (!normalizedSource.startsWith(resolvedCwd) && normalizedSource !== cwd) {
-        log.warn(`devcontainer mount rejected (outside project dir): ${source}`)
-        continue
-      }
-
-      allowed.push(mount)
-    }
-
-    return allowed.length > 0 ? allowed : undefined
-  }
-
-  /**
-   * Extract the source path from a mount string.
-   * Handles both `source:target[:opts]` and `source=path,target=path,type=bind`.
-   */
-  _extractMountSource(mount) {
-    // Long-form: source=...,target=...,type=bind
-    const sourceMatch = mount.match(/(?:^|,)source=([^,]+)/)
-    if (sourceMatch) return sourceMatch[1]
-
-    // Short-form: source:target[:opts]
-    const parts = mount.split(':')
-    if (parts.length >= 2) return parts[0]
-
-    return null
-  }
-
-  /**
-   * Sanitize containerEnv keys. Only keys matching [A-Za-z_][A-Za-z0-9_]*
-   * are allowed. Invalid keys are rejected and logged.
-   *
-   * @param {Object|undefined} containerEnv - Raw env vars from devcontainer.json
-   * @returns {Object|undefined} Filtered env object with only valid keys
-   */
-  _sanitizeContainerEnv(containerEnv) {
-    if (!containerEnv || typeof containerEnv !== 'object') return undefined
-
-    const sanitized = Object.create(null)
-    let hasKeys = false
-
-    for (const [key, value] of Object.entries(containerEnv)) {
-      if (!VALID_ENV_KEY_RE.test(key)) {
-        log.warn(`devcontainer env key rejected (invalid characters): ${key}`)
-        continue
-      }
-      sanitized[key] = value
-      hasKeys = true
-    }
-
-    return hasKeys ? sanitized : undefined
-  }
 
   // ──────────────────────────────────────────────────────────────────────────
   // Persistence
@@ -727,26 +647,13 @@ export class EnvironmentManager extends EventEmitter {
         environments: Array.from(this._environments.values()),
       }
 
-      const tmpPath = this._statePath + '.tmp'
-      writeFileRestricted(tmpPath, JSON.stringify(data, null, 2))
-      if (isWindows) {
-        try { unlinkSync(this._statePath) } catch (e) {
-          if (e && e.code !== 'ENOENT') log.error(`Failed to remove existing state file: ${e.message}`)
-        }
-      }
-      try {
-        renameSync(tmpPath, this._statePath)
-      } catch (renameErr) {
-        // Clean up the orphaned .tmp so it doesn't leak across retries.
-        // Suppress ENOENT (nothing to clean up). Log but do not re-throw any
-        // secondary unlink error — the original rename error is what matters.
-        try { unlinkSync(tmpPath) } catch (cleanupErr) {
-          if (cleanupErr && cleanupErr.code !== 'ENOENT') {
-            log.warn(`Failed to remove orphaned ${tmpPath}: ${cleanupErr.message}`)
-          }
-        }
-        throw renameErr
-      }
+      // writeFileRestricted is atomic on both POSIX (#4850) and Windows
+      // (#4913) and cleans up its intermediate `.tmp` on rename failure
+      // (#4874) — no manual tmp+rename wrapper needed here. The
+      // pre-#4874 unlinkSync(EEXIST) workaround is no longer required
+      // since Node's renameSync uses MoveFileExW(REPLACE_EXISTING) on
+      // Windows.
+      writeFileRestricted(this._statePath, JSON.stringify(data, null, 2))
     } catch (err) {
       log.error(`Failed to persist environment state: ${err.message}`)
     }

@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/server",
-  "version": "0.8.3",
+  "version": "0.9.46",
   "description": "Chroxy server daemon and CLI",
   "type": "module",
   "main": "src/cli.js",
@@ -10,10 +10,11 @@
   "scripts": {
     "start": "node src/cli.js start",
     "dev": "node --watch src/cli.js start",
-    "test": "c8 node --experimental-test-module-mocks --test --test-force-exit './tests/**/*.test.js'",
-    "test:coverage": "c8 --reporter=text --reporter=html node --experimental-test-module-mocks --test --test-force-exit './tests/**/*.test.js'",
-    "test:integration": "node --test ./tests/*.integration.test.js",
-    "test:integration:k8s": "RUN_K8S_INTEGRATION=1 node --test ./tests/integration/k8s-sidecar-roundtrip.test.js",
+    "test": "node ./scripts/assert-test-count.mjs c8 node --import ./tests/_setup.mjs --experimental-test-module-mocks --test './tests/**/*.test.js'",
+    "test:raw": "c8 node --import ./tests/_setup.mjs --experimental-test-module-mocks --test './tests/**/*.test.js'",
+    "test:coverage": "c8 --reporter=text --reporter=html node --import ./tests/_setup.mjs --experimental-test-module-mocks --test './tests/**/*.test.js'",
+    "test:integration": "node --import ./tests/_setup.mjs --test ./tests/*.integration.test.js",
+    "test:integration:k8s": "RUN_K8S_INTEGRATION=1 node --import ./tests/_setup.mjs --test ./tests/integration/k8s-sidecar-roundtrip.test.js",
     "lint": "eslint src/",
     "postinstall": "node scripts/fix-node-pty-helper.js"
   },
@@ -23,6 +24,7 @@
     "@chroxy/protocol": "*",
     "@chroxy/store-core": "*",
     "@kubernetes/client-node": "^1.4.0",
+    "@modelcontextprotocol/sdk": "^1.29.0",
     "@xterm/addon-fit": "^0.10.0",
     "@xterm/xterm": "^5.5.0",
     "bonjour-service": "^1.3.0",

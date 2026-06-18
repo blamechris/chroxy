@@ -215,8 +215,25 @@ jobs:
           # speech-helper for macOS and signs it with hardened runtime +
           # timestamp). When unset/'-', both paths fall through to adhoc.
           APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY || '-' }}
+          # Explicit keychain for build.rs codesign calls (#3832). Scopes
+          # identity lookup to the temp signing keychain created in the
+          # "Import signing certificate" step, instead of relying on the
+          # default user search path.
+          APPLE_KEYCHAIN_PATH: ${{ runner.temp }}/app-signing.keychain-db
         working-directory: packages/desktop
         run: cargo tauri build --target universal-apple-darwin --bundles app,dmg -c "$TAURI_CONFIG_OVERRIDE"
+
+      - name: Verify .app entitlements (#4801 regression guard)
+        shell: bash
+        working-directory: packages/desktop
+        run: |
+          APP_PATH="$(find src-tauri/target/universal-apple-darwin/release/bundle/macos -maxdepth 2 -name '*.app' -print -quit)"
+          if [ -z "$APP_PATH" ]; then
+            echo "No .app bundle found under src-tauri/target/universal-apple-darwin/release/bundle/macos" >&2
+            exit 1
+          fi
+          echo "Verifying entitlements on $APP_PATH"
+          bash scripts/verify-entitlements.sh "$APP_PATH"
 
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -300,6 +317,52 @@ jobs:
         working-directory: packages/desktop
         run: cargo tauri build --target x86_64-pc-windows-msvc --bundles msi -c "$TAURI_CONFIG_OVERRIDE"
 
+      - name: Detect Authenticode signing
+        shell: bash
+        env:
+          # Azure Trusted Signing — Authenticode code-signing of the installer to
+          # clear the Windows SmartScreen "Windows protected your PC" dialog (#3808).
+          # Distinct from TAURI_SIGNING_* above, which is minisign for the auto-updater.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          TRUSTED_SIGNING_ENDPOINT: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          TRUSTED_SIGNING_ACCOUNT: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          TRUSTED_SIGNING_CERT_PROFILE: ${{ secrets.TRUSTED_SIGNING_CERT_PROFILE }}
+        run: |
+          # All six secrets must be present for signing to run. Any missing → skip
+          # (graceful degradation, mirroring the updater/notarization steps): the MSI
+          # still builds and uploads, just unsigned (SmartScreen warning persists).
+          if [ -n "$AZURE_TENANT_ID" ] && [ -n "$AZURE_CLIENT_ID" ] && [ -n "$AZURE_CLIENT_SECRET" ] \
+             && [ -n "$TRUSTED_SIGNING_ENDPOINT" ] && [ -n "$TRUSTED_SIGNING_ACCOUNT" ] \
+             && [ -n "$TRUSTED_SIGNING_CERT_PROFILE" ]; then
+            echo "SIGN_ENABLED=true" >> "$GITHUB_ENV"
+            echo "::notice::Windows Authenticode signing enabled (Azure Trusted Signing)"
+          else
+            echo "SIGN_ENABLED=false" >> "$GITHUB_ENV"
+            echo "::notice::Windows Authenticode signing disabled — MSI ships unsigned (set AZURE_TENANT_ID, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, TRUSTED_SIGNING_ENDPOINT, TRUSTED_SIGNING_ACCOUNT, TRUSTED_SIGNING_CERT_PROFILE to enable). See docs/release-signing.md."
+          fi
+
+      - name: Sign MSI (Azure Trusted Signing)
+        if: env.SIGN_ENABLED == 'true'
+        # Signs the standalone .msi in place before upload, so the installer users
+        # download is Authenticode-trusted. The updater payload (.msi.zip) was zipped
+        # during the build step and keeps its minisign signature only — see the
+        # "Windows Authenticode code signing" section of docs/release-signing.md.
+        # Intentionally NOT continue-on-error: if signing was meant to happen
+        # (SIGN_ENABLED) but fails, fail the release rather than ship an unsigned MSI.
+        uses: azure/trusted-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.TRUSTED_SIGNING_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.TRUSTED_SIGNING_ACCOUNT }}
+          certificate-profile-name: ${{ secrets.TRUSTED_SIGNING_CERT_PROFILE }}
+          files-folder: packages/desktop/src-tauri/target/x86_64-pc-windows-msvc/release/bundle/msi
+          files-folder-filter: msi
+          files-folder-recurse: false
+
       - name: Upload artifact
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -343,6 +406,34 @@ jobs:
           name: chroxy-windows
           path: artifacts/
 
+      - name: Merge Tauri updater feeds
+        shell: bash
+        run: |
+          # Each desktop job emits its own latest.json with only the
+          # platforms it built (darwin-* from macOS, windows-* from
+          # Windows). Tauri's auto-updater expects a single feed with all
+          # `platforms` entries merged, so combine them into one file
+          # before attaching to the release.
+          #
+          # When updater signing is disabled for a job (no
+          # TAURI_SIGNING_PRIVATE_KEY), that job won't have produced a
+          # latest.json; the merge script tolerates missing inputs and
+          # exits non-zero only if NO inputs contributed platforms.
+          mkdir -p artifacts/updater
+          # Newline-separated list — safe because no path in artifacts/ can
+          # contain a newline (download-artifact preserves the on-runner
+          # paths, all of which are inside the workflow workspace).
+          FEEDS=$(find artifacts -type f -name latest.json -not -path 'artifacts/updater/*' | sort)
+          if [ -z "$FEEDS" ]; then
+            echo "::notice::No latest.json fragments found — auto-updater feed will not be published this release"
+            exit 0
+          fi
+          echo "Merging updater feeds:"
+          printf '  %s\n' "$FEEDS"
+          # shellcheck disable=SC2086 # intentional word-splitting to expand FEEDS into argv
+          node scripts/merge-updater-feeds.mjs --output artifacts/updater/latest.json $FEEDS
+          cat artifacts/updater/latest.json
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@a06a81a03ee405af7f2048a818ed3f03bbf83c7b # v2
         with:
@@ -353,6 +444,6 @@ jobs:
             artifacts/**/*.msi.zip
             artifacts/**/*.tar.gz
             artifacts/**/*.sig
-            artifacts/**/latest.json
+            artifacts/updater/latest.json
           draft: false
           prerelease: false

@@ -2,6 +2,10 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
+import {
+  extractAppHandlerTypes,
+  extractDashboardHandlerTypes,
+} from '@chroxy/protocol/handler-coverage'
 
 /**
  * Handler coverage contract test
@@ -11,6 +15,23 @@ import { resolve } from 'node:path'
  * types as platform-specific.
  *
  * Uses static analysis (regex on source files) — no runtime imports needed.
+ *
+ * RELATIONSHIP TO THE #5556.5 BEHAVIORAL-CONTRACT FIXTURES
+ * --------------------------------------------------------
+ * This guard is a SPELLING / EXHAUSTIVENESS check: it asserts that EVERY
+ * ServerMessageType has *some* handler `case` (in a client switch, the shared
+ * store-core dispatch table, or an explicit exclusion). It is RETAINED because
+ * it covers an axis the fixtures do not: completeness across ALL ~95 message
+ * types, catching a brand-new wire type that nobody wired up anywhere.
+ *
+ * It does NOT — and structurally cannot — assert that the two clients produce
+ * the SAME store mutation for a given input; a case can exist in both and still
+ * behave differently (the exact drift the #5556 swarm-audit found). That gap is
+ * closed by the BEHAVIORAL-CONTRACT FIXTURES in
+ * `packages/store-core/src/contract-fixtures/` (driven through both clients'
+ * real dispatch table + switch in store-core / app jest / dashboard vitest).
+ * The two are complementary: this guard = "a handler exists for every type";
+ * the fixtures = "the handlers that exist agree on behaviour".
  */
 
 // ---------------------------------------------------------------------------
@@ -27,8 +48,11 @@ const SYNTHETIC_TYPES = new Set([
   'conversations_list',    // legacy alias for list response
   'search_results',        // legacy alias for search response
   'budget_resumed',        // budget resume ack (server-internal)
+  'budget_resume_ack',     // #5752 resume_budget positive ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the shared store-core dispatch table
+  'cancel_activity_ack',   // #5277 cancel correlation ack — emitted from input-handlers.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard
+  'billing_canary',        // #5821 live billing canary — broadcast from billing-canary-monitor.js (not the ws-server.js broadcast surface the extractor scans), handled by the dashboard; also seeded into auth_ok
   'thinking_level_changed', // thinking level change ack (server-internal)
-  'permission_timeout',     // app-side handler for future permission timeout event (not yet in protocol)
+  'permission_timeout',     // handled by both clients for the future permission timeout event (not yet in protocol; dashboard gained parity in #5454)
 ])
 
 // ---------------------------------------------------------------------------
@@ -42,12 +66,23 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'error' removed — both handlers now implement case 'error': (PR #2742)
   'session_created',    // ack handled via session_list refresh, no dedicated case needed
   'session_destroyed',  // ack handled via session_list refresh, no dedicated case needed
-  'session_activity',   // server-side session activity tracking, not displayed in handlers
   'discovered_sessions', // multi-server discovery, handled at connection layer
   'rate_limited',       // rate limit signals, handled at connection layer
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
+  'pair_request_pending', // #5510 pairing-approval primitive — consumed by the dedicated requester panel (dashboard utils/request-pairing.ts, its own short-lived WS onmessage), NOT the main message-handler dispatch the extractor scans. Mobile requester side is an explicit out-of-scope fast-follow per epic #5509.
+  'pair_result',          // #5510 pairing-approval primitive — same as pair_request_pending: terminal result for the requester, handled by utils/request-pairing.ts, not the main dispatch. Mobile requester side deferred per epic #5509.
+  // 'activity_snapshot' / 'activity_delta' removed — the dashboard now handles
+  // them (Control Room panel #5163); they moved to PLATFORM_SPECIFIC as
+  // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5159.
+  // 'host_status_snapshot' removed — the dashboard now handles it (Control
+  // Room Host/Repo Status section #5175); it moved to PLATFORM_SPECIFIC as
+  // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
+  // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
+  // 'session_usage' is now handled by both dashboard (#4073) and mobile
+  // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
+  // because each handler has a `case 'session_usage':` clause.
   // 'evaluator_rewrite' removed — dashboard now handles it (#3188)
   // 'evaluator_clarify' removed — dashboard now handles it (#3188)
   // 'skills_list' removed — dashboard now handles it (#3209)
@@ -63,7 +98,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
 // ---------------------------------------------------------------------------
 const PLATFORM_SPECIFIC = {
   // Mobile app only
-  'pair_fail': 'app',           // QR pairing is mobile-only
+  // (pair_fail is now handled by BOTH platforms — the dashboard gained
+  //  paste-a-pairing-URL support in #5297 — so it's no longer platform-specific.)
   'push_token_error': 'app',    // push notifications are mobile-only
   'write_file_result': 'app',   // app file editing UI
   'git_branches_result': 'app', // app git UI
@@ -73,6 +109,9 @@ const PLATFORM_SPECIFIC = {
 
   // Dashboard only
   'pairing_refreshed': 'dashboard',  // QR display and auto-refresh is dashboard-only (#2916)
+  'pair_pending': 'dashboard',       // #5510 pairing-approval primitive — host-level approval banner fan-out is dashboard-only for v1 (the mobile app has no approve surface yet); mobile/desktop-tray approve is an explicit out-of-scope fast-follow per epic #5509
+  'pair_resolved': 'dashboard',      // #5510 pairing-approval primitive — banner retraction pairs with pair_pending; dashboard-only for v1, mobile parity deferred per epic #5509
+  'monthly_budget': 'dashboard',     // #5665 monthly programmatic-credit meter renders in the dashboard sidebar; mobile parity tracked as a follow-up
   'log_entry': 'dashboard',          // console page is dashboard-only
   'file_list': 'dashboard',          // file explorer sidebar is dashboard-only
   'environment_created': 'dashboard', // environment panel is dashboard-only
@@ -82,6 +121,8 @@ const PLATFORM_SPECIFIC = {
   'environment_error': 'dashboard',   // environment panel is dashboard-only
   'evaluate_draft_result': 'dashboard', // manual prompt evaluator (#3068) is dashboard-only for v1
   'prompt_evaluator_changed': 'dashboard', // per-session promptEvaluator toggle (#3185) is dashboard-only — same epic as evaluate_draft_result, mobile app exposure tracked in #3068
+  'chroxy_context_hint_changed': 'dashboard', // per-session Chroxy context hint toggle (#3805) is dashboard-only for v1; mobile mirror tracked in the issue's non-goals
+  'session_preamble_changed': 'dashboard', // per-session preamble (#4660) is dashboard-only for v1; mobile mirror tracked in the issue's out-of-scope section
   'evaluator_rewrite': 'dashboard',   // auto-evaluator rewrite broadcast (#3208 schema, #3186 emit, #3188 handler) — dashboard renders rewrite-explanation banner; mobile app exposure tracked under parent epic #3068
   'evaluator_clarify': 'dashboard',   // auto-evaluator clarify broadcast (#3208 schema, #3186 emit, #3188 handler) — dashboard renders inline clarify question with iteration counter; mobile app exposure tracked under parent epic #3068
   'skills_list': 'dashboard',       // skills list response (#3209) is dashboard-only for v1; mobile app exposure tracked under parent epic #2958
@@ -92,11 +133,61 @@ const PLATFORM_SPECIFIC = {
   'skill_trust_request': 'dashboard',  // community skill awaiting first-activation grant (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_granted': 'dashboard',  // community trust granted broadcast (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
   'skill_trust_grant_ok': 'dashboard', // ack for skill_trust_grant handler (#3297) — dashboard-only for v1; mobile app exposure tracked under parent epic #2959
+  'byok_credentials_status': 'dashboard', // paste-API-key form is dashboard-only (#4052); mobile app exposure tracked under the BYOK epic #4047
+  'credentials_status': 'dashboard',   // Provider Credentials pane is dashboard-only (#3855); mobile app exposure tracked under the BYOK epic #4047
+  'credential_test_result': 'dashboard', // Provider Credentials "Test" result is dashboard-only (#3855); mobile app exposure tracked under the BYOK epic #4047
+  // 'multi_question_intervention' is now handled by both dashboard (#4758)
+  // and mobile app (#4764 / PR #4862); no PLATFORM_SPECIFIC entry needed.
+  // Coverage test passes because each handler has a
+  // `case 'multi_question_intervention':` clause.
+  // 'terminal_output' is now handled by both dashboard (#5835 PR2) and the
+  // mobile app (#5987 — the user-shell read-only mirror routes it through the
+  // same write-callback → xterm path as 'raw'); no PLATFORM_SPECIFIC entry
+  // needed. Coverage passes because each handler has a `case 'terminal_output':`.
+  'terminal_size': 'dashboard', // #5835 Phase 2 authoritative live-PTY grid size — the dashboard letterboxes the mirror to it (setTerminalSize); mobile applies resize from its own pane measurement (#5987) but does not yet consume the server's terminal_size echo, so still dashboard-only
+  'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
+  'activity_snapshot': 'dashboard', // Control Room live activity tree (#5161 schema / #5160 server / #5162 reducer / #5163 dashboard panel) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5159
+  'activity_delta': 'dashboard',    // Control Room activity delta — see activity_snapshot above; dashboard-only for v1, mobile parity is Phase-2 per epic #5159
+  'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
+  'runner_status_snapshot': 'dashboard', // Control Room self-hosted runner survey reply (#5253) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'integration_status_snapshot': 'dashboard', // Control Room Integrations survey reply (#5499, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'integration_action_ack': 'dashboard', // Control Room Integrations Reindex action ack (#5500, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'skills_inventory_snapshot': 'dashboard', // Control Room Skills inventory survey reply (#5554, epic #5159) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'mailbox_status_snapshot': 'dashboard', // Control Room "Mailbox" tab survey reply (#5914 follow-up) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)
+  'session_preset_snapshot': 'dashboard', // Control Room per-repo session-preset reply (#5553, epic #5159) — host-level surface (gear drawer + create-modal disclosure), dashboard-only; the server applies the preamble universally, so the mobile app needs no handler for v1 (explicitly out of scope per the issue)
+  // 'agent_event' (#5016) is now handled by both dashboard and mobile
+  // app (#5060 — mobile renders the same nested sub-bubbles inside the
+  // parent Task tool_call). No PLATFORM_SPECIFIC entry needed; the
+  // coverage test passes because both handlers have a
+  // `case 'agent_event':` clause.
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Extract the message types owned by the SHARED store-core dispatch table
+ * (epic #5556, sub-item 3). These cases were migrated OUT of both
+ * clients' switches into `store-core/src/dispatch-table.ts`, so they no longer
+ * appear as a `case` in app/dashboard source — but they ARE covered by both
+ * clients (each routes through `runDispatch` before its own switch). The
+ * coverage checks below union this set into BOTH client type sets so a
+ * table-registered case counts as covered for both platforms.
+ *
+ * Source of truth is the `DISPATCH_TABLE_TYPES` array in dispatch-table.ts;
+ * static-parse it (same approach as the rest of this test — no runtime import).
+ */
+function extractSharedDispatchTypes(dispatchSrc) {
+  const block = dispatchSrc.match(
+    /DISPATCH_TABLE_TYPES:\s*readonly\s+DispatchMessageType\[\]\s*=\s*\[([\s\S]*?)\]/,
+  )
+  assert.ok(block, 'Should find DISPATCH_TABLE_TYPES array in dispatch-table.ts')
+  const types = [...block[1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1])
+  assert.ok(types.length > 0, 'Should find shared dispatch-table types')
+  return new Set(types)
+}
 
 function extractServerMessageTypes(wsServerSrc) {
   // Extract server message types from the Server -> Client doc comment in ws-server.js
@@ -112,32 +203,10 @@ function extractServerMessageTypes(wsServerSrc) {
   return result
 }
 
-function extractAppHandlerTypes(appSrc) {
-  // App uses only case statements
-  const cases = [...appSrc.matchAll(/case\s+'([a-z_]+)'/g)].map(m => m[1])
-  return new Set(cases)
-}
-
-function extractDashboardHandlerTypes(dashSrc) {
-  const types = new Set()
-
-  // 1. HANDLERS map keys (e.g. `pong: handlePong,`)
-  const handlersBlock = dashSrc.match(
-    /const HANDLERS:\s*Record<string,\s*Handler>\s*=\s*\{([\s\S]*?)\}/,
-  )
-  if (handlersBlock) {
-    for (const m of handlersBlock[1].matchAll(/^\s*(\w+):/gm)) {
-      types.add(m[1])
-    }
-  }
-
-  // 2. case statements
-  for (const m of dashSrc.matchAll(/case\s+'([a-z_]+)'/g)) {
-    types.add(m[1])
-  }
-
-  return types
-}
+// extractAppHandlerTypes / extractDashboardHandlerTypes are imported from the
+// shared @chroxy/protocol/handler-coverage module (#6021) so this guard and the
+// store-core coverage lint can never diverge on how they parse the two clients'
+// handler sources.
 
 // ---------------------------------------------------------------------------
 // Tests
@@ -148,14 +217,41 @@ describe('handler coverage contract', () => {
   const wsServerPath = resolve(import.meta.dirname, '../../server/src/ws-server.js')
   const appHandlerPath = resolve(import.meta.dirname, '../../app/src/store/message-handler.ts')
   const dashHandlerPath = resolve(import.meta.dirname, '../../dashboard/src/store/message-handler.ts')
+  const dispatchTablePath = resolve(import.meta.dirname, '../../store-core/src/dispatch-table.ts')
 
   const wsServerSrc = readFileSync(wsServerPath, 'utf-8')
   const appSrc = readFileSync(appHandlerPath, 'utf-8')
   const dashSrc = readFileSync(dashHandlerPath, 'utf-8')
+  const dispatchSrc = readFileSync(dispatchTablePath, 'utf-8')
 
   const allServerTypes = extractServerMessageTypes(wsServerSrc)
-  const appTypes = extractAppHandlerTypes(appSrc)
-  const dashTypes = extractDashboardHandlerTypes(dashSrc)
+  // #5556 — cases owned by the shared store-core dispatch table count as
+  // covered by BOTH clients (each routes through `runDispatch` first). Union
+  // them into both per-client sets so a migrated case isn't reported missing.
+  //
+  // #5653 — EXCEPTION for decline-capable cases: some shared-table handlers
+  // (the file-ops / git wrapper cases) require a client to opt its imperative
+  // -callback registry into the table via `adapter.getCallback`; a client that
+  // does not (the dashboard) DECLINES — `runDispatch` returns false and the
+  // case falls through to that client's own switch. So a shared-table type that
+  // is declared single-platform in PLATFORM_SPECIFIC is credited ONLY to its
+  // declared platform, not blindly to both (the other platform really does NOT
+  // handle it — it declines and has no local case). This keeps the
+  // "PLATFORM_SPECIFIC matches actual coverage" guard honest.
+  const platformSpecificSet = new Set(Object.keys(PLATFORM_SPECIFIC))
+  const sharedDispatchTypes = extractSharedDispatchTypes(dispatchSrc)
+  const sharedForApp = new Set(
+    [...sharedDispatchTypes].filter(
+      (t) => !platformSpecificSet.has(t) || PLATFORM_SPECIFIC[t] === 'app',
+    ),
+  )
+  const sharedForDash = new Set(
+    [...sharedDispatchTypes].filter(
+      (t) => !platformSpecificSet.has(t) || PLATFORM_SPECIFIC[t] === 'dashboard',
+    ),
+  )
+  const appTypes = new Set([...extractAppHandlerTypes(appSrc), ...sharedForApp])
+  const dashTypes = new Set([...extractDashboardHandlerTypes(dashSrc), ...sharedForDash])
 
   it('every ServerMessageType is handled by at least one handler (or explicitly excluded)', () => {
     const unhandled = []
