@@ -619,7 +619,13 @@ jobs:
 
   desktop-tests:
     name: Desktop Rust Tests
-    runs-on: macos-latest
+    # Runs on the self-hosted macOS runner (Apple Silicon) to avoid GitHub-hosted
+    # macOS minutes (billed at 10x ubuntu). SECURITY: this repo is public, so the
+    # job is gated to same-repo events only — fork PRs must NOT execute on the
+    # self-hosted host. A fork PR touching desktop code simply skips this job
+    # (maintainer can validate it locally / on a hosted re-run if needed).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 15
     defaults:
       run:
