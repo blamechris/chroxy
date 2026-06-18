@@ -229,10 +229,20 @@ export * from './user-question'
 export * from './stream'
 
 // ---------------------------------------------------------------------------
-// Misc leftover handlers (model_changed, claude_ready, agent_idle / agent_busy,
-// thinking_level_changed, slash_commands / agent_list / provider_list /
-// file_list, available_models, mcp_servers, session_cost_threshold_crossed,
-// notification_prefs, resolvePermissionStreamSplit) live in ./misc.ts (audit
-// P2-3 split). Re-exported here so the barrel's public surface is unchanged.
+// The former ./misc.ts catch-all (audit P2-3 leftover) was split into
+// cohesively-named slices (#6034); each is re-exported here so the barrel's
+// public surface is unchanged:
+//   - ./session-config — session/agent runtime config + readiness
+//     (model_changed, claude_ready, agent_idle / agent_busy,
+//     thinking_level_changed + ThinkingLevel).
+//   - ./inventory — server-side inventory list-replacement (slash_commands /
+//     agent_list / provider_list / file_list, available_models, mcp_servers).
+//   - ./alerts — client-side alert / banner state
+//     (session_cost_threshold_crossed, notification_prefs).
+//   - ./permission-stream-split — the #554 resolvePermissionStreamSplit
+//     mid-stream permission-boundary split resolver.
 // ---------------------------------------------------------------------------
-export * from './misc'
+export * from './session-config'
+export * from './inventory'
+export * from './alerts'
+export * from './permission-stream-split'
