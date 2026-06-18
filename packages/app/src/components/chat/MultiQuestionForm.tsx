@@ -55,9 +55,9 @@ export interface MultiQuestionFormProps {
   questions: ChatMessageQuestion[];
   onSubmit: (answersMap: MultiQuestionAnswersMap) => void;
   /**
-   * #5699 — when false (disconnected), the Submit button is disabled. The answer
-   * can't reach the server's already-expired pending request, so the control
-   * must not look actionable.
+   * #5699 — when true (the caller passes `disabled={!connected}`), the Submit
+   * button is disabled: a disconnected answer can't reach the server's
+   * already-expired pending request, so the control must not look actionable.
    */
   disabled?: boolean;
 }
