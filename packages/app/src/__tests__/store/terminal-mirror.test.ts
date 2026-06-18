@@ -84,6 +84,54 @@ describe('sendTerminalResize', () => {
   });
 });
 
+describe('sendTerminalInput (#6003)', () => {
+  it('sends a single terminal_input frame for a small payload', () => {
+    const sent = mockOpenSocket();
+    useConnectionStore.getState().sendTerminalInput('sess-1', 'ls -la\r');
+    expect(sent).toEqual([{ type: 'terminal_input', sessionId: 'sess-1', data: 'ls -la\r' }]);
+  });
+
+  it('does nothing for an empty sessionId or empty data', () => {
+    const sent = mockOpenSocket();
+    useConnectionStore.getState().sendTerminalInput('', 'x');
+    useConnectionStore.getState().sendTerminalInput('sess-1', '');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('no-ops (does not throw) when the socket is not open', () => {
+    useConnectionStore.setState({ socket: null });
+    expect(() => useConnectionStore.getState().sendTerminalInput('sess-1', 'x')).not.toThrow();
+  });
+
+  it('chunks a >64k paste into sub-cap frames that concatenate back to the original', () => {
+    const sent = mockOpenSocket();
+    const big = 'a'.repeat(70000); // > MAX (65536), < 100k cap
+    useConnectionStore.getState().sendTerminalInput('sess-1', big);
+    expect(sent.length).toBeGreaterThan(1);
+    for (const f of sent) {
+      expect(f.type).toBe('terminal_input');
+      expect(f.sessionId).toBe('sess-1');
+      expect((f.data as string).length).toBeLessThanOrEqual(65536);
+    }
+    expect(sent.map((f) => f.data).join('')).toBe(big);
+  });
+
+  it('never splits a UTF-16 surrogate pair across a chunk boundary', () => {
+    const sent = mockOpenSocket();
+    // Fill exactly to the boundary with single-code-unit chars, then an emoji
+    // (surrogate pair) straddling the 65536 seam.
+    const data = 'a'.repeat(65535) + '😀' + 'b'.repeat(1000);
+    useConnectionStore.getState().sendTerminalInput('sess-1', data);
+    // Reassembles losslessly and no chunk ends on a lone high surrogate.
+    expect(sent.map((f) => f.data).join('')).toBe(data);
+    for (const f of sent) {
+      const s = f.data as string;
+      const last = s.charCodeAt(s.length - 1);
+      expect(last >= 0xd800 && last <= 0xdbff).toBe(false);
+    }
+  });
+});
+
 describe('terminal_output receive', () => {
   const mockSocket = { readyState: 1, send: jest.fn(), close: jest.fn() } as unknown as WebSocket;
 

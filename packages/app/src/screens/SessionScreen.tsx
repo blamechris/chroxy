@@ -520,6 +520,11 @@ export function SessionScreen() {
   // Reuses the reactive `activeSessionProvider` selector declared above.
   const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER;
   const isPtyMirror = isUserShell;
+  // #6003 — a user-shell terminal is interactive (drivable) only when this client
+  // may drive it: the server's userShell capability is gated on the primary token
+  // (+ userShell.enabled), matching the terminal_input authority gate. claude-tui
+  // mirrors stay read-only. Enables xterm stdin + keystroke forwarding below.
+  const terminalInteractive = isUserShell && userShellSupported;
   // A user-shell session is terminal-only, so it always has a terminal even
   // though it isn't a claude-tui PTY.
   const hasTerminal = isUserShell || !isCliMode || (activeSession?.hasTerminal ?? false);
@@ -584,6 +589,19 @@ export function SessionScreen() {
       store.sendTerminalResize(sid, cols, rows);
     } else {
       store.resize(cols, rows);
+    }
+  }, []);
+
+  // #6003 — forward keystrokes/paste from an interactive user-shell terminal to
+  // the PTY (terminal_input, chunked under the 100k cap). Reads the session
+  // fresh from the store so the callback stays stable; only sends for a
+  // user-shell (the read-only mirror's xterm never emits onData anyway).
+  const handleTerminalInput = useCallback((data: string) => {
+    const store = useConnectionStore.getState();
+    const { activeSessionId: sid, sessions: sess } = store;
+    const provider = sess.find((s) => s.sessionId === sid)?.provider;
+    if (sid && provider === USER_SHELL_PROVIDER) {
+      store.sendTerminalInput(sid, data);
     }
   }, []);
 
@@ -1532,7 +1550,7 @@ export function SessionScreen() {
             <View style={styles.splitDivider} />
             <View style={styles.splitPane}>
               <ErrorBoundary fallbackTitle="Terminal error">
-                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} />
               </ErrorBoundary>
             </View>
           </View>
@@ -1587,11 +1605,11 @@ export function SessionScreen() {
             />
           </ErrorBoundary>
         ) : (
-          // TODO(#6003): interactive keystroke input (xterm stdin + terminal_input) — PR2.
-          // PR1 is a read-only mirror: terminal_output renders here via the
-          // write-callback path, but no keystrokes are forwarded yet.
+          // #6003 — interactive for a user-shell PTY (xterm stdin + terminal_input);
+          // read-only mirror for claude-tui (terminal_output renders via the
+          // write-callback path, onData stays disabled so no input is forwarded).
           <ErrorBoundary fallbackTitle="Terminal error">
-            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} />
+            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} />
           </ErrorBoundary>
         )
       )}
