@@ -5,12 +5,40 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded in-progress runs on the same PR so a burst of pushes (fix
+# commits, rebases) doesn't run the full matrix N times. Keying on the PR's
+# source branch groups a PR's runs together; on push to main `head_ref` is empty
+# so we fall back to the unique `run_id` — every main run gets its own group and
+# is therefore never cancelled OR queued behind another main run (each validates
+# a distinct merged commit and must complete).
+concurrency:
+  group: ci-${{ github.head_ref || github.run_id }}
+  cancel-in-progress: true
+
 permissions:
   contents: read
+
+# SELF_HOSTED_OR_HOSTED runner routing
+# ------------------------------------
+# Jobs marked `runs-on: ${{ ... SELF_HOSTED_OR_HOSTED ... }}` route to the
+# self-hosted Linux runner pool (Docker-based, labels self-hosted,Linux,ARM64)
+# for SAME-REPO pushes and PRs, keeping them off the GitHub-hosted bill. If no
+# self-hosted Linux runner is online, those jobs queue until one appears. FORK
+# PRs fall back to
+# `ubuntu-24.04` (GitHub-hosted) so untrusted contributor code never executes on
+# the self-hosted machine, while external contributors still get full CI.
+# The macOS desktop job uses the separate self-hosted macOS runner; the Windows
+# job stays GitHub-hosted (no self-hosted Windows box). Three heavy/env-sensitive
+# test jobs (Server Tests, App Tests, Store Core Tests) also stay GitHub-hosted —
+# see the per-job notes; revisit once the Linux runner env/RAM is hardened.
 
 jobs:
   server-tests:
     name: Server Tests
+    # Stays GitHub-hosted: the suite has env-sensitive tests that fail on the
+    # ARM64 self-hosted container (e.g. the permission-hook pipeline), and its
+    # c8 coverage run is memory-heavy. Revisit if the runner env is hardened
+    # (see the self-hosted migration follow-up).
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     defaults:
@@ -59,7 +87,7 @@ jobs:
     # multiplier vs `ubuntu-24.04`, so we only fire it on PRs that touch
     # the files it actually covers. Pushes to `main` skip this job and
     # always run the Windows suite (see `server-tests-windows.if`).
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     # `dorny/paths-filter` calls the GitHub REST API (`listFiles`) to read the
@@ -169,7 +197,7 @@ jobs:
 
   server-lint:
     name: Server Lint
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -284,7 +312,7 @@ jobs:
 
   dashboard-tests:
     name: Dashboard Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
     defaults:
       run:
@@ -319,7 +347,7 @@ jobs:
 
   dashboard-typecheck:
     name: Dashboard Type Check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -346,6 +374,9 @@ jobs:
 
   store-core-tests:
     name: Store Core Tests
+    # Stays GitHub-hosted: under the self-hosted pool's npm-ci memory pressure
+    # (7.7GB Docker VM) this job's install OOM'd (exit 137). Revisit once the
+    # runner has more RAM (see the self-hosted migration follow-up).
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
@@ -369,7 +400,7 @@ jobs:
 
   claude-hooks-tests:
     name: Claude Hooks Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -397,7 +428,7 @@ jobs:
 
   store-core-typecheck:
     name: Store Core Type Check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -420,6 +451,9 @@ jobs:
 
   app-tests:
     name: App Tests
+    # Stays GitHub-hosted: 7 jest-expo suites "failed to run" on the ARM64
+    # self-hosted container (native/transform env differences). Revisit if the
+    # runner env is hardened (see the self-hosted migration follow-up).
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     defaults:
@@ -458,7 +492,7 @@ jobs:
 
   app-typecheck:
     name: App Type Check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -485,7 +519,7 @@ jobs:
 
   app-expo-doctor:
     name: App Expo Doctor
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -575,7 +609,7 @@ jobs:
 
   protocol-tests:
     name: Protocol Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -609,7 +643,13 @@ jobs:
 
   desktop-tests:
     name: Desktop Rust Tests
-    runs-on: macos-latest
+    # Runs on the self-hosted macOS runner (Apple Silicon) to avoid GitHub-hosted
+    # macOS minutes (billed at 10x ubuntu). SECURITY: this repo is public, so the
+    # job is gated to same-repo events only — fork PRs must NOT execute on the
+    # self-hosted host. A fork PR touching desktop code simply skips this job
+    # (maintainer can validate it locally / on a hosted re-run if needed).
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: [self-hosted, macOS, ARM64]
     timeout-minutes: 15
     defaults:
       run:
@@ -642,7 +682,7 @@ jobs:
 
   scripts-tests:
     name: Scripts Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

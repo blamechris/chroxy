@@ -1,4 +1,4 @@
-import { describe, it } from 'node:test'
+import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import { EventEmitter } from 'node:events'
 import { Writable, Readable } from 'node:stream'
@@ -11,8 +11,24 @@ import { CliSession } from '../src/cli-session.js'
  * the queue is drained in order when the process becomes ready.
  */
 
+// #6027: destroy() every constructed session after each test so the
+// sendMessage-armed _hardTimeout/_streamStallTimeout don't outlive the suite
+// (keeping it alive without --test-force-exit). destroy() is idempotent.
+const _createdSessions = []
+afterEach(() => {
+  for (const s of _createdSessions) {
+    // Null the mock child first: destroy() otherwise arms a 3s forceKillTimer
+    // cleared only by a real child's 'close' event, which the mock never emits.
+    s._child = null
+    try { const r = s.destroy(); if (r && typeof r.catch === 'function') r.catch(() => {}) } catch {}
+  }
+  _createdSessions.length = 0
+})
+
 function createSession(opts = {}) {
-  return new CliSession({ cwd: '/tmp', ...opts })
+  const session = new CliSession({ cwd: '/tmp', ...opts })
+  _createdSessions.push(session)
+  return session
 }
 
 function createMockChild() {
