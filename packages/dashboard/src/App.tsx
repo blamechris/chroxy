@@ -487,10 +487,13 @@ export function App() {
   // PTY mirror (e.g. after switching to a chat provider), fall back to chat —
   // the tab is hidden there, so the user shouldn't be stranded on it.
   useEffect(() => {
-    // #5986 — user-shell is terminal-only (no Chat view). Force the operator
-    // onto the Output terminal whenever a user-shell session is active so they
-    // never land on the (hidden) Chat tab after a session switch.
-    if (isUserShell && viewMode !== 'terminal') {
+    // #5986/#5997 — user-shell has no Chat view (the tab is hidden). Redirect
+    // the operator to the Output terminal ONLY from the now-hidden Chat tab
+    // (e.g. a persisted 'chat' viewMode carried over from a prior session). We
+    // deliberately do NOT force away from other tabs (Files / System / Diff /
+    // Envs are useful for a shell's cwd) — snapping back from every non-terminal
+    // view trapped the operator on the terminal (#5997).
+    if (isUserShell && viewMode === 'chat') {
       setViewMode('terminal')
       return
     }
@@ -607,6 +610,17 @@ export function App() {
     openSettings,
     closeControlRoom,
   } = useControlRoomState()
+  // #5997 — split view is a chat|terminal pane pair; it makes no sense for a
+  // terminal-only user-shell session (the chat half renders empty). The Split
+  // button is hidden for user-shell in ViewSwitcher, but a split carried over
+  // from a prior chat session would persist — clear it when a user-shell
+  // session becomes active so the operator is never left with an empty pane.
+  useEffect(() => {
+    if (isUserShell && splitMode) {
+      setSplitMode(null)
+      persistSplitMode(null)
+    }
+  }, [isUserShell, splitMode, setSplitMode])
   // #5206 — the session id awaiting close-confirmation, or null when no
   // confirm is pending. Drives the ConfirmDialog rendered near the modals.
   const [closeConfirmSessionId, setCloseConfirmSessionId] = useState<string | null>(null)
@@ -925,6 +939,9 @@ export function App() {
     viewMode,
     setViewMode,
     setSplitMode,
+    // #5997 — gate the chat/terminal toggle + split shortcuts off for a
+    // terminal-only user-shell session (no chat surface to toggle/split).
+    terminalOnly: isUserShell,
     setPaletteOpen,
     setSidebarOpen,
     setSettingsOpen,

@@ -242,6 +242,20 @@ describe('useShortcutDispatch', () => {
     expect(props.setViewMode).toHaveBeenCalledWith('terminal')
   })
 
+  it('view.toggleChatTerminal is a no-op for a terminal-only provider (#5997)', () => {
+    const props = makeProps({ viewMode: 'terminal', terminalOnly: true })
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: 't', metaKey: true })
+    expect(props.setViewMode).not.toHaveBeenCalled()
+  })
+
+  it('view.cycleSplit is a no-op for a terminal-only provider (#5997)', () => {
+    const props = makeProps({ terminalOnly: true })
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: '\\', metaKey: true })
+    expect(props.setSplitMode).not.toHaveBeenCalled()
+  })
+
   it('session.copyTranscript calls handleCopyTranscript', () => {
     const props = makeProps()
     renderHook(() => useShortcutDispatch(props))

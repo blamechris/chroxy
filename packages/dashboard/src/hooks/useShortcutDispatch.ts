@@ -43,6 +43,14 @@ export interface ShortcutDispatchProps {
   viewMode: ViewMode | string
   setViewMode: (m: ViewMode) => void
   setSplitMode: (fn: (prev: SplitDirection | null) => SplitDirection | null) => void
+  /**
+   * #5997 — the active session is a terminal-only provider (user-shell): no
+   * Chat view, so the chat/terminal toggle and split shortcuts are no-ops.
+   * Gating them here (rather than relying on the App-level cleanup effects)
+   * avoids the one-frame empty-chat-pane flicker those keystrokes would
+   * otherwise cause before the effect snaps the view back.
+   */
+  terminalOnly?: boolean
   setPaletteOpen: (fn: (prev: boolean) => boolean) => void
   setSidebarOpen: (fn: (prev: boolean) => boolean) => void
   setSettingsOpen: (fn: (prev: boolean) => boolean) => void
@@ -71,6 +79,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     viewMode,
     setViewMode,
     setSplitMode,
+    terminalOnly,
     setPaletteOpen,
     setSidebarOpen,
     setSettingsOpen,
@@ -205,9 +214,16 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             setShowCreateSession(true)
             break
           case 'view.toggleChatTerminal':
+            // #5997 — a terminal-only provider has no Chat view; the toggle
+            // would flash an empty chat pane before the redirect effect snaps
+            // it back. No-op it at the source instead.
+            if (terminalOnly) break
             setViewMode(viewMode === 'chat' ? 'terminal' : 'chat')
             break
           case 'view.cycleSplit':
+            // #5997 — split is a chat|terminal pane pair; no chat surface on a
+            // terminal-only provider, so skip it here too.
+            if (terminalOnly) break
             setSplitMode(prev => {
               const next = prev === null ? 'horizontal' : prev === 'horizontal' ? 'vertical' : null
               persistSplitMode(next)
@@ -264,6 +280,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     handleCloseSession,
     viewMode,
     setViewMode,
+    terminalOnly,
     sendInterrupt,
     handleCopyTranscript,
     shortcutRegistry,
