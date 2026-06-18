@@ -5,6 +5,13 @@ on:
     branches: [main]
   pull_request:
 
+# Cancel superseded in-progress runs on the same PR/branch so a burst of pushes
+# (fix commits, rebases) doesn't run the full matrix N times. Never cancels main
+# (post-merge) runs — those each validate a distinct merged commit.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
 permissions:
   contents: read
 
