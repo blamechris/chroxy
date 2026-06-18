@@ -16,7 +16,14 @@ const log = createLogger('token-manager')
  * 4. Calls the persist callback to save the new token
  *
  * Events:
- *   token_rotated { oldToken, newToken, expiresAt }
+ *   token_rotated { oldToken, newToken, expiresAt, reason }
+ *
+ * `reason` distinguishes a scheduled/periodic rotation ('scheduled') from an
+ * operator revoke ('revoke', via `revoke()`). A revoke is the panic button:
+ * the old token is invalidated immediately (no grace window) and downstream
+ * (WsServer) severs privileged sessions and forces every connection to
+ * re-authenticate (#6006). A scheduled rotation re-keys gracefully — the old
+ * token stays valid through the grace period and live sessions survive.
  */
 
 // Default grace period: 5 minutes
@@ -95,24 +102,53 @@ export class TokenManager extends EventEmitter {
   }
 
   /**
-   * Perform immediate rotation (e.g. manual trigger).
+   * Immediately revoke the current token — the operator panic button (#6006).
+   *
+   * Unlike a scheduled rotation this (a) invalidates the old token at once,
+   * with NO grace window, so a leaked token can't ride out the (default 5min)
+   * grace, and (b) carries `reason: 'revoke'` so WsServer severs privileged
+   * (user-shell) sessions and forces every connection to re-authenticate with
+   * the new token rather than transparently re-keying. Returns the new token.
+   */
+  revoke() {
+    return this.rotate('revoke')
+  }
+
+  /**
+   * Perform an immediate rotation. `reason` defaults to 'scheduled' (the
+   * graceful periodic path used by the rotation timer); pass 'revoke' (via
+   * `revoke()`) for the panic-button behavior described above.
    * Returns the new token.
    */
-  rotate() {
+  rotate(reason = 'scheduled') {
+    const isRevoke = reason === 'revoke'
     const oldToken = this._currentToken
     const newToken = randomBytes(32).toString('base64url')
 
-    this._previousToken = oldToken
     this._currentToken = newToken
     this._expiresAt = this._expiryMs ? Date.now() + this._expiryMs : null
 
-    log.info(`Token rotated`)
+    if (isRevoke) {
+      // Panic button: the old token is compromised. Kill it NOW — drop it as
+      // the previous-token and tear down any in-flight grace timer so
+      // validate() rejects it immediately.
+      this._previousToken = null
+      if (this._graceTimer) {
+        clearTimeout(this._graceTimer)
+        this._graceTimer = null
+      }
+      log.warn(`Token REVOKED (old token invalidated immediately, no grace)`)
+    } else {
+      this._previousToken = oldToken
+      log.info(`Token rotated`)
+    }
 
     // Emit event for WsServer to broadcast to clients
     this.emit('token_rotated', {
       oldToken,
       newToken,
       expiresAt: this._expiresAt,
+      reason,
     })
 
     // Persist the new token
@@ -122,13 +158,16 @@ export class TokenManager extends EventEmitter {
       })
     }
 
-    // Start grace period for old token
-    if (this._graceTimer) clearTimeout(this._graceTimer)
-    this._graceTimer = setTimeout(() => {
-      this._graceTimer = null
-      this._previousToken = null
-      log.info(`Grace period expired, old token invalidated`)
-    }, this._graceMs)
+    // Start grace period for the old token — scheduled rotations only. A revoke
+    // killed the old token above and must not resurrect it via a grace window.
+    if (!isRevoke) {
+      if (this._graceTimer) clearTimeout(this._graceTimer)
+      this._graceTimer = setTimeout(() => {
+        this._graceTimer = null
+        this._previousToken = null
+        log.info(`Grace period expired, old token invalidated`)
+      }, this._graceMs)
+    }
 
     // Schedule next rotation
     if (this.rotationEnabled) {

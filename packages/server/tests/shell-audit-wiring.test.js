@@ -255,6 +255,65 @@ if (typeof mock.module !== 'function') {
       rmSync(mgr._tmpDir, { recursive: true, force: true })
     })
   })
+
+  // #6006 — the token-revoke sever primitive. destroyAllUserShellSessions()
+  // kills every user-shell (and ONLY user-shells), audits each with the supplied
+  // reason, and is the panic-button half WsServer calls on a token revoke.
+  describe('destroyAllUserShellSessions (#6006)', () => {
+    beforeEach(() => { destroyCalls.length = 0 })
+
+    it('severs every user-shell, leaves other sessions untouched, returns the count', () => {
+      const mgr = makeMgr()
+      const sh1 = mgr.createSession({ name: 'sh1', cwd: '/tmp', provider: 'test-audit-usershell' })
+      const sh2 = mgr.createSession({ name: 'sh2', cwd: '/tmp', provider: 'test-audit-usershell' })
+      const chat = mgr.createSession({ name: 'chat', cwd: '/tmp', provider: 'test-audit-normal' })
+
+      const severed = mgr.destroyAllUserShellSessions('revoked')
+
+      assert.equal(severed, 2, 'returns the number of shells severed')
+      assert.equal(mgr.getSession(sh1), null, 'shell 1 gone')
+      assert.equal(mgr.getSession(sh2), null, 'shell 2 gone')
+      assert.ok(mgr.getSession(chat), 'the normal session survives')
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+
+    it('stamps the reason on the destroy audit for a still-live shell', () => {
+      const mgr = makeMgr()
+      mgr.createSession({ name: 'sh', cwd: '/tmp', provider: 'test-audit-usershell' })
+
+      mgr.destroyAllUserShellSessions('revoked')
+
+      assert.equal(destroyCalls.length, 1)
+      assert.equal(destroyCalls[0].reason, 'revoked')
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+
+    it('does NOT clobber a natural exit reason already recorded', () => {
+      const mgr = makeMgr()
+      const sessionId = mgr.createSession({ name: 'sh', cwd: '/tmp', provider: 'test-audit-usershell' })
+      const entry = mgr.getSession(sessionId)
+      // The shell exited on its own first — preserve that reason in the trail.
+      entry.session._exitCode = 0
+      entry.session._exitReason = 'exit'
+
+      mgr.destroyAllUserShellSessions('revoked')
+
+      assert.equal(destroyCalls.length, 1)
+      assert.equal(destroyCalls[0].reason, 'exit', 'natural exit reason preserved')
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+
+    it('returns 0 and audits nothing when there are no user-shells', () => {
+      const mgr = makeMgr()
+      mgr.createSession({ name: 'chat', cwd: '/tmp', provider: 'test-audit-normal' })
+
+      const severed = mgr.destroyAllUserShellSessions('revoked')
+
+      assert.equal(severed, 0)
+      assert.equal(destroyCalls.length, 0)
+      rmSync(mgr._tmpDir, { recursive: true, force: true })
+    })
+  })
 }
 
 function makeWs() { return {} }
