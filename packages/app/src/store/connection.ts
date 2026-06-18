@@ -493,6 +493,7 @@ function clearSessionRolesAcrossSessions(
 
 export const useConnectionStore = create<ConnectionState>((set, get) => ({
   socket: null,
+  queuedMessageCount: 0,
   sessions: [],
   activeSessionId: null,
   sessionStates: {},

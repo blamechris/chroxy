@@ -233,10 +233,17 @@ export interface SessionNotification {
 
 /**
  * Group 1 — Connection & socket. Lifecycle phase/URL/token live in
- * `useConnectionLifecycleStore`; this interface holds only the live socket.
+ * `useConnectionLifecycleStore`; this interface holds the live socket plus the
+ * reactive mirror of the outgoing-queue depth (see `queuedMessageCount`).
  */
 export interface ConnectionSocketData {
   socket: WebSocket | null;
+  // #5699 — reactive mirror of the number of queued *user input* messages (the
+  // queue itself lives in message-handler's module context, which is
+  // non-reactive). Counts only `input`, not ephemeral `interrupt` control
+  // signals. Surfaced so the reconnect banner can show "N queued" and the
+  // manual-disconnect path can warn before discarding unsent messages.
+  queuedMessageCount: number;
 }
 
 /**

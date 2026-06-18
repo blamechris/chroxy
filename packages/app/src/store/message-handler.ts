@@ -1009,6 +1009,21 @@ function payloadSessionId(payload: unknown): string | null {
   return null;
 }
 
+/**
+ * #5699 — mirror the count of queued *user input* into the store so the
+ * reconnect banner + manual-disconnect warning can react to it. Counts only
+ * `input` entries, not `interrupt`: an interrupt is an ephemeral control signal
+ * (5s TTL, see QUEUE_TTLS) the user never typed as a "message", so including it
+ * would make the banner say "1 unsent message queued" — and the discard-warning
+ * copy lie — when nothing the user authored is actually pending. No-op when the
+ * store isn't wired yet (early enqueue / unit fixtures).
+ */
+function syncQueueCount(): void {
+  if (!_store) return;
+  const count = _ctx.messageQueue.reduce((n, m) => (m.type === 'input' ? n + 1 : n), 0);
+  _store.setState({ queuedMessageCount: count });
+}
+
 export function enqueueMessage(type: string, payload: unknown): 'queued' | false {
   if (QUEUE_EXCLUDED.has(type)) return false;
   const maxAge = QUEUE_TTLS[type];
@@ -1029,6 +1044,7 @@ export function enqueueMessage(type: string, payload: unknown): 'queued' | false
   }
   _ctx.messageQueue.push({ type, payload, queuedAt: Date.now(), maxAge });
   console.log(`[queue] Queued ${type} (${_ctx.messageQueue.length}/${QUEUE_MAX_SIZE})`);
+  syncQueueCount();
   return 'queued';
 }
 
@@ -1042,6 +1058,7 @@ export function drainMessageQueue(socket: WebSocket): void {
     else expired.push(m);
   }
   _ctx.messageQueue.length = 0;
+  syncQueueCount(); // queue emptied on drain — clear the reactive count (#5699)
 
   // #5633: a queued message can expire before a longer backoff completes —
   // notably an `interrupt` with its 5s TTL. That drop was invisible: the user
@@ -1082,6 +1099,7 @@ export function drainMessageQueue(socket: WebSocket): void {
 
 export function clearMessageQueue(): void {
   _ctx.messageQueue.length = 0;
+  syncQueueCount(); // #5699
 }
 
 /** @internal Exposed for testing only */
