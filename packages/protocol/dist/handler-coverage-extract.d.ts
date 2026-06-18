@@ -44,11 +44,11 @@ export declare function extractCaseTypes(src: string): Set<string>;
  * the closing brace is decorated, then reads only TOP-LEVEL keys.
  *
  * Keys are read with the per-line matcher `^\s*(\w+):` (permissively `\w+` so a
- * future key with a digit or capital isn't silently dropped). Per-line matching
- * is robust to interleaved `//` comment lines between entries — which the
- * char-by-char alternative is not — and these handler maps are flat object
- * literals, so a line-based read of the brace-balanced body collects exactly
- * the top-level keys.
+ * future key with a digit or capital isn't silently dropped) applied only to
+ * lines at the map's TOP LEVEL — a running brace-depth counter skips any line
+ * inside a nested object value, so a `someType: { ... }` entry contributes only
+ * its top-level key `someType`, never the nested literal's inner keys. Per-line
+ * matching is also robust to interleaved `//` comment lines between entries.
  */
 export declare function extractHandlersMapKeys(src: string): Set<string>;
 /**

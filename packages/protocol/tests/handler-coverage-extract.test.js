@@ -74,6 +74,10 @@ describe('handler-coverage shared extractor (#6021)', () => {
     assert.ok(keys.has('early_key'), 'early_key recovered')
     assert.ok(keys.has('late_key_a'), 'late_key_a recovered (old regex dropped it)')
     assert.ok(keys.has('late_key_b'), 'late_key_b recovered (old regex dropped it)')
+    // ...and it must NOT over-capture the nested object value's inner key
+    // (`opt:` sits inside `makeHandler({ ... })`, depth > 0). A whole-body key
+    // matcher would mistake it for a message type; the depth-aware scan skips it.
+    assert.ok(!keys.has('opt'), 'nested object-value key must NOT be captured as a message type')
   })
 
   it('tolerates a decorated closing brace (} as const / trailing tokens)', () => {

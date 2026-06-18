@@ -46,11 +46,11 @@ export function extractCaseTypes(src) {
  * the closing brace is decorated, then reads only TOP-LEVEL keys.
  *
  * Keys are read with the per-line matcher `^\s*(\w+):` (permissively `\w+` so a
- * future key with a digit or capital isn't silently dropped). Per-line matching
- * is robust to interleaved `//` comment lines between entries — which the
- * char-by-char alternative is not — and these handler maps are flat object
- * literals, so a line-based read of the brace-balanced body collects exactly
- * the top-level keys.
+ * future key with a digit or capital isn't silently dropped) applied only to
+ * lines at the map's TOP LEVEL — a running brace-depth counter skips any line
+ * inside a nested object value, so a `someType: { ... }` entry contributes only
+ * its top-level key `someType`, never the nested literal's inner keys. Per-line
+ * matching is also robust to interleaved `//` comment lines between entries.
  */
 export function extractHandlersMapKeys(src) {
     const keys = new Set();
@@ -76,8 +76,24 @@ export function extractHandlersMapKeys(src) {
     if (endIdx === -1)
         return keys;
     const body = src.slice(openIdx + 1, endIdx);
-    for (const m of body.matchAll(/^\s*(\w+)\s*:/gm))
-        keys.add(m[1]);
+    // Walk line by line tracking brace depth; collect keys only at the map's top
+    // level (depth 0) so a nested object value's inner keys are not mistaken for
+    // message types. The key on a `someType: {` line is matched before that line
+    // raises the depth, so the real top-level key is still captured.
+    let lineDepth = 0;
+    for (const line of body.split('\n')) {
+        if (lineDepth === 0) {
+            const m = line.match(/^\s*(\w+)\s*:/);
+            if (m)
+                keys.add(m[1]);
+        }
+        for (const ch of line) {
+            if (ch === '{')
+                lineDepth++;
+            else if (ch === '}')
+                lineDepth--;
+        }
+    }
     return keys;
 }
 /**
