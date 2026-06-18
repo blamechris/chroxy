@@ -236,6 +236,14 @@ vi.mock('./store/connection', () => {
     requestHostStatus: vi.fn(),
     requestRunnerStatus: vi.fn(),
     requestIntegrationStatus: vi.fn(),
+    // #5998 — the App-level view-mode effect opts a PTY-backed session into the
+    // live terminal mirror and forces the view-mode for terminal-only / non-PTY
+    // providers. The base mock exposes the two mirror actions + the
+    // serverCapabilities slice the effect (and the "New Shell" gate) read, so the
+    // effect's selectors don't crash on a missing action when these tests run.
+    subscribeTerminalMirror: vi.fn(),
+    unsubscribeTerminalMirror: vi.fn(),
+    serverCapabilities: null,
   }
   const useConnectionStore = (
     selector?: (s: typeof baseState) => unknown,
@@ -2585,5 +2593,191 @@ describe('context meter with unknown context window (#5424)', () => {
     const label = screen.getByTestId('status-context-label')
     expect(label.textContent).toContain('12.5k')
     expect(label.textContent).toContain('32.0k')
+  })
+})
+
+// #5998 — App-level view-mode effect (App.tsx). The effect:
+//   1. forces a user-shell (terminal-only) session's view to 'terminal'
+//      when it's sitting on the now-hidden Chat tab;
+//   2. forces a non-PTY (chat) provider back to 'chat' if it's stranded on
+//      the Output tab — but ONLY once the provider is known (not null), the
+//      #5838 null-provider guard, so a persisted Output view for a claude-tui
+//      session isn't kicked away during the load/reconnect window;
+//   3. opts a PTY-backed session (BOTH claude-tui AND user-shell) into the
+//      live terminal mirror when on the Output tab + connected, re-subscribing
+//      after a reconnect (connectionPhase flips back to 'connected').
+describe('App-level view-mode effect (#5998)', () => {
+  function session(provider: string) {
+    return {
+      sessionId: 's1',
+      name: 'Test',
+      cwd: '/tmp',
+      type: 'cli' as const,
+      hasTerminal: true,
+      model: null,
+      permissionMode: null,
+      isBusy: false,
+      createdAt: Date.now(),
+      conversationId: null,
+      provider,
+    }
+  }
+
+  // AC1 — switching to a user-shell session forces viewMode to 'terminal'
+  // (the Chat tab is hidden for a terminal-only provider, so a session sitting
+  // on the persisted 'chat' default must snap to the Output terminal).
+  it('forces viewMode to terminal for a user-shell session sitting on chat (AC1)', () => {
+    const setViewMode = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('user-shell')],
+      activeSessionId: 's1',
+      viewMode: 'chat',
+      serverCapabilities: { userShell: true },
+      setViewMode,
+    }
+    render(<App />)
+    expect(setViewMode).toHaveBeenCalledWith('terminal')
+  })
+
+  it('does NOT force a user-shell session away from a non-chat tab (System stays put) (AC1)', () => {
+    // The effect only redirects from the now-hidden Chat tab — Files/System are
+    // useful for a shell's cwd and must not be snapped back (#5997).
+    const setViewMode = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('user-shell')],
+      activeSessionId: 's1',
+      viewMode: 'system',
+      serverCapabilities: { userShell: true },
+      setViewMode,
+    }
+    render(<App />)
+    expect(setViewMode).not.toHaveBeenCalled()
+  })
+
+  // AC2 — a non-PTY (chat) provider stranded on the Output tab is forced back
+  // to chat once the provider is known.
+  it('forces viewMode to chat when a non-PTY provider is stranded on the Output tab (AC2)', () => {
+    const setViewMode = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-sdk')],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      setViewMode,
+    }
+    render(<App />)
+    expect(setViewMode).toHaveBeenCalledWith('chat')
+  })
+
+  // AC2 — the #5838 null-provider guard: during the initial-load / reconnect
+  // window the active session's provider is still null/unknown. Force-switching
+  // then would kick the operator out of a persisted Output view for a
+  // claude-tui session, so the effect must NOT force away from 'terminal'.
+  it('does NOT force-switch from terminal while the provider is still null (#5838 guard) (AC2)', () => {
+    const setViewMode = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      // No matching session for activeSessionId → activeSessionProvider is null
+      // (the load/reconnect window before session_list resolves the provider).
+      sessions: [],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      setViewMode,
+    }
+    render(<App />)
+    expect(setViewMode).not.toHaveBeenCalled()
+  })
+
+  // AC3 — a PTY provider on the Output tab + connected subscribes to the mirror.
+  // BOTH claude-tui and user-shell are PTY-backed (isPtyProvider = isTui ||
+  // isUserShell), so both subscribe.
+  it('subscribes to the terminal mirror for a claude-tui session on Output + connected (AC3)', () => {
+    const subscribeTerminalMirror = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-tui')],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      subscribeTerminalMirror,
+    }
+    render(<App />)
+    expect(subscribeTerminalMirror).toHaveBeenCalledWith('s1')
+  })
+
+  it('subscribes to the terminal mirror for a user-shell session on Output + connected (AC3)', () => {
+    const subscribeTerminalMirror = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('user-shell')],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      serverCapabilities: { userShell: true },
+      subscribeTerminalMirror,
+    }
+    render(<App />)
+    expect(subscribeTerminalMirror).toHaveBeenCalledWith('s1')
+  })
+
+  it('does NOT subscribe for a non-PTY (chat) provider even on the Output tab (AC3)', () => {
+    // A claude-sdk session has no PTY mirror; it's force-switched to chat
+    // (AC2) and never subscribes.
+    const subscribeTerminalMirror = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-sdk')],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      subscribeTerminalMirror,
+    }
+    render(<App />)
+    expect(subscribeTerminalMirror).not.toHaveBeenCalled()
+  })
+
+  it('does NOT subscribe while disconnected, then subscribes when the socket connects (AC3)', () => {
+    // The opt-in is gated on a live socket (connectionPhase === 'connected').
+    const subscribeTerminalMirror = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connecting',
+      sessions: [session('claude-tui')],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      subscribeTerminalMirror,
+    }
+    const { rerender } = render(<App />)
+    expect(subscribeTerminalMirror).not.toHaveBeenCalled()
+
+    stateOverrides = { ...stateOverrides, connectionPhase: 'connected' }
+    rerender(<App />)
+    expect(subscribeTerminalMirror).toHaveBeenCalledWith('s1')
+  })
+
+  it('re-subscribes to the terminal mirror after a reconnect (AC3)', () => {
+    // A reconnect clears the server-side terminalSessionIds set, so the effect
+    // must re-run on the connectionPhase change and re-subscribe — otherwise
+    // the mirror silently stops updating (#5838).
+    const subscribeTerminalMirror = vi.fn()
+    const unsubscribeTerminalMirror = vi.fn()
+    stateOverrides = {
+      connectionPhase: 'connected',
+      sessions: [session('claude-tui')],
+      activeSessionId: 's1',
+      viewMode: 'terminal',
+      subscribeTerminalMirror,
+      unsubscribeTerminalMirror,
+    }
+    const { rerender } = render(<App />)
+    expect(subscribeTerminalMirror).toHaveBeenCalledTimes(1)
+
+    // Drop the connection (cleanup runs → unsubscribe), then reconnect.
+    stateOverrides = { ...stateOverrides, connectionPhase: 'reconnecting' }
+    rerender(<App />)
+    expect(unsubscribeTerminalMirror).toHaveBeenCalledWith('s1')
+
+    stateOverrides = { ...stateOverrides, connectionPhase: 'connected' }
+    rerender(<App />)
+    expect(subscribeTerminalMirror).toHaveBeenCalledTimes(2)
+    expect(subscribeTerminalMirror).toHaveBeenLastCalledWith('s1')
   })
 })
