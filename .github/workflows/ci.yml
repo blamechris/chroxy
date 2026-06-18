@@ -18,10 +18,21 @@ concurrency:
 permissions:
   contents: read
 
+# SELF_HOSTED_OR_HOSTED runner routing
+# ------------------------------------
+# Jobs marked `runs-on: ${{ ... SELF_HOSTED_OR_HOSTED ... }}` route to the
+# self-hosted Linux runner pool (4 Docker replicas on the maintainer's Mac —
+# labels self-hosted,Linux,ARM64; see ~/actions-runner-linux) for SAME-REPO
+# pushes and PRs, keeping them off the GitHub-hosted bill. FORK PRs fall back to
+# `ubuntu-24.04` (GitHub-hosted) so untrusted contributor code never executes on
+# the self-hosted machine, while external contributors still get full CI.
+# The macOS desktop job uses the separate self-hosted macOS runner; the Windows
+# job stays GitHub-hosted (no self-hosted Windows box).
+
 jobs:
   server-tests:
     name: Server Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
     defaults:
       run:
@@ -69,7 +80,7 @@ jobs:
     # multiplier vs `ubuntu-24.04`, so we only fire it on PRs that touch
     # the files it actually covers. Pushes to `main` skip this job and
     # always run the Windows suite (see `server-tests-windows.if`).
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 2
     if: github.event_name == 'pull_request'
     # `dorny/paths-filter` calls the GitHub REST API (`listFiles`) to read the
@@ -179,7 +190,7 @@ jobs:
 
   server-lint:
     name: Server Lint
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -294,7 +305,7 @@ jobs:
 
   dashboard-tests:
     name: Dashboard Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
     defaults:
       run:
@@ -329,7 +340,7 @@ jobs:
 
   dashboard-typecheck:
     name: Dashboard Type Check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -356,7 +367,7 @@ jobs:
 
   store-core-tests:
     name: Store Core Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -379,7 +390,7 @@ jobs:
 
   claude-hooks-tests:
     name: Claude Hooks Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -407,7 +418,7 @@ jobs:
 
   store-core-typecheck:
     name: Store Core Type Check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -430,7 +441,7 @@ jobs:
 
   app-tests:
     name: App Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -468,7 +479,7 @@ jobs:
 
   app-typecheck:
     name: App Type Check
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -495,7 +506,7 @@ jobs:
 
   app-expo-doctor:
     name: App Expo Doctor
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -585,7 +596,7 @@ jobs:
 
   protocol-tests:
     name: Protocol Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     defaults:
       run:
@@ -658,7 +669,7 @@ jobs:
 
   scripts-tests:
     name: Scripts Tests
-    runs-on: ubuntu-24.04
+    runs-on: ${{ (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted", "Linux", "ARM64"]') || 'ubuntu-24.04' }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
