@@ -1774,9 +1774,19 @@ fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
 fn probe_external_health(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{}/health", port);
     for attempt in 0..10 {
-        if let Ok(resp) = ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
-            if resp.status() == 200 {
-                return true;
+        // Log each attempt (mirrors the embedded-server health check in
+        // server.rs) so a stuck client-mode launch is debuggable from the app's
+        // stderr/console rather than a silent spinner.
+        match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
+            Ok(resp) => {
+                let code = resp.status();
+                eprintln!("[client-adopt] attempt #{} GET {} -> {}", attempt + 1, url, code);
+                if code == 200 {
+                    return true;
+                }
+            }
+            Err(err) => {
+                eprintln!("[client-adopt] attempt #{} GET {} -> Err({})", attempt + 1, url, err);
             }
         }
         // No sleep after the final attempt.
