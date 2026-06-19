@@ -123,15 +123,22 @@ fi
 # Returns the command's exit code, or 124 if it was killed for exceeding SECS.
 run_with_timeout() {
   local secs="$1"; shift
+  # Marker file the watchdog writes IFF it actually fired (the command was still
+  # alive at the deadline). `wait` on a SIGTERM/SIGKILL-ed child returns 143/137,
+  # not 124, so we can't infer a timeout from the exit status — the marker does.
+  local marker; marker="$(mktemp)"
   "$@" &
   local cmd_pid=$!
   (
     sleep "$secs"
     # Only signal if the command is still the live process (guards the tiny
     # window where it exits right as the timeout fires — avoids PID reuse).
-    kill -0 "$cmd_pid" 2>/dev/null && kill -TERM "$cmd_pid" 2>/dev/null
-    sleep 5
-    kill -0 "$cmd_pid" 2>/dev/null && kill -KILL "$cmd_pid" 2>/dev/null
+    if kill -0 "$cmd_pid" 2>/dev/null; then
+      printf 'timeout' > "$marker"
+      kill -TERM "$cmd_pid" 2>/dev/null
+      sleep 5
+      kill -0 "$cmd_pid" 2>/dev/null && kill -KILL "$cmd_pid" 2>/dev/null
+    fi
   ) &
   local wd_pid=$!
   local rc=0
@@ -139,6 +146,9 @@ run_with_timeout() {
   # Cancel the watchdog if the command finished on its own.
   kill "$wd_pid" 2>/dev/null
   wait "$wd_pid" 2>/dev/null || true
+  # Normalize a watchdog-induced kill to the conventional timeout code.
+  [ -s "$marker" ] && rc=124
+  rm -f "$marker"
   return "$rc"
 }
 
@@ -183,7 +193,12 @@ if [ "$START_MOCK" -eq 1 ]; then
     echo "[runner] Reusing healthy mock server already on port $MOCK_PORT"
   else
     echo "[runner] Starting mock server..."
-    bash "$SCRIPT_DIR/start-mock-server.sh"
+    # Fail fast: a dead mock server would otherwise cascade into a wall of
+    # session-flow failures that look like flow defects.
+    if ! bash "$SCRIPT_DIR/start-mock-server.sh"; then
+      echo "ERROR: mock server failed to start on port $MOCK_PORT; aborting." >&2
+      exit 1
+    fi
     MOCK_STARTED=1
   fi
 fi
