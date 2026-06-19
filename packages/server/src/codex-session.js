@@ -143,7 +143,7 @@ export function resolveCodexSandbox() {
  * driven by chroxy's UX, distinct from the skills-content `trustStore` in
  * `base-session.js`), gate this flag on that confirmation — pass it for
  * trusted cwds, omit it for untrusted ones so Codex's own git-repo heuristic
- * adds a second line of defence. Until that UX lands, always-on is correct
+ * adds a second line of defense. Until that UX lands, always-on is correct
  * because the user picking a cwd in chroxy IS today's trust signal.
  *
  * `--sandbox <mode>` is always passed (#3837 stopgap): without it Codex

@@ -316,7 +316,14 @@ will accept non-git cwds (#3834). This is correct today because
 chroxy's cwd-picker is itself the trust signal — but if a directory-trust
 prompt is ever added (#3840), the flag should be gated on that
 confirmation so Codex's git-repo heuristic can act as a second line of
-defence for untrusted directories.
+defense for untrusted directories.
+
+Chroxy also unconditionally passes `--skip-git-repo-check` so Codex
+will accept non-git cwds (#3834). This is correct today because
+chroxy's cwd-picker is itself the trust signal — but if a directory-trust
+prompt is ever added (#3840), the flag should be gated on that
+confirmation so Codex's git-repo heuristic can act as a second line of
+defense for untrusted directories.
 
 Separately, Codex maintains an internal memory store at
 `$HOME/.codex/memories`. This is written by Codex's own in-process
