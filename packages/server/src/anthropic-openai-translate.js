@@ -47,22 +47,30 @@ function anthropicMessageToOpenAi(msg) {
     return [{ role, content: '' }]
   }
 
+  const textParts = content
+    .filter((b) => b?.type === 'text' && typeof b.text === 'string')
+    .map((b) => b.text)
+
   // Tool RESULT blocks (carried on a 'user' message in Anthropic) become
-  // standalone OpenAI 'tool' messages keyed by tool_call_id.
+  // standalone OpenAI 'tool' messages keyed by tool_call_id. A user turn may
+  // ALSO carry sibling text blocks alongside the results — byok-session's
+  // MAX_TOOL_ROUNDS path builds exactly such a `[tool_result…, text]` turn (the
+  // "summarise, do not call tools" instruction). OpenAI has no text channel on a
+  // `tool` message, so append the text as a following `user` message rather than
+  // dropping it (#6128).
   const toolResults = content.filter((b) => b?.type === 'tool_result')
   if (toolResults.length > 0) {
-    return toolResults.map((b) => ({
+    const msgs = toolResults.map((b) => ({
       role: 'tool',
       tool_call_id: b.tool_use_id,
       content: toolResultContentToString(b.content),
     }))
+    if (textParts.length > 0) msgs.push({ role: 'user', content: textParts.join('') })
+    return msgs
   }
 
   // Assistant tool_use blocks → OpenAI assistant message with tool_calls.
   const toolUses = content.filter((b) => b?.type === 'tool_use')
-  const textParts = content
-    .filter((b) => b?.type === 'text' && typeof b.text === 'string')
-    .map((b) => b.text)
   if (toolUses.length > 0) {
     return [
       {

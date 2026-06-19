@@ -46,6 +46,24 @@ describe('#5420 anthropicRequestToOpenAi', () => {
     assert.deepEqual(out.messages, [{ role: 'tool', tool_call_id: 'call_1', content: 'result text' }])
   })
 
+  it('keeps sibling text alongside tool_result as a following user message (#6128)', () => {
+    const out = anthropicRequestToOpenAi({
+      messages: [
+        {
+          role: 'user',
+          content: [
+            { type: 'tool_result', tool_use_id: 'call_1', content: 'done' },
+            { type: 'text', text: 'Now summarise. Do not call tools.' },
+          ],
+        },
+      ],
+    })
+    assert.deepEqual(out.messages, [
+      { role: 'tool', tool_call_id: 'call_1', content: 'done' },
+      { role: 'user', content: 'Now summarise. Do not call tools.' },
+    ])
+  })
+
   it('translates an assistant tool_use block to OpenAI tool_calls', () => {
     const out = anthropicRequestToOpenAi({
       messages: [{ role: 'assistant', content: [{ type: 'tool_use', id: 'call_1', name: 'grep', input: { q: 'x' } }] }],
