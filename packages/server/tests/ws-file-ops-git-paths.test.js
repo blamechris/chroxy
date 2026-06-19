@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { execFile as execFileCb } from 'child_process'
 import { promisify } from 'util'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+import { RM_RETRY } from './test-helpers.js'
 
 const execFileAsync = promisify(execFileCb)
 
@@ -29,7 +30,7 @@ describe('gitStage/gitUnstage path validation (#1958)', () => {
   })
 
   after(async () => {
-    if (tmpDir) await rm(tmpDir, { recursive: true, force: true })
+    if (tmpDir) await rm(tmpDir, RM_RETRY)
   })
 
   it('gitStage rejects path traversal (../../etc/passwd)', async () => {
@@ -116,8 +117,8 @@ describe('git ops workspace root validation (#2690)', () => {
   })
 
   after(async () => {
-    if (workspaceDir) await rm(workspaceDir, { recursive: true, force: true })
-    if (outsideDir) await rm(outsideDir, { recursive: true, force: true })
+    if (workspaceDir) await rm(workspaceDir, RM_RETRY)
+    if (outsideDir) await rm(outsideDir, RM_RETRY)
   })
 
   it('gitStatus rejects a path outside workspace root', async () => {
