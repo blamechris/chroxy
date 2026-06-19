@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -386,6 +386,134 @@ describe('runner_status_request handler (#5253)', () => {
     await handleSessionMessage(ws, client, { type: 'runner_status_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'runner_status_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6133 (epic #5530) — Containers & environments survey handler. Same contract
+// shape as host_status / runner_status; the survey itself is injected via
+// ctx.surveyContainers so the handler test never shells out to docker.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_CONTAINERS_SNAPSHOT = {
+  generatedAt: '2026-06-19T00:00:00.000Z',
+  summary: { total: 1, running: 1, stopped: 0, other: 0 },
+  containers: [
+    {
+      id: 'env-1',
+      name: 'web',
+      cwd: '/home/user/Projects/app',
+      image: 'node:22-slim',
+      status: 'running',
+      backend: 'docker',
+      containerId: 'abcdef123456',
+      composeProject: null,
+      sessionCount: 2,
+      createdAt: '2026-06-19T00:00:00.000Z',
+      uptimeMs: 0,
+      stats: { cpuPercent: 0.5, memBytes: 1000, memPercent: 1.2 },
+    },
+  ],
+  dockerStatsNote: null,
+}
+
+function makeContainersCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({
+    send: sendSpy,
+    surveyContainers: createSpy(async () => SAMPLE_CONTAINERS_SNAPSHOT),
+    ...overrides,
+    _send: sendSpy,
+  })
+}
+
+describe('containers_status_request handler (#6133)', () => {
+  let ctx, client, ws
+
+  beforeEach(() => {
+    ctx = makeContainersCtx()
+    client = { id: 'client-C' }
+    ws = {}
+  })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('containers_status_request'))
+    assert.equal(typeof controlRoomHandlers.containers_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant containers_status_snapshot', async () => {
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request', requestId: 'c1' }, ctx)
+    assert.equal(ctx._send.callCount, 1)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'containers_status_snapshot')
+    assert.equal(payload.requestId, 'c1')
+    assert.ok(ServerContainersStatusSnapshotSchema.safeParse(payload).success, JSON.stringify(ServerContainersStatusSnapshotSchema.safeParse(payload).error?.issues))
+    assert.equal(payload.containers.length, 1)
+    assert.equal(payload.summary.running, 1)
+  })
+
+  it('wires listEnvironments to the EnvironmentManager.list()', async () => {
+    const envs = [{ id: 'e1' }, { id: 'e2' }]
+    ctx = makeContainersCtx({ services: { environmentManager: { list: () => envs } } })
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request' }, ctx)
+    const [opts] = ctx.surveyContainers.lastCall
+    assert.deepEqual(opts.listEnvironments(), envs)
+  })
+
+  it('passes an empty inventory when no EnvironmentManager is present', async () => {
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request' }, ctx)
+    const [opts] = ctx.surveyContainers.lastCall
+    assert.deepEqual(opts.listEnvironments(), [])
+  })
+
+  it('enables docker-stats enrichment by default (config key unset)', async () => {
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request' }, ctx)
+    assert.equal(ctx.surveyContainers.lastCall[0].includeStats, true)
+  })
+
+  it('disables docker-stats enrichment when controlRoomContainersIncludeStats is false', async () => {
+    ctx = makeContainersCtx({ config: { controlRoomContainersIncludeStats: false } })
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request' }, ctx)
+    assert.equal(ctx.surveyContainers.lastCall[0].includeStats, false)
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request', requestId: 'c1' }, ctx)
+    assert.equal(ctx.surveyContainers.callCount, 0, 'must not survey for a bound client')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'FORBIDDEN')
+    assert.ok(ServerContainersStatusSnapshotSchema.safeParse(payload).success)
+    assert.deepEqual(payload.containers, [])
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeContainersCtx({ surveyContainers: createSpy(async () => { await gate; return SAMPLE_CONTAINERS_SNAPSHOT }) })
+    const first = controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveyContainers.callCount, 1)
+    const rejected = ctx._send.calls.find(c => c[1].requestId === 'b')
+    assert.equal(rejected[1].error.code, 'SURVEY_IN_PROGRESS')
+    release()
+    await first
+  })
+
+  it('sends an error snapshot when the survey throws', async () => {
+    ctx = makeContainersCtx({ surveyContainers: createSpy(async () => { throw new Error('docker exploded') }) })
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request', requestId: 'e1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'SURVEY_FAILED')
+    assert.match(payload.error.message, /docker exploded/)
+    assert.ok(ServerContainersStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'containers_status_request', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'containers_status_snapshot')
     assert.equal(payload.requestId, 'reg')
   })
 })

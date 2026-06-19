@@ -80,6 +80,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
+  'containers_status_snapshot', // #6133 (epic #5530) — Control Room containers & environments survey reply. Server contract (survey + handler) landed first; the dashboard Containers section (store + ControlRoomView tab + ContainersStatusSection) is the tracked follow-up slice, at which point this moves to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.

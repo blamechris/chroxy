@@ -1234,6 +1234,108 @@ export declare const ServerRunnerStatusSnapshotSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$strip>;
 /**
+ * Best-effort `docker stats` resource snapshot for one running container. Every
+ * field is nullable: `docker stats` may be unavailable (docker absent, daemon
+ * down, a stuck probe), in which case the whole `stats` object is null on the
+ * entry — `null` means "unknown", never "zero".
+ */
+export declare const ContainerStatsSchema: z.ZodObject<{
+    cpuPercent: z.ZodNullable<z.ZodNumber>;
+    memBytes: z.ZodNullable<z.ZodNumber>;
+    memPercent: z.ZodNullable<z.ZodNumber>;
+}, z.core.$strip>;
+/**
+ * One chroxy-managed container / environment.
+ *
+ * Fields:
+ *   - `id`             — EnvironmentManager environment id.
+ *   - `name`           — operator-facing environment name.
+ *   - `cwd`            — host working directory mounted as the workspace (the
+ *                        repo the environment backs); the dashboard groups by it.
+ *   - `image`          — container image, or null when unknown.
+ *   - `status`         — lifecycle status string (`running`, `stopped`, `error`,
+ *                        `unknown`, …) as the EnvironmentManager reports it.
+ *   - `backend`        — `docker` | `compose` | `k8s` | `rancher` | `unknown`.
+ *   - `containerId`    — backing container id, or null (compose/k8s/unknown).
+ *   - `composeProject` — compose project name, or null.
+ *   - `sessionCount`   — number of live chroxy sessions attached.
+ *   - `createdAt`      — ISO-8601 creation time, or null.
+ *   - `uptimeMs`       — derived ms since `createdAt` at survey time, or null.
+ *   - `stats`          — live resource snapshot, or null when unavailable / the
+ *                        container isn't running.
+ */
+export declare const ContainerEntrySchema: z.ZodObject<{
+    id: z.ZodString;
+    name: z.ZodString;
+    cwd: z.ZodString;
+    image: z.ZodNullable<z.ZodString>;
+    status: z.ZodString;
+    backend: z.ZodString;
+    containerId: z.ZodNullable<z.ZodString>;
+    composeProject: z.ZodNullable<z.ZodString>;
+    sessionCount: z.ZodNumber;
+    createdAt: z.ZodNullable<z.ZodString>;
+    uptimeMs: z.ZodNullable<z.ZodNumber>;
+    stats: z.ZodNullable<z.ZodObject<{
+        cpuPercent: z.ZodNullable<z.ZodNumber>;
+        memBytes: z.ZodNullable<z.ZodNumber>;
+        memPercent: z.ZodNullable<z.ZodNumber>;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+/**
+ * Aggregate container counts so the summary chips don't re-tally. `other`
+ * absorbs any status that's neither running nor a known stopped/exited/error
+ * state. All non-negative integers.
+ */
+export declare const ContainersStatusSummarySchema: z.ZodObject<{
+    total: z.ZodNumber;
+    running: z.ZodNumber;
+    stopped: z.ZodNumber;
+    other: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * #6133 — full containers & environments snapshot. Emitted in reply to a
+ * `containers_status_request` (see client.ts). An empty `containers` array is
+ * the valid "no chroxy-managed environments" state — never omitted.
+ * `dockerStatsNote` is a snapshot-level degradation annotation set when the
+ * `docker stats` enrichment was skipped/failed (the inventory is still present;
+ * every entry's `stats` is null).
+ */
+export declare const ServerContainersStatusSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"containers_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    summary: z.ZodObject<{
+        total: z.ZodNumber;
+        running: z.ZodNumber;
+        stopped: z.ZodNumber;
+        other: z.ZodNumber;
+    }, z.core.$strip>;
+    containers: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+        cwd: z.ZodString;
+        image: z.ZodNullable<z.ZodString>;
+        status: z.ZodString;
+        backend: z.ZodString;
+        containerId: z.ZodNullable<z.ZodString>;
+        composeProject: z.ZodNullable<z.ZodString>;
+        sessionCount: z.ZodNumber;
+        createdAt: z.ZodNullable<z.ZodString>;
+        uptimeMs: z.ZodNullable<z.ZodNumber>;
+        stats: z.ZodNullable<z.ZodObject<{
+            cpuPercent: z.ZodNullable<z.ZodNumber>;
+            memBytes: z.ZodNullable<z.ZodNumber>;
+            memPercent: z.ZodNullable<z.ZodNumber>;
+        }, z.core.$strip>>;
+    }, z.core.$strip>>;
+    dockerStatsNote: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+/**
  * repo-memory cache file stats for one repo (`.repo-memory/cache.db` plus its
  * `-wal` sidecar). `present` is false when the cache file doesn't exist yet
  * (config without traffic); `sizeBytes` then reports 0. `lastModified` is the
@@ -2539,6 +2641,7 @@ export type RunnerInfo = z.infer<typeof RunnerInfoSchema>;
 export type RepoRunners = z.infer<typeof RepoRunnersSchema>;
 export type RunnerStatusSummary = z.infer<typeof RunnerStatusSummarySchema>;
 export type ServerRunnerStatusSnapshotMessage = z.infer<typeof ServerRunnerStatusSnapshotSchema>;
+export type ServerContainersStatusSnapshotMessage = z.infer<typeof ServerContainersStatusSnapshotSchema>;
 export type RepoMemoryCache = z.infer<typeof RepoMemoryCacheSchema>;
 export type RepoMemoryReport = z.infer<typeof RepoMemoryReportSchema>;
 export type RepoMemoryStatus = z.infer<typeof RepoMemoryStatusSchema>;
