@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { getPartialSummary, tryParseCompleteJson } from '@chroxy/store-core';
+import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -57,20 +57,43 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
     onExpandedChange?.(message.id, next);
   };
   const longPressedRef = useRef(false);
+  // #6018 / #5770 — AskUserQuestion's tool_input shape is internal: the mobile
+  // surface already renders the structured question via the QuestionPrompt /
+  // MultiQuestionForm card (driven by the parallel `user_question` event).
+  // Surfacing the raw `{"questions":[...` JSON in the collapsed summary or the
+  // expanded partial-preview next to that card produces the two-bubbles-for-one-
+  // prompt symptom (#4667). Gate computed once so both branches stay in sync.
+  // Mirrors `shouldSuppressRawToolInput` usage in the dashboard ToolBubble (#5770).
+  // Must be computed before `partialPreview` and `partialSummary` so both gating
+  // sites can reference it without a temporal dead zone.
+  const suppressRawInput = shouldSuppressRawToolInput(message.tool);
   // #4081: streaming inputs land in `toolInputPartial` before `content`
   // is populated. Use it as the bubble body when `content` is empty or
   // identical to the tool name (the placeholder handleToolStart sets
   // when `msg.input` is missing). The result-arrival path is unchanged.
-  const partialPreview = !message.toolResult && message.toolInputPartial
+  // #6018 — gate on suppressRawInput: AskUserQuestion's raw tool_input
+  // must never surface in the expanded body (the structured QuestionPrompt
+  // card is the canonical render path for that tool).
+  const partialPreview = !message.toolResult && message.toolInputPartial && !suppressRawInput
     ? formatPartialPreview(message.toolInputPartial)
     : '';
   const rawContent = message.content?.trim() || '';
   const isPlaceholderContent = !rawContent || rawContent === message.tool;
-  const content = partialPreview && isPlaceholderContent
-    ? partialPreview
-    : (rawContent || partialPreview);
+  // #6018 — the NON-streaming path also leaks: when `tool_start` carries `input`,
+  // store-core serializes it into `message.content` (`content: msg.input ?
+  // JSON.stringify(msg.input) : tool`), so `rawContent` is the raw `{"questions":
+  // [...` JSON. For suppressed tools, never let that become the bubble body —
+  // collapse to the tool-name placeholder so the expanded body shows only the
+  // tool name (the structured QuestionPrompt card is the canonical render path).
+  const content = suppressRawInput
+    ? (message.tool || '')
+    : partialPreview && isPlaceholderContent
+      ? partialPreview
+      : (rawContent || partialPreview);
 
-  // Hide empty tool messages
+  // Hide empty tool messages. For suppressed tools `content` is the tool-name
+  // placeholder (non-empty, since the tool was matched by name) so the bubble
+  // still renders as a quiet placeholder with just the tool name + pulse marker.
   if (!content) return null;
 
   const displayTool = formatToolName(message.tool);
@@ -133,15 +156,19 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   //
   // The Bash early-abort UX (#4063) hinges on `command` being
   // legible at a glance without expanding the bubble.
-  const partialSummary = message.toolInputPartial
+  // #6018 — suppress raw tool_input in the collapsed preview for tools whose
+  // input is handled by a dedicated structured card. When suppressed, the
+  // collapsed bubble shows only the tool name (header). Matches the dashboard
+  // ToolBubble's `suppressRawInput` gate on the `summary` computation.
+  const partialSummary = message.toolInputPartial && !suppressRawInput
     ? getPartialSummary(message.toolInputPartial)
     : null;
-  const contentSummary = !isPlaceholderContent
+  const contentSummary = !isPlaceholderContent && !suppressRawInput
     ? getPartialSummary(content)
     : null;
   const previewSource = partialSummary && isPlaceholderContent
     ? partialSummary
-    : (contentSummary || content);
+    : (contentSummary || (suppressRawInput ? '' : content));
   const preview = previewSource.length > 60 ? previewSource.slice(0, 60) + '...' : previewSource;
 
   // #4180: TodoWrite tool_result is rendered as a structured checklist
