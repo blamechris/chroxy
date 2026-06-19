@@ -27,7 +27,6 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
-  handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
@@ -2661,17 +2660,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'model_changed': {
-      const { model } = sharedModelChanged(msg);
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      {
-        const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
-        if (effectiveId && get().sessionStates[effectiveId]) {
-          updateSession(effectiveId, () => ({ activeModel: model }));
-        }
-      }
-      break;
-    }
+    // #5618 — model_changed migrated to the shared store-core dispatch table
+    // (runDispatch handles it before this switch). Removed from here.
 
     case 'available_models': {
       if (Array.isArray(msg.models)) {

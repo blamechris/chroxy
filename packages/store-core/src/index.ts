@@ -449,6 +449,7 @@ export {
   OTHER_OPTION_LABEL,
   resolveSessionId,
   handleModelChanged,
+  handleModelChangedPatch,
   handlePermissionModeChanged,
   handleAvailablePermissionModes,
   handleSessionUpdated,
