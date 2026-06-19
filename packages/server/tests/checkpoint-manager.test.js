@@ -5,12 +5,13 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { CheckpointManager } from '../src/checkpoint-manager.js'
-import { GIT } from './test-helpers.js'
+import { GIT, disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 
 // Create a temporary git repo for testing
 function createTempGitRepo() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-cp-test-'))
   execFileSync(GIT, ['init'], { cwd: dir })
+  disableRepoAutoGc(dir) // #6075: stop background gc racing the teardown rmSync
   execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: dir })
   execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: dir })
   writeFileSync(join(dir, 'file.txt'), 'initial content')
@@ -36,8 +37,8 @@ describe('CheckpointManager', () => {
   })
 
   afterEach(() => {
-    rmSync(gitDir, { recursive: true, force: true })
-    try { rmSync(tmpCheckpointsDir, { recursive: true, force: true }) } catch {}
+    rmSync(gitDir, RM_RETRY)
+    try { rmSync(tmpCheckpointsDir, RM_RETRY) } catch {}
   })
 
   it('creates a checkpoint with metadata', async () => {

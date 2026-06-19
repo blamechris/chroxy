@@ -15,6 +15,7 @@ import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
+import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 import {
   isPidAlive,
   parsePid,
@@ -134,6 +135,7 @@ describe('worktree-gc integration (real git repo)', () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'chroxy-wtgc-'))
     git(repo, ['init', '--initial-branch=main', '.'])
+    disableRepoAutoGc(repo) // #6075: stop background gc racing the teardown rmSync
     git(repo, ['config', 'user.email', 'test@test'])
     git(repo, ['config', 'user.name', 'Test'])
     git(repo, ['commit', '--allow-empty', '-m', 'init'])
@@ -141,7 +143,7 @@ describe('worktree-gc integration (real git repo)', () => {
   })
 
   afterEach(() => {
-    rmSync(repo, { recursive: true, force: true })
+    rmSync(repo, RM_RETRY)
   })
 
   it('plans: reclaim clean+dead-pid, skip dirty/live/no-pid/unlocked, prune dir-gone', () => {
@@ -416,6 +418,7 @@ describe('worktree-gc CLI (runWorktreeGc against a real repo)', () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'chroxy-wtgc-cli-'))
     git(repo, ['init', '--initial-branch=main', '.'])
+    disableRepoAutoGc(repo) // #6075: stop background gc racing the teardown rmSync
     git(repo, ['config', 'user.email', 'test@test'])
     git(repo, ['config', 'user.name', 'Test'])
     git(repo, ['commit', '--allow-empty', '-m', 'init'])
@@ -428,7 +431,7 @@ describe('worktree-gc CLI (runWorktreeGc against a real repo)', () => {
     git(repo, ['worktree', 'lock', '--reason', `claude agent a2 (pid ${DEAD_PID})`, dirtyDead])
   })
 
-  afterEach(() => rmSync(repo, { recursive: true, force: true }))
+  afterEach(() => rmSync(repo, RM_RETRY))
 
   it('dry-run (default) reports reclaimable and deletes nothing', async () => {
     const { runWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
@@ -490,6 +493,7 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
     repo = join(root, 'project-a')
     mkdirSync(repo, { recursive: true })
     git(repo, ['init', '--initial-branch=main', '.'])
+    disableRepoAutoGc(repo) // #6075: stop background gc racing the teardown rmSync
     git(repo, ['config', 'user.email', 'test@test'])
     git(repo, ['config', 'user.name', 'Test'])
     git(repo, ['commit', '--allow-empty', '-m', 'init'])
@@ -498,7 +502,7 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
     git(repo, ['worktree', 'lock', '--reason', `claude agent a1 (pid ${DEAD_PID})`, cleanDead])
   })
 
-  afterEach(() => rmSync(root, { recursive: true, force: true }))
+  afterEach(() => rmSync(root, RM_RETRY))
 
   it('discovers repos under config.controlRoomRoot when no --repo is given', async () => {
     const { collectWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
@@ -555,6 +559,7 @@ describe('sweepOrphanChroxyWorktrees (real git repo)', () => {
   beforeEach(() => {
     repo = mkdtempSync(join(tmpdir(), 'chroxy-cwt-repo-'))
     git(repo, ['init', '--initial-branch=main', '.'])
+    disableRepoAutoGc(repo) // #6075: stop background gc racing the teardown rmSync
     git(repo, ['config', 'user.email', 'test@test'])
     git(repo, ['config', 'user.name', 'Test'])
     git(repo, ['commit', '--allow-empty', '-m', 'init'])
@@ -562,7 +567,7 @@ describe('sweepOrphanChroxyWorktrees (real git repo)', () => {
   })
 
   afterEach(() => {
-    rmSync(repo, { recursive: true, force: true })
+    rmSync(repo, RM_RETRY)
     rmSync(base, { recursive: true, force: true })
   })
 

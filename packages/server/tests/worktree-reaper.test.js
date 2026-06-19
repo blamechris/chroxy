@@ -13,6 +13,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
+import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 import { reapWorktrees, maybeAutoReapWorktrees, startPeriodicAutoReap } from '../src/worktree-reaper.js'
 
 const LIVE_PID = 4100002
@@ -43,6 +44,7 @@ describe('worktree-reaper', () => {
     repo = join(root, 'proj')
     mkdirSync(repo, { recursive: true })
     git(repo, ['init', '--initial-branch=main', '.'])
+    disableRepoAutoGc(repo) // #6075: stop background gc racing the teardown rmSync
     git(repo, ['config', 'user.email', 'test@test'])
     git(repo, ['config', 'user.name', 'Test'])
     git(repo, ['commit', '--allow-empty', '-m', 'init'])
@@ -58,7 +60,7 @@ describe('worktree-reaper', () => {
     git(repo, ['worktree', 'lock', '--reason', `claude agent a3 (pid ${LIVE_PID})`, live])
   })
 
-  afterEach(() => rmSync(root, { recursive: true, force: true }))
+  afterEach(() => rmSync(root, RM_RETRY))
 
   it('reapWorktrees reclaims clean+dead, preserves dirty + live', async () => {
     const summary = await reapWorktrees({ repos: [{ name: 'proj', path: repo }], planDeps, yieldFn })
