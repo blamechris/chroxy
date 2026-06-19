@@ -152,3 +152,59 @@ describe('InputBar imperative draft ownership (#5556)', () => {
     expect(renderCount).toBe(afterFirst);
   });
 });
+
+describe('InputBar send-while-streaming un-gate (#5938)', () => {
+  // findByProps throws on 0 or >1; it collapses composite+host duplicates to the
+  // single component, so it's the reliable presence/absence probe here.
+  function present(tree: renderer.ReactTestRenderer, id: string): boolean {
+    try { tree.root.findByProps({ testID: id }); return true; } catch { return false; }
+  }
+
+  it('shows ONLY the Send button when idle', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<InputBar {...baseProps} isStreaming={false} onChangeText={noop} />);
+    });
+    expect(present(tree, 'chat-send-button')).toBe(true);
+    expect(present(tree, 'chat-stop-button')).toBe(false);
+  });
+
+  it('shows BOTH Send and Stop while streaming (so a mid-turn send can queue)', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<InputBar {...baseProps} isStreaming={true} onChangeText={noop} />);
+    });
+    // Send stays available → routes to the outgoing queue.
+    expect(present(tree, 'chat-send-button')).toBe(true);
+    // Stop is alongside it → interrupts the live turn.
+    expect(present(tree, 'chat-stop-button')).toBe(true);
+  });
+
+  it('the streaming Send button is enabled and fires onSend (enqueue path)', () => {
+    const onSend = jest.fn();
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<InputBar {...baseProps} isStreaming={true} onSend={onSend} onChangeText={noop} />);
+    });
+    const send = tree.root.findByProps({ testID: 'chat-send-button' });
+    expect(send.props.accessibilityState?.disabled).toBeFalsy();
+    // The label flips to "Queue message" mid-turn for clarity.
+    expect(send.props.accessibilityLabel).toBe('Queue message');
+    act(() => { send.props.onPress(); });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+
+  it('Enter-to-send stays wired while streaming (onSubmitEditing fires onSend)', () => {
+    const onSend = jest.fn();
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} isStreaming={true} enterToSend onSend={onSend} onChangeText={noop} />,
+      );
+    });
+    const input = getTextInput(tree);
+    expect(input.props.onSubmitEditing).toBeDefined();
+    act(() => { input.props.onSubmitEditing(); });
+    expect(onSend).toHaveBeenCalledTimes(1);
+  });
+});

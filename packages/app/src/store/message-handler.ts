@@ -2413,9 +2413,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             // Reuse existing response message (reconnect replay dedup)
             return { streamingMessageId: out.streamingMessageId };
           }
+          // #5938 — insert the new assistant message BEFORE any trailing queued
+          // follow-up bubbles. A message queued during the pending window (before
+          // this stream_start) was appended at the end; without this it would sit
+          // ABOVE the response it precedes (wrong chronology) and stay there after
+          // flush. Queue-aware only: with no queued bubbles the index is the array
+          // end, so the result is byte-identical to the plain append.
+          const base = filterThinking(ss.messages);
+          const queuedIdSet = new Set(
+            (ss.queuedMessages ?? [])
+              .map((q) => q.clientMessageId)
+              .filter((id): id is string => !!id),
+          );
+          let insertAt = base.length;
+          while (insertAt > 0 && queuedIdSet.has(base[insertAt - 1].id)) insertAt--;
           return {
             streamingMessageId: out.streamingMessageId,
-            messages: [...filterThinking(ss.messages), out.newMessage!],
+            messages: [...base.slice(0, insertAt), out.newMessage!, ...base.slice(insertAt)],
           };
         });
       }

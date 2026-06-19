@@ -168,10 +168,17 @@ import {
   RECONNECT_MAX_RUNG,
   // #5537 — shared LAN→tunnel fast-fallback decision for the reconnect ladder.
   selectReconnectEndpoint,
+  // #5938 (epic #5935 slice ③) — optimistic outgoing-queue helpers for the
+  // send-while-streaming path. The server is authoritative (it echoes
+  // message_queued / message_dequeued, reconciled by the shared dispatch
+  // table); these only seed/clear the local bubble so the queued state renders
+  // immediately without waiting on the round-trip.
+  enqueueOptimisticQueuedMessage,
+  removeQueuedMessage,
   type ProbeResult,
   type ConnectEndpoint,
 } from '@chroxy/store-core';
-import type { InputSettings } from '@chroxy/store-core';
+import type { InputSettings, QueuedSessionMessage } from '@chroxy/store-core';
 import { setCallback as setImperativeCallback, getCallback, clearAllCallbacks } from './imperative-callbacks';
 import { useMultiClientStore } from './multi-client';
 import { useWebStore } from './web';
@@ -343,6 +350,12 @@ export const selectLastResultDuration = (s: ConnectionState): number | null =>
   activeSession(s)?.lastResultDuration ?? null;
 export const selectIsIdle = (s: ConnectionState): boolean =>
   activeSession(s)?.isIdle ?? true;
+// #5938 — the active session's outgoing queue (messages sent mid-turn, awaiting
+// flush). Stable empty fallback so an idle/empty session keeps a referentially
+// constant value and never churns the selector.
+const EMPTY_QUEUED: QueuedSessionMessage[] = [];
+export const selectQueuedMessages = (s: ConnectionState): QueuedSessionMessage[] =>
+  activeSession(s)?.queuedMessages ?? EMPTY_QUEUED;
 
 // Search request tracking — prevents stale timeout/response races
 let searchNonce = 0;
@@ -1593,6 +1606,30 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       timestamp: Date.now(),
     };
 
+    // #5938 (epic #5935 slice ③) — send-while-streaming: the live turn already
+    // owns the thinking indicator + streamingMessageId, so a queued follow-up
+    // must NOT re-arm either (that would replace the in-flight turn's spinner
+    // and reset its stream id). Instead append the user bubble and seed an
+    // optimistic `'pending'` queue entry so it renders with a "Queued" badge
+    // immediately; the server's message_queued/message_dequeued (reconciled by
+    // the shared dispatch table) flips it to confirmed and clears it on flush.
+    // No safety-net timer either — the entry's lifecycle is the queue's, not a
+    // stream-stall window. Mirrors the dashboard's addUserMessage({ queued }).
+    if (opts?.queued) {
+      const activeId = get().activeSessionId;
+      if (activeId && get().sessionStates[activeId]) {
+        updateActiveSession((ss) => ({
+          messages: [...ss.messages, userMsg],
+          queuedMessages: enqueueOptimisticQueuedMessage(ss.queuedMessages ?? [], {
+            clientMessageId: userMsg.id,
+            text,
+            queuedAt: Date.now(),
+          }),
+        }));
+      }
+      return;
+    }
+
     // #5633: capture the session this optimistic turn belongs to AT ARM TIME.
     // The old safety net re-read `get().activeSessionId` when the timer FIRED,
     // so switching sessions (or a legitimately slow stream_start on cellular)
@@ -1696,12 +1733,54 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket, activeSessionId } = get();
     const payload: Record<string, unknown> = { type: 'interrupt' };
     if (activeSessionId) payload.sessionId = activeSessionId;
+    // #5938 — Stop clears the outgoing queue too (server policy #5936: a
+    // deliberate interrupt cancels pending follow-ups rather than auto-firing
+    // them). Drop the queued bubbles + entries optimistically so they don't
+    // linger as phantom "sent" messages; the server's per-item
+    // message_dequeued{interrupted} then no-ops against the cleared queue.
+    if (activeSessionId && get().sessionStates[activeSessionId]) {
+      const queued = get().sessionStates[activeSessionId].queuedMessages ?? [];
+      if (queued.length > 0) {
+        const queuedIds = new Set(queued.map((q) => q.clientMessageId).filter((id): id is string => !!id));
+        updateSession(activeSessionId, (ss) => ({
+          queuedMessages: [],
+          messages: ss.messages.filter((m) => !queuedIds.has(m.id)),
+        }));
+      }
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticMedium();
       wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('interrupt', payload);
+  },
+
+  // #5938 (#5943) — cancel one still-queued follow-up before it flushes. Unlike
+  // sendInput, this is NOT queued offline: the server EXPIRES the outgoing queue
+  // when the socket drops, so a buffered cancel would drain into the void on
+  // reconnect. Refuse it while disconnected and optimistically drop the local
+  // bubble; the server's message_dequeued { reason: 'cancelled' } is idempotent
+  // with the removal (handled by the shared dispatch table). Mirrors the
+  // dashboard's sendCancelQueued.
+  sendCancelQueued: (clientMessageId: string, sessionId?: string) => {
+    const { socket, activeSessionId } = get();
+    const sid = sessionId ?? activeSessionId;
+    if (!(socket && socket.readyState === WebSocket.OPEN)) return false;
+    const payload: Record<string, unknown> = { type: 'cancel_queued', clientMessageId };
+    if (sid) payload.sessionId = sid;
+    if (sid && get().sessionStates[sid]) {
+      updateSession(sid, (ss) => ({
+        queuedMessages: removeQueuedMessage(ss.queuedMessages ?? [], clientMessageId),
+        // #5938 — also drop the optimistic bubble (its id IS the clientMessageId);
+        // a cancelled message was never sent, so it must not linger as a phantom
+        // "sent" bubble once the queued badge clears.
+        messages: ss.messages.filter((m) => m.id !== clientMessageId),
+      }));
+    }
+    hapticLight();
+    wsSend(socket, payload);
+    return 'sent';
   },
 
   sendPermissionResponse: (requestId: string, decision: string) => {

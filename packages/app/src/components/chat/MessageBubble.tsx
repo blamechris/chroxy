@@ -73,8 +73,16 @@ export function buildPromptSessionLabel(
   return provider ? `${name} · ${provider}` : name;
 }
 
-function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
+function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, onSubmitMultiQuestion, allowMultiQuestion, allowSingleMultiSelect, isSelected, isSelecting, onLongPress, onPress, onOpenDetail, onImagePress, onRetryStreamStall, getInitialExpanded, onExpandedChange }: {
   message: ChatMessage;
+  /**
+   * #5938 — true when this `user_input` bubble was sent mid-turn and is sitting
+   * in the outgoing queue (awaiting the current turn's completion). Renders a
+   * "Queued" badge + cancel affordance under the message body.
+   */
+  queued?: boolean;
+  /** #5938 — cancel this queued follow-up by its message id before it flushes. */
+  onCancelQueued?: (id: string) => void;
   onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
   /**
    * #4973 — submit handler for the multi-question form. Fires with the
@@ -452,6 +460,28 @@ function MessageBubbleImpl({ message, onSelectOption, onSubmitMultiQuestion, all
           ))}
         </View>
       )}
+      {/* #5938 — queued follow-up: a "Queued" badge + cancel affordance under
+          a user bubble sent mid-turn. The server flushes it when the current
+          turn completes; tapping × cancels it before then. Only on user bubbles
+          flagged queued by ChatView (via the per-session queue). */}
+      {isUser && queued && (
+        <View style={styles.queuedRow} testID={`msg-queued-${message.id}`}>
+          <Text style={styles.queuedLabel}>Queued</Text>
+          {onCancelQueued && (
+            <TouchableOpacity
+              onPress={() => onCancelQueued(message.id)}
+              // #5938 — pad the tap target to ~44pt (iOS HIG): the "Cancel"
+              // text is ~16pt tall, so ≥14pt of vertical hitSlop clears the bar.
+              hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}
+              accessibilityRole="button"
+              accessibilityLabel="Cancel queued message"
+              testID={`msg-queued-cancel-${message.id}`}
+            >
+              <Text style={styles.queuedCancel}>Cancel</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
       {showDisconnectedAnswerHint && (
         <Text testID="prompt-disconnected-hint" style={styles.promptDisconnectedHint}>
           Disconnected — reconnect to respond
@@ -694,6 +724,10 @@ export const MessageBubble = React.memo(MessageBubbleImpl, (prev, next) => {
     // bubble keeps stale gating (the dashboard re-renders via useMessageRenderer's
     // deps; the app relies on this comparator).
     prev.allowSingleMultiSelect === next.allowSingleMultiSelect &&
+    // #5938 — re-render when the queued flag flips (badge appears/clears on
+    // enqueue/flush) or the cancel handler's presence changes.
+    prev.queued === next.queued &&
+    (prev.onCancelQueued == null) === (next.onCancelQueued == null) &&
     (prev.onRetryStreamStall == null) === (next.onRetryStreamStall == null)
   );
 });
@@ -712,6 +746,26 @@ const styles = StyleSheet.create({
     alignSelf: 'flex-end',
     borderColor: COLORS.accentBlueBorder,
     borderWidth: 1,
+  },
+  // #5938 — queued-follow-up affordance under a user bubble.
+  queuedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    gap: 10,
+    marginTop: 6,
+  },
+  queuedLabel: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.6,
+  },
+  queuedCancel: {
+    color: COLORS.accentRed,
+    fontSize: 12,
+    fontWeight: '600',
   },
   attachmentRow: {
     flexDirection: 'row',

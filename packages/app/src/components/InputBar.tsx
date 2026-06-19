@@ -330,7 +330,9 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           onChangeText={handleChangeText}
           // When enterToSend is true, multiline is false and onSubmitEditing fires on Enter.
           // When enterToSend is false, multiline is true so onSubmitEditing never fires.
-          onSubmitEditing={enterToSend && !isStreaming && !disabled ? onSend : undefined}
+          // #5938 — Enter sends EVEN while streaming now; onSend routes a
+          // mid-turn message to the outgoing queue (the send-while-busy path).
+          onSubmitEditing={enterToSend && !disabled ? onSend : undefined}
           blurOnSubmit={false}
           multiline={!enterToSend}
           autoCapitalize={viewMode === 'chat' ? 'sentences' : 'none'}
@@ -387,7 +389,10 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
             </Animated.View>
           </TouchableOpacity>
         )}
-        {isStreaming ? (
+        {/* #5938 — during a turn, BOTH controls show: Stop interrupts the live
+            turn, Send queues a follow-up that flushes when the turn completes.
+            When idle, only Send renders. */}
+        {isStreaming && (
           <TouchableOpacity
             style={[styles.interruptButton, disabled && styles.interruptButtonDisabled]}
             onPress={onInterrupt}
@@ -395,22 +400,22 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
             accessibilityRole="button"
             accessibilityLabel="Interrupt Claude"
             accessibilityState={a11yDisabled}
+            testID="chat-stop-button"
           >
             <Icon name="stop" size={16} color={COLORS.textPrimary} />
           </TouchableOpacity>
-        ) : (
-          <TouchableOpacity
-            style={[styles.sendButton, disabled && styles.sendButtonDisabled]}
-            onPress={onSend}
-            disabled={disabled}
-            accessibilityRole="button"
-            accessibilityLabel="Send message"
-            accessibilityState={a11yDisabled}
-            testID="chat-send-button"
-          >
-            <Icon name="arrowUp" size={20} color={COLORS.textPrimary} />
-          </TouchableOpacity>
         )}
+        <TouchableOpacity
+          style={[styles.sendButton, disabled && styles.sendButtonDisabled]}
+          onPress={onSend}
+          disabled={disabled}
+          accessibilityRole="button"
+          accessibilityLabel={isStreaming ? 'Queue message' : 'Send message'}
+          accessibilityState={a11yDisabled}
+          testID="chat-send-button"
+        >
+          <Icon name="arrowUp" size={20} color={COLORS.textPrimary} />
+        </TouchableOpacity>
       </View>
     </View>
   );
