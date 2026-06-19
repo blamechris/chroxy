@@ -43,6 +43,21 @@ let connectionCounter = 0
 // the flag stays consumed/unset, and reconnect.yaml fails at the assertion.
 let sawSimulateDisconnect = false
 
+// #5699: timed reconnect-hold. `simulate-disconnect-hold` drops the socket AND
+// makes the HTTP health endpoint return 503 for RECONNECT_HOLD_MS, so the app's
+// pre-WS health check keeps failing and the reconnect ladder stays in the
+// `reconnecting` phase — a STABLE disconnected window the
+// permission-disconnected-noop flow can assert against. The plain
+// `simulate-disconnect` window is ~1s (the mock health stays 200, so the app
+// re-dials almost immediately — see reconnect.yaml's "~1-in-3 catch rate"
+// note), too racy to tap a button inside. The hold self-releases (health 200
+// again) well before the ladder's 10-rung give-up (~59s → terminal
+// server_down), so the app auto-reconnects and the flow leaves the app usable
+// for the next run-all flow. reconnectHoldUntil is an absolute epoch-ms
+// deadline; 0 means "no hold active".
+const RECONNECT_HOLD_MS = 10000
+let reconnectHoldUntil = 0
+
 // #5469: per-connection counter for `show-stream-stall` hits.
 // On the SECOND trigger (within the same connection) the mock emits the
 // stall error with a distinguishable detail ("stall re-emission #2") and
@@ -134,6 +149,14 @@ function send(ws, msg) {
 
 const httpServer = createServer((req, res) => {
   if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+    // #5699: while a reconnect-hold is active, fail health so the app's pre-WS
+    // health check keeps the reconnect ladder in `reconnecting` (stable
+    // disconnected window for permission-disconnected-noop.yaml).
+    if (Date.now() < reconnectHoldUntil) {
+      res.writeHead(503, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify({ status: 'down', reason: 'reconnect-hold' }))
+      return
+    }
     res.writeHead(200, { 'Content-Type': 'application/json' })
     res.end(JSON.stringify({ status: 'ok', mode: 'cli', hostname: 'mock-server', version: '0.1.0-test' }))
     return
@@ -515,6 +538,22 @@ wss.on('connection', (ws) => {
           sawSimulateDisconnect = true
           setTimeout(() => {
             console.log('[mock] simulate-disconnect — terminating WS')
+            try { ws.terminate() } catch {}
+          }, 1000)
+          break
+        }
+
+        // #5699: like simulate-disconnect, but ALSO holds the HTTP health
+        // endpoint down (503) for RECONNECT_HOLD_MS so the reconnect ladder
+        // can't re-dial immediately — a stable disconnected window the
+        // permission-disconnected-noop flow taps a permission button inside.
+        // The hold self-releases so the app auto-reconnects afterwards.
+        if (text.trim() === 'simulate-disconnect-hold') {
+          reconnectHoldUntil = Date.now() + RECONNECT_HOLD_MS
+          setTimeout(() => {
+            console.log(
+              `[mock] simulate-disconnect-hold — terminating WS; health 503 for ${RECONNECT_HOLD_MS}ms`,
+            )
             try { ws.terminate() } catch {}
           }, 1000)
           break

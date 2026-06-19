@@ -122,3 +122,13 @@ name: All E2E flows
 # encrypted assistant message round-trip. See key-exchange.yaml header
 # for on-device verification notes and assumptions.
 - runFlow: key-exchange.yaml
+
+# Flow 22: Permission tap while disconnected is a no-op (#5699) — pins
+# the last acceptance criterion of the optimistic-action-loss fix:
+# seeds an AskUserQuestion prompt, drops + holds the connection down
+# (mock 'simulate-disconnect-hold' fails /health for ~10s), asserts the
+# `prompt-disconnected-hint` feedback, taps Approve, and asserts the
+# bubble is STILL unanswered (hint persists). The non-vacuity hinge —
+# a regression that optimistically answered the tap would clear the
+# hint and fail the flow. Recovers via the self-releasing hold.
+- runFlow: permission-disconnected-noop.yaml
