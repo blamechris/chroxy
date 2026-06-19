@@ -14,6 +14,7 @@ import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
 import { SessionManager, WorktreeError } from '../src/session-manager.js'
 import { GIT } from '../src/git.js'
+import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
 // Register a no-op stub provider (avoids importing real SDK/CLI sessions)
@@ -74,6 +75,7 @@ before(async () => {
 function makeGitRepo() {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-wt-test-'))
   execFileSync(GIT, ['init', '--initial-branch=main', dir], { stdio: 'pipe' })
+  disableRepoAutoGc(dir) // #6075: stop background gc racing the teardown rmSync
   execFileSync(GIT, ['-C', dir, 'config', 'user.email', 'test@chroxy.test'], { stdio: 'pipe' })
   execFileSync(GIT, ['-C', dir, 'config', 'user.name', 'Test'], { stdio: 'pipe' })
   // worktree add requires at least one commit so HEAD is valid
@@ -111,7 +113,7 @@ describe('SessionManager worktree isolation', () => {
   })
 
   afterEach(() => {
-    rmSync(gitRepo, { recursive: true, force: true })
+    rmSync(gitRepo, RM_RETRY)
   })
 
   it('creates a worktree directory when worktree:true is passed', () => {
@@ -402,7 +404,7 @@ describe('SessionManager _removeWorktree fallback (#2460)', () => {
   })
 
   afterEach(() => {
-    rmSync(gitRepo, { recursive: true, force: true })
+    rmSync(gitRepo, RM_RETRY)
     rmSync(externalWorktreeBase, { recursive: true, force: true })
   })
 
@@ -479,7 +481,7 @@ describe('SessionManager isolation derivation (#2475)', () => {
   })
 
   afterEach(() => {
-    rmSync(gitRepo, { recursive: true, force: true })
+    rmSync(gitRepo, RM_RETRY)
   })
 
   it('default session has isolation "none"', () => {

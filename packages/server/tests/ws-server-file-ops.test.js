@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
-import { createMockSession, createMockSessionManager, waitFor, GIT } from './test-helpers.js'
+import { createMockSession, createMockSessionManager, waitFor, GIT, disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
@@ -1074,6 +1074,7 @@ describe('get_diff handler', () => {
     tempDir = mkdtempSync(join(tmpdir(), 'chroxy-diff-test-'))
     // Initialize a git repo in the temp directory
     execFileSync(GIT, ['init'], { cwd: tempDir, stdio: 'pipe' })
+    disableRepoAutoGc(tempDir) // #6075: stop background gc racing the teardown rmSync
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tempDir, stdio: 'pipe' })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tempDir, stdio: 'pipe' })
     // Create an initial commit
@@ -1087,7 +1088,7 @@ describe('get_diff handler', () => {
       server.close()
       server = null
     }
-    rmSync(tempDir, { recursive: true, force: true })
+    rmSync(tempDir, RM_RETRY)
   })
 
   async function createDiffTestServer() {

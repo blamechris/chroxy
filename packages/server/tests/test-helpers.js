@@ -1,9 +1,31 @@
 import { EventEmitter } from 'node:events'
+import { execFileSync } from 'node:child_process'
 import { WsClientManager } from '../src/ws-client-manager.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
+import { GIT as _GIT } from '../src/git.js'
 
 // Re-export GIT from the source module so test files can import it from here
 export { GIT } from '../src/git.js'
+
+// #6075: many server tests create a throwaway git repo and rm it in teardown.
+// git spawns a DETACHED background `gc --auto` / `maintenance run --auto` after
+// commits once loose-object thresholds are met; on a busy runner that process
+// keeps writing under .git AFTER our synchronous git commands return, racing
+// the recursive remove and surfacing as `ENOTEMPTY: rmdir '<dir>/.git'`. This
+// flaked Server Tests after they moved to the self-hosted Linux runner.
+//
+// Disable auto-gc/maintenance on the throwaway repo's OWN config (NOT process-
+// wide GIT_CONFIG_* env — that leaks into the code-under-test's git commands and
+// broke checkpoint tag ops). Call right after `git init`, before any commit.
+export function disableRepoAutoGc(dir) {
+  execFileSync(_GIT, ['-C', dir, 'config', 'gc.auto', '0'], { stdio: 'pipe' })
+  execFileSync(_GIT, ['-C', dir, 'config', 'maintenance.auto', 'false'], { stdio: 'pipe' })
+}
+
+// rmSync options that ride out the ENOTEMPTY/EBUSY teardown race window — Node's
+// rmSync retries on exactly those codes. Belt-and-suspenders alongside
+// disableRepoAutoGc(); also covers any non-gc holder (#6075).
+export const RM_RETRY = Object.freeze({ recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
 
 // Re-export the ctx-shape assert so handler tests can guard their mocks.
 export { assertCtxShape } from '../src/ws-handler-context.js'

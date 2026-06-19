@@ -5,6 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { Supervisor } from '../src/supervisor.js'
+import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 
 /**
  * Adversary A9 (2026-04-11 audit) — known-good-ref poisoning via
@@ -49,6 +50,7 @@ describe('Supervisor._rollbackToKnownGood — Adversary A9', () => {
     mkdirSync(chroxyDir)
 
     git(['init', '-q', '-b', 'main'], repoDir)
+    disableRepoAutoGc(repoDir) // #6075: stop background gc racing the teardown rmSync
     writeFileSync(join(repoDir, 'a.txt'), 'one')
     git(['add', 'a.txt'], repoDir)
     git(['commit', '-q', '-m', 'first'], repoDir)
@@ -79,7 +81,7 @@ describe('Supervisor._rollbackToKnownGood — Adversary A9', () => {
 
   after(() => {
     try { process.chdir(originalCwd) } catch {}
-    try { rmSync(tmpDir, { recursive: true, force: true }) } catch {}
+    try { rmSync(tmpDir, RM_RETRY) } catch {}
   })
 
   it('accepts a ref that matches a known-good-* tag', () => {
