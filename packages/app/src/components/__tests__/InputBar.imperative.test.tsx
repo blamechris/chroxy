@@ -207,4 +207,31 @@ describe('InputBar send-while-streaming un-gate (#5938)', () => {
     act(() => { input.props.onSubmitEditing(); });
     expect(onSend).toHaveBeenCalledTimes(1);
   });
+
+  // #6116 — the agent_busy-but-not-streaming window (isBusy && !isStreaming):
+  // the send queues (#6113), so the busy affordance must show even though no
+  // text is streaming yet.
+  it('shows Stop + "Queue message" + follow-up placeholder when busy pre-stream', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} isStreaming={false} isBusy={true} onChangeText={noop} />,
+      );
+    });
+    expect(present(tree, 'chat-stop-button')).toBe(true);
+    const send = tree.root.findByProps({ testID: 'chat-send-button' });
+    expect(send.props.accessibilityLabel).toBe('Queue message');
+    expect(getTextInput(tree).props.placeholder).toBe('Type to send follow-up…');
+  });
+
+  it('idle (not streaming, not busy) shows neither Stop nor the queue label', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} isStreaming={false} isBusy={false} onChangeText={noop} />,
+      );
+    });
+    expect(present(tree, 'chat-stop-button')).toBe(false);
+    expect(tree.root.findByProps({ testID: 'chat-send-button' }).props.accessibilityLabel).toBe('Send message');
+  });
 });

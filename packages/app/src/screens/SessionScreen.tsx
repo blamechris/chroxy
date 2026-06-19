@@ -1680,6 +1680,7 @@ export function SessionScreen() {
         enterToSend={enterToSend}
         onToggleEnterMode={handleToggleEnterMode}
         isStreaming={!!streamingMessageId}
+        isBusy={!isIdle}
         claudeReady={claudeReady}
         viewMode={viewMode}
         hasTerminal={hasTerminal}
