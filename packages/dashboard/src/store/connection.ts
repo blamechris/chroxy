@@ -3188,6 +3188,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         lastResultCost: cached.lastResultCost,
         lastResultDuration: cached.lastResultDuration,
         isIdle: cached.isIdle,
+        // #5731 T2: mirror the per-session primary-owner into the flat slot too.
+        // `primaryClientId` is a FLAT ConnectionState field (the presence/"who's
+        // driving" badge reads it flat), so omitting it here left the PREVIOUS
+        // session's owner bleeding into the newly-selected session's UI until a
+        // `primary_changed`/`session_role` re-synced it — cross-session bleed.
+        // (thinkingLevel / sessionRole are per-session-read from sessionStates,
+        // not flat, so they don't bleed through the flat slot.)
+        primaryClientId: cached.primaryClientId,
         sessionNotifications: filteredNotifications,
       });
     } else {
@@ -3215,6 +3223,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         lastResultCost: null,
         lastResultDuration: null,
         isIdle: seedIsIdle,
+        // #5731 T2: reset the flat primary-owner so the previous session's owner
+        // doesn't bleed through during the server round-trip (cross-session
+        // bleed). Re-syncs from primary_changed/session_role once the switch
+        // lands. (thinkingLevel / sessionRole are per-session-read, not flat.)
+        primaryClientId: null,
         sessionNotifications: filteredNotifications,
       });
     }
