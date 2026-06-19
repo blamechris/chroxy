@@ -1500,11 +1500,36 @@ function verifyServerIdentityOrRefuse(
     applyIdentityRefusal(ctx, decision.reason, decision.message);
     return { refused: true };
   }
-  // Connect — capture the pin to persist on first use; clear the pairing
-  // identity once it's been adopted (or wasn't needed).
-  const pinToPersist = decision.action === 'pin-and-connect' ? decision.identityKey : null;
+  // Proceed — clear the pairing identity once it's been adopted (or wasn't
+  // needed) and capture the pin to persist.
+  //
+  // NB: an if/else chain, NOT a switch — the protocol handler-coverage contract
+  // (packages/protocol/tests/handler-coverage.test.js) statically greps this
+  // file for `case '<x>':` and asserts every <x> is a ServerMessageType. A
+  // switch over `decision.action` would surface 'connect'/'rotate-pin'/... as
+  // bogus "uncovered message types". Same exhaustiveness, no false case hits.
   pendingPairingIdentityKey = null;
-  return { refused: false, pinToPersist };
+  if (decision.action === 'connect') {
+    // Verified against an existing pin, or an old/unpinned daemon — leave the
+    // stored record's pin untouched.
+    return { refused: false, pinToPersist: null };
+  }
+  if (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') {
+    // #5616 — TOFU first-use ('pin-and-connect') AND a forward-chained identity
+    // rotation ('rotate-pin', where the old pinned identity signed the new one)
+    // both persist the offered identity as the new pin. Without the explicit
+    // 'rotate-pin' arm a rotation would connect but drop the new pin
+    // (pinToPersist=null), silently failing to chain it forward (#5978).
+    return { refused: false, pinToPersist: decision.identityKey };
+  }
+  // Exhaustiveness guard (#5978): adding a KeyPinDecision variant without
+  // handling it above is a compile error here. At runtime (e.g. a version-skew
+  // discriminator that bypasses the compiler) fail CLOSED — refuse rather than
+  // return the raw object, which has no `refused` field and would make callers
+  // silently proceed without a pin.
+  const _exhaustive: never = decision;
+  void _exhaustive;
+  return { refused: true };
 }
 
 /**
