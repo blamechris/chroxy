@@ -292,7 +292,13 @@ describe('ClaudeTuiSession', () => {
       assert.ok(settings.hooks?.PreToolUse, 'PreToolUse hook present')
       assert.ok(settings.hooks?.PostToolUse, 'PostToolUse hook present')
       const stopCmd = settings.hooks.Stop[0].hooks[0].command
-      assert.match(stopCmd, /stop-\$\(uuidgen\)\.json/, 'Stop uses uuidgen for unique-per-turn names (mktemp + .json suffix breaks on BSD macOS)')
+      // Stop uses a $(...)-substituted unique name per turn (mktemp + .json
+      // suffix breaks on BSD macOS — see writeHookSettings note).
+      assert.match(stopCmd, /stop-\$\(uuidgen.*\)\.json/, 'Stop uses a $(...)-substituted unique-per-turn filename')
+      // #6075: uuidgen is absent on minimal Debian/Ubuntu containers, so the
+      // substitution MUST fall back to the kernel UUID source — otherwise every
+      // turn collides on `stop-.json` and the poller drops all but the last.
+      assert.match(stopCmd, /\/proc\/sys\/kernel\/random\/uuid/, 'uuid generation falls back to the kernel source when uuidgen is unavailable')
     })
 
     it('rejects + emits error if PTY exits during warmup (#5316)', async () => {

@@ -200,16 +200,25 @@ describe('directory listing', () => {
     await waitForMessage(messages, 'auth_ok', 2000)
     messages.length = 0
 
-    // Use this test file itself as a file path
-    const filePath = new URL(import.meta.url).pathname
-    send(ws, { type: 'list_directory', path: filePath })
+    // list_directory restricts to $HOME, so the file under test must live there.
+    // Using this test file's own path only worked when the repo happened to be
+    // under $HOME (a dev machine); in a CI container the repo is at /work and
+    // the home-restriction fired first, masking the not-a-directory check
+    // (#6075). Create a real file inside $HOME instead.
+    const homeTmpDir = mkdtempSync(join(homedir(), '.chx-fileops-test-'))
+    const filePath = join(homeTmpDir, 'afile.txt')
+    writeFileSync(filePath, 'x')
+    try {
+      send(ws, { type: 'list_directory', path: filePath })
 
-    const listing = await waitForMessage(messages, 'directory_listing', 2000)
-    assert.ok(listing, 'Should receive directory_listing')
-    assert.equal(listing.error, 'Not a directory')
-    assert.deepEqual(listing.entries, [])
-
-    ws.close()
+      const listing = await waitForMessage(messages, 'directory_listing', 2000)
+      assert.ok(listing, 'Should receive directory_listing')
+      assert.equal(listing.error, 'Not a directory')
+      assert.deepEqual(listing.entries, [])
+    } finally {
+      rmSync(homeTmpDir, { recursive: true, force: true })
+      ws.close()
+    }
   })
 
   it('filters hidden directories', async () => {
@@ -277,7 +286,13 @@ describe('directory listing', () => {
     assert.ok(listing, 'Should receive directory_listing')
     assert.equal(listing.error, null)
     assert.ok(listing.path, 'Should have a resolved path')
-    assert.ok(listing.entries.length > 0, 'Home directory should have entries')
+    // The empty path must default to $HOME. Assert the resolved path IS the
+    // home directory rather than that home is non-empty — a fresh CI container
+    // home (/root) can be empty once hidden entries are filtered, which made
+    // the old entries>0 check fail there (#6075).
+    assert.equal(realpathSync(listing.path), realpathSync(homedir()),
+      'empty path should resolve to the home directory')
+    assert.ok(Array.isArray(listing.entries), 'entries should be an array')
 
     ws.close()
   })

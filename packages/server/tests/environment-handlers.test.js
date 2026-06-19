@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { homedir } from 'node:os'
 import { featureHandlers as environmentHandlers } from '../src/handlers/feature-handlers.js'
 import { waitFor, nsCtx } from './test-helpers.js'
 
@@ -85,7 +86,12 @@ describe('create_environment handler', () => {
     const ctx = createMockCtx({ environmentManager: envManager })
 
     const handler = environmentHandlers.create_environment
-    handler(ws, client, { type: 'create_environment', name: 'test-env', cwd: process.cwd() }, ctx)
+    // Use the home directory as the cwd: validateCwdAllowed() requires the cwd
+    // to be within $HOME when no workspaceRoots are configured. process.cwd()
+    // is the repo, which is under $HOME on a dev machine but NOT in a CI
+    // container (repo at /work, home at /root) — that mismatch made the handler
+    // respond environment_error instead of environment_created (#6075).
+    handler(ws, client, { type: 'create_environment', name: 'test-env', cwd: homedir() }, ctx)
 
     // Handler is async (uses .then), wait for response
     await waitFor(() => ctx._sent.length >= 1, { label: 'environment_created response' })

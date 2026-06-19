@@ -74,13 +74,16 @@ jobs:
           fi
   server-tests:
     name: Server Tests
-    # Stays GitHub-hosted (#6046): RAM was ruled out — with the self-hosted
-    # runner at 24GB, 9 tests still fail on the ARM64 Linux container from
-    # genuine env differences (keychain rekey, create_environment /
-    # Docker-in-Docker, disk-cache paths, permission-hook pipeline,
-    # ws-file-ops + directory-listing fs perms). Making the server suite
-    # container-portable is tracked in #6075.
-    runs-on: ubuntu-24.04
+    # Moved to the self-hosted Linux pool (#6075). #6046 left this GitHub-hosted
+    # because 9 tests failed on the ARM64 Linux container from genuine env
+    # differences; #6075 made the suite container-portable (root bypasses POSIX
+    # perm bits → skip those asserts; tests that assumed the repo lives under
+    # $HOME now use $HOME-relative paths; the per-turn hook filenames fall back
+    # to /proc/sys/kernel/random/uuid when uuidgen is absent). Verified 0-fail
+    # on node:22-bookworm as root. Fork PRs still route to ubuntu-24.04 via
+    # runner-target (untrusted code never runs on the self-hosted machine).
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
     defaults:
       run:

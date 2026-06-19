@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { createModelsRegistry, canonicalStringify } from '../src/models.js'
 import { addLogListener, getLogLevel, removeLogListener, setLogLevel } from '../src/logger.js'
+import { POSIX_PERM_SKIP } from './test-helpers.js'
 
 describe('createModelsRegistry', () => {
   it('returns an object with all registry methods', () => {
@@ -427,10 +428,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     assert.equal(statSync(cachePath).mtimeMs, beforeMtime, 'disk file should not be rewritten on clean load')
   })
 
-  it('saveCache swallows write errors (returns false) on read-only parent', () => {
-    // POSIX-only: chmod bits don't map cleanly to Windows ACLs, where the
-    // invoking user often retains write permission regardless. Skip there.
-    if (process.platform === 'win32') return
+  it('saveCache swallows write errors (returns false) on read-only parent', { skip: POSIX_PERM_SKIP }, () => {
     chmodSync(dir, 0o500)
     try {
       const r = createModelsRegistry()
@@ -512,8 +510,7 @@ describe('silent failure logging (#2830)', () => {
     rmSync(dir, { recursive: true, force: true })
   })
 
-  it('saveCache failure logs a warn with the path and error', () => {
-    if (process.platform === 'win32') return
+  it('saveCache failure logs a warn with the path and error', { skip: POSIX_PERM_SKIP }, () => {
     chmodSync(dir, 0o500)
     try {
       const r = createModelsRegistry()
