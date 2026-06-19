@@ -35,7 +35,6 @@ name: PlanApprovalCard deny-feedback path
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 # Wait for the plan approval card to render.
 - extendedWaitUntil:
@@ -66,7 +65,6 @@ name: PlanApprovalCard deny-feedback path
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 # Card unmounts once plan state clears.
 - extendedWaitUntil:

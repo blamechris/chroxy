@@ -54,7 +54,6 @@ name: ChatView AskUserQuestion approve flow (#4697)
 
 # Drop the keyboard so the prompt bubble + option buttons aren't
 # covered by the input area.
-- hideKeyboard
 
 # Wait for the prompt bubble header to render. `approval-question-0`
 # is the canonical multi-question-friendly selector — for a single-

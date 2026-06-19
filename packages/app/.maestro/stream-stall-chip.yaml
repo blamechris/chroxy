@@ -59,7 +59,6 @@ name: ChatView StreamStallChip render + retry (#4507)
     id: "chat-send-button"
 
 # Drop the keyboard so the chip + Retry button aren't covered.
-- hideKeyboard
 
 # Wait for the chip itself. testID set on the outer Pressable in
 # StreamStallChip.tsx.

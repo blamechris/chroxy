@@ -40,7 +40,6 @@ name: ChatView TodoWrite tool rendering
 # Dismiss the keyboard so the activity group's bounds line up with the
 # unscrolled screen — the keyboard pushes content up by ~50% and would
 # move the entry row out from under our point-tap.
-- hideKeyboard
 
 # Wait for the activity group to land. testID set on the outer View
 # in ActivityGroup.tsx (the View wraps the header + body).

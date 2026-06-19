@@ -35,7 +35,6 @@ name: PlanApprovalCard approve path
     id: "chat-send-button"
 
 # Dismiss the keyboard so the plan card sits where we expect on-screen.
-- hideKeyboard
 
 # Wait for the plan approval card to render — testID set on the outer
 # View in ChatView.tsx PlanApprovalCard. The card mounts via the

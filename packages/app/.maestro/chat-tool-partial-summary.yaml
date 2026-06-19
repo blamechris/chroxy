@@ -48,7 +48,6 @@ name: ChatView ToolBubble collapsed-preview field-priority (#4260)
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 # Wait for the activity group to land (mock server emits tool_start +
 # three tool_input_delta chunks; no tool_result — the bubble stays
