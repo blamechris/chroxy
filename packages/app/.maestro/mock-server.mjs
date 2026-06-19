@@ -13,6 +13,8 @@ const { encodeBase64, decodeBase64 } = naclUtil
 
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') || '9876', 10)
 const API_TOKEN = 'test-token-maestro'
+// #6019: opt-in token that steers a connection onto the encrypted handshake.
+const ENCRYPTED_TOKEN = 'test-token-maestro-encrypted'
 let seqCounter = 0
 // #4201: per-trigger counter so repeated `show-todos` inputs don't collide
 // on a single fixed id (which would cause React-key duplicates + stuck
@@ -199,7 +201,11 @@ wss.on('connection', (ws) => {
 
     switch (msg.type) {
       case 'auth': {
-        if (msg.token !== API_TOKEN) {
+        // #6019: accept the encryption opt-in token too. A client connecting
+        // with `test-token-maestro-encrypted` is steered onto the
+        // encryption:'required' handshake path below; the standard token keeps
+        // encryption disabled so all other flows are unaffected.
+        if (msg.token !== API_TOKEN && msg.token !== ENCRYPTED_TOKEN) {
           send(ws, { type: 'auth_fail', reason: 'invalid token' })
           ws.close()
           return
@@ -239,7 +245,7 @@ wss.on('connection', (ws) => {
         // is not sending eagerPublicKey — check the discrete fallback path in
         // the app (which sends a standalone `key_exchange` message) and ensure
         // the mock's `case 'key_exchange'` handler below resolves it.
-        const useEncryption = (msg.token === 'test-token-maestro-encrypted')
+        const useEncryption = (msg.token === ENCRYPTED_TOKEN)
 
         let eagerSharedKey = null
         let eagerServerPublicKey = null
@@ -967,7 +973,15 @@ wss.on('connection', (ws) => {
         const messageId = `msg-${Date.now()}`
         secureSend(ws, { type: 'stream_start', messageId, sessionId: 'mock-sess-1' })
         secureSend(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
-        const response = `I received your message: "${text}". This is a mock response for E2E testing.`
+        // #6019: prefix the reply with a marker ONLY when the session is actually
+        // encrypted. This is what makes key-exchange.yaml non-vacuous — the
+        // marker round-trips only if: encrypted token accepted → handshake →
+        // app encrypts the input → mock DECRYPTS it (reaching this handler) →
+        // mock re-encrypts the reply → app decrypts + renders. Asserting the
+        // plain echo of the user's own input would pass on an unencrypted
+        // session too (the bug this replaces).
+        const encMarker = encryptedSession ? 'encrypted-session-ok ' : ''
+        const response = `${encMarker}I received your message: "${text}". This is a mock response for E2E testing.`
         // Send as a single delta for simplicity
         secureSend(ws, { type: 'stream_delta', messageId, delta: response, sessionId: 'mock-sess-1' })
         secureSend(ws, { type: 'stream_end', messageId, sessionId: 'mock-sess-1' })

@@ -88,17 +88,25 @@ name: E2E key exchange eager handshake (#6019)
       text: "Connect to Chroxy|Chat"
     timeout: 30000
 
-# If we auto-connected to a stale saved server, bail out to ConnectScreen.
+# The app auto-connects to the previously-used server here: on iOS
+# `clearState: true` wipes the app data container but NOT SecureStore
+# (expo-secure-store → keychain, which survives a data-clear), so the cached
+# server URL + STANDARD token are restored and the app lands on Chat. We MUST
+# return to ConnectScreen to re-connect with the ENCRYPTED token — otherwise the
+# flow would silently exercise the unencrypted path (the standard token keeps
+# encryption disabled). Tapping the header Disconnect routes back to ConnectScreen.
 - runFlow:
     when:
-      visible:
-        id: "reconnect-banner"
+      visible: "Chat"
     commands:
+      # The header Disconnect button renders the text "Disconnect" but carries
+      # accessibilityLabel="Disconnect and go back", which overrides the visible
+      # text in Maestro's matcher — so match the label, not "Disconnect".
       - tapOn:
           text: "Disconnect and go back"
       - extendedWaitUntil:
           visible: "Connect to Chroxy"
-          timeout: 8000
+          timeout: 10000
 
 # Connect using the encrypted token. This opts the mock into the
 # encryption:'required' path (the standard token keeps encryption:'disabled').
@@ -119,8 +127,10 @@ name: E2E key exchange eager handshake (#6019)
       - eraseText: 50
       - inputText: "test-token-maestro-encrypted"
 
-      - hideKeyboard
-
+      # Tap submit by testID directly — Maestro auto-scrolls to a testID, and a
+      # tapOn dismisses the keyboard as a side effect. (`hideKeyboard` is broken
+      # on the current Maestro CLI / iOS build — see #6089 — and a neutral
+      # coordinate tap risks hitting the QR/manual toggle.)
       - tapOn:
           id: "connect-submit"
 
@@ -153,13 +163,15 @@ name: E2E key exchange eager handshake (#6019)
 
 - hideKeyboard
 
-# Wait for the echo-response bubble from the mock server. The mock
-# default branch emits: `I received your message: "ping-encrypted".
-# This is a mock response for E2E testing.` — assert the phrase is
-# present in the chat to pin that the encrypted round-trip worked.
+# Assert the mock's `encrypted-session-ok` marker. The mock prefixes its
+# default reply with this string ONLY when the inbound input arrived on an
+# active encrypted session (i.e. it had to DECRYPT the frame to reach the
+# handler). A plain echo of "ping-encrypted" would also appear on an
+# UNENCRYPTED session (the user's own bubble + the mock's echo), so asserting
+# the marker — not the echo — is what makes this flow load-bearing for #6019.
 - extendedWaitUntil:
     visible:
-      text: ".*ping-encrypted.*"
+      text: ".*encrypted-session-ok.*"
     timeout: 15000
 
 - takeScreenshot: key-exchange-encrypted-roundtrip-confirmed
