@@ -504,6 +504,17 @@ export function ConnectScreen() {
         </View>
       )}
 
+      {/* #6089: a single terminal-state anchor for E2E. Rendered for every scan
+          outcome (servers found / empty / error all set scanCompleted), so the
+          Maestro lan-scan flow can wait on one environment-independent marker
+          instead of an `anyOf` of the per-outcome anchors (unsupported by the
+          current Maestro CLI). */}
+      {scanCompleted && (
+        // Must stay in the accessibility tree so Maestro can match it by
+        // testID — do NOT add accessibilityElementsHidden here.
+        <View testID="lan-scan-complete" style={{ height: 1, width: 1 }} />
+      )}
+
       {scanCompleted && discoveredServers.length === 0 && !scanning && (
         <View
           style={styles.discoveredSection}
