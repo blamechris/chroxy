@@ -16,6 +16,7 @@ import ActivityScreen from './screens/ActivityScreen';
 import { LockScreen } from './components/LockScreen';
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer';
 import { useConnectionStore } from './store/connection';
+import { disconnectWithQueueGuard } from './store/disconnectWithQueueGuard';
 import { useConnectionLifecycleStore } from './store/connection-lifecycle';
 import { setupNotificationResponseListener } from './notifications';
 import { useBiometricLock } from './hooks/useBiometricLock';
@@ -152,7 +153,7 @@ export default function App() {
                 title: sessionTitle,
                 headerRight: () => (
                   <TouchableOpacity
-                    onPress={() => useConnectionStore.getState().disconnect()}
+                    onPress={disconnectWithQueueGuard}
                     style={{ paddingLeft: 12 }}
                     accessibilityRole="button"
                     accessibilityLabel="Disconnect and go back"
