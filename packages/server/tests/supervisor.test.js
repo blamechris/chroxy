@@ -144,6 +144,10 @@ function createTestSupervisor(overrides = {}) {
     pidFilePath: join(tmpDir, 'supervisor.pid'),
     knownGoodFile: join(tmpDir, 'known-good-ref'),
     maxRestarts: overrides.maxRestarts ?? 3, // low for fast tests
+    // #6022: default the terminal-down grace to 0 so give-up tests exit on the
+    // next tick (preserving the prior exit-immediately timing). Tests that
+    // assert the terminal-down signal set their own grace.
+    terminalDownGraceMs: overrides.terminalDownGraceMs ?? 0,
     ...overrides,
   }
 
@@ -708,6 +712,57 @@ describe('Supervisor', () => {
       assert.equal(body.status, 'restarting')
       assert.equal(body.metrics.totalRestarts, 3)
       assert.equal(body.metrics.lastBackoffMs, 5000)
+    })
+
+    it('serves a terminal down status after giving up (#6022)', async () => {
+      // Large grace so the timer does not fire mid-test; we probe then clean up.
+      const { supervisor } = setup({ terminalDownGraceMs: 60000 })
+      supervisor._port = 0
+      supervisor._metrics.totalRestarts = 7
+      supervisor._metrics.consecutiveRestarts = 4
+
+      supervisor._serveTerminalDown()
+      assert.equal(supervisor._terminalDown, true)
+      assert.ok(supervisor._standbyServer !== null)
+
+      await new Promise((resolve) => {
+        if (supervisor._standbyServer.listening) return resolve()
+        supervisor._standbyServer.on('listening', resolve)
+      })
+
+      const addr = supervisor._standbyServer.address()
+      const res = await fetch(`http://127.0.0.1:${addr.port}/health`)
+      const body = await res.json()
+
+      // Explicit, non-transient terminal-down signal — distinct from 'restarting'.
+      assert.equal(res.status, 503)
+      assert.equal(body.status, 'down')
+      assert.equal(body.reason, 'supervisor_gave_up')
+      assert.equal(body.fatal, true)
+      assert.equal(body.metrics.totalRestarts, 7)
+      assert.equal(body.metrics.consecutiveRestarts, 4)
+
+      // The grace timer is still pending — has not exited yet.
+      assert.equal(supervisor._exitCalled, null)
+
+      // Clean up the pending grace timer + socket.
+      clearTimeout(supervisor._terminalDownTimer)
+      supervisor._terminalDownTimer = null
+      supervisor._stopStandbyServer()
+    })
+
+    it('exits(1) after the terminal-down grace window elapses (#6022)', async () => {
+      const { supervisor } = setup({ terminalDownGraceMs: 0 })
+      supervisor._port = 0
+
+      await new Promise((resolve) => {
+        supervisor.once('test_exit', resolve)
+        supervisor._serveTerminalDown()
+      })
+
+      assert.equal(supervisor._exitCalled, 1)
+      // The standby socket is released as part of the exit sequence.
+      assert.equal(supervisor._standbyServer, null)
     })
 
     it('stops standby server when child becomes ready', () => {
