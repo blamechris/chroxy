@@ -781,6 +781,140 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6134 (epic #5530) — containers_action: stop / restart / destroy a
+// chroxy-managed container or environment.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * #6134: per-environment in-flight guard for container lifecycle actions, keyed
+ * by environmentId. Independent of the integration-action bucket (different key
+ * space, different subprocess fan-out) — same string-keyed Map shape, entries
+ * deleted in the handler's `finally`, `.size` doubling as the global gauge.
+ */
+const containerActionInFlight = new Map()
+/** #6134: global cap on concurrent container actions (reject, never queue). */
+export const MAX_CONCURRENT_CONTAINER_ACTIONS = 2
+
+/**
+ * #6134: shared CONTAINER_ACTION_FAILED reply. Mirrors `integrationActionError`:
+ * a `session_error` envelope with the stable code, a `reason` discriminator, and
+ * the request's correlation fields (`action` / `environmentId` / `requestId`)
+ * echoed so the dashboard can clear the exact row's pending state.
+ */
+function containerActionError(ws, ctx, msg, reason, message) {
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    code: 'CONTAINER_ACTION_FAILED',
+    message,
+    reason,
+    action: typeof msg?.action === 'string' ? msg.action : null,
+    environmentId: typeof msg?.environmentId === 'string' ? msg.environmentId : null,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+  })
+}
+
+/** #6134: resulting status reported in the ack per action. */
+const CONTAINER_ACTION_FAILURE_REASON = {
+  stop: 'stop-failed',
+  restart: 'restart-failed',
+  destroy: 'destroy-failed',
+}
+
+/**
+ * #6134 (epic #5530) — `containers_action` handler. Stop / restart / destroy a
+ * chroxy-managed environment, replying with exactly one `containers_action_ack`
+ * on success or one CONTAINER_ACTION_FAILED `session_error` on failure.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist):
+ *   1. Host-level authority — a pairing-bound (share-a-session) client is scoped
+ *      to one session and must not run host-wide lifecycle actions.
+ *   2. Survey membership — the client-supplied `environmentId` MUST name a live
+ *      environment the EnvironmentManager tracks (the same set the containers
+ *      survey reports). An unknown id is rejected; the client id is a lookup
+ *      key, never a trusted target. Only chroxy's own environments are touchable
+ *      — never an arbitrary host container.
+ *
+ * Concurrency: one in-flight action per environment, plus a global cap of
+ * MAX_CONCURRENT_CONTAINER_ACTIONS (rejected, not queued).
+ */
+async function handleContainersAction(ws, client, msg, ctx) {
+  // Authority gate (#1): host-level (unbound) clients only.
+  if (client?.boundSessionId) {
+    containerActionError(ws, ctx, msg, 'forbidden',
+      'containers_action requires host-level authority (a session-bound token cannot run host actions)')
+    return
+  }
+
+  const action = typeof msg?.action === 'string' ? msg.action : ''
+  if (action !== 'stop' && action !== 'restart' && action !== 'destroy') {
+    containerActionError(ws, ctx, msg, 'unsupported-action',
+      `Unsupported container action: ${action.length > 0 ? action : '(none)'}`)
+    return
+  }
+
+  const environmentId = typeof msg?.environmentId === 'string' ? msg.environmentId : ''
+  if (environmentId.length === 0) {
+    containerActionError(ws, ctx, msg, 'invalid-environment-id',
+      'containers_action requires a non-empty environmentId')
+    return
+  }
+
+  const envManager = ctx?.services?.environmentManager || null
+  if (!envManager || typeof envManager.get !== 'function') {
+    containerActionError(ws, ctx, msg, 'no-environment-manager',
+      'Container environments are not enabled on this server')
+    return
+  }
+
+  // Survey membership gate (#2): the id MUST name a live environment.
+  const env = envManager.get(environmentId)
+  if (!env) {
+    containerActionError(ws, ctx, msg, 'unknown-environment',
+      `environmentId does not name a surveyed environment: ${environmentId}`)
+    return
+  }
+
+  // Per-environment overlap guard, then the global cap (reject, never queue).
+  if (containerActionInFlight.has(environmentId)) {
+    containerActionError(ws, ctx, msg, 'action-in-progress',
+      `A container action (${containerActionInFlight.get(environmentId)}) is already in progress for ${environmentId}`)
+    return
+  }
+  if (containerActionInFlight.size >= MAX_CONCURRENT_CONTAINER_ACTIONS) {
+    containerActionError(ws, ctx, msg, 'busy',
+      `The host is busy: ${containerActionInFlight.size} container actions are already in flight (max ${MAX_CONCURRENT_CONTAINER_ACTIONS}) — retry when one finishes`)
+    return
+  }
+
+  containerActionInFlight.set(environmentId, action)
+  try {
+    let status
+    if (action === 'stop') {
+      status = await envManager.stop(environmentId)
+    } else if (action === 'restart') {
+      status = await envManager.restart(environmentId)
+    } else {
+      await envManager.destroy(environmentId)
+      status = 'destroyed'
+    }
+    log.info(`containers_action ${action} completed for ${environmentId} (client=${client?.id})`)
+    ctx.transport.send(ws, {
+      type: 'containers_action_ack',
+      action,
+      environmentId,
+      requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+      status: typeof status === 'string' ? status : null,
+    })
+  } catch (err) {
+    const message = err && err.message ? err.message : `${action} failed`
+    log.warn(`containers_action ${action} failed for ${environmentId}: ${message}`)
+    containerActionError(ws, ctx, msg, CONTAINER_ACTION_FAILURE_REASON[action], message)
+  } finally {
+    containerActionInFlight.delete(environmentId)
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -827,6 +961,7 @@ export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
   containers_status_request: handleContainersStatusRequest,
+  containers_action: handleContainersAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,

@@ -1711,6 +1711,21 @@ export declare const ServerIntegrationActionAckSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$loose>;
 /**
+ * #6134 (epic #5530) — ack for a successful `containers_action` (stop / restart
+ * / destroy). Echoes `action` + the client-supplied `environmentId` (+ optional
+ * `requestId`) so the dashboard can clear the exact row's pending state, and
+ * carries the resulting `status` (`stopped` / `running` / `destroyed`). A
+ * failure instead replies with a `CONTAINER_ACTION_FAILED` session_error
+ * carrying the same correlation fields (mirrors integration_action's contract).
+ */
+export declare const ServerContainersActionAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"containers_action_ack">;
+    action: z.ZodString;
+    environmentId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    status: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$loose>;
+/**
  * #5554 — one skill in the inventory snapshot. Carries only names /
  * descriptions / metadata — never the skill BODY (the security boundary: skill
  * bodies never leave the server). Fields:
@@ -2654,6 +2669,7 @@ export type IntegrationCliStatus = z.infer<typeof IntegrationCliStatusSchema>;
 export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegrationStatusSnapshotSchema>;
 export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>;
 export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>;
+export type ServerContainersActionAckMessage = z.infer<typeof ServerContainersActionAckSchema>;
 export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>;
 export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>;
 export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>;

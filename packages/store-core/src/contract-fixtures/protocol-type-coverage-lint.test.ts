@@ -190,6 +190,9 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  'containers_action_ack',                // #6134 (epic #5530) Control Room container lifecycle action ack —
+                                          //   server contract landed first; the dashboard action buttons that
+                                          //   consume the ack are the tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

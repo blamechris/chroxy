@@ -405,6 +405,64 @@ export class EnvironmentManager extends EventEmitter {
   }
 
   /**
+   * #6134 — stop a running standalone environment's container (the backing
+   * container survives, so it can be restarted). Returns the resulting status.
+   * No-op (returns the current status) when the environment is already stopped.
+   *
+   * Compose environments are not supported yet (a compose stack needs
+   * `docker compose stop`, tracked as a follow-up) — they throw. Backends that
+   * don't implement the lifecycle (k8s/rancher today) throw a clear error that
+   * the handler surfaces as CONTAINER_ACTION_FAILED.
+   */
+  async stop(envId) {
+    const release = await this._acquireLock(envId)
+    try {
+      const env = this._environments.get(envId)
+      if (!env) throw new Error(`Environment not found: ${envId}`)
+      if (env.compose) throw new Error(`Stop is not supported for compose environments yet`)
+      if (!env.containerId) throw new Error(`Environment "${env.name}" has no container to stop`)
+      if (typeof this._backend.stopEnvironment !== 'function') {
+        throw new Error(`Stop is not supported on this environment backend`)
+      }
+      if (env.status !== 'running') return env.status
+      log.info(`Stopping environment "${env.name}" (${envId})`)
+      await this._backend.stopEnvironment(env.containerId)
+      env.status = 'stopped'
+      this._persist()
+      this.emit('environment_stopped', { id: envId, name: env.name })
+      return env.status
+    } finally {
+      release()
+    }
+  }
+
+  /**
+   * #6134 — restart a standalone environment's container (works whether it is
+   * currently running or stopped; ends running). Returns the resulting status.
+   * Same compose / backend-support constraints as {@link stop}.
+   */
+  async restart(envId) {
+    const release = await this._acquireLock(envId)
+    try {
+      const env = this._environments.get(envId)
+      if (!env) throw new Error(`Environment not found: ${envId}`)
+      if (env.compose) throw new Error(`Restart is not supported for compose environments yet`)
+      if (!env.containerId) throw new Error(`Environment "${env.name}" has no container to restart`)
+      if (typeof this._backend.restartEnvironment !== 'function') {
+        throw new Error(`Restart is not supported on this environment backend`)
+      }
+      log.info(`Restarting environment "${env.name}" (${envId})`)
+      await this._backend.restartEnvironment(env.containerId)
+      env.status = 'running'
+      this._persist()
+      this.emit('environment_restarted', { id: envId, name: env.name })
+      return env.status
+    } finally {
+      release()
+    }
+  }
+
+  /**
    * List all environments.
    * @returns {Object[]} Array of environment objects
    */

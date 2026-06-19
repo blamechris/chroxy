@@ -1117,6 +1117,21 @@ export const IntegrationActionSchema = z.object({
   requestId: z.string().max(128).optional(),
 }).passthrough()
 
+// #6134 (epic #5530): a lifecycle action on a chroxy-managed container /
+// environment surfaced by the containers survey (#6133). `environmentId` is the
+// EnvironmentManager id — the server validates it against its OWN survey (the id
+// must name a live environment) before acting, so the client id is a lookup key,
+// never a trusted target. `destroy` is destructive (the UI requires a
+// confirmation). The optional `requestId` is echoed on the
+// `containers_action_ack` (success) and the `CONTAINER_ACTION_FAILED`
+// session_error (failure), mirroring the integration_action correlation contract.
+export const ContainersActionSchema = z.object({
+  type: z.literal('containers_action'),
+  action: z.enum(['stop', 'restart', 'destroy']),
+  environmentId: z.string().min(1).max(256),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
 // #5547: summarize a session's persisted history into a continuation brief.
 // The server reads the session's `SessionMessageHistory` (the universal,
 // restart-surviving source — works even when the provider subprocess is gone),
@@ -1242,6 +1257,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SkillsInventoryRequestSchema,
   MailboxStatusRequestSchema,
   IntegrationActionSchema,
+  ContainersActionSchema,
   SummarizeSessionSchema,
   PairApproveSchema,
   PairDenySchema,
@@ -1270,6 +1286,7 @@ export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRe
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
+export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>
