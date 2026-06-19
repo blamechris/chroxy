@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { GIT } from '../src/git.js'
-import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobustAsync } from './test-helpers.js'
 
 describe('git status handler', () => {
   let tmpDir
@@ -31,7 +31,7 @@ describe('git status handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, RM_RETRY)
+    await rmDirRobustAsync(tmpDir)
   })
 
   it('returns current branch and clean status', async () => {
@@ -127,7 +127,7 @@ describe('git branches handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, RM_RETRY)
+    await rmDirRobustAsync(tmpDir)
   })
 
   it('lists local branches with current branch marked', async () => {

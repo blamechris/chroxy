@@ -1,11 +1,11 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'fs'
+import { mkdtempSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { Supervisor } from '../src/supervisor.js'
-import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 
 /**
  * Adversary A9 (2026-04-11 audit) — known-good-ref poisoning via
@@ -81,7 +81,7 @@ describe('Supervisor._rollbackToKnownGood — Adversary A9', () => {
 
   after(() => {
     try { process.chdir(originalCwd) } catch {}
-    try { rmSync(tmpDir, RM_RETRY) } catch {}
+    try { rmDirRobust(tmpDir) } catch {}
   })
 
   it('accepts a ref that matches a known-good-* tag', () => {

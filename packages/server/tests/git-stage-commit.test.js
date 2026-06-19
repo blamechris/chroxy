@@ -6,7 +6,7 @@ import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { GIT } from '../src/git.js'
-import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobustAsync } from './test-helpers.js'
 
 describe('git stage handler', () => {
   let tmpDir
@@ -28,7 +28,7 @@ describe('git stage handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, RM_RETRY)
+    await rmDirRobustAsync(tmpDir)
   })
 
   it('stages specified files', async () => {
@@ -87,7 +87,7 @@ describe('git unstage handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, RM_RETRY)
+    await rmDirRobustAsync(tmpDir)
   })
 
   it('unstages specified files', async () => {
@@ -139,7 +139,7 @@ describe('git commit handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, RM_RETRY)
+    await rmDirRobustAsync(tmpDir)
   })
 
   it('creates a commit with staged changes', async () => {
