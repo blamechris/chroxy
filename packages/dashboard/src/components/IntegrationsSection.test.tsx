@@ -56,6 +56,7 @@ function repoMemory(over: Partial<RepoMemoryStatus> = {}): RepoMemoryStatus {
       cacheEntryCount: 1391,
       staleEntryCount: 2,
       lastActivity: null,
+      topMissedQueries: [],
     },
     reason: null,
     ...over,
@@ -198,6 +199,7 @@ describe('IntegrationsSection — populated', () => {
           report: {
             totalEvents: 0, cacheHits: 0, cacheMisses: 0, cacheHitRatio: 0,
             estimatedTokensSaved: 0, cacheEntryCount: 10, staleEntryCount: 0, lastActivity: null,
+            topMissedQueries: [],
           },
         }),
       },
@@ -205,6 +207,44 @@ describe('IntegrationsSection — populated', () => {
     cleanup()
     renderSection(quiet)
     expect(screen.getByTestId('integration-ratio-quiet').textContent).toBe('no events')
+  })
+
+  it('missed-searches cell (#5681) shows the total count + distinct-query count, with the queries on hover', () => {
+    const snap = oneRepoSnapshot([
+      {
+        name: 'misses',
+        path: '/p/misses',
+        repoMemory: repoMemory({
+          report: {
+            totalEvents: 50, cacheHits: 40, cacheMisses: 10, cacheHitRatio: 0.8,
+            estimatedTokensSaved: 100, cacheEntryCount: 5, staleEntryCount: 0, lastActivity: null,
+            topMissedQueries: [
+              { query: 'websocket reconnect', count: 3 },
+              { query: 'oauth refresh', count: 1 },
+            ],
+          },
+        }),
+      },
+    ])
+    renderSection(snap)
+    const cell = screen.getByTestId('integration-missed-misses')
+    // total = 3 + 1 = 4, distinct = 2
+    expect(cell.textContent).toContain('4')
+    expect(cell.textContent).toContain('(2)')
+    expect(cell.getAttribute('title')).toBe('websocket reconnect (3)\noauth refresh (1)')
+  })
+
+  it('missed-searches cell renders "—" with no misses or on an older repo-memory (#5681)', () => {
+    // Default fixture has topMissedQueries: [] → quiet dash.
+    renderSection(snapshot())
+    expect(screen.getByTestId('integration-missed-chroxy').textContent).toBe('—')
+    // Degraded (no report) also shows the dash, not an error.
+    const broken = oneRepoSnapshot([
+      { name: 'broken', path: '/p/broken', repoMemory: repoMemory({ report: null, reason: 'report failed' }) },
+    ])
+    cleanup()
+    renderSection(broken)
+    expect(screen.getByTestId('integration-missed-broken').textContent).toBe('—')
   })
 
   it('renders tokens saved and entry counts (with stale annotation)', () => {

@@ -1265,6 +1265,10 @@ export declare const RepoMemoryReportSchema: z.ZodObject<{
     cacheEntryCount: z.ZodNullable<z.ZodNumber>;
     staleEntryCount: z.ZodNullable<z.ZodNumber>;
     lastActivity: z.ZodNullable<z.ZodString>;
+    topMissedQueries: z.ZodDefault<z.ZodArray<z.ZodObject<{
+        query: z.ZodString;
+        count: z.ZodNumber;
+    }, z.core.$strip>>>;
 }, z.core.$strip>;
 /**
  * One repo's repo-memory status.
@@ -1296,6 +1300,10 @@ export declare const RepoMemoryStatusSchema: z.ZodObject<{
         cacheEntryCount: z.ZodNullable<z.ZodNumber>;
         staleEntryCount: z.ZodNullable<z.ZodNumber>;
         lastActivity: z.ZodNullable<z.ZodString>;
+        topMissedQueries: z.ZodDefault<z.ZodArray<z.ZodObject<{
+            query: z.ZodString;
+            count: z.ZodNumber;
+        }, z.core.$strip>>>;
     }, z.core.$strip>>;
     reason: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
@@ -1407,6 +1415,10 @@ export declare const IntegrationRepoSchema: z.ZodObject<{
             cacheEntryCount: z.ZodNullable<z.ZodNumber>;
             staleEntryCount: z.ZodNullable<z.ZodNumber>;
             lastActivity: z.ZodNullable<z.ZodString>;
+            topMissedQueries: z.ZodDefault<z.ZodArray<z.ZodObject<{
+                query: z.ZodString;
+                count: z.ZodNumber;
+            }, z.core.$strip>>>;
         }, z.core.$strip>>;
         reason: z.ZodNullable<z.ZodString>;
     }, z.core.$strip>>;
@@ -1503,6 +1515,10 @@ export declare const ServerIntegrationStatusSnapshotSchema: z.ZodObject<{
                 cacheEntryCount: z.ZodNullable<z.ZodNumber>;
                 staleEntryCount: z.ZodNullable<z.ZodNumber>;
                 lastActivity: z.ZodNullable<z.ZodString>;
+                topMissedQueries: z.ZodDefault<z.ZodArray<z.ZodObject<{
+                    query: z.ZodString;
+                    count: z.ZodNumber;
+                }, z.core.$strip>>>;
             }, z.core.$strip>>;
             reason: z.ZodNullable<z.ZodString>;
         }, z.core.$strip>>;

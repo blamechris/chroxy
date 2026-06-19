@@ -99,6 +99,7 @@ function snapshot(over: Partial<ServerIntegrationStatusSnapshotMessage> = {}): S
             cacheEntryCount: 1391,
             staleEntryCount: 2,
             lastActivity: null,
+            topMissedQueries: [],
           },
           reason: null,
         },
