@@ -109,6 +109,20 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 - assertVisible:
     text: ".*Q3 — rollback strategy\\?.*"
 
+# Dismiss the keyboard and bring Q1 fully into view before tapping
+# (#6103). With the keyboard up and the sticky session/tab header, the
+# chat list sits scrolled to the form's bottom — the upper questions
+# land under the header, so their taps miss, the form stays partly
+# unanswered and Submit never enables. hideKeyboard frees the space;
+# scrollUntilVisible (100% by default) guarantees Q1 is clear of the
+# header before the first tap.
+- hideKeyboard
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      id: "question-multi-option-0-approve"
+    direction: UP
+
 # Answer every question: Q[0] approve (single-select radio), Q[1]
 # app + server (multi-select checkbox — two taps add to the array),
 # Q[2] auto-rollback (single-select radio).

@@ -69,6 +69,20 @@ name: ChatView AskUserQuestion multi-question form (#4697, #4604 Chunk B)
 - assertVisible:
     text: ".*Q1 — deploy to production\\?.*"
 
+# Dismiss the keyboard and bring Q1 fully into view before tapping
+# (#6103). With the keyboard up and the sticky session/tab header, the
+# chat list sits scrolled to the form's bottom — the upper questions
+# (Q1/Q2) land under the header, so their taps miss, the form stays
+# partly unanswered and Submit never enables. hideKeyboard frees the
+# space; scrollUntilVisible (100% by default) guarantees Q1 is clear of
+# the header before the first tap.
+- hideKeyboard
+- waitForAnimationToEnd
+- scrollUntilVisible:
+    element:
+      id: "question-multi-option-0-approve"
+    direction: UP
+
 # Answer all four questions (each is single-select) and submit —
 # round-trips the per-question answers map on the wire.
 - tapOn:
