@@ -260,37 +260,28 @@ export function createStreamTranslator() {
       events.push({ type: 'content_block_delta', index: textBlock.index, delta: { type: 'text_delta', text: delta.content } })
     }
 
-    // Tool-call deltas.
+    // Tool-call deltas. The block is NOT opened until BOTH id and name are
+    // known: a conformant OpenAI server sends them in the first tool_call delta,
+    // but a non-standard one (this module's whole point) may split them across
+    // chunks — emitting content_block_start eagerly would bake wrong/empty
+    // id/name into the streamed tool_start (dashboard label + any id-keyed
+    // correlation). So buffer args until we can start, then flush them. #6128.
     if (Array.isArray(delta.tool_calls)) {
       for (const tc of delta.tool_calls) {
         const oaIndex = typeof tc.index === 'number' ? tc.index : 0
         let entry = toolCalls.get(oaIndex)
         if (!entry) {
-          // A tool block begins — close any open text block first (Anthropic
-          // blocks don't overlap).
-          events.push(...closeTextBlock())
-          entry = { blockIndex: nextBlockIndex++, id: tc.id || '', name: tc.function?.name || '', args: '' }
+          entry = { blockIndex: null, id: tc.id || '', name: tc.function?.name || '', args: '', started: false, emittedLen: 0 }
           toolCalls.set(oaIndex, entry)
           order.push({ type: 'tool_use', ref: entry })
-          events.push({
-            type: 'content_block_start',
-            index: entry.blockIndex,
-            content_block: { type: 'tool_use', id: entry.id, name: entry.name, input: {} },
-          })
         } else {
-          // Late id/name (some servers send them split across chunks).
           if (!entry.id && tc.id) entry.id = tc.id
           if (!entry.name && tc.function?.name) entry.name = tc.function.name
         }
         const argFragment = tc.function?.arguments
-        if (typeof argFragment === 'string' && argFragment.length > 0) {
-          entry.args += argFragment
-          events.push({
-            type: 'content_block_delta',
-            index: entry.blockIndex,
-            delta: { type: 'input_json_delta', partial_json: argFragment },
-          })
-        }
+        if (typeof argFragment === 'string') entry.args += argFragment
+        events.push(...maybeStartToolBlock(entry))
+        events.push(...flushToolArgs(entry))
       }
     }
 
@@ -298,16 +289,59 @@ export function createStreamTranslator() {
     return events
   }
 
+  /**
+   * Open the tool_use block once id+name are known (close any open text block
+   * first — Anthropic blocks don't overlap). No-op until then, or once started.
+   */
+  function maybeStartToolBlock(entry) {
+    if (entry.started || !entry.id || !entry.name) return []
+    const events = closeTextBlock()
+    entry.blockIndex = nextBlockIndex++
+    entry.started = true
+    events.push({
+      type: 'content_block_start',
+      index: entry.blockIndex,
+      content_block: { type: 'tool_use', id: entry.id, name: entry.name, input: {} },
+    })
+    return events
+  }
+
+  /** Emit any buffered tool-arg JSON not yet streamed (only once started). */
+  function flushToolArgs(entry) {
+    if (!entry.started || entry.args.length <= entry.emittedLen) return []
+    const pending = entry.args.slice(entry.emittedLen)
+    entry.emittedLen = entry.args.length
+    return [{ type: 'content_block_delta', index: entry.blockIndex, delta: { type: 'input_json_delta', partial_json: pending } }]
+  }
+
   function finish() {
     const events = []
+    // A tool_call that never received both id+name (non-conformant server) is
+    // force-started now so its block + accumulated args still surface.
+    for (const entry of toolCalls.values()) {
+      if (!entry.started) {
+        events.push(...closeTextBlock())
+        entry.blockIndex = nextBlockIndex++
+        entry.started = true
+        events.push({
+          type: 'content_block_start',
+          index: entry.blockIndex,
+          content_block: { type: 'tool_use', id: entry.id, name: entry.name, input: {} },
+        })
+        events.push(...flushToolArgs(entry))
+      }
+    }
     // Close any still-open blocks (text, then each tool block in order).
     events.push(...closeTextBlock())
     for (const entry of toolCalls.values()) {
       events.push({ type: 'content_block_stop', index: entry.blockIndex })
     }
     const finalUsage = mapUsage(usage)
-    // message_delta carries the final stop_reason + usage; message_stop ends it.
-    events.push({ type: 'message_delta', delta: { stop_reason: stopReason }, usage: finalUsage })
+    // Resolve the stop_reason ONCE: if the server omitted finish_reason but the
+    // model emitted tool calls, infer tool_use so the byok loop runs the tools.
+    // Both message_delta and finalMessage carry this same value (no drift).
+    const effectiveStopReason = stopReason ?? (toolCalls.size > 0 ? 'tool_use' : 'end_turn')
+    events.push({ type: 'message_delta', delta: { stop_reason: effectiveStopReason }, usage: finalUsage })
     events.push({ type: 'message_stop' })
 
     const content = order.map((o) =>
@@ -321,9 +355,7 @@ export function createStreamTranslator() {
       role: 'assistant',
       model,
       content,
-      // If the model emitted tool calls but the server omitted a finish_reason,
-      // infer tool_use so the byok loop runs the tools.
-      stop_reason: stopReason ?? (toolCalls.size > 0 ? 'tool_use' : 'end_turn'),
+      stop_reason: effectiveStopReason,
       stop_sequence: null,
       usage: finalUsage,
     }

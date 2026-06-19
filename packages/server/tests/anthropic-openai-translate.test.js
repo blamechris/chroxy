@@ -152,6 +152,41 @@ describe('#5420 createStreamTranslator — tool call stream', () => {
     assert.equal(finalMessage.stop_reason, 'tool_use')
   })
 
+  it('buffers args until id+name are known when a server splits them across chunks', () => {
+    const { events, finalMessage } = run([
+      { id: 'm5', choices: [{ delta: { role: 'assistant' } }] },
+      // First tool_call delta: index + args fragment, but NO id/name yet.
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { arguments: '{"q":' } }] } }] },
+      // id arrives.
+      { choices: [{ delta: { tool_calls: [{ index: 0, id: 'call_x' }] } }] },
+      // name arrives — only now may the block open.
+      { choices: [{ delta: { tool_calls: [{ index: 0, function: { name: 'grep', arguments: '"x"}' } }] } }] },
+      { choices: [{ delta: {}, finish_reason: 'tool_calls' }] },
+    ])
+    // content_block_start must NOT precede knowing id+name, and must carry the
+    // CORRECT id/name (not the empty values from the first fragment).
+    const start = events.find((e) => e.type === 'content_block_start' && e.content_block?.type === 'tool_use')
+    assert.equal(start.content_block.id, 'call_x')
+    assert.equal(start.content_block.name, 'grep')
+    // The buffered '{"q":' fragment is flushed once started; full input parses.
+    assert.deepEqual(finalMessage.content, [{ type: 'tool_use', id: 'call_x', name: 'grep', input: { q: 'x' } }])
+    // No content_block_delta appears before the content_block_start.
+    const startIdx = events.indexOf(start)
+    const earlyDelta = events.findIndex((e) => e.type === 'content_block_delta')
+    assert.ok(earlyDelta > startIdx, 'args deltas only after the block opens')
+  })
+
+  it('emits a consistent stop_reason in message_delta AND finalMessage when finish_reason is omitted', () => {
+    const { events, finalMessage } = run([
+      { id: 'm6', choices: [{ delta: { tool_calls: [{ index: 0, id: 'c', function: { name: 'f', arguments: '{}' } }] } }] },
+      // Server ends the stream with NO finish_reason (non-conformant).
+      { choices: [{ delta: {} }] },
+    ])
+    const md = events.find((e) => e.type === 'message_delta')
+    assert.equal(md.delta.stop_reason, 'tool_use', 'message_delta carries the inferred reason')
+    assert.equal(finalMessage.stop_reason, 'tool_use', 'finalMessage matches message_delta')
+  })
+
   it('handles two parallel tool calls as two tool_use blocks', () => {
     const { finalMessage } = run([
       { id: 'm3', choices: [{ delta: { role: 'assistant' } }] },
