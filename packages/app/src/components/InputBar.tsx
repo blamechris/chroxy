@@ -181,9 +181,14 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
     pulseAnim.setValue(1);
   }, [isRecognizing, pulseAnim]);
 
+  // #6118 — attach/camera stay available during an active turn (streaming or
+  // busy). Since #5938 a mid-turn send QUEUES rather than being blocked, and the
+  // queued-send path carries attachments — so a user must be able to compose a
+  // full follow-up (text + files) while Claude is working. The old `!isStreaming`
+  // hide only existed because sending was disabled mid-turn; that reason is gone.
   const showMicButton = viewMode === 'chat' && !disabled && (onMicPress || speechUnavailable);
-  const showAttachButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onAttach;
-  const showCameraButton = viewMode === 'chat' && !hasTerminal && !isStreaming && !disabled && onCamera;
+  const showAttachButton = viewMode === 'chat' && !hasTerminal && !disabled && onAttach;
+  const showCameraButton = viewMode === 'chat' && !hasTerminal && !disabled && onCamera;
 
   // Filter slash commands based on current input (only when typing `/` at the start)
   const filteredCommands = useMemo(() => {

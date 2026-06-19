@@ -234,4 +234,20 @@ describe('InputBar send-while-streaming un-gate (#5938)', () => {
     expect(present(tree, 'chat-stop-button')).toBe(false);
     expect(tree.root.findByProps({ testID: 'chat-send-button' }).props.accessibilityLabel).toBe('Send message');
   });
+
+  // #6118 — attach/camera stay available during an active turn so a queued
+  // follow-up can carry attachments.
+  it('keeps Attach + Camera available while streaming (queue a follow-up with files)', () => {
+    const hasLabel = (tree: renderer.ReactTestRenderer, label: string) => {
+      try { tree.root.findByProps({ accessibilityLabel: label }); return true; } catch { return false; }
+    };
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} isStreaming={true} onAttach={noop} onCamera={noop} onChangeText={noop} />,
+      );
+    });
+    expect(hasLabel(tree, 'Attach file')).toBe(true);
+    expect(hasLabel(tree, 'Take photo')).toBe(true);
+  });
 });
