@@ -4,7 +4,6 @@ import {
   Text,
   TouchableOpacity,
   StyleSheet,
-  ScrollView,
   Platform,
   LayoutAnimation,
 } from 'react-native';
@@ -263,7 +262,13 @@ export function ActivityGroup({
       </TouchableOpacity>
       {isThinking && <ThinkingIndicator />}
       {expanded && (
-        <ScrollView style={styles.activityList} nestedScrollEnabled>
+        // #6103: a plain View, not a nested ScrollView. A vertical ScrollView
+        // nested inside the virtualized chat list (#5534) is a React Native
+        // anti-pattern — it intercepts the entries' touch responders (their
+        // onPress never fired, so an entry could not be expanded) and triggers
+        // the "VirtualizedLists should never be nested" path. The outer chat
+        // list already scrolls; the group grows with its entries.
+        <View style={styles.activityList}>
           {activityMessages.map((msg) => (
             <ActivityEntry
               key={msg.id}
@@ -275,7 +280,7 @@ export function ActivityGroup({
               onExpandedChange={onExpandedChange}
             />
           ))}
-        </ScrollView>
+        </View>
       )}
     </View>
   );
@@ -311,7 +316,6 @@ const styles = StyleSheet.create({
   },
   activityList: {
     marginTop: 8,
-    maxHeight: 200,
   },
   activityEntry: {
     minHeight: 44,
