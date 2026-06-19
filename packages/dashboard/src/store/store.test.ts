@@ -798,6 +798,41 @@ describe('useConnectionStore', () => {
     useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, messages: [] });
   });
 
+  it('switchSession resets the flat primaryClientId so it does not bleed across sessions (#5731 T2)', async () => {
+    const { useConnectionStore } = await import('./connection');
+
+    const makeSession = (id: string) => ({
+      sessionId: id, name: id, cwd: '/tmp', type: 'cli' as const,
+      hasTerminal: false, model: null, permissionMode: null, isBusy: false,
+      createdAt: 0, conversationId: null,
+    });
+
+    // Session A is owned by client-a; switching to a session with cached state
+    // must adopt that session's owner (not retain A's), and switching to an
+    // uncached session must reset the flat owner to null.
+    useConnectionStore.setState({
+      sessions: [makeSession('session-a'), makeSession('session-b'), makeSession('session-c')],
+      activeSessionId: 'session-a',
+      primaryClientId: 'client-a',
+      sessionStates: {
+        'session-b': { ...createEmptySessionState(), primaryClientId: 'client-b' },
+      },
+    });
+
+    // Cached target → adopt the cached session's owner, not the prior one.
+    useConnectionStore.getState().switchSession('session-b');
+    expect(useConnectionStore.getState().primaryClientId).toBe('client-b');
+
+    // Uncached target → reset to null (no bleed of session-b's owner).
+    useConnectionStore.getState().switchSession('session-c');
+    expect(useConnectionStore.getState().primaryClientId).toBeNull();
+
+    // Cleanup
+    useConnectionStore.setState({
+      sessions: [], activeSessionId: null, sessionStates: {}, messages: [], primaryClientId: null,
+    });
+  });
+
   it('addMessage appends to messages array', async () => {
     const { useConnectionStore } = await import('./connection');
     const msg: ChatMessage = {
