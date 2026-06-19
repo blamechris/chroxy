@@ -166,7 +166,6 @@ name: E2E key exchange eager handshake (#6019)
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 # Assert the mock's `encrypted-session-ok` marker. The mock prefixes its
 # default reply with this string ONLY when the inbound input arrived on an

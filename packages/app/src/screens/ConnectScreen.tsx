@@ -477,6 +477,16 @@ export function ConnectScreen() {
         />
       </View>
 
+      {/* #6089: a single terminal-state anchor for E2E, rendered for EVERY scan
+          outcome (found / empty / error all set scanCompleted). Placed
+          immediately after the scan row — BEFORE the (potentially long)
+          results list — so it stays within the initial viewport and Maestro's
+          non-scrolling assertVisible finds it on the servers-found path too.
+          Kept in the a11y tree (no accessibilityElementsHidden). */}
+      {scanCompleted && (
+        <View testID="lan-scan-complete" style={{ height: 1, width: 1 }} />
+      )}
+
       {discoveredServers.length > 0 && (
         <View style={styles.discoveredSection}>
           <Text style={styles.discoveredTitle}>

@@ -74,7 +74,9 @@ name: TerminalView render + raw data forwarding (#4701)
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
+# (No hideKeyboard — it is unreliable on the current Maestro CLI / iOS build,
+# see #6089; the assertVisible below finds terminal-view by testID regardless of
+# the soft keyboard.)
 
 # Re-assert the TerminalView is still mounted post-raw-write. The
 # WebView is not introspectable from Maestro (xterm.js text lives

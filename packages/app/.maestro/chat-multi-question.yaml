@@ -66,7 +66,6 @@ name: ChatView mixed multi-question AskUserQuestion form (#4762, #4973)
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 # Wait for the interactive multi-question form container to render
 # (#4973). The mock session is `provider: 'claude-sdk'`, so the mobile

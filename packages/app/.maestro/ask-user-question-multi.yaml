@@ -43,7 +43,6 @@ name: ChatView AskUserQuestion multi-question form (#4697, #4604 Chunk B)
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 # Wait for Q[0]'s prompt to render — same selector as the single-
 # question flow because Q[0] IS the rendered question.

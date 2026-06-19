@@ -30,8 +30,6 @@ name: Manual entry flow
 # Take screenshot after entering URL
 - takeScreenshot: manual-connect-filled
 
-# Hide keyboard before tapping Connect (keyboard can cover it)
-- hideKeyboard
 
 # Tap Connect button
 - tapOn:

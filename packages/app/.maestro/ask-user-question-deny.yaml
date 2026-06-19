@@ -25,7 +25,6 @@ name: ChatView AskUserQuestion deny flow (#4697)
 - tapOn:
     id: "chat-send-button"
 
-- hideKeyboard
 
 - extendedWaitUntil:
     visible:

@@ -70,7 +70,6 @@ name: ChatView AskUserQuestion Other freeform send-path (#4877, #4755)
 
 # Drop the keyboard so the prompt bubble + option buttons aren't
 # covered by the input area.
-- hideKeyboard
 
 # Wait for the prompt bubble header to render.
 - extendedWaitUntil:
@@ -135,7 +134,6 @@ name: ChatView AskUserQuestion Other freeform send-path (#4877, #4755)
 # No tap needed to focus: the freetext TextInput mounts with
 # `autoFocus` (MessageBubble.tsx), so type straight into it.
 - inputText: "ephemeral-preview-env-42"
-- hideKeyboard
 
 # Tap Send. SessionScreen.handleSelectOption receives the
 # `{otherLabel:'Other', freeformText:'ephemeral-preview-env-42'}`

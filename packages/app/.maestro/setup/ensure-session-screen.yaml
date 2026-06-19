@@ -87,9 +87,11 @@ name: Ensure SessionScreen (connected to mock server)
       - eraseText: 50
       - inputText: "test-token-maestro"
 
-      # Hide keyboard before tapping Connect (keyboard can cover it)
-      - hideKeyboard
-
+      # Tap Connect by testID directly — Maestro auto-scrolls to a testID and the
+      # tap dismisses the keyboard as a side effect. (`hideKeyboard` is broken on
+      # the current Maestro CLI / iOS build — see #6089 — and only surfaced here
+      # because flows normally auto-connect from cached SecureStore creds and skip
+      # this manual block entirely.)
       - tapOn:
           id: "connect-submit"
 
