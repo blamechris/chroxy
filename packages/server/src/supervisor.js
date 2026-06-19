@@ -63,6 +63,18 @@ export class Supervisor extends EventEmitter {
     this._standbyServer = null
     this._standbyRetries = 0
     this._standbyRetryTimer = null
+    // #6022: terminal-down state. When the restart budget is exhausted the
+    // supervisor flips the standby server into a terminal `status:'down'`
+    // response (reason `supervisor_gave_up`) and serves it for a bounded grace
+    // window — long enough for a polling client to observe and latch the
+    // terminal state — before exiting. Configurable: 0 keeps the prior
+    // exit-immediately behaviour; a larger value extends the signal window.
+    this._terminalDown = false
+    this._terminalDownTimer = null
+    this._terminalDownGraceMs =
+      (typeof config.terminalDownGraceMs === 'number' && config.terminalDownGraceMs >= 0)
+        ? config.terminalDownGraceMs
+        : 15000
     this._shuttingDown = false
     this._draining = false
     this._childReady = false
@@ -528,7 +540,18 @@ export class Supervisor extends EventEmitter {
           } catch (pushErr) {
             this._log.error(`Failed to send push notification on supervisor exit: ${pushErr.message}`)
           }
-          this._exit(1)
+          // #6022: serve a terminal-down signal before exiting. The crash-looping
+          // child is dead, so there is no live WS path to broadcast a final
+          // shutdown through (the "dead-child problem"). Instead the supervisor —
+          // which still owns the port and the tunnel — flips the standby server
+          // into a terminal `status:'down'` response and serves it for a bounded
+          // grace window. A reconnecting client (local or remote, via the tunnel)
+          // polling /health during that window sees an explicit terminal-down
+          // status and can latch its "server appears down" state, instead of
+          // reconnect-looping forever once the port goes silent. After the grace
+          // window the supervisor exits(1) as before — freeing the port and
+          // preserving any outer launchd/KeepAlive recovery semantics.
+          this._serveTerminalDown()
           return
         }
 
@@ -565,6 +588,33 @@ export class Supervisor extends EventEmitter {
 
     this._standbyServer = createServer((req, res) => {
       if (req.method === 'GET' && (req.url === '/' || req.url === '/health')) {
+        // #6022: terminal-down — the restart budget is exhausted and the
+        // supervisor is about to exit. Report an explicit, non-transient down
+        // status so a polling client distinguishes "gave up" from the
+        // recoverable "restarting" state (and from a silent port = asleep).
+        if (this._terminalDown) {
+          // 200 (not 503) deliberately: the client health probe discards the
+          // body on a non-2xx response (`if (!res.ok) throw`) and keys off the
+          // `status` field — exactly as it does for the 200 `status:'restarting'`
+          // signal. A 503 would make this terminal-down body invisible to the
+          // reconnect ladder (#6023). The `status:'down'` field is the
+          // discriminator; selection still keys off `status:'ok'`, so a 'down'
+          // box is never mistaken for a healthy one.
+          res.writeHead(200, { 'Content-Type': 'application/json' })
+          res.end(JSON.stringify({
+            status: 'down',
+            reason: 'supervisor_gave_up',
+            fatal: true,
+            metrics: {
+              supervisorUptimeS: Math.round((Date.now() - this._metrics.startedAt) / 1000),
+              totalRestarts: this._metrics.totalRestarts,
+              consecutiveRestarts: this._metrics.consecutiveRestarts,
+              lastExitReason: this._metrics.lastExitReason,
+              lastBackoffMs: this._metrics.lastBackoffMs,
+            },
+          }))
+          return
+        }
         // Calculate restart ETA: remaining backoff time + estimated child startup (~5s)
         // Uses actual scheduled time to account for elapsed wait since the restart was queued
         const STARTUP_ESTIMATE = 5000
@@ -629,6 +679,33 @@ export class Supervisor extends EventEmitter {
       this._standbyServer.close()
       this._standbyServer = null
     }
+  }
+
+  /**
+   * #6022 — the restart budget is exhausted. Bind the port (reusing the standby
+   * server, now in terminal-down mode) to serve an explicit
+   * `status:'down' reason:'supervisor_gave_up'` health response, hold it for the
+   * configured grace window so a polling client can observe and latch the
+   * terminal state, then exit(1). A grace of 0 preserves the prior
+   * exit-immediately behaviour (the terminal server is started and torn down on
+   * the next tick).
+   */
+  _serveTerminalDown() {
+    // Idempotent: the give-up branch is single-call by construction (the child
+    // is dead and not respawned), but guard defensively against a future caller.
+    if (this._terminalDown) return
+    this._terminalDown = true
+    // Reuse the standby server machinery (incl. its EADDRINUSE retry) — the
+    // crash-looped child is dead, so the port is normally free. The handler
+    // serves the terminal-down body while `_terminalDown` is set.
+    this._startStandbyServer()
+    this._terminalDownTimer = setTimeout(() => {
+      this._terminalDownTimer = null
+      this._stopStandbyServer()
+      this._exit(1)
+    }, this._terminalDownGraceMs)
+    // Do NOT unref: this timer is the supervisor's last responsibility — the
+    // process must stay alive serving the terminal-down status until it fires.
   }
 
   /**
@@ -777,6 +854,9 @@ export class Supervisor extends EventEmitter {
     if (this._heartbeatInterval) clearInterval(this._heartbeatInterval)
     if (this._restartTimer) clearTimeout(this._restartTimer)
     if (this._deployResetTimer) { clearTimeout(this._deployResetTimer); this._deployResetTimer = null }
+    // #6022: a SIGINT/SIGTERM during the terminal-down grace window pre-empts it
+    // — drop the pending exit(1) timer; the shutdown path below exits(0) cleanly.
+    if (this._terminalDownTimer) { clearTimeout(this._terminalDownTimer); this._terminalDownTimer = null }
     this._log.info(`${signal} received, shutting down...`)
 
     // Remove PID file

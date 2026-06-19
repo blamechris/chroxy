@@ -37,6 +37,11 @@ const CONFIG_SCHEMA = {
   allowedTools: 'array',
   noAuth: 'boolean',
   maxRestarts: 'number',
+  // #6022: ms the supervisor serves a terminal `status:'down'` health response
+  // (reason `supervisor_gave_up`) after exhausting its restart budget, before
+  // exiting — long enough for a polling client to latch the terminal state.
+  // 0 preserves the prior exit-immediately behaviour. Default 15000.
+  terminalDownGraceMs: 'number',
   tunnel: 'string',
   tunnelName: 'string',
   tunnelHostname: 'string',
@@ -1223,6 +1228,7 @@ function envKeyForConfig(key) {
     allowedTools: 'CHROXY_ALLOWED_TOOLS',
     noAuth: 'CHROXY_NO_AUTH',
     maxRestarts: 'CHROXY_MAX_RESTARTS',
+    terminalDownGraceMs: 'CHROXY_TERMINAL_DOWN_GRACE_MS',
     tunnel: 'CHROXY_TUNNEL',
     tunnelName: 'CHROXY_TUNNEL_NAME',
     tunnelHostname: 'CHROXY_TUNNEL_HOSTNAME',
