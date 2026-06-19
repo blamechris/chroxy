@@ -593,7 +593,7 @@ export function handleKeyExchange(ctx, ws, msg) {
     let serverKeySig = null
     if (serverIdentity?.secretKey) {
       try {
-        serverKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey)
+        serverKeySig = signExchangeKey(serverKp.publicKey, serverIdentity.secretKey, { domainSeparated: true })
       } catch (err) {
         log.warn(`Failed to sign exchange key for ${client.id}: ${err.message}`)
       }
