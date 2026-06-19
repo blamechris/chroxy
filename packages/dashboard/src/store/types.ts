@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -700,6 +700,20 @@ export interface ConnectionState {
   runnerStatusLoading: boolean;
 
   /**
+   * #6133 (epic #5530) — Control Room containers & environments survey: the
+   * latest `containers_status_snapshot` from the server. `null` until the first
+   * snapshot lands (the Containers section renders an empty/loading state).
+   * Replaced wholesale on each snapshot (full picture, no delta stream).
+   */
+  containersStatus: ServerContainersStatusSnapshotMessage | null;
+  /**
+   * #6133 — true between dispatching a `containers_status_request` and the
+   * matching `containers_status_snapshot` arriving, so the Containers-tab
+   * Refresh button can spin. Cleared when a snapshot lands.
+   */
+  containersStatusLoading: boolean;
+
+  /**
    * #5499 (epic #5498) — Control Room Integrations survey: the latest
    * `integration_status_snapshot` from the server (per-repo repo-memory
    * status). `null` until the first snapshot lands (the Integrations section
@@ -1312,6 +1326,13 @@ export interface ConnectionState {
   // message went on the wire (false = socket closed). Sets `runnerStatusLoading`
   // while in flight.
   requestRunnerStatus: () => boolean;
+
+  // #6133 (epic #5530): request a containers & environments survey. Dispatches a
+  // `containers_status_request`; the server replies with a single
+  // `containers_status_snapshot` handled into `containersStatus`. Returns whether
+  // the message went on the wire (false = socket closed). Sets
+  // `containersStatusLoading` while in flight.
+  requestContainersStatus: () => boolean;
 
   // #5499 (epic #5498): request an Integrations survey. Dispatches an
   // `integration_status_request`; the server replies with a single
