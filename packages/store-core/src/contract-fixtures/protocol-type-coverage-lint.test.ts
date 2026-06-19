@@ -189,6 +189,9 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  'containers_status_snapshot',           // #6133 (epic #5530) Control Room containers survey — server contract
+                                          //   landed first; the dashboard Containers section is the tracked
+                                          //   follow-up slice, at which point this moves to DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

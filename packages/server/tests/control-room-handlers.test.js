@@ -467,6 +467,17 @@ describe('containers_status_request handler (#6133)', () => {
     assert.deepEqual(opts.listEnvironments(), [])
   })
 
+  it('enables docker-stats enrichment by default (config key unset)', async () => {
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request' }, ctx)
+    assert.equal(ctx.surveyContainers.lastCall[0].includeStats, true)
+  })
+
+  it('disables docker-stats enrichment when controlRoomContainersIncludeStats is false', async () => {
+    ctx = makeContainersCtx({ config: { controlRoomContainersIncludeStats: false } })
+    await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request' }, ctx)
+    assert.equal(ctx.surveyContainers.lastCall[0].includeStats, false)
+  })
+
   it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
     client.boundSessionId = 'sess-1'
     await controlRoomHandlers.containers_status_request(ws, client, { type: 'containers_status_request', requestId: 'c1' }, ctx)

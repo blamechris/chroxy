@@ -301,10 +301,18 @@ async function handleContainersStatusRequest(ws, client, msg, ctx) {
   // to an empty inventory rather than erroring.
   const envManager = ctx?.services?.environmentManager || null
 
+  // #6133: `docker stats` enrichment is on by default; an operator on a slow or
+  // socketless docker disables it (inventory-only survey) by setting
+  // controlRoomContainersIncludeStats false. Only an explicit `false` turns it
+  // off — unset/undefined stays true. Mirrors the runner survey's includeGithub.
+  const config = ctx?.services?.config || {}
+  const includeStats = config.controlRoomContainersIncludeStats !== false
+
   containersInFlight.add(client)
   try {
     const snapshot = await surveyFn({
       listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
+      includeStats,
     })
     ctx.transport.send(ws, {
       type: 'containers_status_snapshot',

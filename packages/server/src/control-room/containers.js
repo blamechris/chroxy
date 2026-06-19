@@ -133,6 +133,13 @@ export function parseDockerStats(stdout) {
 function statsForContainer(containerId, statsById) {
   if (!containerId || statsById.size === 0) return null
   if (statsById.has(containerId)) return statsById.get(containerId)
+  // docker echoes a 12-char short id from `docker stats`, while the stored
+  // `containerId` is usually the full 64-char id — so the common case is
+  // `containerId.startsWith(shortId)`. The reverse (`shortId.startsWith(...)`)
+  // only fires if a stored id is itself shorter than 12 chars (it never is for a
+  // real docker id), so it's a harmless belt-and-braces for a truncated id;
+  // both directions are unambiguous because docker short-ids are unique by
+  // prefix.
   for (const [shortId, stats] of statsById) {
     if (containerId.startsWith(shortId) || shortId.startsWith(containerId)) return stats
   }
