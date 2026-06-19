@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2577,6 +2577,18 @@ function handleRunnerStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, 
 }
 
 /**
+ * #6133 (epic #5530) — containers & environments survey
+ * `containers_status_snapshot`: REPLACE the stored survey and clear the loading
+ * flag. Same defensive, full-replace, clear-loading-only-on-valid-parse contract
+ * as the host/runner survey handlers above.
+ */
+function handleContainersStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerContainersStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ containersStatus: parsed.data, containersStatusLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2777,6 +2789,7 @@ const HANDLERS: Record<string, Handler> = {
   session_preset_snapshot: handleSessionPresetSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,
+  containers_status_snapshot: handleContainersStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,

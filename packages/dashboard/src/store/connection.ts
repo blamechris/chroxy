@@ -497,6 +497,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // runner_status_snapshot handler. Null until the first survey lands.
   runnerStatus: null,
   runnerStatusLoading: false,
+  // #6133 (epic #5530): Control Room containers & environments snapshot, fed by
+  // the containers_status_snapshot handler. Null until the first survey lands.
+  containersStatus: null,
+  containersStatusLoading: false,
   // #5499 (epic #5498): Control Room Integrations snapshot, fed by the
   // integration_status_snapshot handler. Null until the first survey lands.
   integrationStatus: null,
@@ -976,6 +980,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ runnerStatusLoading: true });
       wsSend(socket, { type: 'runner_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #6133 (epic #5530): request a containers & environments survey. Mirrors
+  // requestRunnerStatus — flips containersStatusLoading and sends a
+  // containers_status_request; the reply is a single containers_status_snapshot
+  // handled into containersStatus. Returns false (and does NOT set loading) when
+  // the socket is closed.
+  requestContainersStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ containersStatusLoading: true });
+      wsSend(socket, { type: 'containers_status_request' });
       return true;
     }
     return false;

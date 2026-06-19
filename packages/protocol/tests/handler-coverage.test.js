@@ -80,7 +80,6 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  'containers_status_snapshot', // #6133 (epic #5530) — Control Room containers & environments survey reply. Server contract (survey + handler) landed first; the dashboard Containers section (store + ControlRoomView tab + ContainersStatusSection) is the tracked follow-up slice, at which point this moves to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.
@@ -151,6 +150,7 @@ const PLATFORM_SPECIFIC = {
   'activity_delta': 'dashboard',    // Control Room activity delta — see activity_snapshot above; dashboard-only for v1, mobile parity is Phase-2 per epic #5159
   'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
   'runner_status_snapshot': 'dashboard', // Control Room self-hosted runner survey reply (#5253) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'containers_status_snapshot': 'dashboard', // Control Room containers & environments survey reply (#6133, epic #5530) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'integration_status_snapshot': 'dashboard', // Control Room Integrations survey reply (#5499, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'integration_action_ack': 'dashboard', // Control Room Integrations Reindex action ack (#5500, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'skills_inventory_snapshot': 'dashboard', // Control Room Skills inventory survey reply (#5554, epic #5159) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow

@@ -40,6 +40,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
+import { ContainersStatusSection } from './ContainersStatusSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
@@ -114,6 +115,19 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'runnerStatus',
     loadingKey: 'runnerStatusLoading',
     requestKey: 'requestRunnerStatus',
+  },
+  // #6133 (epic #5530): the Containers tab — host-wide survey of chroxy-managed
+  // containers & environments (Docker/Compose; k8s/rancher as validated) with
+  // state / image / uptime / session linkage / docker-stats. Same survey:true
+  // request/snapshot flow as the others; the #5546 staleness guard comes free.
+  {
+    key: 'containers',
+    label: 'Containers',
+    survey: true,
+    requestType: 'containers_status_request',
+    snapshotKey: 'containersStatus',
+    loadingKey: 'containersStatusLoading',
+    requestKey: 'requestContainersStatus',
   },
   {
     key: 'integrations',
@@ -364,6 +378,8 @@ export function ControlRoomView({
         <ControlRoomSection onInvestigate={onInvestigate} onOpenSession={onOpenSession} onConfigureRepo={onConfigureRepo} />
       ) : tab === 'runners' ? (
         <RunnerStatusSection />
+      ) : tab === 'containers' ? (
+        <ContainersStatusSection />
       ) : tab === 'integrations' ? (
         <IntegrationsSection />
       ) : tab === 'skills' ? (
