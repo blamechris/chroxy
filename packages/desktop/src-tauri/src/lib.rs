@@ -1350,11 +1350,42 @@ pub fn run() {
             if !is_first_run {
                 let settings = app.state::<Mutex<DesktopSettings>>();
                 let auto_start = lock_or_recover(&settings).auto_start_server;
-                if auto_start {
-                    let config = config::load_config();
-                    if config.api_token.is_some() {
-                        handle_start(app.handle());
+                drop(settings);
+                let config = config::load_config();
+                match startup_action(auto_start, config.api_token.is_some()) {
+                    StartupAction::StartOwn => handle_start(app.handle()),
+                    // #6015 — client mode: adopt an already-running external server
+                    // instead of hanging on the splash. Probe /health on the
+                    // configured port; navigate to its dashboard on success, or
+                    // surface an actionable error (not an indefinite spinner).
+                    StartupAction::AdoptExternal => {
+                        let app_handle = app.handle().clone();
+                        let port = config.port;
+                        let token = config.api_token.clone();
+                        std::thread::spawn(move || {
+                            if probe_external_health(port) {
+                                match token {
+                                    Some(t) => window::emit_server_ready(&app_handle, port, Some(&t)),
+                                    None => window::emit_server_error(
+                                        &app_handle,
+                                        &format!(
+                                            "A server is running on port {} but no access token was found. Pair the app or paste a token in Settings.",
+                                            port
+                                        ),
+                                    ),
+                                }
+                            } else {
+                                window::emit_server_error(
+                                    &app_handle,
+                                    &format!(
+                                        "No server found on port {}. Start a server, or enable Auto-start Server in Settings.",
+                                        port
+                                    ),
+                                );
+                            }
+                        });
                     }
+                    StartupAction::Skip => {}
                 }
             }
 
@@ -1710,6 +1741,49 @@ fn monitor_startup(app: &tauri::AppHandle, context: StartupContext) -> bool {
     update_menu_state(app, MenuState::Stopped);
     window::emit_server_error(app, &timeout_msg);
     send_notification(app, timeout_title, &timeout_msg);
+    false
+}
+
+/// #6015 — what to do for the embedded server at a (non-first-run) launch. The
+/// pure decision is split out from the I/O (probe + navigate) so it is unit
+/// testable.
+#[derive(Debug, PartialEq, Eq)]
+enum StartupAction {
+    /// Auto-start is on and a token exists — launch the bundled server.
+    StartOwn,
+    /// Auto-start is off — act as a CLIENT: probe for an already-running
+    /// external server (e.g. an always-on launchd daemon) and navigate to its
+    /// dashboard, instead of hanging on the "Still starting…" splash forever.
+    AdoptExternal,
+    /// Auto-start is on but no token yet — nothing to do here (the pairing /
+    /// first-run flow mints one); avoids launching a tokenless server.
+    Skip,
+}
+
+fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
+    match (auto_start, has_token) {
+        (true, true) => StartupAction::StartOwn,
+        (true, false) => StartupAction::Skip,
+        (false, _) => StartupAction::AdoptExternal,
+    }
+}
+
+/// #6015 — probe an already-running external server's `/health` on loopback.
+/// A few short attempts (so a just-launched daemon is still adopted); returns
+/// true on the first 200. Mirrors the embedded-server health check (ureq, 2s).
+fn probe_external_health(port: u16) -> bool {
+    let url = format!("http://127.0.0.1:{}/health", port);
+    for attempt in 0..10 {
+        if let Ok(resp) = ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
+            if resp.status() == 200 {
+                return true;
+            }
+        }
+        // No sleep after the final attempt.
+        if attempt < 9 {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+        }
+    }
     false
 }
 
@@ -2288,6 +2362,17 @@ mod tests {
         cfg.get("allowAutoPermissionMode")
             .and_then(|v| v.as_bool())
             .unwrap_or(false)
+    }
+
+    // #6015 — startup-mode decision: auto-start+token launches our own server;
+    // auto-start without a token does nothing (pairing mints one); auto-start
+    // OFF means act as a client and adopt an external server.
+    #[test]
+    fn startup_action_maps_each_mode() {
+        assert_eq!(startup_action(true, true), StartupAction::StartOwn);
+        assert_eq!(startup_action(true, false), StartupAction::Skip);
+        assert_eq!(startup_action(false, true), StartupAction::AdoptExternal);
+        assert_eq!(startup_action(false, false), StartupAction::AdoptExternal);
     }
 
     #[test]
