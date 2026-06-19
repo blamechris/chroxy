@@ -322,8 +322,17 @@ bash packages/app/.maestro/scripts/start-mock-server.sh
 ### Running Flows
 
 ```bash
-# Run all flows sequentially (recommended)
 export PATH="$PATH:$HOME/.maestro/bin"
+
+# Full green gate (recommended) — each flow in its OWN maestro process (#6091).
+# Reliable on a single simulator over long runs: avoids the XCUITest instability
+# that accumulates when all 22 flows share one process (run-all.yaml). Parses the
+# flow inventory from run-all.yaml, starts/reuses the mock server, retries a
+# failing flow once (env flakiness vs real defect), prints a pass/fail summary.
+bash packages/app/.maestro/scripts/run-all-sequential.sh --device <device-id>
+
+# Single-process run of all flows (fine on stable hosts / for a quick pass, but
+# flaky over long single-simulator runs — see #6091).
 maestro test --device <device-id> packages/app/.maestro/run-all.yaml
 
 # Run a single flow
@@ -369,7 +378,7 @@ This keeps the app dependency-free (no debug menu, no URL scheme handler) and te
 
 ### Gotchas
 
-- **Always use `run-all.yaml`** for multiple flows — passing multiple `.yaml` files runs them in parallel (breaks on one simulator)
+- **For a full multi-flow gate, prefer `scripts/run-all-sequential.sh`** (each flow in its own maestro process) over `run-all.yaml` on a single simulator — the single-process `run-all.yaml` accumulates XCUITest instability and crashes non-deterministically mid-flow (`kAXErrorInvalidUIElement` / abrupt termination) over long runs (#6091). Never pass multiple `.yaml` files to one `maestro test` — that runs them in parallel and breaks on one simulator.
 - **Dev-client menu + onboarding** can appear on launch — flows dismiss them with `optional: true` taps (the dev menu's "Continue" sheet / a top-of-screen tap, then onboarding "Skip"); expect these as WARNED/SKIPPED steps in green runs
 - **Flow `name:` must not contain "/"** — Maestro derives report filenames from it; a slash crashes standalone runs with FileNotFoundException
 - **`wait` is not a valid command** — use `waitForAnimationToEnd` or `extendedWaitUntil`
