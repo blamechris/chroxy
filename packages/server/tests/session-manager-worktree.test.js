@@ -14,7 +14,7 @@ import { execFileSync } from 'child_process'
 import { EventEmitter } from 'events'
 import { SessionManager, WorktreeError } from '../src/session-manager.js'
 import { GIT } from '../src/git.js'
-import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 
 // ---------------------------------------------------------------------------
 // Register a no-op stub provider (avoids importing real SDK/CLI sessions)
@@ -113,7 +113,7 @@ describe('SessionManager worktree isolation', () => {
   })
 
   afterEach(() => {
-    rmSync(gitRepo, RM_RETRY)
+    rmDirRobust(gitRepo)
   })
 
   it('creates a worktree directory when worktree:true is passed', () => {
@@ -404,7 +404,7 @@ describe('SessionManager _removeWorktree fallback (#2460)', () => {
   })
 
   afterEach(() => {
-    rmSync(gitRepo, RM_RETRY)
+    rmDirRobust(gitRepo)
     rmSync(externalWorktreeBase, { recursive: true, force: true })
   })
 
@@ -481,7 +481,7 @@ describe('SessionManager isolation derivation (#2475)', () => {
   })
 
   afterEach(() => {
-    rmSync(gitRepo, RM_RETRY)
+    rmDirRobust(gitRepo)
   })
 
   it('default session has isolation "none"', () => {

@@ -1,5 +1,6 @@
 import { EventEmitter } from 'node:events'
 import { execFileSync } from 'node:child_process'
+import { rmSync } from 'node:fs'
 import { WsClientManager } from '../src/ws-client-manager.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 import { GIT as _GIT } from '../src/git.js'
@@ -38,6 +39,46 @@ export function disableRepoAutoGc(dir) {
 // load peak. The common case still succeeds on the first try with zero added
 // delay (rmSync only sleeps when a retry is actually needed).
 export const RM_RETRY = Object.freeze({ recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
+
+// Synchronous sleep (no busy-spin) for the re-recurse backoff below. Atomics.wait
+// on a throwaway SharedArrayBuffer blocks the thread for `ms` without burning CPU.
+function sleepSync(ms) {
+  if (!(ms > 0)) return
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+}
+
+// #6114: robustly remove a temp dir that git background gc may still be writing
+// into during teardown. `rmSync(dir, RM_RETRY)` retries the FAILING operation —
+// but the gc-race failure mode is a NEW loose object written into an
+// already-emptied `.git/objects/…` subtree AFTER the recursive walk passed it.
+// The final `rmdir '.git'` then throws ENOTEMPTY, and rmSync's internal retry
+// only re-attempts that same rmdir (the new file is never re-walked), so the
+// 10.5s RM_RETRY budget can still be exceeded (seen on a required check, #6114).
+// Re-running the WHOLE recursive remove RE-WALKS and clears the recreated object.
+//
+// Each outer attempt carries RM_RETRY's own per-op backoff; between attempts we
+// pause briefly to let gc settle before re-walking. Only the transient teardown
+// codes trigger a re-recurse — a real error (e.g. EACCES on a chmod-locked path)
+// surfaces immediately. `force: true` means a missing dir is a no-op (no ENOENT).
+// The common case still succeeds on the first rmSync with zero added delay.
+const RM_TRANSIENT_CODES = new Set(['ENOTEMPTY', 'EBUSY', 'ENOTDIR', 'EPERM'])
+// `_rm` / `_sleep` are injection seams for the unit test (deterministic
+// re-recurse coverage without needing the actual gc race); production callers
+// pass neither and get the real fs/sleep.
+export function rmDirRobust(dir, { attempts = 5, backoffMs = 50, _rm = rmSync, _sleep = sleepSync } = {}) {
+  for (let i = 0; i < attempts - 1; i++) {
+    try {
+      _rm(dir, RM_RETRY)
+      return
+    } catch (err) {
+      if (!RM_TRANSIENT_CODES.has(err?.code)) throw err
+      _sleep(backoffMs * (i + 1))
+    }
+  }
+  // Final attempt: let a persistent failure throw so a genuine teardown bug
+  // (not a transient gc-race) still fails the test loudly.
+  _rm(dir, RM_RETRY)
+}
 
 // Re-export the ctx-shape assert so handler tests can guard their mocks.
 export { assertCtxShape } from '../src/ws-handler-context.js'

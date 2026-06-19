@@ -8,12 +8,12 @@
  */
 import { describe, it, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, writeFileSync, mkdirSync } from 'fs'
+import { mkdtempSync, existsSync, writeFileSync, mkdirSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
-import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 import { reapWorktrees, maybeAutoReapWorktrees, startPeriodicAutoReap } from '../src/worktree-reaper.js'
 
 const LIVE_PID = 4100002
@@ -60,7 +60,7 @@ describe('worktree-reaper', () => {
     git(repo, ['worktree', 'lock', '--reason', `claude agent a3 (pid ${LIVE_PID})`, live])
   })
 
-  afterEach(() => rmSync(root, RM_RETRY))
+  afterEach(() => rmDirRobust(root))
 
   it('reapWorktrees reclaims clean+dead, preserves dirty + live', async () => {
     const summary = await reapWorktrees({ repos: [{ name: 'proj', path: repo }], planDeps, yieldFn })

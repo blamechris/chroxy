@@ -5,7 +5,7 @@ import { join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { CheckpointManager } from '../src/checkpoint-manager.js'
-import { GIT, disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 
 // Create a temporary git repo for testing
 function createTempGitRepo() {
@@ -37,8 +37,8 @@ describe('CheckpointManager', () => {
   })
 
   afterEach(() => {
-    rmSync(gitDir, RM_RETRY)
-    try { rmSync(tmpCheckpointsDir, RM_RETRY) } catch {}
+    rmDirRobust(gitDir)
+    try { rmDirRobust(tmpCheckpointsDir) } catch {}
   })
 
   it('creates a checkpoint with metadata', async () => {
