@@ -75,6 +75,7 @@ import {
   handleMcpServers,
   handleSessionUsage,
   handleSessionContext,
+  handleModelChangedPatch,
   handleSessionCostThresholdCrossed,
   handleDevPreview,
   handleDevPreviewStopped,
@@ -150,6 +151,11 @@ export interface DispatchSessionBase {
   // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
   // Both clients' real `SessionState` carry this array (BaseSessionState).
   queuedMessages?: QueuedSessionMessage[]
+  // --- reconciled divergent case (#5618) ---
+  // `activeModel` — written by model_changed. Both clients' real `SessionState`
+  // carry it (the dashboard also mirrors the active session's value to flat
+  // top-level state via its adapter).
+  activeModel?: string | null
 }
 
 /**
@@ -343,6 +349,11 @@ export interface DispatchMessageMap {
     gitAhead?: unknown
     projectName?: unknown
   }
+  model_changed: {
+    type: 'model_changed'
+    sessionId?: string
+    model?: string
+  }
   session_cost_threshold_crossed: {
     type: 'session_cost_threshold_crossed'
     sessionId?: string
@@ -445,8 +456,12 @@ export type DispatchTable<S extends DispatchSessionBase> = {
 // Handlers — one pure delegation per migrated case
 //
 // Each was byte-for-byte identical between the app and dashboard switches
-// (see the PR body's per-case diff verdicts). Genuinely-divergent cases
-// (model_changed, permission_mode_changed, agent_idle — all carry a dashboard
+// (see the PR body's per-case diff verdicts). model_changed (#5618) was
+// RECONCILED into the table — its only divergence was a stray-unknown-session
+// edge fallback (app → active session; dashboard → flat write), now a clean
+// no-op; every known-target case (incl. the dashboard's flat mirror) is
+// preserved. Genuinely-divergent cases still left out:
+// (permission_mode_changed, agent_idle — carry a dashboard
 // flat-state fallback the app lacks; budget_warning/exceeded — platform alert
 // APIs; primary_changed, client_joined/left/focus_changed — the app's
 // dedicated multi-client store; available_models — dashboard-only
@@ -908,6 +923,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     mcp_servers: sessionPatchDispatcher<S>(handleMcpServers),
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
+    model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
     session_cost_threshold_crossed: dispatchSessionCostThresholdCrossed,
     dev_preview: dispatchDevPreview,
     dev_preview_stopped: dispatchDevPreviewStopped,
@@ -992,6 +1008,8 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   'message_queued',
   'message_dequeued',
+  // --- reconciled divergent case (#5618) ---
+  'model_changed',
 ]
 
 /**

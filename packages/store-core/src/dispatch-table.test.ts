@@ -98,7 +98,9 @@ describe('shared dispatch table', () => {
   describe('runner mechanics', () => {
     it('returns false (table miss) for an unregistered type so the caller falls through', () => {
       const env = makeAdapter()
-      expect(dispatch(env, { type: 'model_changed', model: 'opus' })).toBe(false)
+      // permission_mode_changed stays platform-local (divergent dashboard
+      // flat-state fallback), so it is NOT in the shared table — a clean miss.
+      expect(dispatch(env, { type: 'permission_mode_changed', mode: 'plan' })).toBe(false)
     })
 
     it('returns false for a non-string type', () => {

@@ -10,7 +10,7 @@
  */
 
 import type { ActiveTool, TranscriptBackgroundTask } from '../types'
-import { parseStringField } from './_shared'
+import { parseStringField, resolveSessionId, type SessionPatch } from './_shared'
 
 // ---------------------------------------------------------------------------
 // model_changed
@@ -19,6 +19,26 @@ import { parseStringField } from './_shared'
 /** Extract the model value from a `model_changed` message. */
 export function handleModelChanged(msg: Record<string, unknown>): { model: string | null } {
   return { model: parseStringField(msg, 'model') }
+}
+
+/**
+ * #5618 — `model_changed` as a session patch for the shared dispatch table.
+ * Targets the resolved session (msg.sessionId, else the active session) and sets
+ * its `activeModel`. The `sessionPatchDispatcher` only applies the patch when
+ * that session exists, so a stray `model_changed` for an unknown session is a
+ * no-op — replacing the two clients' divergent edge fallbacks (the app updated
+ * the active session; the dashboard wrote flat `activeModel`). For every normal
+ * case (a known target — including the active session, whose flat mirror the
+ * dashboard adapter keeps in sync) both clients behave exactly as before.
+ */
+export function handleModelChangedPatch(
+  msg: Record<string, unknown>,
+  activeSessionId: string | null,
+): SessionPatch {
+  return {
+    sessionId: resolveSessionId(msg, activeSessionId),
+    patch: { activeModel: handleModelChanged(msg).model },
+  }
 }
 
 // ---------------------------------------------------------------------------

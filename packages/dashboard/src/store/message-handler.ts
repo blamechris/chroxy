@@ -17,7 +17,6 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
-  handleModelChanged as sharedModelChanged,
   handlePermissionModeChanged as sharedPermissionModeChanged,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
@@ -322,8 +321,12 @@ export function clearPendingTrustGrants(): void {
 // the dashboard keeps showing a model the session never switched to. Remember
 // the model we switched FROM, keyed by the set_model requestId the server
 // echoes on its error, so the `error` handler can roll the optimistic update
-// back. Cleared on the matching `model_changed` success, on a matching error,
-// or on disconnect. Bounded FIFO like the trust-grant map.
+// back. Consumed (deleted) on a matching error; otherwise cleared on disconnect
+// or evicted by the bounded FIFO cap. A successful change is NOT cleared here —
+// the server sends model_changed XOR error per requestId (#5711), so a success
+// entry simply ages out via the cap and is never mis-consumed by a later error.
+// (model_changed itself is handled by the shared store-core dispatch table since
+// #5618 and only writes activeModel; it never touched this map.)
 interface PendingModelRevert {
   sessionId: string | null;
   previousModel: string | null;
@@ -1350,22 +1353,11 @@ function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set
   set({ conversationHistory: conversations, conversationHistoryLoading: false });
 }
 
-function handleModelChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const { model } = sharedModelChanged(msg);
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => ({ activeModel: model }));
-  } else {
-    set({ activeModel: model });
-  }
-  // #5711: deliberately do NOT clear pending reverts here. The server sends
-  // model_changed XOR error per requestId (never both), so a successful change
-  // never receives a later error to mis-consume. Clearing by sessionId would be
-  // too coarse — with two rapid changes on one session (A→B, B→C), the ack for
-  // the first would drop the SECOND's still-in-flight revert, stranding the
-  // dropdown if the second is then rejected. Stale success entries are bounded
-  // by the FIFO cap and cleared on disconnect.
-}
+// #5618 — model_changed migrated to the shared store-core dispatch table
+// (runDispatch handles it before the HANDLERS map / switch). Removed from here.
+// The #5711 note (model_changed deliberately does NOT clear pending model-revert
+// entries — server sends model_changed XOR error per requestId) still holds: the
+// shared handler likewise only writes activeModel and never touches reverts.
 
 function handleThinkingLevelChanged(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   const { level } = sharedThinkingLevelChanged(msg);
@@ -2736,7 +2728,6 @@ const HANDLERS: Record<string, Handler> = {
   // web_feature_status / web_task_list migrated to the shared dispatch table
   // (#5556 slice 2)
   conversations_list: handleConversationsList,
-  model_changed: handleModelChanged,
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
   chroxy_context_hint_changed: handleChroxyContextHintChanged,

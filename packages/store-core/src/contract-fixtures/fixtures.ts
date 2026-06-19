@@ -198,6 +198,32 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { sessions: { active: { isIdle: false } } },
   },
 
+  // 3b. model_changed (#5618) — set the target session's activeModel. Reconciled
+  // from the two clients' divergent edge fallbacks: a known target updates that
+  // session (incl. the active session, whose flat mirror the dashboard adapter
+  // keeps in sync); a stray unknown-session model_changed is a clean no-op.
+  {
+    name: 'model_changed sets activeModel on the explicit target session',
+    type: 'model_changed',
+    init: { sessions: { s1: { activeModel: 'claude-sonnet-4-6' } } },
+    message: { type: 'model_changed', sessionId: 's1', model: 'claude-opus-4-8' },
+    expect: { sessions: { s1: { activeModel: 'claude-opus-4-8' } } },
+  },
+  {
+    name: 'model_changed falls back to the active session when sessionId is absent',
+    type: 'model_changed',
+    init: { activeSessionId: 'active', sessions: { active: { activeModel: 'claude-sonnet-4-6' } } },
+    message: { type: 'model_changed', model: 'claude-opus-4-8' },
+    expect: { sessions: { active: { activeModel: 'claude-opus-4-8' } } },
+  },
+  {
+    name: 'model_changed for an unknown session is a no-op (reconciled edge)',
+    type: 'model_changed',
+    init: { activeSessionId: 'active', sessions: { active: { activeModel: 'keep' } } },
+    message: { type: 'model_changed', sessionId: 'ghost', model: 'ignored' },
+    expect: { noop: true },
+  },
+
   // 4. budget_resumed — append system message (target session OR flat addMessage)
   {
     name: 'budget_resumed appends the system message to the target session',

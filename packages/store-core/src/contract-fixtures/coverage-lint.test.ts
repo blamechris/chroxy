@@ -81,7 +81,6 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'cost_update',
   'history_replay_end',
   'key_exchange_ok',
-  'model_changed',
   'multi_question_intervention',
   'pair_fail',
   'permission_expired',
