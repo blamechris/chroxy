@@ -59,6 +59,15 @@ export interface InputBarProps {
   enterToSend: boolean;
   onToggleEnterMode: () => void;
   isStreaming: boolean;
+  /**
+   * #6116 — `isBusy` (= the active session's `isIdle === false`) covers the
+   * window after `agent_busy` but before `stream_start`, where the server is
+   * processing but no text is streaming yet. A send during this window queues
+   * (#6113), so the composer must show the same Stop + "Queue message"
+   * affordance it shows while streaming — `isStreaming || isBusy` is the
+   * "turn active" gate, matching the dashboard.
+   */
+  isBusy?: boolean;
   claudeReady: boolean;
   viewMode: 'chat' | 'terminal' | 'files' | 'system';
   hasTerminal: boolean;
@@ -93,6 +102,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   enterToSend,
   onToggleEnterMode,
   isStreaming,
+  isBusy = false,
   claudeReady,
   viewMode,
   hasTerminal,
@@ -112,6 +122,10 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   onRemovePastedText,
 }, ref) {
   const a11yDisabled = disabled ? { disabled: true as const } : undefined;
+  // #6116 — a turn is "active" while streaming OR while the server is busy
+  // pre-stream (isBusy). Both states queue a send (#6113), so both show the
+  // Stop button + "Queue message" affordance + follow-up placeholder.
+  const turnActive = isStreaming || isBusy;
 
   // #5556 — InputBar owns the composer draft internally so that streaming
   // re-renders in SessionScreen don't re-render the TextInput on every delta.
@@ -324,7 +338,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
         <TextInput
           ref={textInputRef}
           style={[styles.input, !enterToSend && styles.inputMultiline, disabled && styles.inputDisabled]}
-          placeholder={disabled ? (disabledPlaceholder || 'Reconnecting...') : !claudeReady ? 'Connecting to Claude...' : 'Message Claude...'}
+          placeholder={disabled ? (disabledPlaceholder || 'Reconnecting...') : !claudeReady ? 'Connecting to Claude...' : turnActive ? 'Type to send follow-up…' : 'Message Claude...'}
           placeholderTextColor={COLORS.textDim}
           value={value}
           onChangeText={handleChangeText}
@@ -389,10 +403,10 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
             </Animated.View>
           </TouchableOpacity>
         )}
-        {/* #5938 — during a turn, BOTH controls show: Stop interrupts the live
-            turn, Send queues a follow-up that flushes when the turn completes.
-            When idle, only Send renders. */}
-        {isStreaming && (
+        {/* #5938/#6116 — during an active turn (streaming OR busy pre-stream),
+            BOTH controls show: Stop interrupts the turn, Send queues a follow-up
+            that flushes when the turn completes. When idle, only Send renders. */}
+        {turnActive && (
           <TouchableOpacity
             style={[styles.interruptButton, disabled && styles.interruptButtonDisabled]}
             onPress={onInterrupt}
@@ -410,7 +424,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           onPress={onSend}
           disabled={disabled}
           accessibilityRole="button"
-          accessibilityLabel={isStreaming ? 'Queue message' : 'Send message'}
+          accessibilityLabel={turnActive ? 'Queue message' : 'Send message'}
           accessibilityState={a11yDisabled}
           testID="chat-send-button"
         >

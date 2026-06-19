@@ -58,9 +58,9 @@ describe('InputBar component', () => {
 
   test('has send button with accessibilityRole and accessibilityLabel', () => {
     expect(inputBarSrc).toMatch(/accessibilityRole="button"/)
-    // #5938 — the Send label is now dynamic: 'Queue message' mid-turn (the
-    // send-while-streaming un-gate), 'Send message' when idle.
-    expect(inputBarSrc).toMatch(/accessibilityLabel=\{isStreaming \? 'Queue message' : 'Send message'\}/)
+    // #5938/#6116 — the Send label is dynamic: 'Queue message' during an active
+    // turn (streaming OR busy pre-stream, via turnActive), 'Send message' when idle.
+    expect(inputBarSrc).toMatch(/accessibilityLabel=\{turnActive \? 'Queue message' : 'Send message'\}/)
   })
 
   test('has interrupt button with accessibility label', () => {
