@@ -51,16 +51,21 @@ MAX_RETRIES="${MAX_RETRIES:-1}"
 FLOW_TIMEOUT="${FLOW_TIMEOUT:-300}"
 RESET_ON_FAIL=1
 
+need_val() { [ $# -ge 2 ] || { echo "ERROR: $1 needs a value" >&2; exit 2; }; }
 while [ $# -gt 0 ]; do
   case "$1" in
-    --device) DEVICE="$2"; shift 2 ;;
+    --device) need_val "$@"; DEVICE="$2"; shift 2 ;;
     --no-mock) START_MOCK=0; shift ;;
-    --retries) MAX_RETRIES="$2"; shift 2 ;;
-    --timeout) FLOW_TIMEOUT="$2"; shift 2 ;;
+    --retries) need_val "$@"; MAX_RETRIES="$2"; shift 2 ;;
+    --timeout) need_val "$@"; FLOW_TIMEOUT="$2"; shift 2 ;;
     --no-reset) RESET_ON_FAIL=0; shift ;;
     *) echo "Unknown arg: $1" >&2; exit 2 ;;
   esac
 done
+
+# Numeric guards so a bad --retries/--timeout fails fast, not mid-loop.
+case "$MAX_RETRIES" in (*[!0-9]*|'') echo "ERROR: --retries must be a non-negative integer" >&2; exit 2 ;; esac
+case "$FLOW_TIMEOUT" in (*[!0-9]*|'') echo "ERROR: --timeout must be a positive integer (seconds)" >&2; exit 2 ;; esac
 
 # maestro needs Java. A JAVA_HOME inherited from the user's profile is often a
 # pinned Cellar version path (e.g. openjdk@21/21.0.9) that goes stale on the next
@@ -122,9 +127,11 @@ run_with_timeout() {
   local cmd_pid=$!
   (
     sleep "$secs"
-    kill -TERM "$cmd_pid" 2>/dev/null
+    # Only signal if the command is still the live process (guards the tiny
+    # window where it exits right as the timeout fires — avoids PID reuse).
+    kill -0 "$cmd_pid" 2>/dev/null && kill -TERM "$cmd_pid" 2>/dev/null
     sleep 5
-    kill -KILL "$cmd_pid" 2>/dev/null
+    kill -0 "$cmd_pid" 2>/dev/null && kill -KILL "$cmd_pid" 2>/dev/null
   ) &
   local wd_pid=$!
   local rc=0
@@ -135,14 +142,23 @@ run_with_timeout() {
   return "$rc"
 }
 
+# Reap maestro's iOS driver children (xcodebuild + the XCUITest runner app).
+# Killing only the maestro JVM on a timeout can orphan these, leaving the sim's
+# accessibility state busy; reset_simulator also calls this, but we reap on every
+# timeout so the orphan window is closed even when --no-reset is set.
+kill_maestro_children() {
+  pkill -f "maestro.cli.AppKt test" 2>/dev/null || true
+  pkill -f "maestro-driver-iosUITests-Runner" 2>/dev/null || true
+  pkill -f "xcodebuild test-without-building.*maestro" 2>/dev/null || true
+}
+
 # Clear a wedged simulator accessibility state (the only reliable recovery from
 # kAXErrorInvalidUIElement): kill any maestro driver, shutdown + boot the sim,
 # wait for boot to settle.
 reset_simulator() {
   [ "$RESET_ON_FAIL" -eq 1 ] || return 0
   echo "[runner] resetting simulator $DEVICE (clearing wedged a11y state)..."
-  pkill -f "maestro.cli.AppKt test" 2>/dev/null || true
-  pkill -f "maestro-driver-iosUITests-Runner" 2>/dev/null || true
+  kill_maestro_children
   xcrun simctl shutdown "$DEVICE" 2>/dev/null || true
   xcrun simctl boot "$DEVICE" 2>/dev/null || true
   # bootstatus -b blocks until the device is fully booted (best-effort).
@@ -210,6 +226,8 @@ for flow in "${FLOWS[@]}"; do
     fi
     if [ "$rc" -eq 124 ]; then
       echo "[runner] TIMEOUT (${FLOW_TIMEOUT}s): $flow"
+      # Reap orphaned driver children now, in case reset is disabled.
+      kill_maestro_children
     fi
     # Failure (crash, timeout, or assertion): reset the sim before the next
     # attempt / next flow so a wedged a11y state doesn't poison what follows.
