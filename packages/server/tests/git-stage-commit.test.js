@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { GIT } from '../src/git.js'
+import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 
 describe('git stage handler', () => {
   let tmpDir
@@ -18,6 +19,7 @@ describe('git stage handler', () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-stage-'))
     fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
+    disableRepoAutoGc(tmpDir) // #6098: stop background gc racing the teardown rm
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
     await writeFile(join(tmpDir, 'README.md'), '# Test')
@@ -26,7 +28,7 @@ describe('git stage handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, { recursive: true, force: true })
+    await rm(tmpDir, RM_RETRY)
   })
 
   it('stages specified files', async () => {
@@ -76,6 +78,7 @@ describe('git unstage handler', () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-unstage-'))
     fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
+    disableRepoAutoGc(tmpDir) // #6098: stop background gc racing the teardown rm
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
     await writeFile(join(tmpDir, 'README.md'), '# Test')
@@ -84,7 +87,7 @@ describe('git unstage handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, { recursive: true, force: true })
+    await rm(tmpDir, RM_RETRY)
   })
 
   it('unstages specified files', async () => {
@@ -127,6 +130,7 @@ describe('git commit handler', () => {
     tmpDir = await mkdtemp(join(tmpdir(), 'chroxy-git-commit-'))
     fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
+    disableRepoAutoGc(tmpDir) // #6098: stop background gc racing the teardown rm
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
     await writeFile(join(tmpDir, 'README.md'), '# Test')
@@ -135,7 +139,7 @@ describe('git commit handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, { recursive: true, force: true })
+    await rm(tmpDir, RM_RETRY)
   })
 
   it('creates a commit with staged changes', async () => {

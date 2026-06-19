@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 import { readSessionContext } from '../src/session-context.js'
-import { GIT } from './test-helpers.js'
+import { GIT, disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 
 describe('readSessionContext', () => {
   let gitDir   // temp dir with git init + commit
@@ -15,6 +15,7 @@ describe('readSessionContext', () => {
     // Create a temp git repo fixture
     gitDir = await mkdtemp(join(tmpdir(), 'session-ctx-git-'))
     execFileSync(GIT, ['init', '-b', 'main'], { cwd: gitDir })
+    disableRepoAutoGc(gitDir) // #6098: stop background gc racing the teardown rm
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: gitDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: gitDir })
     await writeFile(join(gitDir, 'package.json'), JSON.stringify({ name: 'test-project' }))
@@ -26,8 +27,8 @@ describe('readSessionContext', () => {
   })
 
   after(async () => {
-    await rm(gitDir, { recursive: true, force: true })
-    await rm(plainDir, { recursive: true, force: true })
+    await rm(gitDir, RM_RETRY)
+    await rm(plainDir, RM_RETRY)
   })
 
   it('returns git branch for a git repository', async () => {

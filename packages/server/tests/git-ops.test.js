@@ -6,6 +6,7 @@ import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { createFileOps } from '../src/ws-file-ops/index.js'
 import { GIT } from '../src/git.js'
+import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
 
 describe('git status handler', () => {
   let tmpDir
@@ -20,6 +21,7 @@ describe('git status handler', () => {
     fileOps = createFileOps(mockSend, tmpDir)
     // Init a git repo in tmpDir
     execFileSync(GIT, ['init'], { cwd: tmpDir })
+    disableRepoAutoGc(tmpDir) // #6098: stop background gc racing the teardown rm
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
     // Create an initial commit
@@ -29,7 +31,7 @@ describe('git status handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, { recursive: true, force: true })
+    await rm(tmpDir, RM_RETRY)
   })
 
   it('returns current branch and clean status', async () => {
@@ -114,6 +116,7 @@ describe('git branches handler', () => {
     // Pass tmpDir as workspaceRoot so git ops within it are allowed
     fileOps = createFileOps(mockSend, tmpDir)
     execFileSync(GIT, ['init'], { cwd: tmpDir })
+    disableRepoAutoGc(tmpDir) // #6098: stop background gc racing the teardown rm
     execFileSync(GIT, ['config', 'user.email', 'test@test.com'], { cwd: tmpDir })
     execFileSync(GIT, ['config', 'user.name', 'Test'], { cwd: tmpDir })
     await writeFile(join(tmpDir, 'README.md'), '# Test')
@@ -124,7 +127,7 @@ describe('git branches handler', () => {
   })
 
   after(async () => {
-    await rm(tmpDir, { recursive: true, force: true })
+    await rm(tmpDir, RM_RETRY)
   })
 
   it('lists local branches with current branch marked', async () => {
