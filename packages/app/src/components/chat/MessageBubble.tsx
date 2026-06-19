@@ -470,7 +470,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
           {onCancelQueued && (
             <TouchableOpacity
               onPress={() => onCancelQueued(message.id)}
-              hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+              // #5938 — pad the tap target to ~44pt (iOS HIG): the "Cancel"
+              // text is ~16pt tall, so ≥14pt of vertical hitSlop clears the bar.
+              hitSlop={{ top: 14, bottom: 14, left: 12, right: 12 }}
               accessibilityRole="button"
               accessibilityLabel="Cancel queued message"
               testID={`msg-queued-cancel-${message.id}`}
