@@ -137,6 +137,27 @@ describe('ContainersStatusSection — populated', () => {
     expect(screen.getByTestId('container-stats-env-3').textContent).toBe('—')
   })
 
+  it('stats cell shows "—" when stats is present but every field is null', () => {
+    const snap = snapshot({
+      summary: { total: 1, running: 1, stopped: 0, other: 0 },
+      containers: [container({ id: 'e-null', stats: { cpuPercent: null, memBytes: null, memPercent: null } })],
+    })
+    render(<ContainersStatusSection snapshot={snap} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('container-stats-e-null').textContent).toBe('—')
+  })
+
+  it('surfaces a degraded-survey error banner instead of looking like an empty survey', () => {
+    const snap = snapshot({
+      summary: { total: 0, running: 0, stopped: 0, other: 0 },
+      containers: [],
+      error: { code: 'SURVEY_FAILED', message: 'docker daemon unreachable' },
+    })
+    render(<ContainersStatusSection snapshot={snap} loading={false} connected={true} onRefresh={() => {}} />)
+    const banner = screen.getByTestId('containers-error')
+    expect(banner.textContent).toContain('SURVEY_FAILED')
+    expect(banner.textContent).toContain('docker daemon unreachable')
+  })
+
   it('renders the docker-stats degradation note when present', () => {
     render(<ContainersStatusSection snapshot={snapshot({ dockerStatsNote: 'docker stats unavailable: docker not found' })} loading={false} connected={true} onRefresh={() => {}} />)
     expect(screen.getByTestId('containers-stats-note').textContent).toContain('docker stats unavailable')

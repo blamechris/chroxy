@@ -101,7 +101,10 @@ function StatusTag({ container }: { container: ContainerEntry }) {
 /** Live resource cell: CPU% + memory, or "—" when stats are unavailable. */
 function StatsCell({ container }: { container: ContainerEntry }) {
   const { stats } = container
-  if (!stats) {
+  // null stats (not running / probe failed) OR a stats object whose individual
+  // fields are all null (the protocol allows each to be nullable) → "—", never a
+  // blank cell.
+  if (!stats || (stats.cpuPercent === null && stats.memBytes === null && stats.memPercent === null)) {
     return <td className="cr-dim" data-testid={`container-stats-${container.id}`}>—</td>
   }
   return (
@@ -238,6 +241,11 @@ export function ContainersStatusSection({
           <p className="cr-sub" data-testid="containers-sub">
             {snapshot.summary.total} container{snapshot.summary.total === 1 ? '' : 's'} across {groups.length} workdir
             {groups.length === 1 ? '' : 's'} — chroxy-managed environments only.
+          </p>
+        )}
+        {snapshot?.error && (
+          <p className="cr-callout cr-callout-bad" data-testid="containers-error" role="alert">
+            <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
           </p>
         )}
         {snapshot?.dockerStatsNote && (

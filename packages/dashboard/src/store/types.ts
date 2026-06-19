@@ -709,7 +709,8 @@ export interface ConnectionState {
   /**
    * #6133 — true between dispatching a `containers_status_request` and the
    * matching `containers_status_snapshot` arriving, so the Containers-tab
-   * Refresh button can spin. Cleared when a snapshot lands.
+   * Refresh button can spin. Cleared when a VALID snapshot lands (a malformed
+   * payload is dropped and leaves this true, matching the sibling surveys).
    */
   containersStatusLoading: boolean;
 
