@@ -15,7 +15,7 @@ import { basename, join } from 'path'
 import { tmpdir } from 'os'
 import { execFileSync } from 'child_process'
 import { GIT } from '../src/git.js'
-import { disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 import {
   isPidAlive,
   parsePid,
@@ -143,7 +143,7 @@ describe('worktree-gc integration (real git repo)', () => {
   })
 
   afterEach(() => {
-    rmSync(repo, RM_RETRY)
+    rmDirRobust(repo)
   })
 
   it('plans: reclaim clean+dead-pid, skip dirty/live/no-pid/unlocked, prune dir-gone', () => {
@@ -431,7 +431,7 @@ describe('worktree-gc CLI (runWorktreeGc against a real repo)', () => {
     git(repo, ['worktree', 'lock', '--reason', `claude agent a2 (pid ${DEAD_PID})`, dirtyDead])
   })
 
-  afterEach(() => rmSync(repo, RM_RETRY))
+  afterEach(() => rmDirRobust(repo))
 
   it('dry-run (default) reports reclaimable and deletes nothing', async () => {
     const { runWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
@@ -502,7 +502,7 @@ describe('worktree-gc CLI (config controlRoomRoot auto-discovery, #5221)', () =>
     git(repo, ['worktree', 'lock', '--reason', `claude agent a1 (pid ${DEAD_PID})`, cleanDead])
   })
 
-  afterEach(() => rmSync(root, RM_RETRY))
+  afterEach(() => rmDirRobust(root))
 
   it('discovers repos under config.controlRoomRoot when no --repo is given', async () => {
     const { collectWorktreeGc } = await import('../src/cli/worktree-gc-cmd.js')
@@ -567,7 +567,7 @@ describe('sweepOrphanChroxyWorktrees (real git repo)', () => {
   })
 
   afterEach(() => {
-    rmSync(repo, RM_RETRY)
+    rmDirRobust(repo)
     rmSync(base, { recursive: true, force: true })
   })
 
