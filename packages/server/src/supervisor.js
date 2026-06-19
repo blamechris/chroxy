@@ -593,7 +593,14 @@ export class Supervisor extends EventEmitter {
         // status so a polling client distinguishes "gave up" from the
         // recoverable "restarting" state (and from a silent port = asleep).
         if (this._terminalDown) {
-          res.writeHead(503, { 'Content-Type': 'application/json' })
+          // 200 (not 503) deliberately: the client health probe discards the
+          // body on a non-2xx response (`if (!res.ok) throw`) and keys off the
+          // `status` field — exactly as it does for the 200 `status:'restarting'`
+          // signal. A 503 would make this terminal-down body invisible to the
+          // reconnect ladder (#6023). The `status:'down'` field is the
+          // discriminator; selection still keys off `status:'ok'`, so a 'down'
+          // box is never mistaken for a healthy one.
+          res.writeHead(200, { 'Content-Type': 'application/json' })
           res.end(JSON.stringify({
             status: 'down',
             reason: 'supervisor_gave_up',

@@ -735,7 +735,9 @@ describe('Supervisor', () => {
       const body = await res.json()
 
       // Explicit, non-transient terminal-down signal — distinct from 'restarting'.
-      assert.equal(res.status, 503)
+      // 200 (not 503) so the client health probe (which discards non-2xx bodies)
+      // can read it; `status:'down'` is the discriminator (#6022 / #6023).
+      assert.equal(res.status, 200)
       assert.equal(body.status, 'down')
       assert.equal(body.reason, 'supervisor_gave_up')
       assert.equal(body.fatal, true)
