@@ -18,62 +18,8 @@ name: PlanApprovalCard approve path
 # Requires: dev client installed + mock server on port 9876
 #   cd packages/app && npx expo run:ios
 #   bash packages/app/.maestro/scripts/start-mock-server.sh
-#
-# Note: this flow is self-contained (no `runFlow: setup/...`) because
-# the existing setup/ flows target Expo Go (appId host.exp.Exponent),
-# whereas this needs the chroxy dev client (com.blamechris.chroxy).
-# Mirrors the same launch sequence as chat-todolist.yaml.
 
-# Launch via the dev client's deep link so we skip the
-# "Development Build / pick a dev server" screen and load the
-# chroxy bundle directly. `clearState: true` resets app data but NOT
-# the SecureStore Keychain entry that holds saved connections, so the
-# app may auto-connect to a previously-used server — the conditional
-# below handles both fresh and warm starts.
-- launchApp:
-    clearState: true
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Dismiss the dev menu sheet that shows on first launch of a dev build.
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-# Skip the onboarding carousel if it's showing.
-- tapOn:
-    text: "Skip"
-    optional: true
-
-# Wait until either ConnectScreen OR Chat lands.
-- extendedWaitUntil:
-    visible:
-      text: "Connect to Chroxy|Chat"
-    timeout: 30000
-
-# If we landed on ConnectScreen, fill the manual-entry form.
-- runFlow:
-    when:
-      visible: "Connect to Chroxy"
-    commands:
-      - tapOn:
-          id: "connect-manual-toggle"
-      - tapOn:
-          id: "connect-server-url"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-      - tapOn:
-          id: "connect-api-token"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-      - hideKeyboard
-      - tapOn:
-          id: "connect-submit"
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+- runFlow: setup/ensure-session-screen.yaml
 
 # Make sure Chat tab is selected.
 - tapOn: "Chat"

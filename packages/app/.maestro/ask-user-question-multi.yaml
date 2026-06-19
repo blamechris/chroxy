@@ -31,51 +31,7 @@ name: ChatView AskUserQuestion multi-question form (#4697, #4604 Chunk B)
 #     round-trip (`user_question_response` with the per-question
 #     answers map) and the post-answer summary chip render.
 
-- launchApp:
-    clearState: true
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-- tapOn:
-    text: "Skip"
-    optional: true
-
-- extendedWaitUntil:
-    visible:
-      text: "Connect to Chroxy|Chat"
-    timeout: 30000
-
-- runFlow:
-    when:
-      visible: "Connect to Chroxy"
-    commands:
-      - tapOn:
-          id: "connect-manual-toggle"
-
-      - tapOn:
-          id: "connect-server-url"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-
-      - tapOn:
-          id: "connect-api-token"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-
-      - hideKeyboard
-
-      - tapOn:
-          id: "connect-submit"
-
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+- runFlow: setup/ensure-session-screen.yaml
 
 - tapOn: "Chat"
 - waitForAnimationToEnd

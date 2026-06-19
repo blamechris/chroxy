@@ -2,7 +2,7 @@ appId: com.blamechris.chroxy
 name: ChatView StreamStallChip render + retry (#4507)
 ---
 
-# #4507 — End-to-end coverage for the mobile StreamStallChip (#4496)
+# #4507 / #5469 — End-to-end coverage for the mobile StreamStallChip (#4496)
 # adoption of the server's `error{code:'stream_stall'}` wire signal
 # (server PR #4475). Unit + integration tests in
 # StreamStallChip.test.tsx and MessageBubble.streamStall.test.tsx pin
@@ -20,70 +20,27 @@ name: ChatView StreamStallChip render + retry (#4507)
 # Trigger: 'show-stream-stall' user input → mock-server.mjs emits a
 # `{ type: 'message', messageType: 'error', code: 'stream_stall',
 # content }` envelope mirroring the event-normalizer's production
-# wire shape (server/src/event-normalizer.js error: builder). The
-# fixture seeding pattern is documented in CLAUDE.md → "Fixture
-# Seeding for Structured Renderers".
+# wire shape (server/src/event-normalizer.js error: builder).
+#
+# #5469 — Re-emission marker: on the SECOND 'show-stream-stall' hit
+# within the same connection the mock emits a distinguishable content
+# string ("stall re-emission #2") AND a follow-up assistant message
+# ("retry-received") that this flow hard-asserts after tapping Retry.
+# This pins the full `onRetryStreamStall → sendInput → wire round-trip`
+# path: without the wiring, no resend arrives at the mock, the counter
+# never increments to 2, and the "retry-received" bubble never appears.
+#
+# Deliberately RED run (for on-device verification): comment out the
+# `onRetryStreamStall` wiring in ChatView.tsx and confirm the
+# `extendedWaitUntil` for "retry-received" times out.
 #
 # Tested devices: portrait iPhone (iOS 17+). Mirrors chat-todolist
 # and chat-tool-partial-summary flows.
 # Requires: dev client installed + mock server on port 9876
 #   cd packages/app && npx expo run:ios
 #   bash packages/app/.maestro/scripts/start-mock-server.sh
-#
-# Self-contained (no `runFlow: setup/...`) because the existing setup/
-# flows target Expo Go (appId host.exp.Exponent), whereas this needs
-# the chroxy dev client (com.blamechris.chroxy). Mirrors the
-# chat-todolist.yaml / chat-tool-partial-summary.yaml structure.
 
-- launchApp:
-    clearState: true
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-# Skip onboarding carousel post-clearState.
-- tapOn:
-    text: "Skip"
-    optional: true
-
-# Wait until either ConnectScreen OR Chat lands.
-- extendedWaitUntil:
-    visible:
-      text: "Connect to Chroxy|Chat"
-    timeout: 30000
-
-# If we landed on ConnectScreen, fill the manual-entry form.
-- runFlow:
-    when:
-      visible: "Connect to Chroxy"
-    commands:
-      - tapOn:
-          id: "connect-manual-toggle"
-
-      - tapOn:
-          id: "connect-server-url"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-
-      - tapOn:
-          id: "connect-api-token"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-
-      - hideKeyboard
-
-      - tapOn:
-          id: "connect-submit"
-
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+- runFlow: setup/ensure-session-screen.yaml
 
 # Ensure Chat tab.
 - tapOn: "Chat"
@@ -140,39 +97,29 @@ name: ChatView StreamStallChip render + retry (#4507)
 - waitForAnimationToEnd
 
 # Tap Retry — wires through ChatView's onRetryStreamStall which calls
-# `sendInput(lastUserInputContent)` (see ChatView.tsx:333). NOTE:
-# `sendInput` itself does NOT add an optimistic user_input bubble —
-# that pairing only happens in SessionScreen's input-submit handler
-# (SessionScreen.tsx:580), where `addUserMessage` is called *before*
-# `sendInput`. The chip's retry path is wire-only, so no new
-# `user_input` bubble lands in the chat from the tap alone. The
-# resend proof we CAN assert is the mock-server's re-emission: the
-# wire payload `{ type:'input', data:'show-stream-stall' }` re-hits
-# the `case 'input'` branch, which fires the same `show-stream-stall`
-# emitter again — producing a SECOND `stream-stall-chip` in the tree.
-# So the regression we pin is: tail-gating wires onRetry → tap fires
-# sendInput → wire round-trips → second chip appears.
+# `sendInput(lastUserInputContent)` (see ChatView.tsx:333). The resent
+# input "show-stream-stall" arrives at mock-server's `case 'input'`
+# handler for the SECOND time, incrementing showStreamStallCounter to 2.
+# The mock then emits the distinguishable re-emission content AND a
+# follow-up "retry-received" assistant message.
 - tapOn:
     id: "stream-stall-chip-retry"
 - waitForAnimationToEnd
 
-# Wait for the second chip to land (re-emitted by mock-server in
-# response to the resent wire input). This is the actual resend-path
-# proof: without #4496's tail-gating + sendInput wiring, no second
-# emission would happen. `assertVisible: id:` matches any element
-# with that testID, so it passes once at least one chip exists —
-# but we also assert the original "show-stream-stall" user_input
-# bubble (the chat-side fixture seed) is still present, so the
-# combination pins both the retry's wire-trip and the absence of
-# any state corruption that would scrub the original bubble.
+# #5469 — Hard-assert the re-emission marker. The mock emits a stream
+# triple (stream_start / stream_delta:"retry-received" / stream_end)
+# after the second stall, producing a normal assistant bubble in ChatView.
+# `assertVisible` on the text proves the resend wire-tripped: without the
+# onRetryStreamStall → sendInput wiring the second `show-stream-stall`
+# never arrives at the mock, showStreamStallCounter stays at 1, and the
+# "retry-received" bubble is never emitted.
 - extendedWaitUntil:
     visible:
-      id: "stream-stall-chip"
+      text: ".*retry-received.*"
     timeout: 10000
-# Wildcard match: the user bubble is an accessible container that the
-# a11y tree flattens to "You, show-stream-stall", so an exact
-# "show-stream-stall" match finds no element (verified via
-# `maestro hierarchy` on-device 2026-06-10).
+
+# Also assert the original user bubble is still present (pins that the
+# retry didn't corrupt the chat history).
 - assertVisible:
     text: ".*show-stream-stall.*"
 

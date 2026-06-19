@@ -7,9 +7,14 @@
 
 import { createServer } from 'http'
 import { WebSocketServer } from 'ws'
+import nacl from 'tweetnacl'
+import naclUtil from 'tweetnacl-util'
+const { encodeBase64, decodeBase64 } = naclUtil
 
 const PORT = parseInt(process.argv.find((_, i, a) => a[i - 1] === '--port') || '9876', 10)
 const API_TOKEN = 'test-token-maestro'
+// #6019: opt-in token that steers a connection onto the encrypted handshake.
+const ENCRYPTED_TOKEN = 'test-token-maestro-encrypted'
 let seqCounter = 0
 // #4201: per-trigger counter so repeated `show-todos` inputs don't collide
 // on a single fixed id (which would cause React-key duplicates + stuck
@@ -24,6 +29,103 @@ let showBashPartialCounter = 0
 // invocations on the same session need unique toolUseIds so the
 // app's user_question handler doesn't collide on a fixed id.
 let showAskUserQuestionCounter = 0
+
+// #5468: connection counter — incremented once per `auth` message, used only
+// for the marker's text ("mock reconnect #N") + the [mock] Auth #N log line.
+let connectionCounter = 0
+// #5468: marker gate. The app reconnects incidentally during dev-client setup
+// (auth #1 → drop → auth #2) BEFORE the flow sends `simulate-disconnect`, so a
+// plain "counter ≥ 2" gate would emit the marker from that setup churn and the
+// RED test (ws.terminate() commented out) would still pass vacuously. Instead
+// we arm this flag ONLY when `simulate-disconnect` is received, and emit the
+// marker on the next auth — so the marker is reachable ONLY via a genuine
+// deliberate drop + reconnect. With the drop disabled there is no reconnect,
+// the flag stays consumed/unset, and reconnect.yaml fails at the assertion.
+let sawSimulateDisconnect = false
+
+// #5469: per-connection counter for `show-stream-stall` hits.
+// On the SECOND trigger (within the same connection) the mock emits the
+// stall error with a distinguishable detail ("stall re-emission #2") and
+// an additional assistant message ("retry-received"). stream-stall-chip.yaml
+// hard-asserts that marker after tapping Retry, so a broken
+// onRetryStreamStall → sendInput wiring fails the flow instead of passing
+// vacuously because the first chip already satisfies the `id: stream-stall-chip`
+// extendedWaitUntil.
+let showStreamStallCounter = 0
+
+// #6019: E2E key_exchange / eager-handshake support.
+//
+// The mock server maintains an ephemeral X25519 keypair per process (not
+// per connection — the Maestro flow doesn't test key rotation, only the
+// basic handshake path). On receiving a `key_exchange` message from the
+// client it derives the shared key using DH, sends `key_exchange_ok`, and
+// wraps all subsequent outbound messages in the `{ type:'encrypted', d, n }`
+// envelope the app's `case 'encrypted'` handler decrypts. Because the mock
+// starts the encrypted session with a fixed `sendNonce = 0` and increments
+// it on every frame, the app's nonce-equality guard is satisfied.
+//
+// Crypto primitives mirror the store-core crypto.ts implementation:
+//   - X25519 DH via nacl.box.before
+//   - XSalsa20-Poly1305 secretbox via nacl.secretbox / nacl.secretbox.open
+//   - Nonce: [direction_byte, counter_LE_8bytes, ...15_zero_bytes]
+//   - Connection sub-key: SHA-512(sharedKey ∥ saltBytes)[0:32]
+//   - Direction: 0x00 = server→client, 0x01 = client→server
+
+const NONCE_LENGTH = 24
+const DIRECTION_SERVER = 0x00
+const DIRECTION_CLIENT = 0x01
+const CONNECTION_SALT_BYTES = 32
+
+// Generate a static server keypair for this process lifetime. A real server
+// persists this as its identity keypair; for the mock we regenerate on restart,
+// which is fine — the Maestro flow doesn't test pinning.
+const SERVER_KEYPAIR = nacl.box.keyPair()
+const SERVER_PUBLIC_KEY_B64 = encodeBase64(SERVER_KEYPAIR.publicKey)
+
+/**
+ * Build a 24-byte nonce matching store-core crypto.ts nonceFromCounter:
+ *   byte 0: direction (0x00 = server, 0x01 = client)
+ *   bytes 1-8: counter little-endian
+ *   bytes 9-23: zero-padded
+ */
+function nonceFromCounter(n, direction) {
+  const nonce = new Uint8Array(NONCE_LENGTH)
+  nonce[0] = direction
+  let val = n
+  for (let i = 1; i <= 8; i++) {
+    nonce[i] = val & 0xff
+    val = Math.floor(val / 256)
+  }
+  return nonce
+}
+
+/**
+ * Derive the per-connection sub-key: SHA-512(sharedKey ∥ saltBytes)[0:32].
+ * Matches store-core deriveConnectionKey exactly.
+ */
+function deriveConnectionKey(sharedKey, saltBase64) {
+  const saltBytes = decodeBase64(saltBase64)
+  const input = new Uint8Array(sharedKey.length + saltBytes.length)
+  input.set(sharedKey, 0)
+  input.set(saltBytes, sharedKey.length)
+  const hash = nacl.hash(input)
+  return hash.slice(0, nacl.secretbox.keyLength)
+}
+
+/**
+ * Encrypt a JSON payload using XSalsa20-Poly1305 for the encrypted session.
+ * Returns the `{ type:'encrypted', d, n }` wire envelope.
+ */
+function encryptFrame(payload, sharedKey, nonceCounter) {
+  const nonce = nonceFromCounter(nonceCounter, DIRECTION_SERVER)
+  const messageBytes = new Uint8Array(Buffer.from(JSON.stringify(payload), 'utf8'))
+  const ciphertext = nacl.secretbox(messageBytes, new Uint8Array(nonce), new Uint8Array(sharedKey))
+  return {
+    type: 'encrypted',
+    d: encodeBase64(ciphertext),
+    n: nonceCounter,
+  }
+}
 
 function send(ws, msg) {
   seqCounter++
@@ -51,23 +153,140 @@ httpServer.on('upgrade', (req, socket, head) => {
 wss.on('connection', (ws) => {
   console.log('[mock] Client connected')
   seqCounter = 0
+  showStreamStallCounter = 0
+
+  // Per-connection encryption state. Populated after key_exchange handshake.
+  let encryptedSession = null  // { sharedKey: Uint8Array, sendNonce: number, recvNonce: number }
+
+  /**
+   * Send a message: if an encrypted session is active, wrap in the encrypted
+   * envelope; otherwise send plaintext. This mirrors the post-handshake
+   * behaviour of the production ws-server.js.
+   */
+  function secureSend(ws, msg) {
+    seqCounter++
+    if (encryptedSession) {
+      const envelope = encryptFrame({ ...msg, seq: seqCounter }, encryptedSession.sharedKey, encryptedSession.sendNonce)
+      encryptedSession.sendNonce++
+      ws.send(JSON.stringify(envelope))
+    } else {
+      ws.send(JSON.stringify({ ...msg, seq: seqCounter }))
+    }
+  }
 
   ws.on('message', (raw) => {
     let msg
     try {
-      msg = JSON.parse(raw.toString())
+      // #6019: if an encrypted session is active, each inbound message is an
+      // `{ type:'encrypted', d, n }` envelope — decrypt it first. The client
+      // uses DIRECTION_CLIENT nonces; the server uses DIRECTION_SERVER nonces
+      // (both per store-core crypto.ts direction constants).
+      const parsed = JSON.parse(raw.toString())
+      if (encryptedSession && parsed.type === 'encrypted') {
+        // #6019: decrypt with the wire nonce the client stamped (`parsed.n`),
+        // matching store-core's contract (the client's send counter), rather
+        // than blindly trusting our local recvNonce. Validate monotonicity so a
+        // replayed/out-of-order frame is rejected like production does.
+        const clientNonceCounter = typeof parsed.n === 'number' ? parsed.n : encryptedSession.recvNonce
+        if (clientNonceCounter !== encryptedSession.recvNonce) {
+          console.error(`[mock] Nonce mismatch — expected ${encryptedSession.recvNonce}, got ${clientNonceCounter}`)
+          return
+        }
+        const nonce = nonceFromCounter(clientNonceCounter, DIRECTION_CLIENT)
+        const ciphertext = new Uint8Array(decodeBase64(parsed.d))
+        const plaintext = nacl.secretbox.open(ciphertext, new Uint8Array(nonce), new Uint8Array(encryptedSession.sharedKey))
+        if (!plaintext) {
+          console.error('[mock] Decryption failed — MAC mismatch or wrong key')
+          return
+        }
+        encryptedSession.recvNonce++
+        msg = JSON.parse(Buffer.from(plaintext).toString('utf8'))
+      } else {
+        msg = parsed
+      }
     } catch {
       return
     }
 
     switch (msg.type) {
       case 'auth': {
-        if (msg.token !== API_TOKEN) {
+        // #6019: accept the encryption opt-in token too. A client connecting
+        // with `test-token-maestro-encrypted` is steered onto the
+        // encryption:'required' handshake path below; the standard token keeps
+        // encryption disabled so all other flows are unaffected.
+        if (msg.token !== API_TOKEN && msg.token !== ENCRYPTED_TOKEN) {
           send(ws, { type: 'auth_fail', reason: 'invalid token' })
           ws.close()
           return
         }
-        // Full post-auth sequence
+
+        // #5468: increment the per-process connection counter. The mock server
+        // is NOT restarted between flows in run-all.yaml, so the counter
+        // monotonically tracks total auth completions in this server process.
+        connectionCounter++
+        console.log(`[mock] Auth #${connectionCounter}`)
+
+        // #6019: check for eager key exchange fields sent alongside auth.
+        // The app sends `{ ..., eagerPublicKey, eagerSalt }` in its `auth`
+        // message when it has pre-generated an ephemeral keypair (onopen →
+        // prepareEagerKeyExchange). If present, the server performs the DH
+        // NOW and includes its own public key in `auth_ok.serverPublicKey`,
+        // allowing the client to derive the shared key without a
+        // key_exchange round trip.
+        //
+        // The mock supports BOTH eager and discrete handshake:
+        //   - Eager: client sends eagerPublicKey+eagerSalt → server echoes
+        //     serverPublicKey in auth_ok → client derives key immediately.
+        //   - Discrete: client sends no eager fields → auth_ok has
+        //     encryption:'required' + no serverPublicKey → client sends
+        //     key_exchange → server replies key_exchange_ok → shared key derived.
+        //
+        // For the key-exchange E2E flow we always advertise
+        // encryption:'required' so that the app is forced through the
+        // cryptographic handshake path. Flows that don't set the token to
+        // 'test-token-maestro-encrypted' keep the existing 'disabled' path
+        // so all other flows are unaffected.
+        //
+        // NOTE (assumption for on-device verification): the app generates its
+        // eager keypair in socket.onopen before sending auth, so eagerPublicKey
+        // is expected to be present. If the on-device run shows the mock
+        // sending key_exchange_ok but the app timing out, it's likely the app
+        // is not sending eagerPublicKey — check the discrete fallback path in
+        // the app (which sends a standalone `key_exchange` message) and ensure
+        // the mock's `case 'key_exchange'` handler below resolves it.
+        const useEncryption = (msg.token === ENCRYPTED_TOKEN)
+
+        let eagerSharedKey = null
+        let eagerServerPublicKey = null
+
+        // #6019: production honors the eager path only when BOTH eagerPublicKey
+        // AND eagerSalt are present (ws-auth.js). Require both here too —
+        // deriving without the salt would produce a key the app never computes.
+        if (useEncryption && msg.eagerPublicKey && msg.eagerSalt) {
+          // Derive the shared key from the client's eager public key and our
+          // secret. This mirrors ws-server.js key exchange logic.
+          try {
+            const clientPub = decodeBase64(msg.eagerPublicKey)
+            const rawShared = nacl.box.before(clientPub, SERVER_KEYPAIR.secretKey)
+            eagerSharedKey = deriveConnectionKey(rawShared, msg.eagerSalt)
+            eagerServerPublicKey = SERVER_PUBLIC_KEY_B64
+            console.log('[mock] Eager key exchange — shared key derived')
+          } catch (err) {
+            console.warn('[mock] Eager key derivation failed:', err.message)
+            eagerSharedKey = null
+          }
+        }
+
+        // Build the auth_ok payload. For encrypted sessions include the
+        // server's public key so the client can perform eager derivation.
+        // NOTE: the mock does NOT supply a real `serverKeySig` (Ed25519
+        // identity signature over the exchange key). The app only enforces
+        // signature verification when a pin is already stored for this server
+        // URL. In the Maestro flow clearState:true wipes SecureStore on every
+        // run, so the connection is always unpinned and the signature check is
+        // skipped (TOFU — Trust On First Use). If a future flow intentionally
+        // tests pinned-identity verification, the mock will need a real Ed25519
+        // signing keypair.
         send(ws, {
           type: 'auth_ok',
           clientId: 'mock-client-1',
@@ -77,57 +296,91 @@ wss.on('connection', (ws) => {
           serverCommit: 'abc1234',
           cwd: '/tmp/mock-project',
           connectedClients: [],
-          encryption: 'disabled',
+          encryption: useEncryption ? 'required' : 'disabled',
+          ...(eagerServerPublicKey ? { serverPublicKey: eagerServerPublicKey, serverKeySig: null } : {}),
         })
-        send(ws, { type: 'server_mode', mode: 'cli' })
-        send(ws, { type: 'status', connected: true })
-        send(ws, {
-          type: 'session_list',
-          sessions: [{
+
+        if (eagerSharedKey) {
+          // Encryption is now active — post-auth burst uses secureSend.
+          encryptedSession = { sharedKey: eagerSharedKey, sendNonce: 0, recvNonce: 0 }
+          console.log('[mock] Encrypted session started (eager)')
+        } else if (useEncryption) {
+          // Discrete path: wait for key_exchange from the client before
+          // sending the post-auth burst. The `case 'key_exchange'` handler
+          // below sets up encryptedSession and then calls the burst.
+          console.log('[mock] Waiting for discrete key_exchange from client')
+          break
+        }
+
+        // Send the post-auth burst (for non-encrypted sessions or after
+        // the eager handshake established encryption).
+        sendPostAuthBurst(ws, secureSend)
+
+        // #5468: emit the reconnect marker only on the reconnect that FOLLOWS a
+        // deliberate `simulate-disconnect` (see `sawSimulateDisconnect`). Sent
+        // via secureSend so it lands in the correct session (encrypted or not).
+        // NOTE: emitted as `messageType: 'response'` (a Chat-tab bubble), NOT
+        // 'system' — buildChatViewMessages filters `type: 'system'` OFF the Chat
+        // tab (they live on the System tab), so a system marker is invisible to
+        // reconnect.yaml which asserts on Chat.
+        if (sawSimulateDisconnect) {
+          sawSimulateDisconnect = false
+          secureSend(ws, {
+            type: 'message',
+            messageType: 'response',
+            content: `mock reconnect #${connectionCounter}`,
+            timestamp: Date.now(),
             sessionId: 'mock-sess-1',
-            name: 'Mock Session',
-            cwd: '/tmp/mock-project',
-            type: 'cli',
-            // #4701: report `hasTerminal: true` so the SessionScreen
-            // mode toggle includes the Terminal button (which the
-            // terminal-view.yaml flow taps). Existing flows do not
-            // assert on the absence of the Term button, so flipping
-            // this default is safe.
-            hasTerminal: true,
-            model: 'sonnet',
-            permissionMode: 'approve',
-            isBusy: false,
-            createdAt: Date.now(),
-            conversationId: null,
-            provider: 'claude-sdk',
-            capabilities: {},
-          }],
-        })
-        send(ws, {
-          type: 'session_switched',
-          sessionId: 'mock-sess-1',
-          name: 'Mock Session',
-          cwd: '/tmp/mock-project',
-          conversationId: null,
-        })
-        send(ws, {
-          type: 'available_models',
-          models: [
-            { id: 'sonnet', name: 'Sonnet', description: 'Fast and capable' },
-            { id: 'opus', name: 'Opus', description: 'Most capable' },
-          ],
-        })
-        send(ws, {
-          type: 'available_permission_modes',
-          modes: [
-            { id: 'approve', label: 'Approve' },
-            { id: 'auto', label: 'Auto' },
-            { id: 'plan', label: 'Plan' },
-          ],
-        })
-        send(ws, { type: 'claude_ready', sessionId: 'mock-sess-1' })
-        send(ws, { type: 'model_changed', model: 'sonnet', sessionId: 'mock-sess-1' })
-        send(ws, { type: 'permission_mode_changed', mode: 'approve', sessionId: 'mock-sess-1' })
+          })
+        }
+        break
+      }
+
+      // #6019: discrete key_exchange — client sends its ephemeral X25519
+      // public key after auth_ok (when eager path was not used or the eager
+      // derivation failed on the client). The server DH-exchanges, derives the
+      // shared key, replies with key_exchange_ok carrying the server's public
+      // key, then emits the post-auth burst encrypted.
+      case 'key_exchange': {
+        if (!msg.publicKey) {
+          console.error('[mock] key_exchange missing publicKey')
+          ws.close()
+          break
+        }
+        try {
+          const clientPub = decodeBase64(msg.publicKey)
+          const rawShared = nacl.box.before(clientPub, SERVER_KEYPAIR.secretKey)
+          const sharedKey = msg.salt
+            ? deriveConnectionKey(rawShared, msg.salt)
+            : new Uint8Array(rawShared)
+          // Reply PLAINTEXT — encryption activates after this frame, for
+          // subsequent messages (mirrors production ws-server.js behaviour).
+          send(ws, {
+            type: 'key_exchange_ok',
+            publicKey: SERVER_PUBLIC_KEY_B64,
+            // No serverKeySig — see note in auth handler above.
+            serverKeySig: null,
+          })
+          encryptedSession = { sharedKey, sendNonce: 0, recvNonce: 0 }
+          console.log('[mock] Encrypted session started (discrete key_exchange)')
+          // Now send the post-auth burst encrypted.
+          sendPostAuthBurst(ws, secureSend)
+          if (sawSimulateDisconnect) {
+            sawSimulateDisconnect = false
+            // Chat-tab bubble (see note on the eager-path marker above) — not
+            // 'system', which is filtered off the Chat tab.
+            secureSend(ws, {
+              type: 'message',
+              messageType: 'response',
+              content: `mock reconnect #${connectionCounter}`,
+              timestamp: Date.now(),
+              sessionId: 'mock-sess-1',
+            })
+          }
+        } catch (err) {
+          console.error('[mock] key_exchange DH failed:', err.message)
+          ws.close()
+        }
         break
       }
 
@@ -137,15 +390,15 @@ wss.on('connection', (ws) => {
         break
 
       case 'list_slash_commands':
-        send(ws, { type: 'slash_commands', commands: [] })
+        secureSend(ws, { type: 'slash_commands', commands: [] })
         break
 
       case 'list_agents':
-        send(ws, { type: 'agent_list', agents: [] })
+        secureSend(ws, { type: 'agent_list', agents: [] })
         break
 
       case 'ping':
-        send(ws, { type: 'pong' })
+        secureSend(ws, { type: 'pong' })
         break
 
       case 'browse_files': {
@@ -157,7 +410,7 @@ wss.on('connection', (ws) => {
         // session-file-browser flow's post-Back package.json assert fails.
         if (!requestedPath || requestedPath === '/tmp/mock-project') {
           // Root directory
-          send(ws, {
+          secureSend(ws, {
             type: 'file_listing',
             path: '/tmp/mock-project',
             parentPath: null,
@@ -170,7 +423,7 @@ wss.on('connection', (ws) => {
             error: null,
           })
         } else if (requestedPath === 'src' || requestedPath.endsWith('/src')) {
-          send(ws, {
+          secureSend(ws, {
             type: 'file_listing',
             path: '/tmp/mock-project/src',
             parentPath: '/tmp/mock-project',
@@ -181,7 +434,7 @@ wss.on('connection', (ws) => {
             error: null,
           })
         } else {
-          send(ws, {
+          secureSend(ws, {
             type: 'file_listing',
             path: requestedPath,
             parentPath: '/tmp/mock-project',
@@ -193,7 +446,7 @@ wss.on('connection', (ws) => {
       }
 
       case 'read_file':
-        send(ws, {
+        secureSend(ws, {
           type: 'file_content',
           path: msg.path,
           content: '// Mock file content\nconsole.log("Hello from mock server")\n',
@@ -229,7 +482,7 @@ wss.on('connection', (ws) => {
         if (text.trim() === 'show-terminal') {
           // Trip a CR + carriage return so xterm renders cleanly,
           // then a styled line + reset.
-          send(ws, {
+          secureSend(ws, {
             type: 'raw',
             sessionId: 'mock-sess-1',
             data: '\r\n\x1b[32mmaestro-terminal-fixture\x1b[0m\r\n$ ',
@@ -257,6 +510,9 @@ wss.on('connection', (ws) => {
         // frame, which is exactly what an abrupt tunnel drop looks
         // like — the client observes a 1006 close code locally.
         if (text.trim() === 'simulate-disconnect') {
+          // #5468: arm the marker for the reconnect that follows the drop. Set
+          // it here (not inside the timeout) so it's armed regardless of timing.
+          sawSimulateDisconnect = true
           setTimeout(() => {
             console.log('[mock] simulate-disconnect — terminating WS')
             try { ws.terminate() } catch {}
@@ -264,7 +520,7 @@ wss.on('connection', (ws) => {
           break
         }
 
-        // #4507: trigger phrase 'show-stream-stall' emits a recoverable
+        // #4507 / #5469: trigger phrase 'show-stream-stall' emits a recoverable
         // `error{code:'stream_stall'}` so the Maestro stream-stall-chip
         // flow can exercise the StreamStallChip render + retry path on
         // a real simulator. Mirrors the production wire shape — see
@@ -285,15 +541,40 @@ wss.on('connection', (ws) => {
         // `_handleStreamStall` clears busy state via
         // `_emitInterruptedTurnResult` and then emits the error, so the
         // chip lands while the session is idle (retry-able).
+        //
+        // #5469: track per-connection hits. On the SECOND hit, emit an
+        // additional detail string ("stall re-emission #2") and a
+        // follow-up assistant message ("retry-received") so the flow can
+        // hard-assert that tapping Retry actually caused a resend. Without
+        // this marker the post-Retry assert passes vacuously because the
+        // FIRST chip (emitted before Retry was tapped) already satisfies
+        // `id: stream-stall-chip`.
         if (text.trim() === 'show-stream-stall') {
-          send(ws, {
+          showStreamStallCounter++
+          const isReEmission = showStreamStallCounter >= 2
+          secureSend(ws, {
             type: 'message',
             messageType: 'error',
-            content: 'Stream stalled — no response for 5 minutes. Try sending again.',
+            content: isReEmission
+              ? 'Stream stalled — no response for 5 minutes. Try sending again. (stall re-emission #2)'
+              : 'Stream stalled — no response for 5 minutes. Try sending again.',
             code: 'stream_stall',
             timestamp: Date.now(),
             sessionId: 'mock-sess-1',
           })
+          if (isReEmission) {
+            // Emit a normal assistant message that the flow can hard-assert
+            // as proof that the retry wire round-tripped. testID for this
+            // assistant bubble: the stream_start/delta/stream_end triple
+            // produces a `response` ChatMessage which renders in ChatView
+            // as a regular message bubble — Maestro can assert on its text.
+            const retryMsgId = `msg-retry-marker-${Date.now()}`
+            secureSend(ws, { type: 'stream_start', messageId: retryMsgId, sessionId: 'mock-sess-1' })
+            secureSend(ws, { type: 'stream_delta', messageId: retryMsgId, delta: 'retry-received', sessionId: 'mock-sess-1' })
+            secureSend(ws, { type: 'stream_end', messageId: retryMsgId, sessionId: 'mock-sess-1' })
+            secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+            secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          }
           break
         }
 
@@ -314,7 +595,7 @@ wss.on('connection', (ws) => {
         // `response` ChatMessage regardless of subsequent content). Real
         // tool-only turns from the server elide stream_* entirely.
         if (text.trim() === 'show-todos') {
-          send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
           // #4201: ids are stable within the test but unique per trigger
           // so repeated `show-todos` invocations don't collide on React
           // keys (handleToolStart appends, doesn't replace, outside
@@ -324,7 +605,7 @@ wss.on('connection', (ws) => {
           showTodosCounter += 1
           const toolUseId = `tu-todowrite-mock-${showTodosCounter}`
           const toolMessageId = `tool-todowrite-mock-${showTodosCounter}`
-          send(ws, {
+          secureSend(ws, {
             type: 'tool_start',
             sessionId: 'mock-sess-1',
             tool: 'TodoWrite',
@@ -346,14 +627,14 @@ wss.on('connection', (ws) => {
             '  [~] Running tests (t2)',
             '  [ ] Address review (t3)',
           ].join('\n')
-          send(ws, {
+          secureSend(ws, {
             type: 'tool_result',
             sessionId: 'mock-sess-1',
             toolUseId,
             result: todoResult,
           })
-          send(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
-          send(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
           break
         }
 
@@ -374,11 +655,11 @@ wss.on('connection', (ws) => {
         // field. No `tool_result` is emitted — we want the bubble to
         // stay in the streaming-collapsed state for the assertion.
         if (text.trim() === 'show-bash-partial') {
-          send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+          secureSend(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
           showBashPartialCounter += 1
           const toolUseId = `tu-bash-partial-mock-${showBashPartialCounter}`
           const toolMessageId = `tool-bash-partial-mock-${showBashPartialCounter}`
-          send(ws, {
+          secureSend(ws, {
             type: 'tool_start',
             sessionId: 'mock-sess-1',
             tool: 'Bash',
@@ -401,7 +682,7 @@ wss.on('connection', (ws) => {
             'ls -la /tmp"}',
           ]
           for (const partialJson of partials) {
-            send(ws, {
+            secureSend(ws, {
               type: 'tool_input_delta',
               sessionId: 'mock-sess-1',
               messageId: toolMessageId,
@@ -436,7 +717,7 @@ wss.on('connection', (ws) => {
         // not set because plan-ready arrives at end-of-turn (the prior
         // turn that produced the plan already cleared busy via `result`).
         if (text.trim() === 'show-plan-approval') {
-          send(ws, {
+          secureSend(ws, {
             type: 'plan_ready',
             sessionId: 'mock-sess-1',
             allowedPrompts: [
@@ -490,7 +771,7 @@ wss.on('connection', (ws) => {
           // model and are usually capitalized — the testID format works
           // regardless because the assertion targets the test fixture
           // by exact match.
-          send(ws, {
+          secureSend(ws, {
             type: 'user_question',
             sessionId: 'mock-sess-1',
             toolUseId,
@@ -536,7 +817,7 @@ wss.on('connection', (ws) => {
         if (text.trim() === 'show-ask-other') {
           showAskUserQuestionCounter += 1
           const toolUseId = `tu-askuserquestion-other-mock-${showAskUserQuestionCounter}`
-          send(ws, {
+          secureSend(ws, {
             type: 'user_question',
             sessionId: 'mock-sess-1',
             toolUseId,
@@ -589,7 +870,7 @@ wss.on('connection', (ws) => {
         if (text.trim() === 'show-multi-question') {
           showAskUserQuestionCounter += 1
           const toolUseId = `tu-multi-question-mock-${showAskUserQuestionCounter}`
-          send(ws, {
+          secureSend(ws, {
             type: 'user_question',
             sessionId: 'mock-sess-1',
             toolUseId,
@@ -619,7 +900,7 @@ wss.on('connection', (ws) => {
                   { label: 'dashboard' },
                 ],
               },
-              // Q[2] — single-select with synthetic Other (no model-
+              // Q[2] — single-select with synthetic 'Other' (no model-
               // supplied entry; handleUserQuestion appends the
               // OTHER_OPTION_VALUE sentinel automatically).
               {
@@ -660,7 +941,7 @@ wss.on('connection', (ws) => {
           // can assert that the wire payload preserved every question
           // (a regression in handleUserQuestion's normalizedAll filter
           // would drop entries and we'd see fewer labels round-trip).
-          send(ws, {
+          secureSend(ws, {
             type: 'user_question',
             sessionId: 'mock-sess-1',
             toolUseId,
@@ -700,14 +981,22 @@ wss.on('connection', (ws) => {
 
         // Default: simulate a normal text-only assistant response.
         const messageId = `msg-${Date.now()}`
-        send(ws, { type: 'stream_start', messageId, sessionId: 'mock-sess-1' })
-        send(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
-        const response = `I received your message: "${text}". This is a mock response for E2E testing.`
+        secureSend(ws, { type: 'stream_start', messageId, sessionId: 'mock-sess-1' })
+        secureSend(ws, { type: 'agent_busy', sessionId: 'mock-sess-1' })
+        // #6019: prefix the reply with a marker ONLY when the session is actually
+        // encrypted. This is what makes key-exchange.yaml non-vacuous — the
+        // marker round-trips only if: encrypted token accepted → handshake →
+        // app encrypts the input → mock DECRYPTS it (reaching this handler) →
+        // mock re-encrypts the reply → app decrypts + renders. Asserting the
+        // plain echo of the user's own input would pass on an unencrypted
+        // session too (the bug this replaces).
+        const encMarker = encryptedSession ? 'encrypted-session-ok ' : ''
+        const response = `${encMarker}I received your message: "${text}". This is a mock response for E2E testing.`
         // Send as a single delta for simplicity
-        send(ws, { type: 'stream_delta', messageId, delta: response, sessionId: 'mock-sess-1' })
-        send(ws, { type: 'stream_end', messageId, sessionId: 'mock-sess-1' })
-        send(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
-        send(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
+        secureSend(ws, { type: 'stream_delta', messageId, delta: response, sessionId: 'mock-sess-1' })
+        secureSend(ws, { type: 'stream_end', messageId, sessionId: 'mock-sess-1' })
+        secureSend(ws, { type: 'result', cost: 0.001, duration: 100, usage: {}, sessionId: 'mock-sess-1' })
+        secureSend(ws, { type: 'agent_idle', sessionId: 'mock-sess-1' })
         break
       }
 
@@ -740,7 +1029,7 @@ wss.on('connection', (ws) => {
         break
 
       case 'request_session_context':
-        send(ws, {
+        secureSend(ws, {
           type: 'session_context',
           sessionId: 'mock-sess-1',
           gitBranch: 'main',
@@ -759,6 +1048,64 @@ wss.on('connection', (ws) => {
     console.log('[mock] Client disconnected')
   })
 })
+
+/**
+ * Send the standard post-auth burst (session_list, status, models, etc.).
+ * Extracted so both the eager and discrete encryption paths can share the
+ * same sequence. `sendFn` is the connection-scoped `secureSend` closure so
+ * the burst goes through the correct (plain or encrypted) channel.
+ */
+function sendPostAuthBurst(ws, sendFn) {
+  sendFn(ws, { type: 'server_mode', mode: 'cli' })
+  sendFn(ws, { type: 'status', connected: true })
+  sendFn(ws, {
+    type: 'session_list',
+    sessions: [{
+      sessionId: 'mock-sess-1',
+      name: 'Mock Session',
+      cwd: '/tmp/mock-project',
+      type: 'cli',
+      // #4701: report `hasTerminal: true` so the SessionScreen
+      // mode toggle includes the Terminal button (which the
+      // terminal-view.yaml flow taps). Existing flows do not
+      // assert on the absence of the Term button, so flipping
+      // this default is safe.
+      hasTerminal: true,
+      model: 'sonnet',
+      permissionMode: 'approve',
+      isBusy: false,
+      createdAt: Date.now(),
+      conversationId: null,
+      provider: 'claude-sdk',
+      capabilities: {},
+    }],
+  })
+  sendFn(ws, {
+    type: 'session_switched',
+    sessionId: 'mock-sess-1',
+    name: 'Mock Session',
+    cwd: '/tmp/mock-project',
+    conversationId: null,
+  })
+  sendFn(ws, {
+    type: 'available_models',
+    models: [
+      { id: 'sonnet', name: 'Sonnet', description: 'Fast and capable' },
+      { id: 'opus', name: 'Opus', description: 'Most capable' },
+    ],
+  })
+  sendFn(ws, {
+    type: 'available_permission_modes',
+    modes: [
+      { id: 'approve', label: 'Approve' },
+      { id: 'auto', label: 'Auto' },
+      { id: 'plan', label: 'Plan' },
+    ],
+  })
+  sendFn(ws, { type: 'claude_ready', sessionId: 'mock-sess-1' })
+  sendFn(ws, { type: 'model_changed', model: 'sonnet', sessionId: 'mock-sess-1' })
+  sendFn(ws, { type: 'permission_mode_changed', mode: 'approve', sessionId: 'mock-sess-1' })
+}
 
 httpServer.listen(PORT, () => {
   console.log(`[mock] Chroxy mock server listening on port ${PORT}`)

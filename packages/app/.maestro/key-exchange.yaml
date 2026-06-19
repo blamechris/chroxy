@@ -1,0 +1,182 @@
+appId: com.blamechris.chroxy
+name: E2E key exchange eager handshake (#6019)
+---
+
+# #6019 — Device-layer coverage for the key_exchange / eager-handshake
+# path (deferred from #5619 / #5605 / #5556). The encrypted-handshake
+# path is covered at the store-core level via FakeHandshakeServer /
+# FakeHandshakeClient contract-switch suites, but had no Maestro
+# coverage against a real device.
+#
+# This flow exercises the full encrypted connect sequence on a real RN
+# runtime:
+#   auth (with eagerPublicKey + eagerSalt) →
+#   auth_ok (with serverPublicKey) →
+#   shared-key derivation →
+#   encrypted post-auth burst →
+#   encrypted assistant message →
+#   SessionScreen lands
+#
+# The flow uses token `test-token-maestro-encrypted` to opt-in to the
+# mock-server's encrypted path (standard `test-token-maestro` keeps
+# encryption:'disabled' so existing flows are unaffected).
+#
+# Handshake modes supported by the mock:
+#   Eager path (expected): the app sends `eagerPublicKey` + `eagerSalt`
+#     in its `auth` message → mock derives the shared key from its own
+#     static keypair + the client's public key → includes
+#     `serverPublicKey` in auth_ok → client derives shared key in the
+#     auth_ok handler → encryption active immediately → post-auth burst
+#     arrives encrypted.
+#   Discrete fallback: if the app does NOT send eagerPublicKey (older
+#     build or eager disabled) → mock replies auth_ok with
+#     encryption:'required' but no serverPublicKey → client sends a
+#     standalone `key_exchange` message → mock replies key_exchange_ok
+#     with serverPublicKey → shared key derived → burst sent encrypted.
+#
+# Verified on-device (iPhone 16 Pro, iOS 18.6): the eager path fires — the app
+# sends eagerPublicKey+eagerSalt in `auth`, the mock logs "Eager key exchange —
+# shared key derived" + "Encrypted session started (eager)", and the encrypted
+# round-trip lands (the `encrypted-session-ok` marker below). The discrete
+# `key_exchange` fallback is also implemented if a future build omits the eager
+# fields.
+#
+# NOTES:
+#   1. `clearState: true` does NOT wipe SecureStore on iOS (expo-secure-store →
+#      keychain survives a data-clear), so the app auto-reconnects to the cached
+#      (standard, unencrypted) server and lands on Chat. The force-disconnect
+#      block below returns to ConnectScreen so we can connect with the ENCRYPTED
+#      token — without it this flow would silently exercise the unencrypted path.
+#   2. The mock's static server keypair has no Ed25519 identity signature
+#      (serverKeySig: null); the app skips signature verification on this
+#      UNPINNED connection (TOFU). A "identity refused" failure would mean a
+#      stale pin from a prior pinned-identity run — wipe the simulator's keychain.
+#   3. The mock does not implement server-initiated re-key / rotation; this flow
+#      only covers the initial handshake.
+#
+# Deliberately RED run (for on-device verification): patch the app so
+# that `wsSend` in connection.ts bypasses encryption (remove the
+# `encryptionState` branch) and confirm the mock's decryption logs
+# "Decryption failed — MAC mismatch" or the flow times out on Chat.
+#
+# Tested devices: portrait iPhone (iOS 17+).
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+# Use launchApp + openLink directly (not setup/ensure-session-screen.yaml)
+# because this flow must connect with a different token
+# (test-token-maestro-encrypted) than the standard fixture. We replicate
+# the same launch + connect sequence that ensure-session-screen.yaml uses,
+# but with the encrypted token in the API-token field.
+- launchApp:
+    clearState: true
+- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
+
+# Dismiss the dev menu sheet (intro 'Continue' OR main menu close).
+- tapOn:
+    text: "Continue"
+    optional: true
+- tapOn:
+    point: "50%,10%"
+    optional: true
+
+# Skip the onboarding carousel post-clearState.
+- tapOn:
+    text: "Skip"
+    optional: true
+
+# Wait until either ConnectScreen OR Chat lands — extended timeout
+# because Metro may need to bundle on first launch.
+- extendedWaitUntil:
+    visible:
+      text: "Connect to Chroxy|Chat"
+    timeout: 30000
+
+# The app auto-connects to the previously-used server here: on iOS
+# `clearState: true` wipes the app data container but NOT SecureStore
+# (expo-secure-store → keychain, which survives a data-clear), so the cached
+# server URL + STANDARD token are restored and the app lands on Chat. We MUST
+# return to ConnectScreen to re-connect with the ENCRYPTED token — otherwise the
+# flow would silently exercise the unencrypted path (the standard token keeps
+# encryption disabled). Tapping the header Disconnect routes back to ConnectScreen.
+- runFlow:
+    when:
+      visible: "Chat"
+    commands:
+      # The header Disconnect button renders the text "Disconnect" but carries
+      # accessibilityLabel="Disconnect and go back", which overrides the visible
+      # text in Maestro's matcher — so match the label, not "Disconnect".
+      - tapOn:
+          text: "Disconnect and go back"
+      - extendedWaitUntil:
+          visible: "Connect to Chroxy"
+          timeout: 10000
+
+# Connect using the encrypted token. This opts the mock into the
+# encryption:'required' path (the standard token keeps encryption:'disabled').
+- runFlow:
+    when:
+      visible: "Connect to Chroxy"
+    commands:
+      - tapOn:
+          id: "connect-manual-toggle"
+
+      - tapOn:
+          id: "connect-server-url"
+      - eraseText: 50
+      - inputText: "ws://localhost:9876"
+
+      - tapOn:
+          id: "connect-api-token"
+      - eraseText: 50
+      - inputText: "test-token-maestro-encrypted"
+
+      # Tap submit by testID directly — Maestro auto-scrolls to a testID, and a
+      # tapOn dismisses the keyboard as a side effect. (`hideKeyboard` is broken
+      # on the current Maestro CLI / iOS build — see #6089 — and a neutral
+      # coordinate tap risks hitting the QR/manual toggle.)
+      - tapOn:
+          id: "connect-submit"
+
+# SessionScreen should land — the encrypted post-auth burst completes
+# just like the unencrypted path; the session_list / session_switched
+# flow is the same, just wrapped in encrypted envelopes. A timeout here
+# means the handshake failed (check the mock-server log for "Encrypted
+# session started" vs "Waiting for discrete key_exchange from client"
+# vs "Decryption failed").
+- extendedWaitUntil:
+    visible: "Chat"
+    timeout: 20000
+
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+- takeScreenshot: key-exchange-session-screen-landed
+
+# Send a plain message to confirm the encrypted session is fully
+# functional — input goes through wsSend (encrypted), the mock decrypts
+# it, and replies with the default assistant response (also encrypted).
+# If encryption is broken the mock logs "Decryption failed" and either
+# closes the socket or the response never arrives.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "ping-encrypted"
+
+- tapOn:
+    id: "chat-send-button"
+
+- hideKeyboard
+
+# Assert the mock's `encrypted-session-ok` marker. The mock prefixes its
+# default reply with this string ONLY when the inbound input arrived on an
+# active encrypted session (i.e. it had to DECRYPT the frame to reach the
+# handler). A plain echo of "ping-encrypted" would also appear on an
+# UNENCRYPTED session (the user's own bubble + the mock's echo), so asserting
+# the marker — not the echo — is what makes this flow load-bearing for #6019.
+- extendedWaitUntil:
+    visible:
+      text: ".*encrypted-session-ok.*"
+    timeout: 15000
+
+- takeScreenshot: key-exchange-encrypted-roundtrip-confirmed

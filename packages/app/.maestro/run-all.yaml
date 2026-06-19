@@ -113,3 +113,12 @@ name: All E2E flows
 # `question-multi-submit`, and pins the summary chip including the
 # multi-select answer list ("app, server").
 - runFlow: chat-multi-question.yaml
+
+# Flow 21: E2E key_exchange / eager-handshake (#6019) — exercises the
+# encrypted-handshake path at the device layer. The mock-server performs
+# real X25519 DH + XSalsa20-Poly1305 secretbox when the client connects
+# with `test-token-maestro-encrypted`. Pins: eager auth_ok with
+# serverPublicKey → shared-key derivation → encrypted post-auth burst →
+# encrypted assistant message round-trip. See key-exchange.yaml header
+# for on-device verification notes and assumptions.
+- runFlow: key-exchange.yaml

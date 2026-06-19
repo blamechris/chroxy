@@ -13,51 +13,7 @@ name: ChatView AskUserQuestion deny flow (#4697)
 # the only delta here is the tapped option and the resulting
 # answered-state assertion.
 
-- launchApp:
-    clearState: true
-- openLink: "exp+chroxy://expo-development-client/?url=http://localhost:8081"
-
-- tapOn:
-    text: "Continue"
-    optional: true
-- tapOn:
-    point: "50%,10%"
-    optional: true
-
-- tapOn:
-    text: "Skip"
-    optional: true
-
-- extendedWaitUntil:
-    visible:
-      text: "Connect to Chroxy|Chat"
-    timeout: 30000
-
-- runFlow:
-    when:
-      visible: "Connect to Chroxy"
-    commands:
-      - tapOn:
-          id: "connect-manual-toggle"
-
-      - tapOn:
-          id: "connect-server-url"
-      - eraseText: 50
-      - inputText: "ws://localhost:9876"
-
-      - tapOn:
-          id: "connect-api-token"
-      - eraseText: 50
-      - inputText: "test-token-maestro"
-
-      - hideKeyboard
-
-      - tapOn:
-          id: "connect-submit"
-
-      - extendedWaitUntil:
-          visible: "Chat"
-          timeout: 10000
+- runFlow: setup/ensure-session-screen.yaml
 
 - tapOn: "Chat"
 - waitForAnimationToEnd
