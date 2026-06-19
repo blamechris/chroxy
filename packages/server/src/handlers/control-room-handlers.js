@@ -814,7 +814,7 @@ function containerActionError(ws, ctx, msg, reason, message) {
   })
 }
 
-/** #6134: resulting status reported in the ack per action. */
+/** #6134: failure `reason` discriminator per action (for CONTAINER_ACTION_FAILED). */
 const CONTAINER_ACTION_FAILURE_REASON = {
   stop: 'stop-failed',
   restart: 'restart-failed',

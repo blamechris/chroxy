@@ -384,7 +384,13 @@ export class EnvironmentManager extends EventEmitter {
           composeProject: env.composeProject,
           cwd: env.cwd,
         })
-      } else if (env.containerId && env.status === 'running') {
+      } else if (env.containerId) {
+        // #6134: remove the container whenever one exists — NOT only when
+        // status==='running'. Now that stop() makes 'stopped' a reachable state,
+        // gating on 'running' would orphan a stopped container (the manager
+        // entry is deleted but `docker rm -f` never runs). `docker rm -f` works
+        // on stopped/exited containers too, and _removeContainer swallows a
+        // "no such container" for one that never started.
         await this._backend.destroyEnvironment(env.containerId)
       }
 

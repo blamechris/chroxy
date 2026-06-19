@@ -81,6 +81,19 @@ describe('#6134 EnvironmentManager.stop / restart', () => {
     assert.ok(backend.calls.some((c) => c.method === 'restart' && c.containerId === 'stub-container-id'))
   })
 
+  it('destroy() removes the container even when the env was stopped (#6134 no orphan)', async () => {
+    const backend = lifecycleBackend()
+    const { manager, id } = await createRunning(backend)
+    await manager.stop(id)
+    await manager.destroy(id)
+    // The stopped container must still be `docker rm -f`'d — not orphaned.
+    assert.ok(
+      backend.calls.some((c) => c.method === 'destroy' && c.containerId === 'stub-container-id'),
+      'destroy must remove a stopped container, not just drop the manager entry',
+    )
+    assert.equal(manager.get(id), null)
+  })
+
   it('stop() throws for an unknown environment', async () => {
     const backend = lifecycleBackend()
     const manager = new EnvironmentManager({ statePath, backend })
