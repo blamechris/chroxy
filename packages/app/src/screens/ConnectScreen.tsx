@@ -477,6 +477,16 @@ export function ConnectScreen() {
         />
       </View>
 
+      {/* #6089: a single terminal-state anchor for E2E, rendered for EVERY scan
+          outcome (found / empty / error all set scanCompleted). Placed
+          immediately after the scan row — BEFORE the (potentially long)
+          results list — so it stays within the initial viewport and Maestro's
+          non-scrolling assertVisible finds it on the servers-found path too.
+          Kept in the a11y tree (no accessibilityElementsHidden). */}
+      {scanCompleted && (
+        <View testID="lan-scan-complete" style={{ height: 1, width: 1 }} />
+      )}
+
       {discoveredServers.length > 0 && (
         <View style={styles.discoveredSection}>
           <Text style={styles.discoveredTitle}>
@@ -502,17 +512,6 @@ export function ConnectScreen() {
             </TouchableOpacity>
           ))}
         </View>
-      )}
-
-      {/* #6089: a single terminal-state anchor for E2E. Rendered for every scan
-          outcome (servers found / empty / error all set scanCompleted), so the
-          Maestro lan-scan flow can wait on one environment-independent marker
-          instead of an `anyOf` of the per-outcome anchors (unsupported by the
-          current Maestro CLI). */}
-      {scanCompleted && (
-        // Must stay in the accessibility tree so Maestro can match it by
-        // testID — do NOT add accessibilityElementsHidden here.
-        <View testID="lan-scan-complete" style={{ height: 1, width: 1 }} />
       )}
 
       {scanCompleted && discoveredServers.length === 0 && !scanning && (
