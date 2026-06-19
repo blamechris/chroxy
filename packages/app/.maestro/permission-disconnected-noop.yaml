@@ -1,0 +1,128 @@
+appId: com.blamechris.chroxy
+name: Permission tap while disconnected is a no-op (#5699)
+---
+
+# #5699 — End-to-end coverage for the LAST acceptance criterion of the
+# optimistic-action-loss fix: tapping a permission / AskUserQuestion option
+# while the session is DISCONNECTED must be a no-op with clear feedback, NOT a
+# silent loss (the bubble flips to "answered" but the answer never reaches the
+# now-expired pending request on the server).
+#
+# The fix is two layers, both pinned here:
+#   (a) UI gate — MessageBubble disables the option buttons when
+#       `connectionPhase !== 'connected'` (isDisabled = ... || !connected) and
+#       renders the `prompt-disconnected-hint` caption
+#       ("Disconnected — reconnect to respond").
+#   (b) Store gate — SessionScreen.handleSelectOption only calls
+#       markPromptAnswered `if (sent === 'sent')`, and sendUserQuestionResponse
+#       returns false while the socket isn't OPEN. So even a tap that slipped
+#       past the UI gate produces NO optimistic "answered" state.
+#
+# Non-vacuity: the load-bearing assertion is that AFTER tapping Approve while
+# disconnected, the prompt is STILL unanswered — `prompt-disconnected-hint`
+# stays visible (it renders only while `!connected && answered == null`). If a
+# regression let the tap optimistically answer the bubble (the original #5699
+# bug), `answered` becomes non-null, the hint disappears, and this flow fails.
+#
+# Stable disconnected window: the plain `simulate-disconnect` trigger drops the
+# socket but leaves mock health at 200, so the app re-dials in ~1s — too racy
+# to tap a button inside (see reconnect.yaml). This flow uses
+# `simulate-disconnect-hold`, which additionally fails the mock's HTTP health
+# endpoint (503) for ~10s so the reconnect ladder stays in `reconnecting`. The
+# hold self-releases well before the ladder's 10-rung give-up (~59s →
+# server_down), so the app auto-reconnects at the end and the flow leaves it
+# usable for the next run-all flow.
+#
+# Deliberately RED run (for on-device verification): comment out the
+# `!connected` term in MessageBubble's `isDisabled` AND the `sent === 'sent'`
+# guard in SessionScreen.handleSelectOption — the tap then optimistically
+# answers the bubble, the hint disappears, and the post-tap
+# `assertVisible: prompt-disconnected-hint` times out.
+#
+# Tested devices: portrait iPhone (iOS 17+). Mirrors ask-user-question /
+# reconnect flows.
+# Requires: dev client installed + mock server on port 9876
+#   cd packages/app && npx expo run:ios
+#   bash packages/app/.maestro/scripts/start-mock-server.sh
+
+- runFlow: setup/ensure-session-screen.yaml
+
+# Ensure Chat tab.
+- tapOn: "Chat"
+- waitForAnimationToEnd
+
+# Seed an AskUserQuestion prompt (Approve / Deny options) while connected.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "show-ask-user-question"
+
+- tapOn:
+    id: "chat-send-button"
+
+# Prompt bubble renders with both option buttons (connected baseline).
+- extendedWaitUntil:
+    visible:
+      id: "approval-button-approve"
+    timeout: 10000
+- assertVisible:
+    id: "approval-button-deny"
+
+# Now drop the connection AND hold it down so we have a stable disconnected
+# window. Mock terminates the WS ~1s later and returns 503 from /health for
+# ~10s, keeping the app in `reconnecting`.
+- tapOn:
+    id: "chat-message-input"
+- inputText: "simulate-disconnect-hold"
+
+- tapOn:
+    id: "chat-send-button"
+
+# Clear feedback appears: the prompt bubble shows the disconnected hint. This
+# proves we reached a non-connected phase AND the prompt is still unanswered
+# (the hint renders only while `!connected && answered == null`).
+- extendedWaitUntil:
+    visible:
+      id: "prompt-disconnected-hint"
+    timeout: 20000
+
+- takeScreenshot: permission-disconnected-hint
+
+# Attempt to answer while disconnected. The button is disabled (UI gate), so
+# onPress should not fire; even if it did, the store gate refuses the send and
+# never marks answered. Either way this must be a no-op.
+- tapOn:
+    id: "approval-button-approve"
+- waitForAnimationToEnd
+
+# Load-bearing no-op assertion: the prompt is STILL unanswered. The hint stays
+# visible (it requires `answered == null`); if the tap had optimistically
+# answered the bubble, the hint would be gone and this assertion would fail.
+- assertVisible:
+    id: "prompt-disconnected-hint"
+- assertVisible:
+    id: "approval-button-approve"
+
+- takeScreenshot: permission-disconnected-after-tap-noop
+
+# Recovery: the hold self-releases (health → 200) and the app auto-reconnects.
+# Wait for the connected happy-path layout (the input placeholder flips back to
+# "Message Claude...") so the flow leaves the app usable for the next flow and
+# proves the disconnect was transient, not a crash.
+- extendedWaitUntil:
+    visible:
+      text: "Message Claude..."
+    timeout: 30000
+
+# Once reconnected, the disconnected hint is gone (connected → the gate clears).
+- extendedWaitUntil:
+    notVisible:
+      id: "prompt-disconnected-hint"
+    timeout: 10000
+
+# The prompt bubble survived the reconnect (it lives in cached history) and is
+# answerable again now that the gate cleared — assert the option button is still
+# present so "recovery" means a usable prompt, not a wiped one.
+- assertVisible:
+    id: "approval-button-approve"
+
+- takeScreenshot: permission-disconnected-recovered
