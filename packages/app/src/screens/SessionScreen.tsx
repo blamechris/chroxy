@@ -721,7 +721,13 @@ export function SessionScreen() {
     // out: it queues (the bubble renders with a "Queued" badge and the server
     // flushes it when the current turn completes) rather than starting a fresh
     // turn. `busy` drives addUserMessage's optimistic-enqueue path below.
-    const busy = !!streamingMessageId;
+    // #6113 — match the dashboard's #5952 condition: `isIdle === false` covers
+    // the window after `agent_busy` but before `stream_start` (or a tool-only
+    // turn that never streams text), where the server is processing but
+    // streamingMessageId is still null. Without it a send in that window would
+    // force-send on mobile while the dashboard queues. isIdle defaults to true,
+    // so a genuinely idle send still starts a fresh turn (no false-queue).
+    const busy = !!streamingMessageId || !isIdle;
     // Expand any collapsed-paste markers back to their original content
     // before send (#3797). Trim happens AFTER expansion so an expanded
     // payload with surrounding whitespace still sends cleanly.
