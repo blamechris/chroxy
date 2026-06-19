@@ -1771,6 +1771,21 @@ fn startup_action(auto_start: bool, has_token: bool) -> StartupAction {
 /// #6015 — probe an already-running external server's `/health` on loopback.
 /// A few short attempts (so a just-launched daemon is still adopted); returns
 /// true on the first 200. Mirrors the embedded-server health check (ureq, 2s).
+/// #6015 (security, #6123 review) — confirm a 200 `/health` body is actually a
+/// chroxy server before adopting it. We navigate WITH the access token, so a
+/// 200 from an UNRELATED local service squatting on the port must NOT receive
+/// the token. chroxy's health JSON is `{"status":"ok","mode":...,"version":...}`
+/// — require `status:"ok"` AND a string `version` as the fingerprint. Pure, so
+/// unit-tested.
+fn is_chroxy_health(body: &str) -> bool {
+    serde_json::from_str::<serde_json::Value>(body)
+        .map(|v| {
+            v.get("status").and_then(|s| s.as_str()) == Some("ok")
+                && v.get("version").and_then(|x| x.as_str()).is_some()
+        })
+        .unwrap_or(false)
+}
+
 fn probe_external_health(port: u16) -> bool {
     let url = format!("http://127.0.0.1:{}/health", port);
     for attempt in 0..10 {
@@ -1780,9 +1795,19 @@ fn probe_external_health(port: u16) -> bool {
         match ureq::get(&url).timeout(std::time::Duration::from_secs(2)).call() {
             Ok(resp) => {
                 let code = resp.status();
-                eprintln!("[client-adopt] attempt #{} GET {} -> {}", attempt + 1, url, code);
                 if code == 200 {
-                    return true;
+                    // Token-leak guard: only adopt a verified chroxy server.
+                    let body = resp.into_string().unwrap_or_default();
+                    if is_chroxy_health(&body) {
+                        eprintln!("[client-adopt] attempt #{} GET {} -> 200 (chroxy)", attempt + 1, url);
+                        return true;
+                    }
+                    eprintln!(
+                        "[client-adopt] attempt #{} GET {} -> 200 but not a chroxy /health body; not adopting",
+                        attempt + 1, url
+                    );
+                } else {
+                    eprintln!("[client-adopt] attempt #{} GET {} -> {}", attempt + 1, url, code);
                 }
             }
             Err(err) => {
@@ -2383,6 +2408,21 @@ mod tests {
         assert_eq!(startup_action(true, false), StartupAction::Skip);
         assert_eq!(startup_action(false, true), StartupAction::AdoptExternal);
         assert_eq!(startup_action(false, false), StartupAction::AdoptExternal);
+    }
+
+    // #6015 (security) — only a real chroxy /health body is adoptable; a 200
+    // from an unrelated local service squatting on the port must NOT be adopted
+    // (we'd otherwise navigate the token to it).
+    #[test]
+    fn is_chroxy_health_fingerprint() {
+        assert!(is_chroxy_health(r#"{"status":"ok","mode":"cli","version":"0.9.46"}"#));
+        // Wrong/foreign shapes — reject.
+        assert!(!is_chroxy_health(r#"{"status":"ok"}"#)); // no version
+        assert!(!is_chroxy_health(r#"{"status":"healthy","version":"1.0"}"#)); // not chroxy's "ok"
+        assert!(!is_chroxy_health(r#"{"version":"1.0"}"#)); // no status
+        assert!(!is_chroxy_health("OK")); // not JSON (e.g. another service)
+        assert!(!is_chroxy_health("")); // empty
+        assert!(!is_chroxy_health(r#"{"status":"ok","version":200}"#)); // version not a string
     }
 
     #[test]
