@@ -82,7 +82,35 @@ describe('parseRepoMemoryReport', () => {
       cacheEntryCount: 1391,
       staleEntryCount: 2,
       lastActivity: null,
+      // #5681 — absent on the 0.15.0 sample (pre-0.17.0), defaults to [].
+      topMissedQueries: [],
     })
+  })
+
+  it('maps topMissedQueries (#5681) and drops malformed entries', () => {
+    const report = parseRepoMemoryReport(JSON.stringify({
+      totalEvents: 10, cacheHits: 3, cacheMisses: 7, cacheHitRatio: 0.3, estimatedTokensSaved: 0,
+      topMissedQueries: [
+        { query: 'websocket reconnect', count: 3 },
+        { query: 'oauth refresh', count: 1.9 },     // count truncated to 1
+        { query: 'no count' },                        // dropped (count missing)
+        { count: 2 },                                 // dropped (query missing)
+        { query: 5, count: 2 },                       // dropped (query not a string)
+        { query: 'negative', count: -1 },             // dropped (count negative)
+        'not an object',                              // dropped
+      ],
+    }))
+    assert.deepEqual(report.topMissedQueries, [
+      { query: 'websocket reconnect', count: 3 },
+      { query: 'oauth refresh', count: 1 },
+    ])
+  })
+
+  it('defaults topMissedQueries to [] when absent or not an array (#5681)', () => {
+    const absent = parseRepoMemoryReport(JSON.stringify({ totalEvents: 1, cacheHits: 1, cacheMisses: 0, cacheHitRatio: 1, estimatedTokensSaved: 5 }))
+    assert.deepEqual(absent.topMissedQueries, [])
+    const wrongType = parseRepoMemoryReport(JSON.stringify({ totalEvents: 1, cacheHits: 1, cacheMisses: 0, cacheHitRatio: 1, estimatedTokensSaved: 5, topMissedQueries: 'nope' }))
+    assert.deepEqual(wrongType.topMissedQueries, [])
   })
 
   it('tolerates a missing diagnostics block (entry counts null)', () => {

@@ -189,6 +189,14 @@ export function parseRepoMemoryReport(json) {
       ? Math.trunc(diag.staleEntryCount)
       : null,
     lastActivity: deriveLastActivity(parsed),
+    // #5681 — failed search_by_purpose queries (repo-memory 0.17.0+). Absent on
+    // older CLIs; malformed entries tolerated: default to [] and keep only
+    // well-formed {query:string, count:>=0} pairs (mirrors the diagnostics guard).
+    topMissedQueries: Array.isArray(parsed.topMissedQueries)
+      ? parsed.topMissedQueries
+          .filter(m => m && typeof m === 'object' && typeof m.query === 'string' && Number.isFinite(m.count) && m.count >= 0)
+          .map(m => ({ query: m.query, count: Math.trunc(m.count) }))
+      : [],
   }
 }
 

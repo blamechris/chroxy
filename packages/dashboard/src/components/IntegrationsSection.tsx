@@ -150,6 +150,29 @@ function HitRatioCell({ repo }: { repo: IntegrationRepo }) {
   )
 }
 
+/**
+ * Missed-searches cell (#5681): the total count of failed `search_by_purpose`
+ * queries (sum of per-query counts) with the distinct-query count alongside and
+ * the actual queries on hover. A repo with no report, an older repo-memory
+ * (field absent → defaulted to []), or zero misses renders the quiet "—" — the
+ * same "absence is signal, not an error" treatment as the sibling cells.
+ */
+function MissedSearchesCell({ repo }: { repo: IntegrationRepo }) {
+  const report = repo.repoMemory?.report ?? null
+  const missed = report?.topMissedQueries ?? []
+  if (!report || missed.length === 0) {
+    return <td className="cr-dim" data-testid={`integration-missed-${repo.name}`}>—</td>
+  }
+  const total = missed.reduce((sum, m) => sum + m.count, 0)
+  const tooltip = missed.map(m => `${m.query} (${m.count})`).join('\n')
+  return (
+    <td data-testid={`integration-missed-${repo.name}`} title={tooltip}>
+      <span className="cr-warn">{total}</span>
+      <span className="cr-dim cr-mono"> ({missed.length})</span>
+    </td>
+  )
+}
+
 // ---------------------------------------------------------------------------
 // #5501 — repo-relay cells.
 // ---------------------------------------------------------------------------
@@ -465,6 +488,7 @@ function IntegrationRow({
       </td>
       <CacheCell repo={repo} />
       <HitRatioCell repo={repo} />
+      <MissedSearchesCell repo={repo} />
       <td className="cr-dim cr-mono" data-testid={`integration-tokens-${repo.name}`}>
         {report ? `~${report.estimatedTokensSaved.toLocaleString('en-US')}` : '—'}
       </td>
@@ -666,7 +690,7 @@ export function IntegrationsSection({
                     legible. */}
                 <tr>
                   <th rowSpan={2}>Repo</th>
-                  <th colSpan={8} className="cr-th-group" data-testid="integration-group-memory">repo-memory</th>
+                  <th colSpan={9} className="cr-th-group" data-testid="integration-group-memory">repo-memory</th>
                   <th colSpan={5} className="cr-th-group" data-testid="integration-group-relay">repo-relay</th>
                 </tr>
                 <tr>
@@ -674,6 +698,7 @@ export function IntegrationsSection({
                   <th>Summarizer / tools</th>
                   <th>Cache</th>
                   <th>Hit ratio</th>
+                  <th>Missed</th>
                   <th>Tokens saved</th>
                   <th>Entries</th>
                   <th>Last activity</th>
@@ -688,7 +713,7 @@ export function IntegrationsSection({
               <tbody>
                 {snapshot.repos.length === 0 ? (
                   <tr data-testid="integration-no-repos">
-                    <td colSpan={14} className="cr-dim">
+                    <td colSpan={15} className="cr-dim">
                       No repos found under {snapshot.root}.
                     </td>
                   </tr>

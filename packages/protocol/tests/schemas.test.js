@@ -2774,6 +2774,24 @@ describe('@chroxy/protocol schemas', () => {
         assert.ok(!RepoMemoryReportSchema.safeParse({ ...report, totalEvents: -1 }).success)
       })
 
+      it('defaults topMissedQueries to [] when absent and validates entries (#5681)', async () => {
+        const { RepoMemoryReportSchema } = await import('../src/schemas/server.ts')
+        // Absent (pre-0.17.0 CLI) → defaults to [].
+        const absent = RepoMemoryReportSchema.safeParse({ ...report })
+        assert.ok(absent.success)
+        assert.deepEqual(absent.data.topMissedQueries, [])
+        // Well-formed entries pass through.
+        const present = RepoMemoryReportSchema.safeParse({
+          ...report,
+          topMissedQueries: [{ query: 'websocket reconnect', count: 3 }],
+        })
+        assert.ok(present.success)
+        assert.equal(present.data.topMissedQueries[0].query, 'websocket reconnect')
+        // Malformed entries are rejected by the schema (count must be a non-negative int, query a string).
+        assert.ok(!RepoMemoryReportSchema.safeParse({ ...report, topMissedQueries: [{ query: 'x', count: -1 }] }).success)
+        assert.ok(!RepoMemoryReportSchema.safeParse({ ...report, topMissedQueries: [{ count: 1 }] }).success)
+      })
+
       it('accepts an error snapshot without repoMemoryCli (shared error envelope)', async () => {
         const { ServerIntegrationStatusSnapshotSchema } = await import('../src/schemas/server.ts')
         assert.ok(ServerIntegrationStatusSnapshotSchema.safeParse({

@@ -1417,6 +1417,14 @@ export const RepoMemoryReportSchema = z.object({
   cacheEntryCount: z.number().int().nonnegative().finite().nullable(),
   staleEntryCount: z.number().int().nonnegative().finite().nullable(),
   lastActivity: z.string().datetime().nullable(),
+  // #5681 — `search_by_purpose` queries that matched nothing against a
+  // non-empty corpus, aggregated by query and ranked by frequency. Added in
+  // repo-memory 0.17.0; `.default([])` keeps pre-0.17.0 snapshots (and the
+  // #5503-era fixtures) valid when the field is absent.
+  topMissedQueries: z.array(z.object({
+    query: z.string(),
+    count: z.number().int().nonnegative().finite(),
+  })).default([]),
 })
 
 /**
