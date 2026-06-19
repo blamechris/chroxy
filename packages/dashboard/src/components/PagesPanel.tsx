@@ -88,15 +88,26 @@ export function PagesPanel({ fetchImpl, getToken, copyImpl, origin }: PagesPanel
 
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
+  // The "Copied!" flash timer: held in a ref so a repeat click clears the
+  // previous timer (one consistent 1.5s window from the latest click, no
+  // overlapping timers) and so it's torn down on unmount.
+  const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     void refreshRef.current()
+    return () => {
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+    }
   }, [])
 
   const handleCopy = useCallback(async (page: PageEntry) => {
     const ok = await resolvedCopy(`${resolvedOrigin}${page.path}`)
     if (ok) {
       setCopiedSlug(page.slug)
-      setTimeout(() => setCopiedSlug((s) => (s === page.slug ? null : s)), 1500)
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => {
+        copyTimerRef.current = null
+        setCopiedSlug((s) => (s === page.slug ? null : s))
+      }, 1500)
     }
   }, [resolvedCopy, resolvedOrigin])
 
