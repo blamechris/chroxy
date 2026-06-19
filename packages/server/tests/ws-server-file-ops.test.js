@@ -7,7 +7,7 @@ import { join, dirname } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { tmpdir, homedir } from 'node:os'
 import { WsServer as _WsServer } from '../src/ws-server.js'
-import { createMockSession, createMockSessionManager, waitFor, GIT, disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { createMockSession, createMockSessionManager, waitFor, GIT, disableRepoAutoGc, rmDirRobust } from './test-helpers.js'
 import { setLogListener } from '../src/logger.js'
 
 // Wrapper that defaults noEncrypt: true for all tests (avoids 5s key exchange timeouts)
@@ -1088,7 +1088,7 @@ describe('get_diff handler', () => {
       server.close()
       server = null
     }
-    rmSync(tempDir, RM_RETRY)
+    rmDirRobust(tempDir)
   })
 
   async function createDiffTestServer() {

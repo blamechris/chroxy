@@ -5,7 +5,7 @@ import { tmpdir } from 'os'
 import { join } from 'path'
 import { execFileSync } from 'child_process'
 import { readSessionContext } from '../src/session-context.js'
-import { GIT, disableRepoAutoGc, RM_RETRY } from './test-helpers.js'
+import { GIT, disableRepoAutoGc, rmDirRobustAsync } from './test-helpers.js'
 
 describe('readSessionContext', () => {
   let gitDir   // temp dir with git init + commit
@@ -27,8 +27,8 @@ describe('readSessionContext', () => {
   })
 
   after(async () => {
-    await rm(gitDir, RM_RETRY)
-    await rm(plainDir, RM_RETRY)
+    await rmDirRobustAsync(gitDir)
+    await rmDirRobustAsync(plainDir)
   })
 
   it('returns git branch for a git repository', async () => {

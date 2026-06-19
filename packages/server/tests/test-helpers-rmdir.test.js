@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from 'fs'
 import { join } from 'path'
 import { tmpdir } from 'os'
-import { rmDirRobust } from './test-helpers.js'
+import { rmDirRobust, rmDirRobustAsync } from './test-helpers.js'
 
 /**
  * #6114 — rmDirRobust re-recurses on the transient gc-race teardown codes so a
@@ -67,5 +67,55 @@ describe('rmDirRobust (#6114)', () => {
     }
     assert.throws(() => rmDirRobust('/tmp/busy', { attempts: 4, _rm, _sleep: () => {} }), /ENOTEMPTY/)
     assert.equal(calls, 4, 'should attempt exactly `attempts` times, then surface the failure')
+  })
+})
+
+describe('rmDirRobustAsync (#6120)', () => {
+  it('removes a populated directory tree on the real filesystem (happy path)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-rmdir-async-'))
+    mkdirSync(join(dir, 'a', 'b'), { recursive: true })
+    writeFileSync(join(dir, 'a', 'b', 'f.txt'), 'x')
+    await rmDirRobustAsync(dir)
+    assert.equal(existsSync(dir), false)
+  })
+
+  it('re-recurses after a transient ENOTEMPTY, then succeeds', async () => {
+    let calls = 0
+    let slept = 0
+    const _rm = async () => {
+      calls++
+      if (calls <= 2) {
+        const err = new Error("ENOTEMPTY: directory not empty, rmdir '/tmp/x/.git'")
+        err.code = 'ENOTEMPTY'
+        throw err
+      }
+    }
+    await rmDirRobustAsync('/tmp/x', { _rm, _sleep: async () => { slept++ } })
+    assert.equal(calls, 3)
+    assert.equal(slept, 2)
+  })
+
+  it('surfaces a non-transient error immediately (no re-recurse)', async () => {
+    let calls = 0
+    const _rm = async () => {
+      calls++
+      const err = new Error('EACCES: permission denied')
+      err.code = 'EACCES'
+      throw err
+    }
+    await assert.rejects(() => rmDirRobustAsync('/tmp/locked', { _rm, _sleep: async () => {} }), /EACCES/)
+    assert.equal(calls, 1)
+  })
+
+  it('gives up (rejects) after `attempts` persistent transient failures', async () => {
+    let calls = 0
+    const _rm = async () => {
+      calls++
+      const err = new Error('EBUSY')
+      err.code = 'EBUSY'
+      throw err
+    }
+    await assert.rejects(() => rmDirRobustAsync('/tmp/busy', { attempts: 3, _rm, _sleep: async () => {} }), /EBUSY/)
+    assert.equal(calls, 3)
   })
 })

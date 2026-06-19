@@ -1,6 +1,7 @@
 import { EventEmitter } from 'node:events'
 import { execFileSync } from 'node:child_process'
 import { rmSync } from 'node:fs'
+import { rm as rmAsync } from 'node:fs/promises'
 import { WsClientManager } from '../src/ws-client-manager.js'
 import { CTX_NAMESPACES, CTX_NAMESPACE_NAMES, assertCtxShape } from '../src/ws-handler-context.js'
 import { GIT as _GIT } from '../src/git.js'
@@ -78,6 +79,26 @@ export function rmDirRobust(dir, { attempts = 5, backoffMs = 50, _rm = rmSync, _
   // Final attempt: let a persistent failure throw so a genuine teardown bug
   // (not a transient gc-race) still fails the test loudly.
   _rm(dir, RM_RETRY)
+}
+
+// Async counterpart of rmDirRobust for teardowns that `await rm(dir, RM_RETRY)`
+// (node:fs/promises). Same re-recurse-on-transient-code semantics; the backoff
+// is a real awaited timer rather than a blocking Atomics.wait. `_rm` / `_sleep`
+// are injection seams for the unit test.
+export async function rmDirRobustAsync(
+  dir,
+  { attempts = 5, backoffMs = 50, _rm = rmAsync, _sleep = (ms) => new Promise((r) => setTimeout(r, ms)) } = {},
+) {
+  for (let i = 0; i < attempts - 1; i++) {
+    try {
+      await _rm(dir, RM_RETRY)
+      return
+    } catch (err) {
+      if (!RM_TRANSIENT_CODES.has(err?.code)) throw err
+      await _sleep(backoffMs * (i + 1))
+    }
+  }
+  await _rm(dir, RM_RETRY)
 }
 
 // Re-export the ctx-shape assert so handler tests can guard their mocks.
