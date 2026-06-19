@@ -1385,7 +1385,16 @@ pub fn run() {
                             }
                         });
                     }
-                    StartupAction::Skip => {}
+                    // #6124 — auto-start is on but no token yet. The pairing /
+                    // first-run flow normally mints one, but if it never
+                    // completes (wizard dismissed, token expected-but-absent)
+                    // the splash would hang forever — the same failure class
+                    // #6015 fixes on the client branch. Surface an actionable
+                    // message instead of a silent spinner.
+                    StartupAction::Skip => window::emit_server_error(
+                        app.handle(),
+                        "Auto-start is on but no access token was found. Complete pairing, or paste a token in Settings.",
+                    ),
                 }
             }
 
@@ -1755,8 +1764,10 @@ enum StartupAction {
     /// external server (e.g. an always-on launchd daemon) and navigate to its
     /// dashboard, instead of hanging on the "Still starting…" splash forever.
     AdoptExternal,
-    /// Auto-start is on but no token yet — nothing to do here (the pairing /
-    /// first-run flow mints one); avoids launching a tokenless server.
+    /// Auto-start is on but no token yet — do NOT launch a tokenless server
+    /// (the pairing / first-run flow mints one). #6124: the caller surfaces an
+    /// actionable "complete pairing" message rather than hanging on the splash
+    /// if that flow never completes.
     Skip,
 }
 
