@@ -151,6 +151,11 @@ export interface DispatchSessionBase {
   // `queuedMessages` — read+rewritten by message_queued / message_dequeued.
   // Both clients' real `SessionState` carry this array (BaseSessionState).
   queuedMessages?: QueuedSessionMessage[]
+  // --- reconciled divergent case (#5618) ---
+  // `activeModel` — written by model_changed. Both clients' real `SessionState`
+  // carry it (the dashboard also mirrors the active session's value to flat
+  // top-level state via its adapter).
+  activeModel?: string | null
 }
 
 /**

@@ -321,8 +321,12 @@ export function clearPendingTrustGrants(): void {
 // the dashboard keeps showing a model the session never switched to. Remember
 // the model we switched FROM, keyed by the set_model requestId the server
 // echoes on its error, so the `error` handler can roll the optimistic update
-// back. Cleared on the matching `model_changed` success, on a matching error,
-// or on disconnect. Bounded FIFO like the trust-grant map.
+// back. Consumed (deleted) on a matching error; otherwise cleared on disconnect
+// or evicted by the bounded FIFO cap. A successful change is NOT cleared here —
+// the server sends model_changed XOR error per requestId (#5711), so a success
+// entry simply ages out via the cap and is never mis-consumed by a later error.
+// (model_changed itself is handled by the shared store-core dispatch table since
+// #5618 and only writes activeModel; it never touched this map.)
 interface PendingModelRevert {
   sessionId: string | null;
   previousModel: string | null;
