@@ -25,7 +25,16 @@ export function disableRepoAutoGc(dir) {
 // rmSync options that ride out the ENOTEMPTY/EBUSY teardown race window — Node's
 // rmSync retries on exactly those codes. Belt-and-suspenders alongside
 // disableRepoAutoGc(); also covers any non-gc holder (#6075).
-export const RM_RETRY = Object.freeze({ recursive: true, force: true, maxRetries: 10, retryDelay: 50 })
+//
+// maxRetries is 20 (not 10): Node uses LINEAR backoff (wait = retryDelay *
+// attempt), so 20×50ms ≈ a 10.5s cumulative window vs ~2.75s at 10. A git repo
+// that just ran `git add -A`/tag writes loose objects into .git, and on the busy
+// self-hosted runner the recursive delete can readdir→rmdir before the FS
+// settles → `ENOTEMPTY: rmdir '.../.git'`. The 10-retry budget was exceeded once
+// on a required check (checkpoint-manager teardown, main @c17d8009); the wider
+// window covers the load peak. The common case still succeeds on the first try
+// with zero added delay.
+export const RM_RETRY = Object.freeze({ recursive: true, force: true, maxRetries: 20, retryDelay: 50 })
 
 // Re-export the ctx-shape assert so handler tests can guard their mocks.
 export { assertCtxShape } from '../src/ws-handler-context.js'
