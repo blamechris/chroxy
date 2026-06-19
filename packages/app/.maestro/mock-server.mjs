@@ -28,14 +28,18 @@ let showBashPartialCounter = 0
 // app's user_question handler doesn't collide on a fixed id.
 let showAskUserQuestionCounter = 0
 
-// #5468: connection counter — incremented once per `auth` message so the
-// reconnect flow can detect that a real WS drop + reconnect happened.
-// On the SECOND auth (counter ≥ 2 for the current process lifetime) the
-// mock emits a distinguishable system message ("mock reconnect #2") that
-// reconnect.yaml hard-asserts. This marker is ONLY reachable via a genuine
-// disconnect + reconnect — the first connect does not emit it, so a broken
-// simulate-disconnect path causes the flow to fail at the assertion.
+// #5468: connection counter — incremented once per `auth` message, used only
+// for the marker's text ("mock reconnect #N") + the [mock] Auth #N log line.
 let connectionCounter = 0
+// #5468: marker gate. The app reconnects incidentally during dev-client setup
+// (auth #1 → drop → auth #2) BEFORE the flow sends `simulate-disconnect`, so a
+// plain "counter ≥ 2" gate would emit the marker from that setup churn and the
+// RED test (ws.terminate() commented out) would still pass vacuously. Instead
+// we arm this flag ONLY when `simulate-disconnect` is received, and emit the
+// marker on the next auth — so the marker is reachable ONLY via a genuine
+// deliberate drop + reconnect. With the drop disabled there is no reconnect,
+// the flag stays consumed/unset, and reconnect.yaml fails at the assertion.
+let sawSimulateDisconnect = false
 
 // #5469: per-connection counter for `show-stream-stall` hits.
 // On the SECOND trigger (within the same connection) the mock emits the
@@ -296,13 +300,18 @@ wss.on('connection', (ws) => {
         // the eager handshake established encryption).
         sendPostAuthBurst(ws, secureSend)
 
-        // #5468: on the second+ auth within this server process, emit the
-        // reconnect marker. Because the burst itself uses secureSend the
-        // marker is sent in the correct session (encrypted or not).
-        if (connectionCounter >= 2) {
+        // #5468: emit the reconnect marker only on the reconnect that FOLLOWS a
+        // deliberate `simulate-disconnect` (see `sawSimulateDisconnect`). Sent
+        // via secureSend so it lands in the correct session (encrypted or not).
+        // NOTE: emitted as `messageType: 'response'` (a Chat-tab bubble), NOT
+        // 'system' — buildChatViewMessages filters `type: 'system'` OFF the Chat
+        // tab (they live on the System tab), so a system marker is invisible to
+        // reconnect.yaml which asserts on Chat.
+        if (sawSimulateDisconnect) {
+          sawSimulateDisconnect = false
           secureSend(ws, {
             type: 'message',
-            messageType: 'system',
+            messageType: 'response',
             content: `mock reconnect #${connectionCounter}`,
             timestamp: Date.now(),
             sessionId: 'mock-sess-1',
@@ -340,10 +349,13 @@ wss.on('connection', (ws) => {
           console.log('[mock] Encrypted session started (discrete key_exchange)')
           // Now send the post-auth burst encrypted.
           sendPostAuthBurst(ws, secureSend)
-          if (connectionCounter >= 2) {
+          if (sawSimulateDisconnect) {
+            sawSimulateDisconnect = false
+            // Chat-tab bubble (see note on the eager-path marker above) — not
+            // 'system', which is filtered off the Chat tab.
             secureSend(ws, {
               type: 'message',
-              messageType: 'system',
+              messageType: 'response',
               content: `mock reconnect #${connectionCounter}`,
               timestamp: Date.now(),
               sessionId: 'mock-sess-1',
@@ -482,6 +494,9 @@ wss.on('connection', (ws) => {
         // frame, which is exactly what an abrupt tunnel drop looks
         // like — the client observes a 1006 close code locally.
         if (text.trim() === 'simulate-disconnect') {
+          // #5468: arm the marker for the reconnect that follows the drop. Set
+          // it here (not inside the timeout) so it's armed regardless of timing.
+          sawSimulateDisconnect = true
           setTimeout(() => {
             console.log('[mock] simulate-disconnect — terminating WS')
             try { ws.terminate() } catch {}
