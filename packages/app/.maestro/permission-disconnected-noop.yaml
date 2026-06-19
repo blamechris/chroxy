@@ -119,4 +119,10 @@ name: Permission tap while disconnected is a no-op (#5699)
       id: "prompt-disconnected-hint"
     timeout: 10000
 
+# The prompt bubble survived the reconnect (it lives in cached history) and is
+# answerable again now that the gate cleared — assert the option button is still
+# present so "recovery" means a usable prompt, not a wiped one.
+- assertVisible:
+    id: "approval-button-approve"
+
 - takeScreenshot: permission-disconnected-recovered

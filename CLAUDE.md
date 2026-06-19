@@ -347,7 +347,7 @@ When you modify app components (screens, UI elements, styling), verify with Maes
 | `manual-connect.yaml` | Manual entry form, URL input, Connect → optimistic SessionScreen + reconnect banner on unreachable server, header Disconnect back to ConnectScreen |
 | `lan-scan.yaml` | LAN scan trigger, in-progress or results state (scan can finish near-instantly) |
 | `chat-todolist.yaml` | TodoList renderer end-to-end (mock-server emits TodoWrite tool_use+tool_result, entry expands, structured TodoList renders with testIDs) |
-| `run-all.yaml` | Runs all 20 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, …) |
+| `run-all.yaml` | Runs all 22 flows sequentially — see its commented list for the full per-flow inventory (session, plan approval, AskUserQuestion, terminal, reconnect, disconnected-permission no-op, …) |
 
 ### Fixture Seeding for Structured Renderers
 
