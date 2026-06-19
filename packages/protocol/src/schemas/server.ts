@@ -1378,6 +1378,104 @@ export const ServerRunnerStatusSnapshotSchema = z.object({
 })
 
 // ---------------------------------------------------------------------------
+// #6133 (epic #5530) — Control Room "Containers" survey: the chroxy-managed
+// containers & environments the daemon depends on. Emitted in reply to a
+// `containers_status_request` (see client.ts). Same pull-on-Refresh,
+// degraded-snapshot-with-`error` contract as the host/runner/integration
+// surveys. A flat `containers` array (each entry carries its `cwd`) rather than
+// a nested `repos` shape: an environment is a discrete unit keyed by its mount,
+// not a 1:many-per-repo grouping like runners — the dashboard groups by `cwd`
+// at render time.
+// ---------------------------------------------------------------------------
+
+/**
+ * Best-effort `docker stats` resource snapshot for one running container. Every
+ * field is nullable: `docker stats` may be unavailable (docker absent, daemon
+ * down, a stuck probe), in which case the whole `stats` object is null on the
+ * entry — `null` means "unknown", never "zero".
+ */
+export const ContainerStatsSchema = z.object({
+  cpuPercent: z.number().nonnegative().finite().nullable(),
+  memBytes: z.number().nonnegative().finite().nullable(),
+  memPercent: z.number().nonnegative().finite().nullable(),
+})
+
+/**
+ * One chroxy-managed container / environment.
+ *
+ * Fields:
+ *   - `id`             — EnvironmentManager environment id.
+ *   - `name`           — operator-facing environment name.
+ *   - `cwd`            — host working directory mounted as the workspace (the
+ *                        repo the environment backs); the dashboard groups by it.
+ *   - `image`          — container image, or null when unknown.
+ *   - `status`         — lifecycle status string (`running`, `stopped`, `error`,
+ *                        `unknown`, …) as the EnvironmentManager reports it.
+ *   - `backend`        — `docker` | `compose` | `k8s` | `rancher` | `unknown`.
+ *   - `containerId`    — backing container id, or null (compose/k8s/unknown).
+ *   - `composeProject` — compose project name, or null.
+ *   - `sessionCount`   — number of live chroxy sessions attached.
+ *   - `createdAt`      — ISO-8601 creation time, or null.
+ *   - `uptimeMs`       — derived ms since `createdAt` at survey time, or null.
+ *   - `stats`          — live resource snapshot, or null when unavailable / the
+ *                        container isn't running.
+ */
+export const ContainerEntrySchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  cwd: z.string(),
+  image: z.string().nullable(),
+  status: z.string(),
+  backend: z.string(),
+  containerId: z.string().nullable(),
+  composeProject: z.string().nullable(),
+  sessionCount: z.number().int().nonnegative().finite(),
+  createdAt: z.string().nullable(),
+  uptimeMs: z.number().int().nonnegative().finite().nullable(),
+  stats: ContainerStatsSchema.nullable(),
+})
+
+/**
+ * Aggregate container counts so the summary chips don't re-tally. `other`
+ * absorbs any status that's neither running nor a known stopped/exited/error
+ * state. All non-negative integers.
+ */
+export const ContainersStatusSummarySchema = z.object({
+  total: z.number().int().nonnegative().finite(),
+  running: z.number().int().nonnegative().finite(),
+  stopped: z.number().int().nonnegative().finite(),
+  other: z.number().int().nonnegative().finite(),
+})
+
+/**
+ * #6133 — full containers & environments snapshot. Emitted in reply to a
+ * `containers_status_request` (see client.ts). An empty `containers` array is
+ * the valid "no chroxy-managed environments" state — never omitted.
+ * `dockerStatsNote` is a snapshot-level degradation annotation set when the
+ * `docker stats` enrichment was skipped/failed (the inventory is still present;
+ * every entry's `stats` is null).
+ */
+export const ServerContainersStatusSnapshotSchema = z.object({
+  type: z.literal('containers_status_snapshot'),
+  // Echoes the client's request requestId so the dashboard can correlate a
+  // snapshot to the Refresh click. Present (null when the client omitted one).
+  requestId: z.string().nullable().optional(),
+  generatedAt: z.string().datetime(),
+  summary: ContainersStatusSummarySchema,
+  containers: z.array(ContainerEntrySchema),
+  dockerStatsNote: z.string().nullable().optional(),
+  // Additive degraded-snapshot annotation (mirrors the sibling surveys): on a
+  // forbidden/in-progress/failed survey the handler returns an otherwise-valid
+  // (empty containers, zeroed summary) snapshot plus this `error`.
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+    })
+    .optional(),
+})
+
+// ---------------------------------------------------------------------------
 // #5499 (epic #5498) — Control Room "Integrations" tab: per-repo repo-memory
 // observability. Emitted in reply to an `integration_status_request` (see
 // client.ts). Same pull-on-Refresh, degraded-snapshot-with-`error` contract as
@@ -2768,6 +2866,7 @@ export type RunnerInfo = z.infer<typeof RunnerInfoSchema>
 export type RepoRunners = z.infer<typeof RepoRunnersSchema>
 export type RunnerStatusSummary = z.infer<typeof RunnerStatusSummarySchema>
 export type ServerRunnerStatusSnapshotMessage = z.infer<typeof ServerRunnerStatusSnapshotSchema>
+export type ServerContainersStatusSnapshotMessage = z.infer<typeof ServerContainersStatusSnapshotSchema>
 
 // #5499 (epic #5498): Integrations tab Control Room contract. Consumed by the
 // server emitter (control-room/integrations.js), the dashboard store handler,

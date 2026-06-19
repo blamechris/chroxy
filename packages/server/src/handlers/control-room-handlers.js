@@ -34,6 +34,7 @@ import { createLogger } from '../logger.js'
 import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-set.js'
 import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
+import { surveyContainers } from '../control-room/containers.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -50,6 +51,8 @@ const runnerInFlight = new WeakSet()
 const integrationInFlight = new WeakSet()
 // #5554: same again for the skills inventory survey — independent of all above.
 const skillsInventoryInFlight = new WeakSet()
+// #6133: same again for the containers & environments survey — independent of all above.
+const containersInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -244,6 +247,81 @@ async function handleRunnerStatusRequest(ws, client, msg, ctx) {
     }))
   } finally {
     runnerInFlight.delete(client)
+  }
+}
+
+/**
+ * #6133 — `containers_status_snapshot` error reply. The containers survey uses a
+ * flat `containers` shape (no `root`/`repos`), so it builds its own degraded
+ * snapshot rather than the shared `buildSurveyErrorSnapshot` (which sets
+ * `repos: []`). Empty containers + zeroed summary + the typed `error`.
+ */
+function containersErrorSnapshot(requestId, error) {
+  return {
+    type: 'containers_status_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    summary: { total: 0, running: 0, stopped: 0, other: 0 },
+    containers: [],
+    dockerStatsNote: null,
+    error,
+  }
+}
+
+/**
+ * #6133 (epic #5530) — containers & environments survey handler. Same authority
+ * + in-flight + degraded-reply contract as the sibling surveys: it exposes
+ * host-wide runtime metadata, so it is served only to host-level (unbound)
+ * clients, one survey per client at a time. Surveys ONLY chroxy's own
+ * EnvironmentManager records (never arbitrary host containers).
+ */
+async function handleContainersStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+
+  // Authority gate: a host-wide container survey is for host-level clients only.
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, containersErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'containers_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+
+  if (containersInFlight.has(client)) {
+    ctx.transport.send(ws, containersErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A containers status survey is already in progress for this client',
+    }))
+    return
+  }
+
+  // Tests inject `ctx.surveyContainers` to stub the docker/exec calls.
+  const surveyFn = typeof ctx?.surveyContainers === 'function' ? ctx.surveyContainers : surveyContainers
+  // The EnvironmentManager may be absent (container support disabled) — degrade
+  // to an empty inventory rather than erroring.
+  const envManager = ctx?.services?.environmentManager || null
+
+  containersInFlight.add(client)
+  try {
+    const snapshot = await surveyFn({
+      listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
+    })
+    ctx.transport.send(ws, {
+      type: 'containers_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      summary: snapshot.summary,
+      containers: snapshot.containers,
+      dockerStatsNote: snapshot.dockerStatsNote ?? null,
+    })
+  } catch (err) {
+    log.warn(`containers_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, containersErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'containers status survey failed',
+    }))
+  } finally {
+    containersInFlight.delete(client)
   }
 }
 
@@ -740,6 +818,7 @@ function handleMailboxStatusRequest(ws, client, msg, ctx) {
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
+  containers_status_request: handleContainersStatusRequest,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,

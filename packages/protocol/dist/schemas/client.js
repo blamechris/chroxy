@@ -915,6 +915,17 @@ export const RunnerStatusRequestSchema = z.object({
     type: z.literal('runner_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #6133 (epic #5530): Control Room — request a survey of the chroxy-managed
+// containers & environments (Docker / Compose, and k8s/rancher as they're
+// validated). The server enumerates the EnvironmentManager's records, enriches
+// running containers with a best-effort `docker stats` snapshot, and replies
+// with a single `containers_status_snapshot` (see server.ts). Pull-on-Refresh,
+// same as the host/runner/integration surveys. The optional `requestId` lets the
+// dashboard correlate a Refresh click to its snapshot.
+export const ContainersStatusRequestSchema = z.object({
+    type: z.literal('containers_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1091,6 +1102,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     EvaluateDraftSchema,
     HostStatusRequestSchema,
     RunnerStatusRequestSchema,
+    ContainersStatusRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     MailboxStatusRequestSchema,
