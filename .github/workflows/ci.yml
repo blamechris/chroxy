@@ -41,9 +41,10 @@ permissions:
 # is not a `runner-target` consumer). The Windows job stays GitHub-hosted (no
 # self-hosted Windows box). After the Linux runner was bumped to 24GB (#6046),
 # Store Core Tests and App Tests moved to the self-hosted pool (their blocker was
-# npm-ci/transform OOM, not arch). Server Tests stays GitHub-hosted — RAM was
-# ruled out; 9 tests fail on the ARM64 container from genuine env differences
-# (keychain, Docker-in-Docker, fs perms) — tracked in #6075.
+# npm-ci/transform OOM, not arch). Server Tests moved too once #6075 made the
+# suite container-portable (the 9 ARM64-container failures were genuine env
+# differences — root-bypassed fs perms, $HOME assumptions, a uuidgen dependency —
+# not RAM); see the server-tests job comment.
 
 jobs:
   runner-target:
