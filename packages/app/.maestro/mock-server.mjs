@@ -183,7 +183,16 @@ wss.on('connection', (ws) => {
       // (both per store-core crypto.ts direction constants).
       const parsed = JSON.parse(raw.toString())
       if (encryptedSession && parsed.type === 'encrypted') {
-        const nonce = nonceFromCounter(encryptedSession.recvNonce, DIRECTION_CLIENT)
+        // #6019: decrypt with the wire nonce the client stamped (`parsed.n`),
+        // matching store-core's contract (the client's send counter), rather
+        // than blindly trusting our local recvNonce. Validate monotonicity so a
+        // replayed/out-of-order frame is rejected like production does.
+        const clientNonceCounter = typeof parsed.n === 'number' ? parsed.n : encryptedSession.recvNonce
+        if (clientNonceCounter !== encryptedSession.recvNonce) {
+          console.error(`[mock] Nonce mismatch — expected ${encryptedSession.recvNonce}, got ${clientNonceCounter}`)
+          return
+        }
+        const nonce = nonceFromCounter(clientNonceCounter, DIRECTION_CLIENT)
         const ciphertext = new Uint8Array(decodeBase64(parsed.d))
         const plaintext = nacl.secretbox.open(ciphertext, new Uint8Array(nonce), new Uint8Array(encryptedSession.sharedKey))
         if (!plaintext) {
@@ -250,15 +259,16 @@ wss.on('connection', (ws) => {
         let eagerSharedKey = null
         let eagerServerPublicKey = null
 
-        if (useEncryption && msg.eagerPublicKey) {
+        // #6019: production honors the eager path only when BOTH eagerPublicKey
+        // AND eagerSalt are present (ws-auth.js). Require both here too —
+        // deriving without the salt would produce a key the app never computes.
+        if (useEncryption && msg.eagerPublicKey && msg.eagerSalt) {
           // Derive the shared key from the client's eager public key and our
           // secret. This mirrors ws-server.js key exchange logic.
           try {
             const clientPub = decodeBase64(msg.eagerPublicKey)
             const rawShared = nacl.box.before(clientPub, SERVER_KEYPAIR.secretKey)
-            eagerSharedKey = msg.eagerSalt
-              ? deriveConnectionKey(rawShared, msg.eagerSalt)
-              : new Uint8Array(rawShared)
+            eagerSharedKey = deriveConnectionKey(rawShared, msg.eagerSalt)
             eagerServerPublicKey = SERVER_PUBLIC_KEY_B64
             console.log('[mock] Eager key exchange — shared key derived')
           } catch (err) {
