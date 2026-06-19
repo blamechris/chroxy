@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, symlinkSync, chmodSync, 
 import { join } from 'path'
 import { tmpdir } from 'os'
 import { createFileOps } from '../src/ws-file-ops/index.js'
+import { POSIX_PERM_SKIP } from './test-helpers.js'
 
 describe('ws-file-ops error paths', () => {
   let tmp
@@ -24,7 +25,7 @@ describe('ws-file-ops error paths', () => {
     rmSync(tmp, { recursive: true, force: true })
   })
 
-  it('browseFiles returns Permission denied for EACCES', async () => {
+  it('browseFiles returns Permission denied for EACCES', { skip: POSIX_PERM_SKIP }, async () => {
     const noRead = join(tmp, 'noperm')
     mkdirSync(noRead)
     chmodSync(noRead, 0o000)

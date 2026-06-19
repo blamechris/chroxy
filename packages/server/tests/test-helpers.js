@@ -8,6 +8,23 @@ export { GIT } from '../src/git.js'
 // Re-export the ctx-shape assert so handler tests can guard their mocks.
 export { assertCtxShape } from '../src/ws-handler-context.js'
 
+// Skip reason for tests that chmod a path to a restrictive mode (0o000 / 0o500)
+// and assert the resulting EACCES / write failure. Two environments can't
+// observe POSIX permission-bit denials:
+//   - root (e.g. a CI Linux container running as uid 0) bypasses mode bits
+//     entirely, so a "read-only" dir is still writable and a 0o000 dir is
+//     still readable — the expected denial never happens.
+//   - Windows ACLs don't map to chmod bits; the invoking user typically keeps
+//     access regardless.
+// Pass this straight to node:test's `{ skip }` option — it's a reason string
+// when skipping and `false` (i.e. run the test) otherwise. See #6075.
+export const POSIX_PERM_SKIP =
+  process.platform === 'win32'
+    ? 'Windows ACLs do not map to chmod permission bits'
+    : (typeof process.getuid === 'function' && process.getuid() === 0)
+      ? 'running as root (e.g. CI Linux container) bypasses Unix permission bits'
+      : false
+
 // Reverse index: flat field name -> namespace it belongs to. Derived from the
 // single source of truth (CTX_NAMESPACES) so the test mock builder can't drift.
 const FIELD_TO_NS = {}

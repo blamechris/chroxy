@@ -175,7 +175,14 @@ export function ensureCwdTrusted(cwd) {
 //   PreToolUse   → <sink>/pre-<uuid>.json    (one per tool call)
 //   PostToolUse  → <sink>/post-<uuid>.json   (one per tool call)
 //
-// `uuidgen` gives us atomic unique names cross-platform (macOS + Linux).
+// Unique filenames come from UUID_CMD below. `uuidgen` is the first choice
+// (always present on macOS, and on Linux when `uuid-runtime` is installed) but
+// it is NOT in a minimal Debian/Ubuntu container — a bare `$(uuidgen)` there
+// collapses to an empty string, so every event collides on `pre-.json` /
+// `post-.json` and the poller silently sees only the last one (#6075). We fall
+// back to the kernel UUID source (`/proc/sys/kernel/random/uuid`, present on
+// every Linux with no package) and finally to pid+nanoseconds. The expression
+// is POSIX-sh safe (no `$RANDOM`/bashisms) since claude may run hooks under sh.
 // IMPORTANT: do not use `mktemp <sink>/foo-XXXXXX.json` — macOS BSD mktemp
 // does NOT expand the X-template when there's a `.json` suffix after it,
 // so the file ends up named literally "foo-XXXXXX.json" and every turn
@@ -193,13 +200,15 @@ export function ensureCwdTrusted(cwd) {
 export function writeHookSettings(sinkDir, { permissionsEnabled }) {
   const settingsPath = join(sinkDir, 'settings.json')
   const sinkDirEsc = JSON.stringify(sinkDir)
+  // Portable unique-id source for hook filenames — see the UUID note above.
+  const UUID_CMD = '$(uuidgen 2>/dev/null || cat /proc/sys/kernel/random/uuid 2>/dev/null || echo "$$-$(date +%s%N)")'
   // PreToolUse runs ALL registered hooks in order. We always capture the
   // event for our own observability; when permissions are enabled the
   // chroxy permission-hook.sh runs SECOND, gating the tool call via long-
   // poll to /permission. Claude waits for every hook to exit non-zero
   // before running the tool.
   const preToolUseHooks = [
-    { type: 'command', command: `cat > ${sinkDirEsc}/pre-$(uuidgen).json` },
+    { type: 'command', command: `cat > ${sinkDirEsc}/pre-${UUID_CMD}.json` },
   ]
   if (permissionsEnabled) {
     preToolUseHooks.push({
@@ -211,7 +220,7 @@ export function writeHookSettings(sinkDir, { permissionsEnabled }) {
   const settings = {
     hooks: {
       Stop: [
-        { hooks: [{ type: 'command', command: `cat > ${sinkDirEsc}/stop-$(uuidgen).json` }] },
+        { hooks: [{ type: 'command', command: `cat > ${sinkDirEsc}/stop-${UUID_CMD}.json` }] },
       ],
       PreToolUse: [
         { hooks: preToolUseHooks },
@@ -222,7 +231,7 @@ export function writeHookSettings(sinkDir, { permissionsEnabled }) {
         // because cat would consume stdin entirely, leaving the cleanup
         // hook with an empty payload.
         { hooks: [
-          { type: 'command', command: `tee ${sinkDirEsc}/post-$(uuidgen).json | grep -q '"tool_name":"AskUserQuestion"' && rm -rf ${sinkDirEsc}/askuserquestion-active || true` },
+          { type: 'command', command: `tee ${sinkDirEsc}/post-${UUID_CMD}.json | grep -q '"tool_name":"AskUserQuestion"' && rm -rf ${sinkDirEsc}/askuserquestion-active || true` },
         ] },
       ],
     },

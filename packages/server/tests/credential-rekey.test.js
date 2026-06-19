@@ -18,6 +18,7 @@ import {
   setMasterKey,
 } from '../src/credential-cipher.js'
 import { runCredentialsRekey } from '../src/cli/credentials-cmd.js'
+import { POSIX_PERM_SKIP } from './test-helpers.js'
 
 /**
  * Credential data-key rotation / rekey (#5229). An in-memory keychain fake
@@ -167,8 +168,7 @@ describe('credential data-key rekey (#5229)', () => {
     assert.equal(keychain.getToken(CRED_KEY_SERVICE), keyBefore) // key never rotated
   })
 
-  it('rolls the keychain key back on a write failure so the existing store stays readable', (t) => {
-    if (process.platform === 'win32') return t.skip('dir-permission write failure not reproducible on win32')
+  it('rolls the keychain key back on a write failure so the existing store stays readable', { skip: POSIX_PERM_SKIP }, () => {
     setStoredCredential('ANTHROPIC_API_KEY', 'sk-ant-secret-value')
     const keyBefore = keychain.getToken(CRED_KEY_SERVICE)
     // Make the atomic temp-write fail: a read-only parent dir can't hold the tmp file.
