@@ -684,6 +684,9 @@ export class Supervisor extends EventEmitter {
    * the next tick).
    */
   _serveTerminalDown() {
+    // Idempotent: the give-up branch is single-call by construction (the child
+    // is dead and not respawned), but guard defensively against a future caller.
+    if (this._terminalDown) return
     this._terminalDown = true
     // Reuse the standby server machinery (incl. its EADDRINUSE retry) — the
     // crash-looped child is dead, so the port is normally free. The handler
