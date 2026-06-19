@@ -1733,6 +1733,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const { socket, activeSessionId } = get();
     const payload: Record<string, unknown> = { type: 'interrupt' };
     if (activeSessionId) payload.sessionId = activeSessionId;
+    // #5938 — Stop clears the outgoing queue too (server policy #5936: a
+    // deliberate interrupt cancels pending follow-ups rather than auto-firing
+    // them). Drop the queued bubbles + entries optimistically so they don't
+    // linger as phantom "sent" messages; the server's per-item
+    // message_dequeued{interrupted} then no-ops against the cleared queue.
+    if (activeSessionId && get().sessionStates[activeSessionId]) {
+      const queued = get().sessionStates[activeSessionId].queuedMessages ?? [];
+      if (queued.length > 0) {
+        const queuedIds = new Set(queued.map((q) => q.clientMessageId).filter((id): id is string => !!id));
+        updateSession(activeSessionId, (ss) => ({
+          queuedMessages: [],
+          messages: ss.messages.filter((m) => !queuedIds.has(m.id)),
+        }));
+      }
+    }
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticMedium();
       wsSend(socket, payload);
@@ -1757,6 +1772,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (sid && get().sessionStates[sid]) {
       updateSession(sid, (ss) => ({
         queuedMessages: removeQueuedMessage(ss.queuedMessages ?? [], clientMessageId),
+        // #5938 — also drop the optimistic bubble (its id IS the clientMessageId);
+        // a cancelled message was never sent, so it must not linger as a phantom
+        // "sent" bubble once the queued badge clears.
+        messages: ss.messages.filter((m) => m.id !== clientMessageId),
       }));
     }
     hapticLight();

@@ -182,6 +182,45 @@ describe('message-handler', () => {
       expect(ss.streamingMessageId).toBe('start-1');
     });
 
+    it('#5938 — inserts the response BEFORE a trailing queued follow-up bubble', () => {
+      // A message was queued during the pending window: it sits at the end of
+      // `messages` with a matching `queuedMessages` entry, after the 'thinking'
+      // placeholder. When stream_start lands, the new response must go BEFORE the
+      // queued bubble (chronology: the queued message is a FUTURE turn).
+      store = createMockStore(createMockState({
+        streamingMessageId: 'pending',
+        messages: [
+          { id: 'user-a', type: 'user_input', content: 'A', timestamp: 1 },
+          { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+          { id: 'queued-b', type: 'user_input', content: 'B', timestamp: 3 },
+        ],
+        queuedMessages: [{ clientMessageId: 'queued-b', text: 'B', queuedAt: 3, status: 'pending' }],
+      } as unknown as Partial<SessionState>));
+      setStore(store);
+
+      handleMessage({ type: 'stream_start', messageId: 'resp-a', sessionId: SESSION_ID });
+
+      const ids = store.getState().sessionStates[SESSION_ID].messages.map((m) => m.id);
+      // 'thinking' removed; response inserted before the still-queued 'queued-b'.
+      expect(ids).toEqual(['user-a', 'resp-a', 'queued-b']);
+    });
+
+    it('#5938 — appends the response at the end when nothing is queued (regression)', () => {
+      store = createMockStore(createMockState({
+        streamingMessageId: 'pending',
+        messages: [
+          { id: 'user-a', type: 'user_input', content: 'A', timestamp: 1 },
+          { id: 'thinking', type: 'thinking', content: '', timestamp: 2 },
+        ],
+      } as unknown as Partial<SessionState>));
+      setStore(store);
+
+      handleMessage({ type: 'stream_start', messageId: 'resp-a', sessionId: SESSION_ID });
+
+      const ids = store.getState().sessionStates[SESSION_ID].messages.map((m) => m.id);
+      expect(ids).toEqual(['user-a', 'resp-a']);
+    });
+
     it('reuses existing response message on reconnect replay', () => {
       store = createMockStore(createMockState({
         messages: [{ id: 'start-2', type: 'response', content: 'old content', timestamp: 1000 }],

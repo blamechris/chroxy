@@ -128,6 +128,25 @@ describe('#5938 — sendCancelQueued', () => {
     expect(ids).toEqual(['cmid-2']);
   });
 
+  it('also removes the optimistic bubble from messages (no phantom "sent" bubble)', () => {
+    const socket: FakeSocket = { readyState: OPEN, send: jest.fn() };
+    seedSession({
+      messages: [
+        { id: 'cmid-1', type: 'user_input', content: 'a', timestamp: 1 },
+        { id: 'cmid-2', type: 'user_input', content: 'b', timestamp: 2 },
+      ],
+      queuedMessages: [
+        { clientMessageId: 'cmid-1', text: 'a', queuedAt: 1, status: 'confirmed' },
+        { clientMessageId: 'cmid-2', text: 'b', queuedAt: 2, status: 'confirmed' },
+      ],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    useConnectionStore.getState().sendCancelQueued('cmid-1');
+    // The cancelled bubble is gone from messages; the other survives.
+    expect(activeState().messages.map((m) => m.id)).toEqual(['cmid-2']);
+  });
+
   it('refuses (returns false, no mutation) while disconnected', () => {
     seedSession({
       queuedMessages: [{ clientMessageId: 'cmid-1', text: 'a', queuedAt: 1, status: 'confirmed' }],
@@ -138,5 +157,46 @@ describe('#5938 — sendCancelQueued', () => {
     expect(result).toBe(false);
     // The entry is preserved — the queue stays actionable on reconnect.
     expect(activeState().queuedMessages).toHaveLength(1);
+  });
+});
+
+describe('#5938 — sendInterrupt clears the queue', () => {
+  it('drops queued bubbles + entries (Stop cancels pending follow-ups)', () => {
+    const socket: FakeSocket = { readyState: OPEN, send: jest.fn() };
+    seedSession({
+      streamingMessageId: 'live-1',
+      messages: [
+        { id: 'live-1', type: 'response', content: '…', timestamp: 1 },
+        { id: 'q-1', type: 'user_input', content: 'a', timestamp: 2 },
+        { id: 'q-2', type: 'user_input', content: 'b', timestamp: 3 },
+      ],
+      queuedMessages: [
+        { clientMessageId: 'q-1', text: 'a', queuedAt: 2, status: 'confirmed' },
+        { clientMessageId: 'q-2', text: 'b', queuedAt: 3, status: 'pending' },
+      ],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    useConnectionStore.getState().sendInterrupt();
+
+    const s = activeState();
+    // Interrupt frame went out; the queue + its phantom bubbles are cleared,
+    // the live response bubble is untouched.
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(socket.send.mock.calls[0][0])).toMatchObject({ type: 'interrupt' });
+    expect(s.queuedMessages).toHaveLength(0);
+    expect(s.messages.map((m) => m.id)).toEqual(['live-1']);
+  });
+
+  it('leaves messages untouched when there is no queue', () => {
+    const socket: FakeSocket = { readyState: OPEN, send: jest.fn() };
+    seedSession({
+      streamingMessageId: 'live-1',
+      messages: [{ id: 'live-1', type: 'response', content: '…', timestamp: 1 }],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    useConnectionStore.getState().sendInterrupt();
+    expect(activeState().messages.map((m) => m.id)).toEqual(['live-1']);
   });
 });
