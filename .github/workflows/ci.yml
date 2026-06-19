@@ -239,7 +239,14 @@ jobs:
         # but scopes to the platform suite to keep the Windows job fast.
         # `c8` is intentionally omitted — we don't need coverage from the
         # Windows runner; the ubuntu job is the source of truth there.
-        run: node --import ./tests/_setup.mjs --experimental-test-module-mocks --test --test-force-exit ./tests/platform.test.js ./tests/platform-windows.test.js
+        #
+        # No `--test-force-exit` (#5480): it can silently truncate a run (exit 0
+        # while trailing suites are still queued). These two files have no leaked
+        # async handles — platform.test.js already runs flag-free as part of the
+        # main `npm test` glob, and platform-windows.test.js only uses sync
+        # spawnSync/fs (its forceKill is a synchronous child.kill, no timer) — so
+        # the runner exits naturally and a truncated run can't masquerade as green.
+        run: node --import ./tests/_setup.mjs --experimental-test-module-mocks --test ./tests/platform.test.js ./tests/platform-windows.test.js
 
   server-lint:
     name: Server Lint
