@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import * as Clipboard from 'expo-clipboard';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, stripAnsi, nextMessageId } from '../store/connection';
+import { useConnectionStore, selectMessages, selectClaudeReady, selectStreamingMessageId, selectActiveModel, selectPermissionMode, selectContextUsage, selectLastResultCost, selectLastResultDuration, selectIsIdle, selectQueuedMessages, stripAnsi, nextMessageId } from '../store/connection';
 import type { ChatMessage, ConnectionPhase, AgentInfo, McpServer, DevPreview } from '../store/connection';
 import type { SessionIntervention } from '@chroxy/store-core';
 // #4875: shared typed predicate for the AskUserQuestion freeform shape.
@@ -224,6 +224,18 @@ export function SessionScreen() {
   const setViewMode = useConnectionStore((s) => s.setViewMode);
   const sendInput = useConnectionStore((s) => s.sendInput);
   const sendInterrupt = useConnectionStore((s) => s.sendInterrupt);
+  // #5938 — the active session's outgoing queue (mid-turn follow-ups). Derive a
+  // Set of queued clientMessageIds so ChatView/MessageBubble can flag matching
+  // user bubbles with a "Queued" badge + cancel affordance in O(1) per row.
+  // Reads from the per-session store (not ChatView-local state) so it survives
+  // the session-switch re-render without leaking across sessions.
+  const queuedMessages = useConnectionStore(selectQueuedMessages);
+  const sendCancelQueued = useConnectionStore((s) => s.sendCancelQueued);
+  const queuedIds = useMemo(
+    () => new Set(queuedMessages.map((m) => m.clientMessageId).filter((id): id is string => !!id)),
+    [queuedMessages],
+  );
+  const handleCancelQueued = useCallback((id: string) => { sendCancelQueued(id); }, [sendCancelQueued]);
   // #5699 — reactive count of queued (unsent) messages, surfaced in the
   // reconnect banner so held input isn't invisible to the user.
   const queuedMessageCount = useConnectionStore((s) => s.queuedMessageCount);
@@ -704,7 +716,12 @@ export function SessionScreen() {
     const hasAttachments = pendingAttachments.length > 0;
     // #5556 — read the draft from the InputBar ref (it owns the value now).
     const draft = inputRef.current?.getValue() ?? '';
-    if ((!draft.trim() && !hasAttachments) || streamingMessageId) return;
+    if (!draft.trim() && !hasAttachments) return;
+    // #5938 — capture busy state at send time. A send mid-turn no longer bails
+    // out: it queues (the bubble renders with a "Queued" badge and the server
+    // flushes it when the current turn completes) rather than starting a fresh
+    // turn. `busy` drives addUserMessage's optimistic-enqueue path below.
+    const busy = !!streamingMessageId;
     // Expand any collapsed-paste markers back to their original content
     // before send (#3797). Trim happens AFTER expansion so an expanded
     // payload with surrounding whitespace still sends cleanly.
@@ -755,7 +772,7 @@ export function SessionScreen() {
     const clientMessageId = nextMessageId('user');
 
     if (viewMode === 'chat' || viewMode === 'files') {
-      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments, { clientMessageId });
+      addUserMessage(text || `[${pendingAttachments.length} file(s) attached]`, msgAttachments, { clientMessageId, queued: busy });
     }
 
     // Clear plan approval card — user has responded (whether approving or giving feedback)
@@ -1551,6 +1568,8 @@ export function SessionScreen() {
                   isSelectingRef={isSelectingRef}
                   onToggleSelection={toggleSelection}
                   streamingMessageId={streamingMessageId}
+                  queuedIds={queuedIds}
+                  onCancelQueued={handleCancelQueued}
                   isPlanPending={isPlanPending}
                   planAllowedPrompts={planAllowedPrompts}
                   onApprovePlan={handleApprovePlan}
@@ -1585,6 +1604,8 @@ export function SessionScreen() {
               isSelectingRef={isSelectingRef}
               onToggleSelection={toggleSelection}
               streamingMessageId={streamingMessageId}
+              queuedIds={queuedIds}
+              onCancelQueued={handleCancelQueued}
               isPlanPending={isPlanPending}
               planAllowedPrompts={planAllowedPrompts}
               onApprovePlan={handleApprovePlan}

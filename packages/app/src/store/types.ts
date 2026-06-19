@@ -467,9 +467,16 @@ export interface MultiClientSessionActions {
  */
 export interface MessageInputActions {
   addMessage: (message: ChatMessage) => void;
-  addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string }) => void;
+  // #5938 — `queued: true` records the bubble as a send-while-streaming
+  // follow-up: append it WITHOUT re-arming the thinking indicator / stream id
+  // and seed an optimistic `queuedMessages` entry (rendered with a "Queued"
+  // badge) instead of starting a fresh turn.
+  addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
   sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
+  // #5938 (#5943) — cancel one queued follow-up by its clientMessageId before
+  // it flushes. Returns false (refused) while disconnected; never offline-queued.
+  sendCancelQueued: (clientMessageId: string, sessionId?: string) => 'sent' | false;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   /**
    * Send a `user_question_response` answer to the server.

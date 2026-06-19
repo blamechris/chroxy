@@ -75,6 +75,16 @@ export interface ChatViewProps {
   isSelectingRef: React.MutableRefObject<boolean>;
   onToggleSelection: (id: string) => void;
   streamingMessageId: string | null;
+  /**
+   * #5938 — clientMessageIds of the active session's user bubbles that are
+   * currently queued (sent mid-turn, awaiting flush). A matching `user_input`
+   * row renders a "Queued" badge + cancel affordance. Per-session, derived in
+   * SessionScreen from the store's `queuedMessages` so it survives the
+   * session-switch re-render without leaking across sessions.
+   */
+  queuedIds?: Set<string>;
+  /** #5938 — cancel a still-queued follow-up by its clientMessageId. */
+  onCancelQueued?: (id: string) => void;
   isPlanPending?: boolean;
   planAllowedPrompts?: { tool: string; prompt: string }[];
   onApprovePlan?: () => void;
@@ -153,6 +163,8 @@ export function ChatView({
   isSelectingRef,
   onToggleSelection,
   streamingMessageId,
+  queuedIds,
+  onCancelQueued,
   isPlanPending,
   planAllowedPrompts,
   onApprovePlan,
@@ -411,6 +423,8 @@ export function ChatView({
             <MessageBubble
               allowSingleMultiSelect={allowSingleMultiSelect}
               message={msg}
+              queued={msg.type === 'user_input' && (queuedIds?.has(msg.id) ?? false)}
+              onCancelQueued={onCancelQueued}
               onSelectOption={onSelectOption}
               onSubmitMultiQuestion={onSubmitMultiQuestion}
               allowMultiQuestion={allowMultiQuestion}
@@ -453,6 +467,8 @@ export function ChatView({
       onSubmitMultiQuestion,
       allowMultiQuestion,
       allowSingleMultiSelect,
+      queuedIds,
+      onCancelQueued,
       chatTailMessageId,
       lastUserInputContent,
       sendInput,
