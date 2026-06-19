@@ -83,6 +83,17 @@ jobs:
     # to /proc/sys/kernel/random/uuid when uuidgen is absent). Verified 0-fail
     # on node:22-bookworm as root. Fork PRs still route to ubuntu-24.04 via
     # runner-target (untrusted code never runs on the self-hosted machine).
+    #
+    # RUNNER CONTRACT (#6094): this job has NO `container:` key, so its uid/image
+    # come from how the self-hosted Linux runner agent is configured, OUT OF BAND
+    # from this repo. The portability story above ASSUMES it runs as ROOT in
+    # node:22-bookworm: POSIX_PERM_SKIP (packages/server/tests/test-helpers.js)
+    # only skips the four chmod-denial asserts when `process.getuid() === 0`. If a
+    # future runner reconfig runs jobs as a NON-root user, those four tests run
+    # again and may fail on container fs semantics — investigate the runner's
+    # uid/image first, not the tests. (Pinning `container: node:22-bookworm` here
+    # would make this reproducible, but the other self-hosted Linux consumers are
+    # container-less too, so that's a pool-wide decision — left for a follow-up.)
     needs: runner-target
     runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
     timeout-minutes: 10
