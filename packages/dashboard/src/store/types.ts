@@ -629,9 +629,10 @@ export interface EmulatorActionResult {
 /**
  * #6138 (epic #5530) — outcome of the last WSL2 distro action (start /
  * terminate), kept for inline display. The target id is the distro `name`. A
- * successful `wsl_action_ack` records a human `note` (the new state) with
- * `error: null`; a WSL_ACTION_FAILED session_error records the message with
- * `note: null`. `at` is the local receipt time (epoch ms).
+ * successful `wsl_action_ack` records an action-oriented human `note`
+ * ("Started" / "Terminated", with the echoed status appended only when it's
+ * unexpected) and `error: null`; a WSL_ACTION_FAILED session_error records the
+ * message with `note: null`. `at` is the local receipt time (epoch ms).
  */
 export interface WslActionResult {
   action: string;
