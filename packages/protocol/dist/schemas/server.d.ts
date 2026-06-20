@@ -1335,6 +1335,94 @@ export declare const ServerContainersStatusSnapshotSchema: z.ZodObject<{
         message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+/** Devcontainer detection for one repo: present + the detected file path. */
+export declare const RepoRuntimeDevcontainerSchema: z.ZodObject<{
+    present: z.ZodBoolean;
+    path: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+/** Compose detection for one repo: present + the compose file path(s)
+ *  (a devcontainer `dockerComposeFile`, else repo-root compose files). */
+export declare const RepoRuntimeComposeSchema: z.ZodObject<{
+    present: z.ZodBoolean;
+    files: z.ZodArray<z.ZodString>;
+}, z.core.$strip>;
+/** One repo's runtime config. `error` (non-null) marks a repo that couldn't be
+ *  inspected — its other fields are nulled. */
+export declare const RepoRuntimeConfigEntrySchema: z.ZodObject<{
+    name: z.ZodString;
+    path: z.ZodString;
+    devcontainer: z.ZodObject<{
+        present: z.ZodBoolean;
+        path: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>;
+    compose: z.ZodObject<{
+        present: z.ZodBoolean;
+        files: z.ZodArray<z.ZodString>;
+    }, z.core.$strip>;
+    image: z.ZodNullable<z.ZodString>;
+    imageSource: z.ZodNullable<z.ZodEnum<{
+        default: "default";
+        devcontainer: "devcontainer";
+    }>>;
+    imageAllowed: z.ZodNullable<z.ZodBoolean>;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+/** Headline counts across the repo set. */
+export declare const RepoRuntimeConfigSummarySchema: z.ZodObject<{
+    total: z.ZodNumber;
+    withDevcontainer: z.ZodNumber;
+    withCompose: z.ZodNumber;
+    imagesDenied: z.ZodNumber;
+    errored: z.ZodNumber;
+}, z.core.$strip>;
+export declare const ServerRepoRuntimeConfigSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"repo_runtime_config_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    backend: z.ZodString;
+    backendSource: z.ZodEnum<{
+        default: "default";
+        config: "config";
+    }>;
+    isolation: z.ZodString;
+    allowlist: z.ZodObject<{
+        source: z.ZodEnum<{
+            default: "default";
+            config: "config";
+        }>;
+        patterns: z.ZodArray<z.ZodString>;
+    }, z.core.$strip>;
+    repos: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        path: z.ZodString;
+        devcontainer: z.ZodObject<{
+            present: z.ZodBoolean;
+            path: z.ZodNullable<z.ZodString>;
+        }, z.core.$strip>;
+        compose: z.ZodObject<{
+            present: z.ZodBoolean;
+            files: z.ZodArray<z.ZodString>;
+        }, z.core.$strip>;
+        image: z.ZodNullable<z.ZodString>;
+        imageSource: z.ZodNullable<z.ZodEnum<{
+            default: "default";
+            devcontainer: "devcontainer";
+        }>>;
+        imageAllowed: z.ZodNullable<z.ZodBoolean>;
+        error: z.ZodNullable<z.ZodString>;
+    }, z.core.$strip>>;
+    summary: z.ZodObject<{
+        total: z.ZodNumber;
+        withDevcontainer: z.ZodNumber;
+        withCompose: z.ZodNumber;
+        imagesDenied: z.ZodNumber;
+        errored: z.ZodNumber;
+    }, z.core.$strip>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
 /**
  * repo-memory cache file stats for one repo (`.repo-memory/cache.db` plus its
  * `-wal` sidecar). `present` is false when the cache file doesn't exist yet
@@ -2657,6 +2745,8 @@ export type RepoRunners = z.infer<typeof RepoRunnersSchema>;
 export type RunnerStatusSummary = z.infer<typeof RunnerStatusSummarySchema>;
 export type ServerRunnerStatusSnapshotMessage = z.infer<typeof ServerRunnerStatusSnapshotSchema>;
 export type ServerContainersStatusSnapshotMessage = z.infer<typeof ServerContainersStatusSnapshotSchema>;
+export type ServerRepoRuntimeConfigSnapshotMessage = z.infer<typeof ServerRepoRuntimeConfigSnapshotSchema>;
+export type RepoRuntimeConfigEntry = z.infer<typeof RepoRuntimeConfigEntrySchema>;
 export type RepoMemoryCache = z.infer<typeof RepoMemoryCacheSchema>;
 export type RepoMemoryReport = z.infer<typeof RepoMemoryReportSchema>;
 export type RepoMemoryStatus = z.infer<typeof RepoMemoryStatusSchema>;

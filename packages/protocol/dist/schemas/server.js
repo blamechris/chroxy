@@ -1382,6 +1382,71 @@ export const ServerContainersStatusSnapshotSchema = z.object({
         .optional(),
 });
 // ---------------------------------------------------------------------------
+// #6139 (epic #5530) — Control Room "Repo Runtime Config" tab: per-repo,
+// read-only survey of what governs container runtimes. Emitted in reply to a
+// `repo_runtime_config_request` (see client.ts). Same pull-on-Refresh,
+// degraded-snapshot-with-`error` contract as the host/runner/containers surveys.
+// ---------------------------------------------------------------------------
+/** Devcontainer detection for one repo: present + the detected file path. */
+export const RepoRuntimeDevcontainerSchema = z.object({
+    present: z.boolean(),
+    path: z.string().nullable(),
+});
+/** Compose detection for one repo: present + the compose file path(s)
+ *  (a devcontainer `dockerComposeFile`, else repo-root compose files). */
+export const RepoRuntimeComposeSchema = z.object({
+    present: z.boolean(),
+    files: z.array(z.string()),
+});
+/** One repo's runtime config. `error` (non-null) marks a repo that couldn't be
+ *  inspected — its other fields are nulled. */
+export const RepoRuntimeConfigEntrySchema = z.object({
+    name: z.string(),
+    path: z.string(),
+    devcontainer: RepoRuntimeDevcontainerSchema,
+    compose: RepoRuntimeComposeSchema,
+    // The image this repo WOULD run (devcontainer `image`, else the env default),
+    // its source, and the docker-image-allowlist verdict. All null on an errored
+    // repo entry.
+    image: z.string().nullable(),
+    imageSource: z.enum(['devcontainer', 'default']).nullable(),
+    imageAllowed: z.boolean().nullable(),
+    error: z.string().nullable(),
+});
+/** Headline counts across the repo set. */
+export const RepoRuntimeConfigSummarySchema = z.object({
+    total: z.number().int().nonnegative().finite(),
+    withDevcontainer: z.number().int().nonnegative().finite(),
+    withCompose: z.number().int().nonnegative().finite(),
+    imagesDenied: z.number().int().nonnegative().finite(),
+    errored: z.number().int().nonnegative().finite(),
+});
+export const ServerRepoRuntimeConfigSnapshotSchema = z.object({
+    type: z.literal('repo_runtime_config_snapshot'),
+    // Echoes the client's request requestId (null when omitted) for correlation.
+    requestId: z.string().nullable().optional(),
+    generatedAt: z.string().datetime(),
+    // Host-level defaults that apply across all repos.
+    backend: z.string(),
+    backendSource: z.enum(['config', 'default']),
+    isolation: z.string(),
+    allowlist: z.object({
+        source: z.enum(['config', 'default']),
+        patterns: z.array(z.string()),
+    }),
+    repos: z.array(RepoRuntimeConfigEntrySchema),
+    summary: RepoRuntimeConfigSummarySchema,
+    // Additive degraded-snapshot annotation (mirrors the sibling surveys): a
+    // forbidden/in-progress/failed survey returns an otherwise-valid (empty
+    // repos, zeroed summary) snapshot plus this `error`.
+    error: z
+        .object({
+        code: z.string(),
+        message: z.string(),
+    })
+        .optional(),
+});
+// ---------------------------------------------------------------------------
 // #5499 (epic #5498) — Control Room "Integrations" tab: per-repo repo-memory
 // observability. Emitted in reply to an `integration_status_request` (see
 // client.ts). Same pull-on-Refresh, degraded-snapshot-with-`error` contract as

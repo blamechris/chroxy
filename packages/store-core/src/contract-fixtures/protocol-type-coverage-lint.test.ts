@@ -191,6 +191,9 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  'repo_runtime_config_snapshot',         // #6139 (epic #5530) Control Room per-repo runtime config survey —
+                                          //   server contract landed first; the dashboard tab that consumes
+                                          //   the snapshot is the tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------
