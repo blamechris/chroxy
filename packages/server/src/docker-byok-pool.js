@@ -621,8 +621,8 @@ export class DockerContainerPool extends EventEmitter {
       }
       all.sort((a, b) => a.releasedAt - b.releasedAt)
       for (const { key, entry } of all.slice(0, overTotal)) {
+        // _removeEntry already clears the idle timer for the matched entry.
         this._removeEntry(key, entry.containerId)
-        this._clearTimeout(entry.timer)
         this._createdAt.delete(entry.containerId)
         this._soiledIds.delete(entry.containerId)
         this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: entry.containerId, reason })
