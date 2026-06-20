@@ -1,15 +1,18 @@
 /**
- * DeviceRuntimesSection (#6136 / #6137, epic #5530) — the "Device runtimes"
- * Control Room tab. Surfaces two device-runtime panels: iOS simulators (#6136)
- * and Android emulators (#6137). (WSL2 #6138 is a Windows-only follow-up.)
+ * DeviceRuntimesSection (#6136 / #6137 / #6138, epic #5530) — the "Device
+ * runtimes" Control Room tab. Surfaces three device-runtime panels: iOS
+ * simulators (#6136), Android emulators (#6137), and WSL2 distros (#6138,
+ * Windows-host-only).
  *
- * Each panel renders its `*_status_snapshot` (devices + the headline **"Ready
- * for Maestro" verdict** — a booted/running device AND Metro (:8081) AND the
- * mock server (:9876) reachable — turning the manual Maestro pre-flight
- * (CLAUDE.md "UI Verification with Maestro") into one glance) plus per-row
- * lifecycle actions (simulator boot/shutdown; emulator boot/kill). Each follows
- * the established per-row discipline: the server takes the device id, re-surveys
- * + re-validates it as a lookup key, and state-gates the action. Non-destructive
+ * The simulator/emulator panels render their `*_status_snapshot` with the
+ * headline **"Ready for Maestro" verdict** — a booted/running device AND Metro
+ * (:8081) AND the mock server (:9876) reachable — turning the manual Maestro
+ * pre-flight (CLAUDE.md "UI Verification with Maestro") into one glance, plus
+ * per-row lifecycle actions (simulator boot/shutdown; emulator boot/kill). The
+ * WSL panel has no Maestro verdict (it's a host runtime, not a test target),
+ * just the distro survey + per-row start/terminate. Each follows the established
+ * per-row discipline: the server takes the device/distro id, re-surveys +
+ * re-validates it as a lookup key, and state-gates the action. Non-destructive
  * (no data loss), so no ConfirmDialog. `available:false` (no SDK / off-platform)
  * is a first-class state — no tables, just a note.
  */
