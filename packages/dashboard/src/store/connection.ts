@@ -505,6 +505,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // the repo_runtime_config_snapshot handler. Null until the first survey lands.
   repoRuntimeConfig: null,
   repoRuntimeConfigLoading: false,
+  // #6135 (epic #5530): Control Room BYOK pool snapshot, fed by the
+  // byok_pool_status_snapshot handler. Null until the first survey lands.
+  byokPoolStatus: null,
+  byokPoolStatusLoading: false,
   // #5499 (epic #5498): Control Room Integrations snapshot, fed by the
   // integration_status_snapshot handler. Null until the first survey lands.
   integrationStatus: null,
@@ -524,6 +528,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // outcome per environment for inline display (same lifecycle as reindex).
   containerActioningIds: new Set<string>(),
   containerActionResults: {},
+  // #6135 slice 3: BYOK pool action — in-flight target ids + last outcome per
+  // target for inline display (same lifecycle as containerActioningIds).
+  byokPoolActioningIds: new Set<string>(),
+  byokPoolActionResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1023,6 +1031,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #6135 (epic #5530): request a BYOK pool survey. Mirrors
+  // requestContainersStatus — flips byokPoolStatusLoading and sends a
+  // byok_pool_status_request; the reply is a single byok_pool_status_snapshot
+  // handled into byokPoolStatus. Returns false (and does NOT set loading) when
+  // the socket is closed.
+  requestByokPoolStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ byokPoolStatusLoading: true });
+      wsSend(socket, { type: 'byok_pool_status_request' });
+      return true;
+    }
+    return false;
+  },
+
   // #5499 (epic #5498): request an Integrations survey. Mirrors
   // requestRunnerStatus — flips integrationStatusLoading and sends an
   // integration_status_request; the reply is a single
@@ -1118,6 +1141,43 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     delete results[environmentId];
     set({ containerActioningIds: pending, containerActionResults: results });
     wsSend(socket, { type: 'containers_action', action, environmentId, requestId });
+    return true;
+  },
+
+  // #6135 slice 3 (epic #5530): run a BYOK pool mutating action. The pool is a
+  // single process-wide singleton, so the target id keys the pending/result
+  // state: 'drain' (pool-wide), 'recycle:<key>' (one bucket), 'resize'
+  // (pool-wide). Same wire-or-nothing contract as sendContainersAction — tag the
+  // request with a requestId the server echoes on the byok_pool_action_ack /
+  // BYOK_POOL_ACTION_FAILED session_error, and mark the target pending ONLY when
+  // the message is genuinely on the wire (never queued offline). For recycle the
+  // bucket key is required and is the survey's own key — the server re-validates
+  // it against the live pool's inspect() before any exec. For resize the caps are
+  // passed through and the server clamps them to the configured ceiling. The
+  // target's previous inline result is dropped so a stale outcome can't sit next
+  // to the pending state. Drain/recycle confirmation lives in the UI.
+  sendByokPoolAction: (
+    action: 'drain' | 'recycle' | 'resize',
+    opts?: { key?: string; maxPerKey?: number; maxTotal?: number },
+  ): boolean => {
+    const { socket } = get();
+    if (action !== 'drain' && action !== 'recycle' && action !== 'resize') return false;
+    if (action === 'recycle' && !opts?.key) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const targetId = action === 'recycle' ? `recycle:${opts!.key}` : action;
+    const requestId = `byok-pool-action-${nextMessageId()}`;
+    const pending = new Set(get().byokPoolActioningIds);
+    pending.add(targetId);
+    const results = { ...get().byokPoolActionResults };
+    delete results[targetId];
+    set({ byokPoolActioningIds: pending, byokPoolActionResults: results });
+    const msg: Record<string, unknown> = { type: 'byok_pool_action', action, requestId };
+    if (action === 'recycle') msg.key = opts!.key;
+    if (action === 'resize') {
+      if (typeof opts?.maxPerKey === 'number') msg.maxPerKey = opts.maxPerKey;
+      if (typeof opts?.maxTotal === 'number') msg.maxTotal = opts.maxTotal;
+    }
+    wsSend(socket, msg);
     return true;
   },
 
@@ -1905,6 +1965,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().containerActioningIds.size > 0) {
         set({ containerActioningIds: new Set<string>() });
       }
+      // #6135: ditto for in-flight BYOK pool actions — the ack/failure is
+      // socket-scoped, so clear pending targets on a drop. (The server-side
+      // action keeps running; the next survey refresh shows its effect.)
+      if (get().byokPoolActioningIds.size > 0) {
+        set({ byokPoolActioningIds: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -2179,6 +2245,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6134: container lifecycle action pending/result state goes with it.
       containerActioningIds: new Set<string>(),
       containerActionResults: {},
+      // #6135: BYOK pool action pending/result state goes with it.
+      byokPoolActioningIds: new Set<string>(),
+      byokPoolActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -2219,6 +2288,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6134: container lifecycle action pending/result state goes with it.
       containerActioningIds: new Set<string>(),
       containerActionResults: {},
+      // #6135: BYOK pool action pending/result state goes with it.
+      byokPoolActioningIds: new Set<string>(),
+      byokPoolActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,

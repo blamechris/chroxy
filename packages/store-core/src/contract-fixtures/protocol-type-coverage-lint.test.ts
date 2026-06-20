@@ -144,6 +144,8 @@ const DASHBOARD_ONLY = new Set<string>([
   'containers_status_snapshot', // Control Room containers & environments survey (#6133, epic #5530) — dashboard-only
   'containers_action_ack',      // Control Room container lifecycle action ack (#6134, epic #5530) — dashboard-only
   'repo_runtime_config_snapshot', // Control Room per-repo runtime config survey (#6139, epic #5530) — dashboard-only
+  'byok_pool_status_snapshot',  // Control Room BYOK pool survey (#6135, epic #5530) — dashboard-only
+  'byok_pool_action_ack',       // Control Room BYOK pool action ack (#6135, epic #5530) — dashboard-only
   'chroxy_context_hint_changed',// per-session context-hint toggle (#3805) — dashboard-only for v1
   'credential_test_result',     // Provider Credentials "Test" result (#3855) — dashboard-only
   'credentials_status',         // Provider Credentials pane (#3855) — dashboard-only
@@ -192,13 +194,6 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
-  'byok_pool_status_snapshot',            // #6135 (epic #5530) Control Room BYOK pool stats survey —
-                                          //   server contract landed first; the dashboard surface that consumes
-                                          //   the snapshot is the tracked follow-up, then this → DASHBOARD_ONLY
-  'byok_pool_action_ack',                 // #6135 slice 2 (epic #5530) Control Room BYOK pool mutating-action
-                                          //   (drain/recycle/resize) ack — server contract landed first; the
-                                          //   dashboard slice that consumes the ack is the tracked follow-up
-                                          //   (slice 3), then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

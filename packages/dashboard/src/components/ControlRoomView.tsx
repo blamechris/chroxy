@@ -42,6 +42,7 @@ import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRe
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { ContainersStatusSection } from './ContainersStatusSection'
 import { RepoRuntimeConfigSection } from './RepoRuntimeConfigSection'
+import { ByokPoolSection } from './ByokPoolSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
@@ -143,6 +144,19 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'repoRuntimeConfig',
     loadingKey: 'repoRuntimeConfigLoading',
     requestKey: 'requestRepoRuntimeConfig',
+  },
+  // #6135 (epic #5530): the BYOK Pool tab — host-wide survey of the BYOK warm-
+  // container pool (enabled flag, configured limits, live stats + per-shape warm
+  // buckets) with drain / recycle / resize mutating actions. Same survey:true
+  // request/snapshot flow as the others; the #5546 staleness guard comes free.
+  {
+    key: 'byok-pool',
+    label: 'BYOK pool',
+    survey: true,
+    requestType: 'byok_pool_status_request',
+    snapshotKey: 'byokPoolStatus',
+    loadingKey: 'byokPoolStatusLoading',
+    requestKey: 'requestByokPoolStatus',
   },
   {
     key: 'integrations',
@@ -397,6 +411,8 @@ export function ControlRoomView({
         <ContainersStatusSection />
       ) : tab === 'repo-config' ? (
         <RepoRuntimeConfigSection />
+      ) : tab === 'byok-pool' ? (
+        <ByokPoolSection />
       ) : tab === 'integrations' ? (
         <IntegrationsSection />
       ) : tab === 'skills' ? (

@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -566,6 +566,23 @@ export interface ContainerActionResult {
   at: number;
 }
 
+/**
+ * #6135 slice 3 (epic #5530) — outcome of the last BYOK pool mutating action
+ * (drain / recycle / resize) for one action target, kept for inline display.
+ * The target id is `'drain'`, `'recycle:<bucket key>'`, or `'resize'` (the pool
+ * is a single process-wide singleton — drain/resize are pool-wide, recycle is
+ * per-resource-shape bucket). A successful `byok_pool_action_ack` records the
+ * echoed `action` + a human `note` (drained/evicted counts) with `error: null`;
+ * a BYOK_POOL_ACTION_FAILED session_error records the message with `note: null`.
+ * `at` is the local receipt time (epoch ms).
+ */
+export interface ByokPoolActionResult {
+  action: string;
+  note: string | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -745,6 +762,22 @@ export interface ConnectionState {
   repoRuntimeConfigLoading: boolean;
 
   /**
+   * #6135 (epic #5530) — Control Room BYOK pool survey: the latest
+   * `byok_pool_status_snapshot` (enabled flag, configured limits, live stats +
+   * per-shape warm buckets), or null before the first one lands (the BYOK Pool
+   * section renders an empty/loading state). Replaced wholesale on each snapshot
+   * (full picture, no delta stream).
+   */
+  byokPoolStatus: ServerByokPoolStatusSnapshotMessage | null;
+  /**
+   * #6135 — true between dispatching a `byok_pool_status_request` and the
+   * matching `byok_pool_status_snapshot` arriving, so the tab's Refresh button
+   * can spin. Cleared when a VALID snapshot lands (a malformed payload is
+   * dropped and leaves this true, matching the sibling surveys).
+   */
+  byokPoolStatusLoading: boolean;
+
+  /**
    * #5499 (epic #5498) — Control Room Integrations survey: the latest
    * `integration_status_snapshot` from the server (per-repo repo-memory
    * status). `null` until the first snapshot lands (the Integrations section
@@ -814,6 +847,19 @@ export interface ConnectionState {
    * again.
    */
   containerActionResults: Record<string, ContainerActionResult>;
+  /**
+   * #6135 slice 3 (epic #5530) — action target ids with an in-flight
+   * `byok_pool_action`: set when sendByokPoolAction is called, cleared on the
+   * `byok_pool_action_ack` / BYOK_POOL_ACTION_FAILED session_error. Keyed by the
+   * action target (`'drain'`, `'recycle:<bucket key>'`, `'resize'`) so each
+   * control disables independently while its action is on the wire.
+   */
+  byokPoolActioningIds: Set<string>;
+  /**
+   * #6135 slice 3 — last BYOK pool action outcome per target id, for inline
+   * display. Replaced when the same target is actioned again.
+   */
+  byokPoolActionResults: Record<string, ByokPoolActionResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1379,6 +1425,13 @@ export interface ConnectionState {
   // `containersStatusLoading` while in flight.
   requestContainersStatus: () => boolean;
 
+  // #6135 (epic #5530): request a BYOK pool survey. Dispatches a
+  // `byok_pool_status_request`; the server replies with a single
+  // `byok_pool_status_snapshot` handled into `byokPoolStatus`. Returns whether
+  // the message went on the wire (false = socket closed). Sets
+  // `byokPoolStatusLoading` while in flight.
+  requestByokPoolStatus: () => boolean;
+
   // #6139 (epic #5530): request a per-repo runtime config survey. Dispatches a
   // `repo_runtime_config_request`; the server replies with a single
   // `repo_runtime_config_snapshot` handled into `repoRuntimeConfig`. Returns
@@ -1429,6 +1482,26 @@ export interface ConnectionState {
   // queuing, so the row can't strand mid-action. Destroy confirmation is the
   // caller's responsibility (the UI gates it behind a ConfirmDialog).
   sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy') => boolean;
+
+  // #6135 slice 3 (epic #5530): run a BYOK pool mutating action. The pool is a
+  // single process-wide singleton, so the actions differ by shape:
+  //   - 'drain'   — evict all idle warm containers (no target).
+  //   - 'recycle' — evict one resource-shape bucket; pass `opts.key` (the
+  //     bucket key the survey enumerated; the server re-validates it against the
+  //     live pool before any exec).
+  //   - 'resize'  — set runtime caps; pass `opts.maxPerKey` / `opts.maxTotal`
+  //     (the server clamps each to the operator-configured ceiling).
+  // Dispatches a `byok_pool_action` tagged with a requestId the server echoes on
+  // the `byok_pool_action_ack` / BYOK_POOL_ACTION_FAILED session_error. Marks
+  // the action target (`'drain'` / `'recycle:<key>'` / `'resize'`) in
+  // `byokPoolActioningIds` (and drops its stale result) ONLY when the message
+  // actually went on the wire; an offline send (or a recycle with no key) returns
+  // false without queuing. Drain/recycle confirmation is the caller's
+  // responsibility (the UI gates them behind a ConfirmDialog).
+  sendByokPoolAction: (
+    action: 'drain' | 'recycle' | 'resize',
+    opts?: { key?: string; maxPerKey?: number; maxTotal?: number },
+  ) => boolean;
 
   // #5547: request a server-side one-shot summary of a session's persisted
   // history (the sidebar "Summarize & start new session" action). Dispatches a
