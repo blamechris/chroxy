@@ -314,6 +314,12 @@ export class ClaudeTuiSession extends BaseSession {
     // rejects after this many ms so the poll loop re-checks its hard-timeout
     // guard instead of awaiting a frozen mount forever. Overridable in tests.
     this._hookFsTimeoutMs = ClaudeTuiSession.HOOK_FS_TIMEOUT_MS
+    // #6178 (review): a timed-out fs op can't be canceled — it stays pending in
+    // the libuv threadpool. Re-issuing it every poll pass would pile up stuck
+    // work and exhaust the shared 4-thread pool, reintroducing the cross-session
+    // impact #6132 fixed. So coalesce: keep ONE outstanding op per (kind,path)
+    // and re-race the SAME promise each pass until it settles (see _boundedHookFs).
+    this._inFlightHookFs = new Map()
 
     this._port = port || null
     // #4044: when true, spawn `claude` with --dangerously-skip-permissions
@@ -752,10 +758,44 @@ export class ClaudeTuiSession extends BaseSession {
 
   // #6178: hot-path hook-drain fs accessors. Thin wrappers over fs/promises so a
   // test can override them to simulate a hung mount; production just forwards.
-  // The drain wraps each call in withHookFsTimeout so a stuck one self-recovers.
+  // The drain calls them via _boundedHookFs (bound + coalesced), never directly.
   _hookReaddir(dir) { return readdir(dir) }
   _hookReadFile(path) { return readFile(path, 'utf8') }
   _hookUnlink(path) { return unlink(path) }
+
+  /**
+   * #6178 (review) — run a hot-path hook-drain fs op bounded by HOOK_FS_TIMEOUT_MS
+   * AND coalesced so at most one underlying op per (kind,path) is outstanding.
+   *
+   * A timed-out fs op can't be canceled: the real readdir/readFile/unlink stays
+   * pending in the libuv threadpool until the mount unfreezes. If each poll pass
+   * started a fresh op we'd accumulate stuck threadpool work and exhaust the
+   * shared 4-thread pool — reintroducing the cross-session blocking #6132 fixed.
+   * So we keep the SAME underlying promise per (kind,path) and re-race a fresh
+   * timer against it each pass; only after it finally settles is a new op issued.
+   *
+   * @param {'readdir'|'readFile'|'unlink'} kind
+   * @param {string} path  the sink dir (readdir) or a hook file (readFile/unlink)
+   * @returns {Promise<*>} the op result, or a HOOK_FS_TIMEOUT rejection
+   */
+  _boundedHookFs(kind, path) {
+    const key = `${kind}:${path}`
+    let inflight = this._inFlightHookFs.get(key)
+    if (!inflight) {
+      inflight = kind === 'readdir' ? this._hookReaddir(path)
+        : kind === 'readFile' ? this._hookReadFile(path)
+          : this._hookUnlink(path)
+      // Free the slot when the real op finally settles (even long after our race
+      // gave up), so a recovered mount can issue a fresh op. The then(noop,noop)
+      // marks the underlying promise handled so a late rejection is never an
+      // unhandledRejection; the guard avoids clobbering a newer entry.
+      inflight.then(() => {}, () => {}).finally(() => {
+        if (this._inFlightHookFs.get(key) === inflight) this._inFlightHookFs.delete(key)
+      })
+      this._inFlightHookFs.set(key, inflight)
+    }
+    return withHookFsTimeout(inflight, this._hookFsTimeoutMs, kind)
+  }
 
   /**
    * #5329 (IP-1): recover the hook sink dir after a readdir failure during the
@@ -2360,7 +2400,7 @@ export class ClaudeTuiSession extends BaseSession {
     const drainHookFiles = async () => {
       let entries
       try {
-        entries = await withHookFsTimeout(this._hookReaddir(this._sinkDir), this._hookFsTimeoutMs, 'readdir')
+        entries = await this._boundedHookFs('readdir', this._sinkDir)
       } catch (err) {
         // #6178: a hung sink fs (FUSE/NFS freeze) — DON'T treat it as deletion.
         // Skip this pass and return; the while-guard re-checks HOOK_TIMEOUT_MS so
@@ -2401,9 +2441,10 @@ export class ClaudeTuiSession extends BaseSession {
         const full = join(this._sinkDir, name)
         let parsed
         try {
-          // #6178: bounded — a timeout rejects and folds into this skip-and-retry
-          // (same as a partial-write/parse failure: re-read on the next pass).
-          const raw = await withHookFsTimeout(this._hookReadFile(full), this._hookFsTimeoutMs, 'readFile')
+          // #6178: bounded + coalesced — a timeout rejects and folds into this
+          // skip-and-retry (same as a partial-write/parse failure: re-read next
+          // pass), and the SAME readFile is re-raced rather than re-issued.
+          const raw = await this._boundedHookFs('readFile', full)
           if (raw.length === 0) continue  // partial write — poll again
           parsed = JSON.parse(raw)
         } catch { continue }
@@ -2434,7 +2475,7 @@ export class ClaudeTuiSession extends BaseSession {
           // failure), so a stuck unlink can't re-process the file or wedge. The
           // file then stays on disk (never re-unlinked); on a permanently stuck
           // mount that's bounded sink growth, with sweepStaleSinkDirs as backstop.
-          await withHookFsTimeout(this._hookUnlink(full), this._hookFsTimeoutMs, 'unlink')
+          await this._boundedHookFs('unlink', full)
           this._consumedFiles.delete(name)
         } catch { /* leave the dedup guard in place */ }
       }
@@ -2471,7 +2512,9 @@ export class ClaudeTuiSession extends BaseSession {
       if (now - lastHeartbeatMs >= ClaudeTuiSession.HOOK_HEARTBEAT_MS) {
         lastHeartbeatMs = now
         let sinkFileCount = 0
-        try { sinkFileCount = (await withHookFsTimeout(this._hookReaddir(this._sinkDir), this._hookFsTimeoutMs, 'heartbeat-readdir')).length } catch {}
+        // #6178 (review): shares the coalesced readdir slot with the drain, so the
+        // heartbeat never enqueues a second stuck readdir on a frozen mount.
+        try { sinkFileCount = (await this._boundedHookFs('readdir', this._sinkDir)).length } catch {}
         log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'})`)
       }
       if (stopPayload) break

@@ -815,10 +815,11 @@ describe('ClaudeTuiSession', () => {
       session._hookFsTimeoutMs = 40
       // Simulate a frozen mount: readdir never resolves. Pre-fix, the poll loop
       // would await this forever on the first pass and wedge until the PTY died
-      // (the while-guard never re-evaluated). Post-fix, each readdir rejects at
+      // (the while-guard never re-evaluated). Post-fix, each pass rejects at
       // _hookFsTimeoutMs, the loop keeps iterating, and the hard-timeout watchdog
       // ends the turn. If the fix regressed, this test HANGS (node:test timeout).
-      session._hookReaddir = () => new Promise(() => {})
+      let readdirCalls = 0
+      session._hookReaddir = () => { readdirCalls++; return new Promise(() => {}) }
       session._term = { write: () => {}, kill: () => {} }
       session.on('error', () => {})
       const start = Date.now()
@@ -826,6 +827,11 @@ describe('ClaudeTuiSession', () => {
       const elapsed = Date.now() - start
       assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms), not wedged on the frozen readdir`)
       assert.equal(session._isBusy, false, 'busy cleared — the next turn isn\'t wedged')
+      // #6178 (review): the stuck readdir is COALESCED — re-raced, not re-issued.
+      // Across the multiple poll passes before the hard timeout, the underlying
+      // op is started exactly once, so it can't pile up stuck libuv threadpool
+      // work and exhaust the shared pool (which would re-block other sessions).
+      assert.equal(readdirCalls, 1, 'frozen readdir issued once, not once-per-pass')
       rmSync(session._sinkDir, { recursive: true, force: true })
     })
 
