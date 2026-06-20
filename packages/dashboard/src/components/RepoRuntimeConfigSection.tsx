@@ -41,11 +41,12 @@ function PresenceCell({ present, detail, testid }: { present: boolean; detail?: 
   )
 }
 
-/** The allowlist verdict for a repo's image: allowed / denied / N/A (default). */
+/**
+ * The allowlist verdict for a repo's image: allowed / denied / N/A (default).
+ * Only rendered for non-errored entries — RepoRow short-circuits an errored
+ * entry to a dedicated error row before this is reached.
+ */
 function VerdictCell({ entry }: { entry: RepoEntry }) {
-  if (entry.error) {
-    return <td className="cr-dim" data-testid={`repo-config-verdict-${entry.path}`}>—</td>
-  }
   // imageAllowed is null for the built-in default image (never allowlist-checked)
   // — show N/A, not a (misleading) verdict.
   if (entry.imageAllowed === null) {
@@ -148,7 +149,7 @@ export function RepoRuntimeConfigSection({
           host · repo runtime config{snapshot ? ` · ${isoDate(snapshot.generatedAt)}` : ''}
         </div>
         <div className="cr-titlerow">
-          <h1 className="cr-title">Repo Runtime Config</h1>
+          <h1 className="cr-title">Repo runtime config</h1>
           <button
             type="button"
             className="cr-refresh"
