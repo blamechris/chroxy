@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -730,6 +730,21 @@ export interface ConnectionState {
   containersStatusLoading: boolean;
 
   /**
+   * #6139 (epic #5530) — Control Room per-repo runtime config survey: the
+   * latest `repo_runtime_config_snapshot`, or null before the first one lands
+   * (the Repo Runtime Config section renders an empty/loading state). Replaced
+   * wholesale on each snapshot (full picture, no delta stream).
+   */
+  repoRuntimeConfig: ServerRepoRuntimeConfigSnapshotMessage | null;
+  /**
+   * #6139 — true between dispatching a `repo_runtime_config_request` and the
+   * matching `repo_runtime_config_snapshot` arriving, so the tab's Refresh
+   * button can spin. Cleared when a VALID snapshot lands (a malformed payload
+   * is dropped and leaves this true, matching the sibling surveys).
+   */
+  repoRuntimeConfigLoading: boolean;
+
+  /**
    * #5499 (epic #5498) — Control Room Integrations survey: the latest
    * `integration_status_snapshot` from the server (per-repo repo-memory
    * status). `null` until the first snapshot lands (the Integrations section
@@ -1363,6 +1378,13 @@ export interface ConnectionState {
   // the message went on the wire (false = socket closed). Sets
   // `containersStatusLoading` while in flight.
   requestContainersStatus: () => boolean;
+
+  // #6139 (epic #5530): request a per-repo runtime config survey. Dispatches a
+  // `repo_runtime_config_request`; the server replies with a single
+  // `repo_runtime_config_snapshot` handled into `repoRuntimeConfig`. Returns
+  // whether the message went on the wire (false = socket closed). Sets
+  // `repoRuntimeConfigLoading` while in flight.
+  requestRepoRuntimeConfig: () => boolean;
 
   // #5499 (epic #5498): request an Integrations survey. Dispatches an
   // `integration_status_request`; the server replies with a single

@@ -143,6 +143,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'cancel_activity_ack',        // Control Room cancel-click correlation ack (#5277)
   'containers_status_snapshot', // Control Room containers & environments survey (#6133, epic #5530) — dashboard-only
   'containers_action_ack',      // Control Room container lifecycle action ack (#6134, epic #5530) — dashboard-only
+  'repo_runtime_config_snapshot', // Control Room per-repo runtime config survey (#6139, epic #5530) — dashboard-only
   'chroxy_context_hint_changed',// per-session context-hint toggle (#3805) — dashboard-only for v1
   'credential_test_result',     // Provider Credentials "Test" result (#3855) — dashboard-only
   'credentials_status',         // Provider Credentials pane (#3855) — dashboard-only
@@ -191,9 +192,6 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
-  'repo_runtime_config_snapshot',         // #6139 (epic #5530) Control Room per-repo runtime config survey —
-                                          //   server contract landed first; the dashboard tab that consumes
-                                          //   the snapshot is the tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

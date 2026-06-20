@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2589,6 +2589,18 @@ function handleContainersStatusSnapshot(msg: Record<string, unknown>, _get: MsgG
 }
 
 /**
+ * #6139 (epic #5530) — per-repo runtime config survey
+ * `repo_runtime_config_snapshot`: REPLACE the stored survey and clear the
+ * loading flag. Same defensive, full-replace, clear-loading-only-on-valid-parse
+ * contract as the host/runner/containers survey handlers above.
+ */
+function handleRepoRuntimeConfigSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerRepoRuntimeConfigSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ repoRuntimeConfig: parsed.data, repoRuntimeConfigLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2829,6 +2841,8 @@ const HANDLERS: Record<string, Handler> = {
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,
   containers_status_snapshot: handleContainersStatusSnapshot,
+  // #6139 (epic #5530): Control Room per-repo runtime config survey snapshot.
+  repo_runtime_config_snapshot: handleRepoRuntimeConfigSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,

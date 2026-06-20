@@ -501,6 +501,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // the containers_status_snapshot handler. Null until the first survey lands.
   containersStatus: null,
   containersStatusLoading: false,
+  // #6139 (epic #5530): Control Room per-repo runtime config snapshot, fed by
+  // the repo_runtime_config_snapshot handler. Null until the first survey lands.
+  repoRuntimeConfig: null,
+  repoRuntimeConfigLoading: false,
   // #5499 (epic #5498): Control Room Integrations snapshot, fed by the
   // integration_status_snapshot handler. Null until the first survey lands.
   integrationStatus: null,
@@ -999,6 +1003,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ containersStatusLoading: true });
       wsSend(socket, { type: 'containers_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #6139 (epic #5530): request a per-repo runtime config survey. Mirrors
+  // requestContainersStatus — flips repoRuntimeConfigLoading and sends a
+  // repo_runtime_config_request; the reply is a single
+  // repo_runtime_config_snapshot handled into repoRuntimeConfig. Returns false
+  // (and does NOT set loading) when the socket is closed.
+  requestRepoRuntimeConfig: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ repoRuntimeConfigLoading: true });
+      wsSend(socket, { type: 'repo_runtime_config_request' });
       return true;
     }
     return false;
