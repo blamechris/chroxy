@@ -2041,6 +2041,62 @@ export declare const ServerSimulatorActionAckSchema: z.ZodObject<{
     status: z.ZodNullable<z.ZodString>;
 }, z.core.$loose>;
 /**
+ * One Android emulator/AVD. A running emulator has a `serial` (e.g.
+ * "emulator-5554") and `state:"running"`; an installed-but-stopped AVD has
+ * `serial:null` and `state:"stopped"`. `avd` may be null for a running emulator
+ * whose AVD name couldn't be resolved.
+ */
+export declare const EmulatorDeviceSchema: z.ZodObject<{
+    avd: z.ZodNullable<z.ZodString>;
+    serial: z.ZodNullable<z.ZodString>;
+    state: z.ZodString;
+}, z.core.$strip>;
+/** The composite Android "Ready for Maestro" verdict (CLAUDE.md pre-flight). */
+export declare const EmulatorReadyForMaestroSchema: z.ZodObject<{
+    ready: z.ZodBoolean;
+    runningDevice: z.ZodNullable<z.ZodString>;
+    metroReachable: z.ZodBoolean;
+    mockServerReachable: z.ZodBoolean;
+    reasons: z.ZodArray<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerEmulatorStatusSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"emulator_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    available: z.ZodBoolean;
+    note: z.ZodNullable<z.ZodString>;
+    devices: z.ZodArray<z.ZodObject<{
+        avd: z.ZodNullable<z.ZodString>;
+        serial: z.ZodNullable<z.ZodString>;
+        state: z.ZodString;
+    }, z.core.$strip>>;
+    readyForMaestro: z.ZodObject<{
+        ready: z.ZodBoolean;
+        runningDevice: z.ZodNullable<z.ZodString>;
+        metroReachable: z.ZodBoolean;
+        mockServerReachable: z.ZodBoolean;
+        reasons: z.ZodArray<z.ZodString>;
+    }, z.core.$strip>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$loose>;
+/**
+ * #6137 — ack for a successful `emulator_action` (boot/kill). Echoes `action`
+ * (+ optional `avd`/`serial`/`requestId`) and carries the resulting `status`
+ * ("starting" after a boot, "killed" after a kill). A failure replies with an
+ * `EMULATOR_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export declare const ServerEmulatorActionAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"emulator_action_ack">;
+    action: z.ZodString;
+    avd: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    serial: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    status: z.ZodNullable<z.ZodString>;
+}, z.core.$loose>;
+/**
  * #5554 — one skill in the inventory snapshot. Carries only names /
  * descriptions / metadata — never the skill BODY (the security boundary: skill
  * bodies never leave the server). Fields:
@@ -2993,6 +3049,8 @@ export type ServerHostPruneStatusSnapshotMessage = z.infer<typeof ServerHostPrun
 export type ServerHostPruneActionAckMessage = z.infer<typeof ServerHostPruneActionAckSchema>;
 export type ServerSimulatorStatusSnapshotMessage = z.infer<typeof ServerSimulatorStatusSnapshotSchema>;
 export type ServerSimulatorActionAckMessage = z.infer<typeof ServerSimulatorActionAckSchema>;
+export type ServerEmulatorStatusSnapshotMessage = z.infer<typeof ServerEmulatorStatusSnapshotSchema>;
+export type ServerEmulatorActionAckMessage = z.infer<typeof ServerEmulatorActionAckSchema>;
 export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>;
 export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>;
 export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>;

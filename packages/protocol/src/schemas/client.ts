@@ -1099,6 +1099,16 @@ export const SimulatorStatusRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #6137 (epic #5530): the same Control Room "Device runtimes" tab also asks the
+// server to survey Android emulators (`emulator -list-avds` + `adb devices`) +
+// the "Ready for Maestro" verdict. The server replies with a single
+// emulator_status_snapshot (see server.ts). No Android SDK → first-class
+// available:false snapshot.
+export const EmulatorStatusRequestSchema = z.object({
+  type: z.literal('emulator_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1229,6 +1239,22 @@ export const SimulatorActionSchema = z.object({
   requestId: z.string().max(128).optional(),
 }).passthrough()
 
+// #6137 (epic #5530): boot an AVD / kill a running Android emulator from the
+// Control Room "Device runtimes" tab. Host authority (server-enforced). boot
+// targets an `avd` (the survey enumerated, currently stopped) with an optional
+// `headless` (`-no-window`); kill targets a running `serial`. Both are LOOKUP
+// KEYS — the server re-surveys and rejects any avd/serial the survey didn't
+// enumerate, plus state-gates. The optional `requestId` is echoed on the
+// emulator_action_ack (success) and the EMULATOR_ACTION_FAILED session_error.
+export const EmulatorActionSchema = z.object({
+  type: z.literal('emulator_action'),
+  action: z.enum(['boot', 'kill']),
+  avd: z.string().min(1).max(256).optional(),
+  serial: z.string().min(1).max(128).optional(),
+  headless: z.boolean().optional(),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
 // #5547: summarize a session's persisted history into a continuation brief.
 // The server reads the session's `SessionMessageHistory` (the universal,
 // restart-surviving source — works even when the provider subprocess is gone),
@@ -1354,6 +1380,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ByokPoolStatusRequestSchema,
   HostPruneStatusRequestSchema,
   SimulatorStatusRequestSchema,
+  EmulatorStatusRequestSchema,
   IntegrationStatusRequestSchema,
   SkillsInventoryRequestSchema,
   MailboxStatusRequestSchema,
@@ -1362,6 +1389,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ByokPoolActionSchema,
   HostPruneActionSchema,
   SimulatorActionSchema,
+  EmulatorActionSchema,
   SummarizeSessionSchema,
   PairApproveSchema,
   PairDenySchema,
@@ -1390,6 +1418,7 @@ export type RepoRuntimeConfigRequestMessage = z.infer<typeof RepoRuntimeConfigRe
 export type ByokPoolStatusRequestMessage = z.infer<typeof ByokPoolStatusRequestSchema>
 export type HostPruneStatusRequestMessage = z.infer<typeof HostPruneStatusRequestSchema>
 export type SimulatorStatusRequestMessage = z.infer<typeof SimulatorStatusRequestSchema>
+export type EmulatorStatusRequestMessage = z.infer<typeof EmulatorStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
@@ -1398,6 +1427,7 @@ export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>
 export type HostPruneActionMessage = z.infer<typeof HostPruneActionSchema>
 export type SimulatorActionMessage = z.infer<typeof SimulatorActionSchema>
+export type EmulatorActionMessage = z.infer<typeof EmulatorActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>

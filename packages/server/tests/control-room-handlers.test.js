@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -1681,6 +1681,173 @@ describe('simulator_action handler (#6136 slice 2)', () => {
     await handleSessionMessage(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'simulator_action_ack')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6137 (epic #5530) — Android emulator survey + boot/kill action handlers.
+// surveyEmulators + runEmulatorAction injected via ctx so no real SDK is touched.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_EMU = {
+  generatedAt: '2026-06-20T12:00:00.000Z',
+  available: true,
+  note: null,
+  devices: [
+    { avd: 'Pixel_7_API_34', serial: 'emulator-5554', state: 'running' },
+    { avd: 'Pixel_5_API_33', serial: null, state: 'stopped' },
+  ],
+  readyForMaestro: { ready: true, runningDevice: 'Pixel_7_API_34', metroReachable: true, mockServerReachable: true, reasons: [] },
+}
+
+function makeEmuCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({
+    send: sendSpy,
+    surveyEmulators: createSpy(async () => SAMPLE_EMU),
+    runEmulatorAction: createSpy(async ({ action }) => (action === 'boot' ? 'starting' : 'killed')),
+    ...overrides,
+    _send: sendSpy,
+  })
+}
+
+describe('emulator_status_request handler (#6137)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeEmuCtx(); client = { id: 'client-E' }; ws = {} })
+
+  it('is registered', () => {
+    assert.ok(registeredMessageTypes.includes('emulator_status_request'))
+    assert.equal(typeof controlRoomHandlers.emulator_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant emulator_status_snapshot', async () => {
+    await controlRoomHandlers.emulator_status_request(ws, client, { type: 'emulator_status_request', requestId: 'e1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'emulator_status_snapshot')
+    assert.equal(payload.requestId, 'e1')
+    assert.equal(payload.readyForMaestro.ready, true)
+    assert.ok(ServerEmulatorStatusSnapshotSchema.safeParse(payload).success, JSON.stringify(ServerEmulatorStatusSnapshotSchema.safeParse(payload).error?.issues))
+  })
+
+  it('relays an available:false (no SDK) snapshot as a first-class state', async () => {
+    ctx = makeEmuCtx({ surveyEmulators: createSpy(async () => ({ ...SAMPLE_EMU, available: false, note: 'not available', devices: [], readyForMaestro: { ready: false, runningDevice: null, metroReachable: false, mockServerReachable: false, reasons: [] } })) })
+    await controlRoomHandlers.emulator_status_request(ws, client, { type: 'emulator_status_request' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.available, false)
+    assert.ok(ServerEmulatorStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.emulator_status_request(ws, client, { type: 'emulator_status_request' }, ctx)
+    assert.equal(ctx.surveyEmulators.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].error.code, 'FORBIDDEN')
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeEmuCtx({ surveyEmulators: createSpy(async () => { await gate; return SAMPLE_EMU }) })
+    const first = controlRoomHandlers.emulator_status_request(ws, client, { type: 'emulator_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.emulator_status_request(ws, client, { type: 'emulator_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveyEmulators.callCount, 1)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].error.code, 'SURVEY_IN_PROGRESS')
+    release(); await first
+  })
+})
+
+describe('emulator_action handler (#6137)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeEmuCtx(); client = { id: 'client-EA' }; ws = {} })
+
+  it('is registered', () => {
+    assert.ok(registeredMessageTypes.includes('emulator_action'))
+    assert.equal(typeof controlRoomHandlers.emulator_action, 'function')
+  })
+
+  it('boots a stopped AVD and acks a schema-valid emulator_action_ack', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_5_API_33', requestId: 'r1' }, ctx)
+    assert.equal(ctx.runEmulatorAction.callCount, 1)
+    assert.equal(ctx.runEmulatorAction.lastCall[0].avd, 'Pixel_5_API_33')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'emulator_action_ack')
+    assert.equal(payload.action, 'boot')
+    assert.equal(payload.avd, 'Pixel_5_API_33')
+    assert.equal(payload.status, 'starting')
+    assert.ok(ServerEmulatorActionAckSchema.safeParse(payload).success, JSON.stringify(ServerEmulatorActionAckSchema.safeParse(payload).error?.issues))
+  })
+
+  it('kills a running serial', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'kill', serial: 'emulator-5554' }, ctx)
+    assert.equal(ctx.runEmulatorAction.lastCall[0].serial, 'emulator-5554')
+    assert.equal(ctx._send.lastCall[1].status, 'killed')
+  })
+
+  it('rejects an unsupported action', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'wipe', avd: 'x' }, ctx)
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unsupported-action')
+  })
+
+  it('rejects boot with a missing avd / kill with a missing serial', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'invalid-avd')
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'kill' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'invalid-serial')
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+  })
+
+  it('rejects an avd the survey did not enumerate', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Ghost_AVD' }, ctx)
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unknown-avd')
+  })
+
+  it('rejects a serial the survey did not enumerate', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'kill', serial: 'emulator-9999' }, ctx)
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unknown-serial')
+  })
+
+  it('rejects booting an already-running AVD', async () => {
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_7_API_34' }, ctx)
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'already-running')
+  })
+
+  it('rejects a session-bound (non-host) client without surveying', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_5_API_33', requestId: 'f1' }, ctx)
+    assert.equal(ctx.surveyEmulators.callCount, 0)
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'forbidden')
+  })
+
+  it('relays an EMULATOR_ACTION_FAILED when the run throws', async () => {
+    ctx = makeEmuCtx({ runEmulatorAction: createSpy(async () => { throw new Error('emulator blew up') }) })
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_5_API_33', requestId: 'x1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'EMULATOR_ACTION_FAILED')
+    assert.equal(payload.reason, 'boot-failed')
+    assert.match(payload.message, /emulator blew up/)
+  })
+
+  it('fast-rejects a duplicate same-target action without re-surveying', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeEmuCtx({ runEmulatorAction: createSpy(async () => { await gate; return 'starting' }) })
+    const first = controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_5_API_33', requestId: 'a' }, ctx)
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_5_API_33', requestId: 'b' }, ctx)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].reason, 'action-in-progress')
+    assert.equal(ctx.surveyEmulators.callCount, 1)
+    release(); await first
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'emulator_action', action: 'kill', serial: 'emulator-5554', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'emulator_action_ack')
     assert.equal(payload.requestId, 'reg')
   })
 })

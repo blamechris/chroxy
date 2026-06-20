@@ -2033,6 +2033,60 @@ export const ServerSimulatorActionAckSchema = z.object({
 }).passthrough()
 
 // ───────────────────────────────────────────────────────────────────────────
+// #6137 (epic #5530) — Control Room Android emulator survey + "Ready for Maestro"
+// verdict (shares the Device runtimes tab with iOS). Read-only. No Android SDK →
+// available:false (a first-class state), same degraded-snapshot posture.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * One Android emulator/AVD. A running emulator has a `serial` (e.g.
+ * "emulator-5554") and `state:"running"`; an installed-but-stopped AVD has
+ * `serial:null` and `state:"stopped"`. `avd` may be null for a running emulator
+ * whose AVD name couldn't be resolved.
+ */
+export const EmulatorDeviceSchema = z.object({
+  avd: z.string().nullable(),
+  serial: z.string().nullable(),
+  state: z.string(),       // "running" | "stopped"
+})
+
+/** The composite Android "Ready for Maestro" verdict (CLAUDE.md pre-flight). */
+export const EmulatorReadyForMaestroSchema = z.object({
+  ready: z.boolean(),
+  runningDevice: z.string().nullable(),
+  metroReachable: z.boolean(),
+  mockServerReachable: z.boolean(),
+  reasons: z.array(z.string()),
+})
+
+export const ServerEmulatorStatusSnapshotSchema = z.object({
+  type: z.literal('emulator_status_snapshot'),
+  requestId: z.string().nullable().optional(),
+  generatedAt: z.string().datetime(),
+  // false with no Android SDK → devices empty, note set, verdict not-ready.
+  available: z.boolean(),
+  note: z.string().nullable(),
+  devices: z.array(EmulatorDeviceSchema),
+  readyForMaestro: EmulatorReadyForMaestroSchema,
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+}).passthrough()
+
+/**
+ * #6137 — ack for a successful `emulator_action` (boot/kill). Echoes `action`
+ * (+ optional `avd`/`serial`/`requestId`) and carries the resulting `status`
+ * ("starting" after a boot, "killed" after a kill). A failure replies with an
+ * `EMULATOR_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export const ServerEmulatorActionAckSchema = z.object({
+  type: z.literal('emulator_action_ack'),
+  action: z.string(),
+  avd: z.string().nullable().optional(),
+  serial: z.string().nullable().optional(),
+  requestId: z.string().max(128).nullable().optional(),
+  status: z.string().nullable(),
+}).passthrough()
+
+// ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────
 
@@ -3196,6 +3250,8 @@ export type ServerHostPruneStatusSnapshotMessage = z.infer<typeof ServerHostPrun
 export type ServerHostPruneActionAckMessage = z.infer<typeof ServerHostPruneActionAckSchema>
 export type ServerSimulatorStatusSnapshotMessage = z.infer<typeof ServerSimulatorStatusSnapshotSchema>
 export type ServerSimulatorActionAckMessage = z.infer<typeof ServerSimulatorActionAckSchema>
+export type ServerEmulatorStatusSnapshotMessage = z.infer<typeof ServerEmulatorStatusSnapshotSchema>
+export type ServerEmulatorActionAckMessage = z.infer<typeof ServerEmulatorActionAckSchema>
 // #5554 — Skills inventory tab (epic #5159); request side is
 // `SkillsInventoryRequestMessage` in client.ts. Consumed by the server emitter
 // (control-room/skills-inventory.js), the dashboard store handler, and the

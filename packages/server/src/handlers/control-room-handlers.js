@@ -40,6 +40,7 @@ import { surveyByokPool } from '../control-room/byok-pool.js'
 import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
 import { surveyHostPrune, runHostPrune, PRUNE_KINDS } from '../control-room/host-prune.js'
 import { surveySimulators, runSimulatorAction, SIMULATOR_ACTIONS } from '../control-room/simulators.js'
+import { surveyEmulators, runEmulatorAction, EMULATOR_ACTIONS } from '../control-room/emulators.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -66,6 +67,8 @@ const byokPoolInFlight = new WeakSet()
 const hostPruneInFlight = new WeakSet()
 // #6136: same again for the iOS simulator survey — independent of all above.
 const simulatorInFlight = new WeakSet()
+// #6137: same again for the Android emulator survey — independent of all above.
+const emulatorInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -1621,6 +1624,218 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6137 (epic #5530) — Android emulator survey (emulator_status_request) +
+// boot/kill action (emulator_action). Shares the Device runtimes tab with iOS.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** #6137: schema-conformant error reply for the emulator survey. */
+function emulatorErrorSnapshot(requestId, error) {
+  return {
+    type: 'emulator_status_snapshot',
+    requestId: requestId ?? null,
+    generatedAt: new Date().toISOString(),
+    available: false,
+    note: null,
+    devices: [],
+    readyForMaestro: { ready: false, runningDevice: null, metroReachable: false, mockServerReachable: false, reasons: [] },
+    error,
+  }
+}
+
+/**
+ * #6137 — Android emulator survey handler (read-only). Same host-authority +
+ * per-client in-flight + degraded-reply contract as the iOS sibling. No Android
+ * SDK → the survey itself returns a first-class `available:false` snapshot.
+ */
+async function handleEmulatorStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, emulatorErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'emulator_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+  if (emulatorInFlight.has(client)) {
+    ctx.transport.send(ws, emulatorErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'An emulator survey is already in progress for this client',
+    }))
+    return
+  }
+  const surveyFn = typeof ctx?.surveyEmulators === 'function' ? ctx.surveyEmulators : surveyEmulators
+  emulatorInFlight.add(client)
+  try {
+    const snapshot = await surveyFn({})
+    ctx.transport.send(ws, {
+      type: 'emulator_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      available: snapshot.available,
+      note: snapshot.note ?? null,
+      devices: snapshot.devices,
+      readyForMaestro: snapshot.readyForMaestro,
+    })
+  } catch (err) {
+    log.warn(`emulator_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, emulatorErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'emulator survey failed',
+    }))
+  } finally {
+    emulatorInFlight.delete(client)
+  }
+}
+
+/**
+ * #6137: per-target in-flight guard for emulator lifecycle actions, keyed by the
+ * target id (the avd for boot, the serial for kill). Same string-keyed Map shape
+ * as the simulator action guard; `.size` doubles as the global gauge.
+ */
+const emulatorActionInFlight = new Map()
+/** #6137: global cap on concurrent emulator actions (reject, never queue). */
+export const MAX_CONCURRENT_EMULATOR_ACTIONS = 2
+
+/** #6137: shared EMULATOR_ACTION_FAILED reply (mirrors simulatorActionError). */
+function emulatorActionError(ws, ctx, msg, reason, message) {
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    code: 'EMULATOR_ACTION_FAILED',
+    message,
+    reason,
+    action: typeof msg?.action === 'string' ? msg.action : null,
+    avd: typeof msg?.avd === 'string' ? msg.avd : null,
+    serial: typeof msg?.serial === 'string' ? msg.serial : null,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+  })
+}
+
+/** #6137: failure `reason` discriminator per action (for EMULATOR_ACTION_FAILED). */
+const EMULATOR_ACTION_FAILURE_REASON = {
+  boot: 'boot-failed',
+  kill: 'kill-failed',
+}
+
+/**
+ * #6137 (epic #5530) — `emulator_action` handler. Boot an AVD / kill a running
+ * emulator, replying with exactly one `emulator_action_ack` on success or one
+ * EMULATOR_ACTION_FAILED `session_error` on failure.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist):
+ *   1. Host-level authority — a pairing-bound client cannot run host actions.
+ *   2. Survey membership — the client-supplied target (`avd` for boot, `serial`
+ *      for kill) MUST name a device the fresh `surveyEmulators` enumerates, in
+ *      the right state (boot a STOPPED avd, kill a RUNNING serial). The client
+ *      value is a lookup key, never a trusted path — kill never targets a
+ *      non-enumerated device.
+ *
+ * Non-destructive (an emulator holds no unsaved host state), so no confirm gate.
+ * Concurrency: one in-flight action per target, plus a global cap of
+ * MAX_CONCURRENT_EMULATOR_ACTIONS (rejected, not queued).
+ */
+async function handleEmulatorAction(ws, client, msg, ctx) {
+  if (client?.boundSessionId) {
+    emulatorActionError(ws, ctx, msg, 'forbidden',
+      'emulator_action requires host-level authority (a session-bound token cannot run host actions)')
+    return
+  }
+
+  const action = typeof msg?.action === 'string' ? msg.action : ''
+  if (!EMULATOR_ACTIONS.includes(action)) {
+    emulatorActionError(ws, ctx, msg, 'unsupported-action',
+      `Unsupported emulator action: ${action.length > 0 ? action : '(none)'}`)
+    return
+  }
+
+  // The target id depends on the action: boot keys on the avd, kill on serial.
+  const avd = typeof msg?.avd === 'string' ? msg.avd : ''
+  const serial = typeof msg?.serial === 'string' ? msg.serial : ''
+  const targetId = action === 'boot' ? avd : serial
+  if (targetId.length === 0) {
+    emulatorActionError(ws, ctx, msg, action === 'boot' ? 'invalid-avd' : 'invalid-serial',
+      action === 'boot' ? 'emulator_action boot requires a non-empty avd' : 'emulator_action kill requires a non-empty serial')
+    return
+  }
+
+  // Concurrency guard BEFORE the expensive survey (fast-reject duplicates without
+  // shelling out). `.has()`/`.set()` stay synchronous-adjacent so it's race-free.
+  if (emulatorActionInFlight.has(targetId)) {
+    emulatorActionError(ws, ctx, msg, 'action-in-progress',
+      `An emulator action (${emulatorActionInFlight.get(targetId)}) is already in progress for ${targetId}`)
+    return
+  }
+  if (emulatorActionInFlight.size >= MAX_CONCURRENT_EMULATOR_ACTIONS) {
+    emulatorActionError(ws, ctx, msg, 'busy',
+      `The host is busy: ${emulatorActionInFlight.size} emulator actions are already in flight (max ${MAX_CONCURRENT_EMULATOR_ACTIONS}) — retry when one finishes`)
+    return
+  }
+
+  const surveyFn = typeof ctx?.surveyEmulators === 'function' ? ctx.surveyEmulators : surveyEmulators
+  const runFn = typeof ctx?.runEmulatorAction === 'function' ? ctx.runEmulatorAction : runEmulatorAction
+  emulatorActionInFlight.set(targetId, action)
+  try {
+    // Survey membership gate (#2): re-survey and validate the target server-side.
+    let snapshot
+    try {
+      snapshot = await surveyFn({})
+    } catch (err) {
+      emulatorActionError(ws, ctx, msg, 'survey-failed',
+        err && err.message ? err.message : 'emulator survey failed')
+      return
+    }
+    if (!snapshot?.available) {
+      emulatorActionError(ws, ctx, msg, 'unavailable',
+        snapshot?.note || 'Android emulators are not available on this host')
+      return
+    }
+    const devices = Array.isArray(snapshot.devices) ? snapshot.devices : []
+    if (action === 'boot') {
+      const device = devices.find((d) => d.avd === avd) || null
+      if (!device) {
+        emulatorActionError(ws, ctx, msg, 'unknown-avd', `avd does not name a surveyed emulator: ${avd}`)
+        return
+      }
+      if (device.state === 'running') {
+        emulatorActionError(ws, ctx, msg, 'already-running', `Emulator ${avd} is already running`)
+        return
+      }
+    } else {
+      const device = devices.find((d) => d.serial === serial) || null
+      if (!device) {
+        emulatorActionError(ws, ctx, msg, 'unknown-serial', `serial does not name a surveyed emulator: ${serial}`)
+        return
+      }
+      if (device.state !== 'running') {
+        emulatorActionError(ws, ctx, msg, 'not-running', `Emulator ${serial} is not running`)
+        return
+      }
+    }
+
+    const status = await runFn({
+      action,
+      avd: action === 'boot' ? avd : undefined,
+      serial: action === 'kill' ? serial : undefined,
+      headless: msg?.headless === true,
+    })
+    log.info(`emulator_action ${action} completed for ${targetId} (client=${client?.id})`)
+    ctx.transport.send(ws, {
+      type: 'emulator_action_ack',
+      action,
+      avd: action === 'boot' ? avd : null,
+      serial: action === 'kill' ? serial : null,
+      requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+      status: typeof status === 'string' ? status : null,
+    })
+  } catch (err) {
+    const message = err && err.message ? err.message : `${action} failed`
+    log.warn(`emulator_action ${action} failed for ${targetId}: ${message}`)
+    emulatorActionError(ws, ctx, msg, EMULATOR_ACTION_FAILURE_REASON[action], message)
+  } finally {
+    emulatorActionInFlight.delete(targetId)
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -1671,10 +1886,12 @@ export const controlRoomHandlers = {
   byok_pool_status_request: handleByokPoolStatusRequest,
   host_prune_status_request: handleHostPruneStatusRequest,
   simulator_status_request: handleSimulatorStatusRequest,
+  emulator_status_request: handleEmulatorStatusRequest,
   containers_action: handleContainersAction,
   byok_pool_action: handleByokPoolAction,
   host_prune_action: handleHostPruneAction,
   simulator_action: handleSimulatorAction,
+  emulator_action: handleEmulatorAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,
