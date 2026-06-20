@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -1534,6 +1534,153 @@ describe('simulator_status_request handler (#6136)', () => {
     await handleSessionMessage(ws, client, { type: 'simulator_status_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'simulator_status_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6136 slice 2 (epic #5530) — simulator_action handler (boot/shutdown). The
+// survey + the simctl run are injected via ctx so the handler test never shells
+// out. The target udid is validated against the (injected) fresh survey.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_SIM_DEVICES = {
+  generatedAt: '2026-06-19T12:00:00.000Z',
+  available: true,
+  note: null,
+  devices: [
+    { udid: 'U-BOOTED', name: 'iPhone 16 Pro', state: 'Booted', runtime: 'iOS 26.1', deviceType: 'iPhone 16 Pro', isAvailable: true },
+    { udid: 'U-SHUT', name: 'iPhone 15', state: 'Shutdown', runtime: 'iOS 26.1', deviceType: 'iPhone 15', isAvailable: true },
+  ],
+  readyForMaestro: { ready: true, bootedSimulator: 'iPhone 16 Pro', metroReachable: true, mockServerReachable: true, reasons: [] },
+}
+
+function makeSimActionCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({
+    send: sendSpy,
+    surveySimulators: createSpy(async () => SAMPLE_SIM_DEVICES),
+    runSimulatorAction: createSpy(async ({ action }) => (action === 'boot' ? 'Booted' : 'Shutdown')),
+    ...overrides,
+    _send: sendSpy,
+  })
+}
+
+describe('simulator_action handler (#6136 slice 2)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeSimActionCtx(); client = { id: 'client-SA' }; ws = {} })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('simulator_action'))
+    assert.equal(typeof controlRoomHandlers.simulator_action, 'function')
+  })
+
+  it('boots a shutdown device and acks a schema-valid simulator_action_ack', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'r1' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 1)
+    assert.deepEqual([ctx.runSimulatorAction.lastCall[0].action, ctx.runSimulatorAction.lastCall[0].udid], ['boot', 'U-SHUT'])
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'simulator_action_ack')
+    assert.equal(payload.action, 'boot')
+    assert.equal(payload.udid, 'U-SHUT')
+    assert.equal(payload.status, 'Booted')
+    assert.equal(payload.requestId, 'r1')
+    assert.ok(ServerSimulatorActionAckSchema.safeParse(payload).success, JSON.stringify(ServerSimulatorActionAckSchema.safeParse(payload).error?.issues))
+  })
+
+  it('shuts down a booted device', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'shutdown', udid: 'U-BOOTED' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'simulator_action_ack')
+    assert.equal(payload.status, 'Shutdown')
+  })
+
+  it('rejects an unsupported action', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'erase', udid: 'U-SHUT' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'SIMULATOR_ACTION_FAILED')
+    assert.equal(payload.reason, 'unsupported-action')
+  })
+
+  it('rejects a missing udid', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'invalid-udid')
+  })
+
+  it('rejects a udid the survey did not enumerate', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-EVIL', requestId: 'x' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'unknown-device')
+    assert.equal(payload.requestId, 'x')
+  })
+
+  it('rejects booting an already-booted device', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-BOOTED' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'already-booted')
+  })
+
+  it('rejects shutting down a non-booted device', async () => {
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'shutdown', udid: 'U-SHUT' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-booted')
+  })
+
+  it('rejects a session-bound (non-host) client without surveying', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'f1' }, ctx)
+    assert.equal(ctx.surveySimulators.callCount, 0)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'forbidden')
+    assert.equal(payload.requestId, 'f1')
+  })
+
+  it('rejects when simulators are unavailable on the host', async () => {
+    ctx = makeSimActionCtx({ surveySimulators: createSpy(async () => ({ ...SAMPLE_SIM_DEVICES, available: false, note: 'not available on this host', devices: [] })) })
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unavailable')
+  })
+
+  it('relays a survey-failed when the membership survey throws', async () => {
+    ctx = makeSimActionCtx({ surveySimulators: createSpy(async () => { throw new Error('simctl boom') }) })
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT' }, ctx)
+    assert.equal(ctx.runSimulatorAction.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'survey-failed')
+    assert.match(payload.message, /simctl boom/)
+  })
+
+  it('relays a SIMULATOR_ACTION_FAILED when the run throws', async () => {
+    ctx = makeSimActionCtx({ runSimulatorAction: createSpy(async () => { throw new Error('boot blew up') }) })
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'x1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'SIMULATOR_ACTION_FAILED')
+    assert.equal(payload.reason, 'boot-failed')
+    assert.match(payload.message, /boot blew up/)
+  })
+
+  it('serializes concurrent actions on the same udid (rejects, never queues) and fast-rejects without re-surveying', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeSimActionCtx({ runSimulatorAction: createSpy(async () => { await gate; return 'Booted' }) })
+    const first = controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'a' }, ctx)
+    await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'b' }, ctx)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].reason, 'action-in-progress')
+    // The duplicate must be rejected by the in-flight guard BEFORE the expensive
+    // survey — only the first request shells out to simctl (Copilot #6158).
+    assert.equal(ctx.surveySimulators.callCount, 1)
+    release(); await first
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'simulator_action_ack')
     assert.equal(payload.requestId, 'reg')
   })
 })

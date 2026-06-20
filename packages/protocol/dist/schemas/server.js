@@ -1888,6 +1888,19 @@ export const ServerSimulatorStatusSnapshotSchema = z.object({
     readyForMaestro: ReadyForMaestroSchema,
     error: z.object({ code: z.string(), message: z.string() }).optional(),
 }).passthrough();
+/**
+ * #6136 slice 2 — ack for a successful `simulator_action` (boot/shutdown).
+ * Echoes `action`/`udid` (+ optional `requestId`) and carries the resulting
+ * `status` (the device's new state, "Booted"/"Shutdown"). A failure replies with
+ * a `SIMULATOR_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export const ServerSimulatorActionAckSchema = z.object({
+    type: z.literal('simulator_action_ack'),
+    action: z.string(),
+    udid: z.string(),
+    requestId: z.string().max(128).nullable().optional(),
+    status: z.string().nullable(),
+}).passthrough();
 // ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────

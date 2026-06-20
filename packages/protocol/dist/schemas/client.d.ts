@@ -726,6 +726,15 @@ export declare const HostPruneActionSchema: z.ZodObject<{
     }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+export declare const SimulatorActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"simulator_action">;
+    action: z.ZodEnum<{
+        boot: "boot";
+        shutdown: "shutdown";
+    }>;
+    udid: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const SummarizeSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
@@ -1198,6 +1207,14 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"simulator_action">;
+    action: z.ZodEnum<{
+        boot: "boot";
+        shutdown: "shutdown";
+    }>;
+    udid: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1236,6 +1253,7 @@ export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>;
 export type HostPruneActionMessage = z.infer<typeof HostPruneActionSchema>;
+export type SimulatorActionMessage = z.infer<typeof SimulatorActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;

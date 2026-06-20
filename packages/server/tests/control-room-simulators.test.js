@@ -3,6 +3,8 @@ import assert from 'node:assert/strict'
 
 import {
   surveySimulators,
+  runSimulatorAction,
+  SIMULATOR_ACTIONS,
   parseSimctlDevices,
   friendlyRuntime,
   friendlyDeviceType,
@@ -122,5 +124,54 @@ describe('surveySimulators()', () => {
     assert.equal(snap.available, true)
     assert.equal(snap.readyForMaestro.metroReachable, false)
     assert.equal(snap.readyForMaestro.mockServerReachable, false)
+  })
+})
+
+describe('runSimulatorAction()', () => {
+  it('exports the supported actions', () => {
+    assert.deepEqual(SIMULATOR_ACTIONS, ['boot', 'shutdown'])
+  })
+
+  it('boots a device and returns the new state', async () => {
+    const calls = []
+    const status = await runSimulatorAction({
+      action: 'boot',
+      udid: 'U-1',
+      _execFile: async (file, args) => { calls.push([file, ...args]); return { stdout: '' } },
+    })
+    assert.equal(status, 'Booted')
+    assert.deepEqual(calls, [['xcrun', 'simctl', 'boot', 'U-1']])
+  })
+
+  it('shuts a device down and returns the new state', async () => {
+    const calls = []
+    const status = await runSimulatorAction({
+      action: 'shutdown',
+      udid: 'U-2',
+      _execFile: async (file, args) => { calls.push([file, ...args]); return { stdout: '' } },
+    })
+    assert.equal(status, 'Shutdown')
+    assert.deepEqual(calls, [['xcrun', 'simctl', 'shutdown', 'U-2']])
+  })
+
+  it('rejects an unsupported action', async () => {
+    await assert.rejects(
+      () => runSimulatorAction({ action: 'erase', udid: 'U-1', _execFile: async () => ({ stdout: '' }) }),
+      /Unsupported simulator action/,
+    )
+  })
+
+  it('rejects a missing udid', async () => {
+    await assert.rejects(
+      () => runSimulatorAction({ action: 'boot', udid: '', _execFile: async () => ({ stdout: '' }) }),
+      /requires a udid/,
+    )
+  })
+
+  it('propagates a simctl failure', async () => {
+    await assert.rejects(
+      () => runSimulatorAction({ action: 'boot', udid: 'U-1', _execFile: async () => { throw new Error('Unable to boot device in current state: Booted') } }),
+      /Unable to boot device/,
+    )
   })
 })
