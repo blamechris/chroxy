@@ -41,6 +41,7 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 import { ControlRoomSection, type RepoInvestigateRequest, type RepoOpenSessionRequest } from './ControlRoomSection'
 import { RunnerStatusSection } from './RunnerStatusSection'
 import { ContainersStatusSection } from './ContainersStatusSection'
+import { RepoRuntimeConfigSection } from './RepoRuntimeConfigSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
@@ -128,6 +129,20 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'containersStatus',
     loadingKey: 'containersStatusLoading',
     requestKey: 'requestContainersStatus',
+  },
+  // #6139 (epic #5530): the Repo Runtime Config tab — read-only, per-repo view
+  // of what governs container runtimes (devcontainer/compose presence, the image
+  // a repo would run + the allowlist verdict) plus host-level defaults (effective
+  // backend, isolation order, image allowlist). Same survey:true request/snapshot
+  // flow as the others; the #5546 staleness guard comes free.
+  {
+    key: 'repo-config',
+    label: 'Repo runtime config',
+    survey: true,
+    requestType: 'repo_runtime_config_request',
+    snapshotKey: 'repoRuntimeConfig',
+    loadingKey: 'repoRuntimeConfigLoading',
+    requestKey: 'requestRepoRuntimeConfig',
   },
   {
     key: 'integrations',
@@ -380,6 +395,8 @@ export function ControlRoomView({
         <RunnerStatusSection />
       ) : tab === 'containers' ? (
         <ContainersStatusSection />
+      ) : tab === 'repo-config' ? (
+        <RepoRuntimeConfigSection />
       ) : tab === 'integrations' ? (
         <IntegrationsSection />
       ) : tab === 'skills' ? (

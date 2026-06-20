@@ -689,6 +689,22 @@ describe('useConnectionStore', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('#6139: requestRepoRuntimeConfig sets loading and sends on the wire; no-op + no loading offline', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket, repoRuntimeConfigLoading: false });
+    expect(useConnectionStore.getState().requestRepoRuntimeConfig()).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(send.mock.calls[0]![0] as string).type).toBe('repo_runtime_config_request');
+    expect(useConnectionStore.getState().repoRuntimeConfigLoading).toBe(true);
+
+    // Offline: no send, no loading flip.
+    useConnectionStore.setState({ socket: null, repoRuntimeConfigLoading: false });
+    expect(useConnectionStore.getState().requestRepoRuntimeConfig()).toBe(false);
+    expect(useConnectionStore.getState().repoRuntimeConfigLoading).toBe(false);
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();
