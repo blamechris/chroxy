@@ -1482,7 +1482,9 @@ export const ByokPoolStatsSchema = z.object({
     hitRate: z.number().finite(),
     totalSize: z.number().int().nonnegative().finite(),
     buckets: z.array(ByokPoolBucketSchema),
-    evictionsByReason: z.record(z.string(), z.number()),
+    // Per-reason eviction counts — non-negative integers, matching the other count
+    // fields' rigor (the aggregator only ever produces integer counts).
+    evictionsByReason: z.record(z.string(), z.number().int().nonnegative().finite()),
     recentEvictions: z.array(ByokPoolEvictionSchema),
 });
 export const ServerByokPoolStatusSnapshotSchema = z.object({
