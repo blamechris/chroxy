@@ -36,6 +36,7 @@ import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 import { surveyContainers } from '../control-room/containers.js'
 import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/repo-runtime-config.js'
+import { surveyByokPool } from '../control-room/byok-pool.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -56,6 +57,8 @@ const skillsInventoryInFlight = new WeakSet()
 const containersInFlight = new WeakSet()
 // #6139: same again for the per-repo runtime config survey — independent of all above.
 const repoRuntimeConfigInFlight = new WeakSet()
+// #6135: same again for the BYOK pool stats survey — independent of all above.
+const byokPoolInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -441,6 +444,76 @@ async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
     }, hostDefaults))
   } finally {
     repoRuntimeConfigInFlight.delete(client)
+  }
+}
+
+/**
+ * #6135 — `byok_pool_status_snapshot` error reply. Flat shape (no `root`/`repos`
+ * envelope), so it builds its own degraded snapshot: a disabled pool + null
+ * limits/stats + the typed `error`.
+ */
+function byokPoolErrorSnapshot(requestId, error) {
+  return {
+    type: 'byok_pool_status_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    enabled: false,
+    note: null,
+    limits: null,
+    stats: null,
+    error,
+  }
+}
+
+/**
+ * #6135 (epic #5530) — BYOK container-pool stats survey handler. Read-only. Same
+ * authority + in-flight + degraded-reply contract as the sibling surveys: it
+ * exposes host-wide pool metadata, so it is served only to host-level (unbound)
+ * clients, one survey per client at a time. The pool being OFF is a first-class
+ * `enabled: false` snapshot, not an error.
+ */
+async function handleByokPoolStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, byokPoolErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'byok_pool_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+
+  if (byokPoolInFlight.has(client)) {
+    ctx.transport.send(ws, byokPoolErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A BYOK pool status survey is already in progress for this client',
+    }))
+    return
+  }
+
+  // Tests inject `ctx.surveyByokPool` to stub the pool/stats singletons.
+  const surveyFn = typeof ctx?.surveyByokPool === 'function' ? ctx.surveyByokPool : surveyByokPool
+
+  byokPoolInFlight.add(client)
+  try {
+    const snapshot = await surveyFn()
+    ctx.transport.send(ws, {
+      type: 'byok_pool_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      enabled: snapshot.enabled,
+      note: snapshot.note ?? null,
+      limits: snapshot.limits ?? null,
+      stats: snapshot.stats ?? null,
+    })
+  } catch (err) {
+    log.warn(`byok_pool_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, byokPoolErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'BYOK pool status survey failed',
+    }))
+  } finally {
+    byokPoolInFlight.delete(client)
   }
 }
 
@@ -1073,6 +1146,7 @@ export const controlRoomHandlers = {
   runner_status_request: handleRunnerStatusRequest,
   containers_status_request: handleContainersStatusRequest,
   repo_runtime_config_request: handleRepoRuntimeConfigRequest,
+  byok_pool_status_request: handleByokPoolStatusRequest,
   containers_action: handleContainersAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,

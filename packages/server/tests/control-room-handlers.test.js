@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -645,6 +645,120 @@ describe('repo_runtime_config_request handler (#6139)', () => {
     await handleSessionMessage(ws, client, { type: 'repo_runtime_config_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'repo_runtime_config_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6135 (epic #5530) — byok_pool_status_request handler (read-only). The survey
+// is injected via ctx.surveyByokPool so the handler test never touches the
+// process-wide pool/stats singletons.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_BYOK_DISABLED = {
+  generatedAt: '2026-06-19T00:00:00.000Z',
+  enabled: false,
+  note: 'BYOK container pool is disabled (set CHROXY_DOCKER_BYOK_POOL to enable).',
+  limits: null,
+  stats: null,
+}
+
+const SAMPLE_BYOK_ENABLED = {
+  generatedAt: '2026-06-19T00:00:00.000Z',
+  enabled: true,
+  note: null,
+  limits: { idleTimeoutMs: 300000, maxPerKey: 2, maxTotal: 8, maxAgeMs: 1800000 },
+  stats: {
+    hits: 5, misses: 2, releases: 4, shutdowns: 1, hitRate: 0.71, totalSize: 3,
+    buckets: [{ key: 'node:22|/p|2g|2|chroxy', size: 2, oldestIdleMs: 12000 }],
+    evictionsByReason: { idle: 3 },
+    recentEvictions: [{ key: 'node:22|/p|2g|2|chroxy', containerId: 'abc123', reason: 'idle', timestamp: 1000 }],
+  },
+}
+
+function makeByokCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({
+    send: sendSpy,
+    surveyByokPool: createSpy(async () => SAMPLE_BYOK_ENABLED),
+    ...overrides,
+    _send: sendSpy,
+  })
+}
+
+describe('byok_pool_status_request handler (#6135)', () => {
+  let ctx, client, ws
+
+  beforeEach(() => {
+    ctx = makeByokCtx()
+    client = { id: 'client-B' }
+    ws = {}
+  })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('byok_pool_status_request'))
+    assert.equal(typeof controlRoomHandlers.byok_pool_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant byok_pool_status_snapshot (enabled)', async () => {
+    await controlRoomHandlers.byok_pool_status_request(ws, client, { type: 'byok_pool_status_request', requestId: 'b1' }, ctx)
+    assert.equal(ctx._send.callCount, 1)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'byok_pool_status_snapshot')
+    assert.equal(payload.requestId, 'b1')
+    const parsed = ServerByokPoolStatusSnapshotSchema.safeParse(payload)
+    assert.ok(parsed.success, JSON.stringify(parsed.error?.issues))
+    assert.equal(payload.enabled, true)
+    assert.equal(payload.stats.hits, 5)
+  })
+
+  it('relays a disabled-pool snapshot as a first-class enabled:false state', async () => {
+    ctx = makeByokCtx({ surveyByokPool: createSpy(async () => SAMPLE_BYOK_DISABLED) })
+    await controlRoomHandlers.byok_pool_status_request(ws, client, { type: 'byok_pool_status_request' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.enabled, false)
+    assert.match(payload.note, /disabled/i)
+    assert.equal(payload.limits, null)
+    assert.equal(payload.stats, null)
+    assert.ok(ServerByokPoolStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.byok_pool_status_request(ws, client, { type: 'byok_pool_status_request', requestId: 'b1' }, ctx)
+    assert.equal(ctx.surveyByokPool.callCount, 0, 'must not survey for a bound client')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'FORBIDDEN')
+    assert.equal(payload.enabled, false)
+    assert.ok(ServerByokPoolStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeByokCtx({ surveyByokPool: createSpy(async () => { await gate; return SAMPLE_BYOK_ENABLED }) })
+    const first = controlRoomHandlers.byok_pool_status_request(ws, client, { type: 'byok_pool_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.byok_pool_status_request(ws, client, { type: 'byok_pool_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveyByokPool.callCount, 1)
+    const rejected = ctx._send.calls.find(c => c[1].requestId === 'b')
+    assert.equal(rejected[1].error.code, 'SURVEY_IN_PROGRESS')
+    release()
+    await first
+  })
+
+  it('sends a schema-valid error snapshot when the survey throws', async () => {
+    ctx = makeByokCtx({ surveyByokPool: createSpy(async () => { throw new Error('pool exploded') }) })
+    await controlRoomHandlers.byok_pool_status_request(ws, client, { type: 'byok_pool_status_request', requestId: 'e1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'SURVEY_FAILED')
+    assert.match(payload.error.message, /pool exploded/)
+    assert.ok(ServerByokPoolStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'byok_pool_status_request', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'byok_pool_status_snapshot')
     assert.equal(payload.requestId, 'reg')
   })
 })
