@@ -1,5 +1,9 @@
 import { randomBytes, randomUUID } from 'crypto'
-import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'fs'
+import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from 'fs'
+// #6132 (HOL fix from #5337): the per-turn hook-drain hot path uses async fs so a
+// slow/stuck sink (FUSE/NFS, full disk, tmpwatch race) can't block the shared
+// event loop — which would freeze EVERY claude-tui session (the default provider).
+import { readdir, readFile, unlink } from 'fs/promises'
 import { homedir, tmpdir } from 'os'
 import { performance } from 'node:perf_hooks'
 import { dirname, join } from 'path'
@@ -2313,10 +2317,10 @@ export class ClaudeTuiSession extends BaseSession {
     // grow. This cumulative counter drives the heartbeat/exit diagnostics.
     let totalConsumed = 0
 
-    const drainHookFiles = () => {
+    const drainHookFiles = async () => {
       let entries
       try {
-        entries = readdirSync(this._sinkDir)
+        entries = await readdir(this._sinkDir)
       } catch (err) {
         // #5329 (IP-1): the sink lives under /tmp, which a tmpwatch sweep, a
         // tmpfs clear, or a manual rm can delete mid-turn. A silent return here
@@ -2348,7 +2352,7 @@ export class ClaudeTuiSession extends BaseSession {
         const full = join(this._sinkDir, name)
         let parsed
         try {
-          const raw = readFileSync(full, 'utf8')
+          const raw = await readFile(full, 'utf8')
           if (raw.length === 0) continue  // partial write — poll again
           parsed = JSON.parse(raw)
         } catch { continue }
@@ -2374,7 +2378,7 @@ export class ClaudeTuiSession extends BaseSession {
         // (rare), KEEP the name in _consumedFiles as the dedup guard so a later
         // readdir can't re-process it.
         try {
-          unlinkSync(full)
+          await unlink(full)
           this._consumedFiles.delete(name)
         } catch { /* leave the dedup guard in place */ }
       }
@@ -2400,7 +2404,7 @@ export class ClaudeTuiSession extends BaseSession {
       if (this._ptyExited) break
       // _handleHardTimeout clears _isBusy; bail out cleanly if it fired.
       if (!this._isBusy) break
-      drainHookFiles()
+      await drainHookFiles()
       pollIters++
       // Wedge instrumentation (#4678 follow-up): if the loop has been
       // running >= HOOK_HEARTBEAT_MS since the last heartbeat with no
@@ -2411,7 +2415,7 @@ export class ClaudeTuiSession extends BaseSession {
       if (now - lastHeartbeatMs >= ClaudeTuiSession.HOOK_HEARTBEAT_MS) {
         lastHeartbeatMs = now
         let sinkFileCount = 0
-        try { sinkFileCount = readdirSync(this._sinkDir).length } catch {}
+        try { sinkFileCount = (await readdir(this._sinkDir)).length } catch {}
         log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'})`)
       }
       if (stopPayload) break

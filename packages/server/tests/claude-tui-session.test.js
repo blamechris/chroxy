@@ -754,6 +754,52 @@ describe('ClaudeTuiSession', () => {
       assert.equal(session._consumedFiles.size, 0, '_consumedFiles pruned after successful unlink')
     })
 
+    // #6132 (HOL fix from #5337): the drain hot path is now async fs, processing
+    // its file batch with `await` between each readFile/unlink. Lock in that the
+    // causal prefix ordering (pre- before post-, see #3902) survives the
+    // sequential-await rewrite — the regression the async migration most risks.
+    it('emits a multi-file drain pass in causal order (pre→post) under async fs (#6132)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 5000,
+      })
+      session._processReady = true
+      session._sessionId = 'test-order-6132'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-order-'))
+      session._waitForPrompt = async () => true
+      const events = []
+      session.on('tool_start', (e) => events.push(`start:${e.toolUseId}`))
+      session.on('tool_result', (e) => events.push(`result:${e.toolUseId}`))
+      session._term = {
+        write: () => {
+          // Write post- BEFORE pre- on disk: a naive lex sort would order
+          // "post-" ahead of "pre-" ('o' < 'r'), which is exactly the #3902
+          // bug. The prefix-ordered drain must still emit tool_start (pre)
+          // before tool_result (post) even though both land in one async pass.
+          writeFileSync(join(session._sinkDir, 'post-x.json'), JSON.stringify({
+            tool_use_id: 'toolu_x', tool_name: 'Bash', tool_response: { stdout: 'ok' },
+          }))
+          writeFileSync(join(session._sinkDir, 'pre-x.json'), JSON.stringify({
+            tool_use_id: 'toolu_x', tool_name: 'Bash', tool_input: { command: 'ls' },
+          }))
+          writeFileSync(join(session._sinkDir, 'stop-z.json'), JSON.stringify({ last_assistant_message: 'done' }))
+        },
+        kill: () => {},
+      }
+      session.on('error', () => {})
+      await session.sendMessage('hi')
+
+      const startIdx = events.indexOf('start:toolu_x')
+      const resultIdx = events.indexOf('result:toolu_x')
+      assert.ok(startIdx >= 0, 'tool_start emitted')
+      assert.ok(resultIdx >= 0, 'tool_result emitted')
+      assert.ok(startIdx < resultIdx, 'tool_start precedes tool_result despite post- sorting first on disk')
+      // Every consumed hook in the pass is unlinked (async unlink path).
+      assert.ok(!existsSync(join(session._sinkDir, 'pre-x.json')), 'pre- unlinked')
+      assert.ok(!existsSync(join(session._sinkDir, 'post-x.json')), 'post- unlinked')
+      assert.ok(!existsSync(join(session._sinkDir, 'stop-z.json')), 'stop- unlinked')
+    })
+
     describe('sweepStaleSinkDirs', () => {
       const DEAD_PID = 4242424 // deterministically reported dead via the stub below
       let created
