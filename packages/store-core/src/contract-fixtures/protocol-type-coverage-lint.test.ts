@@ -194,6 +194,12 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
+  'host_prune_status_snapshot',           // #6140 (epic #5530) Control Room host prune guardrails survey —
+                                          //   server contract landed first; the dashboard slice that consumes
+                                          //   it is the tracked follow-up, then this → DASHBOARD_ONLY
+  'host_prune_action_ack',                // #6140 (epic #5530) Control Room host prune action ack —
+                                          //   server contract landed first; the dashboard slice that consumes
+                                          //   the ack is the tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------
