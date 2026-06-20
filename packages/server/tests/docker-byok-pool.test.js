@@ -1085,3 +1085,140 @@ describe('DockerContainerPool — inspect() (#5052)', () => {
     assert.equal(snap.length, 0)
   })
 })
+
+describe('DockerContainerPool — mutating actions (#6135 slice 2)', () => {
+  let timers
+  let execFile
+  let pool
+
+  function rmIds() {
+    return execFile.calls.filter((c) => c.args[0] === 'rm').flatMap((c) => c.args.filter((a) => a.startsWith('C')))
+  }
+
+  beforeEach(() => {
+    timers = timerStubs()
+    execFile = execFileStub()
+    pool = new DockerContainerPool({
+      maxPerKey: 3,
+      maxTotal: 6,
+      _execFile: execFile,
+      _setTimeout: timers.setT,
+      _clearTimeout: timers.clearT,
+    })
+  })
+
+  describe('configuredLimits()', () => {
+    it('reports the operator-configured ceiling, distinct from limits()', () => {
+      assert.deepEqual(pool.configuredLimits(), { maxPerKey: 3, maxTotal: 6 })
+      assert.equal(pool.limits().maxPerKey, 3)
+      assert.equal(pool.limits().maxTotal, 6)
+    })
+  })
+
+  describe('drainAll()', () => {
+    it('evicts every idle container across all keys and clears their timers', async () => {
+      await pool.release('a', 'C1')
+      await pool.release('a', 'C2')
+      await pool.release('b', 'C3')
+      assert.equal(pool.size(), 3)
+      assert.equal(timers.pending().length, 3)
+
+      const drained = await pool.drainAll()
+      assert.equal(drained, 3)
+      assert.equal(pool.size(), 0)
+      assert.equal(timers.pending().length, 0, 'idle timers are cleared on drain')
+      assert.deepEqual(rmIds().sort(), ['C1', 'C2', 'C3'])
+    })
+
+    it('drains 0 on an empty pool and stays usable afterwards', async () => {
+      assert.equal(await pool.drainAll(), 0)
+      // Still usable: release/acquire works after a drain (non-terminal).
+      assert.equal(await pool.release('a', 'C9'), true)
+      assert.equal(pool.acquire('a'), 'C9')
+    })
+
+    it('is a no-op while shutting down', async () => {
+      await pool.release('a', 'C1')
+      await pool.shutdown()
+      assert.equal(await pool.drainAll(), 0)
+    })
+  })
+
+  describe('recycleKey()', () => {
+    it('evicts only the named bucket, leaving others intact', async () => {
+      await pool.release('a', 'C1')
+      await pool.release('a', 'C2')
+      await pool.release('b', 'C3')
+
+      const drained = await pool.recycleKey('a')
+      assert.equal(drained, 2)
+      assert.equal(pool.sizeOf('a'), 0)
+      assert.equal(pool.sizeOf('b'), 1)
+      assert.deepEqual(rmIds().sort(), ['C1', 'C2'])
+    })
+
+    it('evicts 0 for an unknown or empty key', async () => {
+      await pool.release('a', 'C1')
+      assert.equal(await pool.recycleKey('nope'), 0)
+      assert.equal(await pool.recycleKey(''), 0)
+      assert.equal(await pool.recycleKey(null), 0)
+      assert.equal(pool.size(), 1)
+    })
+  })
+
+  describe('resize()', () => {
+    it('clamps to the configured ceiling — can tighten, never raise', async () => {
+      // Raise attempt is clamped back down to the configured ceiling.
+      const up = await pool.resize({ maxPerKey: 99, maxTotal: 99 })
+      assert.equal(up.limits.maxPerKey, 3)
+      assert.equal(up.limits.maxTotal, 6)
+      assert.deepEqual(up.configured, { maxPerKey: 3, maxTotal: 6 })
+
+      // Tighten below the ceiling is honored.
+      const down = await pool.resize({ maxPerKey: 1, maxTotal: 2 })
+      assert.equal(down.limits.maxPerKey, 1)
+      assert.equal(down.limits.maxTotal, 2)
+    })
+
+    it('evicts the oldest entries over the new per-key cap', async () => {
+      await pool.release('a', 'C1')
+      await pool.release('a', 'C2')
+      await pool.release('a', 'C3')
+      assert.equal(pool.sizeOf('a'), 3)
+
+      const result = await pool.resize({ maxPerKey: 1 })
+      assert.equal(result.evicted, 2)
+      assert.equal(pool.sizeOf('a'), 1)
+      // Oldest-released (C1, C2) are evicted; the newest (C3) is kept.
+      assert.deepEqual(rmIds().sort(), ['C1', 'C2'])
+      assert.equal(pool.acquire('a'), 'C3')
+    })
+
+    it('evicts the globally-oldest entries over the new total cap', async () => {
+      await pool.release('a', 'C1')
+      await pool.release('b', 'C2')
+      await pool.release('c', 'C3')
+      assert.equal(pool.size(), 3)
+
+      const result = await pool.resize({ maxTotal: 1 })
+      assert.equal(result.evicted, 2)
+      assert.equal(pool.size(), 1)
+      // The two oldest-released across all buckets (C1, C2) go.
+      assert.deepEqual(rmIds().sort(), ['C1', 'C2'])
+    })
+
+    it('ignores non-integer / out-of-range values, leaving caps unchanged', async () => {
+      const result = await pool.resize({ maxPerKey: 0, maxTotal: -1 })
+      assert.equal(result.limits.maxPerKey, 3)
+      assert.equal(result.limits.maxTotal, 6)
+      assert.equal(result.evicted, 0)
+    })
+
+    it('is a no-op while shutting down', async () => {
+      await pool.shutdown()
+      const result = await pool.resize({ maxPerKey: 1 })
+      assert.equal(result.evicted, 0)
+      assert.equal(result.limits.maxPerKey, 3, 'caps unchanged after shutdown')
+    })
+  })
+})

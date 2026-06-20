@@ -81,6 +81,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
   'byok_pool_status_snapshot', // #6135 (epic #5530) — Control Room BYOK container-pool stats survey reply. Server contract (survey + handler + protocol) landed first; the dashboard surface that consumes the snapshot is the tracked follow-up slice, at which point this moves to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
+  'byok_pool_action_ack', // #6135 slice 2 (epic #5530) — Control Room BYOK pool mutating-action (drain/recycle/resize) ack. Server contract (pool methods + handler + protocol) landed first; the dashboard slice that consumes the ack to clear pending row state is the tracked follow-up (slice 3), at which point this moves to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.

@@ -1892,6 +1892,36 @@ export declare const ServerContainersActionAckSchema: z.ZodObject<{
     status: z.ZodOptional<z.ZodNullable<z.ZodString>>;
 }, z.core.$loose>;
 /**
+ * #6135 slice 2 (epic #5530) — ack for a successful `byok_pool_action` (drain /
+ * recycle / resize) of the BYOK warm-container pool. Echoes `action` (+ optional
+ * `requestId`, + `key` for recycle) so the dashboard can clear the row's pending
+ * state, and carries the action result:
+ *   - `drained` — containers evicted by a drain/recycle (null for resize).
+ *   - `evicted` — containers evicted to honor a tightened resize (null otherwise).
+ *   - `limits` — the new effective caps after a resize (null otherwise).
+ *   - `configured` — the operator-configured cap ceiling resize is clamped to.
+ * A failure instead replies with a `BYOK_POOL_ACTION_FAILED` session_error
+ * carrying the same correlation fields (mirrors containers_action's contract).
+ */
+export declare const ServerByokPoolActionAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_pool_action_ack">;
+    action: z.ZodString;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    key: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    drained: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    evicted: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    limits: z.ZodOptional<z.ZodNullable<z.ZodObject<{
+        idleTimeoutMs: z.ZodNumber;
+        maxPerKey: z.ZodNumber;
+        maxTotal: z.ZodNumber;
+        maxAgeMs: z.ZodNullable<z.ZodNumber>;
+    }, z.core.$strip>>>;
+    configured: z.ZodOptional<z.ZodNullable<z.ZodObject<{
+        maxPerKey: z.ZodNumber;
+        maxTotal: z.ZodNumber;
+    }, z.core.$strip>>>;
+}, z.core.$loose>;
+/**
  * #5554 — one skill in the inventory snapshot. Carries only names /
  * descriptions / metadata — never the skill BODY (the security boundary: skill
  * bodies never leave the server). Fields:
@@ -2839,6 +2869,7 @@ export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegr
 export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>;
 export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>;
 export type ServerContainersActionAckMessage = z.infer<typeof ServerContainersActionAckSchema>;
+export type ServerByokPoolActionAckMessage = z.infer<typeof ServerByokPoolActionAckSchema>;
 export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>;
 export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>;
 export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>;

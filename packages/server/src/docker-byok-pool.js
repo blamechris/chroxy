@@ -199,6 +199,12 @@ export class DockerContainerPool extends EventEmitter {
     this._maxTotal = Number.isFinite(opts.maxTotal)
       ? opts.maxTotal
       : DEFAULT_MAX_TOTAL
+    // #6135 slice 2: the operator-configured caps are the CEILING for a
+    // runtime `resize()`. Capture them once at construction so resize can only
+    // ever TIGHTEN below the configured values — a WS-triggered action must
+    // never raise host resource limits above what the operator configured.
+    this._configuredMaxPerKey = this._maxPerKey
+    this._configuredMaxTotal = this._maxTotal
     // Accept Infinity (not "finite") as a valid opt-out — Number.isFinite
     // rejects it, which is exactly what we don't want here.
     this._maxAgeMs = typeof opts.maxAgeMs === 'number' && opts.maxAgeMs > 0
@@ -481,6 +487,152 @@ export class DockerContainerPool extends EventEmitter {
       maxTotal: this._maxTotal,
       maxAgeMs: Number.isFinite(this._maxAgeMs) ? this._maxAgeMs : null,
     }
+  }
+
+  /**
+   * Read-only snapshot of the operator-configured cap CEILING (#6135 slice 2).
+   * `resize()` clamps to these, so the Control Room can render a valid resize
+   * range. Distinct from `limits()`, which reports the CURRENT (possibly
+   * resized-down) effective caps.
+   *
+   * @returns {{ maxPerKey: number, maxTotal: number }}
+   */
+  configuredLimits() {
+    return {
+      maxPerKey: this._configuredMaxPerKey,
+      maxTotal: this._configuredMaxTotal,
+    }
+  }
+
+  /**
+   * #6135 slice 2 — drain mutating action. Evict EVERY idle pooled container
+   * across all keys WITHOUT terminating the pool (unlike `shutdown()`, the
+   * pool stays usable — the next `acquire()` misses and a fresh container is
+   * created). Returns the number of containers evicted. No-op (returns 0)
+   * while shutting down.
+   *
+   * @returns {Promise<number>}
+   */
+  async drainAll() {
+    if (this._shuttingDown) return 0
+    let total = 0
+    for (const key of [...this._entries.keys()]) {
+      total += await this._drainBucket(key, 'drained')
+    }
+    return total
+  }
+
+  /**
+   * #6135 slice 2 — recycle mutating action. Evict every idle pooled container
+   * under ONE key (per-resource-shape), non-terminally. Returns the number
+   * evicted; an unknown / empty key evicts nothing (returns 0). No-op while
+   * shutting down.
+   *
+   * @param {string} key
+   * @returns {Promise<number>}
+   */
+  async recycleKey(key) {
+    if (this._shuttingDown) return 0
+    if (typeof key !== 'string' || key.length === 0) return 0
+    return this._drainBucket(key, 'recycled')
+  }
+
+  /**
+   * #6135 slice 2 — resize mutating action. Adjust the runtime per-key / total
+   * caps, each clamped to `[1, the operator-configured ceiling]` so a runtime
+   * resize can only TIGHTEN below the configured caps, never exceed them.
+   * Non-integer / out-of-range / omitted values leave that cap unchanged.
+   * After tightening, evicts entries now over the new caps (per-key first,
+   * then oldest-idle across all buckets until within the total cap). Returns
+   * the new effective `limits`, the `configured` ceiling, and the count
+   * `evicted`. No-op (no eviction, current limits) while shutting down.
+   *
+   * @param {{ maxPerKey?: number, maxTotal?: number }} [opts]
+   * @returns {Promise<{ limits: object, configured: object, evicted: number }>}
+   */
+  async resize(opts = {}) {
+    if (this._shuttingDown) {
+      return { limits: this.limits(), configured: this.configuredLimits(), evicted: 0 }
+    }
+    const { maxPerKey, maxTotal } = opts || {}
+    if (Number.isInteger(maxPerKey) && maxPerKey >= 1) {
+      this._maxPerKey = Math.min(maxPerKey, this._configuredMaxPerKey)
+    }
+    if (Number.isInteger(maxTotal) && maxTotal >= 1) {
+      this._maxTotal = Math.min(maxTotal, this._configuredMaxTotal)
+    }
+    const evicted = await this._enforceCaps('resized')
+    return { limits: this.limits(), configured: this.configuredLimits(), evicted }
+  }
+
+  /**
+   * Evict every idle entry under one key, emitting EVICTED with `reason` per
+   * container so the stats aggregator buckets the drain/recycle correctly.
+   * Shared by `drainAll()` / `recycleKey()`. Returns the count evicted.
+   */
+  async _drainBucket(key, reason) {
+    const bucket = this._entries.get(key)
+    if (!bucket || bucket.length === 0) return 0
+    const ids = bucket.map((e) => e.containerId)
+    for (const entry of bucket) this._clearTimeout(entry.timer)
+    this._entries.delete(key)
+    for (const containerId of ids) {
+      this._createdAt.delete(containerId)
+      this._soiledIds.delete(containerId)
+      this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId, reason })
+    }
+    await Promise.all(ids.map((containerId) => this._evict(containerId).catch((err) => {
+      log.warn(`${reason} eviction of ${containerId.slice(0, 12)} failed: ${err.message}`)
+    })))
+    return ids.length
+  }
+
+  /**
+   * Evict entries that now exceed the (possibly tightened) caps: trim each
+   * bucket to `_maxPerKey` (evicting the oldest-released first), then drop the
+   * globally-oldest idle entry until within `_maxTotal`. Returns the count
+   * evicted. Used by `resize()`.
+   */
+  async _enforceCaps(reason) {
+    /** @type {string[]} */
+    const evictedIds = []
+    // Per-key cap: trim from the head (oldest releasedAt) of each bucket.
+    for (const [key, bucket] of [...this._entries.entries()]) {
+      while (bucket.length > this._maxPerKey) {
+        const entry = bucket.shift()
+        this._clearTimeout(entry.timer)
+        this._createdAt.delete(entry.containerId)
+        this._soiledIds.delete(entry.containerId)
+        this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: entry.containerId, reason })
+        evictedIds.push(entry.containerId)
+      }
+      if (bucket.length === 0) this._entries.delete(key)
+    }
+    // Total cap: evict the globally-oldest idle entries until within the cap.
+    // One sorted pass (oldest releasedAt first) rather than a rescan-per-eviction
+    // so this stays O(n log n) even if the total ceiling ever grows large.
+    const overTotal = this._totalSize() - this._maxTotal
+    if (overTotal > 0) {
+      const all = []
+      for (const [key, bucket] of this._entries.entries()) {
+        for (const entry of bucket) {
+          all.push({ key, entry, releasedAt: typeof entry.releasedAt === 'number' ? entry.releasedAt : 0 })
+        }
+      }
+      all.sort((a, b) => a.releasedAt - b.releasedAt)
+      for (const { key, entry } of all.slice(0, overTotal)) {
+        // _removeEntry already clears the idle timer for the matched entry.
+        this._removeEntry(key, entry.containerId)
+        this._createdAt.delete(entry.containerId)
+        this._soiledIds.delete(entry.containerId)
+        this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: entry.containerId, reason })
+        evictedIds.push(entry.containerId)
+      }
+    }
+    await Promise.all(evictedIds.map((containerId) => this._evict(containerId).catch((err) => {
+      log.warn(`${reason} eviction of ${containerId.slice(0, 12)} failed: ${err.message}`)
+    })))
+    return evictedIds.length
   }
 
   /**

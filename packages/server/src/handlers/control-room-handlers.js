@@ -37,6 +37,7 @@ import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 import { surveyContainers } from '../control-room/containers.js'
 import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/repo-runtime-config.js'
 import { surveyByokPool } from '../control-room/byok-pool.js'
+import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -1099,6 +1100,171 @@ async function handleContainersAction(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6135 slice 2 (epic #5530) — byok_pool_action: drain / recycle / resize the
+// BYOK warm-container pool.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * #6135 slice 2: the BYOK pool is a process-wide singleton, so a single global
+ * in-flight flag serializes all pool mutations (drain/recycle/resize) — they all
+ * mutate the same shared state and must not race. Rejected, never queued.
+ */
+let byokPoolActionInFlight = false
+
+/**
+ * #6135 slice 2: shared BYOK_POOL_ACTION_FAILED reply. Mirrors
+ * `containerActionError`: a `session_error` envelope with the stable code, a
+ * `reason` discriminator, and the request's correlation fields (`action` / `key`
+ * / `requestId`) echoed so the dashboard can clear the exact row's pending state.
+ */
+function byokPoolActionError(ws, ctx, msg, reason, message) {
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    code: 'BYOK_POOL_ACTION_FAILED',
+    message,
+    reason,
+    action: typeof msg?.action === 'string' ? msg.action : null,
+    key: typeof msg?.key === 'string' ? msg.key : null,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+  })
+}
+
+/**
+ * #6135 slice 2 (epic #5530) — `byok_pool_action` handler. Drain / recycle /
+ * resize the BYOK warm-container pool, replying with exactly one
+ * `byok_pool_action_ack` on success or one BYOK_POOL_ACTION_FAILED
+ * `session_error` on failure.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist):
+ *   1. Host-level authority — a pairing-bound (share-a-session) client is scoped
+ *      to one session and must not run host-wide pool actions.
+ *   2. Survey membership — for `recycle`, the client-supplied `key` MUST name a
+ *      bucket the pool's OWN survey (`inspect()`) currently enumerates. An
+ *      unknown key is rejected; the client key is a lookup key, never a trusted
+ *      target. drain/resize have no client-supplied target — drain acts on all
+ *      buckets the pool itself owns; resize is bounded server-side to the
+ *      operator-configured ceiling (the pool clamps, never the client).
+ *
+ * Concurrency: a single global in-flight flag — pool mutations are host-wide and
+ * serialized (rejected, not queued).
+ */
+async function handleByokPoolAction(ws, client, msg, ctx) {
+  // Authority gate (#1): host-level (unbound) clients only.
+  if (client?.boundSessionId) {
+    byokPoolActionError(ws, ctx, msg, 'forbidden',
+      'byok_pool_action requires host-level authority (a session-bound token cannot run host actions)')
+    return
+  }
+
+  const action = typeof msg?.action === 'string' ? msg.action : ''
+  if (action !== 'drain' && action !== 'recycle' && action !== 'resize') {
+    byokPoolActionError(ws, ctx, msg, 'unsupported-action',
+      `Unsupported BYOK pool action: ${action.length > 0 ? action : '(none)'}`)
+    return
+  }
+
+  // Pool-enabled gate — degrade cleanly when the pool is off (the default).
+  const poolEnabled = typeof ctx?.isPoolEnabled === 'function' ? ctx.isPoolEnabled() : isPoolEnabled(process.env)
+  if (!poolEnabled) {
+    byokPoolActionError(ws, ctx, msg, 'pool-disabled',
+      'The BYOK container pool is disabled (set CHROXY_DOCKER_BYOK_POOL to enable)')
+    return
+  }
+
+  // Tests inject `ctx.byokPool`; production resolves the shared singleton.
+  const pool = 'byokPool' in (ctx || {}) ? ctx.byokPool : getSharedPool(process.env)
+  if (!pool || typeof pool.drainAll !== 'function') {
+    byokPoolActionError(ws, ctx, msg, 'no-pool',
+      'BYOK pool is enabled but no pool instance is available yet')
+    return
+  }
+
+  // Validate the recycle target against the pool's OWN survey (#2) BEFORE taking
+  // the in-flight lock, so a bad request fails fast and doesn't block real work.
+  let key = null
+  if (action === 'recycle') {
+    key = typeof msg?.key === 'string' ? msg.key : ''
+    if (key.length === 0) {
+      byokPoolActionError(ws, ctx, msg, 'invalid-key', 'recycle requires a non-empty key')
+      return
+    }
+    // The survey is the ONLY source of truth for a valid target. If the pool
+    // can't be surveyed, fail with a distinct reason rather than misreporting
+    // every key as unknown — the target can't be validated, so we refuse.
+    if (typeof pool.inspect !== 'function') {
+      byokPoolActionError(ws, ctx, msg, 'no-pool',
+        'BYOK pool cannot be surveyed to validate the recycle target')
+      return
+    }
+    const surveyedKeys = pool.inspect().map((b) => b.key)
+    if (!surveyedKeys.includes(key)) {
+      byokPoolActionError(ws, ctx, msg, 'unknown-key',
+        `key does not name a surveyed pool bucket: ${key}`)
+      return
+    }
+  }
+
+  // Validate resize params: at least one cap, positive integers (the pool clamps
+  // to the configured ceiling — we only reject malformed input here).
+  if (action === 'resize') {
+    const hasPerKey = msg?.maxPerKey !== undefined
+    const hasTotal = msg?.maxTotal !== undefined
+    if (!hasPerKey && !hasTotal) {
+      byokPoolActionError(ws, ctx, msg, 'invalid-resize',
+        'resize requires at least one of maxPerKey / maxTotal')
+      return
+    }
+    if (hasPerKey && !(Number.isInteger(msg.maxPerKey) && msg.maxPerKey >= 1)) {
+      byokPoolActionError(ws, ctx, msg, 'invalid-resize', 'maxPerKey must be a positive integer')
+      return
+    }
+    if (hasTotal && !(Number.isInteger(msg.maxTotal) && msg.maxTotal >= 1)) {
+      byokPoolActionError(ws, ctx, msg, 'invalid-resize', 'maxTotal must be a positive integer')
+      return
+    }
+  }
+
+  // Global serialization (reject, never queue) — one pool mutation at a time.
+  if (byokPoolActionInFlight) {
+    byokPoolActionError(ws, ctx, msg, 'action-in-progress',
+      'A BYOK pool action is already in progress')
+    return
+  }
+
+  byokPoolActionInFlight = true
+  try {
+    const ack = {
+      type: 'byok_pool_action_ack',
+      action,
+      key: key || null,
+      requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+      drained: null,
+      evicted: null,
+      limits: null,
+      configured: null,
+    }
+    if (action === 'drain') {
+      ack.drained = await pool.drainAll()
+    } else if (action === 'recycle') {
+      ack.drained = await pool.recycleKey(key)
+    } else {
+      const result = await pool.resize({ maxPerKey: msg?.maxPerKey, maxTotal: msg?.maxTotal })
+      ack.evicted = result?.evicted ?? 0
+      ack.limits = result?.limits ?? null
+      ack.configured = result?.configured ?? null
+    }
+    log.info(`byok_pool_action ${action} completed (client=${client?.id})`)
+    ctx.transport.send(ws, ack)
+  } catch (err) {
+    const message = err && err.message ? err.message : `${action} failed`
+    log.warn(`byok_pool_action ${action} failed: ${message}`)
+    byokPoolActionError(ws, ctx, msg, `${action}-failed`, message)
+  } finally {
+    byokPoolActionInFlight = false
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -1148,6 +1314,7 @@ export const controlRoomHandlers = {
   repo_runtime_config_request: handleRepoRuntimeConfigRequest,
   byok_pool_status_request: handleByokPoolStatusRequest,
   containers_action: handleContainersAction,
+  byok_pool_action: handleByokPoolAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,

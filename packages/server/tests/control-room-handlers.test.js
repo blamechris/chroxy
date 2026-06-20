@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -1135,6 +1135,182 @@ describe('mailbox_status_request handler (#5914 follow-up)', () => {
     await handleSessionMessage({}, { id: 'c' }, { type: 'mailbox_status_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'mailbox_status_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6135 slice 2 (epic #5530) — byok_pool_action handler (drain/recycle/resize).
+// The pool is injected via ctx.byokPool + ctx.isPoolEnabled so the handler test
+// never touches the process-wide singleton or docker.
+// ---------------------------------------------------------------------------
+
+function makeFakePool(overrides = {}) {
+  return {
+    drainAll: createSpy(async () => 3),
+    recycleKey: createSpy(async () => 2),
+    resize: createSpy(async () => ({
+      limits: { idleTimeoutMs: 300000, maxPerKey: 1, maxTotal: 2, maxAgeMs: null },
+      configured: { maxPerKey: 2, maxTotal: 8 },
+      evicted: 4,
+    })),
+    inspect: createSpy(() => [{ key: 'node:22|/p|2g|2|chroxy', size: 2, oldestIdleMs: 100 }]),
+    ...overrides,
+  }
+}
+
+function makeByokActionCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  const { byokPool, isPoolEnabled, ...rest } = overrides
+  return nsCtx({
+    send: sendSpy,
+    byokPool: 'byokPool' in overrides ? byokPool : makeFakePool(),
+    isPoolEnabled: typeof isPoolEnabled === 'function' ? isPoolEnabled : () => true,
+    ...rest,
+    _send: sendSpy,
+  })
+}
+
+describe('byok_pool_action handler (#6135 slice 2)', () => {
+  let ctx, client, ws
+
+  beforeEach(() => {
+    ctx = makeByokActionCtx()
+    client = { id: 'client-C' }
+    ws = {}
+  })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('byok_pool_action'))
+    assert.equal(typeof controlRoomHandlers.byok_pool_action, 'function')
+  })
+
+  it('drain evicts all and acks a schema-valid byok_pool_action_ack', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'd1' }, ctx)
+    assert.equal(ctx.byokPool.drainAll.callCount, 1)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'byok_pool_action_ack')
+    assert.equal(payload.action, 'drain')
+    assert.equal(payload.requestId, 'd1')
+    assert.equal(payload.drained, 3)
+    assert.ok(ServerByokPoolActionAckSchema.safeParse(payload).success, JSON.stringify(ServerByokPoolActionAckSchema.safeParse(payload).error?.issues))
+  })
+
+  it('recycle validates the key against the pool survey, then evicts that bucket', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'recycle', key: 'node:22|/p|2g|2|chroxy', requestId: 'r1' }, ctx)
+    assert.equal(ctx.byokPool.inspect.callCount, 1, 'survey is consulted to validate the target')
+    assert.equal(ctx.byokPool.recycleKey.callCount, 1)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.action, 'recycle')
+    assert.equal(payload.key, 'node:22|/p|2g|2|chroxy')
+    assert.equal(payload.drained, 2)
+    assert.ok(ServerByokPoolActionAckSchema.safeParse(payload).success)
+  })
+
+  it('recycle rejects a key the survey does not enumerate (never trusts the client key)', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'recycle', key: 'not-a-real-key', requestId: 'r2' }, ctx)
+    assert.equal(ctx.byokPool.recycleKey.callCount, 0, 'must not act on an unsurveyed key')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'session_error')
+    assert.equal(payload.code, 'BYOK_POOL_ACTION_FAILED')
+    assert.equal(payload.reason, 'unknown-key')
+    assert.equal(payload.requestId, 'r2')
+  })
+
+  it('recycle fails with no-pool (not a misleading unknown-key) when the pool cannot be surveyed', async () => {
+    ctx = makeByokActionCtx({ byokPool: makeFakePool({ inspect: undefined }) })
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'recycle', key: 'whatever' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'BYOK_POOL_ACTION_FAILED')
+    assert.equal(payload.reason, 'no-pool')
+  })
+
+  it('recycle requires a non-empty key', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'recycle' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'invalid-key')
+  })
+
+  it('resize forwards the caps and acks limits + configured ceiling + evicted count', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'resize', maxPerKey: 1, maxTotal: 2, requestId: 'z1' }, ctx)
+    assert.deepEqual(ctx.byokPool.resize.lastCall[0], { maxPerKey: 1, maxTotal: 2 })
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.action, 'resize')
+    assert.equal(payload.evicted, 4)
+    assert.equal(payload.limits.maxPerKey, 1)
+    assert.deepEqual(payload.configured, { maxPerKey: 2, maxTotal: 8 })
+    assert.ok(ServerByokPoolActionAckSchema.safeParse(payload).success)
+  })
+
+  it('resize requires at least one cap', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'resize' }, ctx)
+    assert.equal(ctx.byokPool.resize.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'invalid-resize')
+  })
+
+  it('resize rejects non-integer / non-positive caps', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'resize', maxPerKey: 0 }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'invalid-resize')
+    ctx = makeByokActionCtx()
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'resize', maxTotal: 2.5 }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'invalid-resize')
+  })
+
+  it('rejects an unsupported action', async () => {
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'nuke' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'BYOK_POOL_ACTION_FAILED')
+    assert.equal(payload.reason, 'unsupported-action')
+  })
+
+  it('rejects a session-bound (non-host) client', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'f1' }, ctx)
+    assert.equal(ctx.byokPool.drainAll.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'forbidden')
+    assert.equal(payload.requestId, 'f1')
+  })
+
+  it('degrades cleanly when the pool is disabled', async () => {
+    ctx = makeByokActionCtx({ isPoolEnabled: () => false })
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'pool-disabled')
+  })
+
+  it('errors when no pool instance is available', async () => {
+    ctx = makeByokActionCtx({ byokPool: null })
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'no-pool')
+  })
+
+  it('relays a BYOK_POOL_ACTION_FAILED session_error when the pool throws', async () => {
+    ctx = makeByokActionCtx({ byokPool: makeFakePool({ drainAll: createSpy(async () => { throw new Error('docker exploded') }) }) })
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'x1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'BYOK_POOL_ACTION_FAILED')
+    assert.equal(payload.reason, 'drain-failed')
+    assert.match(payload.message, /docker exploded/)
+  })
+
+  it('serializes concurrent pool actions (rejects, never queues)', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeByokActionCtx({ byokPool: makeFakePool({ drainAll: createSpy(async () => { await gate; return 1 }) }) })
+    const first = controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'a' }, ctx)
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'b' }, ctx)
+    const rejected = ctx._send.calls.find(c => c[1].requestId === 'b')
+    assert.equal(rejected[1].reason, 'action-in-progress')
+    release()
+    await first
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'byok_pool_action_ack')
     assert.equal(payload.requestId, 'reg')
   })
 })
