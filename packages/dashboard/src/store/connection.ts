@@ -2122,6 +2122,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().emulatorActioningIds.size > 0) {
         set({ emulatorActioningIds: new Set<string>() });
       }
+      // #6153: reset every Control Room survey *Loading flag that's still true on
+      // a socket drop. Each survey section computes refreshDisabled = loading ||
+      // !connected, so a refresh in flight when the socket dies would leave
+      // loading=true forever — the disabled Refresh button can never clear it
+      // post-reconnect (it can't issue the request that would). One DRY sweep
+      // over the survey family avoids per-tab drift. (We intentionally KEEP the
+      // stale snapshots — the "generated Nm ago" line signals staleness, and a
+      // reconnect re-fetches on tab activation; clearing would flash empty.)
+      const surveyLoadingKeys = [
+        'hostStatusLoading', 'runnerStatusLoading', 'containersStatusLoading',
+        'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
+        'simulatorStatusLoading', 'emulatorStatusLoading', 'integrationStatusLoading',
+        'skillsInventoryLoading', 'mailboxStatusLoading',
+      ] as const;
+      const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
+      for (const key of surveyLoadingKeys) {
+        if (get()[key]) loadingReset[key] = false;
+      }
+      if (Object.keys(loadingReset).length > 0) {
+        set(loadingReset);
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();

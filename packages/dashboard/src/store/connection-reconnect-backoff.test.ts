@@ -351,3 +351,50 @@ describe('onclose clears transient state across all sessions (#5731 T4)', () => 
     expect(st.sessionStates.b!.primaryClientId).toBeNull()
   })
 })
+
+// ---------------------------------------------------------------------------
+// #6153 — onclose resets every Control Room survey *Loading flag. A refresh in
+// flight when the socket drops would otherwise leave loading=true forever, and
+// refreshDisabled = loading || !connected wedges the disabled Refresh button
+// (it can't issue the request that would clear it) until a full remount.
+// ---------------------------------------------------------------------------
+
+describe('onclose resets Control Room survey loading flags (#6153)', () => {
+  it('clears every *StatusLoading that was true; keeps the (stale) snapshots', async () => {
+    const ws = await openConnected()
+
+    useConnectionStore.setState({
+      hostStatusLoading: true,
+      runnerStatusLoading: true,
+      containersStatusLoading: true,
+      repoRuntimeConfigLoading: true,
+      byokPoolStatusLoading: true,
+      hostPruneStatusLoading: true,
+      simulatorStatusLoading: true,
+      emulatorStatusLoading: true,
+      integrationStatusLoading: true,
+      skillsInventoryLoading: true,
+      mailboxStatusLoading: true,
+      // a stale snapshot that must SURVIVE the drop (re-fetched on reconnect)
+      hostPruneStatus: { type: 'host_prune_status_snapshot', generatedAt: '2026-06-20T00:00:00.000Z', dockerAvailable: true, note: null, containers: [], images: [], summary: { containerCount: 0, imageCount: 0, reclaimableBytes: 0 } },
+    } as never)
+
+    ws.onclose?.({ code: 1006 })
+    await vi.advanceTimersByTimeAsync(0)
+
+    const st = useConnectionStore.getState()
+    expect(st.hostStatusLoading).toBe(false)
+    expect(st.runnerStatusLoading).toBe(false)
+    expect(st.containersStatusLoading).toBe(false)
+    expect(st.repoRuntimeConfigLoading).toBe(false)
+    expect(st.byokPoolStatusLoading).toBe(false)
+    expect(st.hostPruneStatusLoading).toBe(false)
+    expect(st.simulatorStatusLoading).toBe(false)
+    expect(st.emulatorStatusLoading).toBe(false)
+    expect(st.integrationStatusLoading).toBe(false)
+    expect(st.skillsInventoryLoading).toBe(false)
+    expect(st.mailboxStatusLoading).toBe(false)
+    // The snapshot is intentionally retained (staleness is signalled in the UI).
+    expect(st.hostPruneStatus).not.toBeNull()
+  })
+})
