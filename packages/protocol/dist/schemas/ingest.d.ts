@@ -60,6 +60,7 @@ export declare const IngestEventSchema: z.ZodObject<{
     project: z.ZodOptional<z.ZodString>;
     sessionId: z.ZodOptional<z.ZodString>;
     type: z.ZodEnum<{
+        stop: "stop";
         session_start: "session_start";
         session_end: "session_end";
         subagent_start: "subagent_start";
@@ -67,7 +68,6 @@ export declare const IngestEventSchema: z.ZodObject<{
         notification: "notification";
         post_tool_use: "post_tool_use";
         user_prompt_submit: "user_prompt_submit";
-        stop: "stop";
     }>;
     data: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnion<readonly [z.ZodString, z.ZodNumber, z.ZodBoolean, z.ZodNull]>>>;
     ts: z.ZodNumber;

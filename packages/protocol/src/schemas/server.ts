@@ -1731,6 +1731,22 @@ export const ServerIntegrationActionAckSchema = z.object({
   counts: IntegrationActionCountsSchema.nullable(),
 }).passthrough()
 
+/**
+ * #6134 (epic #5530) — ack for a successful `containers_action` (stop / restart
+ * / destroy). Echoes `action` + the client-supplied `environmentId` (+ optional
+ * `requestId`) so the dashboard can clear the exact row's pending state, and
+ * carries the resulting `status` (`stopped` / `running` / `destroyed`). A
+ * failure instead replies with a `CONTAINER_ACTION_FAILED` session_error
+ * carrying the same correlation fields (mirrors integration_action's contract).
+ */
+export const ServerContainersActionAckSchema = z.object({
+  type: z.literal('containers_action_ack'),
+  action: z.string(),
+  environmentId: z.string(),
+  requestId: z.string().max(128).nullable().optional(),
+  status: z.string().nullable().optional(),
+}).passthrough()
+
 // ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────
@@ -2886,6 +2902,7 @@ export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegr
 // `IntegrationActionMessage` in client.ts.
 export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>
 export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>
+export type ServerContainersActionAckMessage = z.infer<typeof ServerContainersActionAckSchema>
 // #5554 — Skills inventory tab (epic #5159); request side is
 // `SkillsInventoryRequestMessage` in client.ts. Consumed by the server emitter
 // (control-room/skills-inventory.js), the dashboard store handler, and the

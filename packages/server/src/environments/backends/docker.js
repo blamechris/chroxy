@@ -161,6 +161,43 @@ export class DockerBackend {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
+  // stop / start / restart — standalone-container lifecycle (#6134)
+  //
+  // Unlike `_removeContainer` (which swallows so a teardown never blocks), these
+  // REJECT on failure so the EnvironmentManager / containers_action handler can
+  // surface a CONTAINER_ACTION_FAILED to the operator rather than silently
+  // claiming success.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  /** @returns {Promise<void>} */
+  stopEnvironment(containerId) {
+    return this._dockerLifecycle('stop', containerId)
+  }
+
+  /** @returns {Promise<void>} */
+  startEnvironment(containerId) {
+    return this._dockerLifecycle('start', containerId)
+  }
+
+  /** @returns {Promise<void>} */
+  restartEnvironment(containerId) {
+    return this._dockerLifecycle('restart', containerId)
+  }
+
+  _dockerLifecycle(verb, containerId) {
+    return new Promise((resolve, reject) => {
+      this._execFile('docker', [verb, containerId], { stdio: 'ignore' }, (err) => {
+        if (err) {
+          log.warn(`docker ${verb} ${containerId.slice(0, 12)} failed: ${err.message}`)
+          reject(new Error(`docker ${verb} failed: ${err.message}`))
+          return
+        }
+        resolve()
+      })
+    })
+  }
+
+  // ─────────────────────────────────────────────────────────────────────────
   // removeImage — delete a local Docker image
   // ─────────────────────────────────────────────────────────────────────────
 

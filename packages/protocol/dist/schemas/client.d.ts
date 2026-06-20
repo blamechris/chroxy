@@ -679,6 +679,16 @@ export declare const IntegrationActionSchema: z.ZodObject<{
     runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+export declare const ContainersActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"containers_action">;
+    action: z.ZodEnum<{
+        stop: "stop";
+        restart: "restart";
+        destroy: "destroy";
+    }>;
+    environmentId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const SummarizeSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
@@ -1111,6 +1121,15 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     runId: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"containers_action">;
+    action: z.ZodEnum<{
+        stop: "stop";
+        restart: "restart";
+        destroy: "destroy";
+    }>;
+    environmentId: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1142,6 +1161,7 @@ export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRe
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
+export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -514,6 +514,138 @@ describe('containers_status_request handler (#6133)', () => {
     await handleSessionMessage(ws, client, { type: 'containers_status_request', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'containers_status_snapshot')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6134 (epic #5530) — containers_action handler (stop/restart/destroy). The
+// EnvironmentManager is injected via ctx.services.environmentManager so the
+// handler test never touches docker.
+// ---------------------------------------------------------------------------
+
+function makeEnvManager(overrides = {}) {
+  const envs = { 'env-1': { id: 'env-1', name: 'web', status: 'running' } }
+  return {
+    calls: [],
+    get(id) { return envs[id] || null },
+    async stop(id) { this.calls.push(['stop', id]); return 'stopped' },
+    async restart(id) { this.calls.push(['restart', id]); return 'running' },
+    async destroy(id) { this.calls.push(['destroy', id]) },
+    ...overrides,
+  }
+}
+
+function makeContainersActionCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  const { environmentManager, ...rest } = overrides
+  // Distinguish "not provided" (default a manager) from an explicit `null`
+  // (the no-manager case under test).
+  const mgr = 'environmentManager' in overrides ? environmentManager : makeEnvManager()
+  return nsCtx({
+    send: sendSpy,
+    services: { environmentManager: mgr },
+    ...rest,
+    _send: sendSpy,
+  })
+}
+
+describe('containers_action handler (#6134)', () => {
+  let ctx, client, ws
+
+  beforeEach(() => {
+    ctx = makeContainersActionCtx()
+    client = { id: 'client-A' }
+    ws = {}
+  })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('containers_action'))
+    assert.equal(typeof controlRoomHandlers.containers_action, 'function')
+  })
+
+  it('stop replies with a containers_action_ack carrying the resulting status', async () => {
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1', requestId: 'r1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.ok(ServerContainersActionAckSchema.safeParse(payload).success, JSON.stringify(ServerContainersActionAckSchema.safeParse(payload).error?.issues))
+    assert.equal(payload.action, 'stop')
+    assert.equal(payload.environmentId, 'env-1')
+    assert.equal(payload.requestId, 'r1')
+    assert.equal(payload.status, 'stopped')
+  })
+
+  it('restart calls the manager and acks running', async () => {
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'restart', environmentId: 'env-1' }, ctx)
+    assert.equal(ctx._send.lastCall[1].status, 'running')
+  })
+
+  it('destroy acks status "destroyed"', async () => {
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'destroy', environmentId: 'env-1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.action, 'destroy')
+    assert.equal(payload.status, 'destroyed')
+  })
+
+  it('rejects a session-bound client with a CONTAINER_ACTION_FAILED error (no action run)', async () => {
+    const mgr = makeEnvManager()
+    ctx = makeContainersActionCtx({ environmentManager: mgr })
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1', requestId: 'r1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'CONTAINER_ACTION_FAILED')
+    assert.equal(payload.reason, 'forbidden')
+    assert.equal(payload.requestId, 'r1')
+    assert.equal(mgr.calls.length, 0, 'must not run any action for a bound client')
+  })
+
+  it('rejects an unknown environmentId (never seen in the survey)', async () => {
+    const mgr = makeEnvManager()
+    ctx = makeContainersActionCtx({ environmentManager: mgr })
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'ghost' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'CONTAINER_ACTION_FAILED')
+    assert.equal(payload.reason, 'unknown-environment')
+    assert.equal(mgr.calls.length, 0)
+  })
+
+  it('rejects an unsupported action', async () => {
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'nuke', environmentId: 'env-1' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'unsupported-action')
+  })
+
+  it('surfaces a manager failure as CONTAINER_ACTION_FAILED with the error message', async () => {
+    const mgr = makeEnvManager({ async stop() { throw new Error('docker stop failed: boom') } })
+    ctx = makeContainersActionCtx({ environmentManager: mgr })
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'CONTAINER_ACTION_FAILED')
+    assert.equal(payload.reason, 'stop-failed')
+    assert.match(payload.message, /boom/)
+  })
+
+  it('errors cleanly when no EnvironmentManager is configured', async () => {
+    ctx = makeContainersActionCtx({ environmentManager: null })
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'no-environment-manager')
+  })
+
+  it('debounces a second action on the same environment while one is in flight', async () => {
+    let release
+    const gate = new Promise((r) => { release = r })
+    const mgr = makeEnvManager({ async stop() { await gate; return 'stopped' } })
+    ctx = makeContainersActionCtx({ environmentManager: mgr })
+    const first = controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1', requestId: 'a' }, ctx)
+    await controlRoomHandlers.containers_action(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1', requestId: 'b' }, ctx)
+    const rejected = ctx._send.calls.find((c) => c[1].requestId === 'b')
+    assert.equal(rejected[1].reason, 'action-in-progress')
+    release()
+    await first
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'containers_action', action: 'stop', environmentId: 'env-1', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'containers_action_ack')
     assert.equal(payload.requestId, 'reg')
   })
 })
