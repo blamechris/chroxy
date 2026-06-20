@@ -10,6 +10,7 @@
  * connection-encryption-guard.test.ts / connection-reconnect-backoff.test.ts).
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { PONG_TIMEOUT_MS, HEARTBEAT_INTERVAL_MS } from '@chroxy/store-core'
 
 const store: Record<string, string> = {}
 const localStorageMock = {
@@ -46,7 +47,11 @@ class MockWebSocket {
 }))
 
 const { useConnectionStore } = await import('./connection')
-const { HANDSHAKE_TIMEOUT_MS } = await import('./message-handler')
+// Namespace import so `mh.reconnectAttempt` reflects the live module-level
+// counter — destructuring a `let` export copies the value at import time and
+// would always read 0 (mirrors connection-reconnect-backoff.test.ts).
+const mh = await import('./message-handler')
+const { HANDSHAKE_TIMEOUT_MS } = mh
 
 /** Open a connection and walk it through health check + WS construction + onopen. */
 async function openConnected(): Promise<MockWebSocket> {
@@ -63,6 +68,7 @@ async function openConnected(): Promise<MockWebSocket> {
 beforeEach(() => {
   vi.useFakeTimers()
   MockWebSocket.instances = []
+  mh.resetReconnectAttempt() // deterministic backoff ladder per test (#6066)
   for (const k of Object.keys(store)) delete store[k]
   useConnectionStore.setState({
     serverRegistry: [],
@@ -153,5 +159,118 @@ describe('#5721 client-side handshake timeout (dashboard)', () => {
     await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS)
     await vi.advanceTimersByTimeAsync(10_000) // let the single scheduled rung fire
     expect(MockWebSocket.instances.length).toBe(afterError + 1)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6066 — real-socket reconnect-parity validation after the #6065 connection-
+// runtime extraction. These exercise the SAME shared controller as the cases
+// above, but at the real-socket integration level (drive onopen/onmessage/
+// onclose through connect()), asserting the timer mechanics survive the
+// extraction without behavior drift.
+// ---------------------------------------------------------------------------
+describe('#6066 reconnect parity (real socket, dashboard)', () => {
+  // (1) The stale handshake timer from the FIRST socket must not also fire after
+  //     a reconnect re-enters onopen and re-arms it — exactly one reconnect per
+  //     window, not two.
+  it('handshake timeout does not double-fire on reconnect re-entry', async () => {
+    const first = await openConnected()
+
+    // First handshake times out → close + scheduled reconnect.
+    await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS)
+    expect(first.closed).toBe(1)
+
+    // The reconnect rung fires and builds a fresh socket, whose onopen re-arms
+    // the handshake timer (clearHandshakeTimer-then-set, so the stale first timer
+    // can never also fire).
+    const afterFirstTimeout = MockWebSocket.instances.length
+    await vi.advanceTimersByTimeAsync(10_000)
+    expect(MockWebSocket.instances.length).toBe(afterFirstTimeout + 1)
+    const second = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    second.readyState = 1
+    second.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+
+    // Advance one full handshake window: the SECOND timer fires once → exactly
+    // one further reconnect socket. A surviving stale first timer would schedule
+    // a second reconnect in this same window.
+    const beforeSecondTimeout = MockWebSocket.instances.length
+    await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(10_000) // let the (single) scheduled rung fire
+    expect(MockWebSocket.instances.length).toBe(beforeSecondTimeout + 1) // one, not two
+  })
+
+  // (2) BLACK BOX: once connected+authed, an unanswered ping → pong-timeout
+  //     reaper closes the dead socket and STOPS the heartbeat (no further pings).
+  //     Asserted purely via observable behavior — socket.close() (ws.closed) and
+  //     the send count — with no reliance on any exposed internal
+  //     `isHeartbeatRunning` flag (no source change).
+  it('pong timeout closes the dead socket and stops the heartbeat', async () => {
+    const ws = await openConnected()
+
+    // Complete the handshake so the heartbeat starts (it does NOT start before
+    // auth_ok). Past this point pings flow on HEARTBEAT_INTERVAL_MS.
+    ws.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', serverMode: 'cli' }) })
+    await vi.advanceTimersByTimeAsync(0)
+    expect(ws.closed).toBe(0)
+
+    // Baseline the send count AFTER auth_ok settles (auth_ok triggers list_*
+    // requests), then advance one heartbeat interval → exactly one ping is sent.
+    const sendsAfterAuth = ws.sent.length
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
+    const sendsAfterFirstPing = ws.sent.length
+    expect(sendsAfterFirstPing).toBe(sendsAfterAuth + 1) // the ping went out
+
+    // Do NOT answer the pong; advance past the pong timeout → the reaper closes
+    // the dead socket.
+    await vi.advanceTimersByTimeAsync(PONG_TIMEOUT_MS)
+    expect(ws.closed).toBe(1)
+
+    // The heartbeat is stopped: advancing two more intervals sends nothing more
+    // (observable proof, no internal-flag peek).
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS * 2)
+    expect(ws.sent.length).toBe(sendsAfterFirstPing)
+  })
+
+  // (3) The backoff ladder ADVANCES when the reconnect is triggered by a
+  //     handshake timeout (not just by a socket close/error). A socket that opens
+  //     but never authenticates keeps climbing the ladder.
+  it('backoff ladder advances on a handshake-timeout-triggered reconnect', async () => {
+    await openConnected()
+    expect(mh.reconnectAttempt).toBe(0) // fresh ladder (reset in beforeEach)
+
+    // First handshake never completes → the timeout schedules a reconnect that
+    // burns rung 0.
+    await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(10_000) // rung 0 (1000ms) fires → fresh socket
+    expect(mh.reconnectAttempt).toBe(1) // advanced past rung 0
+
+    // The reconnect socket opens but again never authenticates → its handshake
+    // also times out and burns rung 1.
+    const second = MockWebSocket.instances[MockWebSocket.instances.length - 1]!
+    second.readyState = 1
+    second.onopen?.()
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(HANDSHAKE_TIMEOUT_MS)
+    await vi.advanceTimersByTimeAsync(10_000) // rung 1 (2000ms) fires
+    expect(mh.reconnectAttempt).toBe(2) // climbed again on a handshake-timeout reconnect
+  })
+
+  // (4) No fake timer survives a user-initiated disconnect() — the handshake
+  //     timer, the heartbeat interval, and the pong-timeout are all cleared, so
+  //     nothing leaks into the next test.
+  it('leaves no pending timer after disconnect()', async () => {
+    const ws = await openConnected()
+    // Authenticate so the heartbeat interval is also live (the richest timer set:
+    // handshake cleared by auth_ok, heartbeat interval armed, pong-timeout armed
+    // after a ping).
+    ws.onmessage?.({ data: JSON.stringify({ type: 'auth_ok', serverMode: 'cli' }) })
+    await vi.advanceTimersByTimeAsync(0)
+    await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS) // arm the pong-timeout too
+    expect(vi.getTimerCount()).toBeGreaterThan(0) // timers live pre-disconnect
+
+    useConnectionStore.getState().disconnect()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(vi.getTimerCount()).toBe(0) // every timer cleared — no leak
   })
 })
