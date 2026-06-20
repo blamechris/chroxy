@@ -926,6 +926,19 @@ export const ContainersStatusRequestSchema = z.object({
     type: z.literal('containers_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #6139 (epic #5530): the dashboard's Control Room "Repo Runtime Config" tab
+// asks the server to survey, per managed repo, what governs its container
+// runtimes (devcontainer/compose config presence, the image it would run + the
+// allowlist verdict) plus host-level defaults (effective backend, isolation
+// order, effective image allowlist). Read-only — the server resolves the same
+// repo set as host_status_request and replies with one
+// repo_runtime_config_snapshot (see server.ts). Pull-on-Refresh, like the
+// sibling surveys. The optional requestId lets the dashboard correlate the
+// reply to a Refresh click.
+export const RepoRuntimeConfigRequestSchema = z.object({
+    type: z.literal('repo_runtime_config_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1117,6 +1130,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     HostStatusRequestSchema,
     RunnerStatusRequestSchema,
     ContainersStatusRequestSchema,
+    RepoRuntimeConfigRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     MailboxStatusRequestSchema,

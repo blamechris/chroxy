@@ -35,6 +35,7 @@ import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-
 import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 import { surveyContainers } from '../control-room/containers.js'
+import { surveyRepoRuntimeConfig } from '../control-room/repo-runtime-config.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -53,6 +54,8 @@ const integrationInFlight = new WeakSet()
 const skillsInventoryInFlight = new WeakSet()
 // #6133: same again for the containers & environments survey — independent of all above.
 const containersInFlight = new WeakSet()
+// #6139: same again for the per-repo runtime config survey — independent of all above.
+const repoRuntimeConfigInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -330,6 +333,93 @@ async function handleContainersStatusRequest(ws, client, msg, ctx) {
     }))
   } finally {
     containersInFlight.delete(client)
+  }
+}
+
+/**
+ * #6139 — `repo_runtime_config_snapshot` error reply. Like the containers
+ * survey, this uses a flat shape (no shared `root`/`repos` envelope), so it
+ * builds its own degraded snapshot: empty repos + zeroed summary + safe
+ * defaults for the host-level fields + the typed `error`.
+ */
+function repoRuntimeConfigErrorSnapshot(requestId, error) {
+  return {
+    type: 'repo_runtime_config_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    backend: 'docker',
+    backendSource: 'default',
+    isolation: 'worktree-before-docker',
+    allowlist: { source: 'default', patterns: [] },
+    repos: [],
+    summary: { total: 0, withDevcontainer: 0, withCompose: 0, imagesDenied: 0, errored: 0 },
+    error,
+  }
+}
+
+/**
+ * #6139 (epic #5530) — per-repo runtime config survey handler. Read-only. Same
+ * authority + in-flight + degraded-reply contract as the sibling surveys: it
+ * exposes host-wide runtime metadata (the resolved repo set + the host's
+ * backend/allowlist defaults), so it's served only to host-level (unbound)
+ * clients, one survey per client at a time.
+ */
+async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+
+  // Authority gate: a host-wide runtime-config survey is for host-level clients.
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'repo_runtime_config_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+
+  if (repoRuntimeConfigInFlight.has(client)) {
+    ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A repo runtime config survey is already in progress for this client',
+    }))
+    return
+  }
+
+  const config = ctx?.services?.config || {}
+  // Same repo-set resolution as host_status_request: configured root else the
+  // default, config.repos plus auto-discovered git repos.
+  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+    ? config.controlRoomRoot
+    : DEFAULT_CONTROL_ROOM_ROOT
+  const repos = Array.isArray(config.repos) ? config.repos : []
+
+  // Tests inject `ctx.resolveRepoSet` / `ctx.surveyRepoRuntimeConfig` to stub
+  // the filesystem + devcontainer-parse touches.
+  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+  const surveyFn = typeof ctx?.surveyRepoRuntimeConfig === 'function' ? ctx.surveyRepoRuntimeConfig : surveyRepoRuntimeConfig
+
+  repoRuntimeConfigInFlight.add(client)
+  try {
+    const repoSet = resolveFn({ repos, root })
+    const snapshot = await surveyFn({ repoSet, config })
+    ctx.transport.send(ws, {
+      type: 'repo_runtime_config_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      backend: snapshot.backend,
+      backendSource: snapshot.backendSource,
+      isolation: snapshot.isolation,
+      allowlist: snapshot.allowlist,
+      repos: snapshot.repos,
+      summary: snapshot.summary,
+    })
+  } catch (err) {
+    log.warn(`repo_runtime_config_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'repo runtime config survey failed',
+    }))
+  } finally {
+    repoRuntimeConfigInFlight.delete(client)
   }
 }
 
@@ -961,6 +1051,7 @@ export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
   containers_status_request: handleContainersStatusRequest,
+  repo_runtime_config_request: handleRepoRuntimeConfigRequest,
   containers_action: handleContainersAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
