@@ -1548,40 +1548,11 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
     return
   }
 
-  // Survey membership gate (#2): re-survey and validate the target server-side.
-  const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
-  let snapshot
-  try {
-    snapshot = await surveyFn({})
-  } catch (err) {
-    simulatorActionError(ws, ctx, msg, 'survey-failed',
-      err && err.message ? err.message : 'simulator survey failed')
-    return
-  }
-  if (!snapshot?.available) {
-    simulatorActionError(ws, ctx, msg, 'unavailable',
-      snapshot?.note || 'iOS simulators are not available on this host')
-    return
-  }
-  const device = (Array.isArray(snapshot.devices) ? snapshot.devices : []).find((d) => d.udid === udid) || null
-  if (!device) {
-    simulatorActionError(ws, ctx, msg, 'unknown-device',
-      `udid does not name a surveyed simulator: ${udid}`)
-    return
-  }
-  // State gate: boot a non-booted device, shutdown a booted one.
-  if (action === 'boot' && device.state === 'Booted') {
-    simulatorActionError(ws, ctx, msg, 'already-booted',
-      `Simulator ${device.name} is already booted`)
-    return
-  }
-  if (action === 'shutdown' && device.state !== 'Booted') {
-    simulatorActionError(ws, ctx, msg, 'not-booted',
-      `Simulator ${device.name} is not booted (state: ${device.state})`)
-    return
-  }
-
-  // Per-udid overlap guard, then the global cap (reject, never queue).
+  // Concurrency guard BEFORE the expensive survey: fast-reject a duplicate
+  // same-udid request (or a host-busy one) WITHOUT shelling out to simctl + port
+  // probes. The `.has()` check and the `.set()` below are synchronous-adjacent
+  // (no await between them), so the guard stays race-free. Mirrors the host-prune
+  // handler, which guards in-flight before its survey-bearing run.
   if (simulatorActionInFlight.has(udid)) {
     simulatorActionError(ws, ctx, msg, 'action-in-progress',
       `A simulator action (${simulatorActionInFlight.get(udid)}) is already in progress for ${udid}`)
@@ -1593,9 +1564,42 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
     return
   }
 
+  const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
   const runFn = typeof ctx?.runSimulatorAction === 'function' ? ctx.runSimulatorAction : runSimulatorAction
   simulatorActionInFlight.set(udid, action)
   try {
+    // Survey membership gate (#2): re-survey and validate the target server-side.
+    let snapshot
+    try {
+      snapshot = await surveyFn({})
+    } catch (err) {
+      simulatorActionError(ws, ctx, msg, 'survey-failed',
+        err && err.message ? err.message : 'simulator survey failed')
+      return
+    }
+    if (!snapshot?.available) {
+      simulatorActionError(ws, ctx, msg, 'unavailable',
+        snapshot?.note || 'iOS simulators are not available on this host')
+      return
+    }
+    const device = (Array.isArray(snapshot.devices) ? snapshot.devices : []).find((d) => d.udid === udid) || null
+    if (!device) {
+      simulatorActionError(ws, ctx, msg, 'unknown-device',
+        `udid does not name a surveyed simulator: ${udid}`)
+      return
+    }
+    // State gate: boot a non-booted device, shutdown a booted one.
+    if (action === 'boot' && device.state === 'Booted') {
+      simulatorActionError(ws, ctx, msg, 'already-booted',
+        `Simulator ${device.name} is already booted`)
+      return
+    }
+    if (action === 'shutdown' && device.state !== 'Booted') {
+      simulatorActionError(ws, ctx, msg, 'not-booted',
+        `Simulator ${device.name} is not booted (state: ${device.state})`)
+      return
+    }
+
     // Pass the server-trusted, survey-validated udid (not the raw client string)
     // to the exec — makes the trust boundary self-evident at the call site and
     // survives any future loosening of the `.find` match predicate above.

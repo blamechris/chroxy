@@ -1664,13 +1664,16 @@ describe('simulator_action handler (#6136 slice 2)', () => {
     assert.match(payload.message, /boot blew up/)
   })
 
-  it('serializes concurrent actions on the same udid (rejects, never queues)', async () => {
+  it('serializes concurrent actions on the same udid (rejects, never queues) and fast-rejects without re-surveying', async () => {
     let release
     const gate = new Promise(r => { release = r })
     ctx = makeSimActionCtx({ runSimulatorAction: createSpy(async () => { await gate; return 'Booted' }) })
     const first = controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'a' }, ctx)
     await controlRoomHandlers.simulator_action(ws, client, { type: 'simulator_action', action: 'boot', udid: 'U-SHUT', requestId: 'b' }, ctx)
     assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].reason, 'action-in-progress')
+    // The duplicate must be rejected by the in-flight guard BEFORE the expensive
+    // survey — only the first request shells out to simctl (Copilot #6158).
+    assert.equal(ctx.surveySimulators.callCount, 1)
     release(); await first
   })
 
