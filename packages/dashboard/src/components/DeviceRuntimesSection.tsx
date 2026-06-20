@@ -15,8 +15,8 @@
  */
 import { useEffect } from 'react'
 import { useConnectionStore } from '../store/connection'
-import type { ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage } from '@chroxy/protocol'
-import type { SimulatorActionResult, EmulatorActionResult } from '../store/types'
+import type { ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage } from '@chroxy/protocol'
+import type { SimulatorActionResult, EmulatorActionResult, WslActionResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
 
 type SimAction = 'boot' | 'shutdown'
@@ -236,7 +236,215 @@ export function DeviceRuntimesSection({
       )}
     </div>
     <AndroidEmulatorPanel now={now} />
+    <WslPanel now={now} />
     </>
+  )
+}
+
+function WslActionFeedback({ distro, pending, result }: { distro: string; pending: boolean; result: WslActionResult | undefined }) {
+  if (pending) return <span className="cr-dim" data-testid={`wsl-pending-${distro}`}>Working…</span>
+  if (!result) return null
+  if (result.error) return <span className="cr-bad" data-testid={`wsl-error-${distro}`} role="alert">{result.error}</span>
+  return <span className="cr-ok" data-testid={`wsl-ok-${distro}`}>{result.note ?? 'done'}</span>
+}
+
+export interface WslPanelProps {
+  snapshot?: ServerWslStatusSnapshotMessage | null
+  loading?: boolean
+  connected?: boolean
+  onRefresh?: () => void
+  actioningIds?: Set<string>
+  actionResults?: Record<string, WslActionResult>
+  onAction?: (action: 'start' | 'terminate', distro: string) => void
+  now?: () => number
+}
+
+/**
+ * #6138 — the WSL2 half of the Device runtimes tab. Windows-host-only: off
+ * Windows / no wsl.exe the survey returns `available:false` and the panel shows
+ * just a note. Mirrors the sibling panels' chrome (eyebrow + Refresh +
+ * generated-ago + empty state), but there's no "Ready for Maestro" verdict — WSL
+ * is a host runtime, not a Maestro target. Each distro row exposes a state-gated
+ * Start (a Stopped distro) / Terminate (a Running distro) button; the server
+ * re-surveys + re-validates the distro name (lookup key, never a trusted path)
+ * and state-gates the action. The tab's generic auto-fetch only covers the iOS
+ * survey, so this panel self-fetches the WSL survey once on connect.
+ */
+export function WslPanel({
+  snapshot: snapshotProp,
+  loading: loadingProp,
+  connected: connectedProp,
+  onRefresh: onRefreshProp,
+  actioningIds: actioningIdsProp,
+  actionResults: actionResultsProp,
+  onAction: onActionProp,
+  now = Date.now,
+}: WslPanelProps = {}) {
+  const storeSnapshot = useConnectionStore((s) => s.wslStatus)
+  const storeLoading = useConnectionStore((s) => s.wslStatusLoading)
+  const storeConnected = useConnectionStore((s) => s.connectionPhase === 'connected')
+  const requestWslStatus = useConnectionStore((s) => s.requestWslStatus)
+  const storeActioningIds = useConnectionStore((s) => s.wslActioningIds)
+  const storeActionResults = useConnectionStore((s) => s.wslActionResults)
+  const sendWslAction = useConnectionStore((s) => s.sendWslAction)
+
+  const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
+  const loading = loadingProp !== undefined ? loadingProp : storeLoading
+  const connected = connectedProp !== undefined ? connectedProp : storeConnected
+  const onRefresh = onRefreshProp ?? requestWslStatus
+  const actioningIds = actioningIdsProp ?? storeActioningIds
+  const actionResults = actionResultsProp ?? storeActionResults
+  const onAction = onActionProp ?? sendWslAction
+
+  // The tab's generic auto-fetch only requests the iOS survey, so kick the WSL
+  // survey once when we first connect with no snapshot yet (same pattern as the
+  // Android panel). A no-op when driven by props in tests.
+  useEffect(() => {
+    if (snapshotProp === undefined && storeConnected && storeSnapshot === null && !storeLoading) {
+      requestWslStatus()
+    }
+  }, [snapshotProp, storeConnected, storeSnapshot, storeLoading, requestWslStatus])
+
+  const refreshDisabled = loading || !connected
+  const handleRefresh = () => {
+    if (refreshDisabled) return
+    onRefresh()
+  }
+
+  const generatedAtMs = snapshot ? Date.parse(snapshot.generatedAt) : NaN
+
+  return (
+    <div className="cr-section" data-testid="wsl-section">
+      <header className="cr-header">
+        <div className="cr-eyebrow" data-testid="wsl-eyebrow">
+          host · wsl2 distros{snapshot ? ` · ${isoDate(snapshot.generatedAt)}` : ''}
+        </div>
+        <div className="cr-titlerow">
+          <h2 className="cr-title">WSL2 distros</h2>
+          <button
+            type="button"
+            className="cr-refresh"
+            data-testid="wsl-refresh"
+            onClick={handleRefresh}
+            disabled={refreshDisabled}
+            aria-busy={loading}
+            title={connected ? undefined : 'Not connected — reconnect to run the survey'}
+          >
+            {loading ? 'Refreshing…' : 'Refresh'}
+          </button>
+        </div>
+        {snapshot?.error && (
+          <p className="cr-callout cr-callout-bad" data-testid="wsl-error" role="alert">
+            <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
+          </p>
+        )}
+        {snapshot && !snapshot.available && (
+          <p className="cr-callout" data-testid="wsl-unavailable">
+            {snapshot.note || 'WSL is not available on this host.'}
+          </p>
+        )}
+        {snapshot && !Number.isNaN(generatedAtMs) && (
+          <p className="cr-generated" data-testid="wsl-generated">
+            {formatGeneratedAgo(generatedAtMs, now())}
+          </p>
+        )}
+      </header>
+
+      {!snapshot && (
+        <div className="cr-empty" data-testid="wsl-empty">
+          {loading ? (
+            <span>Running the WSL survey…</span>
+          ) : (
+            <>
+              <p>No WSL survey yet.</p>
+              <button
+                type="button"
+                className="cr-refresh"
+                data-testid="wsl-empty-refresh"
+                onClick={handleRefresh}
+                disabled={!connected}
+                title={connected ? undefined : 'Not connected — reconnect to run the survey'}
+              >
+                Run survey
+              </button>
+              {!connected && (
+                <p className="cr-dim" data-testid="wsl-not-connected">Not connected to the server.</p>
+              )}
+            </>
+          )}
+        </div>
+      )}
+
+      {snapshot?.available && (
+        snapshot.distros.length === 0 ? (
+          <p className="cr-dim" data-testid="wsl-no-distros">
+            No WSL distros are installed on this host.
+          </p>
+        ) : (
+          <section className="cr-table-wrap">
+            <table className="cr-table" data-testid="wsl-table">
+              <thead>
+                <tr><th>Distro</th><th>Version</th><th>State</th><th>Action</th></tr>
+              </thead>
+              <tbody>
+                {snapshot.distros.map((d) => {
+                  const isRunning = d.state === 'Running'
+                  const isStopped = d.state === 'Stopped'
+                  const pending = actioningIds.has(d.name)
+                  return (
+                    <tr key={d.name} data-testid={`wsl-row-${d.name}`}>
+                      <td>
+                        <b data-testid={`wsl-name-${d.name}`}>{d.name}</b>{' '}
+                        {d.isDefault && (
+                          <span className="cr-tag cr-tag-ok" data-testid={`wsl-default-${d.name}`}>default</span>
+                        )}
+                      </td>
+                      <td className="cr-dim" data-testid={`wsl-version-${d.name}`}>
+                        {d.version === null ? '—' : `WSL ${d.version}`}
+                      </td>
+                      <td>
+                        <span
+                          className={`cr-tag ${isRunning ? 'cr-tag-ok' : 'cr-tag-dim'}`}
+                          data-testid={`wsl-state-${d.name}`}
+                        >
+                          {d.state}
+                        </span>
+                      </td>
+                      <td data-testid={`wsl-actions-${d.name}`}>
+                        {isRunning ? (
+                          <button
+                            type="button"
+                            className="cr-action"
+                            data-testid={`wsl-terminate-${d.name}`}
+                            disabled={pending || !connected}
+                            onClick={() => onAction('terminate', d.name)}
+                            title="Terminate this distro"
+                          >
+                            Terminate
+                          </button>
+                        ) : (
+                          <button
+                            type="button"
+                            className="cr-action"
+                            data-testid={`wsl-start-${d.name}`}
+                            disabled={pending || !connected || !isStopped}
+                            onClick={() => onAction('start', d.name)}
+                            title={isStopped ? 'Start this distro' : `Cannot start (state: ${d.state})`}
+                          >
+                            Start
+                          </button>
+                        )}{' '}
+                        <WslActionFeedback distro={d.name} pending={pending} result={actionResults[d.name]} />
+                      </td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </section>
+        )
+      )}
+    </div>
   )
 }
 

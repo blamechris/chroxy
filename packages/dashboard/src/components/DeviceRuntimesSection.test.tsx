@@ -31,10 +31,17 @@ vi.mock('../store/connection', () => ({
       emulatorActioningIds: new Set<string>(),
       emulatorActionResults: {},
       sendEmulatorAction: () => false,
+      // #6138: the WSL panel reads these (rendered by DeviceRuntimesSection).
+      wslStatus: null,
+      wslStatusLoading: false,
+      requestWslStatus: () => false,
+      wslActioningIds: new Set<string>(),
+      wslActionResults: {},
+      sendWslAction: () => false,
     }),
 }))
-import { DeviceRuntimesSection, AndroidEmulatorPanel } from './DeviceRuntimesSection'
-import type { ServerEmulatorStatusSnapshotMessage } from '@chroxy/protocol'
+import { DeviceRuntimesSection, AndroidEmulatorPanel, WslPanel } from './DeviceRuntimesSection'
+import type { ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage } from '@chroxy/protocol'
 
 afterEach(cleanup)
 
@@ -267,5 +274,100 @@ describe('AndroidEmulatorPanel (#6137)', () => {
     render(<AndroidEmulatorPanel snapshot={emuSnapshot({ devices: [{ avd: 'Pixel_7_API_34', serial: null, state: 'starting' }], readyForMaestro: { ready: false, runningDevice: null, metroReachable: true, mockServerReachable: true, reasons: ['No running emulator'] } })} loading={false} connected={true} onRefresh={() => {}} />)
     expect(screen.getByTestId('emulator-row-Pixel_7_API_34')).toBeTruthy()
     expect((screen.getByTestId('emulator-kill-Pixel_7_API_34') as HTMLButtonElement).disabled).toBe(true)
+  })
+})
+
+function wslSnapshot(over: Partial<ServerWslStatusSnapshotMessage> = {}): ServerWslStatusSnapshotMessage {
+  return {
+    type: 'wsl_status_snapshot',
+    generatedAt: '2026-06-20T12:00:00.000Z',
+    available: true,
+    note: null,
+    defaultDistro: 'Ubuntu',
+    distros: [
+      { name: 'Ubuntu', state: 'Running', version: 2, isDefault: true },
+      { name: 'Debian', state: 'Stopped', version: 2, isDefault: false },
+    ],
+    ...over,
+  } as ServerWslStatusSnapshotMessage
+}
+
+describe('WslPanel (#6138)', () => {
+  it('renders the empty state with a Run-survey button when no snapshot', () => {
+    render(<WslPanel snapshot={null} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('wsl-empty')).toBeTruthy()
+    expect(screen.queryByTestId('wsl-table')).toBeNull()
+  })
+
+  it('renders the unavailable note (off Windows) and no table', () => {
+    render(
+      <WslPanel
+        snapshot={wslSnapshot({ available: false, note: 'WSL is only available on Windows hosts.', defaultDistro: null, distros: [] })}
+        loading={false} connected={true} onRefresh={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('wsl-unavailable').textContent).toContain('Windows')
+    expect(screen.queryByTestId('wsl-table')).toBeNull()
+  })
+
+  it('renders state-aware Terminate (Running) + Start (Stopped) buttons and the default marker', () => {
+    render(<WslPanel snapshot={wslSnapshot()} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('wsl-terminate-Ubuntu')).toBeTruthy()
+    expect(screen.getByTestId('wsl-start-Debian')).toBeTruthy()
+    expect(screen.getByTestId('wsl-default-Ubuntu')).toBeTruthy()
+    expect(screen.queryByTestId('wsl-default-Debian')).toBeNull()
+    expect(screen.getByTestId('wsl-version-Ubuntu').textContent).toContain('WSL 2')
+  })
+
+  it('start routes to onAction(start, name); terminate routes to onAction(terminate, name)', () => {
+    const onAction = vi.fn()
+    render(<WslPanel snapshot={wslSnapshot()} loading={false} connected={true} onRefresh={() => {}} onAction={onAction} />)
+    fireEvent.click(screen.getByTestId('wsl-start-Debian'))
+    expect(onAction).toHaveBeenCalledWith('start', 'Debian')
+    fireEvent.click(screen.getByTestId('wsl-terminate-Ubuntu'))
+    expect(onAction).toHaveBeenCalledWith('terminate', 'Ubuntu')
+  })
+
+  it('a transitional-state distro (Installing) shows a disabled Start (cannot start non-Stopped)', () => {
+    render(<WslPanel snapshot={wslSnapshot({ distros: [{ name: 'Ubuntu', state: 'Installing', version: 2, isDefault: true }] })} loading={false} connected={true} onRefresh={() => {}} />)
+    expect((screen.getByTestId('wsl-start-Ubuntu') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('wsl-state-Ubuntu').textContent).toBe('Installing')
+  })
+
+  it('disables the actioning row per-target, leaving others enabled', () => {
+    render(<WslPanel snapshot={wslSnapshot()} loading={false} connected={true} onRefresh={() => {}} actioningIds={new Set(['Ubuntu'])} actionResults={{}} />)
+    expect((screen.getByTestId('wsl-terminate-Ubuntu') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('wsl-pending-Ubuntu')).toBeTruthy()
+    expect((screen.getByTestId('wsl-start-Debian') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('shows a settled note after an action resolves', () => {
+    render(<WslPanel snapshot={wslSnapshot()} loading={false} connected={true} onRefresh={() => {}} actioningIds={new Set<string>()} actionResults={{ Ubuntu: { action: 'terminate', note: 'Terminated', error: null, at: 1 } }} />)
+    expect(screen.getByTestId('wsl-ok-Ubuntu').textContent).toContain('Terminated')
+  })
+
+  it('shows an error note after a failed action', () => {
+    render(<WslPanel snapshot={wslSnapshot()} loading={false} connected={true} onRefresh={() => {}} actioningIds={new Set<string>()} actionResults={{ Debian: { action: 'start', note: null, error: 'wsl.exe ENOENT', at: 1 } }} />)
+    expect(screen.getByTestId('wsl-error-Debian').textContent).toContain('ENOENT')
+  })
+
+  it('Refresh dispatches and is disabled while loading', () => {
+    const onRefresh = vi.fn()
+    const { rerender } = render(<WslPanel snapshot={wslSnapshot()} loading={false} connected={true} onRefresh={onRefresh} />)
+    fireEvent.click(screen.getByTestId('wsl-refresh'))
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    rerender(<WslPanel snapshot={wslSnapshot()} loading={true} connected={true} onRefresh={onRefresh} />)
+    expect((screen.getByTestId('wsl-refresh') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('renders a no-distros note when none are installed', () => {
+    render(<WslPanel snapshot={wslSnapshot({ defaultDistro: null, distros: [] })} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('wsl-no-distros')).toBeTruthy()
+    expect(screen.queryByTestId('wsl-table')).toBeNull()
+  })
+
+  it('renders a null version as an em dash', () => {
+    render(<WslPanel snapshot={wslSnapshot({ distros: [{ name: 'Ubuntu', state: 'Stopped', version: null, isDefault: true }] })} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('wsl-version-Ubuntu').textContent).toBe('—')
   })
 })

@@ -553,6 +553,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #6137: emulator action — in-flight targets (avd/serial) + last outcome.
   emulatorActioningIds: new Set<string>(),
   emulatorActionResults: {},
+  // #6138: Control Room WSL2 distro snapshot, fed by the wsl_status_snapshot
+  // handler. Null until the first survey lands.
+  wslStatus: null,
+  wslStatusLoading: false,
+  // #6138: WSL action — in-flight distro names + last outcome per distro.
+  wslActioningIds: new Set<string>(),
+  wslActionResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1112,6 +1119,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #6138 (epic #5530): request a WSL2 distro survey. Mirrors
+  // requestEmulatorStatus — flips wslStatusLoading and sends a
+  // wsl_status_request; the reply is a single wsl_status_snapshot handled into
+  // wslStatus. Returns false (and does NOT set loading) when the socket is
+  // closed.
+  requestWslStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ wslStatusLoading: true });
+      wsSend(socket, { type: 'wsl_status_request' });
+      return true;
+    }
+    return false;
+  },
+
   // #5499 (epic #5498): request an Integrations survey. Mirrors
   // requestRunnerStatus — flips integrationStatusLoading and sends an
   // integration_status_request; the reply is a single
@@ -1317,6 +1339,26 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       msg.serial = opts.serial;
     }
     wsSend(socket, msg);
+    return true;
+  },
+
+  // #6138 (epic #5530): start / terminate a WSL2 distro. The pending/result
+  // state is keyed by the distro name. Same wire-or-nothing contract as the
+  // sibling actions. Non-destructive (no data loss) → no confirm. The server
+  // re-surveys + re-validates the distro and state-gates it (start requires
+  // Stopped, terminate requires Running).
+  sendWslAction: (action: 'start' | 'terminate', distro: string): boolean => {
+    const { socket } = get();
+    if (action !== 'start' && action !== 'terminate') return false;
+    if (!distro) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `wsl-action-${nextMessageId()}`;
+    const pending = new Set(get().wslActioningIds);
+    pending.add(distro);
+    const results = { ...get().wslActionResults };
+    delete results[distro];
+    set({ wslActioningIds: pending, wslActionResults: results });
+    wsSend(socket, { type: 'wsl_action', action, distro, requestId });
     return true;
   },
 
@@ -2122,6 +2164,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().emulatorActioningIds.size > 0) {
         set({ emulatorActioningIds: new Set<string>() });
       }
+      // #6138: ditto for in-flight WSL distro actions.
+      if (get().wslActioningIds.size > 0) {
+        set({ wslActioningIds: new Set<string>() });
+      }
       // #6153: reset every Control Room survey *Loading flag that's still true on
       // a socket drop. Each survey section computes refreshDisabled = loading ||
       // !connected, so a refresh in flight when the socket dies would leave
@@ -2133,7 +2179,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const surveyLoadingKeys = [
         'hostStatusLoading', 'runnerStatusLoading', 'containersStatusLoading',
         'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
-        'simulatorStatusLoading', 'emulatorStatusLoading', 'integrationStatusLoading',
+        'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
         'skillsInventoryLoading', 'mailboxStatusLoading',
       ] as const;
       const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
@@ -2429,6 +2475,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6137: emulator action pending/result state goes with it.
       emulatorActioningIds: new Set<string>(),
       emulatorActionResults: {},
+      // #6138: WSL distro action pending/result state goes with it.
+      wslActioningIds: new Set<string>(),
+      wslActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -2481,6 +2530,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6137: emulator action pending/result state goes with it.
       emulatorActioningIds: new Set<string>(),
       emulatorActionResults: {},
+      // #6138: WSL distro action pending/result state goes with it.
+      wslActioningIds: new Set<string>(),
+      wslActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,

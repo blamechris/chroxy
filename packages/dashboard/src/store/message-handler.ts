@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2647,6 +2647,18 @@ function handleEmulatorStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet
 }
 
 /**
+ * #6138 (epic #5530) — WSL2 distro survey `wsl_status_snapshot`: REPLACE the
+ * stored snapshot and clear the loading flag. Same defensive, full-replace,
+ * clear-loading-only-on-valid-parse contract as the iOS/Android siblings.
+ * `available:false` (off Windows / no wsl.exe) is a valid snapshot, not an error.
+ */
+function handleWslStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerWslStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ wslStatus: parsed.data, wslStatusLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2953,6 +2965,44 @@ function handleEmulatorActionAck(msg: Record<string, unknown>, get: MsgGet, set:
 }
 
 /**
+ * #6138 (epic #5530) — resolve one WSL distro action target's pending state: drop
+ * the distro name from `wslActioningIds` and record the outcome in
+ * `wslActionResults`. Shared by the ack and the WSL_ACTION_FAILED session_error.
+ */
+function resolveWslAction(
+  get: MsgGet,
+  set: MsgSet,
+  distro: string,
+  result: { action: string; note: string | null; error: string | null },
+): void {
+  const pending = new Set(get().wslActioningIds);
+  pending.delete(distro);
+  set({
+    wslActioningIds: pending,
+    wslActionResults: { ...get().wslActionResults, [distro]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #6138 — WSL action success ack: builds a human note ("Started" after a start,
+ * "Terminated" after a terminate) and clears the distro's pending state. The
+ * target id is the echoed distro name. A malformed ack is dropped (Zod) so the
+ * row keeps its honest pending state.
+ */
+function handleWslActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerWslActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { action, distro, status } = parsed.data;
+  if (!distro) return;
+  // Append the echoed status only when it adds information — the happy path
+  // (start → "running", terminate → "stopped") is implied by the action.
+  const implied = action === 'start' ? 'running' : 'stopped';
+  const base = action === 'start' ? 'Started' : 'Terminated';
+  const note = status && status !== implied ? `${base} (${status})` : base;
+  resolveWslAction(get, set, distro, { action, note, error: null });
+}
+
+/**
  * #5547: a `summarize_session_result` resolves the pending summarize promise
  * (keyed by the echoed requestId) so the awaiting create-session flow opens
  * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
@@ -3075,6 +3125,8 @@ const HANDLERS: Record<string, Handler> = {
   simulator_status_snapshot: handleSimulatorStatusSnapshot,
   // #6137 (epic #5530): Control Room Android emulator survey snapshot.
   emulator_status_snapshot: handleEmulatorStatusSnapshot,
+  // #6138 (epic #5530): Control Room WSL2 distro survey snapshot.
+  wsl_status_snapshot: handleWslStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,
@@ -3095,6 +3147,9 @@ const HANDLERS: Record<string, Handler> = {
   // #6137 (epic #5530): positive ack correlating an emulator_action (boot /
   // kill) request to its outcome.
   emulator_action_ack: handleEmulatorActionAck,
+  // #6138 (epic #5530): positive ack correlating a wsl_action (start /
+  // terminate) request to its outcome.
+  wsl_action_ack: handleWslActionAck,
   // #5547: one-shot session-summary result; resolves the pending summarize
   // promise so the create-session flow can open with the brief seeded.
   summarize_session_result: handleSummarizeSessionResult,
@@ -3857,6 +3912,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             error: parsed.message || 'Emulator action failed.',
           });
         }
+      } else if (parsed.code === 'WSL_ACTION_FAILED' && typeof msg.distro === 'string') {
+        // #6138: a failed wsl_action echoes the exact distro (+ action) — clear
+        // that distro's pending state and surface the reason inline (the generic
+        // branch below still raises the toast, matching the precedents).
+        resolveWslAction(get, set, msg.distro, {
+          action: typeof msg.action === 'string' ? msg.action : '',
+          note: null,
+          error: parsed.message || 'WSL action failed.',
+        });
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;
