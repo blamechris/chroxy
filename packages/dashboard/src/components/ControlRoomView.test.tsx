@@ -37,6 +37,9 @@ function resetStore(over: Record<string, unknown> = {}) {
     requestHostStatus: requestHostStatusMock,
     requestRunnerStatus: requestRunnerStatusMock,
     requestIntegrationStatus: requestIntegrationStatusMock,
+    // #6183: the mission-control tab's wrapper reads these from the store.
+    sessions: [],
+    activity: { bySession: {} },
     ...over,
   }
 }
@@ -73,8 +76,13 @@ vi.mock('./SettingsPanel', () => ({
     </div>
   ),
 }))
+// #6183: stub the (store-backed) mission-control view so the tab-shell test stays
+// focused on routing (the descriptor↔render-branch wiring), not the aggregate.
+vi.mock('./CrossSessionMissionControl', () => ({
+  CrossSessionMissionControl: () => <div data-testid="stub-mission-control">mission-control</div>,
+}))
 
-import { ControlRoomView, CONTROL_ROOM_STALENESS_MS } from './ControlRoomView'
+import { ControlRoomView, CONTROL_ROOM_STALENESS_MS, CONTROL_ROOM_TABS } from './ControlRoomView'
 
 const KEY = 'chroxy_cr_tab'
 
@@ -111,6 +119,28 @@ describe('ControlRoomView', () => {
     expect(screen.queryByTestId('stub-repos')).toBeNull()
     expect(screen.getByTestId('cr-tab-runners').getAttribute('aria-selected')).toBe('true')
     expect(localStorage.getItem(KEY)).toBe('runners')
+  })
+
+  it('switches to the mission-control section when its tab is clicked, and persists it (#6183)', () => {
+    render(<ControlRoomView />)
+    fireEvent.click(screen.getByTestId('cr-tab-mission-control'))
+    expect(screen.getByTestId('stub-mission-control')).toBeTruthy()
+    expect(screen.queryByTestId('stub-repos')).toBeNull()
+    expect(screen.getByTestId('cr-tab-mission-control').getAttribute('aria-selected')).toBe('true')
+    expect(localStorage.getItem(KEY)).toBe('mission-control')
+  })
+
+  it('exposes a tab for every CONTROL_ROOM_TABS descriptor (no deep-linkable-but-missing tab)', () => {
+    // #6183 review: lightweight guard against descriptor drift — every descriptor
+    // must surface a clickable tab button. (A full render-each-panel loop isn't
+    // feasible here: the unmocked survey sections need store fields the minimal
+    // mock omits; the per-tab routing is covered by the targeted tab tests above
+    // + the mission-control test, and ControlRoomView.registry.test.ts covers the
+    // derived-set consistency.)
+    render(<ControlRoomView />)
+    for (const t of CONTROL_ROOM_TABS) {
+      expect(screen.getByTestId(`cr-tab-${t.key}`)).toBeTruthy()
+    }
   })
 
   it('switches to the integrations section when its tab is clicked, and persists it', () => {
