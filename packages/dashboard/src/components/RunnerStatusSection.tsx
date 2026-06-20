@@ -225,6 +225,11 @@ export function RunnerStatusSection({
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
+        {snapshot?.error && (
+          <p className="cr-callout cr-callout-bad" data-testid="runner-error" role="alert">
+            <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
+          </p>
+        )}
         {snapshot && (
           <p className="cr-sub" data-testid="runner-sub">
             {runnerCount} runner{runnerCount === 1 ? '' : 's'} across {snapshot.repos.length} project

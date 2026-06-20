@@ -175,6 +175,18 @@ describe('ControlRoomSection (#5175)', () => {
     expect(screen.getByTestId('cr-callout')).toHaveTextContent('How to read the verdict')
   })
 
+  // #6144: a degraded survey (forbidden / failed / in-progress) carries an
+  // additive `error` annotation — render it as an alert banner, not as an
+  // empty survey.
+  it('renders a degraded-survey error banner (role=alert)', () => {
+    const snap = makeSnapshot({ repos: [], summary: { live: 0, onboarded: 0, abandoned: 0, investigate: 0, recent: 0 }, error: { code: 'SURVEY_FAILED', message: 'git ls-remote timed out' } })
+    render(<ControlRoomSection snapshot={snap} loading={false} onRefresh={() => {}} now={() => NOW} />)
+    const banner = screen.getByTestId('cr-error')
+    expect(banner.getAttribute('role')).toBe('alert')
+    expect(banner.textContent).toContain('SURVEY_FAILED')
+    expect(banner.textContent).toContain('git ls-remote timed out')
+  })
+
   it('renders one row per repo with a colour-coded verdict tag', () => {
     render(<ControlRoomSection snapshot={makeSnapshot()} loading={false} onRefresh={() => {}} now={() => NOW} />)
     expect(screen.getByTestId('cr-row-chroxy')).toBeTruthy()

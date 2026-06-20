@@ -188,6 +188,18 @@ describe('RunnerStatusSection — populated', () => {
     render(<RunnerStatusSection snapshot={snapshot({ repos: [], summary: { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 } })} loading={false} connected={true} onRefresh={() => {}} />)
     expect(screen.getByTestId('runner-no-repos')).toBeTruthy()
   })
+
+  // #6144: a degraded survey (forbidden / failed / in-progress) carries an
+  // additive `error` annotation — render it as an alert banner, not as an
+  // empty survey.
+  it('renders a degraded-survey error banner (role=alert)', () => {
+    const snap = snapshot({ repos: [], summary: { total: 0, busy: 0, idle: 0, offline: 0, stopped: 0, unregistered: 0 }, error: { code: 'FORBIDDEN', message: 'host-level authority required' } })
+    render(<RunnerStatusSection snapshot={snap} loading={false} connected={true} onRefresh={() => {}} />)
+    const banner = screen.getByTestId('runner-error')
+    expect(banner.getAttribute('role')).toBe('alert')
+    expect(banner.textContent).toContain('FORBIDDEN')
+    expect(banner.textContent).toContain('host-level authority required')
+  })
 })
 
 describe('RunnerStatusSection — refresh', () => {
