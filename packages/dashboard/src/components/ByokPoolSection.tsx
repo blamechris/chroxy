@@ -163,7 +163,9 @@ export function ByokPoolSection({
   // 'recycle', key }); null = dialog closed.
   const [confirm, setConfirm] = useState<{ action: 'drain' | 'recycle'; key?: string } | null>(null)
 
-  // Resize inputs are local until Apply; seeded from the current effective caps.
+  // Resize inputs are local until Apply. They start EMPTY (the current effective
+  // caps show as the input placeholders); an empty field is left unchanged on
+  // submit, so the operator only sends the caps they actually typed.
   const [maxPerKeyInput, setMaxPerKeyInput] = useState<string>('')
   const [maxTotalInput, setMaxTotalInput] = useState<string>('')
 
