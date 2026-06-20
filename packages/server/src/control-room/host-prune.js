@@ -4,10 +4,12 @@
  * Surfaces reclaimable HOST docker pressure scoped STRICTLY to chroxy's OWN
  * resources, so the Control Room can prune dangling chroxy artifacts (the
  * container analog of `chroxy worktree gc`) without ever touching a non-chroxy
- * workload. #6155: chroxy now stamps a `com.chroxy.managed=true` docker label on
- * every resource it creates (docker-backend `_startContainer` / `_commitContainer`),
- * and the survey identifies resources BY THAT LABEL first, falling back to the
- * legacy naming convention for resources created before the label existed:
+ * workload. #6155: chroxy stamps a `com.chroxy.managed=true` docker label on the
+ * resources it creates via `docker run` / `docker commit` (docker-backend
+ * `_startContainer` / `_commitContainer`), and the survey identifies resources BY
+ * THAT LABEL first, falling back to the legacy naming convention — which also
+ * covers compose-managed containers (`docker compose up`, project `chroxy-env-*`)
+ * that don't receive the CLI `--label`, and any resource created before the label:
  *   - containers: label `com.chroxy.managed=true`, else name prefix `chroxy-env-`
  *   - images:     label `com.chroxy.managed=true`, else repositories `chroxy-env`
  *                 and `chroxy-byok-snap` (BYOK pool snapshots)
@@ -218,32 +220,47 @@ export async function surveyHostPrune(opts = {}) {
     byokReadFailed = true
   }
 
-  // Stopped chroxy containers. A docker/daemon failure here means docker is
-  // unavailable → degrade the whole survey (no point probing images).
-  // #6155: identify by label first (robust), then the legacy `chroxy-env-*` name
-  // convention for containers created before the label existed. Union, dedup by id.
+  // Stopped chroxy containers. #6155: identify by label first (robust), then the
+  // legacy `chroxy-env-*` name convention (also covers compose-managed containers,
+  // which don't get the CLI label). Union, dedup by id.
+  //
+  // The LEGACY NAME query is the "is docker up" probe: if it throws, docker is
+  // unavailable → degrade the whole survey. The supplementary LABEL query
+  // soft-degrades (a note, keep the name results) — losing it can only *under*-
+  // prune, never over-prune, and the name query already finds every current
+  // chroxy container. (Mirrors the image-side handling below.)
   let containers
+  let containerNote = null
+  const statusFilters = ['--filter', 'status=exited', '--filter', 'status=created', '--filter', 'status=dead']
+  const psFmt = '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Size}}'
+  let byNameOut
   try {
-    const statusFilters = ['--filter', 'status=exited', '--filter', 'status=created', '--filter', 'status=dead']
-    const fmt = '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Size}}'
-    const byLabel = await _execFile('docker', [
-      'ps', '-a', '--size', '--filter', `label=${CHROXY_MANAGED_LABEL}=true`, ...statusFilters, '--format', fmt,
+    byNameOut = await _execFile('docker', [
+      'ps', '-a', '--size', '--filter', 'name=chroxy-env', ...statusFilters, '--format', psFmt,
     ], EXEC_OPTS)
-    const byName = await _execFile('docker', [
-      'ps', '-a', '--size', '--filter', 'name=chroxy-env', ...statusFilters, '--format', fmt,
-    ], EXEC_OPTS)
-    const seen = new Set()
-    containers = []
-    for (const c of [...parseContainerLines(byLabel.stdout, { trusted: true }), ...parseContainerLines(byName.stdout)]) {
-      if (seen.has(c.id)) continue
-      seen.add(c.id)
-      if (!isTrackedContainer(c.id, tracked)) containers.push(c)
-    }
   } catch (err) {
     return {
       ...base,
       dockerAvailable: false,
       note: `docker is unavailable — host prune survey skipped (${err && err.message ? err.message : 'exec failed'}).`,
+    }
+  }
+  let byLabelLines = []
+  try {
+    const byLabel = await _execFile('docker', [
+      'ps', '-a', '--size', '--filter', `label=${CHROXY_MANAGED_LABEL}=true`, ...statusFilters, '--format', psFmt,
+    ], EXEC_OPTS)
+    byLabelLines = parseContainerLines(byLabel.stdout, { trusted: true })
+  } catch (err) {
+    containerNote = `the labeled chroxy container set could not be listed (${err && err.message ? err.message : 'exec failed'}).`
+  }
+  {
+    const seen = new Set()
+    containers = []
+    for (const c of [...byLabelLines, ...parseContainerLines(byNameOut.stdout)]) {
+      if (seen.has(c.id)) continue
+      seen.add(c.id)
+      if (!isTrackedContainer(c.id, tracked)) containers.push(c)
     }
   }
 
@@ -289,7 +306,7 @@ export async function surveyHostPrune(opts = {}) {
   return {
     generatedAt: now.toISOString(),
     dockerAvailable: true,
-    note: imageNote,
+    note: [containerNote, imageNote].filter(Boolean).join(' ') || null,
     containers,
     images,
     summary: {

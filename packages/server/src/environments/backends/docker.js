@@ -6,12 +6,16 @@ const log = createLogger('docker-backend')
 const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 /**
- * #6155 — first-class docker labels stamped on every chroxy-created resource, so
+ * #6155 — first-class docker labels stamped on the chroxy resources created via
+ * `docker run` (`_startContainer`) and `docker commit` (`_commitContainer`), so
  * the Control Room host-prune survey can identify them by label (robust) with the
  * legacy name/tag convention (`chroxy-env-*` / `chroxy-env:` / `chroxy-byok-snap:`)
- * as a fallback for resources created before the label existed. `MANAGED` marks
- * ownership; `KIND` distinguishes a live env container from a committed snapshot
- * image. Kept here (the producer) and imported by `control-room/host-prune.js`.
+ * as a fallback. NOTE: compose-managed containers (`_composeUp` → `docker compose
+ * up`) do NOT receive these CLI `--label` flags — they're covered by the
+ * `chroxy-env-*` name fallback instead (their compose project is `chroxy-env-<id>`).
+ * `MANAGED` marks ownership; `KIND` distinguishes a live env container from a
+ * committed snapshot image. Kept here (the producer) and imported by
+ * `control-room/host-prune.js`.
  */
 export const CHROXY_MANAGED_LABEL = 'com.chroxy.managed'
 export const CHROXY_LABEL_KIND = 'com.chroxy.kind'

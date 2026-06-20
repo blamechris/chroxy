@@ -170,6 +170,36 @@ describe('surveyHostPrune()', () => {
     assert.deepEqual(snap.images.map((i) => i.id).sort(), ['limg', 'rimg'])
   })
 
+  it('soft-degrades when only the label container query fails; name results survive (#6155)', async () => {
+    // The legacy name query (the degrade probe) succeeds, but the supplementary
+    // label query throws. The survey must stay dockerAvailable:true, keep the
+    // name-found container, and surface a note — losing the label query can only
+    // under-prune, never over-prune.
+    const _execFile = async (_cmd, args) => {
+      if (args[0] === 'ps') {
+        if (args.includes('label=com.chroxy.managed=true')) throw new Error('label query boom')
+        return { stdout: 'nameId00\tchroxy-env-keep\texited\t4MB (virtual 9MB)' }
+      }
+      if (args[0] === 'images') return { stdout: '' }
+      return { stdout: '' }
+    }
+    const snap = await surveyHostPrune({ listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
+    assert.equal(snap.dockerAvailable, true)
+    assert.deepEqual(snap.containers.map((c) => c.id), ['nameId00'])
+    assert.match(snap.note || '', /labeled chroxy container set could not be listed/)
+  })
+
+  it('still degrades to dockerAvailable:false when the legacy name query fails (#6155)', async () => {
+    // The name query is the daemon-up probe — if IT throws, the whole survey
+    // degrades (the label query is never reached).
+    const _execFile = async (_cmd, args) => {
+      if (args[0] === 'ps' && args.includes('name=chroxy-env')) throw new Error('Cannot connect to the Docker daemon')
+      return { stdout: '' }
+    }
+    const snap = await surveyHostPrune({ listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
+    assert.equal(snap.dockerAvailable, false)
+  })
+
   it('excludes containers + images tracked by a live env (orphan-only)', async () => {
     const _execFile = execStub({
       psOut: [
@@ -255,13 +285,15 @@ describe('surveyHostPrune()', () => {
     assert.deepEqual(snap.images, [])
   })
 
-  it('queries by the managed label first, then the legacy name/repo filters (#6155)', async () => {
+  it('queries by both the managed label and the legacy name/repo filters (#6155)', async () => {
     const _execFile = execStub({ psOut: '', imagesOut: {} })
     await surveyHostPrune({ listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     const psCalls = _execFile.calls.filter((c) => c.args[0] === 'ps')
-    // Two container queries: label-identified first, then the legacy name prefix.
+    // Two container queries: the legacy name query (the degrade probe) + the
+    // supplementary label query (order: name first so a daemon-down throw degrades
+    // before the label query runs).
     assert.equal(psCalls.length, 2)
-    assert.ok(psCalls[0].args.includes('label=com.chroxy.managed=true'), 'label ps query first')
+    assert.ok(psCalls.some((c) => c.args.includes('label=com.chroxy.managed=true')), 'label ps query present')
     assert.ok(psCalls.some((c) => c.args.includes('name=chroxy-env')), 'legacy name ps query present')
     for (const ps of psCalls) {
       assert.ok(ps.args.includes('--size'))
