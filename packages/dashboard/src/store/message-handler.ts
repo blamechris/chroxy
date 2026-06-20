@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2678,6 +2678,45 @@ function handleIntegrationActionAck(msg: Record<string, unknown>, get: MsgGet, s
 }
 
 /**
+ * #6134 (epic #5530) — resolve one environment's pending container action:
+ * drop the environmentId from `containerActioningIds` and record the outcome
+ * (resulting status, or a failure message) in `containerActionResults` for
+ * inline display. Shared by the success ack and the CONTAINER_ACTION_FAILED
+ * session_error — the same clear-pending-on-either-outcome contract as the
+ * reindex / relay-rerun pairs.
+ */
+function resolveContainerAction(
+  get: MsgGet,
+  set: MsgSet,
+  environmentId: string,
+  result: { action: string; status: string | null; error: string | null },
+): void {
+  const pending = new Set(get().containerActioningIds);
+  pending.delete(environmentId);
+  set({
+    containerActioningIds: pending,
+    containerActionResults: { ...get().containerActionResults, [environmentId]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #6134 — container lifecycle action success ack: positive confirmation that
+ * the `containers_action` stop / restart / destroy completed, echoing the
+ * request's environmentId (+ action + resulting status). A malformed ack is
+ * dropped (Zod safeParse) so the row keeps its honest pending state rather
+ * than clearing on a half-true message.
+ */
+function handleContainersActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerContainersActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  resolveContainerAction(get, set, parsed.data.environmentId, {
+    action: parsed.data.action,
+    status: parsed.data.status ?? null,
+    error: null,
+  });
+}
+
+/**
  * #5547: a `summarize_session_result` resolves the pending summarize promise
  * (keyed by the echoed requestId) so the awaiting create-session flow opens
  * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
@@ -2796,6 +2835,9 @@ const HANDLERS: Record<string, Handler> = {
   // #5500: positive ack correlating an integration_action (repo-memory
   // Reindex) request to its outcome.
   integration_action_ack: handleIntegrationActionAck,
+  // #6134 (epic #5530): positive ack correlating a containers_action (stop /
+  // restart / destroy) request to its outcome.
+  containers_action_ack: handleContainersActionAck,
   // #5547: one-shot session-summary result; resolves the pending summarize
   // promise so the create-session flow can open with the brief seeded.
   summarize_session_result: handleSummarizeSessionResult,
@@ -3506,6 +3548,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             error: parsed.message || 'Reindex failed.',
           });
         }
+      } else if (parsed.code === 'CONTAINER_ACTION_FAILED' && typeof msg.environmentId === 'string') {
+        // #6134: a failed containers_action echoes the exact environmentId
+        // (and action) — clear that row's pending state and surface the reason
+        // inline (the generic branch below still raises the toast, matching the
+        // INTEGRATION_ACTION_FAILED precedent). status is null on failure.
+        resolveContainerAction(get, set, msg.environmentId, {
+          action: typeof msg.action === 'string' ? msg.action : '',
+          status: null,
+          error: parsed.message || 'Container action failed.',
+        });
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;

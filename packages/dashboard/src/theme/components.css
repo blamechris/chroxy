@@ -9986,6 +9986,25 @@ button.sidebar-token-view-session-row:hover {
   background: var(--accent-orange-subtle);
 }
 
+/* #6134 — the destructive "Destroy" row action (container lifecycle). Tinted
+ * red so the irreversible action reads at a glance, sharing .cr-action's
+ * geometry with Stop/Restart. */
+.cr-action-danger {
+  border-color: var(--accent-red-border);
+  color: var(--accent-red);
+}
+.cr-action-danger:hover:not(:disabled) {
+  border-color: var(--accent-red);
+  color: var(--accent-red);
+  background: var(--accent-red-subtle);
+}
+
+/* #6134 — disabled row actions (in-flight, socket down, or not applicable). */
+.cr-action:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
 
 /* #5553 — per-repo session preset disclosure (create-session modal) + drawer. */
 .cr-action-gear {

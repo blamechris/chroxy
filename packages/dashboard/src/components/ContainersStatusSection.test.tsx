@@ -21,6 +21,9 @@ vi.mock('../store/connection', () => ({
       containersStatusLoading: false,
       connectionPhase: 'connected',
       requestContainersStatus: () => false,
+      containerActioningIds: new Set<string>(),
+      containerActionResults: {},
+      sendContainersAction: () => false,
     }),
 }))
 import { ContainersStatusSection } from './ContainersStatusSection'
@@ -184,5 +187,103 @@ describe('ContainersStatusSection — refresh', () => {
     expect(btn.disabled).toBe(true)
     fireEvent.click(btn)
     expect(onRefresh).not.toHaveBeenCalled()
+  })
+})
+
+describe('ContainersStatusSection — lifecycle actions (#6134)', () => {
+  function renderWith(over: Partial<Parameters<typeof ContainersStatusSection>[0]> = {}) {
+    const onAction = vi.fn()
+    render(
+      <ContainersStatusSection
+        snapshot={snapshot()}
+        loading={false}
+        connected={true}
+        onRefresh={() => {}}
+        actioningIds={new Set()}
+        actionResults={{}}
+        onAction={onAction}
+        {...over}
+      />,
+    )
+    return onAction
+  }
+
+  it('Stop/Restart/Destroy render for a single-container docker env', () => {
+    renderWith()
+    expect(screen.getByTestId('container-stop-env-1')).toBeTruthy()
+    expect(screen.getByTestId('container-restart-env-1')).toBeTruthy()
+    expect(screen.getByTestId('container-destroy-env-1')).toBeTruthy()
+  })
+
+  it('hides Stop/Restart for a compose env (only Destroy remains)', () => {
+    renderWith()
+    // env-3 is the compose env (containerId null, composeProject set).
+    expect(screen.queryByTestId('container-stop-env-3')).toBeNull()
+    expect(screen.queryByTestId('container-restart-env-3')).toBeNull()
+    expect(screen.getByTestId('container-destroy-env-3')).toBeTruthy()
+  })
+
+  it('Stop dispatches immediately (no confirmation); Restart too', () => {
+    const onAction = renderWith()
+    fireEvent.click(screen.getByTestId('container-stop-env-1'))
+    expect(onAction).toHaveBeenCalledWith('env-1', 'stop')
+    fireEvent.click(screen.getByTestId('container-restart-env-1'))
+    expect(onAction).toHaveBeenCalledWith('env-1', 'restart')
+  })
+
+  it('Destroy opens a confirmation dialog and only dispatches on confirm', () => {
+    const onAction = renderWith()
+    fireEvent.click(screen.getByTestId('container-destroy-env-1'))
+    // Dialog is shown; nothing dispatched yet.
+    expect(screen.getByTestId('confirm-dialog')).toBeTruthy()
+    expect(onAction).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByTestId('confirm-dialog-confirm'))
+    expect(onAction).toHaveBeenCalledWith('env-1', 'destroy')
+  })
+
+  it('Destroy cancel closes the dialog without dispatching', () => {
+    const onAction = renderWith()
+    fireEvent.click(screen.getByTestId('container-destroy-env-1'))
+    fireEvent.click(screen.getByTestId('confirm-dialog-cancel'))
+    expect(onAction).not.toHaveBeenCalled()
+    expect(screen.queryByTestId('confirm-dialog')).toBeNull()
+  })
+
+  it('Stop is disabled for a non-running container', () => {
+    const snap = snapshot({
+      summary: { total: 1, running: 0, stopped: 1, other: 0 },
+      containers: [container({ id: 'env-x', status: 'stopped' })],
+    })
+    renderWith({ snapshot: snap })
+    expect((screen.getByTestId('container-stop-env-x') as HTMLButtonElement).disabled).toBe(true)
+    // Restart and Destroy stay enabled (restart a stopped container is valid).
+    expect((screen.getByTestId('container-restart-env-x') as HTMLButtonElement).disabled).toBe(false)
+    expect((screen.getByTestId('container-destroy-env-x') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('an in-flight env disables all its buttons and shows Working…', () => {
+    renderWith({ actioningIds: new Set(['env-1']) })
+    expect((screen.getByTestId('container-stop-env-1') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId('container-restart-env-1') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId('container-destroy-env-1') as HTMLButtonElement).disabled).toBe(true)
+    expect(screen.getByTestId('container-action-pending-env-1').textContent).toContain('Working')
+  })
+
+  it('disconnected disables every action button', () => {
+    renderWith({ connected: false })
+    expect((screen.getByTestId('container-stop-env-1') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId('container-destroy-env-1') as HTMLButtonElement).disabled).toBe(true)
+  })
+
+  it('renders a settled success outcome inline', () => {
+    renderWith({ actionResults: { 'env-1': { action: 'stop', status: 'stopped', error: null, at: 1 } } })
+    expect(screen.getByTestId('container-action-ok-env-1').textContent).toContain('stopped')
+  })
+
+  it('renders a settled failure outcome inline (role=alert)', () => {
+    renderWith({ actionResults: { 'env-1': { action: 'stop', status: null, error: 'docker stop failed', at: 1 } } })
+    const err = screen.getByTestId('container-action-error-env-1')
+    expect(err.textContent).toContain('docker stop failed')
+    expect(err.getAttribute('role')).toBe('alert')
   })
 })
