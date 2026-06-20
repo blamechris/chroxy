@@ -6,6 +6,21 @@ const log = createLogger('docker-backend')
 const DEFAULT_CONTAINER_CLI_PATH = '/usr/local/lib/node_modules/@anthropic-ai/claude-code/cli.js'
 
 /**
+ * #6155 — first-class docker labels stamped on the chroxy resources created via
+ * `docker run` (`_startContainer`) and `docker commit` (`_commitContainer`), so
+ * the Control Room host-prune survey can identify them by label (robust) with the
+ * legacy name/tag convention (`chroxy-env-*` / `chroxy-env:` / `chroxy-byok-snap:`)
+ * as a fallback. NOTE: compose-managed containers (`_composeUp` → `docker compose
+ * up`) do NOT receive these CLI `--label` flags — they're covered by the
+ * `chroxy-env-*` name fallback instead (their compose project is `chroxy-env-<id>`).
+ * `MANAGED` marks ownership; `KIND` distinguishes a live env container from a
+ * committed snapshot image. Kept here (the producer) and imported by
+ * `control-room/host-prune.js`.
+ */
+export const CHROXY_MANAGED_LABEL = 'com.chroxy.managed'
+export const CHROXY_LABEL_KIND = 'com.chroxy.kind'
+
+/**
  * #5127 — Cap on the per-stream buffer the streaming execInEnvironment path
  * retains for the resolved value / failure tail. The buffered execFile path
  * rejects past Node's 1 MB maxBuffer; the streaming path used to accumulate
@@ -600,6 +615,9 @@ export class DockerBackend {
       const runArgs = [
         'run', '-d', '--init',
         '--name', `chroxy-env-${envId}`,
+        // #6155: first-class ownership labels (survey identity, name as fallback).
+        '--label', `${CHROXY_MANAGED_LABEL}=true`,
+        '--label', `${CHROXY_LABEL_KIND}=env`,
         '--memory', memoryLimit,
         '--cpus', cpuLimit,
         '--pids-limit', '512',
@@ -697,7 +715,16 @@ export class DockerBackend {
 
   _commitContainer(containerId, imageTag) {
     return new Promise((resolve, reject) => {
-      this._execFile('docker', ['commit', containerId, imageTag], { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
+      // #6155: stamp ownership labels onto the committed snapshot image (both env
+      // snapshots and BYOK pool snapshots commit through here) via `--change LABEL`,
+      // so host-prune can identify it by label with the `chroxy-*` tag as fallback.
+      const commitArgs = [
+        'commit',
+        '--change', `LABEL ${CHROXY_MANAGED_LABEL}=true`,
+        '--change', `LABEL ${CHROXY_LABEL_KIND}=snapshot`,
+        containerId, imageTag,
+      ]
+      this._execFile('docker', commitArgs, { encoding: 'utf-8', timeout: 120_000 }, (err, stdout, stderr) => {
         if (err) {
           reject(new Error(stderr ? stderr.trim() : err.message))
           return

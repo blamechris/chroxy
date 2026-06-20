@@ -4,10 +4,14 @@
  * Surfaces reclaimable HOST docker pressure scoped STRICTLY to chroxy's OWN
  * resources, so the Control Room can prune dangling chroxy artifacts (the
  * container analog of `chroxy worktree gc`) without ever touching a non-chroxy
- * workload. chroxy stamps no docker labels — it identifies its resources by
- * naming convention:
- *   - containers: name prefix `chroxy-env-` (docker-backend `--name chroxy-env-<id>`)
- *   - images:     repositories `chroxy-env` (env snapshots `chroxy-env:<id>-<ts>`)
+ * workload. #6155: chroxy stamps a `com.chroxy.managed=true` docker label on the
+ * resources it creates via `docker run` / `docker commit` (docker-backend
+ * `_startContainer` / `_commitContainer`), and the survey identifies resources BY
+ * THAT LABEL first, falling back to the legacy naming convention — which also
+ * covers compose-managed containers (`docker compose up`, project `chroxy-env-*`)
+ * that don't receive the CLI `--label`, and any resource created before the label:
+ *   - containers: label `com.chroxy.managed=true`, else name prefix `chroxy-env-`
+ *   - images:     label `com.chroxy.managed=true`, else repositories `chroxy-env`
  *                 and `chroxy-byok-snap` (BYOK pool snapshots)
  * There are no chroxy-managed named volumes (the backends use bind mounts).
  *
@@ -31,6 +35,7 @@ import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { parseByteSize } from './containers.js'
 import { listSnapshots } from '../snapshots-store.js'
+import { CHROXY_MANAGED_LABEL } from '../environments/backends/docker.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -55,17 +60,24 @@ export const PRUNABLE_CONTAINER_STATES = Object.freeze(['exited', 'created', 'de
  * `Size` token is `"<writable> (virtual <total>)"`; we count the writable layer
  * (what `docker rm` actually frees).
  *
+ * #6155: `trusted` skips the name-prefix check — the caller already constrained
+ * the query by `--filter label=com.chroxy.managed=true`, so membership is proven
+ * by the label even if the name doesn't follow the legacy `chroxy-env-*` shape.
+ * The default (name-prefix required) is the legacy/fallback path.
+ *
  * @param {string} stdout
+ * @param {{trusted?: boolean}} [opts]
  * @returns {Array<{id: string, name: string, state: string, sizeBytes: number|null}>}
  */
-export function parseContainerLines(stdout) {
+export function parseContainerLines(stdout, { trusted = false } = {}) {
   if (typeof stdout !== 'string') return []
   const out = []
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
     const [id, name, state, ...sizeParts] = trimmed.split('\t')
-    if (!id || typeof name !== 'string' || !name.startsWith(CHROXY_CONTAINER_PREFIX)) continue
+    if (!id || typeof name !== 'string') continue
+    if (!trusted && !name.startsWith(CHROXY_CONTAINER_PREFIX)) continue
     const st = (state || '').trim().toLowerCase()
     if (!PRUNABLE_CONTAINER_STATES.includes(st)) continue
     // Size = "1.09kB (virtual 5.59MB)" → writable side before " (".
@@ -83,17 +95,24 @@ export function parseContainerLines(stdout) {
  * display/exclusion-matching only; removal is always by image `id`, and a bare
  * repo ref never collides with a retained `repo:tag` exclusion entry).
  *
+ * #6155: `trusted` skips the repository-membership check — the caller already
+ * constrained the query by `--filter label=com.chroxy.managed=true`, so the image
+ * is chroxy's by label regardless of its repository. The default (repo must be in
+ * CHROXY_IMAGE_REPOS) is the legacy/fallback path.
+ *
  * @param {string} stdout
+ * @param {{trusted?: boolean}} [opts]
  * @returns {Array<{id: string, ref: string, repository: string, sizeBytes: number|null}>}
  */
-export function parseImageLines(stdout) {
+export function parseImageLines(stdout, { trusted = false } = {}) {
   if (typeof stdout !== 'string') return []
   const out = []
   for (const line of stdout.split('\n')) {
     const trimmed = line.trim()
     if (!trimmed) continue
     const [id, repository, tag, size] = trimmed.split('\t')
-    if (!id || typeof repository !== 'string' || !CHROXY_IMAGE_REPOS.includes(repository.trim())) continue
+    if (!id || typeof repository !== 'string') continue
+    if (!trusted && !CHROXY_IMAGE_REPOS.includes(repository.trim())) continue
     const repo = repository.trim()
     const t = (tag || '').trim()
     const ref = t && t !== '<none>' ? `${repo}:${t}` : repo
@@ -201,24 +220,47 @@ export async function surveyHostPrune(opts = {}) {
     byokReadFailed = true
   }
 
-  // Stopped chroxy containers. A docker/daemon failure here means docker is
-  // unavailable → degrade the whole survey (no point probing images).
+  // Stopped chroxy containers. #6155: identify by label first (robust), then the
+  // legacy `chroxy-env-*` name convention (also covers compose-managed containers,
+  // which don't get the CLI label). Union, dedup by id.
+  //
+  // The LEGACY NAME query is the "is docker up" probe: if it throws, docker is
+  // unavailable → degrade the whole survey. The supplementary LABEL query
+  // soft-degrades (a note, keep the name results) — losing it can only *under*-
+  // prune, never over-prune, and the name query already finds every current
+  // chroxy container. (Mirrors the image-side handling below.)
   let containers
+  let containerNote = null
+  const statusFilters = ['--filter', 'status=exited', '--filter', 'status=created', '--filter', 'status=dead']
+  const psFmt = '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Size}}'
+  let byNameOut
   try {
-    const { stdout } = await _execFile('docker', [
-      'ps', '-a', '--size',
-      '--filter', 'name=chroxy-env',
-      '--filter', 'status=exited',
-      '--filter', 'status=created',
-      '--filter', 'status=dead',
-      '--format', '{{.ID}}\t{{.Names}}\t{{.State}}\t{{.Size}}',
+    byNameOut = await _execFile('docker', [
+      'ps', '-a', '--size', '--filter', 'name=chroxy-env', ...statusFilters, '--format', psFmt,
     ], EXEC_OPTS)
-    containers = parseContainerLines(stdout).filter((c) => !isTrackedContainer(c.id, tracked))
   } catch (err) {
     return {
       ...base,
       dockerAvailable: false,
       note: `docker is unavailable — host prune survey skipped (${err && err.message ? err.message : 'exec failed'}).`,
+    }
+  }
+  let byLabelLines = []
+  try {
+    const byLabel = await _execFile('docker', [
+      'ps', '-a', '--size', '--filter', `label=${CHROXY_MANAGED_LABEL}=true`, ...statusFilters, '--format', psFmt,
+    ], EXEC_OPTS)
+    byLabelLines = parseContainerLines(byLabel.stdout, { trusted: true })
+  } catch (err) {
+    containerNote = `the labeled chroxy container set could not be listed (${err && err.message ? err.message : 'exec failed'}).`
+  }
+  {
+    const seen = new Set()
+    containers = []
+    for (const c of [...byLabelLines, ...parseContainerLines(byNameOut.stdout)]) {
+      if (seen.has(c.id)) continue
+      seen.add(c.id)
+      if (!isTrackedContainer(c.id, tracked)) containers.push(c)
     }
   }
 
@@ -231,16 +273,30 @@ export async function surveyHostPrune(opts = {}) {
   if (byokReadFailed) {
     imageNote = 'BYOK snapshot registry unavailable — image pruning skipped to avoid deleting retained snapshots.'
   } else {
+    const imgFmt = '{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}'
+    const seenImg = new Set()
+    // Excluded if referenced by a live env (image or saved snapshot) OR retained
+    // as a BYOK snapshot sidecar. Only true orphans survive. Dedup by id so an
+    // image found by both the label and the repo query is considered once.
+    const consider = (img) => {
+      if (seenImg.has(img.id)) return
+      seenImg.add(img.id)
+      if (!tracked.imageRefs.has(img.ref) && !retainedByokTags.has(img.ref)) images.push(img)
+    }
+    // #6155: label-identified images first (robust, any repo), then the legacy
+    // per-repo lists for images created before the label existed.
+    try {
+      const { stdout } = await _execFile('docker', [
+        'images', '--filter', `label=${CHROXY_MANAGED_LABEL}=true`, '--format', imgFmt,
+      ], EXEC_OPTS)
+      for (const img of parseImageLines(stdout, { trusted: true })) consider(img)
+    } catch (err) {
+      imageNote = `the labeled chroxy image set could not be listed (${err && err.message ? err.message : 'exec failed'}).`
+    }
     for (const repo of CHROXY_IMAGE_REPOS) {
       try {
-        const { stdout } = await _execFile('docker', [
-          'images', repo, '--format', '{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}',
-        ], EXEC_OPTS)
-        for (const img of parseImageLines(stdout)) {
-          // Excluded if referenced by a live env (image or saved snapshot) OR
-          // retained as a BYOK snapshot sidecar. Only true orphans survive.
-          if (!tracked.imageRefs.has(img.ref) && !retainedByokTags.has(img.ref)) images.push(img)
-        }
+        const { stdout } = await _execFile('docker', ['images', repo, '--format', imgFmt], EXEC_OPTS)
+        for (const img of parseImageLines(stdout)) consider(img)
       } catch (err) {
         imageNote = `some chroxy image repositories could not be listed (${err && err.message ? err.message : 'exec failed'}).`
       }
@@ -250,7 +306,7 @@ export async function surveyHostPrune(opts = {}) {
   return {
     generatedAt: now.toISOString(),
     dockerAvailable: true,
-    note: imageNote,
+    note: [containerNote, imageNote].filter(Boolean).join(' ') || null,
     containers,
     images,
     summary: {

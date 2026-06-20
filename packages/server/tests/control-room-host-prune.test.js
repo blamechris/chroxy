@@ -64,6 +64,15 @@ describe('parseContainerLines()', () => {
     assert.equal(out[0].sizeBytes, 12_500_000)
     assert.equal(out[1].sizeBytes, 0)
   })
+
+  it('trusted: accepts a non-chroxy-named row (label-identified, #6155)', () => {
+    // The label-filtered docker query already proved membership, so a row whose
+    // name doesn't follow the legacy prefix is still kept.
+    const out = parseContainerLines('zzz\tweird-name\texited\t1MB (virtual 2MB)', { trusted: true })
+    assert.deepEqual(out.map((c) => c.id), ['zzz'])
+    // running is still excluded even when trusted (prunable-state gate stays).
+    assert.deepEqual(parseContainerLines('zzz\tweird-name\trunning\t1MB', { trusted: true }), [])
+  })
 })
 
 describe('parseImageLines()', () => {
@@ -76,6 +85,13 @@ describe('parseImageLines()', () => {
     ].join('\n'))
     assert.deepEqual(out.map((i) => i.ref), ['chroxy-env:foo-123', 'chroxy-byok-snap:abc-1', 'chroxy-env'])
     assert.equal(out[0].sizeBytes, 1_200_000_000)
+  })
+
+  it('trusted: accepts an image in a non-chroxy repo (label-identified, #6155)', () => {
+    // A label-filtered docker query can return an image whose repository isn't in
+    // the legacy set — trusted keeps it (membership proven by the label).
+    const out = parseImageLines('imgX\tmy-custom-repo\tv1\t50MB', { trusted: true })
+    assert.deepEqual(out.map((i) => i.ref), ['my-custom-repo:v1'])
   })
 })
 
@@ -117,6 +133,71 @@ describe('surveyHostPrune()', () => {
     assert.equal(snap.summary.imageCount, 2)
     assert.equal(snap.summary.reclaimableBytes, 10_000_000 + 1_000_000_000 + 500_000_000)
     assert.equal(snap.generatedAt, '2026-06-19T12:00:00.000Z')
+  })
+
+  it('unions the label-identified set with the legacy name/repo set, deduped (#6155)', async () => {
+    // A bespoke exec that returns DIFFERENT rows for the label query vs the legacy
+    // query, so we can prove: (a) a labeled container with a non-conventional name
+    // is found via the label path, (b) a legacy unlabeled chroxy-env-* container is
+    // found via the name path, (c) one returned by BOTH is deduped to a single row.
+    const calls = []
+    const _execFile = async (_cmd, args) => {
+      calls.push(args)
+      if (args[0] === 'ps') {
+        if (args.includes('label=com.chroxy.managed=true')) {
+          return { stdout: [
+            'labeledX\trenamed-by-user\texited\t1MB (virtual 9MB)',     // labeled, non-conventional name
+            'bothid00\tchroxy-env-both\texited\t2MB (virtual 9MB)',     // labeled AND conventional
+          ].join('\n') }
+        }
+        // legacy name query
+        return { stdout: [
+          'bothid00\tchroxy-env-both\texited\t2MB (virtual 9MB)',       // same as above → dedup
+          'legacyId0\tchroxy-env-old\texited\t3MB (virtual 9MB)',       // unlabeled legacy
+        ].join('\n') }
+      }
+      if (args[0] === 'images') {
+        if (args.includes('label=com.chroxy.managed=true')) {
+          return { stdout: 'limg\tmy-custom\tv1\t10MB' }                // labeled, non-chroxy repo
+        }
+        return { stdout: args[1] === 'chroxy-env' ? 'rimg\tchroxy-env\told-1\t20MB' : '' }
+      }
+      return { stdout: '' }
+    }
+    const snap = await surveyHostPrune({ listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
+    assert.deepEqual(snap.containers.map((c) => c.id).sort(), ['bothid00', 'labeledX', 'legacyId0'])
+    assert.equal(snap.summary.containerCount, 3) // deduped (bothid00 once)
+    assert.deepEqual(snap.images.map((i) => i.id).sort(), ['limg', 'rimg'])
+  })
+
+  it('soft-degrades when only the label container query fails; name results survive (#6155)', async () => {
+    // The legacy name query (the degrade probe) succeeds, but the supplementary
+    // label query throws. The survey must stay dockerAvailable:true, keep the
+    // name-found container, and surface a note — losing the label query can only
+    // under-prune, never over-prune.
+    const _execFile = async (_cmd, args) => {
+      if (args[0] === 'ps') {
+        if (args.includes('label=com.chroxy.managed=true')) throw new Error('label query boom')
+        return { stdout: 'nameId00\tchroxy-env-keep\texited\t4MB (virtual 9MB)' }
+      }
+      if (args[0] === 'images') return { stdout: '' }
+      return { stdout: '' }
+    }
+    const snap = await surveyHostPrune({ listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
+    assert.equal(snap.dockerAvailable, true)
+    assert.deepEqual(snap.containers.map((c) => c.id), ['nameId00'])
+    assert.match(snap.note || '', /labeled chroxy container set could not be listed/)
+  })
+
+  it('still degrades to dockerAvailable:false when the legacy name query fails (#6155)', async () => {
+    // The name query is the daemon-up probe — if IT throws, the whole survey
+    // degrades (the label query is never reached).
+    const _execFile = async (_cmd, args) => {
+      if (args[0] === 'ps' && args.includes('name=chroxy-env')) throw new Error('Cannot connect to the Docker daemon')
+      return { stdout: '' }
+    }
+    const snap = await surveyHostPrune({ listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
+    assert.equal(snap.dockerAvailable, false)
   })
 
   it('excludes containers + images tracked by a live env (orphan-only)', async () => {
@@ -204,17 +285,27 @@ describe('surveyHostPrune()', () => {
     assert.deepEqual(snap.images, [])
   })
 
-  it('uses the chroxy name + state + image-repo filters on the docker ps/images calls', async () => {
+  it('queries by both the managed label and the legacy name/repo filters (#6155)', async () => {
     const _execFile = execStub({ psOut: '', imagesOut: {} })
     await surveyHostPrune({ listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
-    const ps = _execFile.calls.find((c) => c.args[0] === 'ps')
-    assert.ok(ps.args.includes('--size'))
-    assert.ok(ps.args.includes('name=chroxy-env'))
-    assert.ok(ps.args.includes('status=exited'))
-    assert.ok(ps.args.includes('status=created'))
-    assert.ok(ps.args.includes('status=dead'))
-    const imageRepos = _execFile.calls.filter((c) => c.args[0] === 'images').map((c) => c.args[1])
-    assert.deepEqual(imageRepos.sort(), ['chroxy-byok-snap', 'chroxy-env'])
+    const psCalls = _execFile.calls.filter((c) => c.args[0] === 'ps')
+    // Two container queries: the legacy name query (the degrade probe) + the
+    // supplementary label query (order: name first so a daemon-down throw degrades
+    // before the label query runs).
+    assert.equal(psCalls.length, 2)
+    assert.ok(psCalls.some((c) => c.args.includes('label=com.chroxy.managed=true')), 'label ps query present')
+    assert.ok(psCalls.some((c) => c.args.includes('name=chroxy-env')), 'legacy name ps query present')
+    for (const ps of psCalls) {
+      assert.ok(ps.args.includes('--size'))
+      assert.ok(ps.args.includes('status=exited'))
+      assert.ok(ps.args.includes('status=created'))
+      assert.ok(ps.args.includes('status=dead'))
+    }
+    // Image queries: one label-filtered (any repo) + the two legacy per-repo lists.
+    const imageCalls = _execFile.calls.filter((c) => c.args[0] === 'images')
+    assert.ok(imageCalls.some((c) => c.args.includes('label=com.chroxy.managed=true')), 'label images query present')
+    const repos = imageCalls.filter((c) => c.args[1] !== '--filter').map((c) => c.args[1])
+    assert.deepEqual(repos.sort(), ['chroxy-byok-snap', 'chroxy-env'])
   })
 })
 
