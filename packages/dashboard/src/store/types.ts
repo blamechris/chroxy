@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -598,6 +598,20 @@ export interface HostPruneActionResult {
   at: number;
 }
 
+/**
+ * #6136 slice 3 (epic #5530) — outcome of the last simulator action (boot /
+ * shutdown), kept for inline display. The target id is the device `udid`. A
+ * successful `simulator_action_ack` records a human `note` (the new state) with
+ * `error: null`; a SIMULATOR_ACTION_FAILED session_error records the message
+ * with `note: null`. `at` is the local receipt time (epoch ms).
+ */
+export interface SimulatorActionResult {
+  action: string;
+  note: string | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -898,6 +912,33 @@ export interface ConnectionState {
   hostPruneActioningIds: Set<string>;
   /** #6140 slice 2 — last host prune outcome per kind, for inline display. */
   hostPruneActionResults: Record<string, HostPruneActionResult>;
+  /**
+   * #6136 (epic #5530) — Control Room iOS simulator survey: the latest
+   * `simulator_status_snapshot` (devices + "Ready for Maestro" verdict), or null
+   * before the first one lands. Replaced wholesale on each snapshot (full
+   * picture, no delta stream). `available:false` off macOS is a valid state.
+   */
+  simulatorStatus: ServerSimulatorStatusSnapshotMessage | null;
+  /**
+   * #6136 — true between dispatching a `simulator_status_request` and the
+   * matching snapshot arriving, so the tab's Refresh button can spin. Cleared
+   * when a VALID snapshot lands (a malformed payload is dropped and leaves this
+   * true, matching the sibling surveys).
+   */
+  simulatorStatusLoading: boolean;
+  /**
+   * #6136 slice 3 (epic #5530) — device udids with an in-flight
+   * `simulator_action` (boot / shutdown): set when sendSimulatorAction is
+   * called, cleared on the `simulator_action_ack` / SIMULATOR_ACTION_FAILED
+   * session_error. Keyed by udid so each device row's buttons disable
+   * independently while their action is on the wire.
+   */
+  simulatorActioningIds: Set<string>;
+  /**
+   * #6136 slice 3 — last simulator action outcome per udid, for inline display
+   * in the device row. Replaced when the same device is actioned again.
+   */
+  simulatorActionResults: Record<string, SimulatorActionResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1477,6 +1518,13 @@ export interface ConnectionState {
   // `hostPruneStatusLoading` while in flight.
   requestHostPruneStatus: () => boolean;
 
+  // #6136 (epic #5530): request an iOS simulator survey. Dispatches a
+  // `simulator_status_request`; the server replies with a single
+  // `simulator_status_snapshot` handled into `simulatorStatus`. Returns whether
+  // the message went on the wire (false = socket closed). Sets
+  // `simulatorStatusLoading` while in flight.
+  requestSimulatorStatus: () => boolean;
+
   // #6139 (epic #5530): request a per-repo runtime config survey. Dispatches a
   // `repo_runtime_config_request`; the server replies with a single
   // `repo_runtime_config_snapshot` handled into `repoRuntimeConfig`. Returns
@@ -1558,6 +1606,16 @@ export interface ConnectionState {
   // send returns false. Confirmation is the caller's responsibility (the UI
   // gates it behind a ConfirmDialog — it's destructive).
   sendHostPruneAction: (kind: 'containers' | 'images' | 'all') => boolean;
+
+  // #6136 slice 3 (epic #5530): boot / shut down an iOS simulator. `udid` names a
+  // device the survey enumerated — the server re-surveys and re-validates it (the
+  // udid is a lookup key, never a trusted target) plus state-gates the action.
+  // Dispatches a `simulator_action` tagged with a requestId the server echoes on
+  // the `simulator_action_ack` / SIMULATOR_ACTION_FAILED session_error. Marks the
+  // `udid` in `simulatorActioningIds` (dropping its stale result) ONLY when the
+  // message actually went on the wire; an offline send (or an empty udid)
+  // returns false without queuing. Non-destructive, so no confirm gate.
+  sendSimulatorAction: (action: 'boot' | 'shutdown', udid: string) => boolean;
 
   // #5547: request a server-side one-shot summary of a session's persisted
   // history (the sidebar "Summarize & start new session" action). Dispatches a
