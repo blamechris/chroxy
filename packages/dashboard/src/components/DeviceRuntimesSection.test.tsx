@@ -259,4 +259,13 @@ describe('AndroidEmulatorPanel (#6137)', () => {
     expect(screen.getByTestId('emulator-no-devices')).toBeTruthy()
     expect(screen.queryByTestId('emulator-table')).toBeNull()
   })
+
+  it('a live device with no serial renders safely with a disabled Kill (nothing to kill)', () => {
+    // Schema-permitted edge: a just-starting emulator the survey hasn't assigned
+    // a serial to yet. The row keys off the avd fallback and the Kill button
+    // disables (no serial → no kill target) instead of breaking.
+    render(<AndroidEmulatorPanel snapshot={emuSnapshot({ devices: [{ avd: 'Pixel_7_API_34', serial: null, state: 'starting' }], readyForMaestro: { ready: false, runningDevice: null, metroReachable: true, mockServerReachable: true, reasons: ['No running emulator'] } })} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('emulator-row-Pixel_7_API_34')).toBeTruthy()
+    expect((screen.getByTestId('emulator-kill-Pixel_7_API_34') as HTMLButtonElement).disabled).toBe(true)
+  })
 })

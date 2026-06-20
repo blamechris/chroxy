@@ -409,8 +409,13 @@ export function AndroidEmulatorPanel({
                 <tbody>
                   {snapshot.devices.map((d) => {
                     const isLive = d.state !== 'stopped'
-                    // Target id: avd for a stopped AVD (boot), serial for a live one (kill).
-                    const targetId = isLive ? (d.serial ?? '') : (d.avd ?? '')
+                    // Target id keys per-row pending/feedback. It matches the id
+                    // sendEmulatorAction marks pending: serial for a live (kill)
+                    // row, avd for a stopped (boot) row. A live row with no serial
+                    // (schema-permitted, e.g. a just-starting emulator) falls back
+                    // to its avd so pending/feedback still render under the row —
+                    // the Kill button stays disabled (no serial → nothing to kill).
+                    const targetId = isLive ? (d.serial ?? d.avd ?? '') : (d.avd ?? '')
                     const pending = targetId.length > 0 && actioningIds.has(targetId)
                     const rowKey = d.serial || d.avd || 'unknown'
                     return (
