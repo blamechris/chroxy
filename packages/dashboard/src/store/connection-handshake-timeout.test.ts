@@ -220,6 +220,9 @@ describe('#6066 reconnect parity (real socket, dashboard)', () => {
     await vi.advanceTimersByTimeAsync(HEARTBEAT_INTERVAL_MS)
     const sendsAfterFirstPing = ws.sent.length
     expect(sendsAfterFirstPing).toBe(sendsAfterAuth + 1) // the ping went out
+    // ...and the new frame is actually the heartbeat ping (not some other
+    // auth_ok-triggered outbound), so the count can't false-positive.
+    expect(ws.sent.some((d) => String(d).includes('"type":"ping"'))).toBe(true)
 
     // Do NOT answer the pong; advance past the pong timeout → the reaper closes
     // the dead socket.
