@@ -36,8 +36,10 @@ export const PROBE_TIMEOUT_MS = 1500
 
 /**
  * Friendly runtime name from a simctl runtime key, e.g.
- * `com.apple.CoreSimulator.SimRuntime.iOS-26-1` → `iOS 26.1`. Unknown shapes
- * fall back to the raw key (never throws).
+ * `com.apple.CoreSimulator.SimRuntime.iOS-26-1` → `iOS 26.1`. A key whose tail
+ * doesn't match the `OS-major[-minor[-patch]]` shape falls back to that raw tail
+ * (e.g. `iOS-26-1-2` → `iOS-26-1-2`); a non-string falls back to `'unknown'`.
+ * Never throws.
  *
  * @param {string} key
  * @returns {string}
