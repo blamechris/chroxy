@@ -110,13 +110,17 @@ export class PushManager {
    *   #5828: also feeds DiscordBillingSink — `billingStatePath` (its own state
    *   file, kept separate from the status store) and `billingAlerts` (kill-switch,
    *   default on when a webhook resolves).
+   * @param {() => number} [opts.now] - #6146 injectable clock (epoch ms),
+   *   defaults to `Date.now`. send()'s rate-limit AND the #4544 quiet-hours gate
+   *   evaluate against "now"; tests pin it to a deterministic instant so the
+   *   quiet-hours classification can't flip on a CI run near a window boundary.
    */
-  constructor({ storagePath, prefsPath, discord = {}, now } = {}) {
-    // #6146: injectable clock. send()'s rate-limit AND the #4544 quiet-hours
-    // gate evaluate against "now"; tests pin it to a deterministic instant so
-    // the quiet-hours classification can't flip on a CI run near a window
-    // boundary (the flake this seam fixes). Defaults to the real wall clock.
-    this._now = typeof now === 'function' ? now : Date.now
+  constructor({ storagePath, prefsPath, discord = {}, now = Date.now } = {}) {
+    // #6146: injectable clock (default Date.now). Assigned directly — an invalid
+    // value fails fast on use rather than silently reverting, matching the
+    // codebase's clock-seam convention (utils/respawn-rate-limiter.js,
+    // turn-tracker.js).
+    this._now = now
     // #4541: notification-prefs path. Optional — when omitted PushManager
     // operates entirely in-memory (callers like one-off tests don't need
     // to write to disk). When set, getPrefs / setPrefs round-trip
