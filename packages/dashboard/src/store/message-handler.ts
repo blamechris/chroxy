@@ -2825,6 +2825,21 @@ function resolveHostPruneAction(
 }
 
 /**
+ * #6140 slice 2 — compact auto-unit byte format for the prune note, so it reads
+ * consistently with the section's chips/tables (which use the same KiB/MiB/GiB
+ * scaling) rather than always-MiB.
+ */
+function formatReclaimedBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
+}
+
+/**
  * #6140 slice 2 — host prune success ack: builds a human note from removed counts
  * + reclaimed bytes (+ any per-resource failures) and clears the kind's pending
  * state. A malformed ack is dropped (Zod safeParse) so the row keeps its honest
@@ -2834,8 +2849,7 @@ function handleHostPruneActionAck(msg: Record<string, unknown>, get: MsgGet, set
   const parsed = ServerHostPruneActionAckSchema.safeParse(msg);
   if (!parsed.success) return;
   const { kind, removedContainers, removedImages, reclaimedBytes, failures } = parsed.data;
-  const mib = (reclaimedBytes / (1024 * 1024)).toFixed(reclaimedBytes < 1024 * 1024 ? 2 : 0);
-  let note = `Removed ${removedContainers} container${removedContainers === 1 ? '' : 's'}, ${removedImages} image${removedImages === 1 ? '' : 's'} (~${mib} MiB)`;
+  let note = `Removed ${removedContainers} container${removedContainers === 1 ? '' : 's'}, ${removedImages} image${removedImages === 1 ? '' : 's'} (~${formatReclaimedBytes(reclaimedBytes)})`;
   if (failures.length > 0) note += ` — ${failures.length} failed`;
   resolveHostPruneAction(get, set, kind, { note, error: null });
 }
