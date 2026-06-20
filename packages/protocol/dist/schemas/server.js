@@ -1856,6 +1856,39 @@ export const ServerHostPruneActionAckSchema = z.object({
     failures: z.array(z.object({ ref: z.string(), error: z.string() })),
 }).passthrough();
 // ───────────────────────────────────────────────────────────────────────────
+// #6136 (epic #5530) — Control Room iOS simulator survey + "Ready for Maestro"
+// verdict. Read-only. Off macOS / no xcrun → available:false (a first-class
+// state, not an error), same degraded-snapshot posture as the sibling surveys.
+// ───────────────────────────────────────────────────────────────────────────
+/** One iOS simulator from `xcrun simctl list devices`. */
+export const SimulatorDeviceSchema = z.object({
+    udid: z.string(),
+    name: z.string(),
+    state: z.string(), // "Booted" | "Shutdown" | "Unknown" | …
+    runtime: z.string(), // friendly, e.g. "iOS 26.1"
+    deviceType: z.string().nullable(),
+    isAvailable: z.boolean(),
+});
+/** The composite "Ready for Maestro" verdict (CLAUDE.md pre-flight). */
+export const ReadyForMaestroSchema = z.object({
+    ready: z.boolean(),
+    bootedSimulator: z.string().nullable(),
+    metroReachable: z.boolean(),
+    mockServerReachable: z.boolean(),
+    reasons: z.array(z.string()),
+});
+export const ServerSimulatorStatusSnapshotSchema = z.object({
+    type: z.literal('simulator_status_snapshot'),
+    requestId: z.string().nullable().optional(),
+    generatedAt: z.string().datetime(),
+    // false off macOS / no xcrun → devices empty, note set, verdict not-ready.
+    available: z.boolean(),
+    note: z.string().nullable(),
+    devices: z.array(SimulatorDeviceSchema),
+    readyForMaestro: ReadyForMaestroSchema,
+    error: z.object({ code: z.string(), message: z.string() }).optional(),
+}).passthrough();
+// ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────
 /**

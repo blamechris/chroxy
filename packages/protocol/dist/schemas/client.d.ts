@@ -673,6 +673,10 @@ export declare const HostPruneStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"host_prune_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const SimulatorStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"simulator_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const IntegrationStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"integration_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1145,6 +1149,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"host_prune_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"simulator_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"integration_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
@@ -1221,6 +1228,7 @@ export type ContainersStatusRequestMessage = z.infer<typeof ContainersStatusRequ
 export type RepoRuntimeConfigRequestMessage = z.infer<typeof RepoRuntimeConfigRequestSchema>;
 export type ByokPoolStatusRequestMessage = z.infer<typeof ByokPoolStatusRequestSchema>;
 export type HostPruneStatusRequestMessage = z.infer<typeof HostPruneStatusRequestSchema>;
+export type SimulatorStatusRequestMessage = z.infer<typeof SimulatorStatusRequestSchema>;
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;

@@ -39,6 +39,7 @@ import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/re
 import { surveyByokPool } from '../control-room/byok-pool.js'
 import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
 import { surveyHostPrune, runHostPrune, PRUNE_KINDS } from '../control-room/host-prune.js'
+import { surveySimulators } from '../control-room/simulators.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -63,6 +64,8 @@ const repoRuntimeConfigInFlight = new WeakSet()
 const byokPoolInFlight = new WeakSet()
 // #6140: same again for the host prune guardrails survey — independent of all above.
 const hostPruneInFlight = new WeakSet()
+// #6136: same again for the iOS simulator survey — independent of all above.
+const simulatorInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -1410,6 +1413,69 @@ async function handleHostPruneAction(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6136 (epic #5530) — iOS simulator survey (simulator_status_request).
+// ───────────────────────────────────────────────────────────────────────────
+
+/** #6136: schema-conformant error reply for the simulator survey. */
+function simulatorErrorSnapshot(requestId, error) {
+  return {
+    type: 'simulator_status_snapshot',
+    requestId: requestId ?? null,
+    generatedAt: new Date().toISOString(),
+    available: false,
+    note: null,
+    devices: [],
+    readyForMaestro: { ready: false, bootedSimulator: null, metroReachable: false, mockServerReachable: false, reasons: [] },
+    error,
+  }
+}
+
+/**
+ * #6136 — iOS simulator survey handler (read-only). Host-authority + per-client
+ * in-flight + degraded-reply contract as the sibling surveys. Off macOS / no
+ * xcrun, the survey itself returns a first-class `available:false` snapshot.
+ */
+async function handleSimulatorStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, simulatorErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'simulator_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+  if (simulatorInFlight.has(client)) {
+    ctx.transport.send(ws, simulatorErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A simulator survey is already in progress for this client',
+    }))
+    return
+  }
+  const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
+  simulatorInFlight.add(client)
+  try {
+    const snapshot = await surveyFn({})
+    ctx.transport.send(ws, {
+      type: 'simulator_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      available: snapshot.available,
+      note: snapshot.note ?? null,
+      devices: snapshot.devices,
+      readyForMaestro: snapshot.readyForMaestro,
+    })
+  } catch (err) {
+    log.warn(`simulator_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, simulatorErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'simulator survey failed',
+    }))
+  } finally {
+    simulatorInFlight.delete(client)
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -1459,6 +1525,7 @@ export const controlRoomHandlers = {
   repo_runtime_config_request: handleRepoRuntimeConfigRequest,
   byok_pool_status_request: handleByokPoolStatusRequest,
   host_prune_status_request: handleHostPruneStatusRequest,
+  simulator_status_request: handleSimulatorStatusRequest,
   containers_action: handleContainersAction,
   byok_pool_action: handleByokPoolAction,
   host_prune_action: handleHostPruneAction,

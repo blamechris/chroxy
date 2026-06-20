@@ -958,6 +958,14 @@ export const HostPruneStatusRequestSchema = z.object({
     type: z.literal('host_prune_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #6136 (epic #5530): the Control Room "Device runtimes" tab asks the server to
+// survey iOS simulators (`xcrun simctl list devices`) + the "Ready for Maestro"
+// verdict. The server replies with a single simulator_status_snapshot (see
+// server.ts). Off macOS / no xcrun → a first-class available:false snapshot.
+export const SimulatorStatusRequestSchema = z.object({
+    type: z.literal('simulator_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1189,6 +1197,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     RepoRuntimeConfigRequestSchema,
     ByokPoolStatusRequestSchema,
     HostPruneStatusRequestSchema,
+    SimulatorStatusRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     MailboxStatusRequestSchema,

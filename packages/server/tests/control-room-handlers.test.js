@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -1453,6 +1453,87 @@ describe('host_prune_action handler (#6140)', () => {
     await handleSessionMessage(ws, client, { type: 'host_prune_action', kind: 'containers', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'host_prune_action_ack')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6136 (epic #5530) — simulator_status_request handler (read-only). The survey
+// is injected via ctx.surveySimulators so the handler test never touches simctl.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_SIM = {
+  generatedAt: '2026-06-19T12:00:00.000Z',
+  available: true,
+  note: null,
+  devices: [{ udid: 'U-BOOTED', name: 'iPhone 16 Pro', state: 'Booted', runtime: 'iOS 26.1', deviceType: 'iPhone 16 Pro', isAvailable: true }],
+  readyForMaestro: { ready: true, bootedSimulator: 'iPhone 16 Pro', metroReachable: true, mockServerReachable: true, reasons: [] },
+}
+
+function makeSimCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({ send: sendSpy, surveySimulators: createSpy(async () => SAMPLE_SIM), ...overrides, _send: sendSpy })
+}
+
+describe('simulator_status_request handler (#6136)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeSimCtx(); client = { id: 'client-S' }; ws = {} })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('simulator_status_request'))
+    assert.equal(typeof controlRoomHandlers.simulator_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant simulator_status_snapshot', async () => {
+    await controlRoomHandlers.simulator_status_request(ws, client, { type: 'simulator_status_request', requestId: 's1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'simulator_status_snapshot')
+    assert.equal(payload.requestId, 's1')
+    assert.equal(payload.readyForMaestro.ready, true)
+    assert.ok(ServerSimulatorStatusSnapshotSchema.safeParse(payload).success, JSON.stringify(ServerSimulatorStatusSnapshotSchema.safeParse(payload).error?.issues))
+  })
+
+  it('relays an available:false (off-macOS) snapshot as a first-class state', async () => {
+    ctx = makeSimCtx({ surveySimulators: createSpy(async () => ({ ...SAMPLE_SIM, available: false, note: 'not available on this host', devices: [], readyForMaestro: { ready: false, bootedSimulator: null, metroReachable: false, mockServerReachable: false, reasons: [] } })) })
+    await controlRoomHandlers.simulator_status_request(ws, client, { type: 'simulator_status_request' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.available, false)
+    assert.ok(ServerSimulatorStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.simulator_status_request(ws, client, { type: 'simulator_status_request', requestId: 's1' }, ctx)
+    assert.equal(ctx.surveySimulators.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'FORBIDDEN')
+    assert.ok(ServerSimulatorStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeSimCtx({ surveySimulators: createSpy(async () => { await gate; return SAMPLE_SIM }) })
+    const first = controlRoomHandlers.simulator_status_request(ws, client, { type: 'simulator_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.simulator_status_request(ws, client, { type: 'simulator_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveySimulators.callCount, 1)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].error.code, 'SURVEY_IN_PROGRESS')
+    release(); await first
+  })
+
+  it('sends a schema-valid error snapshot when the survey throws', async () => {
+    ctx = makeSimCtx({ surveySimulators: createSpy(async () => { throw new Error('simctl boom') }) })
+    await controlRoomHandlers.simulator_status_request(ws, client, { type: 'simulator_status_request', requestId: 'e1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'SURVEY_FAILED')
+    assert.match(payload.error.message, /simctl boom/)
+    assert.ok(ServerSimulatorStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'simulator_status_request', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'simulator_status_snapshot')
     assert.equal(payload.requestId, 'reg')
   })
 })
