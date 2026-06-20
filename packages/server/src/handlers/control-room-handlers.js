@@ -1596,7 +1596,10 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
   const runFn = typeof ctx?.runSimulatorAction === 'function' ? ctx.runSimulatorAction : runSimulatorAction
   simulatorActionInFlight.set(udid, action)
   try {
-    const status = await runFn({ action, udid })
+    // Pass the server-trusted, survey-validated udid (not the raw client string)
+    // to the exec — makes the trust boundary self-evident at the call site and
+    // survives any future loosening of the `.find` match predicate above.
+    const status = await runFn({ action, udid: device.udid })
     log.info(`simulator_action ${action} completed for ${udid} (client=${client?.id})`)
     ctx.transport.send(ws, {
       type: 'simulator_action_ack',
