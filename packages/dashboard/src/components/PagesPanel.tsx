@@ -105,10 +105,15 @@ export function PagesPanel({ fetchImpl, getToken, copyImpl, origin }: PagesPanel
   // previous timer (one consistent 1.5s window from the latest click, no
   // overlapping timers) and so it's torn down on unmount.
   const copyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  // #6110 review: the publish-result copy uses its OWN flash timer, separate from
+  // the per-card list copy above. Sharing one ref meant copying one link
+  // canceled the other's clear-timer, leaving a stuck "Copied!" (both directions).
+  const publishCopyTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
     void refreshRef.current()
     return () => {
       if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      if (publishCopyTimerRef.current) clearTimeout(publishCopyTimerRef.current)
     }
   }, [])
 
@@ -206,9 +211,9 @@ export function PagesPanel({ fetchImpl, getToken, copyImpl, origin }: PagesPanel
     const ok = await resolvedCopy(publishedUrl)
     if (ok) {
       setPublishedCopied(true)
-      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
-      copyTimerRef.current = setTimeout(() => {
-        copyTimerRef.current = null
+      if (publishCopyTimerRef.current) clearTimeout(publishCopyTimerRef.current)
+      publishCopyTimerRef.current = setTimeout(() => {
+        publishCopyTimerRef.current = null
         setPublishedCopied(false)
       }, 1500)
     }

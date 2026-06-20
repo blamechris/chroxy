@@ -147,6 +147,37 @@ describe('PagesPanel', () => {
       expect((screen.getByTestId('pages-publish-title') as HTMLInputElement).value).toBe('Report')
     })
 
+    it('uses an independent copy timer from the list — copying both does not leave a stuck "Copied!"', async () => {
+      vi.useFakeTimers()
+      try {
+        const copyImpl = vi.fn(async () => true)
+        const fetchImpl = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+          const url = typeof input === 'string' ? input : input.toString()
+          if (url === '/api/pages' && init?.method === 'POST') return jsonResponse({ slug: 's', path: '/p/s/' })
+          return jsonResponse({ pages: PAGES })
+        })
+        render(<PagesPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 't'} copyImpl={copyImpl} origin="https://x.example" />)
+        await vi.waitFor(() => expect(screen.getByTestId('page-card-status-report')).toBeTruthy())
+        // Publish so the result copy button exists.
+        fireEvent.click(screen.getByTestId('pages-publish-toggle'))
+        fireEvent.change(screen.getByTestId('pages-publish-html'), { target: { value: '<p>x</p>' } })
+        fireEvent.click(screen.getByTestId('pages-publish-submit'))
+        await vi.waitFor(() => expect(screen.getByTestId('pages-publish-result-copy')).toBeTruthy())
+        // Copy the list link, then immediately copy the published URL.
+        fireEvent.click(screen.getByTestId('page-copy-status-report'))
+        await vi.waitFor(() => expect(screen.getByTestId('page-copy-status-report').textContent).toBe('Copied!'))
+        fireEvent.click(screen.getByTestId('pages-publish-result-copy'))
+        await vi.waitFor(() => expect(screen.getByTestId('pages-publish-result-copy').textContent).toBe('Copied!'))
+        // After the flash window, BOTH revert — the publish copy didn't cancel the
+        // list copy's clear-timer (separate refs).
+        vi.advanceTimersByTime(1600)
+        await vi.waitFor(() => expect(screen.getByTestId('page-copy-status-report').textContent).toBe('Copy link'))
+        expect(screen.getByTestId('pages-publish-result-copy').textContent).toBe('Copy link')
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
     it('disables Publish until HTML is entered', async () => {
       const fetchImpl = vi.fn(async () => jsonResponse({ pages: [] }))
       render(<PagesPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 't'} />)
