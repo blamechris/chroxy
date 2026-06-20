@@ -677,6 +677,10 @@ export declare const SimulatorStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"simulator_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const EmulatorStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"emulator_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const IntegrationStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"integration_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -733,6 +737,17 @@ export declare const SimulatorActionSchema: z.ZodObject<{
         shutdown: "shutdown";
     }>;
     udid: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+export declare const EmulatorActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"emulator_action">;
+    action: z.ZodEnum<{
+        boot: "boot";
+        kill: "kill";
+    }>;
+    avd: z.ZodOptional<z.ZodString>;
+    serial: z.ZodOptional<z.ZodString>;
+    headless: z.ZodOptional<z.ZodBoolean>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const SummarizeSessionSchema: z.ZodObject<{
@@ -1161,6 +1176,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"simulator_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"emulator_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"integration_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
@@ -1215,6 +1233,16 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     udid: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"emulator_action">;
+    action: z.ZodEnum<{
+        boot: "boot";
+        kill: "kill";
+    }>;
+    avd: z.ZodOptional<z.ZodString>;
+    serial: z.ZodOptional<z.ZodString>;
+    headless: z.ZodOptional<z.ZodBoolean>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1246,6 +1274,7 @@ export type RepoRuntimeConfigRequestMessage = z.infer<typeof RepoRuntimeConfigRe
 export type ByokPoolStatusRequestMessage = z.infer<typeof ByokPoolStatusRequestSchema>;
 export type HostPruneStatusRequestMessage = z.infer<typeof HostPruneStatusRequestSchema>;
 export type SimulatorStatusRequestMessage = z.infer<typeof SimulatorStatusRequestSchema>;
+export type EmulatorStatusRequestMessage = z.infer<typeof EmulatorStatusRequestSchema>;
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
@@ -1254,6 +1283,7 @@ export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>;
 export type HostPruneActionMessage = z.infer<typeof HostPruneActionSchema>;
 export type SimulatorActionMessage = z.infer<typeof SimulatorActionSchema>;
+export type EmulatorActionMessage = z.infer<typeof EmulatorActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;

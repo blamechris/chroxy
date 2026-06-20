@@ -966,6 +966,15 @@ export const SimulatorStatusRequestSchema = z.object({
     type: z.literal('simulator_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #6137 (epic #5530): the same Control Room "Device runtimes" tab also asks the
+// server to survey Android emulators (`emulator -list-avds` + `adb devices`) +
+// the "Ready for Maestro" verdict. The server replies with a single
+// emulator_status_snapshot (see server.ts). No Android SDK → first-class
+// available:false snapshot.
+export const EmulatorStatusRequestSchema = z.object({
+    type: z.literal('emulator_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1087,6 +1096,21 @@ export const SimulatorActionSchema = z.object({
     type: z.literal('simulator_action'),
     action: z.enum(['boot', 'shutdown']),
     udid: z.string().min(1).max(128),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
+// #6137 (epic #5530): boot an AVD / kill a running Android emulator from the
+// Control Room "Device runtimes" tab. Host authority (server-enforced). boot
+// targets an `avd` (the survey enumerated, currently stopped) with an optional
+// `headless` (`-no-window`); kill targets a running `serial`. Both are LOOKUP
+// KEYS — the server re-surveys and rejects any avd/serial the survey didn't
+// enumerate, plus state-gates. The optional `requestId` is echoed on the
+// emulator_action_ack (success) and the EMULATOR_ACTION_FAILED session_error.
+export const EmulatorActionSchema = z.object({
+    type: z.literal('emulator_action'),
+    action: z.enum(['boot', 'kill']),
+    avd: z.string().min(1).max(256).optional(),
+    serial: z.string().min(1).max(128).optional(),
+    headless: z.boolean().optional(),
     requestId: z.string().max(128).optional(),
 }).passthrough();
 // #5547: summarize a session's persisted history into a continuation brief.
@@ -1211,6 +1235,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ByokPoolStatusRequestSchema,
     HostPruneStatusRequestSchema,
     SimulatorStatusRequestSchema,
+    EmulatorStatusRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     MailboxStatusRequestSchema,
@@ -1219,6 +1244,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ByokPoolActionSchema,
     HostPruneActionSchema,
     SimulatorActionSchema,
+    EmulatorActionSchema,
     SummarizeSessionSchema,
     PairApproveSchema,
     PairDenySchema,

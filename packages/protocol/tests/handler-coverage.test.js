@@ -75,6 +75,8 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'activity_snapshot' / 'activity_delta' removed — the dashboard now handles
   // them (Control Room panel #5163); they moved to PLATFORM_SPECIFIC as
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5159.
+  'emulator_status_snapshot', // #6137 (epic #5530) — Control Room Android emulator survey reply. Server contract landed first; the dashboard slice that consumes it (the Device runtimes Android panel) moves this to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
+  'emulator_action_ack', // #6137 (epic #5530) — Control Room Android emulator boot/kill action ack. Server contract landed first (same server-first split as the survey above); the dashboard slice that consumes it moves this to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only.
   // 'host_status_snapshot' removed — the dashboard now handles it (Control
   // Room Host/Repo Status section #5175); it moved to PLATFORM_SPECIFIC as
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
