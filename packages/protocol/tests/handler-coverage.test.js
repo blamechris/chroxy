@@ -75,8 +75,6 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'activity_snapshot' / 'activity_delta' removed — the dashboard now handles
   // them (Control Room panel #5163); they moved to PLATFORM_SPECIFIC as
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5159.
-  'emulator_status_snapshot', // #6137 (epic #5530) — Control Room Android emulator survey reply. Server contract landed first; the dashboard slice that consumes it (the Device runtimes Android panel) moves this to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
-  'emulator_action_ack', // #6137 (epic #5530) — Control Room Android emulator boot/kill action ack. Server contract landed first (same server-first split as the survey above); the dashboard slice that consumes it moves this to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only.
   // 'host_status_snapshot' removed — the dashboard now handles it (Control
   // Room Host/Repo Status section #5175); it moved to PLATFORM_SPECIFIC as
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
@@ -163,6 +161,8 @@ const PLATFORM_SPECIFIC = {
   'host_prune_action_ack': 'dashboard', // Control Room host prune action ack (#6140, epic #5530) — the dashboard consumes it to clear pending kind state; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'simulator_status_snapshot': 'dashboard', // Control Room iOS simulator survey reply (#6136, epic #5530) — the Device runtimes tab consumes it (devices + Ready-for-Maestro verdict); host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'simulator_action_ack': 'dashboard', // Control Room iOS simulator boot/shutdown action ack (#6136, epic #5530) — the dashboard consumes it to clear pending device state; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'emulator_status_snapshot': 'dashboard', // Control Room Android emulator survey reply (#6137, epic #5530) — the Device runtimes Android panel consumes it (devices + Ready-for-Maestro verdict); host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'emulator_action_ack': 'dashboard', // Control Room Android emulator boot/kill action ack (#6137, epic #5530) — the dashboard consumes it to clear pending device state; host-level surface, dashboard-only; mobile parity would be a fast-follow
   'skills_inventory_snapshot': 'dashboard', // Control Room Skills inventory survey reply (#5554, epic #5159) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'mailbox_status_snapshot': 'dashboard', // Control Room "Mailbox" tab survey reply (#5914 follow-up) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)

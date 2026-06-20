@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2635,6 +2635,18 @@ function handleSimulatorStatusSnapshot(msg: Record<string, unknown>, _get: MsgGe
 }
 
 /**
+ * #6137 (epic #5530) — Android emulator survey `emulator_status_snapshot`:
+ * REPLACE the stored snapshot and clear the loading flag. Same defensive,
+ * full-replace, clear-loading-only-on-valid-parse contract as the iOS sibling.
+ * `available:false` (no Android SDK) is a valid snapshot, not an error.
+ */
+function handleEmulatorStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerEmulatorStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ emulatorStatus: parsed.data, emulatorStatusLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2905,6 +2917,42 @@ function handleSimulatorActionAck(msg: Record<string, unknown>, get: MsgGet, set
 }
 
 /**
+ * #6137 (epic #5530) — resolve one emulator action target's pending state: drop
+ * the target (avd or serial) from `emulatorActioningIds` and record the outcome
+ * in `emulatorActionResults`. Shared by the ack and the EMULATOR_ACTION_FAILED
+ * session_error.
+ */
+function resolveEmulatorAction(
+  get: MsgGet,
+  set: MsgSet,
+  targetId: string,
+  result: { action: string; note: string | null; error: string | null },
+): void {
+  const pending = new Set(get().emulatorActioningIds);
+  pending.delete(targetId);
+  set({
+    emulatorActioningIds: pending,
+    emulatorActionResults: { ...get().emulatorActionResults, [targetId]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #6137 — emulator action success ack: builds a human note ("Starting…" after a
+ * boot, "Killed" after a kill) and clears the target's pending state. The target
+ * id is the echoed avd (boot) or serial (kill). A malformed ack is dropped (Zod)
+ * so the row keeps its honest pending state.
+ */
+function handleEmulatorActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerEmulatorActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { action, avd, serial, status } = parsed.data;
+  const targetId = action === 'boot' ? avd : serial;
+  if (!targetId) return;
+  const note = action === 'boot' ? `Starting${status ? `… (${status})` : '…'}` : `Killed${status ? ` (${status})` : ''}`;
+  resolveEmulatorAction(get, set, targetId, { action, note, error: null });
+}
+
+/**
  * #5547: a `summarize_session_result` resolves the pending summarize promise
  * (keyed by the echoed requestId) so the awaiting create-session flow opens
  * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
@@ -3025,6 +3073,8 @@ const HANDLERS: Record<string, Handler> = {
   host_prune_status_snapshot: handleHostPruneStatusSnapshot,
   // #6136 (epic #5530): Control Room iOS simulator survey snapshot.
   simulator_status_snapshot: handleSimulatorStatusSnapshot,
+  // #6137 (epic #5530): Control Room Android emulator survey snapshot.
+  emulator_status_snapshot: handleEmulatorStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,
@@ -3042,6 +3092,9 @@ const HANDLERS: Record<string, Handler> = {
   // #6136 (epic #5530): positive ack correlating a simulator_action (boot /
   // shutdown) request to its outcome.
   simulator_action_ack: handleSimulatorActionAck,
+  // #6137 (epic #5530): positive ack correlating an emulator_action (boot /
+  // kill) request to its outcome.
+  emulator_action_ack: handleEmulatorActionAck,
   // #5547: one-shot session-summary result; resolves the pending summarize
   // promise so the create-session flow can open with the brief seeded.
   summarize_session_result: handleSummarizeSessionResult,
@@ -3789,6 +3842,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           note: null,
           error: parsed.message || 'Simulator action failed.',
         });
+      } else if (parsed.code === 'EMULATOR_ACTION_FAILED' && (typeof msg.avd === 'string' || typeof msg.serial === 'string')) {
+        // #6137: a failed emulator_action echoes the target (avd for boot,
+        // serial for kill) — clear that target's pending state and surface the
+        // reason inline (the generic branch below still raises the toast).
+        const action = typeof msg.action === 'string' ? msg.action : '';
+        const targetId = action === 'boot'
+          ? (typeof msg.avd === 'string' ? msg.avd : '')
+          : (typeof msg.serial === 'string' ? msg.serial : '');
+        if (targetId) {
+          resolveEmulatorAction(get, set, targetId, {
+            action,
+            note: null,
+            error: parsed.message || 'Emulator action failed.',
+          });
+        }
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
         const crashedId = parsed.sessionPatch.sessionId;
