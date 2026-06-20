@@ -183,7 +183,13 @@ export function PagesPanel({ fetchImpl, getToken, copyImpl, origin }: PagesPanel
         throw new Error((body as { error?: string }).error || `HTTP ${res.status}`)
       }
       const body = (await res.json()) as { path?: string; slug?: string }
-      setPublishedUrl(body.path ? `${resolvedOrigin}${body.path}` : '')
+      if (body.path) {
+        setPublishedUrl(`${resolvedOrigin}${body.path}`)
+      } else {
+        // Published, but no path to link — surface a note rather than a dead
+        // (empty-href) link. Defensive: today's server always returns a path.
+        setPublishError('Published, but the server returned no share URL.')
+      }
       setPublishTitle('')
       setPublishHtml('')
       // The new page now exists server-side — reflect it in the list.

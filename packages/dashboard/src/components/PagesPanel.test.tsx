@@ -135,6 +135,18 @@ describe('PagesPanel', () => {
       expect(JSON.parse(post.init?.body as string).title).toBe('Untitled')
     })
 
+    it('loads a .html file into the textarea and seeds the title from the filename', async () => {
+      const fetchImpl = vi.fn(async () => jsonResponse({ pages: [] }))
+      render(<PagesPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 't'} />)
+      await waitFor(() => expect(screen.getByTestId('pages-empty')).toBeTruthy())
+      fireEvent.click(screen.getByTestId('pages-publish-toggle'))
+      const file = new File(['<h1>loaded</h1>'], 'Report.html', { type: 'text/html' })
+      fireEvent.change(screen.getByTestId('pages-publish-file'), { target: { files: [file] } })
+      await waitFor(() => expect((screen.getByTestId('pages-publish-html') as HTMLTextAreaElement).value).toBe('<h1>loaded</h1>'))
+      // Title seeded from the filename with the extension stripped.
+      expect((screen.getByTestId('pages-publish-title') as HTMLInputElement).value).toBe('Report')
+    })
+
     it('disables Publish until HTML is entered', async () => {
       const fetchImpl = vi.fn(async () => jsonResponse({ pages: [] }))
       render(<PagesPanel fetchImpl={fetchImpl as unknown as typeof fetch} getToken={() => 't'} />)
