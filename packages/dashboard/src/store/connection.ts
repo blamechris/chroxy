@@ -546,6 +546,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #6136 slice 3: simulator action — in-flight udids + last outcome per udid.
   simulatorActioningIds: new Set<string>(),
   simulatorActionResults: {},
+  // #6137: Control Room Android emulator snapshot, fed by the
+  // emulator_status_snapshot handler. Null until the first survey lands.
+  emulatorStatus: null,
+  emulatorStatusLoading: false,
+  // #6137: emulator action — in-flight targets (avd/serial) + last outcome.
+  emulatorActioningIds: new Set<string>(),
+  emulatorActionResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1090,6 +1097,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #6137 (epic #5530): request an Android emulator survey. Mirrors
+  // requestSimulatorStatus — flips emulatorStatusLoading and sends an
+  // emulator_status_request; the reply is a single emulator_status_snapshot
+  // handled into emulatorStatus. Returns false (no loading) when the socket is
+  // closed.
+  requestEmulatorStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ emulatorStatusLoading: true });
+      wsSend(socket, { type: 'emulator_status_request' });
+      return true;
+    }
+    return false;
+  },
+
   // #5499 (epic #5498): request an Integrations survey. Mirrors
   // requestRunnerStatus — flips integrationStatusLoading and sends an
   // integration_status_request; the reply is a single
@@ -1268,6 +1290,33 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     delete results[udid];
     set({ simulatorActioningIds: pending, simulatorActionResults: results });
     wsSend(socket, { type: 'simulator_action', action, udid, requestId });
+    return true;
+  },
+
+  // #6137 (epic #5530): boot an AVD / kill a running Android emulator. The
+  // pending/result state is keyed by the target (avd for boot, serial for kill).
+  // Same wire-or-nothing contract as the sibling actions. Non-destructive → no
+  // confirm. The server re-surveys + re-validates the target and state-gates it.
+  sendEmulatorAction: (action: 'boot' | 'kill', opts: { avd?: string; serial?: string; headless?: boolean }): boolean => {
+    const { socket } = get();
+    if (action !== 'boot' && action !== 'kill') return false;
+    const targetId = action === 'boot' ? opts?.avd : opts?.serial;
+    if (!targetId) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `emulator-action-${nextMessageId()}`;
+    const pending = new Set(get().emulatorActioningIds);
+    pending.add(targetId);
+    const results = { ...get().emulatorActionResults };
+    delete results[targetId];
+    set({ emulatorActioningIds: pending, emulatorActionResults: results });
+    const msg: Record<string, unknown> = { type: 'emulator_action', action, requestId };
+    if (action === 'boot') {
+      msg.avd = opts.avd;
+      if (opts.headless) msg.headless = true;
+    } else {
+      msg.serial = opts.serial;
+    }
+    wsSend(socket, msg);
     return true;
   },
 
@@ -2069,6 +2118,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().simulatorActioningIds.size > 0) {
         set({ simulatorActioningIds: new Set<string>() });
       }
+      // #6137: ditto for in-flight emulator actions.
+      if (get().emulatorActioningIds.size > 0) {
+        set({ emulatorActioningIds: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -2352,6 +2405,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6136: simulator action pending/result state goes with it.
       simulatorActioningIds: new Set<string>(),
       simulatorActionResults: {},
+      // #6137: emulator action pending/result state goes with it.
+      emulatorActioningIds: new Set<string>(),
+      emulatorActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -2401,6 +2457,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6136: simulator action pending/result state goes with it.
       simulatorActioningIds: new Set<string>(),
       simulatorActionResults: {},
+      // #6137: emulator action pending/result state goes with it.
+      emulatorActioningIds: new Set<string>(),
+      emulatorActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,

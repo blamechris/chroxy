@@ -150,6 +150,8 @@ const DASHBOARD_ONLY = new Set<string>([
   'host_prune_action_ack',      // Control Room host prune action ack (#6140, epic #5530) — dashboard-only
   'simulator_status_snapshot',  // Control Room iOS simulator survey (#6136, epic #5530) — dashboard-only (Device runtimes tab)
   'simulator_action_ack',       // Control Room iOS simulator boot/shutdown action ack (#6136, epic #5530) — dashboard-only
+  'emulator_status_snapshot',   // Control Room Android emulator survey (#6137, epic #5530) — dashboard-only (Device runtimes Android panel)
+  'emulator_action_ack',        // Control Room Android emulator boot/kill action ack (#6137, epic #5530) — dashboard-only
   'chroxy_context_hint_changed',// per-session context-hint toggle (#3805) — dashboard-only for v1
   'credential_test_result',     // Provider Credentials "Test" result (#3855) — dashboard-only
   'credentials_status',         // Provider Credentials pane (#3855) — dashboard-only
@@ -198,14 +200,6 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
-  'emulator_status_snapshot',             // #6137 (epic #5530) Control Room Android emulator survey —
-                                          //   server contract landed first; the Device runtimes Android-panel
-                                          //   dashboard slice that consumes it is the tracked follow-up, then
-                                          //   this → DASHBOARD_ONLY
-  'emulator_action_ack',                  // #6137 (epic #5530) Control Room Android emulator boot/kill action
-                                          //   ack — server contract landed first (same server-first split as
-                                          //   the survey above); the dashboard slice that consumes it is the
-                                          //   tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

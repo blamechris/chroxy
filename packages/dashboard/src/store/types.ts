@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -612,6 +612,20 @@ export interface SimulatorActionResult {
   at: number;
 }
 
+/**
+ * #6137 (epic #5530) — outcome of the last Android emulator action (boot /
+ * kill), kept for inline display. The target id is the avd (boot) or serial
+ * (kill). A successful `emulator_action_ack` records a human `note` with
+ * `error: null`; an EMULATOR_ACTION_FAILED session_error records the message
+ * with `note: null`. `at` is the local receipt time (epoch ms).
+ */
+export interface EmulatorActionResult {
+  action: string;
+  note: string | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -939,6 +953,31 @@ export interface ConnectionState {
    * in the device row. Replaced when the same device is actioned again.
    */
   simulatorActionResults: Record<string, SimulatorActionResult>;
+  /**
+   * #6137 (epic #5530) — Control Room Android emulator survey: the latest
+   * `emulator_status_snapshot` (devices + "Ready for Maestro" verdict), or null
+   * before the first one lands. `available:false` (no Android SDK) is a valid
+   * state. Replaced wholesale on each snapshot.
+   */
+  emulatorStatus: ServerEmulatorStatusSnapshotMessage | null;
+  /**
+   * #6137 — true between dispatching an `emulator_status_request` and the
+   * matching snapshot arriving (Refresh spinner). Cleared when a VALID snapshot
+   * lands (a malformed payload is dropped and leaves this true).
+   */
+  emulatorStatusLoading: boolean;
+  /**
+   * #6137 — emulator action targets (avd for boot / serial for kill) with an
+   * in-flight `emulator_action`: set when sendEmulatorAction is called, cleared
+   * on the `emulator_action_ack` / EMULATOR_ACTION_FAILED session_error. Keyed
+   * by target so each device row's buttons disable independently.
+   */
+  emulatorActioningIds: Set<string>;
+  /**
+   * #6137 — last emulator action outcome per target id, for inline display.
+   * Replaced when the same target is actioned again.
+   */
+  emulatorActionResults: Record<string, EmulatorActionResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1525,6 +1564,13 @@ export interface ConnectionState {
   // `simulatorStatusLoading` while in flight.
   requestSimulatorStatus: () => boolean;
 
+  // #6137 (epic #5530): request an Android emulator survey. Dispatches an
+  // `emulator_status_request`; the server replies with a single
+  // `emulator_status_snapshot` handled into `emulatorStatus`. Returns whether
+  // the message went on the wire (false = socket closed). Sets
+  // `emulatorStatusLoading` while in flight.
+  requestEmulatorStatus: () => boolean;
+
   // #6139 (epic #5530): request a per-repo runtime config survey. Dispatches a
   // `repo_runtime_config_request`; the server replies with a single
   // `repo_runtime_config_snapshot` handled into `repoRuntimeConfig`. Returns
@@ -1616,6 +1662,18 @@ export interface ConnectionState {
   // message actually went on the wire; an offline send (or an empty udid)
   // returns false without queuing. Non-destructive, so no confirm gate.
   sendSimulatorAction: (action: 'boot' | 'shutdown', udid: string) => boolean;
+
+  // #6137 (epic #5530): boot an AVD / kill a running Android emulator. boot
+  // targets an `avd` (the survey enumerated, currently stopped) with an optional
+  // `headless` (`-no-window`); kill targets a running `serial`. The server
+  // re-surveys + re-validates the target (lookup key, never a trusted path) and
+  // state-gates the action. Dispatches an `emulator_action` tagged with a
+  // requestId the server echoes on the `emulator_action_ack` /
+  // EMULATOR_ACTION_FAILED session_error. Marks the target (avd or serial) in
+  // `emulatorActioningIds` (dropping its stale result) ONLY when the message
+  // actually went on the wire; an offline send (or a missing target) returns
+  // false without queuing. Non-destructive, so no confirm gate.
+  sendEmulatorAction: (action: 'boot' | 'kill', opts: { avd?: string; serial?: string; headless?: boolean }) => boolean;
 
   // #5547: request a server-side one-shot summary of a session's persisted
   // history (the sidebar "Summarize & start new session" action). Dispatches a
