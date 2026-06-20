@@ -5,7 +5,7 @@ import { formatShortcutKeys } from '../utils/platform'
 // #5204 — 'control-room' is no longer a per-session viewMode; the Control
 // Room is a dedicated session-independent top-level tab (see `controlRoomOpen`
 // / `controlRoomActive` in App).
-export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots' | 'pool' | 'pages'
+export type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots' | 'pool' | 'pages'
 
 /** Scrollable tab bar with arrow buttons when overflowing */
 export function ViewSwitcher({
@@ -133,7 +133,6 @@ export function ViewSwitcher({
         {showConsoleTab && (
           <button className={`view-tab${viewMode === 'console' ? ' active' : ''}`} onClick={() => { setViewMode('console'); setSplitMode(null); persistSplitMode(null) }} type="button">Console</button>
         )}
-        <button className={`view-tab${viewMode === 'environments' ? ' active' : ''}`} onClick={() => { setViewMode('environments'); setSplitMode(null); persistSplitMode(null) }} type="button">Envs</button>
         <button className={`view-tab${viewMode === 'snapshots' ? ' active' : ''}`} onClick={() => { setViewMode('snapshots'); setSplitMode(null); persistSplitMode(null) }} type="button">Snapshots</button>
         <button className={`view-tab${viewMode === 'pool' ? ' active' : ''}`} onClick={() => { setViewMode('pool'); setSplitMode(null); persistSplitMode(null) }} type="button">Pool</button>
         <button className={`view-tab${viewMode === 'pages' ? ' active' : ''}`} onClick={() => { setViewMode('pages'); setSplitMode(null); persistSplitMode(null) }} type="button">Pages</button>

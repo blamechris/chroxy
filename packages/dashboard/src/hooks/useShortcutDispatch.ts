@@ -34,7 +34,7 @@ import { processBase64Image } from '../utils/image-utils'
 import { useConnectionStore } from '../store/connection'
 import { persistSplitMode } from '../store/persistence'
 
-type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'environments' | 'snapshots'
+type ViewMode = 'chat' | 'terminal' | 'files' | 'diff' | 'system' | 'console' | 'snapshots'
 
 export interface ShortcutDispatchProps {
   shortcutRegistry: ShortcutRegistry

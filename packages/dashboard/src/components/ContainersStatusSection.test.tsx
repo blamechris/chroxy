@@ -26,6 +26,12 @@ vi.mock('../store/connection', () => ({
       sendContainersAction: () => false,
     }),
 }))
+// #6141: the converged deep-management view. Stub it (like ControlRoomView.test
+// stubs its child sections) so this unit test stays focused on the disclosure
+// wiring rather than EnvironmentPanel's own store coupling.
+vi.mock('./EnvironmentPanel', () => ({
+  EnvironmentPanel: () => <div data-testid="stub-env-panel">+ New Environment</div>,
+}))
 import { ContainersStatusSection } from './ContainersStatusSection'
 
 afterEach(cleanup)
@@ -285,5 +291,23 @@ describe('ContainersStatusSection — lifecycle actions (#6134)', () => {
     const err = screen.getByTestId('container-action-error-env-1')
     expect(err.textContent).toContain('docker stop failed')
     expect(err.getAttribute('role')).toBe('alert')
+  })
+})
+
+describe('ContainersStatusSection — environment management (#6141)', () => {
+  it('the manage-environments disclosure is collapsed by default', () => {
+    render(<ContainersStatusSection snapshot={snapshot()} loading={false} connected={true} onRefresh={() => {}} />)
+    expect(screen.getByTestId('containers-manage-toggle')).toBeTruthy()
+    expect(screen.queryByTestId('containers-manage-panel')).toBeNull()
+  })
+
+  it('clicking the toggle reveals the converged EnvironmentPanel (create/list/destroy)', () => {
+    render(<ContainersStatusSection snapshot={snapshot()} loading={false} connected={true} onRefresh={() => {}} />)
+    fireEvent.click(screen.getByTestId('containers-manage-toggle'))
+    const panel = screen.getByTestId('containers-manage-panel')
+    expect(panel).toBeTruthy()
+    // EnvironmentPanel (stubbed) renders inside the disclosure.
+    expect(screen.getByTestId('stub-env-panel')).toBeTruthy()
+    expect(panel.textContent).toContain('New Environment')
   })
 })
