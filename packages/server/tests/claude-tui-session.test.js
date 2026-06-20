@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync, readFileSync, existsSync, statSync, utimesSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
-import { ClaudeTuiSession } from '../src/claude-tui-session.js'
+import { ClaudeTuiSession, withHookFsTimeout } from '../src/claude-tui-session.js'
 import { RespawnRateLimiter } from '../src/utils/respawn-rate-limiter.js'
 import { addLogListener, removeLogListener } from '../src/logger.js'
 
@@ -798,6 +798,65 @@ describe('ClaudeTuiSession', () => {
       assert.ok(!existsSync(join(session._sinkDir, 'pre-x.json')), 'pre- unlinked')
       assert.ok(!existsSync(join(session._sinkDir, 'post-x.json')), 'post- unlinked')
       assert.ok(!existsSync(join(session._sinkDir, 'stop-z.json')), 'stop- unlinked')
+    })
+
+    // #6178: per-session self-recovery — the hot-path fs ops are bounded so a
+    // stuck sink fs can't wedge the turn that owns it (the cross-session win was
+    // #6132; this is the single-session follow-up).
+    it('self-recovers from a hung sink fs instead of wedging the turn (#6178)', async () => {
+      session = new ClaudeTuiSession({
+        cwd: '/tmp', skillsDir: emptySkillsDir, repoSkillsDir: null,
+        resultTimeoutMs: 5000, hardTimeoutMs: 400,
+      })
+      session._processReady = true
+      session._sessionId = 'test-hung-fs-6178'
+      session._sinkDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-sink-hung-'))
+      session._waitForPrompt = async () => true
+      session._hookFsTimeoutMs = 40
+      // Simulate a frozen mount: readdir never resolves. Pre-fix, the poll loop
+      // would await this forever on the first pass and wedge until the PTY died
+      // (the while-guard never re-evaluated). Post-fix, each pass rejects at
+      // _hookFsTimeoutMs, the loop keeps iterating, and the hard-timeout watchdog
+      // ends the turn. If the fix regressed, this test HANGS (node:test timeout).
+      let readdirCalls = 0
+      session._hookReaddir = () => { readdirCalls++; return new Promise(() => {}) }
+      session._term = { write: () => {}, kill: () => {} }
+      session.on('error', () => {})
+      const start = Date.now()
+      await session.sendMessage('hi')
+      const elapsed = Date.now() - start
+      assert.ok(elapsed < 3000, `turn self-terminated (${elapsed}ms), not wedged on the frozen readdir`)
+      assert.equal(session._isBusy, false, 'busy cleared — the next turn isn\'t wedged')
+      // #6178 (review): the stuck readdir is COALESCED — re-raced, not re-issued.
+      // Across the multiple poll passes before the hard timeout, the underlying
+      // op is started exactly once, so it can't pile up stuck libuv threadpool
+      // work and exhaust the shared pool (which would re-block other sessions).
+      assert.equal(readdirCalls, 1, 'frozen readdir issued once, not once-per-pass')
+      rmSync(session._sinkDir, { recursive: true, force: true })
+    })
+
+    // #6178: the bound primitive itself.
+    describe('withHookFsTimeout', () => {
+      it('rejects with a tagged HOOK_FS_TIMEOUT after the bound on a stuck promise', async () => {
+        const start = Date.now()
+        await assert.rejects(
+          () => withHookFsTimeout(new Promise(() => {}), 30, 'readdir'),
+          (err) => err.code === 'HOOK_FS_TIMEOUT' && /readdir/.test(err.message),
+        )
+        assert.ok(Date.now() - start < 1000, 'rejected promptly at the bound, not hung')
+      })
+
+      it('resolves with the value when the promise settles before the bound', async () => {
+        const v = await withHookFsTimeout(Promise.resolve(['a.json', 'b.json']), 1000, 'readdir')
+        assert.deepEqual(v, ['a.json', 'b.json'])
+      })
+
+      it('propagates the underlying rejection (not a timeout) when the promise rejects first', async () => {
+        await assert.rejects(
+          () => withHookFsTimeout(Promise.reject(new Error('ENOENT: gone')), 1000, 'readFile'),
+          (err) => /ENOENT/.test(err.message) && err.code !== 'HOOK_FS_TIMEOUT',
+        )
+      })
     })
 
     describe('sweepStaleSinkDirs', () => {
