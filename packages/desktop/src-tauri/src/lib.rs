@@ -342,8 +342,12 @@ fn set_dock_badge(label: Option<String>) {
         let dock_tile: id = msg_send![ns_app, dockTile];
         match label {
             Some(text) => {
+                // alloc/init returns a +1-retained NSString (NOT autoreleased).
+                // setBadgeLabel: keeps its own copy, so release our reference
+                // afterwards or it leaks one NSString per badge update.
                 let ns_str: id = NSString::alloc(nil).init_str(&text);
                 let _: () = msg_send![dock_tile, setBadgeLabel: ns_str];
+                let _: () = msg_send![ns_str, release];
             }
             None => {
                 let _: () = msg_send![dock_tile, setBadgeLabel: nil];

@@ -37,6 +37,8 @@ export function useTrayBadgeSync(): void {
     const key = `${total.blocked}:${total.failed}`
     if (key === lastSentRef.current) return // unchanged — don't spam the bridge.
     lastSentRef.current = key
-    void invoke('update_tray_badge', { blocked: total.blocked, failed: total.failed })
+    // Swallow IPC rejection (backend not ready / command unregistered) so a
+    // best-effort cosmetic badge update can't surface an unhandled rejection.
+    void Promise.resolve(invoke('update_tray_badge', { blocked: total.blocked, failed: total.failed })).catch(() => {})
   }, [activity, sessions])
 }

@@ -30,6 +30,7 @@ const APP_COMMANDS: &[&str] = &[
     "set_summon_hotkey",
     "get_allow_auto_permission_mode",
     "set_allow_auto_permission_mode",
+    "update_tray_badge",
     "voice_available",
     "start_voice_input",
     "stop_voice_input",
