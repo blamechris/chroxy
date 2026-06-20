@@ -468,6 +468,22 @@ export class DockerContainerPool extends EventEmitter {
   }
 
   /**
+   * Read-only snapshot of the configured pool bounds (#6135 Control Room
+   * observability). `maxAgeMs` is `null` when unbounded (Infinity) so the value
+   * is JSON-serialisable. Pure — no side effects, no eviction.
+   *
+   * @returns {{ idleTimeoutMs: number, maxPerKey: number, maxTotal: number, maxAgeMs: number|null }}
+   */
+  limits() {
+    return {
+      idleTimeoutMs: this._idleTimeoutMs,
+      maxPerKey: this._maxPerKey,
+      maxTotal: this._maxTotal,
+      maxAgeMs: Number.isFinite(this._maxAgeMs) ? this._maxAgeMs : null,
+    }
+  }
+
+  /**
    * Mark a container "soiled" so the next `release()` call evicts it
    * inline instead of returning it to the pool. Used by callers that
    * have done something to the container's filesystem which couples it

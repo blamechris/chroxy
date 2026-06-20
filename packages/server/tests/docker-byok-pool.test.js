@@ -222,6 +222,22 @@ describe('DockerContainerPool — defaults', () => {
     assert.equal(pool.sizeOf('any-key'), 0)
     assert.equal(pool.acquire('any-key'), null)
   })
+
+  it('#6135 limits() reports the configured bounds (read-only)', () => {
+    const pool = new DockerContainerPool({
+      _execFile: execFileStub(),
+      idleTimeoutMs: 1000,
+      maxPerKey: 3,
+      maxTotal: 9,
+      maxAgeMs: 60000,
+    })
+    assert.deepEqual(pool.limits(), { idleTimeoutMs: 1000, maxPerKey: 3, maxTotal: 9, maxAgeMs: 60000 })
+  })
+
+  it('#6135 limits() reports maxAgeMs:null when unbounded (Infinity)', () => {
+    const pool = new DockerContainerPool({ _execFile: execFileStub(), maxAgeMs: Infinity })
+    assert.equal(pool.limits().maxAgeMs, null)
+  })
 })
 
 describe('DockerContainerPool acquire / release', () => {

@@ -1069,6 +1069,17 @@ export const RepoRuntimeConfigRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #6135 (epic #5530): the dashboard's Control Room "BYOK pool" surface asks the
+// server for the docker-byok warm-container pool stats — whether it's enabled,
+// its configured bounds, and the live rolling stats (hits/misses/evictions + the
+// per-key warm buckets). Read-only — the server replies with one
+// byok_pool_status_snapshot (see server.ts). Pull-on-Refresh, like the sibling
+// surveys. The optional requestId lets the dashboard correlate the reply.
+export const ByokPoolStatusRequestSchema = z.object({
+  type: z.literal('byok_pool_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1268,6 +1279,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   RunnerStatusRequestSchema,
   ContainersStatusRequestSchema,
   RepoRuntimeConfigRequestSchema,
+  ByokPoolStatusRequestSchema,
   IntegrationStatusRequestSchema,
   SkillsInventoryRequestSchema,
   MailboxStatusRequestSchema,
@@ -1298,6 +1310,7 @@ export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>
 export type ContainersStatusRequestMessage = z.infer<typeof ContainersStatusRequestSchema>
 export type RepoRuntimeConfigRequestMessage = z.infer<typeof RepoRuntimeConfigRequestSchema>
+export type ByokPoolStatusRequestMessage = z.infer<typeof ByokPoolStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
