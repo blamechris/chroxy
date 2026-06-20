@@ -43,6 +43,7 @@ import { RunnerStatusSection } from './RunnerStatusSection'
 import { ContainersStatusSection } from './ContainersStatusSection'
 import { RepoRuntimeConfigSection } from './RepoRuntimeConfigSection'
 import { ByokPoolSection } from './ByokPoolSection'
+import { HostPruneSection } from './HostPruneSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
@@ -157,6 +158,19 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'byokPoolStatus',
     loadingKey: 'byokPoolStatusLoading',
     requestKey: 'requestByokPoolStatus',
+  },
+  // #6140 (epic #5530): the Host prune tab — reclaimable, chroxy-scoped,
+  // orphan-only docker pressure (stopped chroxy containers + chroxy snapshot
+  // images not tracked by a live env) with drain/recycle-style prune actions.
+  // Same survey:true request/snapshot flow as the others.
+  {
+    key: 'host-prune',
+    label: 'Host prune',
+    survey: true,
+    requestType: 'host_prune_status_request',
+    snapshotKey: 'hostPruneStatus',
+    loadingKey: 'hostPruneStatusLoading',
+    requestKey: 'requestHostPruneStatus',
   },
   {
     key: 'integrations',
@@ -413,6 +427,8 @@ export function ControlRoomView({
         <RepoRuntimeConfigSection />
       ) : tab === 'byok-pool' ? (
         <ByokPoolSection />
+      ) : tab === 'host-prune' ? (
+        <HostPruneSection />
       ) : tab === 'integrations' ? (
         <IntegrationsSection />
       ) : tab === 'skills' ? (

@@ -509,6 +509,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // byok_pool_status_snapshot handler. Null until the first survey lands.
   byokPoolStatus: null,
   byokPoolStatusLoading: false,
+  // #6140 (epic #5530): Control Room host prune snapshot, fed by the
+  // host_prune_status_snapshot handler. Null until the first survey lands.
+  hostPruneStatus: null,
+  hostPruneStatusLoading: false,
   // #5499 (epic #5498): Control Room Integrations snapshot, fed by the
   // integration_status_snapshot handler. Null until the first survey lands.
   integrationStatus: null,
@@ -532,6 +536,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // target for inline display (same lifecycle as containerActioningIds).
   byokPoolActioningIds: new Set<string>(),
   byokPoolActionResults: {},
+  // #6140 slice 2: host prune action — in-flight kinds + last outcome per kind.
+  hostPruneActioningIds: new Set<string>(),
+  hostPruneActionResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1046,6 +1053,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #6140 (epic #5530): request a host prune survey. Mirrors
+  // requestByokPoolStatus — flips hostPruneStatusLoading and sends a
+  // host_prune_status_request; the reply is a single host_prune_status_snapshot
+  // handled into hostPruneStatus. Returns false (no loading) when the socket is
+  // closed.
+  requestHostPruneStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ hostPruneStatusLoading: true });
+      wsSend(socket, { type: 'host_prune_status_request' });
+      return true;
+    }
+    return false;
+  },
+
   // #5499 (epic #5498): request an Integrations survey. Mirrors
   // requestRunnerStatus — flips integrationStatusLoading and sends an
   // integration_status_request; the reply is a single
@@ -1178,6 +1200,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (typeof opts?.maxTotal === 'number') msg.maxTotal = opts.maxTotal;
     }
     wsSend(socket, msg);
+    return true;
+  },
+
+  // #6140 slice 2 (epic #5530): run a host prune for one `kind`
+  // (containers/images/all). The pending/result state is keyed by the kind. Same
+  // wire-or-nothing contract as the sibling actions: tag with a requestId the
+  // server echoes on the host_prune_action_ack / HOST_PRUNE_ACTION_FAILED
+  // session_error, and mark the kind pending ONLY when the message is genuinely
+  // on the wire. The server takes no target list — it re-surveys the chroxy-scoped
+  // orphan set and removes only those ids. The kind's previous result is dropped
+  // so a stale outcome can't sit beside the pending state. Confirmation lives in
+  // the UI.
+  sendHostPruneAction: (kind: 'containers' | 'images' | 'all'): boolean => {
+    const { socket } = get();
+    if (kind !== 'containers' && kind !== 'images' && kind !== 'all') return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `host-prune-action-${nextMessageId()}`;
+    const pending = new Set(get().hostPruneActioningIds);
+    pending.add(kind);
+    const results = { ...get().hostPruneActionResults };
+    delete results[kind];
+    set({ hostPruneActioningIds: pending, hostPruneActionResults: results });
+    wsSend(socket, { type: 'host_prune_action', kind, requestId });
     return true;
   },
 
@@ -1971,6 +2016,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().byokPoolActioningIds.size > 0) {
         set({ byokPoolActioningIds: new Set<string>() });
       }
+      // #6140: ditto for in-flight host prune actions.
+      if (get().hostPruneActioningIds.size > 0) {
+        set({ hostPruneActioningIds: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -2248,6 +2297,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6135: BYOK pool action pending/result state goes with it.
       byokPoolActioningIds: new Set<string>(),
       byokPoolActionResults: {},
+      // #6140: host prune action pending/result state goes with it.
+      hostPruneActioningIds: new Set<string>(),
+      hostPruneActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -2291,6 +2343,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6135: BYOK pool action pending/result state goes with it.
       byokPoolActioningIds: new Set<string>(),
       byokPoolActionResults: {},
+      // #6140: host prune action pending/result state goes with it.
+      hostPruneActioningIds: new Set<string>(),
+      hostPruneActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
