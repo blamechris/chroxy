@@ -195,6 +195,10 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
   'byok_pool_status_snapshot',            // #6135 (epic #5530) Control Room BYOK pool stats survey —
                                           //   server contract landed first; the dashboard surface that consumes
                                           //   the snapshot is the tracked follow-up, then this → DASHBOARD_ONLY
+  'byok_pool_action_ack',                 // #6135 slice 2 (epic #5530) Control Room BYOK pool mutating-action
+                                          //   (drain/recycle/resize) ack — server contract landed first; the
+                                          //   dashboard slice that consumes the ack is the tracked follow-up
+                                          //   (slice 3), then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

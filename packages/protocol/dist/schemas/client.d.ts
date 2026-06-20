@@ -697,6 +697,18 @@ export declare const ContainersActionSchema: z.ZodObject<{
     environmentId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+export declare const ByokPoolActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"byok_pool_action">;
+    action: z.ZodEnum<{
+        drain: "drain";
+        recycle: "recycle";
+        resize: "resize";
+    }>;
+    key: z.ZodOptional<z.ZodString>;
+    maxPerKey: z.ZodOptional<z.ZodNumber>;
+    maxTotal: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const SummarizeSessionSchema: z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
@@ -1144,6 +1156,17 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     environmentId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"byok_pool_action">;
+    action: z.ZodEnum<{
+        drain: "drain";
+        recycle: "recycle";
+        resize: "resize";
+    }>;
+    key: z.ZodOptional<z.ZodString>;
+    maxPerKey: z.ZodOptional<z.ZodNumber>;
+    maxTotal: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1178,6 +1201,7 @@ export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryReques
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
+export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;

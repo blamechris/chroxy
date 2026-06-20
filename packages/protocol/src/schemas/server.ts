@@ -1886,6 +1886,35 @@ export const ServerContainersActionAckSchema = z.object({
   status: z.string().nullable().optional(),
 }).passthrough()
 
+/**
+ * #6135 slice 2 (epic #5530) — ack for a successful `byok_pool_action` (drain /
+ * recycle / resize) of the BYOK warm-container pool. Echoes `action` (+ optional
+ * `requestId`, + `key` for recycle) so the dashboard can clear the row's pending
+ * state, and carries the action result:
+ *   - `drained` — containers evicted by a drain/recycle (null for resize).
+ *   - `evicted` — containers evicted to honor a tightened resize (null otherwise).
+ *   - `limits` — the new effective caps after a resize (null otherwise).
+ *   - `configured` — the operator-configured cap ceiling resize is clamped to.
+ * A failure instead replies with a `BYOK_POOL_ACTION_FAILED` session_error
+ * carrying the same correlation fields (mirrors containers_action's contract).
+ */
+export const ServerByokPoolActionAckSchema = z.object({
+  type: z.literal('byok_pool_action_ack'),
+  action: z.string(),
+  requestId: z.string().max(128).nullable().optional(),
+  key: z.string().nullable().optional(),
+  drained: z.number().int().nonnegative().finite().nullable().optional(),
+  evicted: z.number().int().nonnegative().finite().nullable().optional(),
+  limits: ByokPoolLimitsSchema.nullable().optional(),
+  configured: z
+    .object({
+      maxPerKey: z.number().int().nonnegative().finite(),
+      maxTotal: z.number().int().nonnegative().finite(),
+    })
+    .nullable()
+    .optional(),
+}).passthrough()
+
 // ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────
@@ -3045,6 +3074,7 @@ export type ServerIntegrationStatusSnapshotMessage = z.infer<typeof ServerIntegr
 export type IntegrationActionCounts = z.infer<typeof IntegrationActionCountsSchema>
 export type ServerIntegrationActionAckMessage = z.infer<typeof ServerIntegrationActionAckSchema>
 export type ServerContainersActionAckMessage = z.infer<typeof ServerContainersActionAckSchema>
+export type ServerByokPoolActionAckMessage = z.infer<typeof ServerByokPoolActionAckSchema>
 // #5554 — Skills inventory tab (epic #5159); request side is
 // `SkillsInventoryRequestMessage` in client.ts. Consumed by the server emitter
 // (control-room/skills-inventory.js), the dashboard store handler, and the

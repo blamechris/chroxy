@@ -1157,6 +1157,31 @@ export const ContainersActionSchema = z.object({
   requestId: z.string().max(128).optional(),
 }).passthrough()
 
+// #6135 slice 2 (epic #5530) — BYOK warm-container pool mutating action. Host
+// authority (a session-bound token cannot run host actions, enforced server
+// side). Three actions, all bounded by the pool's OWN state / operator config:
+//   - 'drain'   — evict every idle pooled container across all keys.
+//   - 'recycle' — evict idle containers for ONE resource-shape key; the key is
+//     validated against the pool's live survey (`inspect()`), never trusted as
+//     a path — an unknown key is rejected.
+//   - 'resize'  — set runtime per-key / total caps, each clamped server-side to
+//     `[1, the operator-configured ceiling]` (resize can only TIGHTEN, never
+//     raise host limits). At least one of maxPerKey / maxTotal is required.
+// The optional `requestId` is echoed on the `byok_pool_action_ack` (success)
+// and the BYOK_POOL_ACTION_FAILED session_error (failure), mirroring the
+// containers_action correlation contract. Destructive (drain/recycle evict warm
+// containers) — the dashboard gates them behind a confirmation affordance.
+export const ByokPoolActionSchema = z.object({
+  type: z.literal('byok_pool_action'),
+  action: z.enum(['drain', 'recycle', 'resize']),
+  // Required for 'recycle' (the target resource-shape key); ignored otherwise.
+  key: z.string().min(1).max(1024).optional(),
+  // For 'resize' only — new caps, clamped server-side to the configured ceiling.
+  maxPerKey: z.number().int().positive().max(1024).optional(),
+  maxTotal: z.number().int().positive().max(4096).optional(),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
 // #5547: summarize a session's persisted history into a continuation brief.
 // The server reads the session's `SessionMessageHistory` (the universal,
 // restart-surviving source — works even when the provider subprocess is gone),
@@ -1285,6 +1310,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   MailboxStatusRequestSchema,
   IntegrationActionSchema,
   ContainersActionSchema,
+  ByokPoolActionSchema,
   SummarizeSessionSchema,
   PairApproveSchema,
   PairDenySchema,
@@ -1316,6 +1342,7 @@ export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryReques
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>
+export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>
