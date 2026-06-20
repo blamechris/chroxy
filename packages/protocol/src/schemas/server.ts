@@ -1106,6 +1106,17 @@ export const ServerHostStatusSnapshotSchema = z.object({
   root: z.string(),
   summary: HostStatusSummarySchema,
   repos: z.array(RepoStatusSchema),
+  // #6144: additive degraded-snapshot annotation — on a forbidden/in-progress/
+  // failed survey the handler returns an otherwise-valid (empty repos, zeroed
+  // summary) snapshot plus this `error`, so the Control Room section can surface
+  // the failure typed rather than mistaking it for an empty survey. Mirrors the
+  // runner/containers/integrations snapshots.
+  error: z
+    .object({
+      code: z.string(),
+      message: z.string(),
+    })
+    .optional(),
 })
 
 // ---------------------------------------------------------------------------

@@ -899,6 +899,10 @@ export declare const ServerHostStatusSnapshotSchema: z.ZodObject<{
         lastTouched: z.ZodString;
         note: z.ZodOptional<z.ZodString>;
     }, z.core.$strip>>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
 }, z.core.$strip>;
 /** One live agentCommId → session registration row. */
 export declare const MailboxRegistrationSchema: z.ZodObject<{

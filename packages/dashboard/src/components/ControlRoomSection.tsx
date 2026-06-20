@@ -1001,6 +1001,11 @@ export function ControlRoomSection({
             {loading ? 'Refreshing…' : 'Refresh'}
           </button>
         </div>
+        {snapshot?.error && (
+          <p className="cr-callout cr-callout-bad" data-testid="cr-error" role="alert">
+            <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
+          </p>
+        )}
         {snapshot && (
           <p className="cr-sub" data-testid="cr-sub">
             All {snapshot.repos.length} managed repo{snapshot.repos.length === 1 ? '' : 's'} under{' '}
