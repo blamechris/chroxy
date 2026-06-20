@@ -258,6 +258,13 @@ export type {
   SessionActivityState,
   ActivityState,
   ActivityTreeNode,
+  // #6182 (Control Room v2 phase 2 / #5964): cross-session aggregation selector.
+  SessionDerivedStatus,
+  CrossSessionRollup,
+  CrossSessionMeta,
+  CrossSessionGroupSession,
+  CrossSessionGroup,
+  CrossSessionActivity,
 } from './activity-reducer'
 
 // #5163: re-export the wire-level activity types from the protocol through the
@@ -279,6 +286,9 @@ export {
   clearSessionActivity,
   selectSessionEntries,
   selectActivityTree,
+  // #6182: cross-session aggregation (group by repo+worktree + rollups).
+  deriveSessionStatus,
+  selectCrossSessionActivity,
 } from './activity-reducer'
 
 // #4242: cheap structural gate for `JSON.parse` on streaming
