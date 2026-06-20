@@ -28,12 +28,35 @@ const execFileAsync = promisify(execFile)
 export const EXEC_TIMEOUT_MS = 20000
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024
 const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
+// The survey reads `wsl.exe -l -v`, which emits UTF-16LE. execFile's default
+// UTF-8 decode would corrupt non-ASCII distro names BEFORE the parser sees them,
+// so capture raw bytes and decode explicitly (see decodeWslOutput).
+const EXEC_OPTS_BUFFER = { ...EXEC_OPTS, encoding: 'buffer' }
 
 /** #6138: the mutating WSL actions the Control Room can run. */
 export const WSL_ACTIONS = ['start', 'terminate']
 
 /** NUL byte, built without a control-char literal in source (see #6138 parse). */
 const NUL = String.fromCharCode(0)
+
+/**
+ * Decode `wsl.exe` output to a string. wsl.exe emits UTF-16LE, so the survey
+ * captures raw bytes (`encoding: 'buffer'`). Heuristic: a Buffer containing any
+ * NUL byte is UTF-16LE (ASCII text in UTF-16LE has a NUL in every other byte;
+ * valid UTF-8 never contains NUL) → decode `utf16le`; otherwise `utf8`. A value
+ * that's already a string is returned as-is (test convenience + defensive). This
+ * preserves non-ASCII distro names that a UTF-8 decode of UTF-16 bytes would
+ * corrupt. Never throws.
+ *
+ * @param {Buffer|string} out
+ * @returns {string}
+ */
+export function decodeWslOutput(out) {
+  if (typeof out === 'string') return out
+  if (!out || typeof out.includes !== 'function') return ''
+  // Buffer.includes(0) → true when a NUL byte is present (UTF-16LE signature).
+  return out.includes(0) ? out.toString('utf16le') : out.toString('utf8')
+}
 
 /**
  * Parse `wsl.exe -l -v` output into a distro list. The real command emits
@@ -106,8 +129,9 @@ export async function surveyWsl(opts = {}) {
 
   let distros
   try {
-    const { stdout } = await _execFile('wsl.exe', ['-l', '-v'], EXEC_OPTS)
-    distros = parseWslList(stdout)
+    // Capture raw bytes (wsl.exe emits UTF-16LE) and decode explicitly.
+    const { stdout } = await _execFile('wsl.exe', ['-l', '-v'], EXEC_OPTS_BUFFER)
+    distros = parseWslList(decodeWslOutput(stdout))
   } catch (err) {
     // No wsl.exe / WSL not installed — first-class "absent".
     return {

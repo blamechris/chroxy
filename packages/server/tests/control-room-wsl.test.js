@@ -6,6 +6,7 @@ import {
   runWslAction,
   WSL_ACTIONS,
   parseWslList,
+  decodeWslOutput,
 } from '../src/control-room/wsl.js'
 
 /**
@@ -60,6 +61,21 @@ describe('parseWslList()', () => {
   })
 })
 
+describe('decodeWslOutput()', () => {
+  it('decodes a UTF-16LE buffer (the real wsl.exe encoding) — preserves non-ASCII', () => {
+    const text = '* Ubuntü   Running   2'
+    const buf = Buffer.from(text, 'utf16le')
+    assert.equal(decodeWslOutput(buf), text)
+  })
+  it('decodes a plain UTF-8 buffer when no NUL bytes are present', () => {
+    assert.equal(decodeWslOutput(Buffer.from('hello', 'utf8')), 'hello')
+  })
+  it('passes a string through unchanged; tolerates junk', () => {
+    assert.equal(decodeWslOutput('already a string'), 'already a string')
+    assert.equal(decodeWslOutput(null), '')
+  })
+})
+
 describe('surveyWsl()', () => {
   it('lists distros + the default on a Windows host', async () => {
     const snap = await surveyWsl({ _execFile: async () => ({ stdout: SAMPLE }), _platform: WIN, _now: NOW })
@@ -67,6 +83,15 @@ describe('surveyWsl()', () => {
     assert.equal(snap.distros.length, 3)
     assert.equal(snap.defaultDistro, 'Ubuntu')
     assert.equal(snap.generatedAt, '2026-06-20T12:00:00.000Z')
+  })
+
+  it('decodes a real UTF-16LE Buffer from wsl.exe (preserves a non-ASCII name)', async () => {
+    // The production exec uses encoding:'buffer'; prove the survey decodes it.
+    const utf16 = Buffer.from('  NAME   STATE   VERSION\n* Ubuntü   Running   2', 'utf16le')
+    const snap = await surveyWsl({ _execFile: async () => ({ stdout: utf16 }), _platform: WIN, _now: NOW })
+    assert.equal(snap.available, true)
+    assert.deepEqual(snap.distros.map((d) => d.name), ['Ubuntü'])
+    assert.equal(snap.defaultDistro, 'Ubuntü')
   })
 
   it('degrades to available:false (quiet) off Windows without execing', async () => {
