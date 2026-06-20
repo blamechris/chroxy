@@ -99,22 +99,28 @@ export function CrossSessionMissionControl({ activity, sessions, now = Date.now 
             <RollupChips rollup={group.rollup} testidPrefix="mission-control-group-rollup" />
           </h3>
 
-          <ul className="mission-control-session-list">
+          {/* Reuse the v1 ActivityTree list reset (control-room-entry-list) so the
+              session rows share the tree's spacing/markers-off styling. */}
+          <ul className="mission-control-session-list control-room-entry-list">
             {group.sessions.map((s) => {
               const isOpen = expanded.has(s.sessionId)
+              // aria-controls must reference the expanded region's id (set below).
+              const treeId = `mission-control-session-tree-${s.sessionId}`
               return (
                 <li key={s.sessionId} className="mission-control-session" data-testid={`mission-control-session-${s.sessionId}`}>
+                  {/* Reuse control-room-entry so the row matches the v1 tree rows. */}
                   <button
                     type="button"
-                    className={`mission-control-session-row status-${s.status}`}
+                    className={`control-room-entry mission-control-session-row status-${s.status}`}
                     data-status={s.status}
                     data-testid={`mission-control-session-toggle-${s.sessionId}`}
                     aria-expanded={isOpen}
+                    aria-controls={isOpen ? treeId : undefined}
                     onClick={() => toggle(s.sessionId)}
                   >
-                    <span className="mission-control-session-name">{s.name}</span>
+                    <span className="control-room-entry-label mission-control-session-name">{s.name}</span>
                     <span
-                      className={`mc-status-badge status-${s.status}`}
+                      className={`control-room-status-badge status-${s.status}`}
                       data-testid={`mission-control-session-status-${s.sessionId}`}
                       role="status"
                       aria-label={`Status: ${STATUS_LABEL[s.status]}`}
@@ -123,7 +129,7 @@ export function CrossSessionMissionControl({ activity, sessions, now = Date.now 
                     </span>
                   </button>
                   {isOpen && (
-                    <div className="mission-control-session-tree" data-testid={`mission-control-session-tree-${s.sessionId}`}>
+                    <div className="mission-control-session-tree" id={treeId} data-testid={treeId}>
                       <ActivityTree activity={activity} sessionId={s.sessionId} now={now} />
                     </div>
                   )}

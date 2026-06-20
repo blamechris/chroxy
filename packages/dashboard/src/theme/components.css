@@ -1384,6 +1384,100 @@ button.sidebar-token-view-session-row:hover {
   border-color: var(--accent-orange-border-strong);
 }
 
+/* #6183: the cross-session aggregate can derive an `idle` session status (no
+   in-flight work) that the per-entry v1 statuses never produce — give it a muted
+   neutral treatment so the reused control-room status badge isn't unstyled. */
+.control-room-status-badge.status-idle {
+  color: var(--text-muted);
+  background: var(--surface-raised, rgba(127, 127, 127, 0.12));
+  border-color: var(--border-subtle, rgba(127, 127, 127, 0.25));
+}
+
+/* #6183 (Control Room v2 phase 2 / #5964): cross-session mission-control view.
+   The session list/rows/status-badge reuse the v1 control-room-* styles above;
+   these rules cover the NEW aggregate chrome (wrapper, group headers, the
+   per-group + overall rollup chips, the worktree tag). */
+.mission-control {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  overflow-y: auto;
+  height: 100%;
+  padding: 4px 2px;
+}
+.mission-control-empty {
+  color: var(--text-muted);
+  font-size: 12px;
+  font-style: italic;
+  padding: 8px 2px;
+}
+.mission-control-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.2));
+}
+.mc-total-label,
+.mission-control-group-label {
+  font-weight: 600;
+  font-size: 12px;
+  color: var(--text-primary, inherit);
+}
+.mission-control-group {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.mission-control-group-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin: 0;
+  font-size: 12px;
+}
+.mc-worktree-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--accent-purple, var(--text-muted));
+  background: var(--accent-purple-light, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  padding: 1px 5px;
+}
+.mc-rollup {
+  display: inline-flex;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+.mc-chip {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  border-radius: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+  color: var(--text-muted);
+}
+.mc-chip-running {
+  color: var(--accent-green, #4ade80);
+  border-color: var(--accent-green-border, rgba(74, 222, 128, 0.4));
+}
+.mc-chip-blocked {
+  color: var(--accent-orange);
+  border-color: var(--accent-orange-border-strong);
+}
+.mc-chip-failed {
+  color: var(--accent-red, #f87171);
+  border-color: var(--accent-red-border, rgba(248, 113, 113, 0.4));
+}
+.mission-control-session-tree {
+  padding-left: 12px;
+}
+
 /* Blocked-on-input entries are visually prominent and tie into the
    intervention surface (#4891): a steady amber accent + left rule so the
    operator's eye lands on "this needs you". A subtle pulse draws attention
