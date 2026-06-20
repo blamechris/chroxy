@@ -2431,7 +2431,9 @@ export class ClaudeTuiSession extends BaseSession {
         try {
           // #6178: bounded — a timeout rejects into the catch below, which keeps
           // the name in _consumedFiles as the dedup guard (same as any unlink
-          // failure), so a stuck unlink can't re-process the file or wedge.
+          // failure), so a stuck unlink can't re-process the file or wedge. The
+          // file then stays on disk (never re-unlinked); on a permanently stuck
+          // mount that's bounded sink growth, with sweepStaleSinkDirs as backstop.
           await withHookFsTimeout(this._hookUnlink(full), this._hookFsTimeoutMs, 'unlink')
           this._consumedFiles.delete(name)
         } catch { /* leave the dedup guard in place */ }
