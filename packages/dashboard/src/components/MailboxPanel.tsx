@@ -170,7 +170,9 @@ export function MailboxPanel({
           </p>
         )}
         {snapshot && snapshot.error && (
-          <p className="cr-bad" data-testid="mailbox-error">{snapshot.error.message}</p>
+          <p className="cr-callout cr-callout-bad" data-testid="mailbox-error" role="alert">
+            <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
+          </p>
         )}
         {snapshot && !Number.isNaN(generatedAtMs) && (
           <p className="cr-generated" data-testid="mailbox-generated">

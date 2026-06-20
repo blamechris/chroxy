@@ -183,8 +183,10 @@ describe('SkillsInventorySection — degradation', () => {
   it('renders the top-level degraded-survey callout', () => {
     const snap = snapshot({ global: [], repos: [], error: { code: 'FORBIDDEN', message: 'no authority' } })
     render(<SkillsInventorySection {...baseProps} snapshot={snap} />)
-    expect(screen.getByTestId('skills-error').textContent).toContain('no authority')
-    expect(screen.getByTestId('skills-error').textContent).toContain('FORBIDDEN')
+    const banner = screen.getByTestId('skills-error')
+    expect(banner.getAttribute('role')).toBe('alert') // #6167 a11y parity
+    expect(banner.textContent).toContain('no authority')
+    expect(banner.textContent).toContain('FORBIDDEN')
   })
 })
 

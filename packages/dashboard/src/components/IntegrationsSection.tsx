@@ -662,9 +662,9 @@ export function IntegrationsSection({
           </div>
 
           {snapshot.error && (
-            <div className="cr-callout" data-testid="integration-error">
-              <b>Survey degraded:</b> {snapshot.error.message} <span className="cr-dim cr-mono">({snapshot.error.code})</span>
-            </div>
+            <p className="cr-callout cr-callout-bad" data-testid="integration-error" role="alert">
+              <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
+            </p>
           )}
 
           {snapshot.repoMemoryCli && !snapshot.repoMemoryCli.found && (
