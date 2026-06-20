@@ -60,6 +60,12 @@ export function effectiveAllowlist(config = {}) {
   const configured = Array.isArray(config?.allowedDockerImages) ? config.allowedDockerImages : null
   return {
     source: configured ? 'config' : 'default',
+    // Safe to expose the full pattern set HERE: this survey is host-authority
+    // gated (a session-bound token gets FORBIDDEN), so the audience is the
+    // operator who already has read access to the config these patterns come
+    // from. That's a different trust boundary than docker-image-allowlist.js's
+    // `validateDockerImage`, which deliberately withholds the patterns from
+    // untrusted/session-scoped clients to stop allowlist-prefix enumeration.
     patterns: configured || DEFAULT_ALLOWED_DOCKER_IMAGES,
   }
 }

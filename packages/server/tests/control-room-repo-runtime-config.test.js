@@ -175,6 +175,18 @@ describe('#6139 surveyRepoRuntimeConfig', () => {
     assert.equal(snap.backendSource, 'config')
   })
 
+  it('an explicit valid backend equal to the default (docker) still reports source "config"', () => {
+    // The subtle case: an operator who explicitly chose 'docker' is config-driven,
+    // not defaulted — distinct from the typo/unset paths that also resolve to docker.
+    const snap = surveyRepoRuntimeConfig({
+      repoSet: [],
+      config: { environments: { backend: 'docker' } },
+      _now: fixedNow,
+    })
+    assert.equal(snap.backend, 'docker')
+    assert.equal(snap.backendSource, 'config')
+  })
+
   it('a backend typo falls back to docker with source "default"', () => {
     const snap = surveyRepoRuntimeConfig({
       repoSet: [],
