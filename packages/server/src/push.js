@@ -110,8 +110,17 @@ export class PushManager {
    *   #5828: also feeds DiscordBillingSink — `billingStatePath` (its own state
    *   file, kept separate from the status store) and `billingAlerts` (kill-switch,
    *   default on when a webhook resolves).
+   * @param {() => number} [opts.now] - #6146 injectable clock (epoch ms),
+   *   defaults to `Date.now`. send()'s rate-limit AND the #4544 quiet-hours gate
+   *   evaluate against "now"; tests pin it to a deterministic instant so the
+   *   quiet-hours classification can't flip on a CI run near a window boundary.
    */
-  constructor({ storagePath, prefsPath, discord = {} } = {}) {
+  constructor({ storagePath, prefsPath, discord = {}, now = Date.now } = {}) {
+    // #6146: injectable clock (default Date.now). Assigned directly — an invalid
+    // value fails fast on use rather than silently reverting, matching the
+    // codebase's clock-seam convention (utils/respawn-rate-limiter.js,
+    // turn-tracker.js).
+    this._now = now
     // #4541: notification-prefs path. Optional — when omitted PushManager
     // operates entirely in-memory (callers like one-off tests don't need
     // to write to disk). When set, getPrefs / setPrefs round-trip
@@ -509,16 +518,17 @@ export class PushManager {
     // gate so a single shared throttle still applies regardless of
     // per-device prefs. See RATE_LIMITS history comments above.
     const limit = RATE_LIMITS[category] ?? 30_000
+    const nowMs = this._now()
     const lastSent = this._lastSent.get(category) || 0
-    if (Date.now() - lastSent < limit) {
+    if (nowMs - lastSent < limit) {
       return true
     }
-    this._lastSent.set(category, Date.now())
+    this._lastSent.set(category, nowMs)
 
     return await this._sinks.fanOut(
       { category, title, body, data, categoryId },
       {
-        now: Date.now(),
+        now: nowMs,
         isCategoryEnabled: (cat, deviceId) => this.isCategoryEnabled(cat, deviceId),
         isInQuietHours: (now, deviceId) => this.isInQuietHours(now, deviceId),
         shouldBypassQuietHours: (cat, deviceId) => this.shouldBypassQuietHours(cat, deviceId),
