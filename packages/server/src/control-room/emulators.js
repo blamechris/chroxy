@@ -60,23 +60,31 @@ export function parseAvdList(stdout) {
 }
 
 /**
- * Parse `adb devices` stdout into running emulator serials. Lines look like
- * `emulator-5554\tdevice`; we keep only `emulator-*` serials in the `device`
- * state (a booting emulator shows `offline` and is intentionally excluded — it
- * isn't usable yet). Physical devices / `adb` header line are dropped. Never
- * throws.
+ * Parse `adb devices` stdout into emulator entries. Lines look like
+ * `emulator-5554\tdevice`; we keep `emulator-*` serials and map the adb state:
+ * `device` → `running` (usable), `offline` → `starting` (booting, not usable
+ * yet but already live — surfacing it stops the UI from booting a duplicate and
+ * lets `kill` target it). Other states / physical devices / the `adb` header
+ * are dropped. Deduped by serial (preferring `running`), sorted. Never throws.
  *
  * @param {string} stdout
- * @returns {string[]} running emulator serials
+ * @returns {Array<{serial: string, state: 'running'|'starting'}>}
  */
 export function parseAdbDevices(stdout) {
   if (typeof stdout !== 'string') return []
-  const out = []
+  const bySerial = new Map()
   for (const line of stdout.split('\n')) {
     const m = /^(emulator-\d+)\s+(\w+)/.exec(line.trim())
-    if (m && m[2] === 'device') out.push(m[1])
+    if (!m) continue
+    const state = m[2] === 'device' ? 'running' : m[2] === 'offline' ? 'starting' : null
+    if (!state) continue
+    const prev = bySerial.get(m[1])
+    // Prefer the usable 'running' state if a serial somehow appears twice.
+    if (!prev || (prev.state === 'starting' && state === 'running')) {
+      bySerial.set(m[1], { serial: m[1], state })
+    }
   }
-  return [...new Set(out)].sort((a, b) => (a < b ? -1 : a > b ? 1 : 0))
+  return [...bySerial.values()].sort((a, b) => (a.serial < b.serial ? -1 : a.serial > b.serial ? 1 : 0))
 }
 
 /** Default TCP reachability probe for 127.0.0.1:port (no data sent). */
@@ -151,29 +159,31 @@ export async function surveyEmulators(opts = {}) {
   }
 
   // `adb devices` is best-effort: if adb is missing we still list AVDs (all
-  // stopped) rather than failing the whole survey.
-  let runningSerials = []
+  // stopped) rather than failing the whole survey. Each entry is {serial, state}
+  // where state is 'running' (usable) or 'starting' (booting / adb 'offline').
+  let adbRows = []
   try {
     const { stdout } = await _execFile('adb', ['devices'], EXEC_OPTS)
-    runningSerials = parseAdbDevices(stdout)
+    adbRows = parseAdbDevices(stdout)
   } catch {
-    runningSerials = []
+    adbRows = []
   }
 
-  // Resolve each running serial's AVD name so we can fold it into the AVD list.
-  const running = []
-  for (const serial of runningSerials) {
-    const avd = await resolveAvdName(serial, _execFile)
-    running.push({ serial, avd })
+  // Resolve each live serial's AVD name so we can fold it into the AVD list,
+  // carrying the adb state ('running' | 'starting').
+  const live = []
+  for (const row of adbRows) {
+    const avd = await resolveAvdName(row.serial, _execFile)
+    live.push({ serial: row.serial, avd, state: row.state })
   }
-  const runningAvdNames = new Set(running.map((r) => r.avd).filter(Boolean))
+  const liveAvdNames = new Set(live.map((r) => r.avd).filter(Boolean))
 
   const devices = [
-    // Running emulators first (operator's attention): killable, serial known.
-    ...running.map((r) => ({ avd: r.avd, serial: r.serial, state: 'running' })),
+    // Live emulators first (operator's attention): running or starting, serial known.
+    ...live.map((r) => ({ avd: r.avd, serial: r.serial, state: r.state })),
     // Then installed-but-stopped AVDs: bootable, no serial yet.
     ...avds
-      .filter((name) => !runningAvdNames.has(name))
+      .filter((name) => !liveAvdNames.has(name))
       .map((name) => ({ avd: name, serial: null, state: 'stopped' })),
   ]
 
@@ -182,7 +192,10 @@ export async function surveyEmulators(opts = {}) {
     _probePort(MOCK_SERVER_PORT).catch(() => false),
   ])
 
-  const hasRunning = running.length > 0
+  // "Ready for Maestro" needs a FULLY running emulator — a booting ('starting')
+  // one isn't usable yet.
+  const fullyRunning = live.filter((r) => r.state === 'running')
+  const hasRunning = fullyRunning.length > 0
   const reasons = []
   if (!hasRunning) reasons.push('No running emulator')
   if (!metroReachable) reasons.push(`Metro not reachable on :${METRO_PORT}`)
@@ -195,7 +208,7 @@ export async function surveyEmulators(opts = {}) {
     devices,
     readyForMaestro: {
       ready: hasRunning && metroReachable && mockServerReachable,
-      runningDevice: hasRunning ? (running[0].avd || running[0].serial) : null,
+      runningDevice: hasRunning ? (fullyRunning[0].avd || fullyRunning[0].serial) : null,
       metroReachable,
       mockServerReachable,
       reasons,
@@ -209,8 +222,11 @@ export async function surveyEmulators(opts = {}) {
  * exec, mirroring `runSimulatorAction`.
  *
  * boot is a long-lived foreground process, so it is SPAWNED DETACHED (and
- * unref'd) and returns immediately with 'starting' — the next survey shows it
- * as running. kill is a quick `adb emu kill` and returns 'killed'.
+ * unref'd). We AWAIT the child's `spawn` event (so an async spawn failure —
+ * ENOENT/EACCES — rejects here and surfaces as EMULATOR_ACTION_FAILED rather
+ * than crashing the server on an unhandled `error` event), then resolve with
+ * 'starting' — the next survey shows it as running. kill is a quick
+ * `adb emu kill` and returns 'killed'.
  *
  * @param {object} opts
  * @param {'boot'|'kill'} opts.action
@@ -230,10 +246,31 @@ export async function runEmulatorAction({ action, avd, serial, headless = false,
     const args = ['-avd', avd]
     if (headless) args.push('-no-window')
     // Detached + unref so the emulator outlives this request; ignore stdio so
-    // the parent isn't held open by the child's pipes.
-    const child = _spawn('emulator', args, { detached: true, stdio: 'ignore' })
-    if (child && typeof child.unref === 'function') child.unref()
-    return 'starting'
+    // the parent isn't held open by the child's pipes. Resolve on 'spawn',
+    // reject on 'error' — an unhandled 'error' on a ChildProcess would crash
+    // the process.
+    return await new Promise((resolve, reject) => {
+      let settled = false
+      const child = _spawn('emulator', args, { detached: true, stdio: 'ignore' })
+      const onError = (err) => {
+        if (settled) return
+        settled = true
+        reject(err instanceof Error ? err : new Error(`emulator spawn failed: ${err}`))
+      }
+      const onSpawn = () => {
+        if (settled) return
+        settled = true
+        if (typeof child.unref === 'function') child.unref()
+        resolve('starting')
+      }
+      if (child && typeof child.once === 'function') {
+        child.once('error', onError)
+        child.once('spawn', onSpawn)
+      } else {
+        // A stub child without an event emitter (defensive): treat as started.
+        onSpawn()
+      }
+    })
   }
   // kill
   if (typeof serial !== 'string' || !serial) throw new Error('runEmulatorAction kill requires a serial')

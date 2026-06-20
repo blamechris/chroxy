@@ -1796,8 +1796,10 @@ async function handleEmulatorAction(ws, client, msg, ctx) {
         emulatorActionError(ws, ctx, msg, 'unknown-avd', `avd does not name a surveyed emulator: ${avd}`)
         return
       }
-      if (device.state === 'running') {
-        emulatorActionError(ws, ctx, msg, 'already-running', `Emulator ${avd} is already running`)
+      // Reject if it's already live (running OR starting) — booting again would
+      // spawn a duplicate emulator process.
+      if (device.state !== 'stopped') {
+        emulatorActionError(ws, ctx, msg, 'already-running', `Emulator ${avd} is already ${device.state}`)
         return
       }
     } else {
@@ -1806,7 +1808,9 @@ async function handleEmulatorAction(ws, client, msg, ctx) {
         emulatorActionError(ws, ctx, msg, 'unknown-serial', `serial does not name a surveyed emulator: ${serial}`)
         return
       }
-      if (device.state !== 'running') {
+      // Kill targets any live emulator (running OR starting) — only a stopped
+      // device (no live process) is invalid.
+      if (device.state === 'stopped') {
         emulatorActionError(ws, ctx, msg, 'not-running', `Emulator ${serial} is not running`)
         return
       }

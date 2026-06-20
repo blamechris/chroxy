@@ -1,5 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { EventEmitter } from 'node:events'
 
 import {
   surveyEmulators,
@@ -31,9 +32,12 @@ describe('parseAvdList()', () => {
 })
 
 describe('parseAdbDevices()', () => {
-  it('keeps only emulator-* serials in the device state', () => {
+  it('maps emulator-* serials to running (device) / starting (offline), drops physical', () => {
     const stdout = 'List of devices attached\nemulator-5554\tdevice\nemulator-5556\toffline\n0A1B2C\tdevice\n'
-    assert.deepEqual(parseAdbDevices(stdout), ['emulator-5554'])
+    assert.deepEqual(parseAdbDevices(stdout), [
+      { serial: 'emulator-5554', state: 'running' },
+      { serial: 'emulator-5556', state: 'starting' },
+    ])
   })
   it('returns [] on empty/garbage', () => {
     assert.deepEqual(parseAdbDevices(''), [])
@@ -114,6 +118,24 @@ describe('surveyEmulators()', () => {
     assert.equal(snap.readyForMaestro.ready, false)
   })
 
+  it('an offline emulator is surfaced as starting (not ready, not stopped)', async () => {
+    const snap = await surveyEmulators({
+      _execFile: async (file, args) => {
+        if (file === 'emulator') return { stdout: '' }
+        if (file === 'adb' && args[0] === 'devices') return { stdout: 'emulator-5554\toffline\n' }
+        if (file === 'adb' && args.includes('avd')) return { stdout: 'Pixel_7_API_34\n' }
+        throw new Error('unexpected')
+      },
+      _probePort: async () => true,
+      _now: NOW,
+    })
+    assert.equal(snap.devices.length, 1)
+    assert.equal(snap.devices[0].state, 'starting')
+    // A booting emulator isn't usable → not ready.
+    assert.equal(snap.readyForMaestro.ready, false)
+    assert.ok(snap.readyForMaestro.reasons.some((r) => /No running emulator/.test(r)))
+  })
+
   it('a running emulator with an unresolvable AVD name still lists by serial', async () => {
     const snap = await surveyEmulators({
       _execFile: async (file, args) => {
@@ -181,5 +203,23 @@ describe('runEmulatorAction()', () => {
       () => runEmulatorAction({ action: 'kill', serial: 'emulator-5554', _execFile: async () => { throw new Error('device not found') } }),
       /device not found/,
     )
+  })
+
+  it('boot resolves on the child "spawn" event and unrefs', async () => {
+    const child = new EventEmitter()
+    let unrefd = false
+    child.unref = () => { unrefd = true }
+    const p = runEmulatorAction({ action: 'boot', avd: 'Pixel_7_API_34', _spawn: () => child })
+    queueMicrotask(() => child.emit('spawn'))
+    assert.equal(await p, 'starting')
+    assert.equal(unrefd, true)
+  })
+
+  it('boot rejects on an async spawn "error" (ENOENT) rather than crashing', async () => {
+    const child = new EventEmitter()
+    child.unref = () => {}
+    const p = runEmulatorAction({ action: 'boot', avd: 'Pixel_7_API_34', _spawn: () => child })
+    queueMicrotask(() => child.emit('error', new Error('spawn emulator ENOENT')))
+    await assert.rejects(() => p, /ENOENT/)
   })
 })
