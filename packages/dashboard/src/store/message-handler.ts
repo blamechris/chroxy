@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2601,6 +2601,17 @@ function handleRepoRuntimeConfigSnapshot(msg: Record<string, unknown>, _get: Msg
 }
 
 /**
+ * #6135 (epic #5530) — BYOK pool survey `byok_pool_status_snapshot`: REPLACE the
+ * stored snapshot and clear the loading flag. Same defensive, full-replace,
+ * clear-loading-only-on-valid-parse contract as the sibling survey handlers.
+ */
+function handleByokPoolStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerByokPoolStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ byokPoolStatus: parsed.data, byokPoolStatusLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2729,6 +2740,60 @@ function handleContainersActionAck(msg: Record<string, unknown>, get: MsgGet, se
 }
 
 /**
+ * #6135 slice 3 (epic #5530) — derive the pending/result TARGET id for a BYOK
+ * pool action from its echoed `action` (+ `key` for recycle). Must match the id
+ * `sendByokPoolAction` registers: 'drain' / 'recycle:<key>' / 'resize'. A
+ * recycle with no key can't have a live pending entry, so it maps to the bare
+ * action (a harmless no-op delete).
+ */
+function byokPoolActionTargetId(action: string, key: string | null | undefined): string {
+  return action === 'recycle' && typeof key === 'string' && key.length > 0 ? `recycle:${key}` : action;
+}
+
+/**
+ * #6135 slice 3 — resolve one BYOK pool action target's pending state: drop the
+ * target id from `byokPoolActioningIds` and record the outcome (a human `note`,
+ * or a failure message) in `byokPoolActionResults` for inline display. Shared by
+ * the success ack and the BYOK_POOL_ACTION_FAILED session_error — the same
+ * clear-pending-on-either-outcome contract as the container/reindex pairs.
+ */
+function resolveByokPoolAction(
+  get: MsgGet,
+  set: MsgSet,
+  targetId: string,
+  result: { action: string; note: string | null; error: string | null },
+): void {
+  const pending = new Set(get().byokPoolActioningIds);
+  pending.delete(targetId);
+  set({
+    byokPoolActioningIds: pending,
+    byokPoolActionResults: { ...get().byokPoolActionResults, [targetId]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #6135 slice 3 — BYOK pool action success ack: positive confirmation that the
+ * `byok_pool_action` drain / recycle / resize completed. Builds a human note
+ * from the echoed result (drained/evicted counts, new limits) and clears the
+ * matching target's pending state. A malformed ack is dropped (Zod safeParse) so
+ * the row keeps its honest pending state rather than clearing on a half-true
+ * message.
+ */
+function handleByokPoolActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerByokPoolActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { action, key, drained, evicted, limits } = parsed.data;
+  let note: string;
+  if (action === 'resize') {
+    const caps = limits ? ` (caps now ${limits.maxPerKey}/key, ${limits.maxTotal} total)` : '';
+    note = `Resized — evicted ${evicted ?? 0}${caps}`;
+  } else {
+    note = `${action === 'recycle' ? 'Recycled' : 'Drained'} — evicted ${drained ?? 0}`;
+  }
+  resolveByokPoolAction(get, set, byokPoolActionTargetId(action, key), { action, note, error: null });
+}
+
+/**
  * #5547: a `summarize_session_result` resolves the pending summarize promise
  * (keyed by the echoed requestId) so the awaiting create-session flow opens
  * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
@@ -2843,6 +2908,8 @@ const HANDLERS: Record<string, Handler> = {
   containers_status_snapshot: handleContainersStatusSnapshot,
   // #6139 (epic #5530): Control Room per-repo runtime config survey snapshot.
   repo_runtime_config_snapshot: handleRepoRuntimeConfigSnapshot,
+  // #6135 (epic #5530): Control Room BYOK pool survey snapshot.
+  byok_pool_status_snapshot: handleByokPoolStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,
@@ -2852,6 +2919,9 @@ const HANDLERS: Record<string, Handler> = {
   // #6134 (epic #5530): positive ack correlating a containers_action (stop /
   // restart / destroy) request to its outcome.
   containers_action_ack: handleContainersActionAck,
+  // #6135 (epic #5530): positive ack correlating a byok_pool_action (drain /
+  // recycle / resize) request to its outcome.
+  byok_pool_action_ack: handleByokPoolActionAck,
   // #5547: one-shot session-summary result; resolves the pending summarize
   // promise so the create-session flow can open with the brief seeded.
   summarize_session_result: handleSummarizeSessionResult,
@@ -3571,6 +3641,16 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           action: typeof msg.action === 'string' ? msg.action : '',
           status: null,
           error: parsed.message || 'Container action failed.',
+        });
+      } else if (parsed.code === 'BYOK_POOL_ACTION_FAILED' && typeof msg.action === 'string') {
+        // #6135: a failed byok_pool_action echoes the exact action (+ key for
+        // recycle) — clear that target's pending state and surface the reason
+        // inline (the generic branch below still raises the toast, matching the
+        // CONTAINER_ACTION_FAILED precedent).
+        resolveByokPoolAction(get, set, byokPoolActionTargetId(msg.action, typeof msg.key === 'string' ? msg.key : null), {
+          action: msg.action,
+          note: null,
+          error: parsed.message || 'BYOK pool action failed.',
         });
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {

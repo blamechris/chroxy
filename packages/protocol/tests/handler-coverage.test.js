@@ -80,8 +80,6 @@ const INTENTIONALLY_UNHANDLED = new Set([
   // 'dashboard'. Mobile parity is a Phase-2 fast-follow per epic #5170.
   // 'session_stopped' removed — both handlers now implement case 'session_stopped': (dashboard #4878, mobile #4879)
   'prompt_evaluator_skip_pattern_changed', // #3639 server emits the broadcast; dashboard exposure (toggle UI + receipt handler) is a deferred follow-up — until then the surface is the per-session promptEvaluatorSkipPattern field on session_list. Pairs with the parent epic #3068.
-  'byok_pool_status_snapshot', // #6135 (epic #5530) — Control Room BYOK container-pool stats survey reply. Server contract (survey + handler + protocol) landed first; the dashboard surface that consumes the snapshot is the tracked follow-up slice, at which point this moves to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
-  'byok_pool_action_ack', // #6135 slice 2 (epic #5530) — Control Room BYOK pool mutating-action (drain/recycle/resize) ack. Server contract (pool methods + handler + protocol) landed first; the dashboard slice that consumes the ack to clear pending row state is the tracked follow-up (slice 3), at which point this moves to PLATFORM_SPECIFIC as 'dashboard'. Host-level surface, dashboard-only (the mobile app has no Control Room).
   // 'session_usage' is now handled by both dashboard (#4073) and mobile
   // app (#4074); no PLATFORM_SPECIFIC entry needed. Coverage test passes
   // because each handler has a `case 'session_usage':` clause.
@@ -157,6 +155,8 @@ const PLATFORM_SPECIFIC = {
   'integration_status_snapshot': 'dashboard', // Control Room Integrations survey reply (#5499, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'integration_action_ack': 'dashboard', // Control Room Integrations Reindex action ack (#5500, epic #5498) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'containers_action_ack': 'dashboard', // Control Room container lifecycle action ack (#6134, epic #5530) — the dashboard consumes it to clear pending row state; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'byok_pool_status_snapshot': 'dashboard', // Control Room BYOK pool stats survey reply (#6135, epic #5530) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'byok_pool_action_ack': 'dashboard', // Control Room BYOK pool mutating-action (drain/recycle/resize) ack (#6135, epic #5530) — the dashboard consumes it to clear pending target state; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'skills_inventory_snapshot': 'dashboard', // Control Room Skills inventory survey reply (#5554, epic #5159) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'mailbox_status_snapshot': 'dashboard', // Control Room "Mailbox" tab survey reply (#5914 follow-up) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)
