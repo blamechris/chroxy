@@ -2100,6 +2100,44 @@ export declare const ServerEmulatorActionAckSchema: z.ZodObject<{
     requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
     status: z.ZodNullable<z.ZodString>;
 }, z.core.$loose>;
+/** One WSL distro from `wsl.exe -l -v`. */
+export declare const WslDistroSchema: z.ZodObject<{
+    name: z.ZodString;
+    state: z.ZodString;
+    version: z.ZodNullable<z.ZodNumber>;
+    isDefault: z.ZodBoolean;
+}, z.core.$strip>;
+export declare const ServerWslStatusSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"wsl_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    available: z.ZodBoolean;
+    note: z.ZodNullable<z.ZodString>;
+    defaultDistro: z.ZodNullable<z.ZodString>;
+    distros: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        state: z.ZodString;
+        version: z.ZodNullable<z.ZodNumber>;
+        isDefault: z.ZodBoolean;
+    }, z.core.$strip>>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$loose>;
+/**
+ * #6138 — ack for a successful `wsl_action` (start/terminate). Echoes `action`/
+ * `distro` (+ optional `requestId`) and carries the resulting `status`
+ * ("running" after a start, "stopped" after a terminate). A failure replies with
+ * a `WSL_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export declare const ServerWslActionAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"wsl_action_ack">;
+    action: z.ZodString;
+    distro: z.ZodString;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    status: z.ZodNullable<z.ZodString>;
+}, z.core.$loose>;
 /**
  * #5554 — one skill in the inventory snapshot. Carries only names /
  * descriptions / metadata — never the skill BODY (the security boundary: skill
@@ -3055,6 +3093,8 @@ export type ServerSimulatorStatusSnapshotMessage = z.infer<typeof ServerSimulato
 export type ServerSimulatorActionAckMessage = z.infer<typeof ServerSimulatorActionAckSchema>;
 export type ServerEmulatorStatusSnapshotMessage = z.infer<typeof ServerEmulatorStatusSnapshotSchema>;
 export type ServerEmulatorActionAckMessage = z.infer<typeof ServerEmulatorActionAckSchema>;
+export type ServerWslStatusSnapshotMessage = z.infer<typeof ServerWslStatusSnapshotSchema>;
+export type ServerWslActionAckMessage = z.infer<typeof ServerWslActionAckSchema>;
 export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>;
 export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>;
 export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>;

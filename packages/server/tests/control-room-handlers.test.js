@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -1881,6 +1881,193 @@ describe('emulator_action handler (#6137)', () => {
     await handleSessionMessage(ws, client, { type: 'emulator_action', action: 'kill', serial: 'emulator-5554', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'emulator_action_ack')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6138 (epic #5530) — WSL2 distro survey + start/terminate action handlers.
+// surveyWsl + runWslAction injected via ctx so no real WSL/Windows is touched.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_WSL = {
+  generatedAt: '2026-06-20T12:00:00.000Z',
+  available: true,
+  note: null,
+  defaultDistro: 'Ubuntu',
+  distros: [
+    { name: 'Ubuntu', state: 'Running', version: 2, isDefault: true },
+    { name: 'Debian', state: 'Stopped', version: 2, isDefault: false },
+  ],
+}
+
+function makeWslCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({
+    send: sendSpy,
+    surveyWsl: createSpy(async () => SAMPLE_WSL),
+    runWslAction: createSpy(async ({ action }) => (action === 'start' ? 'running' : 'stopped')),
+    ...overrides,
+    _send: sendSpy,
+  })
+}
+
+describe('wsl_status_request handler (#6138)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeWslCtx(); client = { id: 'client-W' }; ws = {} })
+
+  it('is registered', () => {
+    assert.ok(registeredMessageTypes.includes('wsl_status_request'))
+    assert.equal(typeof controlRoomHandlers.wsl_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant wsl_status_snapshot', async () => {
+    await controlRoomHandlers.wsl_status_request(ws, client, { type: 'wsl_status_request', requestId: 'w1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'wsl_status_snapshot')
+    assert.equal(payload.requestId, 'w1')
+    assert.equal(payload.defaultDistro, 'Ubuntu')
+    assert.ok(ServerWslStatusSnapshotSchema.safeParse(payload).success, JSON.stringify(ServerWslStatusSnapshotSchema.safeParse(payload).error?.issues))
+  })
+
+  it('relays an available:false (off-Windows) snapshot as a first-class state', async () => {
+    ctx = makeWslCtx({ surveyWsl: createSpy(async () => ({ ...SAMPLE_WSL, available: false, note: 'only on Windows', defaultDistro: null, distros: [] })) })
+    await controlRoomHandlers.wsl_status_request(ws, client, { type: 'wsl_status_request' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.available, false)
+    assert.ok(ServerWslStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.wsl_status_request(ws, client, { type: 'wsl_status_request' }, ctx)
+    assert.equal(ctx.surveyWsl.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].error.code, 'FORBIDDEN')
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeWslCtx({ surveyWsl: createSpy(async () => { await gate; return SAMPLE_WSL }) })
+    const first = controlRoomHandlers.wsl_status_request(ws, client, { type: 'wsl_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.wsl_status_request(ws, client, { type: 'wsl_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveyWsl.callCount, 1)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].error.code, 'SURVEY_IN_PROGRESS')
+    release(); await first
+  })
+})
+
+describe('wsl_action handler (#6138)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeWslCtx(); client = { id: 'client-WA' }; ws = {} })
+
+  it('is registered', () => {
+    assert.ok(registeredMessageTypes.includes('wsl_action'))
+    assert.equal(typeof controlRoomHandlers.wsl_action, 'function')
+  })
+
+  it('starts a stopped distro and acks a schema-valid wsl_action_ack', async () => {
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Debian', requestId: 'r1' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 1)
+    assert.equal(ctx.runWslAction.lastCall[0].distro, 'Debian')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'wsl_action_ack')
+    assert.equal(payload.action, 'start')
+    assert.equal(payload.distro, 'Debian')
+    assert.equal(payload.status, 'running')
+    assert.ok(ServerWslActionAckSchema.safeParse(payload).success, JSON.stringify(ServerWslActionAckSchema.safeParse(payload).error?.issues))
+  })
+
+  it('terminates a running distro', async () => {
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'terminate', distro: 'Ubuntu' }, ctx)
+    assert.equal(ctx.runWslAction.lastCall[0].distro, 'Ubuntu')
+    assert.equal(ctx._send.lastCall[1].status, 'stopped')
+  })
+
+  it('rejects an unsupported action', async () => {
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'nuke', distro: 'Ubuntu' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unsupported-action')
+  })
+
+  it('rejects a missing distro', async () => {
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'invalid-distro')
+  })
+
+  it('rejects a distro the survey did not enumerate', async () => {
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Ghost' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unknown-distro')
+  })
+
+  it('rejects starting a non-stopped distro (default-closed gate, #6174)', async () => {
+    // Ubuntu is Running in SAMPLE_WSL → start requires explicitly Stopped.
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Ubuntu' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-stopped')
+  })
+
+  it('rejects terminating a non-running distro', async () => {
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'terminate', distro: 'Debian' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-running')
+  })
+
+  it('default-closed gates reject a transitional-state distro for BOTH actions (#6174)', async () => {
+    // A distro mid-transition (e.g. Installing) is neither Stopped nor Running →
+    // neither start nor terminate should poke wsl.exe.
+    ctx = makeWslCtx({ surveyWsl: createSpy(async () => ({
+      ...SAMPLE_WSL,
+      distros: [{ name: 'Fedora', state: 'Installing', version: 2, isDefault: false }],
+    })) })
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Fedora' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-stopped')
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'terminate', distro: 'Fedora' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-running')
+    assert.equal(ctx.runWslAction.callCount, 0)
+  })
+
+  it('rejects a session-bound (non-host) client without surveying', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Debian', requestId: 'f1' }, ctx)
+    assert.equal(ctx.surveyWsl.callCount, 0)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'forbidden')
+  })
+
+  it('rejects when WSL is unavailable on the host', async () => {
+    ctx = makeWslCtx({ surveyWsl: createSpy(async () => ({ ...SAMPLE_WSL, available: false, note: 'only on Windows', distros: [] })) })
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Debian' }, ctx)
+    assert.equal(ctx.runWslAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'unavailable')
+  })
+
+  it('relays a WSL_ACTION_FAILED when the run throws', async () => {
+    ctx = makeWslCtx({ runWslAction: createSpy(async () => { throw new Error('wsl blew up') }) })
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Debian', requestId: 'x1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'WSL_ACTION_FAILED')
+    assert.equal(payload.reason, 'start-failed')
+    assert.match(payload.message, /wsl blew up/)
+  })
+
+  it('fast-rejects a duplicate same-distro action without re-surveying', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeWslCtx({ runWslAction: createSpy(async () => { await gate; return 'running' }) })
+    const first = controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Debian', requestId: 'a' }, ctx)
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Debian', requestId: 'b' }, ctx)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].reason, 'action-in-progress')
+    assert.equal(ctx.surveyWsl.callCount, 1)
+    release(); await first
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'wsl_action', action: 'terminate', distro: 'Ubuntu', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'wsl_action_ack')
     assert.equal(payload.requestId, 'reg')
   })
 })
