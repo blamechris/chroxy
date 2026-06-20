@@ -805,9 +805,16 @@ describe('isInQuietHoursIn — Intl.DateTimeFormat memoization (#4568)', () => {
 })
 
 describe('PushManager.send — quiet-hours gate (#4544)', () => {
+  // #6146: pin "now" to a deterministic instant well inside the 00:00–23:59
+  // window so the quiet-hours classification can't flip when CI runs in the
+  // final 23:59:00–23:59:59 minute (which falls outside an end-exclusive
+  // window). Noon UTC on a fixed date is unambiguously inside.
+  const FIXED_NOW = Date.UTC(2026, 0, 15, 12, 0, 0)
+  const fixedNow = () => FIXED_NOW
+
   it('skips Expo POST when ALL tokens are in quiet hours and category does not bypass', async () => {
     const { PushManager } = await import('../src/push.js')
-    const pm = new PushManager({ prefsPath })
+    const pm = new PushManager({ prefsPath, now: fixedNow })
     pm.registerToken('ExponentPushToken[tok-a]')
     pm.registerToken('ExponentPushToken[tok-b]')
     // Set a global window that covers "now" — set start/end such that
@@ -861,7 +868,7 @@ describe('PushManager.send — quiet-hours gate (#4544)', () => {
 
   it('sends only to tokens NOT in quiet hours when per-device overrides differ', async () => {
     const { PushManager } = await import('../src/push.js')
-    const pm = new PushManager({ prefsPath })
+    const pm = new PushManager({ prefsPath, now: fixedNow })
     pm.registerToken('ExponentPushToken[tok-asleep]')
     pm.registerToken('ExponentPushToken[tok-awake]')
     // Global: always-on quiet hours.
