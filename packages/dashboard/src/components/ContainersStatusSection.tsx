@@ -507,13 +507,14 @@ export function ContainersStatusSection({
           className="cr-action"
           data-testid="containers-manage-toggle"
           aria-expanded={showManage}
+          aria-controls="containers-manage-panel-region"
           onClick={() => setShowManage((v) => !v)}
           title="Create or destroy persistent environments"
         >
           {showManage ? 'Hide environment management' : 'Manage environments'}
         </button>
         {showManage && (
-          <div data-testid="containers-manage-panel">
+          <div id="containers-manage-panel-region" data-testid="containers-manage-panel">
             <EnvironmentPanel />
           </div>
         )}
