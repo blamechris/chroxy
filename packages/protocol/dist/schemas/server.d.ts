@@ -1984,6 +1984,49 @@ export declare const ServerHostPruneActionAckSchema: z.ZodObject<{
         error: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$loose>;
+/** One iOS simulator from `xcrun simctl list devices`. */
+export declare const SimulatorDeviceSchema: z.ZodObject<{
+    udid: z.ZodString;
+    name: z.ZodString;
+    state: z.ZodString;
+    runtime: z.ZodString;
+    deviceType: z.ZodNullable<z.ZodString>;
+    isAvailable: z.ZodBoolean;
+}, z.core.$strip>;
+/** The composite "Ready for Maestro" verdict (CLAUDE.md pre-flight). */
+export declare const ReadyForMaestroSchema: z.ZodObject<{
+    ready: z.ZodBoolean;
+    bootedSimulator: z.ZodNullable<z.ZodString>;
+    metroReachable: z.ZodBoolean;
+    mockServerReachable: z.ZodBoolean;
+    reasons: z.ZodArray<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerSimulatorStatusSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"simulator_status_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    available: z.ZodBoolean;
+    note: z.ZodNullable<z.ZodString>;
+    devices: z.ZodArray<z.ZodObject<{
+        udid: z.ZodString;
+        name: z.ZodString;
+        state: z.ZodString;
+        runtime: z.ZodString;
+        deviceType: z.ZodNullable<z.ZodString>;
+        isAvailable: z.ZodBoolean;
+    }, z.core.$strip>>;
+    readyForMaestro: z.ZodObject<{
+        ready: z.ZodBoolean;
+        bootedSimulator: z.ZodNullable<z.ZodString>;
+        metroReachable: z.ZodBoolean;
+        mockServerReachable: z.ZodBoolean;
+        reasons: z.ZodArray<z.ZodString>;
+    }, z.core.$strip>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$loose>;
 /**
  * #5554 — one skill in the inventory snapshot. Carries only names /
  * descriptions / metadata — never the skill BODY (the security boundary: skill
@@ -2935,6 +2978,7 @@ export type ServerContainersActionAckMessage = z.infer<typeof ServerContainersAc
 export type ServerByokPoolActionAckMessage = z.infer<typeof ServerByokPoolActionAckSchema>;
 export type ServerHostPruneStatusSnapshotMessage = z.infer<typeof ServerHostPruneStatusSnapshotSchema>;
 export type ServerHostPruneActionAckMessage = z.infer<typeof ServerHostPruneActionAckSchema>;
+export type ServerSimulatorStatusSnapshotMessage = z.infer<typeof ServerSimulatorStatusSnapshotSchema>;
 export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>;
 export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>;
 export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>;
