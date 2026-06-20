@@ -30,6 +30,7 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { parseByteSize } from './containers.js'
+import { listSnapshots } from '../snapshots-store.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -104,8 +105,14 @@ export function sumBytes(records) {
 }
 
 /**
- * Build the set of container ids + image refs CURRENTLY tracked by live
- * EnvironmentManager records, so the prune survey excludes them (orphan-only).
+ * Build the set of container ids + RETAINED image refs the EnvironmentManager
+ * records reference, so the prune survey excludes them (orphan-only). Critically,
+ * this includes BOTH `env.image` (the env's current base/committed image) AND
+ * every `env.snapshots[].image` (committed `chroxy-env:<id>-<ts>` snapshots a user
+ * deliberately saved) — missing the latter would `docker rmi` retained snapshots
+ * (data loss, #6140 review). BYOK `chroxy-byok-snap:*` snapshots are tracked
+ * separately via the sidecar store (see `surveyHostPrune`).
+ *
  * Matches both full and 12-char short container ids (the writable-layer id docker
  * may echo) by recording the id and its 12-char prefix.
  *
@@ -123,6 +130,12 @@ export function trackedResources(envs) {
     }
     const image = typeof env?.image === 'string' ? env.image : ''
     if (image) imageRefs.add(image)
+    // #6140 review: retained per-env snapshots are referenced ONLY here, never as
+    // env.image — they must be excluded or the prune deletes saved snapshots.
+    for (const snap of Array.isArray(env?.snapshots) ? env.snapshots : []) {
+      const ref = typeof snap?.image === 'string' ? snap.image : ''
+      if (ref) imageRefs.add(ref)
+    }
   }
   return { containerIds, imageRefs }
 }
@@ -144,6 +157,7 @@ function isTrackedContainer(id, tracked) {
  *
  * @param {object} [opts]
  * @param {() => Array<object>} [opts.listEnvironments] - live env records (to exclude tracked).
+ * @param {() => Array<{tag: string}>} [opts.listByokSnapshots] - BYOK snapshot sidecars (to exclude retained `chroxy-byok-snap:*` images).
  * @param {Function} [opts._execFile] - promisified execFile seam.
  * @param {() => Date} [opts._now] - clock seam.
  * @returns {Promise<{generatedAt: string, dockerAvailable: boolean, note: string|null,
@@ -153,6 +167,7 @@ function isTrackedContainer(id, tracked) {
 export async function surveyHostPrune(opts = {}) {
   const {
     listEnvironments = () => [],
+    listByokSnapshots = () => listSnapshots(),
     _execFile = execFileAsync,
     _now = () => new Date(),
   } = opts
@@ -167,6 +182,21 @@ export async function surveyHostPrune(opts = {}) {
   }
 
   const tracked = trackedResources(typeof listEnvironments === 'function' ? listEnvironments() : [])
+  // #6140 review: retained BYOK snapshots live in the sidecar store, NOT in any
+  // env record — their `chroxy-byok-snap:*` images must be excluded too. A sidecar
+  // is the retention record; an image WITH one is user-retained → never prunable.
+  const retainedByokTags = new Set()
+  let byokReadFailed = false
+  try {
+    for (const s of (typeof listByokSnapshots === 'function' ? listByokSnapshots() : []) || []) {
+      if (s && typeof s.tag === 'string' && s.tag) retainedByokTags.add(s.tag)
+    }
+  } catch {
+    // A sidecar-store read failure must NOT widen the prune set — fail closed by
+    // skipping image pruning entirely (a missing sidecar list could otherwise let
+    // a retained snapshot look like an orphan).
+    byokReadFailed = true
+  }
 
   // Stopped chroxy containers. A docker/daemon failure here means docker is
   // unavailable → degrade the whole survey (no point probing images).
@@ -190,19 +220,27 @@ export async function surveyHostPrune(opts = {}) {
   }
 
   // chroxy images across both repos. A per-repo failure degrades just that repo
-  // (the survey stays valid with whatever resolved).
+  // (the survey stays valid with whatever resolved). If the BYOK sidecar store
+  // couldn't be read, SKIP image pruning entirely (fail closed) — without the
+  // retained-tag set we can't tell a retained snapshot from an orphan.
   const images = []
   let imageNote = null
-  for (const repo of CHROXY_IMAGE_REPOS) {
-    try {
-      const { stdout } = await _execFile('docker', [
-        'images', repo, '--format', '{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}',
-      ], EXEC_OPTS)
-      for (const img of parseImageLines(stdout)) {
-        if (!tracked.imageRefs.has(img.ref)) images.push(img)
+  if (byokReadFailed) {
+    imageNote = 'BYOK snapshot registry unavailable — image pruning skipped to avoid deleting retained snapshots.'
+  } else {
+    for (const repo of CHROXY_IMAGE_REPOS) {
+      try {
+        const { stdout } = await _execFile('docker', [
+          'images', repo, '--format', '{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}',
+        ], EXEC_OPTS)
+        for (const img of parseImageLines(stdout)) {
+          // Excluded if referenced by a live env (image or saved snapshot) OR
+          // retained as a BYOK snapshot sidecar. Only true orphans survive.
+          if (!tracked.imageRefs.has(img.ref) && !retainedByokTags.has(img.ref)) images.push(img)
+        }
+      } catch (err) {
+        imageNote = `some chroxy image repositories could not be listed (${err && err.message ? err.message : 'exec failed'}).`
       }
-    } catch (err) {
-      imageNote = `some chroxy image repositories could not be listed (${err && err.message ? err.message : 'exec failed'}).`
     }
   }
 
@@ -247,11 +285,12 @@ export async function runHostPrune(opts = {}) {
   const {
     kind = 'all',
     listEnvironments = () => [],
+    listByokSnapshots = () => listSnapshots(),
     _execFile = execFileAsync,
     _now = () => new Date(),
   } = opts
   const selected = PRUNE_KINDS.includes(kind) ? kind : 'all'
-  const survey = await surveyHostPrune({ listEnvironments, _execFile, _now })
+  const survey = await surveyHostPrune({ listEnvironments, listByokSnapshots, _execFile, _now })
 
   const result = {
     kind: selected,

@@ -97,6 +97,10 @@ describe('sumBytes()', () => {
   })
 })
 
+// All survey/run calls inject listByokSnapshots so they never read the real
+// ~/.chroxy/snapshots/ sidecar dir (the default). Empty = no retained BYOK snaps.
+const NO_BYOK = () => []
+
 describe('surveyHostPrune()', () => {
   it('reports chroxy-scoped orphan containers + images with a reclaimable estimate', async () => {
     const _execFile = execStub({
@@ -106,9 +110,10 @@ describe('surveyHostPrune()', () => {
         'chroxy-byok-snap': 'img2\tchroxy-byok-snap\tabc-1\t500MB',
       },
     })
-    const snap = await surveyHostPrune({ listEnvironments: () => [], _execFile, _now: NOW })
+    const snap = await surveyHostPrune({ listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     assert.equal(snap.dockerAvailable, true)
     assert.equal(snap.summary.containerCount, 1)
+    // No sidecar → the chroxy-byok-snap image is a true orphan, so both images prune.
     assert.equal(snap.summary.imageCount, 2)
     assert.equal(snap.summary.reclaimableBytes, 10_000_000 + 1_000_000_000 + 500_000_000)
     assert.equal(snap.generatedAt, '2026-06-19T12:00:00.000Z')
@@ -127,6 +132,7 @@ describe('surveyHostPrune()', () => {
     })
     const snap = await surveyHostPrune({
       listEnvironments: () => [{ containerId: 'live123456789abcdef', image: 'chroxy-env:live-1' }],
+      listByokSnapshots: NO_BYOK,
       _execFile,
       _now: NOW,
     })
@@ -134,9 +140,64 @@ describe('surveyHostPrune()', () => {
     assert.deepEqual(snap.images.map((i) => i.ref), ['chroxy-env:orph-1'])
   })
 
+  it('excludes a retained per-env SNAPSHOT image (env.snapshots[]), not just env.image', async () => {
+    const _execFile = execStub({
+      psOut: '',
+      imagesOut: {
+        'chroxy-env': 'imgsnap\tchroxy-env\tlive-100\t1GB\nimgorph\tchroxy-env\tdead-200\t300MB',
+        'chroxy-byok-snap': '',
+      },
+    })
+    const snap = await surveyHostPrune({
+      // env on base image node:22-slim, with a saved snapshot chroxy-env:live-100.
+      listEnvironments: () => [{
+        containerId: 'c1', image: 'node:22-slim',
+        snapshots: [{ id: 'snap-1', image: 'chroxy-env:live-100' }],
+      }],
+      listByokSnapshots: NO_BYOK,
+      _execFile,
+      _now: NOW,
+    })
+    // The saved snapshot is excluded; only the genuine orphan remains.
+    assert.deepEqual(snap.images.map((i) => i.ref), ['chroxy-env:dead-200'])
+  })
+
+  it('excludes a sidecar-backed BYOK snapshot image; prunes a sidecar-less one', async () => {
+    const _execFile = execStub({
+      psOut: '',
+      imagesOut: {
+        'chroxy-env': '',
+        'chroxy-byok-snap': 'imgkeep\tchroxy-byok-snap\tkeep-1\t1GB\nimgorph\tchroxy-byok-snap\torph-1\t500MB',
+      },
+    })
+    const snap = await surveyHostPrune({
+      listEnvironments: () => [],
+      listByokSnapshots: () => [{ tag: 'chroxy-byok-snap:keep-1' }],
+      _execFile,
+      _now: NOW,
+    })
+    assert.deepEqual(snap.images.map((i) => i.ref), ['chroxy-byok-snap:orph-1'])
+  })
+
+  it('FAILS CLOSED: skips image pruning entirely when the BYOK sidecar store is unreadable', async () => {
+    const _execFile = execStub({
+      psOut: 'aaa\tchroxy-env-foo\texited\t10MB (virtual 1GB)',
+      imagesOut: { 'chroxy-env': 'img1\tchroxy-env\tfoo-1\t1GB', 'chroxy-byok-snap': '' },
+    })
+    const snap = await surveyHostPrune({
+      listEnvironments: () => [],
+      listByokSnapshots: () => { throw new Error('snapshots dir unreadable') },
+      _execFile,
+      _now: NOW,
+    })
+    assert.equal(snap.summary.containerCount, 1) // containers still surveyed
+    assert.deepEqual(snap.images, [])            // images skipped — no false orphans
+    assert.match(snap.note, /image pruning skipped/i)
+  })
+
   it('degrades to dockerAvailable:false when docker ps fails', async () => {
     const _execFile = execStub({ psError: 'Cannot connect to the Docker daemon' })
-    const snap = await surveyHostPrune({ _execFile, _now: NOW })
+    const snap = await surveyHostPrune({ listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     assert.equal(snap.dockerAvailable, false)
     assert.match(snap.note, /docker is unavailable/)
     assert.deepEqual(snap.containers, [])
@@ -145,7 +206,7 @@ describe('surveyHostPrune()', () => {
 
   it('uses the chroxy name + state + image-repo filters on the docker ps/images calls', async () => {
     const _execFile = execStub({ psOut: '', imagesOut: {} })
-    await surveyHostPrune({ _execFile, _now: NOW })
+    await surveyHostPrune({ listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     const ps = _execFile.calls.find((c) => c.args[0] === 'ps')
     assert.ok(ps.args.includes('--size'))
     assert.ok(ps.args.includes('name=chroxy-env'))
@@ -163,7 +224,7 @@ describe('runHostPrune()', () => {
       psOut: 'aaa\tchroxy-env-foo\texited\t10MB (virtual 1GB)',
       imagesOut: { 'chroxy-env': 'img1\tchroxy-env\tfoo-1\t1GB', 'chroxy-byok-snap': '' },
     })
-    const res = await runHostPrune({ kind: 'all', listEnvironments: () => [], _execFile, _now: NOW })
+    const res = await runHostPrune({ kind: 'all', listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     assert.equal(res.removedContainers, 1)
     assert.equal(res.removedImages, 1)
     assert.equal(res.reclaimedBytes, 10_000_000 + 1_000_000_000)
@@ -179,13 +240,13 @@ describe('runHostPrune()', () => {
       imagesOut: { 'chroxy-env': 'img1\tchroxy-env\tfoo-1\t1GB', 'chroxy-byok-snap': '' },
     })
     const e1 = mk()
-    const r1 = await runHostPrune({ kind: 'containers', listEnvironments: () => [], _execFile: e1, _now: NOW })
+    const r1 = await runHostPrune({ kind: 'containers', listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile: e1, _now: NOW })
     assert.equal(r1.removedContainers, 1)
     assert.equal(r1.removedImages, 0)
     assert.ok(!e1.calls.some((c) => c.args[0] === 'rmi'))
 
     const e2 = mk()
-    const r2 = await runHostPrune({ kind: 'images', listEnvironments: () => [], _execFile: e2, _now: NOW })
+    const r2 = await runHostPrune({ kind: 'images', listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile: e2, _now: NOW })
     assert.equal(r2.removedContainers, 0)
     assert.equal(r2.removedImages, 1)
     assert.ok(!e2.calls.some((c) => c.args[0] === 'rm' && c.args[1] !== '-f'))
@@ -197,7 +258,7 @@ describe('runHostPrune()', () => {
       imagesOut: { 'chroxy-env': 'img1\tchroxy-env\tfoo-1\t1GB', 'chroxy-byok-snap': '' },
       failIds: new Set(['img1']),
     })
-    const res = await runHostPrune({ kind: 'all', listEnvironments: () => [], _execFile, _now: NOW })
+    const res = await runHostPrune({ kind: 'all', listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     assert.equal(res.removedContainers, 1)
     assert.equal(res.removedImages, 0)
     assert.equal(res.failures.length, 1)
@@ -206,7 +267,7 @@ describe('runHostPrune()', () => {
 
   it('does nothing when docker is unavailable', async () => {
     const _execFile = execStub({ psError: 'daemon down' })
-    const res = await runHostPrune({ kind: 'all', _execFile, _now: NOW })
+    const res = await runHostPrune({ kind: 'all', listByokSnapshots: NO_BYOK, _execFile, _now: NOW })
     assert.equal(res.dockerAvailable, false)
     assert.equal(res.removedContainers, 0)
     assert.equal(res.removedImages, 0)
@@ -220,11 +281,31 @@ describe('runHostPrune()', () => {
     const res = await runHostPrune({
       kind: 'all',
       listEnvironments: () => [{ containerId: 'live12345678abc' }],
+      listByokSnapshots: NO_BYOK,
       _execFile,
       _now: NOW,
     })
     assert.equal(res.removedContainers, 0)
     assert.ok(!_execFile.calls.some((c) => c.args[0] === 'rm'))
+  })
+
+  it('never rmi a retained snapshot image (env.snapshots[] or BYOK sidecar)', async () => {
+    const _execFile = execStub({
+      psOut: '',
+      imagesOut: {
+        'chroxy-env': 'imgenvsnap\tchroxy-env\tsaved-1\t1GB',
+        'chroxy-byok-snap': 'imgbyok\tchroxy-byok-snap\tkeep-1\t1GB',
+      },
+    })
+    const res = await runHostPrune({
+      kind: 'all',
+      listEnvironments: () => [{ containerId: 'c1', image: 'node:22-slim', snapshots: [{ image: 'chroxy-env:saved-1' }] }],
+      listByokSnapshots: () => [{ tag: 'chroxy-byok-snap:keep-1' }],
+      _execFile,
+      _now: NOW,
+    })
+    assert.equal(res.removedImages, 0)
+    assert.ok(!_execFile.calls.some((c) => c.args[0] === 'rmi'), 'no retained snapshot is rmi-d')
   })
 })
 
