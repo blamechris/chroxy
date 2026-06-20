@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
 import { handleSessionMessage, registeredMessageTypes } from '../src/ws-message-handlers.js'
 import { createSpy, createMockSessionManager, nsCtx } from './test-helpers.js'
-import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema } from '@chroxy/protocol'
+import { ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema } from '@chroxy/protocol'
 
 /**
  * Tests for the Control Room Host/Repo Status WS handler (#5174).
@@ -1311,6 +1311,148 @@ describe('byok_pool_action handler (#6135 slice 2)', () => {
     await handleSessionMessage(ws, client, { type: 'byok_pool_action', action: 'drain', requestId: 'reg' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.type, 'byok_pool_action_ack')
+    assert.equal(payload.requestId, 'reg')
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #6140 (epic #5530) — host prune guardrails: survey (host_prune_status_request)
+// + action (host_prune_action). Survey + run are injected via ctx so the handler
+// test never touches docker.
+// ---------------------------------------------------------------------------
+
+const SAMPLE_PRUNE = {
+  generatedAt: '2026-06-19T12:00:00.000Z',
+  dockerAvailable: true,
+  note: null,
+  containers: [{ id: 'aaa', name: 'chroxy-env-foo', state: 'exited', sizeBytes: 10_000_000 }],
+  images: [{ id: 'img1', ref: 'chroxy-env:foo-1', repository: 'chroxy-env', sizeBytes: 1_000_000_000 }],
+  summary: { containerCount: 1, imageCount: 1, reclaimableBytes: 1_010_000_000 },
+}
+
+function makeHostPruneCtx(overrides = {}) {
+  const sendSpy = createSpy()
+  return nsCtx({
+    send: sendSpy,
+    surveyHostPrune: createSpy(async () => SAMPLE_PRUNE),
+    runHostPrune: createSpy(async () => ({
+      kind: 'all', dockerAvailable: true, removedContainers: 1, removedImages: 1,
+      reclaimedBytes: 1_010_000_000, failures: [],
+    })),
+    ...overrides,
+    _send: sendSpy,
+  })
+}
+
+describe('host_prune_status_request handler (#6140)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeHostPruneCtx(); client = { id: 'client-P' }; ws = {} })
+
+  it('is registered in the WS handler registry', () => {
+    assert.ok(registeredMessageTypes.includes('host_prune_status_request'))
+    assert.equal(typeof controlRoomHandlers.host_prune_status_request, 'function')
+  })
+
+  it('replies with a schema-conformant host_prune_status_snapshot', async () => {
+    await controlRoomHandlers.host_prune_status_request(ws, client, { type: 'host_prune_status_request', requestId: 'p1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'host_prune_status_snapshot')
+    assert.equal(payload.requestId, 'p1')
+    assert.equal(payload.summary.containerCount, 1)
+    assert.ok(ServerHostPruneStatusSnapshotSchema.safeParse(payload).success, JSON.stringify(ServerHostPruneStatusSnapshotSchema.safeParse(payload).error?.issues))
+  })
+
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.host_prune_status_request(ws, client, { type: 'host_prune_status_request' }, ctx)
+    assert.equal(ctx.surveyHostPrune.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'FORBIDDEN')
+    assert.ok(ServerHostPruneStatusSnapshotSchema.safeParse(payload).success)
+  })
+
+  it('debounces concurrent requests from the same client', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeHostPruneCtx({ surveyHostPrune: createSpy(async () => { await gate; return SAMPLE_PRUNE }) })
+    const first = controlRoomHandlers.host_prune_status_request(ws, client, { type: 'host_prune_status_request', requestId: 'a' }, ctx)
+    await controlRoomHandlers.host_prune_status_request(ws, client, { type: 'host_prune_status_request', requestId: 'b' }, ctx)
+    assert.equal(ctx.surveyHostPrune.callCount, 1)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].error.code, 'SURVEY_IN_PROGRESS')
+    release(); await first
+  })
+
+  it('sends a schema-valid error snapshot when the survey throws', async () => {
+    ctx = makeHostPruneCtx({ surveyHostPrune: createSpy(async () => { throw new Error('docker boom') }) })
+    await controlRoomHandlers.host_prune_status_request(ws, client, { type: 'host_prune_status_request', requestId: 'e1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.error.code, 'SURVEY_FAILED')
+    assert.match(payload.error.message, /docker boom/)
+    assert.ok(ServerHostPruneStatusSnapshotSchema.safeParse(payload).success)
+  })
+})
+
+describe('host_prune_action handler (#6140)', () => {
+  let ctx, client, ws
+  beforeEach(() => { ctx = makeHostPruneCtx(); client = { id: 'client-Q' }; ws = {} })
+
+  it('is registered', () => {
+    assert.ok(registeredMessageTypes.includes('host_prune_action'))
+    assert.equal(typeof controlRoomHandlers.host_prune_action, 'function')
+  })
+
+  it('runs the prune and acks a schema-valid host_prune_action_ack', async () => {
+    await controlRoomHandlers.host_prune_action(ws, client, { type: 'host_prune_action', kind: 'all', requestId: 'r1' }, ctx)
+    assert.equal(ctx.runHostPrune.callCount, 1)
+    assert.equal(ctx.runHostPrune.lastCall[0].kind, 'all')
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'host_prune_action_ack')
+    assert.equal(payload.removedContainers, 1)
+    assert.equal(payload.removedImages, 1)
+    assert.equal(payload.requestId, 'r1')
+    assert.ok(ServerHostPruneActionAckSchema.safeParse(payload).success, JSON.stringify(ServerHostPruneActionAckSchema.safeParse(payload).error?.issues))
+  })
+
+  it('rejects an unsupported kind', async () => {
+    await controlRoomHandlers.host_prune_action(ws, client, { type: 'host_prune_action', kind: 'everything' }, ctx)
+    assert.equal(ctx.runHostPrune.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'HOST_PRUNE_ACTION_FAILED')
+    assert.equal(payload.reason, 'unsupported-kind')
+  })
+
+  it('rejects a session-bound (non-host) client', async () => {
+    client.boundSessionId = 'sess-1'
+    await controlRoomHandlers.host_prune_action(ws, client, { type: 'host_prune_action', kind: 'all', requestId: 'f1' }, ctx)
+    assert.equal(ctx.runHostPrune.callCount, 0)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.reason, 'forbidden')
+    assert.equal(payload.requestId, 'f1')
+  })
+
+  it('relays a HOST_PRUNE_ACTION_FAILED when the run throws', async () => {
+    ctx = makeHostPruneCtx({ runHostPrune: createSpy(async () => { throw new Error('prune boom') }) })
+    await controlRoomHandlers.host_prune_action(ws, client, { type: 'host_prune_action', kind: 'images', requestId: 'x1' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'HOST_PRUNE_ACTION_FAILED')
+    assert.equal(payload.reason, 'prune-failed')
+    assert.match(payload.message, /prune boom/)
+  })
+
+  it('serializes concurrent prune actions (rejects, never queues)', async () => {
+    let release
+    const gate = new Promise(r => { release = r })
+    ctx = makeHostPruneCtx({ runHostPrune: createSpy(async () => { await gate; return { kind: 'all', dockerAvailable: true, removedContainers: 0, removedImages: 0, reclaimedBytes: 0, failures: [] } }) })
+    const first = controlRoomHandlers.host_prune_action(ws, client, { type: 'host_prune_action', kind: 'all', requestId: 'a' }, ctx)
+    await controlRoomHandlers.host_prune_action(ws, client, { type: 'host_prune_action', kind: 'all', requestId: 'b' }, ctx)
+    assert.equal(ctx._send.calls.find(c => c[1].requestId === 'b')[1].reason, 'action-in-progress')
+    release(); await first
+  })
+
+  it('dispatches through the registry via handleSessionMessage', async () => {
+    await handleSessionMessage(ws, client, { type: 'host_prune_action', kind: 'containers', requestId: 'reg' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.type, 'host_prune_action_ack')
     assert.equal(payload.requestId, 'reg')
   })
 })

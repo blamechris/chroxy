@@ -38,6 +38,7 @@ import { surveyContainers } from '../control-room/containers.js'
 import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/repo-runtime-config.js'
 import { surveyByokPool } from '../control-room/byok-pool.js'
 import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
+import { surveyHostPrune, runHostPrune, PRUNE_KINDS } from '../control-room/host-prune.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -60,6 +61,8 @@ const containersInFlight = new WeakSet()
 const repoRuntimeConfigInFlight = new WeakSet()
 // #6135: same again for the BYOK pool stats survey — independent of all above.
 const byokPoolInFlight = new WeakSet()
+// #6140: same again for the host prune guardrails survey — independent of all above.
+const hostPruneInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -1265,6 +1268,148 @@ async function handleByokPoolAction(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6140 (epic #5530) — host prune guardrails: survey reclaimable chroxy-scoped
+// orphan docker pressure (host_prune_status_request) + prune it (host_prune_action).
+// ───────────────────────────────────────────────────────────────────────────
+
+/** #6140: schema-conformant error reply for the host-prune survey. */
+function hostPruneErrorSnapshot(requestId, error) {
+  return {
+    type: 'host_prune_status_snapshot',
+    requestId: requestId ?? null,
+    generatedAt: new Date().toISOString(),
+    dockerAvailable: false,
+    note: null,
+    containers: [],
+    images: [],
+    summary: { containerCount: 0, imageCount: 0, reclaimableBytes: 0 },
+    error,
+  }
+}
+
+/**
+ * #6140 — host prune survey handler (read-only). Host-authority + per-client
+ * in-flight + degraded-reply contract as the sibling surveys. Surveys ONLY
+ * chroxy's own orphan resources (never arbitrary host containers/images).
+ */
+async function handleHostPruneStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, hostPruneErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'host_prune_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+  if (hostPruneInFlight.has(client)) {
+    ctx.transport.send(ws, hostPruneErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A host prune survey is already in progress for this client',
+    }))
+    return
+  }
+  const surveyFn = typeof ctx?.surveyHostPrune === 'function' ? ctx.surveyHostPrune : surveyHostPrune
+  const envManager = ctx?.services?.environmentManager || null
+  hostPruneInFlight.add(client)
+  try {
+    const snapshot = await surveyFn({
+      listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
+    })
+    ctx.transport.send(ws, {
+      type: 'host_prune_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      dockerAvailable: snapshot.dockerAvailable,
+      note: snapshot.note ?? null,
+      containers: snapshot.containers,
+      images: snapshot.images,
+      summary: snapshot.summary,
+    })
+  } catch (err) {
+    log.warn(`host_prune_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, hostPruneErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'host prune survey failed',
+    }))
+  } finally {
+    hostPruneInFlight.delete(client)
+  }
+}
+
+/**
+ * #6140: a host prune mutates host-wide docker state, so a single global flag
+ * serializes prune actions (rejected, never queued).
+ */
+let hostPruneActionInFlight = false
+
+/** #6140: shared HOST_PRUNE_ACTION_FAILED reply (mirrors byokPoolActionError). */
+function hostPruneActionError(ws, ctx, msg, reason, message) {
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    code: 'HOST_PRUNE_ACTION_FAILED',
+    message,
+    reason,
+    kind: typeof msg?.kind === 'string' ? msg.kind : null,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+  })
+}
+
+/**
+ * #6140 (epic #5530) — `host_prune_action` handler. Removes reclaimable
+ * chroxy-scoped orphan docker resources, replying with exactly one
+ * `host_prune_action_ack` on success or one HOST_PRUNE_ACTION_FAILED
+ * `session_error` on failure.
+ *
+ * SECURITY: host-level authority only. The action takes NO target list — it
+ * re-surveys the chroxy-scoped orphan set server-side (`runHostPrune`) and removes
+ * only those exact ids; the client supplies only a `kind` selector. Never a
+ * blanket docker prune, never a running/tracked/non-chroxy resource.
+ */
+async function handleHostPruneAction(ws, client, msg, ctx) {
+  if (client?.boundSessionId) {
+    hostPruneActionError(ws, ctx, msg, 'forbidden',
+      'host_prune_action requires host-level authority (a session-bound token cannot run host actions)')
+    return
+  }
+  const kind = typeof msg?.kind === 'string' ? msg.kind : ''
+  if (!PRUNE_KINDS.includes(kind)) {
+    hostPruneActionError(ws, ctx, msg, 'unsupported-kind',
+      `Unsupported prune kind: ${kind.length > 0 ? kind : '(none)'}`)
+    return
+  }
+  if (hostPruneActionInFlight) {
+    hostPruneActionError(ws, ctx, msg, 'action-in-progress', 'A host prune action is already in progress')
+    return
+  }
+  const runFn = typeof ctx?.runHostPrune === 'function' ? ctx.runHostPrune : runHostPrune
+  const envManager = ctx?.services?.environmentManager || null
+  hostPruneActionInFlight = true
+  try {
+    const result = await runFn({
+      kind,
+      listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
+    })
+    log.info(`host_prune_action ${kind} removed ${result.removedContainers}c/${result.removedImages}i (client=${client?.id})`)
+    ctx.transport.send(ws, {
+      type: 'host_prune_action_ack',
+      kind: result.kind,
+      requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+      dockerAvailable: result.dockerAvailable,
+      removedContainers: result.removedContainers,
+      removedImages: result.removedImages,
+      reclaimedBytes: result.reclaimedBytes,
+      failures: result.failures,
+    })
+  } catch (err) {
+    const message = err && err.message ? err.message : 'host prune failed'
+    log.warn(`host_prune_action ${kind} failed: ${message}`)
+    hostPruneActionError(ws, ctx, msg, 'prune-failed', message)
+  } finally {
+    hostPruneActionInFlight = false
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -1313,8 +1458,10 @@ export const controlRoomHandlers = {
   containers_status_request: handleContainersStatusRequest,
   repo_runtime_config_request: handleRepoRuntimeConfigRequest,
   byok_pool_status_request: handleByokPoolStatusRequest,
+  host_prune_status_request: handleHostPruneStatusRequest,
   containers_action: handleContainersAction,
   byok_pool_action: handleByokPoolAction,
+  host_prune_action: handleHostPruneAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,

@@ -669,6 +669,10 @@ export declare const ByokPoolStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"byok_pool_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const HostPruneStatusRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"host_prune_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const IntegrationStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"integration_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -707,6 +711,15 @@ export declare const ByokPoolActionSchema: z.ZodObject<{
     key: z.ZodOptional<z.ZodString>;
     maxPerKey: z.ZodOptional<z.ZodNumber>;
     maxTotal: z.ZodOptional<z.ZodNumber>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
+export declare const HostPruneActionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"host_prune_action">;
+    kind: z.ZodEnum<{
+        containers: "containers";
+        images: "images";
+        all: "all";
+    }>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const SummarizeSessionSchema: z.ZodObject<{
@@ -1129,6 +1142,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"byok_pool_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"host_prune_status_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"integration_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
@@ -1167,6 +1183,14 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     maxTotal: z.ZodOptional<z.ZodNumber>;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"host_prune_action">;
+    kind: z.ZodEnum<{
+        containers: "containers";
+        images: "images";
+        all: "all";
+    }>;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"summarize_session">;
     sessionId: z.ZodString;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1196,12 +1220,14 @@ export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchem
 export type ContainersStatusRequestMessage = z.infer<typeof ContainersStatusRequestSchema>;
 export type RepoRuntimeConfigRequestMessage = z.infer<typeof RepoRuntimeConfigRequestSchema>;
 export type ByokPoolStatusRequestMessage = z.infer<typeof ByokPoolStatusRequestSchema>;
+export type HostPruneStatusRequestMessage = z.infer<typeof HostPruneStatusRequestSchema>;
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>;
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>;
+export type HostPruneActionMessage = z.infer<typeof HostPruneActionSchema>;
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>;
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>;
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>;

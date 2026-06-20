@@ -1080,6 +1080,16 @@ export const ByokPoolStatusRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #6140 (epic #5530): the Control Room "Host prune" tab asks the server to
+// survey reclaimable, chroxy-scoped, orphan-only host docker pressure (stopped
+// chroxy-env-* containers + chroxy snapshot images NOT tracked by a live env).
+// The server replies with a single host_prune_status_snapshot (see server.ts).
+// Pull-on-Refresh, like the sibling surveys.
+export const HostPruneStatusRequestSchema = z.object({
+  type: z.literal('host_prune_status_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1179,6 +1189,20 @@ export const ByokPoolActionSchema = z.object({
   // For 'resize' only — new caps, clamped server-side to the configured ceiling.
   maxPerKey: z.number().int().positive().max(1024).optional(),
   maxTotal: z.number().int().positive().max(4096).optional(),
+  requestId: z.string().max(128).optional(),
+}).passthrough()
+
+// #6140 (epic #5530): prune reclaimable, chroxy-scoped, orphan-only host docker
+// resources. `kind` selects what to remove (stopped chroxy containers / chroxy
+// snapshot images / both). Host authority (server-enforced). The server takes NO
+// target list from the client — it re-surveys the chroxy-scoped orphan set
+// server-side and removes only those ids, so a malicious/stale client can never
+// widen the blast radius. Destructive — the dashboard gates it behind a confirm.
+// The optional `requestId` is echoed on the host_prune_action_ack (success) and
+// the HOST_PRUNE_ACTION_FAILED session_error (failure).
+export const HostPruneActionSchema = z.object({
+  type: z.literal('host_prune_action'),
+  kind: z.enum(['containers', 'images', 'all']),
   requestId: z.string().max(128).optional(),
 }).passthrough()
 
@@ -1305,12 +1329,14 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ContainersStatusRequestSchema,
   RepoRuntimeConfigRequestSchema,
   ByokPoolStatusRequestSchema,
+  HostPruneStatusRequestSchema,
   IntegrationStatusRequestSchema,
   SkillsInventoryRequestSchema,
   MailboxStatusRequestSchema,
   IntegrationActionSchema,
   ContainersActionSchema,
   ByokPoolActionSchema,
+  HostPruneActionSchema,
   SummarizeSessionSchema,
   PairApproveSchema,
   PairDenySchema,
@@ -1337,12 +1363,14 @@ export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchem
 export type ContainersStatusRequestMessage = z.infer<typeof ContainersStatusRequestSchema>
 export type RepoRuntimeConfigRequestMessage = z.infer<typeof RepoRuntimeConfigRequestSchema>
 export type ByokPoolStatusRequestMessage = z.infer<typeof ByokPoolStatusRequestSchema>
+export type HostPruneStatusRequestMessage = z.infer<typeof HostPruneStatusRequestSchema>
 export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRequestSchema>
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>
+export type HostPruneActionMessage = z.infer<typeof HostPruneActionSchema>
 export type SummarizeSessionMessage = z.infer<typeof SummarizeSessionSchema>
 export type SessionPresetGetMessage = z.infer<typeof SessionPresetGetSchema>
 export type SessionPresetSetMessage = z.infer<typeof SessionPresetSetSchema>
