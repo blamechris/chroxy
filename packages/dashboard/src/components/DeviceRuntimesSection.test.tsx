@@ -117,14 +117,27 @@ describe('DeviceRuntimesSection — device table + actions', () => {
     expect(onAction).toHaveBeenCalledWith('shutdown', 'U-BOOTED1')
   })
 
-  it('disables every action button while any action is in flight', () => {
+  it('disables the actioning row per-udid, leaving other rows enabled', () => {
+    // The server allows concurrent actions on distinct udids (cap 2), so only
+    // the in-flight device's button disables — other rows stay actionable.
     render(<DeviceRuntimesSection snapshot={snapshot()} loading={false} connected={true} onRefresh={() => {}} actioningIds={new Set(['U-BOOTED1'])} actionResults={{}} />)
-    expect((screen.getByTestId('simulator-boot-U-SHUT0001') as HTMLButtonElement).disabled).toBe(true)
+    expect((screen.getByTestId('simulator-shutdown-U-BOOTED1') as HTMLButtonElement).disabled).toBe(true)
     expect(screen.getByTestId('simulator-pending-U-BOOTED1')).toBeTruthy()
+    expect((screen.getByTestId('simulator-boot-U-SHUT0001') as HTMLButtonElement).disabled).toBe(false)
+  })
+
+  it('surfaces deviceType when it differs from the device name', () => {
+    render(
+      <DeviceRuntimesSection
+        snapshot={snapshot({ devices: [{ udid: 'U-RENAMED1', name: 'My Test Phone', state: 'Shutdown', runtime: 'iOS 26.1', deviceType: 'iPhone 15', isAvailable: true }] })}
+        loading={false} connected={true} onRefresh={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('simulator-devicetype-U-RENAMED1').textContent).toBe('iPhone 15')
   })
 
   it('shows a settled note after an action resolves', () => {
-    render(<DeviceRuntimesSection snapshot={snapshot()} loading={false} connected={true} onRefresh={() => {}} actioningIds={new Set<string>()} actionResults={{ 'U-SHUT0001': { action: 'boot', note: 'Booted (Booted)', error: null, at: 1 } }} />)
+    render(<DeviceRuntimesSection snapshot={snapshot()} loading={false} connected={true} onRefresh={() => {}} actioningIds={new Set<string>()} actionResults={{ 'U-SHUT0001': { action: 'boot', note: 'Booted', error: null, at: 1 } }} />)
     expect(screen.getByTestId('simulator-ok-U-SHUT0001').textContent).toContain('Booted')
   })
 

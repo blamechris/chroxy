@@ -2895,9 +2895,12 @@ function handleSimulatorActionAck(msg: Record<string, unknown>, get: MsgGet, set
   const parsed = ServerSimulatorActionAckSchema.safeParse(msg);
   if (!parsed.success) return;
   const { action, udid, status } = parsed.data;
-  const note = action === 'boot'
-    ? `Booted${status ? ` (${status})` : ''}`
-    : `Shut down${status ? ` (${status})` : ''}`;
+  // Append the echoed status only when it adds information — the happy path
+  // (boot → "Booted", shutdown → "Shutdown") is implied by the action, so a
+  // bare "Booted (Booted)" would be noise.
+  const implied = action === 'boot' ? 'Booted' : 'Shutdown';
+  const base = action === 'boot' ? 'Booted' : 'Shut down';
+  const note = status && status !== implied ? `${base} (${status})` : base;
   resolveSimulatorAction(get, set, udid, { action, note, error: null });
 }
 

@@ -79,7 +79,6 @@ export function DeviceRuntimesSection({
   }
 
   const generatedAtMs = snapshot ? Date.parse(snapshot.generatedAt) : NaN
-  const anyActioning = actioningIds.size > 0
   const verdict = snapshot?.readyForMaestro
 
   return (
@@ -187,6 +186,9 @@ export function DeviceRuntimesSection({
                         <td>
                           <b data-testid={`simulator-name-${d.udid}`}>{d.name}</b>{' '}
                           <span className="cr-dim cr-mono">{d.udid.slice(0, 8)}</span>
+                          {d.deviceType && d.deviceType !== d.name && (
+                            <div className="cr-dim" data-testid={`simulator-devicetype-${d.udid}`}>{d.deviceType}</div>
+                          )}
                         </td>
                         <td className="cr-dim" data-testid={`simulator-runtime-${d.udid}`}>{d.runtime}</td>
                         <td>
@@ -203,7 +205,7 @@ export function DeviceRuntimesSection({
                               type="button"
                               className="cr-action"
                               data-testid={`simulator-shutdown-${d.udid}`}
-                              disabled={anyActioning || !connected}
+                              disabled={pending || !connected}
                               onClick={() => onAction('shutdown', d.udid)}
                               title="Shut down this simulator"
                             >
@@ -214,7 +216,7 @@ export function DeviceRuntimesSection({
                               type="button"
                               className="cr-action"
                               data-testid={`simulator-boot-${d.udid}`}
-                              disabled={anyActioning || !connected}
+                              disabled={pending || !connected}
                               onClick={() => onAction('boot', d.udid)}
                               title="Boot this simulator"
                             >
