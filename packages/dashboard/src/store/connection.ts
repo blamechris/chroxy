@@ -539,6 +539,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #6140 slice 2: host prune action — in-flight kinds + last outcome per kind.
   hostPruneActioningIds: new Set<string>(),
   hostPruneActionResults: {},
+  // #6136 (epic #5530): Control Room iOS simulator snapshot, fed by the
+  // simulator_status_snapshot handler. Null until the first survey lands.
+  simulatorStatus: null,
+  simulatorStatusLoading: false,
+  // #6136 slice 3: simulator action — in-flight udids + last outcome per udid.
+  simulatorActioningIds: new Set<string>(),
+  simulatorActionResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1068,6 +1075,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return false;
   },
 
+  // #6136 (epic #5530): request an iOS simulator survey. Mirrors
+  // requestHostPruneStatus — flips simulatorStatusLoading and sends a
+  // simulator_status_request; the reply is a single simulator_status_snapshot
+  // handled into simulatorStatus. Returns false (no loading) when the socket is
+  // closed.
+  requestSimulatorStatus: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ simulatorStatusLoading: true });
+      wsSend(socket, { type: 'simulator_status_request' });
+      return true;
+    }
+    return false;
+  },
+
   // #5499 (epic #5498): request an Integrations survey. Mirrors
   // requestRunnerStatus — flips integrationStatusLoading and sends an
   // integration_status_request; the reply is a single
@@ -1223,6 +1245,29 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     delete results[kind];
     set({ hostPruneActioningIds: pending, hostPruneActionResults: results });
     wsSend(socket, { type: 'host_prune_action', kind, requestId });
+    return true;
+  },
+
+  // #6136 slice 3 (epic #5530): boot / shut down an iOS simulator. The
+  // pending/result state is keyed by the device `udid`. Same wire-or-nothing
+  // contract as the sibling actions: tag with a requestId the server echoes on
+  // the simulator_action_ack / SIMULATOR_ACTION_FAILED session_error, and mark
+  // the udid pending ONLY when the message is genuinely on the wire. The server
+  // re-surveys + re-validates the udid (lookup key, never a trusted target) and
+  // state-gates the action. The udid's previous result is dropped so a stale
+  // outcome can't sit beside the pending state. Non-destructive → no confirm.
+  sendSimulatorAction: (action: 'boot' | 'shutdown', udid: string): boolean => {
+    const { socket } = get();
+    if (action !== 'boot' && action !== 'shutdown') return false;
+    if (!udid) return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `simulator-action-${nextMessageId()}`;
+    const pending = new Set(get().simulatorActioningIds);
+    pending.add(udid);
+    const results = { ...get().simulatorActionResults };
+    delete results[udid];
+    set({ simulatorActioningIds: pending, simulatorActionResults: results });
+    wsSend(socket, { type: 'simulator_action', action, udid, requestId });
     return true;
   },
 
@@ -2020,6 +2065,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().hostPruneActioningIds.size > 0) {
         set({ hostPruneActioningIds: new Set<string>() });
       }
+      // #6136: ditto for in-flight simulator actions.
+      if (get().simulatorActioningIds.size > 0) {
+        set({ simulatorActioningIds: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -2300,6 +2349,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6140: host prune action pending/result state goes with it.
       hostPruneActioningIds: new Set<string>(),
       hostPruneActionResults: {},
+      // #6136: simulator action pending/result state goes with it.
+      simulatorActioningIds: new Set<string>(),
+      simulatorActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -2346,6 +2398,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #6140: host prune action pending/result state goes with it.
       hostPruneActioningIds: new Set<string>(),
       hostPruneActionResults: {},
+      // #6136: simulator action pending/result state goes with it.
+      simulatorActioningIds: new Set<string>(),
+      simulatorActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,

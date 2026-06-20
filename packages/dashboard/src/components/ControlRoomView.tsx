@@ -44,6 +44,7 @@ import { ContainersStatusSection } from './ContainersStatusSection'
 import { RepoRuntimeConfigSection } from './RepoRuntimeConfigSection'
 import { ByokPoolSection } from './ByokPoolSection'
 import { HostPruneSection } from './HostPruneSection'
+import { DeviceRuntimesSection } from './DeviceRuntimesSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
@@ -171,6 +172,19 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'hostPruneStatus',
     loadingKey: 'hostPruneStatusLoading',
     requestKey: 'requestHostPruneStatus',
+  },
+  // #6136 (epic #5530): the Device runtimes tab — iOS simulators (devices +
+  // "Ready for Maestro" verdict) with boot/shutdown actions. Android (#6137) and
+  // WSL2 (#6138) are separate sub-issues that will add their own panels here.
+  // Same survey:true request/snapshot flow as the others.
+  {
+    key: 'device-runtimes',
+    label: 'Device runtimes',
+    survey: true,
+    requestType: 'simulator_status_request',
+    snapshotKey: 'simulatorStatus',
+    loadingKey: 'simulatorStatusLoading',
+    requestKey: 'requestSimulatorStatus',
   },
   {
     key: 'integrations',
@@ -429,6 +443,8 @@ export function ControlRoomView({
         <ByokPoolSection />
       ) : tab === 'host-prune' ? (
         <HostPruneSection />
+      ) : tab === 'device-runtimes' ? (
+        <DeviceRuntimesSection />
       ) : tab === 'integrations' ? (
         <IntegrationsSection />
       ) : tab === 'skills' ? (

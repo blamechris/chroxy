@@ -148,6 +148,8 @@ const DASHBOARD_ONLY = new Set<string>([
   'byok_pool_action_ack',       // Control Room BYOK pool action ack (#6135, epic #5530) — dashboard-only
   'host_prune_status_snapshot', // Control Room host prune guardrails survey (#6140, epic #5530) — dashboard-only
   'host_prune_action_ack',      // Control Room host prune action ack (#6140, epic #5530) — dashboard-only
+  'simulator_status_snapshot',  // Control Room iOS simulator survey (#6136, epic #5530) — dashboard-only (Device runtimes tab)
+  'simulator_action_ack',       // Control Room iOS simulator boot/shutdown action ack (#6136, epic #5530) — dashboard-only
   'chroxy_context_hint_changed',// per-session context-hint toggle (#3805) — dashboard-only for v1
   'credential_test_result',     // Provider Credentials "Test" result (#3855) — dashboard-only
   'credentials_status',         // Provider Credentials pane (#3855) — dashboard-only
@@ -196,13 +198,6 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
                                           //   no dedicated handler yet (dashboard exposure is a deferred follow-up)
   'stdin_dropped_totals',                 // #3544 transient counter — surface is the SessionInfo flag on
                                           //   session_list, not a dedicated wire-event handler
-  'simulator_status_snapshot',            // #6136 (epic #5530) Control Room iOS simulator survey —
-                                          //   server contract landed first; the dashboard slice that consumes
-                                          //   it is the tracked follow-up, then this → DASHBOARD_ONLY
-  'simulator_action_ack',                 // #6136 slice 2 (epic #5530) Control Room iOS simulator boot/shutdown
-                                          //   action ack — server contract landed first (same server-first split
-                                          //   as the survey above); the "Device runtimes" dashboard slice that
-                                          //   consumes it is the tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

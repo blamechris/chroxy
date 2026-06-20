@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2623,6 +2623,18 @@ function handleHostPruneStatusSnapshot(msg: Record<string, unknown>, _get: MsgGe
 }
 
 /**
+ * #6136 (epic #5530) — iOS simulator survey `simulator_status_snapshot`: REPLACE
+ * the stored snapshot and clear the loading flag. Same defensive, full-replace,
+ * clear-loading-only-on-valid-parse contract as the sibling survey handlers.
+ * `available:false` (off macOS / no xcrun) is a valid snapshot, not an error.
+ */
+function handleSimulatorStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSimulatorStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ simulatorStatus: parsed.data, simulatorStatusLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2855,6 +2867,41 @@ function handleHostPruneActionAck(msg: Record<string, unknown>, get: MsgGet, set
 }
 
 /**
+ * #6136 slice 3 (epic #5530) — resolve one simulator action target's pending
+ * state: drop the `udid` from `simulatorActioningIds` and record the outcome in
+ * `simulatorActionResults`. Shared by the success ack and the
+ * SIMULATOR_ACTION_FAILED session_error.
+ */
+function resolveSimulatorAction(
+  get: MsgGet,
+  set: MsgSet,
+  udid: string,
+  result: { action: string; note: string | null; error: string | null },
+): void {
+  const pending = new Set(get().simulatorActioningIds);
+  pending.delete(udid);
+  set({
+    simulatorActioningIds: pending,
+    simulatorActionResults: { ...get().simulatorActionResults, [udid]: { ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #6136 slice 3 — simulator action success ack: builds a human note from the
+ * echoed new state and clears the udid's pending state. A malformed ack is
+ * dropped (Zod safeParse) so the row keeps its honest pending state.
+ */
+function handleSimulatorActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSimulatorActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { action, udid, status } = parsed.data;
+  const note = action === 'boot'
+    ? `Booted${status ? ` (${status})` : ''}`
+    : `Shut down${status ? ` (${status})` : ''}`;
+  resolveSimulatorAction(get, set, udid, { action, note, error: null });
+}
+
+/**
  * #5547: a `summarize_session_result` resolves the pending summarize promise
  * (keyed by the echoed requestId) so the awaiting create-session flow opens
  * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
@@ -2973,6 +3020,8 @@ const HANDLERS: Record<string, Handler> = {
   byok_pool_status_snapshot: handleByokPoolStatusSnapshot,
   // #6140 (epic #5530): Control Room host prune survey snapshot.
   host_prune_status_snapshot: handleHostPruneStatusSnapshot,
+  // #6136 (epic #5530): Control Room iOS simulator survey snapshot.
+  simulator_status_snapshot: handleSimulatorStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,
@@ -2987,6 +3036,9 @@ const HANDLERS: Record<string, Handler> = {
   byok_pool_action_ack: handleByokPoolActionAck,
   // #6140 (epic #5530): positive ack correlating a host_prune_action to its outcome.
   host_prune_action_ack: handleHostPruneActionAck,
+  // #6136 (epic #5530): positive ack correlating a simulator_action (boot /
+  // shutdown) request to its outcome.
+  simulator_action_ack: handleSimulatorActionAck,
   // #5547: one-shot session-summary result; resolves the pending summarize
   // promise so the create-session flow can open with the brief seeded.
   summarize_session_result: handleSummarizeSessionResult,
@@ -3724,6 +3776,15 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         resolveHostPruneAction(get, set, msg.kind, {
           note: null,
           error: parsed.message || 'Host prune failed.',
+        });
+      } else if (parsed.code === 'SIMULATOR_ACTION_FAILED' && typeof msg.udid === 'string') {
+        // #6136: a failed simulator_action echoes the exact udid (+ action) —
+        // clear that device's pending state and surface the reason inline (the
+        // generic branch below still raises the toast, matching the precedents).
+        resolveSimulatorAction(get, set, msg.udid, {
+          action: typeof msg.action === 'string' ? msg.action : '',
+          note: null,
+          error: parsed.message || 'Simulator action failed.',
         });
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {
