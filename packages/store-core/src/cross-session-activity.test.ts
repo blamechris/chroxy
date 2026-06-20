@@ -63,9 +63,12 @@ describe('deriveSessionStatus', () => {
 })
 
 describe('selectCrossSessionActivity', () => {
+  // Two tabs on the same repo (both the main checkout — realistic) + a third on
+  // another repo. The worktree flag is exercised separately with a realistically
+  // distinct-cwd worktree session (a worktree never shares its origin's cwd).
   const sessions: CrossSessionMeta[] = [
     { sessionId: 's1', cwd: '/home/u/repo-a', name: 'A1' },
-    { sessionId: 's2', cwd: '/home/u/repo-a', name: 'A2', worktree: true },
+    { sessionId: 's2', cwd: '/home/u/repo-a', name: 'A2' },
     { sessionId: 's3', cwd: '/home/u/repo-b', name: 'B1' },
   ]
 
@@ -78,14 +81,28 @@ describe('selectCrossSessionActivity', () => {
     const agg = selectCrossSessionActivity(state, sessions)
     expect(agg.groups.map((g) => g.key)).toEqual(['/home/u/repo-a', '/home/u/repo-b'])
     expect(agg.groups.map((g) => g.label)).toEqual(['repo-a', 'repo-b'])
-    // repo-a has both s1 (running) + s2 (blocked); the group is flagged worktree (s2).
+    // repo-a has both tabs s1 (running) + s2 (blocked).
     const a = agg.groups[0]!
     expect(a.sessions.map((s) => s.sessionId)).toEqual(['s1', 's2'])
-    expect(a.worktree).toBe(true)
+    expect(a.worktree).toBe(false)
     expect(a.rollup).toEqual({ running: 1, blocked: 1, failed: 0, idle: 0 })
     const b = agg.groups[1]!
     expect(b.worktree).toBe(false)
     expect(b.rollup).toEqual({ running: 0, blocked: 0, failed: 1, idle: 0 })
+  })
+
+  it('flags a group as worktree from a realistically distinct-cwd worktree session', () => {
+    // A worktree session has its OWN cwd (never the origin checkout's), so it
+    // forms its own group; that group is flagged worktree.
+    const agg = selectCrossSessionActivity(createEmptyActivityState(), [
+      { sessionId: 'main', cwd: '/home/u/repo-a', name: 'main' },
+      { sessionId: 'wt', cwd: '/home/u/.chroxy/worktrees/repo-a-feat', name: 'feat', worktree: true },
+    ])
+    const main = agg.groups.find((g) => g.key === '/home/u/repo-a')!
+    const wt = agg.groups.find((g) => g.key === '/home/u/.chroxy/worktrees/repo-a-feat')!
+    expect(main.worktree).toBe(false)
+    expect(wt.worktree).toBe(true)
+    expect(wt.label).toBe('repo-a-feat')
   })
 
   it('computes the top-level total across all sessions', () => {
