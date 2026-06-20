@@ -451,7 +451,9 @@ const emptyRollup = (): MutableRollup => ({ running: 0, blocked: 0, failed: 0, i
  * Build the cross-session mission-control aggregate from the activity reducer
  * state + the authoritative session list. The `sessions` list drives membership
  * (activity for a session not in the list is ignored); a session with no
- * activity is included as `idle`. Pure + deterministic for a stable input.
+ * activity is included as `idle`. A duplicate `sessionId` is counted ONCE
+ * (first occurrence wins) so the rollup that drives the "needs me" badge can't
+ * over-count on a malformed list. Pure + deterministic for a stable input.
  */
 export function selectCrossSessionActivity(
   state: ActivityState,
@@ -460,8 +462,11 @@ export function selectCrossSessionActivity(
   type MutableGroup = { worktree: boolean; sessions: CrossSessionGroupSession[]; rollup: MutableRollup }
   const byKey = new Map<string, MutableGroup>()
   const total = emptyRollup()
+  const seen = new Set<string>()
 
   for (const meta of sessions) {
+    if (seen.has(meta.sessionId)) continue // dedupe — first occurrence wins
+    seen.add(meta.sessionId)
     const status = deriveSessionStatus(selectSessionEntries(state, meta.sessionId))
     const key = typeof meta.cwd === 'string' && meta.cwd.trim() !== '' ? meta.cwd : ''
     let group = byKey.get(key)

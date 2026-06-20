@@ -147,4 +147,21 @@ describe('selectCrossSessionActivity', () => {
     const agg = selectCrossSessionActivity(createEmptyActivityState(), metas)
     expect(agg.groups[0]!.sessions.map((s) => s.sessionId)).toEqual(['b', 'a', 'c'])
   })
+
+  it('counts a duplicate sessionId once (first occurrence wins)', () => {
+    const state = stateOf({ dup: [entry({ id: 'e', status: 'blocked' })] })
+    const agg = selectCrossSessionActivity(state, [
+      { sessionId: 'dup', cwd: '/r', name: 'first' },
+      { sessionId: 'dup', cwd: '/r', name: 'second' },
+    ])
+    expect(agg.groups[0]!.sessions.map((s) => s.name)).toEqual(['first'])
+    expect(agg.groups[0]!.rollup).toEqual({ running: 0, blocked: 1, failed: 0, idle: 0 })
+    expect(agg.total).toEqual({ running: 0, blocked: 1, failed: 0, idle: 0 })
+  })
+
+  it('labels a separators-only cwd as the raw cwd (a distinct real group, not Ungrouped)', () => {
+    const agg = selectCrossSessionActivity(createEmptyActivityState(), [{ sessionId: 's', cwd: '/', name: 'root' }])
+    expect(agg.groups[0]!.key).toBe('/')
+    expect(agg.groups[0]!.label).toBe('/')
+  })
 })
