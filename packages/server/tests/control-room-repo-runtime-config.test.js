@@ -18,6 +18,7 @@ import {
   inspectRepo,
   effectiveAllowlist,
   summarizeRepoRuntime,
+  hostRuntimeDefaults,
   ISOLATION_DEFAULT,
   DEFAULT_ENV_IMAGE,
 } from '../src/control-room/repo-runtime-config.js'
@@ -73,9 +74,12 @@ describe('#6139 inspectRepo', () => {
     assert.equal(entry.error, null)
   })
 
-  it('falls back to the default image (and its allowlist verdict) with no devcontainer', () => {
+  it('falls back to the default image with a N/A (null) allowlist verdict — the default bypasses the allowlist', () => {
+    // Even with a deny-all allowlist the default-image repo is NOT "denied": the
+    // built-in default is used unconditionally (never allowlist-checked), so the
+    // verdict is N/A, not false.
     const entry = inspectRepo(repo, {
-      allowlistPatterns: DEFAULT_ALLOWED_DOCKER_IMAGES,
+      allowlistPatterns: [],
       _existsSync: existsStub([]),
       _parseDevContainer: () => ({}),
     })
@@ -83,7 +87,7 @@ describe('#6139 inspectRepo', () => {
     assert.equal(entry.devcontainer.path, null)
     assert.equal(entry.image, DEFAULT_ENV_IMAGE)
     assert.equal(entry.imageSource, 'default')
-    assert.equal(entry.imageAllowed, true) // node:22-slim matches node:*
+    assert.equal(entry.imageAllowed, null)
   })
 
   it('marks a devcontainer image NOT in the allowlist as denied', () => {
@@ -148,6 +152,23 @@ describe('#6139 summarizeRepoRuntime', () => {
       { error: 'unreadable' },
     ])
     assert.deepEqual(s, { total: 3, withDevcontainer: 1, withCompose: 1, imagesDenied: 1, errored: 1 })
+  })
+})
+
+describe('#6139 hostRuntimeDefaults', () => {
+  it('derives backend/source/isolation/allowlist purely from config', () => {
+    const d = hostRuntimeDefaults({ environments: { backend: 'rancher' }, allowedDockerImages: ['x/*'] })
+    assert.equal(d.backend, 'rancher')
+    assert.equal(d.backendSource, 'config')
+    assert.equal(d.isolation, ISOLATION_DEFAULT)
+    assert.deepEqual(d.allowlist, { source: 'config', patterns: ['x/*'] })
+  })
+
+  it('defaults to docker/default for empty config', () => {
+    const d = hostRuntimeDefaults({})
+    assert.equal(d.backend, 'docker')
+    assert.equal(d.backendSource, 'default')
+    assert.equal(d.allowlist.source, 'default')
   })
 })
 

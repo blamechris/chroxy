@@ -593,7 +593,11 @@ describe('repo_runtime_config_request handler (#6139)', () => {
     assert.equal(opts.config.controlRoomRoot, '/root')
   })
 
-  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot', async () => {
+  it('rejects a session-bound client with a schema-valid FORBIDDEN snapshot that does NOT leak host defaults', async () => {
+    // A restrictive allowlist is set, but the FORBIDDEN reply to an unauthorized
+    // (session-bound) client must use SAFE placeholders — never the real backend
+    // or allowlist patterns.
+    ctx = makeRrcCtx({ config: { environments: { backend: 'k8s' }, allowedDockerImages: ['secret/*'] } })
     client.boundSessionId = 'sess-1'
     await controlRoomHandlers.repo_runtime_config_request(ws, client, { type: 'repo_runtime_config_request', requestId: 'r1' }, ctx)
     assert.equal(ctx.surveyRepoRuntimeConfig.callCount, 0, 'must not survey for a bound client')
@@ -601,6 +605,8 @@ describe('repo_runtime_config_request handler (#6139)', () => {
     assert.equal(payload.error.code, 'FORBIDDEN')
     assert.ok(ServerRepoRuntimeConfigSnapshotSchema.safeParse(payload).success)
     assert.deepEqual(payload.repos, [])
+    assert.equal(payload.backend, 'docker', 'must not leak the real backend')
+    assert.deepEqual(payload.allowlist, { source: 'default', patterns: [] }, 'must not leak the real allowlist patterns')
   })
 
   it('debounces concurrent requests from the same client', async () => {
@@ -616,12 +622,22 @@ describe('repo_runtime_config_request handler (#6139)', () => {
     await first
   })
 
-  it('sends a schema-valid error snapshot when the survey throws', async () => {
-    ctx = makeRrcCtx({ surveyRepoRuntimeConfig: createSpy(async () => { throw new Error('fs exploded') }) })
+  it('sends a schema-valid error snapshot when the survey throws, carrying config-derived host defaults', async () => {
+    // The authorized host-level SURVEY_FAILED path reports the REAL backend +
+    // allowlist (derived from config without touching the fs) so the dashboard
+    // still shows correct host defaults even when repo inspection fails.
+    ctx = makeRrcCtx({
+      config: { environments: { backend: 'k8s' }, allowedDockerImages: ['mycorp/*'] },
+      surveyRepoRuntimeConfig: createSpy(async () => { throw new Error('fs exploded') }),
+    })
     await controlRoomHandlers.repo_runtime_config_request(ws, client, { type: 'repo_runtime_config_request', requestId: 'e1' }, ctx)
     const [, payload] = ctx._send.lastCall
     assert.equal(payload.error.code, 'SURVEY_FAILED')
     assert.match(payload.error.message, /fs exploded/)
+    assert.equal(payload.backend, 'k8s')
+    assert.equal(payload.backendSource, 'config')
+    assert.deepEqual(payload.allowlist, { source: 'config', patterns: ['mycorp/*'] })
+    assert.deepEqual(payload.repos, [])
     assert.ok(ServerRepoRuntimeConfigSnapshotSchema.safeParse(payload).success)
   })
 

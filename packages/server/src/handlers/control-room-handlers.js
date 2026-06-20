@@ -35,7 +35,7 @@ import { resolveRepoSet, DEFAULT_CONTROL_ROOM_ROOT } from '../control-room/repo-
 import { surveyRepos } from '../control-room/survey.js'
 import { surveyRunners, DEFAULT_RUNNER_ROOT } from '../control-room/runners.js'
 import { surveyContainers } from '../control-room/containers.js'
-import { surveyRepoRuntimeConfig } from '../control-room/repo-runtime-config.js'
+import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/repo-runtime-config.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -339,18 +339,32 @@ async function handleContainersStatusRequest(ws, client, msg, ctx) {
 /**
  * #6139 — `repo_runtime_config_snapshot` error reply. Like the containers
  * survey, this uses a flat shape (no shared `root`/`repos` envelope), so it
- * builds its own degraded snapshot: empty repos + zeroed summary + safe
- * defaults for the host-level fields + the typed `error`.
+ * builds its own degraded snapshot: empty repos + zeroed summary + the typed
+ * `error`.
+ *
+ * `hostDefaults` (optional) carries the real config-derived host-level fields
+ * (backend / backendSource / isolation / allowlist) so a degraded reply to an
+ * AUTHORIZED host-level client (SURVEY_IN_PROGRESS / SURVEY_FAILED) still
+ * reports the effective defaults instead of placeholders. When omitted (the
+ * FORBIDDEN path — an unauthorized session-bound client) it falls back to safe
+ * placeholders: a session-bound token must NOT learn the host's backend or
+ * allowlist patterns (the same leak boundary as effectiveAllowlist's note).
  */
-function repoRuntimeConfigErrorSnapshot(requestId, error) {
-  return {
-    type: 'repo_runtime_config_snapshot',
-    requestId,
-    generatedAt: new Date().toISOString(),
+function repoRuntimeConfigErrorSnapshot(requestId, error, hostDefaults = null) {
+  const d = hostDefaults || {
     backend: 'docker',
     backendSource: 'default',
     isolation: 'worktree-before-docker',
     allowlist: { source: 'default', patterns: [] },
+  }
+  return {
+    type: 'repo_runtime_config_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    backend: d.backend,
+    backendSource: d.backendSource,
+    isolation: d.isolation,
+    allowlist: d.allowlist,
     repos: [],
     summary: { total: 0, withDevcontainer: 0, withCompose: 0, imagesDenied: 0, errored: 0 },
     error,
@@ -368,6 +382,8 @@ async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
   const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
 
   // Authority gate: a host-wide runtime-config survey is for host-level clients.
+  // FORBIDDEN replies use safe placeholders (no hostDefaults) — a session-bound
+  // token must not learn the host's backend/allowlist.
   if (client?.boundSessionId) {
     ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
       code: 'FORBIDDEN',
@@ -376,15 +392,20 @@ async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
     return
   }
 
+  // Past the authority gate: this client is host-level, so degraded snapshots
+  // may carry the real config-derived host defaults (computed without touching
+  // the filesystem) rather than placeholders.
+  const config = ctx?.services?.config || {}
+  const hostDefaults = hostRuntimeDefaults(config)
+
   if (repoRuntimeConfigInFlight.has(client)) {
     ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
       code: 'SURVEY_IN_PROGRESS',
       message: 'A repo runtime config survey is already in progress for this client',
-    }))
+    }, hostDefaults))
     return
   }
 
-  const config = ctx?.services?.config || {}
   // Same repo-set resolution as host_status_request: configured root else the
   // default, config.repos plus auto-discovered git repos.
   const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
@@ -417,7 +438,7 @@ async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
     ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
       code: 'SURVEY_FAILED',
       message: err && err.message ? err.message : 'repo runtime config survey failed',
-    }))
+    }, hostDefaults))
   } finally {
     repoRuntimeConfigInFlight.delete(client)
   }

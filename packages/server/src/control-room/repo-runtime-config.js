@@ -113,7 +113,14 @@ export function inspectRepo(repo, opts = {}) {
     const dcImage = typeof dc.image === 'string' && dc.image.trim() ? dc.image.trim() : null
     const image = dcImage || DEFAULT_ENV_IMAGE
     const imageSource = dcImage ? 'devcontainer' : 'default'
-    const imageAllowed = imageMatchesAllowlist(image, allowlistPatterns)
+    // The docker-image allowlist gates only CLIENT-supplied images — the
+    // create_environment handler runs validateDockerImage on the WS message's
+    // `image`, while environment-manager.create() uses `image || dcConfig.image
+    // || DEFAULT_IMAGE` WITHOUT re-validating. So the built-in default is used
+    // unconditionally (never allowlist-checked) → its verdict is N/A (null), not
+    // a deny. Only a devcontainer image gets a (would-be) verdict, which a
+    // restrictive `allowedDockerImages` can usefully flag.
+    const imageAllowed = dcImage ? imageMatchesAllowlist(image, allowlistPatterns) : null
 
     // Compose config: a devcontainer dockerComposeFile (array, already
     // normalised by parseDevContainer) wins; else look for a repo-root compose
@@ -160,6 +167,25 @@ export function summarizeRepoRuntime(repos) {
 }
 
 /**
+ * The host-level runtime defaults that apply across all repos, derived purely
+ * from config (no filesystem touch): the effective backend + its source, the
+ * isolation order, and the effective image allowlist. Shared by the survey and
+ * by the handler's degraded snapshots so a SURVEY_FAILED/IN_PROGRESS reply
+ * still reports the real host defaults instead of hardcoded placeholders.
+ *
+ * @param {object} [config]
+ * @returns {{ backend: string, backendSource: 'config'|'default', isolation: string, allowlist: { source: string, patterns: string[] } }}
+ */
+export function hostRuntimeDefaults(config = {}) {
+  const backend = resolveEnvironmentBackend(config)
+  // backendSource is 'config' only when the effective backend came from a valid
+  // explicit `environments.backend` (a typo falls back to docker → 'default').
+  const explicit = config?.environments?.backend
+  const backendSource = typeof explicit === 'string' && explicit === backend ? 'config' : 'default'
+  return { backend, backendSource, isolation: ISOLATION_DEFAULT, allowlist: effectiveAllowlist(config) }
+}
+
+/**
  * Survey per-repo runtime config across the resolved repo set.
  *
  * @param {object} opts
@@ -182,12 +208,7 @@ export function surveyRepoRuntimeConfig(opts = {}) {
   } = opts
 
   const now = _now()
-  const backend = resolveEnvironmentBackend(config)
-  // backendSource is 'config' only when the effective backend came from a valid
-  // explicit `environments.backend` (a typo falls back to docker → 'default').
-  const explicit = config?.environments?.backend
-  const backendSource = typeof explicit === 'string' && explicit === backend ? 'config' : 'default'
-  const allowlist = effectiveAllowlist(config)
+  const { backend, backendSource, isolation, allowlist } = hostRuntimeDefaults(config)
 
   let repos = []
   try {
@@ -209,7 +230,7 @@ export function surveyRepoRuntimeConfig(opts = {}) {
     generatedAt: now.toISOString(),
     backend,
     backendSource,
-    isolation: ISOLATION_DEFAULT,
+    isolation,
     allowlist,
     repos,
     summary: summarizeRepoRuntime(repos),
