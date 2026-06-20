@@ -7,11 +7,14 @@
  * **delete (revoke)**, reusing the existing primary-token-gated HTTP endpoints:
  *
  *   - GET    /api/pages          → { pages: [{ slug, title, createdAt, bytes, path }] }
+ *   - POST   /api/pages          → { slug, path, title, bytes, createdAt }  (#6110)
  *   - DELETE /api/pages/<slug>   → { removed: boolean }  (idempotent)
  *
  * Modeled on PoolStatsPanel (#5053): single fetch on mount + a Refresh button,
  * injectable fetch / token / clipboard / origin seams for tests. The
- * "publish this artifact" affordance from #5689 is a separate follow-up.
+ * "publish this artifact" affordance (#6110) is the in-panel form: paste or load
+ * an HTML artifact, POST it to /api/pages, and the returned share URL shows
+ * inline (copyable) while the new page drops into the list below.
  */
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { getAuthToken } from '../utils/auth'
@@ -56,6 +59,16 @@ export function PagesPanel({ fetchImpl, getToken, copyImpl, origin }: PagesPanel
   const [error, setError] = useState<string | null>(null)
   const [copiedSlug, setCopiedSlug] = useState<string | null>(null)
   const [deletingSlug, setDeletingSlug] = useState<string | null>(null)
+  // #6110: the "publish this artifact" form — paste/load an HTML artifact and
+  // POST it to /api/pages, then surface the share URL inline. Form-scoped state
+  // (its own error + result) so a publish failure never blanks the page list.
+  const [showPublish, setShowPublish] = useState<boolean>(false)
+  const [publishTitle, setPublishTitle] = useState<string>('')
+  const [publishHtml, setPublishHtml] = useState<string>('')
+  const [publishing, setPublishing] = useState<boolean>(false)
+  const [publishError, setPublishError] = useState<string | null>(null)
+  const [publishedUrl, setPublishedUrl] = useState<string | null>(null)
+  const [publishedCopied, setPublishedCopied] = useState<boolean>(false)
 
   const resolvedFetch: typeof fetch =
     fetchImpl ?? ((input: RequestInfo | URL, init?: RequestInit) => window.fetch(input, init))
@@ -132,21 +145,168 @@ export function PagesPanel({ fetchImpl, getToken, copyImpl, origin }: PagesPanel
     }
   }, [resolvedFetch, authHeaders])
 
+  // #6110: load an HTML file into the form (drop the chrome of pasting). Seeds
+  // the title from the filename when the title is still blank.
+  const handleFile = useCallback(async (file: File | undefined) => {
+    if (!file) return
+    setPublishError(null)
+    try {
+      const text = await file.text()
+      setPublishHtml(text)
+      setPublishTitle((t) => t || file.name.replace(/\.html?$/i, ''))
+    } catch {
+      setPublishError(`Could not read ${file.name}`)
+    }
+  }, [])
+
+  // #6110: POST the artifact to the existing primary-token-gated /api/pages,
+  // surface the returned share URL inline (copyable), and refresh so the new
+  // page appears in the list below. The 403 `primary_token_required` from the
+  // endpoint propagates as the inline error (a bound token can't publish).
+  const handlePublish = useCallback(async () => {
+    if (!publishHtml.trim()) {
+      setPublishError('Paste or load some HTML to publish.')
+      return
+    }
+    setPublishError(null)
+    setPublishedUrl(null)
+    setPublishedCopied(false)
+    setPublishing(true)
+    try {
+      const res = await resolvedFetch('/api/pages', {
+        method: 'POST',
+        headers: { ...(authHeaders() ?? {}), 'Content-Type': 'application/json' },
+        body: JSON.stringify({ title: publishTitle.trim() || 'Untitled', html: publishHtml }),
+      })
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({ error: `HTTP ${res.status}` }))
+        throw new Error((body as { error?: string }).error || `HTTP ${res.status}`)
+      }
+      const body = (await res.json()) as { path?: string; slug?: string }
+      setPublishedUrl(body.path ? `${resolvedOrigin}${body.path}` : '')
+      setPublishTitle('')
+      setPublishHtml('')
+      // The new page now exists server-side — reflect it in the list.
+      await refresh()
+    } catch (err) {
+      setPublishError(err instanceof Error ? err.message : 'Failed to publish')
+    } finally {
+      setPublishing(false)
+    }
+  }, [publishHtml, publishTitle, resolvedFetch, authHeaders, resolvedOrigin, refresh])
+
+  const handleCopyPublished = useCallback(async () => {
+    if (!publishedUrl) return
+    const ok = await resolvedCopy(publishedUrl)
+    if (ok) {
+      setPublishedCopied(true)
+      if (copyTimerRef.current) clearTimeout(copyTimerRef.current)
+      copyTimerRef.current = setTimeout(() => {
+        copyTimerRef.current = null
+        setPublishedCopied(false)
+      }, 1500)
+    }
+  }, [publishedUrl, resolvedCopy])
+
   const list = pages ?? []
 
   return (
     <div className="environment-panel" data-testid="pages-panel">
       <div className="env-panel-header">
         <h2>Pages</h2>
-        <button
-          className="btn-env-new"
-          data-testid="pages-refresh"
-          onClick={() => void refresh()}
-          disabled={loading}
-        >
-          {loading ? 'Loading…' : 'Refresh'}
-        </button>
+        <div style={{ display: 'flex', gap: '0.5em' }}>
+          <button
+            className="btn-env-new"
+            data-testid="pages-publish-toggle"
+            onClick={() => setShowPublish((v) => !v)}
+            aria-expanded={showPublish}
+          >
+            {showPublish ? 'Cancel' : '+ Publish HTML'}
+          </button>
+          <button
+            className="btn-env-new"
+            data-testid="pages-refresh"
+            onClick={() => void refresh()}
+            disabled={loading}
+          >
+            {loading ? 'Loading…' : 'Refresh'}
+          </button>
+        </div>
       </div>
+
+      {showPublish && (
+        <div className="env-card" data-testid="pages-publish-form" style={{ marginBottom: '0.75em' }}>
+          <div className="env-card-details">
+            <label className="env-card-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.25em' }}>
+              <span className="env-card-label">Title</span>
+              <input
+                type="text"
+                data-testid="pages-publish-title"
+                value={publishTitle}
+                onChange={(e) => setPublishTitle(e.target.value)}
+                placeholder="Untitled"
+                disabled={publishing}
+              />
+            </label>
+            <label className="env-card-row" style={{ flexDirection: 'column', alignItems: 'stretch', gap: '0.25em' }}>
+              <span className="env-card-label">HTML</span>
+              <textarea
+                data-testid="pages-publish-html"
+                value={publishHtml}
+                onChange={(e) => setPublishHtml(e.target.value)}
+                placeholder="Paste a self-contained HTML artifact, or load a .html file below"
+                rows={6}
+                disabled={publishing}
+                style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: '0.8em', resize: 'vertical' }}
+              />
+            </label>
+            <label className="env-card-row" style={{ gap: '0.5em' }}>
+              <span className="env-card-label">Load file</span>
+              <input
+                type="file"
+                accept=".html,.htm,text/html"
+                data-testid="pages-publish-file"
+                disabled={publishing}
+                onChange={(e) => void handleFile(e.target.files?.[0])}
+              />
+            </label>
+          </div>
+          {publishError && (
+            <div
+              className="env-empty"
+              data-testid="pages-publish-error"
+              style={{ color: 'var(--status-error, #ef4444)' }}
+            >
+              {publishError}
+            </div>
+          )}
+          {publishedUrl !== null && (
+            <div className="env-card-row" data-testid="pages-publish-result" style={{ gap: '0.5em', alignItems: 'center' }}>
+              <span className="env-card-label">Published</span>
+              <a href={publishedUrl} target="_blank" rel="noreferrer" data-testid="pages-publish-result-url" style={{ fontFamily: 'var(--font-mono, monospace)', fontSize: '0.8em', wordBreak: 'break-all' }}>
+                {publishedUrl}
+              </a>
+              <button
+                className="btn-env-action"
+                data-testid="pages-publish-result-copy"
+                onClick={() => void handleCopyPublished()}
+              >
+                {publishedCopied ? 'Copied!' : 'Copy link'}
+              </button>
+            </div>
+          )}
+          <div className="env-card-actions">
+            <button
+              className="btn-env-action"
+              data-testid="pages-publish-submit"
+              onClick={() => void handlePublish()}
+              disabled={publishing || !publishHtml.trim()}
+            >
+              {publishing ? 'Publishing…' : 'Publish'}
+            </button>
+          </div>
+        </div>
+      )}
 
       {error && (
         <div
