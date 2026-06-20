@@ -65,17 +65,37 @@ export function surveyByokPool(opts = {}) {
   return { generatedAt: now.toISOString(), enabled: true, note: null, limits, stats }
 }
 
+/** A non-negative integer or 0 — matches the schema's `.int().nonnegative()`
+ *  count fields (rejects negatives, non-integers, NaN, Infinity, non-numbers). */
+function nonNegInt(v) {
+  return Number.isInteger(v) && v >= 0 ? v : 0
+}
+
+/** A non-negative finite number or 0 — matches the schema's `.nonnegative()
+ *  .finite()` fields (idle-ms ages, which need not be integers). */
+function nonNegFinite(v) {
+  return Number.isFinite(v) && v >= 0 ? v : 0
+}
+
+/** Any finite number or 0 — matches the schema's bare `.finite()` fields. */
+function finiteOr0(v) {
+  return Number.isFinite(v) ? v : 0
+}
+
 /**
- * Coerce a PoolStatsAggregator.snapshot() into the wire shape (defensive — drop
- * to safe zeros/empties for any missing field so the snapshot always validates).
+ * Coerce a PoolStatsAggregator.snapshot() into the wire shape. Defensive — every
+ * field is clamped to its SCHEMA invariant (non-negative integer counts /
+ * non-negative finite ages / finite scalars) so a pathological aggregator value
+ * can never produce a snapshot the client would then reject. Missing / garbage
+ * fields drop to safe zeros/empties.
  */
 function normalizeStats(snap) {
   if (!snap || typeof snap !== 'object') return null
   const buckets = Array.isArray(snap.buckets)
     ? snap.buckets.map((b) => ({
         key: typeof b?.key === 'string' ? b.key : '',
-        size: Number.isFinite(b?.size) ? b.size : 0,
-        oldestIdleMs: Number.isFinite(b?.oldestIdleMs) ? b.oldestIdleMs : 0,
+        size: nonNegInt(b?.size),
+        oldestIdleMs: nonNegFinite(b?.oldestIdleMs),
       }))
     : []
   const recentEvictions = Array.isArray(snap.recentEvictions)
@@ -83,19 +103,28 @@ function normalizeStats(snap) {
         key: typeof e?.key === 'string' ? e.key : '',
         containerId: typeof e?.containerId === 'string' ? e.containerId : null,
         reason: typeof e?.reason === 'string' ? e.reason : 'unknown',
-        timestamp: Number.isFinite(e?.timestamp) ? e.timestamp : 0,
+        timestamp: finiteOr0(e?.timestamp),
       }))
     : []
+  // Build a clean count map (skip non-plain-objects incl. arrays; coerce each
+  // value to a non-negative integer) so the wire `evictionsByReason` always
+  // satisfies its `record(string, int>=0)` schema.
+  const evictionsByReason = {}
+  const rawEvictions = snap.evictionsByReason
+  if (rawEvictions && typeof rawEvictions === 'object' && !Array.isArray(rawEvictions)) {
+    for (const [reason, count] of Object.entries(rawEvictions)) {
+      evictionsByReason[reason] = nonNegInt(count)
+    }
+  }
   return {
-    hits: Number.isFinite(snap.hits) ? snap.hits : 0,
-    misses: Number.isFinite(snap.misses) ? snap.misses : 0,
-    releases: Number.isFinite(snap.releases) ? snap.releases : 0,
-    shutdowns: Number.isFinite(snap.shutdowns) ? snap.shutdowns : 0,
-    hitRate: Number.isFinite(snap.hitRate) ? snap.hitRate : 0,
-    totalSize: Number.isFinite(snap.totalSize) ? snap.totalSize : 0,
+    hits: nonNegInt(snap.hits),
+    misses: nonNegInt(snap.misses),
+    releases: nonNegInt(snap.releases),
+    shutdowns: nonNegInt(snap.shutdowns),
+    hitRate: finiteOr0(snap.hitRate),
+    totalSize: nonNegInt(snap.totalSize),
     buckets,
-    evictionsByReason:
-      snap.evictionsByReason && typeof snap.evictionsByReason === 'object' ? { ...snap.evictionsByReason } : {},
+    evictionsByReason,
     recentEvictions,
   }
 }

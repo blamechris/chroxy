@@ -135,4 +135,45 @@ describe('#6135 surveyByokPool — enabled', () => {
     assert.deepEqual(snap.stats.recentEvictions, [])
     assert.deepEqual(snap.stats.evictionsByReason, {})
   })
+
+  it('normalizeStats clamps pathological values to the schema invariants (non-negative ints)', () => {
+    const snap = surveyByokPool({
+      enabled: true,
+      pool: fakePool(),
+      statsAggregator: fakeStats({
+        hits: -5, misses: 1.5, releases: Infinity, shutdowns: NaN, hitRate: Infinity, totalSize: -3,
+        buckets: [{ key: 'k', size: -2, oldestIdleMs: -10 }, { key: 'k2', size: 1.7, oldestIdleMs: 5.5 }],
+        evictionsByReason: { idle: -1, over_cap: 2.9, over_age: 3 },
+        recentEvictions: [{ key: 'k', containerId: 'c', reason: 'idle', timestamp: NaN }],
+      }),
+      _now: fixedNow,
+    })
+    const s = snap.stats
+    // Negative / non-integer / non-finite counts → 0.
+    assert.equal(s.hits, 0)
+    assert.equal(s.misses, 0)
+    assert.equal(s.releases, 0)
+    assert.equal(s.shutdowns, 0)
+    assert.equal(s.hitRate, 0) // Infinity → 0 (bare finite field)
+    assert.equal(s.totalSize, 0)
+    // bucket.size is int>=0 (negatives + floats → 0); oldestIdleMs is finite>=0.
+    assert.deepEqual(s.buckets, [
+      { key: 'k', size: 0, oldestIdleMs: 0 },
+      { key: 'k2', size: 0, oldestIdleMs: 5.5 },
+    ])
+    // evictionsByReason values clamped to non-negative integers.
+    assert.deepEqual(s.evictionsByReason, { idle: 0, over_cap: 0, over_age: 3 })
+    // recentEvictions.timestamp NaN → 0.
+    assert.equal(s.recentEvictions[0].timestamp, 0)
+  })
+
+  it('normalizeStats drops a non-plain-object evictionsByReason (e.g. an array)', () => {
+    const snap = surveyByokPool({
+      enabled: true,
+      pool: fakePool(),
+      statsAggregator: fakeStats({ ...FULL_SNAP, evictionsByReason: ['nope'] }),
+      _now: fixedNow,
+    })
+    assert.deepEqual(snap.stats.evictionsByReason, {})
+  })
 })
