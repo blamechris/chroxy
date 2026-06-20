@@ -317,9 +317,9 @@ export function SkillsInventorySection({
           </div>
 
           {snapshot.error && (
-            <div className="cr-callout" data-testid="skills-error">
-              <b>Survey degraded:</b> {snapshot.error.message} <span className="cr-dim cr-mono">({snapshot.error.code})</span>
-            </div>
+            <p className="cr-callout cr-callout-bad" data-testid="skills-error" role="alert">
+              <b>Survey failed ({snapshot.error.code}):</b> {snapshot.error.message}
+            </p>
           )}
 
           <SkillCard

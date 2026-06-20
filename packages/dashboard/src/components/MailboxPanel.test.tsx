@@ -109,7 +109,10 @@ describe('MailboxPanel', () => {
         now={NOW}
       />,
     )
-    expect(screen.getByTestId('mailbox-error').textContent).toContain('host-level authority')
+    const banner = screen.getByTestId('mailbox-error')
+    expect(banner.getAttribute('role')).toBe('alert') // #6167 a11y parity
+    expect(banner.textContent).toContain('FORBIDDEN')
+    expect(banner.textContent).toContain('host-level authority')
   })
 
   it('dispatches Refresh and disables it while loading', () => {

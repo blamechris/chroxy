@@ -276,7 +276,10 @@ describe('IntegrationsSection — populated', () => {
       summary: { total: 0, configured: 0, notConfigured: 0, degraded: 0 },
       error: { code: 'SURVEY_FAILED', message: 'stat exploded' },
     }))
-    expect(screen.getByTestId('integration-error').textContent).toContain('stat exploded')
+    const banner = screen.getByTestId('integration-error')
+    expect(banner.getAttribute('role')).toBe('alert') // #6167 a11y parity
+    expect(banner.textContent).toContain('SURVEY_FAILED')
+    expect(banner.textContent).toContain('stat exploded')
   })
 
   it('renders the no-repos row when the survey found nothing', () => {
