@@ -1816,6 +1816,19 @@ describe('emulator_action handler (#6137)', () => {
     assert.equal(ctx._send.lastCall[1].reason, 'already-running')
   })
 
+  it('rejects killing a serial whose surveyed device is not running (defensive state gate)', async () => {
+    // A crafted snapshot where a serial is enumerated but state !== running —
+    // exercises the kill state gate (a real survey only assigns serials to
+    // running devices, so this guards against a future survey-shape change).
+    ctx = makeEmuCtx({ surveyEmulators: createSpy(async () => ({
+      ...SAMPLE_EMU,
+      devices: [{ avd: 'Pixel_7_API_34', serial: 'emulator-5554', state: 'stopped' }],
+    })) })
+    await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'kill', serial: 'emulator-5554' }, ctx)
+    assert.equal(ctx.runEmulatorAction.callCount, 0)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-running')
+  })
+
   it('rejects a session-bound (non-host) client without surveying', async () => {
     client.boundSessionId = 'sess-1'
     await controlRoomHandlers.emulator_action(ws, client, { type: 'emulator_action', action: 'boot', avd: 'Pixel_5_API_33', requestId: 'f1' }, ctx)
