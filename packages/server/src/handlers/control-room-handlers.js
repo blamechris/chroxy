@@ -41,6 +41,7 @@ import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
 import { surveyHostPrune, runHostPrune, PRUNE_KINDS } from '../control-room/host-prune.js'
 import { surveySimulators, runSimulatorAction, SIMULATOR_ACTIONS } from '../control-room/simulators.js'
 import { surveyEmulators, runEmulatorAction, EMULATOR_ACTIONS } from '../control-room/emulators.js'
+import { surveyWsl, runWslAction, WSL_ACTIONS } from '../control-room/wsl.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -69,6 +70,8 @@ const hostPruneInFlight = new WeakSet()
 const simulatorInFlight = new WeakSet()
 // #6137: same again for the Android emulator survey — independent of all above.
 const emulatorInFlight = new WeakSet()
+// #6138: same again for the WSL distro survey — independent of all above.
+const wslInFlight = new WeakSet()
 
 /**
  * #5377 — shared builder for the survey error-snapshots. The error reply is a
@@ -1840,6 +1843,195 @@ async function handleEmulatorAction(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6138 (epic #5530) — WSL2 distro survey (wsl_status_request) + start/terminate
+// action (wsl_action). Shares the Device runtimes tab. Windows-host-only; off
+// Windows the survey itself returns a first-class available:false snapshot.
+// ───────────────────────────────────────────────────────────────────────────
+
+/** #6138: schema-conformant error reply for the WSL survey. */
+function wslErrorSnapshot(requestId, error) {
+  return {
+    type: 'wsl_status_snapshot',
+    requestId: requestId ?? null,
+    generatedAt: new Date().toISOString(),
+    available: false,
+    note: null,
+    defaultDistro: null,
+    distros: [],
+    error,
+  }
+}
+
+/**
+ * #6138 — WSL2 distro survey handler (read-only). Same host-authority +
+ * per-client in-flight + degraded-reply contract as the iOS/Android siblings.
+ * Off Windows / no wsl.exe, the survey itself returns available:false.
+ */
+async function handleWslStatusRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, wslErrorSnapshot(requestId, {
+      code: 'FORBIDDEN',
+      message: 'wsl_status_request requires host-level authority (a session-bound token cannot survey the host)',
+    }))
+    return
+  }
+  if (wslInFlight.has(client)) {
+    ctx.transport.send(ws, wslErrorSnapshot(requestId, {
+      code: 'SURVEY_IN_PROGRESS',
+      message: 'A WSL survey is already in progress for this client',
+    }))
+    return
+  }
+  const surveyFn = typeof ctx?.surveyWsl === 'function' ? ctx.surveyWsl : surveyWsl
+  wslInFlight.add(client)
+  try {
+    const snapshot = await surveyFn({})
+    ctx.transport.send(ws, {
+      type: 'wsl_status_snapshot',
+      requestId,
+      generatedAt: snapshot.generatedAt,
+      available: snapshot.available,
+      note: snapshot.note ?? null,
+      defaultDistro: snapshot.defaultDistro ?? null,
+      distros: snapshot.distros,
+    })
+  } catch (err) {
+    log.warn(`wsl_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
+    ctx.transport.send(ws, wslErrorSnapshot(requestId, {
+      code: 'SURVEY_FAILED',
+      message: err && err.message ? err.message : 'WSL survey failed',
+    }))
+  } finally {
+    wslInFlight.delete(client)
+  }
+}
+
+/**
+ * #6138: per-distro in-flight guard for WSL lifecycle actions, keyed by distro
+ * name. Same string-keyed Map shape as the emulator guard; `.size` doubles as
+ * the global gauge.
+ */
+const wslActionInFlight = new Map()
+/** #6138: global cap on concurrent WSL actions (reject, never queue). */
+export const MAX_CONCURRENT_WSL_ACTIONS = 2
+
+/** #6138: shared WSL_ACTION_FAILED reply (mirrors emulatorActionError). */
+function wslActionError(ws, ctx, msg, reason, message) {
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    code: 'WSL_ACTION_FAILED',
+    message,
+    reason,
+    action: typeof msg?.action === 'string' ? msg.action : null,
+    distro: typeof msg?.distro === 'string' ? msg.distro : null,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+  })
+}
+
+/** #6138: failure `reason` discriminator per action (for WSL_ACTION_FAILED). */
+const WSL_ACTION_FAILURE_REASON = {
+  start: 'start-failed',
+  terminate: 'terminate-failed',
+}
+
+/**
+ * #6138 (epic #5530) — `wsl_action` handler. Start / terminate a surveyed WSL2
+ * distro, replying with exactly one `wsl_action_ack` on success or one
+ * WSL_ACTION_FAILED `session_error` on failure.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist):
+ *   1. Host-level authority — a session-bound token cannot run host actions.
+ *   2. Survey membership — the client-supplied `distro` MUST name a distro the
+ *      fresh `surveyWsl` enumerates; the client value is a lookup key, never a
+ *      trusted target. State-gated: start a non-running distro, terminate a
+ *      running one (terminate never targets a distro the survey didn't list).
+ *
+ * Concurrency: one in-flight action per distro, plus a global cap of
+ * MAX_CONCURRENT_WSL_ACTIONS (rejected, not queued). The duplicate fast-reject
+ * happens before the survey (the .has()/.set() stay synchronous-adjacent).
+ */
+async function handleWslAction(ws, client, msg, ctx) {
+  if (client?.boundSessionId) {
+    wslActionError(ws, ctx, msg, 'forbidden',
+      'wsl_action requires host-level authority (a session-bound token cannot run host actions)')
+    return
+  }
+
+  const action = typeof msg?.action === 'string' ? msg.action : ''
+  if (!WSL_ACTIONS.includes(action)) {
+    wslActionError(ws, ctx, msg, 'unsupported-action',
+      `Unsupported WSL action: ${action.length > 0 ? action : '(none)'}`)
+    return
+  }
+
+  const distro = typeof msg?.distro === 'string' ? msg.distro : ''
+  if (distro.length === 0) {
+    wslActionError(ws, ctx, msg, 'invalid-distro', 'wsl_action requires a non-empty distro')
+    return
+  }
+
+  // Concurrency guard BEFORE the expensive survey (fast-reject duplicates).
+  if (wslActionInFlight.has(distro)) {
+    wslActionError(ws, ctx, msg, 'action-in-progress',
+      `A WSL action (${wslActionInFlight.get(distro)}) is already in progress for ${distro}`)
+    return
+  }
+  if (wslActionInFlight.size >= MAX_CONCURRENT_WSL_ACTIONS) {
+    wslActionError(ws, ctx, msg, 'busy',
+      `The host is busy: ${wslActionInFlight.size} WSL actions are already in flight (max ${MAX_CONCURRENT_WSL_ACTIONS}) — retry when one finishes`)
+    return
+  }
+
+  const surveyFn = typeof ctx?.surveyWsl === 'function' ? ctx.surveyWsl : surveyWsl
+  const runFn = typeof ctx?.runWslAction === 'function' ? ctx.runWslAction : runWslAction
+  wslActionInFlight.set(distro, action)
+  try {
+    let snapshot
+    try {
+      snapshot = await surveyFn({})
+    } catch (err) {
+      wslActionError(ws, ctx, msg, 'survey-failed', err && err.message ? err.message : 'WSL survey failed')
+      return
+    }
+    if (!snapshot?.available) {
+      wslActionError(ws, ctx, msg, 'unavailable', snapshot?.note || 'WSL is not available on this host')
+      return
+    }
+    const device = (Array.isArray(snapshot.distros) ? snapshot.distros : []).find((d) => d.name === distro) || null
+    if (!device) {
+      wslActionError(ws, ctx, msg, 'unknown-distro', `distro does not name a surveyed WSL distro: ${distro}`)
+      return
+    }
+    const isRunning = device.state === 'Running'
+    if (action === 'start' && isRunning) {
+      wslActionError(ws, ctx, msg, 'already-running', `Distro ${distro} is already running`)
+      return
+    }
+    if (action === 'terminate' && !isRunning) {
+      wslActionError(ws, ctx, msg, 'not-running', `Distro ${distro} is not running (state: ${device.state})`)
+      return
+    }
+
+    const status = await runFn({ action, distro })
+    log.info(`wsl_action ${action} completed for ${distro} (client=${client?.id})`)
+    ctx.transport.send(ws, {
+      type: 'wsl_action_ack',
+      action,
+      distro,
+      requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+      status: typeof status === 'string' ? status : null,
+    })
+  } catch (err) {
+    const message = err && err.message ? err.message : `${action} failed`
+    log.warn(`wsl_action ${action} failed for ${distro}: ${message}`)
+    wslActionError(ws, ctx, msg, WSL_ACTION_FAILURE_REASON[action], message)
+  } finally {
+    wslActionInFlight.delete(distro)
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -1891,11 +2083,13 @@ export const controlRoomHandlers = {
   host_prune_status_request: handleHostPruneStatusRequest,
   simulator_status_request: handleSimulatorStatusRequest,
   emulator_status_request: handleEmulatorStatusRequest,
+  wsl_status_request: handleWslStatusRequest,
   containers_action: handleContainersAction,
   byok_pool_action: handleByokPoolAction,
   host_prune_action: handleHostPruneAction,
   simulator_action: handleSimulatorAction,
   emulator_action: handleEmulatorAction,
+  wsl_action: handleWslAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,

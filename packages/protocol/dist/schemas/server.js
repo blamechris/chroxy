@@ -1962,6 +1962,42 @@ export const ServerEmulatorActionAckSchema = z.object({
     status: z.string().nullable(),
 }).passthrough();
 // ───────────────────────────────────────────────────────────────────────────
+// #6138 (epic #5530) — Control Room WSL2 distro survey (shares the Device
+// runtimes tab). Read-only. Off Windows / no wsl.exe → available:false (a
+// first-class state), same degraded-snapshot posture.
+// ───────────────────────────────────────────────────────────────────────────
+/** One WSL distro from `wsl.exe -l -v`. */
+export const WslDistroSchema = z.object({
+    name: z.string(),
+    state: z.string(), // "Running" | "Stopped" | "Unknown" | …
+    version: z.number().nullable(), // WSL version (1 | 2), null if unparseable
+    isDefault: z.boolean(),
+});
+export const ServerWslStatusSnapshotSchema = z.object({
+    type: z.literal('wsl_status_snapshot'),
+    requestId: z.string().nullable().optional(),
+    generatedAt: z.string().datetime(),
+    // false off Windows / no wsl.exe → distros empty, note set.
+    available: z.boolean(),
+    note: z.string().nullable(),
+    defaultDistro: z.string().nullable(),
+    distros: z.array(WslDistroSchema),
+    error: z.object({ code: z.string(), message: z.string() }).optional(),
+}).passthrough();
+/**
+ * #6138 — ack for a successful `wsl_action` (start/terminate). Echoes `action`/
+ * `distro` (+ optional `requestId`) and carries the resulting `status`
+ * ("running" after a start, "stopped" after a terminate). A failure replies with
+ * a `WSL_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export const ServerWslActionAckSchema = z.object({
+    type: z.literal('wsl_action_ack'),
+    action: z.string(),
+    distro: z.string(),
+    requestId: z.string().max(128).nullable().optional(),
+    status: z.string().nullable(),
+}).passthrough();
+// ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────
 /**

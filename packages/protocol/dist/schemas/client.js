@@ -975,6 +975,14 @@ export const EmulatorStatusRequestSchema = z.object({
     type: z.literal('emulator_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #6138 (epic #5530): the same Control Room "Device runtimes" tab also asks the
+// server to survey WSL2 distros (`wsl.exe -l -v`) on Windows hosts. The server
+// replies with a single wsl_status_snapshot (see server.ts). Off Windows / no
+// wsl.exe → a first-class available:false snapshot.
+export const WslStatusRequestSchema = z.object({
+    type: z.literal('wsl_status_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5499 (epic #5498): the dashboard's Control Room "Integrations" tab asks the
 // server to survey integration status across the host's repos — repo-memory
 // for this slice (config presence, cache stats, telemetry report); repo-relay
@@ -1113,6 +1121,19 @@ export const EmulatorActionSchema = z.object({
     headless: z.boolean().optional(),
     requestId: z.string().max(128).optional(),
 }).passthrough();
+// #6138 (epic #5530): start / terminate a WSL2 distro from the Control Room
+// "Device runtimes" tab (Windows hosts). Host authority (server-enforced).
+// `distro` is a LOOKUP KEY — the server re-surveys `wsl.exe -l -v` and rejects
+// any distro the survey didn't enumerate, plus state-gates (start a non-running
+// distro, terminate a running one). terminate is destructive (drops the running
+// distro's processes) so the dashboard gates it behind a confirm. The optional
+// `requestId` is echoed on the wsl_action_ack / WSL_ACTION_FAILED session_error.
+export const WslActionSchema = z.object({
+    type: z.literal('wsl_action'),
+    action: z.enum(['start', 'terminate']),
+    distro: z.string().min(1).max(256),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
 // #5547: summarize a session's persisted history into a continuation brief.
 // The server reads the session's `SessionMessageHistory` (the universal,
 // restart-surviving source — works even when the provider subprocess is gone),
@@ -1236,6 +1257,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     HostPruneStatusRequestSchema,
     SimulatorStatusRequestSchema,
     EmulatorStatusRequestSchema,
+    WslStatusRequestSchema,
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     MailboxStatusRequestSchema,
@@ -1245,6 +1267,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     HostPruneActionSchema,
     SimulatorActionSchema,
     EmulatorActionSchema,
+    WslActionSchema,
     SummarizeSessionSchema,
     PairApproveSchema,
     PairDenySchema,
