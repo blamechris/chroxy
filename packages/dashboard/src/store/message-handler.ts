@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2612,6 +2612,17 @@ function handleByokPoolStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet
 }
 
 /**
+ * #6140 (epic #5530) — host prune survey `host_prune_status_snapshot`: REPLACE
+ * the stored snapshot and clear the loading flag. Same defensive, full-replace,
+ * clear-loading-only-on-valid-parse contract as the sibling survey handlers.
+ */
+function handleHostPruneStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerHostPruneStatusSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ hostPruneStatus: parsed.data, hostPruneStatusLoading: false });
+}
+
+/**
  * #5499 (epic #5498) — Integrations survey `integration_status_snapshot`:
  * REPLACE the stored survey and clear the loading flag. Same defensive,
  * full-replace, clear-loading-only-on-valid-parse contract as the host and
@@ -2794,6 +2805,56 @@ function handleByokPoolActionAck(msg: Record<string, unknown>, get: MsgGet, set:
 }
 
 /**
+ * #6140 slice 2 (epic #5530) — resolve one host prune `kind`'s pending state:
+ * drop it from `hostPruneActioningIds` and record the outcome in
+ * `hostPruneActionResults`. Shared by the ack and the HOST_PRUNE_ACTION_FAILED
+ * session_error.
+ */
+function resolveHostPruneAction(
+  get: MsgGet,
+  set: MsgSet,
+  kind: string,
+  result: { note: string | null; error: string | null },
+): void {
+  const pending = new Set(get().hostPruneActioningIds);
+  pending.delete(kind);
+  set({
+    hostPruneActioningIds: pending,
+    hostPruneActionResults: { ...get().hostPruneActionResults, [kind]: { kind, ...result, at: Date.now() } },
+  });
+}
+
+/**
+ * #6140 slice 2 — compact auto-unit byte format for the prune note, so it reads
+ * consistently with the section's chips/tables (which use the same KiB/MiB/GiB
+ * scaling) rather than always-MiB.
+ */
+function formatReclaimedBytes(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes < 0) return '0 B';
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ['KiB', 'MiB', 'GiB', 'TiB'];
+  let v = bytes / 1024;
+  let i = 0;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v.toFixed(v < 10 ? 2 : 1)} ${units[i]}`;
+}
+
+/**
+ * #6140 slice 2 — host prune success ack: builds a human note from removed counts
+ * + reclaimed bytes (+ any per-resource failures) and clears the kind's pending
+ * state. A malformed ack is dropped (Zod safeParse) so the row keeps its honest
+ * pending state.
+ */
+function handleHostPruneActionAck(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerHostPruneActionAckSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const { kind, removedContainers, removedImages, reclaimedBytes, failures } = parsed.data;
+  let note = `Removed ${removedContainers} container${removedContainers === 1 ? '' : 's'}, ${removedImages} image${removedImages === 1 ? '' : 's'} (~${formatReclaimedBytes(reclaimedBytes)})`;
+  if (failures.length > 0) note += ` — ${failures.length} failed`;
+  resolveHostPruneAction(get, set, kind, { note, error: null });
+}
+
+/**
  * #5547: a `summarize_session_result` resolves the pending summarize promise
  * (keyed by the echoed requestId) so the awaiting create-session flow opens
  * with the brief seeded. The failure half (SUMMARIZE_FAILED) rejects the same
@@ -2910,6 +2971,8 @@ const HANDLERS: Record<string, Handler> = {
   repo_runtime_config_snapshot: handleRepoRuntimeConfigSnapshot,
   // #6135 (epic #5530): Control Room BYOK pool survey snapshot.
   byok_pool_status_snapshot: handleByokPoolStatusSnapshot,
+  // #6140 (epic #5530): Control Room host prune survey snapshot.
+  host_prune_status_snapshot: handleHostPruneStatusSnapshot,
   // #5499 (epic #5498): Control Room Integrations survey snapshot.
   integration_status_snapshot: handleIntegrationStatusSnapshot,
   skills_inventory_snapshot: handleSkillsInventorySnapshot,
@@ -2922,6 +2985,8 @@ const HANDLERS: Record<string, Handler> = {
   // #6135 (epic #5530): positive ack correlating a byok_pool_action (drain /
   // recycle / resize) request to its outcome.
   byok_pool_action_ack: handleByokPoolActionAck,
+  // #6140 (epic #5530): positive ack correlating a host_prune_action to its outcome.
+  host_prune_action_ack: handleHostPruneActionAck,
   // #5547: one-shot session-summary result; resolves the pending summarize
   // promise so the create-session flow can open with the brief seeded.
   summarize_session_result: handleSummarizeSessionResult,
@@ -3651,6 +3716,14 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           action: msg.action,
           note: null,
           error: parsed.message || 'BYOK pool action failed.',
+        });
+      } else if (parsed.code === 'HOST_PRUNE_ACTION_FAILED' && typeof msg.kind === 'string') {
+        // #6140: a failed host_prune_action echoes the exact kind — clear that
+        // kind's pending state and surface the reason inline (the generic branch
+        // below still raises the toast, matching the precedents).
+        resolveHostPruneAction(get, set, msg.kind, {
+          note: null,
+          error: parsed.message || 'Host prune failed.',
         });
       }
       if (parsed.category === 'crash' && parsed.sessionPatch) {

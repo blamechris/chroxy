@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -583,6 +583,21 @@ export interface ByokPoolActionResult {
   at: number;
 }
 
+/**
+ * #6140 slice 2 (epic #5530) — outcome of the last host prune action (kind
+ * containers/images/all), kept for inline display. The target id is the `kind`.
+ * A successful `host_prune_action_ack` records a human `note` (removed counts +
+ * reclaimed bytes, and any per-resource failures) with `error: null`; a
+ * HOST_PRUNE_ACTION_FAILED session_error records the message with `note: null`.
+ * `at` is the local receipt time (epoch ms).
+ */
+export interface HostPruneActionResult {
+  kind: string;
+  note: string | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -770,6 +785,20 @@ export interface ConnectionState {
    */
   byokPoolStatus: ServerByokPoolStatusSnapshotMessage | null;
   /**
+   * #6140 (epic #5530) — Control Room host prune survey: the latest
+   * `host_prune_status_snapshot` (reclaimable chroxy-scoped orphan docker
+   * pressure), or null before the first one lands. Replaced wholesale on each
+   * snapshot (full picture, no delta stream).
+   */
+  hostPruneStatus: ServerHostPruneStatusSnapshotMessage | null;
+  /**
+   * #6140 — true between dispatching a `host_prune_status_request` and the
+   * matching snapshot arriving, so the tab's Refresh button can spin. Cleared
+   * when a VALID snapshot lands (a malformed payload is dropped and leaves this
+   * true, matching the sibling surveys).
+   */
+  hostPruneStatusLoading: boolean;
+  /**
    * #6135 — true between dispatching a `byok_pool_status_request` and the
    * matching `byok_pool_status_snapshot` arriving, so the tab's Refresh button
    * can spin. Cleared when a VALID snapshot lands (a malformed payload is
@@ -860,6 +889,15 @@ export interface ConnectionState {
    * display. Replaced when the same target is actioned again.
    */
   byokPoolActionResults: Record<string, ByokPoolActionResult>;
+  /**
+   * #6140 slice 2 (epic #5530) — host prune action kinds with an in-flight
+   * `host_prune_action` (keyed by `kind`): set when sendHostPruneAction is
+   * called, cleared on the `host_prune_action_ack` / HOST_PRUNE_ACTION_FAILED
+   * session_error.
+   */
+  hostPruneActioningIds: Set<string>;
+  /** #6140 slice 2 — last host prune outcome per kind, for inline display. */
+  hostPruneActionResults: Record<string, HostPruneActionResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1432,6 +1470,13 @@ export interface ConnectionState {
   // `byokPoolStatusLoading` while in flight.
   requestByokPoolStatus: () => boolean;
 
+  // #6140 (epic #5530): request a host prune survey. Dispatches a
+  // `host_prune_status_request`; the server replies with a single
+  // `host_prune_status_snapshot` handled into `hostPruneStatus`. Returns whether
+  // the message went on the wire (false = socket closed). Sets
+  // `hostPruneStatusLoading` while in flight.
+  requestHostPruneStatus: () => boolean;
+
   // #6139 (epic #5530): request a per-repo runtime config survey. Dispatches a
   // `repo_runtime_config_request`; the server replies with a single
   // `repo_runtime_config_snapshot` handled into `repoRuntimeConfig`. Returns
@@ -1502,6 +1547,17 @@ export interface ConnectionState {
     action: 'drain' | 'recycle' | 'resize',
     opts?: { key?: string; maxPerKey?: number; maxTotal?: number },
   ) => boolean;
+
+  // #6140 slice 2 (epic #5530): run a host prune. `kind` selects what to remove
+  // (stopped chroxy containers / chroxy snapshot images / both). The server
+  // takes no target list — it re-surveys the chroxy-scoped orphan set and removes
+  // only those ids. Dispatches a `host_prune_action` tagged with a requestId the
+  // server echoes on the `host_prune_action_ack` / HOST_PRUNE_ACTION_FAILED
+  // session_error. Marks the `kind` in `hostPruneActioningIds` (dropping its
+  // stale result) ONLY when the message actually went on the wire; an offline
+  // send returns false. Confirmation is the caller's responsibility (the UI
+  // gates it behind a ConfirmDialog — it's destructive).
+  sendHostPruneAction: (kind: 'containers' | 'images' | 'all') => boolean;
 
   // #5547: request a server-side one-shot summary of a session's persisted
   // history (the sidebar "Summarize & start new session" action). Dispatches a
