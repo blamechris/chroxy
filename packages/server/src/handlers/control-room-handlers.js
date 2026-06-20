@@ -1189,7 +1189,15 @@ async function handleByokPoolAction(ws, client, msg, ctx) {
       byokPoolActionError(ws, ctx, msg, 'invalid-key', 'recycle requires a non-empty key')
       return
     }
-    const surveyedKeys = typeof pool.inspect === 'function' ? pool.inspect().map((b) => b.key) : []
+    // The survey is the ONLY source of truth for a valid target. If the pool
+    // can't be surveyed, fail with a distinct reason rather than misreporting
+    // every key as unknown — the target can't be validated, so we refuse.
+    if (typeof pool.inspect !== 'function') {
+      byokPoolActionError(ws, ctx, msg, 'no-pool',
+        'BYOK pool cannot be surveyed to validate the recycle target')
+      return
+    }
+    const surveyedKeys = pool.inspect().map((b) => b.key)
     if (!surveyedKeys.includes(key)) {
       byokPoolActionError(ws, ctx, msg, 'unknown-key',
         `key does not name a surveyed pool bucket: ${key}`)

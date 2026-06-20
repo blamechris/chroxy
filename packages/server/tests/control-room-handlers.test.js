@@ -1217,6 +1217,14 @@ describe('byok_pool_action handler (#6135 slice 2)', () => {
     assert.equal(payload.requestId, 'r2')
   })
 
+  it('recycle fails with no-pool (not a misleading unknown-key) when the pool cannot be surveyed', async () => {
+    ctx = makeByokActionCtx({ byokPool: makeFakePool({ inspect: undefined }) })
+    await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'recycle', key: 'whatever' }, ctx)
+    const [, payload] = ctx._send.lastCall
+    assert.equal(payload.code, 'BYOK_POOL_ACTION_FAILED')
+    assert.equal(payload.reason, 'no-pool')
+  })
+
   it('recycle requires a non-empty key', async () => {
     await controlRoomHandlers.byok_pool_action(ws, client, { type: 'byok_pool_action', action: 'recycle' }, ctx)
     const [, payload] = ctx._send.lastCall

@@ -608,22 +608,26 @@ export class DockerContainerPool extends EventEmitter {
       }
       if (bucket.length === 0) this._entries.delete(key)
     }
-    // Total cap: evict the globally-oldest idle entry until within the cap.
-    while (this._totalSize() > this._maxTotal) {
-      let oldest = null
+    // Total cap: evict the globally-oldest idle entries until within the cap.
+    // One sorted pass (oldest releasedAt first) rather than a rescan-per-eviction
+    // so this stays O(n log n) even if the total ceiling ever grows large.
+    const overTotal = this._totalSize() - this._maxTotal
+    if (overTotal > 0) {
+      const all = []
       for (const [key, bucket] of this._entries.entries()) {
         for (const entry of bucket) {
-          const ra = typeof entry.releasedAt === 'number' ? entry.releasedAt : 0
-          if (!oldest || ra < oldest.releasedAt) oldest = { key, entry, releasedAt: ra }
+          all.push({ key, entry, releasedAt: typeof entry.releasedAt === 'number' ? entry.releasedAt : 0 })
         }
       }
-      if (!oldest) break
-      this._removeEntry(oldest.key, oldest.entry.containerId)
-      this._clearTimeout(oldest.entry.timer)
-      this._createdAt.delete(oldest.entry.containerId)
-      this._soiledIds.delete(oldest.entry.containerId)
-      this._emitPoolEvent(POOL_EVENTS.EVICTED, { key: oldest.key, containerId: oldest.entry.containerId, reason })
-      evictedIds.push(oldest.entry.containerId)
+      all.sort((a, b) => a.releasedAt - b.releasedAt)
+      for (const { key, entry } of all.slice(0, overTotal)) {
+        this._removeEntry(key, entry.containerId)
+        this._clearTimeout(entry.timer)
+        this._createdAt.delete(entry.containerId)
+        this._soiledIds.delete(entry.containerId)
+        this._emitPoolEvent(POOL_EVENTS.EVICTED, { key, containerId: entry.containerId, reason })
+        evictedIds.push(entry.containerId)
+      }
     }
     await Promise.all(evictedIds.map((containerId) => this._evict(containerId).catch((err) => {
       log.warn(`${reason} eviction of ${containerId.slice(0, 12)} failed: ${err.message}`)
