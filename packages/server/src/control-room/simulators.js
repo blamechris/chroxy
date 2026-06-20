@@ -113,6 +113,32 @@ export function parseSimctlDevices(stdout) {
   return out
 }
 
+/** #6136 slice 2: the mutating simulator actions the Control Room can run. */
+export const SIMULATOR_ACTIONS = ['boot', 'shutdown']
+
+/**
+ * Boot or shut down a single iOS simulator via `xcrun simctl <action> <udid>`.
+ * Caller (the handler) is responsible for validating `udid` against a fresh
+ * survey and state-gating the action — this is the raw exec, mirroring
+ * `runHostPrune` in host-prune.js. Returns the device's expected new state.
+ *
+ * @param {object} opts
+ * @param {'boot'|'shutdown'} opts.action
+ * @param {string} opts.udid
+ * @param {Function} [opts._execFile]
+ * @returns {Promise<'Booted'|'Shutdown'>}
+ */
+export async function runSimulatorAction({ action, udid, _execFile = execFileAsync } = {}) {
+  if (!SIMULATOR_ACTIONS.includes(action)) {
+    throw new Error(`Unsupported simulator action: ${action || '(none)'}`)
+  }
+  if (typeof udid !== 'string' || !udid) {
+    throw new Error('runSimulatorAction requires a udid')
+  }
+  await _execFile('xcrun', ['simctl', action, udid], EXEC_OPTS)
+  return action === 'boot' ? 'Booted' : 'Shutdown'
+}
+
 /** Default TCP reachability probe for 127.0.0.1:port (no data sent). */
 function defaultProbePort(port) {
   return new Promise((resolve) => {

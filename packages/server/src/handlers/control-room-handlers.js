@@ -39,7 +39,7 @@ import { surveyRepoRuntimeConfig, hostRuntimeDefaults } from '../control-room/re
 import { surveyByokPool } from '../control-room/byok-pool.js'
 import { isPoolEnabled, getSharedPool } from '../docker-byok-pool.js'
 import { surveyHostPrune, runHostPrune, PRUNE_KINDS } from '../control-room/host-prune.js'
-import { surveySimulators } from '../control-room/simulators.js'
+import { surveySimulators, runSimulatorAction, SIMULATOR_ACTIONS } from '../control-room/simulators.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 
@@ -1476,6 +1476,144 @@ async function handleSimulatorStatusRequest(ws, client, msg, ctx) {
   }
 }
 
+// ───────────────────────────────────────────────────────────────────────────
+// #6136 slice 2 (epic #5530) — simulator_action: boot / shutdown an iOS sim.
+// ───────────────────────────────────────────────────────────────────────────
+
+/**
+ * #6136 slice 2: per-udid in-flight guard for simulator lifecycle actions, keyed
+ * by udid. Same string-keyed Map shape as `containerActionInFlight`; entries
+ * deleted in the handler's `finally`, `.size` doubling as the global gauge.
+ */
+const simulatorActionInFlight = new Map()
+/** #6136 slice 2: global cap on concurrent simulator actions (reject, never queue). */
+export const MAX_CONCURRENT_SIMULATOR_ACTIONS = 2
+
+/** #6136 slice 2: shared SIMULATOR_ACTION_FAILED reply (mirrors containerActionError). */
+function simulatorActionError(ws, ctx, msg, reason, message) {
+  ctx.transport.send(ws, {
+    type: 'session_error',
+    code: 'SIMULATOR_ACTION_FAILED',
+    message,
+    reason,
+    action: typeof msg?.action === 'string' ? msg.action : null,
+    udid: typeof msg?.udid === 'string' ? msg.udid : null,
+    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+  })
+}
+
+/** #6136 slice 2: failure `reason` discriminator per action (for SIMULATOR_ACTION_FAILED). */
+const SIMULATOR_ACTION_FAILURE_REASON = {
+  boot: 'boot-failed',
+  shutdown: 'shutdown-failed',
+}
+
+/**
+ * #6136 slice 2 (epic #5530) — `simulator_action` handler. Boot / shut down a
+ * surveyed iOS simulator, replying with exactly one `simulator_action_ack` on
+ * success or one SIMULATOR_ACTION_FAILED `session_error` on failure.
+ *
+ * SECURITY (docs/security/bearer-token-authority.md checklist):
+ *   1. Host-level authority — a pairing-bound (share-a-session) client is scoped
+ *      to one session and must not run host-wide simulator actions.
+ *   2. Survey membership — the client-supplied `udid` MUST name a device the
+ *      fresh `surveySimulators` enumerates. An unknown udid is rejected; the
+ *      client id is a lookup key, never a trusted target. State-gated too: boot
+ *      only a non-booted device, shutdown only a booted one (clear reasons, and
+ *      avoids a pointless simctl error on an already-{booted,shutdown} device).
+ *
+ * Non-destructive (no data loss), so no UI confirm gate. Concurrency: one
+ * in-flight action per udid, plus a global cap of MAX_CONCURRENT_SIMULATOR_ACTIONS
+ * (rejected, not queued).
+ */
+async function handleSimulatorAction(ws, client, msg, ctx) {
+  // Authority gate (#1): host-level (unbound) clients only.
+  if (client?.boundSessionId) {
+    simulatorActionError(ws, ctx, msg, 'forbidden',
+      'simulator_action requires host-level authority (a session-bound token cannot run host actions)')
+    return
+  }
+
+  const action = typeof msg?.action === 'string' ? msg.action : ''
+  if (!SIMULATOR_ACTIONS.includes(action)) {
+    simulatorActionError(ws, ctx, msg, 'unsupported-action',
+      `Unsupported simulator action: ${action.length > 0 ? action : '(none)'}`)
+    return
+  }
+
+  const udid = typeof msg?.udid === 'string' ? msg.udid : ''
+  if (udid.length === 0) {
+    simulatorActionError(ws, ctx, msg, 'invalid-udid',
+      'simulator_action requires a non-empty udid')
+    return
+  }
+
+  // Survey membership gate (#2): re-survey and validate the target server-side.
+  const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
+  let snapshot
+  try {
+    snapshot = await surveyFn({})
+  } catch (err) {
+    simulatorActionError(ws, ctx, msg, 'survey-failed',
+      err && err.message ? err.message : 'simulator survey failed')
+    return
+  }
+  if (!snapshot?.available) {
+    simulatorActionError(ws, ctx, msg, 'unavailable',
+      snapshot?.note || 'iOS simulators are not available on this host')
+    return
+  }
+  const device = (Array.isArray(snapshot.devices) ? snapshot.devices : []).find((d) => d.udid === udid) || null
+  if (!device) {
+    simulatorActionError(ws, ctx, msg, 'unknown-device',
+      `udid does not name a surveyed simulator: ${udid}`)
+    return
+  }
+  // State gate: boot a non-booted device, shutdown a booted one.
+  if (action === 'boot' && device.state === 'Booted') {
+    simulatorActionError(ws, ctx, msg, 'already-booted',
+      `Simulator ${device.name} is already booted`)
+    return
+  }
+  if (action === 'shutdown' && device.state !== 'Booted') {
+    simulatorActionError(ws, ctx, msg, 'not-booted',
+      `Simulator ${device.name} is not booted (state: ${device.state})`)
+    return
+  }
+
+  // Per-udid overlap guard, then the global cap (reject, never queue).
+  if (simulatorActionInFlight.has(udid)) {
+    simulatorActionError(ws, ctx, msg, 'action-in-progress',
+      `A simulator action (${simulatorActionInFlight.get(udid)}) is already in progress for ${udid}`)
+    return
+  }
+  if (simulatorActionInFlight.size >= MAX_CONCURRENT_SIMULATOR_ACTIONS) {
+    simulatorActionError(ws, ctx, msg, 'busy',
+      `The host is busy: ${simulatorActionInFlight.size} simulator actions are already in flight (max ${MAX_CONCURRENT_SIMULATOR_ACTIONS}) — retry when one finishes`)
+    return
+  }
+
+  const runFn = typeof ctx?.runSimulatorAction === 'function' ? ctx.runSimulatorAction : runSimulatorAction
+  simulatorActionInFlight.set(udid, action)
+  try {
+    const status = await runFn({ action, udid })
+    log.info(`simulator_action ${action} completed for ${udid} (client=${client?.id})`)
+    ctx.transport.send(ws, {
+      type: 'simulator_action_ack',
+      action,
+      udid,
+      requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
+      status: typeof status === 'string' ? status : null,
+    })
+  } catch (err) {
+    const message = err && err.message ? err.message : `${action} failed`
+    log.warn(`simulator_action ${action} failed for ${udid}: ${message}`)
+    simulatorActionError(ws, ctx, msg, SIMULATOR_ACTION_FAILURE_REASON[action], message)
+  } finally {
+    simulatorActionInFlight.delete(udid)
+  }
+}
+
 /**
  * #5914 follow-up — reply to a `mailbox_status_request` with a point-in-time
  * snapshot of the daemon's mailbox state for the Control Room "Mailbox" tab:
@@ -1529,6 +1667,7 @@ export const controlRoomHandlers = {
   containers_action: handleContainersAction,
   byok_pool_action: handleByokPoolAction,
   host_prune_action: handleHostPruneAction,
+  simulator_action: handleSimulatorAction,
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,

@@ -2028,6 +2028,19 @@ export declare const ServerSimulatorStatusSnapshotSchema: z.ZodObject<{
     }, z.core.$strip>>;
 }, z.core.$loose>;
 /**
+ * #6136 slice 2 — ack for a successful `simulator_action` (boot/shutdown).
+ * Echoes `action`/`udid` (+ optional `requestId`) and carries the resulting
+ * `status` (the device's new state, "Booted"/"Shutdown"). A failure replies with
+ * a `SIMULATOR_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export declare const ServerSimulatorActionAckSchema: z.ZodObject<{
+    type: z.ZodLiteral<"simulator_action_ack">;
+    action: z.ZodString;
+    udid: z.ZodString;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    status: z.ZodNullable<z.ZodString>;
+}, z.core.$loose>;
+/**
  * #5554 — one skill in the inventory snapshot. Carries only names /
  * descriptions / metadata — never the skill BODY (the security boundary: skill
  * bodies never leave the server). Fields:
@@ -2979,6 +2992,7 @@ export type ServerByokPoolActionAckMessage = z.infer<typeof ServerByokPoolAction
 export type ServerHostPruneStatusSnapshotMessage = z.infer<typeof ServerHostPruneStatusSnapshotSchema>;
 export type ServerHostPruneActionAckMessage = z.infer<typeof ServerHostPruneActionAckSchema>;
 export type ServerSimulatorStatusSnapshotMessage = z.infer<typeof ServerSimulatorStatusSnapshotSchema>;
+export type ServerSimulatorActionAckMessage = z.infer<typeof ServerSimulatorActionAckSchema>;
 export type SkillInventoryEntry = z.infer<typeof SkillInventoryEntrySchema>;
 export type SkillInventoryRepo = z.infer<typeof SkillInventoryRepoSchema>;
 export type ServerSkillsInventorySnapshotMessage = z.infer<typeof ServerSkillsInventorySnapshotSchema>;

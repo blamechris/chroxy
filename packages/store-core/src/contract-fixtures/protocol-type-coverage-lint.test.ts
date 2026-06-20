@@ -199,6 +199,10 @@ const UNHANDLED_BY_DESIGN = new Set<string>([
   'simulator_status_snapshot',            // #6136 (epic #5530) Control Room iOS simulator survey —
                                           //   server contract landed first; the dashboard slice that consumes
                                           //   it is the tracked follow-up, then this → DASHBOARD_ONLY
+  'simulator_action_ack',                 // #6136 slice 2 (epic #5530) Control Room iOS simulator boot/shutdown
+                                          //   action ack — server contract landed first (same server-first split
+                                          //   as the survey above); the "Device runtimes" dashboard slice that
+                                          //   consumes it is the tracked follow-up, then this → DASHBOARD_ONLY
 ])
 
 // ---------------------------------------------------------------------------

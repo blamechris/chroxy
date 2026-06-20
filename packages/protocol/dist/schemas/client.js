@@ -1076,6 +1076,19 @@ export const HostPruneActionSchema = z.object({
     kind: z.enum(['containers', 'images', 'all']),
     requestId: z.string().max(128).optional(),
 }).passthrough();
+// #6136 slice 2 (epic #5530): boot / shutdown an iOS simulator from the Control
+// Room "Device runtimes" tab. Host authority (server-enforced). `udid` is a
+// LOOKUP KEY, never a trusted target — the server re-surveys `xcrun simctl list
+// devices` and rejects any udid the survey didn't enumerate, plus state-guards
+// (boot only a non-booted device, shutdown only a booted one). Non-destructive,
+// so no confirm gate. The optional `requestId` is echoed on the
+// simulator_action_ack (success) and the SIMULATOR_ACTION_FAILED session_error.
+export const SimulatorActionSchema = z.object({
+    type: z.literal('simulator_action'),
+    action: z.enum(['boot', 'shutdown']),
+    udid: z.string().min(1).max(128),
+    requestId: z.string().max(128).optional(),
+}).passthrough();
 // #5547: summarize a session's persisted history into a continuation brief.
 // The server reads the session's `SessionMessageHistory` (the universal,
 // restart-surviving source — works even when the provider subprocess is gone),
@@ -1205,6 +1218,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ContainersActionSchema,
     ByokPoolActionSchema,
     HostPruneActionSchema,
+    SimulatorActionSchema,
     SummarizeSessionSchema,
     PairApproveSchema,
     PairDenySchema,

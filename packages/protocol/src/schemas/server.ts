@@ -2018,6 +2018,20 @@ export const ServerSimulatorStatusSnapshotSchema = z.object({
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 }).passthrough()
 
+/**
+ * #6136 slice 2 — ack for a successful `simulator_action` (boot/shutdown).
+ * Echoes `action`/`udid` (+ optional `requestId`) and carries the resulting
+ * `status` (the device's new state, "Booted"/"Shutdown"). A failure replies with
+ * a `SIMULATOR_ACTION_FAILED` session_error carrying the same correlation fields.
+ */
+export const ServerSimulatorActionAckSchema = z.object({
+  type: z.literal('simulator_action_ack'),
+  action: z.string(),
+  udid: z.string(),
+  requestId: z.string().max(128).nullable().optional(),
+  status: z.string().nullable(),
+}).passthrough()
+
 // ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Control Room "Skills" tab: inventory + usage history.
 // ───────────────────────────────────────────────────────────────────────────
@@ -3181,6 +3195,7 @@ export type ServerByokPoolActionAckMessage = z.infer<typeof ServerByokPoolAction
 export type ServerHostPruneStatusSnapshotMessage = z.infer<typeof ServerHostPruneStatusSnapshotSchema>
 export type ServerHostPruneActionAckMessage = z.infer<typeof ServerHostPruneActionAckSchema>
 export type ServerSimulatorStatusSnapshotMessage = z.infer<typeof ServerSimulatorStatusSnapshotSchema>
+export type ServerSimulatorActionAckMessage = z.infer<typeof ServerSimulatorActionAckSchema>
 // #5554 — Skills inventory tab (epic #5159); request side is
 // `SkillsInventoryRequestMessage` in client.ts. Consumed by the server emitter
 // (control-room/skills-inventory.js), the dashboard store handler, and the
