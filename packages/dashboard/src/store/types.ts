@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -626,6 +626,21 @@ export interface EmulatorActionResult {
   at: number;
 }
 
+/**
+ * #6138 (epic #5530) — outcome of the last WSL2 distro action (start /
+ * terminate), kept for inline display. The target id is the distro `name`. A
+ * successful `wsl_action_ack` records an action-oriented human `note`
+ * ("Started" / "Terminated", with the echoed status appended only when it's
+ * unexpected) and `error: null`; a WSL_ACTION_FAILED session_error records the
+ * message with `note: null`. `at` is the local receipt time (epoch ms).
+ */
+export interface WslActionResult {
+  action: string;
+  note: string | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -978,6 +993,31 @@ export interface ConnectionState {
    * Replaced when the same target is actioned again.
    */
   emulatorActionResults: Record<string, EmulatorActionResult>;
+  /**
+   * #6138 (epic #5530) — Control Room WSL2 distro survey: the latest
+   * `wsl_status_snapshot` (distros + default), or null before the first one
+   * lands. `available:false` (off Windows / no wsl.exe) is a valid state.
+   * Replaced wholesale on each snapshot.
+   */
+  wslStatus: ServerWslStatusSnapshotMessage | null;
+  /**
+   * #6138 — true between dispatching a `wsl_status_request` and the matching
+   * snapshot arriving (Refresh spinner). Cleared when a VALID snapshot lands (a
+   * malformed payload is dropped and leaves this true).
+   */
+  wslStatusLoading: boolean;
+  /**
+   * #6138 — WSL distro names with an in-flight `wsl_action`: set when
+   * sendWslAction is called, cleared on the `wsl_action_ack` /
+   * WSL_ACTION_FAILED session_error. Keyed by distro so each row's buttons
+   * disable independently.
+   */
+  wslActioningIds: Set<string>;
+  /**
+   * #6138 — last WSL action outcome per distro name, for inline display.
+   * Replaced when the same distro is actioned again.
+   */
+  wslActionResults: Record<string, WslActionResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1571,6 +1611,12 @@ export interface ConnectionState {
   // `emulatorStatusLoading` while in flight.
   requestEmulatorStatus: () => boolean;
 
+  // #6138 (epic #5530): request a WSL2 distro survey. Dispatches a
+  // `wsl_status_request`; the server replies with a single `wsl_status_snapshot`
+  // handled into `wslStatus`. Returns whether the message went on the wire
+  // (false = socket closed). Sets `wslStatusLoading` while in flight.
+  requestWslStatus: () => boolean;
+
   // #6139 (epic #5530): request a per-repo runtime config survey. Dispatches a
   // `repo_runtime_config_request`; the server replies with a single
   // `repo_runtime_config_snapshot` handled into `repoRuntimeConfig`. Returns
@@ -1674,6 +1720,17 @@ export interface ConnectionState {
   // actually went on the wire; an offline send (or a missing target) returns
   // false without queuing. Non-destructive, so no confirm gate.
   sendEmulatorAction: (action: 'boot' | 'kill', opts: { avd?: string; serial?: string; headless?: boolean }) => boolean;
+
+  // #6138 (epic #5530): start / terminate a WSL2 distro. `distro` names a distro
+  // the survey enumerated — the server re-surveys `wsl.exe -l -v` and re-validates
+  // it (the name is a lookup key, never a trusted target) plus state-gates the
+  // action (start requires Stopped, terminate requires Running). Dispatches a
+  // `wsl_action` tagged with a requestId the server echoes on the
+  // `wsl_action_ack` / WSL_ACTION_FAILED session_error. Marks the `distro` in
+  // `wslActioningIds` (dropping its stale result) ONLY when the message actually
+  // went on the wire; an offline send (or an empty distro) returns false without
+  // queuing. Non-destructive (no data loss), so no confirm gate.
+  sendWslAction: (action: 'start' | 'terminate', distro: string) => boolean;
 
   // #5547: request a server-side one-shot summary of a session's persisted
   // history (the sidebar "Summarize & start new session" action). Dispatches a
