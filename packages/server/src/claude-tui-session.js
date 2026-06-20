@@ -89,6 +89,27 @@ const DENIED_QUESTION_REAPER_MS = ASK_USER_QUESTION_WATCHDOG_MS
  *   tool_result   { toolUseId, result, truncated }
  *   error         { message }
  */
+
+/**
+ * #6178: bound an fs promise so a stuck mount can't hold it open forever. Races
+ * `promise` against a timer that rejects with a tagged `HOOK_FS_TIMEOUT` error
+ * after `ms`. The timer is `unref`'d (never keeps the process alive) and cleared
+ * on settle (no leak on the happy path). Used only on the hot-path hook-drain
+ * fs ops. Exported for unit testing.
+ */
+export function withHookFsTimeout(promise, ms, label) {
+  let timer
+  const timeout = new Promise((_resolve, reject) => {
+    timer = setTimeout(() => {
+      const err = new Error(`hook-fs ${label} timed out after ${ms}ms`)
+      err.code = 'HOOK_FS_TIMEOUT'
+      reject(err)
+    }, ms)
+    if (typeof timer.unref === 'function') timer.unref()
+  })
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer))
+}
+
 export class ClaudeTuiSession extends BaseSession {
   // #5858: Claude-family flag — single source of truth for isClaudeProvider().
   // This is the DEFAULT_PROVIDER, so its membership is load-bearing (#5855).
@@ -286,6 +307,13 @@ export class ClaudeTuiSession extends BaseSession {
     // may both be fractional.
     const rawMonotonicNow = typeof monotonicNow === 'function' ? monotonicNow : () => performance.now()
     this._monotonicNowFn = () => Math.trunc(rawMonotonicNow())
+
+    // #6178: per-call bound for the hot-path hook-drain fs ops. #6132 made the
+    // drain async so a stuck sink fs can't block OTHER sessions; this bound lets
+    // the stuck session ITSELF self-recover — a hung readdir/readFile/unlink
+    // rejects after this many ms so the poll loop re-checks its hard-timeout
+    // guard instead of awaiting a frozen mount forever. Overridable in tests.
+    this._hookFsTimeoutMs = ClaudeTuiSession.HOOK_FS_TIMEOUT_MS
 
     this._port = port || null
     // #4044: when true, spawn `claude` with --dangerously-skip-permissions
@@ -722,6 +750,13 @@ export class ClaudeTuiSession extends BaseSession {
     try { rmSync(join(this._sinkDir, 'askuserquestion-active'), { recursive: true, force: true }) } catch {}
   }
 
+  // #6178: hot-path hook-drain fs accessors. Thin wrappers over fs/promises so a
+  // test can override them to simulate a hung mount; production just forwards.
+  // The drain wraps each call in withHookFsTimeout so a stuck one self-recovers.
+  _hookReaddir(dir) { return readdir(dir) }
+  _hookReadFile(path) { return readFile(path, 'utf8') }
+  _hookUnlink(path) { return unlink(path) }
+
   /**
    * #5329 (IP-1): recover the hook sink dir after a readdir failure during the
    * poll loop. The sink lives under /tmp, so a tmpwatch sweep / tmpfs clear /
@@ -1063,6 +1098,11 @@ export class ClaudeTuiSession extends BaseSession {
   // stop-hook yet). Sized so healthy short turns (<5s end-to-end) emit
   // zero heartbeats but wedges produce a 5s-cadence trail of state.
   static get HOOK_HEARTBEAT_MS() { return 5_000 }
+  // #6178: per-call timeout for the hot-path hook-drain fs ops (readdir/readFile/
+  // unlink). A healthy sink read is sub-ms; this generous 2s bound only trips on
+  // a genuinely stuck mount (FUSE/NFS freeze), letting the poll loop re-check its
+  // hard-timeout guard rather than awaiting a frozen fs forever.
+  static get HOOK_FS_TIMEOUT_MS() { return 2_000 }
 
   get sessionId() {
     return this._sessionId
@@ -2320,8 +2360,17 @@ export class ClaudeTuiSession extends BaseSession {
     const drainHookFiles = async () => {
       let entries
       try {
-        entries = await readdir(this._sinkDir)
+        entries = await withHookFsTimeout(this._hookReaddir(this._sinkDir), this._hookFsTimeoutMs, 'readdir')
       } catch (err) {
+        // #6178: a hung sink fs (FUSE/NFS freeze) — DON'T treat it as deletion.
+        // Skip this pass and return; the while-guard re-checks HOOK_TIMEOUT_MS so
+        // the turn self-terminates via the hard-timeout watchdog instead of
+        // awaiting a frozen mount. Recreating the sink (below) would be wrong (the
+        // dir isn't gone, it's slow) and its sync mkdir could itself block.
+        if (err && err.code === 'HOOK_FS_TIMEOUT') {
+          log.warn(`hook drain readdir timed out (${this._hookFsTimeoutMs}ms) — sink fs may be stuck; skipping pass`)
+          return
+        }
         // #5329 (IP-1): the sink lives under /tmp, which a tmpwatch sweep, a
         // tmpfs clear, or a manual rm can delete mid-turn. A silent return here
         // spins this poll loop to the hard timeout while every claude
@@ -2352,7 +2401,9 @@ export class ClaudeTuiSession extends BaseSession {
         const full = join(this._sinkDir, name)
         let parsed
         try {
-          const raw = await readFile(full, 'utf8')
+          // #6178: bounded — a timeout rejects and folds into this skip-and-retry
+          // (same as a partial-write/parse failure: re-read on the next pass).
+          const raw = await withHookFsTimeout(this._hookReadFile(full), this._hookFsTimeoutMs, 'readFile')
           if (raw.length === 0) continue  // partial write — poll again
           parsed = JSON.parse(raw)
         } catch { continue }
@@ -2378,7 +2429,10 @@ export class ClaudeTuiSession extends BaseSession {
         // (rare), KEEP the name in _consumedFiles as the dedup guard so a later
         // readdir can't re-process it.
         try {
-          await unlink(full)
+          // #6178: bounded — a timeout rejects into the catch below, which keeps
+          // the name in _consumedFiles as the dedup guard (same as any unlink
+          // failure), so a stuck unlink can't re-process the file or wedge.
+          await withHookFsTimeout(this._hookUnlink(full), this._hookFsTimeoutMs, 'unlink')
           this._consumedFiles.delete(name)
         } catch { /* leave the dedup guard in place */ }
       }
@@ -2415,7 +2469,7 @@ export class ClaudeTuiSession extends BaseSession {
       if (now - lastHeartbeatMs >= ClaudeTuiSession.HOOK_HEARTBEAT_MS) {
         lastHeartbeatMs = now
         let sinkFileCount = 0
-        try { sinkFileCount = (await readdir(this._sinkDir)).length } catch {}
+        try { sinkFileCount = (await withHookFsTimeout(this._hookReaddir(this._sinkDir), this._hookFsTimeoutMs, 'heartbeat-readdir')).length } catch {}
         log.info(`hookPoll heartbeat (msg=${messageId} iters=${pollIters} elapsedMs=${now - pollStart} sinkFiles=${sinkFileCount} consumed=${totalConsumed} stopFound=${stopPayload ? 'yes' : 'no'})`)
       }
       if (stopPayload) break
