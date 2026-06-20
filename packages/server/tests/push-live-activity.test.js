@@ -181,6 +181,25 @@ describe('PushManager Live Activity tokens (#2172)', () => {
       await manager.sendLiveActivityUpdate('writing', 'Step 2')
       assert.equal(fetchMock.mock.calls.length, 2)
     })
+
+    // #6165: the rate-limit honours the injected `_now` clock seam (not the wall
+    // clock), consistent with send(). Advancing only the injected clock past the
+    // 5s window must unblock the next update.
+    it('rate-limit reads the injected _now clock seam', async () => {
+      let nowMs = 1_000_000
+      const pm = new PushManager({ now: () => nowMs })
+      pm.registerLiveActivityToken(LA_TOKEN_1)
+      const fetchMock = mockFetchOk()
+      globalThis.fetch = fetchMock
+
+      await pm.sendLiveActivityUpdate('thinking', 'Step 1')
+      await pm.sendLiveActivityUpdate('thinking', 'Step 2') // same frozen instant — blocked
+      assert.equal(fetchMock.mock.calls.length, 1)
+
+      nowMs += 6_000 // advance only the injected clock past the 5s window
+      await pm.sendLiveActivityUpdate('writing', 'Step 3')
+      assert.equal(fetchMock.mock.calls.length, 2)
+    })
   })
 
   // -- backward compatibility --

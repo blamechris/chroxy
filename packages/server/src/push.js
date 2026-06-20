@@ -548,14 +548,17 @@ export class PushManager {
   async sendLiveActivityUpdate(state, detail) {
     if (!this._expoSink.hasLiveActivityTokens) return
 
-    // Rate limit check (live_activity category: 5s)
+    // Rate limit check (live_activity category: 5s). #6165: use the injected
+    // clock seam (same as send()) — both share `_lastSent`, so reading the wall
+    // clock here while send() honoured `_now` would mix clocks through the map.
     const category = 'live_activity'
     const limit = RATE_LIMITS[category]
+    const nowMs = this._now()
     const lastSent = this._lastSent.get(category) || 0
-    if (Date.now() - lastSent < limit) {
+    if (nowMs - lastSent < limit) {
       return
     }
-    this._lastSent.set(category, Date.now())
+    this._lastSent.set(category, nowMs)
 
     await this._expoSink.sendLiveActivityUpdate(state, detail)
   }
