@@ -249,7 +249,7 @@ describe('runHostPrune()', () => {
     const r2 = await runHostPrune({ kind: 'images', listEnvironments: () => [], listByokSnapshots: NO_BYOK, _execFile: e2, _now: NOW })
     assert.equal(r2.removedContainers, 0)
     assert.equal(r2.removedImages, 1)
-    assert.ok(!e2.calls.some((c) => c.args[0] === 'rm' && c.args[1] !== '-f'))
+    assert.ok(!e2.calls.some((c) => c.args[0] === 'rm'), 'kind=images never invokes docker rm (containers)')
   })
 
   it('records a per-resource failure without aborting the rest', async () => {

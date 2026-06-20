@@ -78,7 +78,10 @@ export function parseContainerLines(stdout) {
 /**
  * Parse `docker images <repo> --format '{{.ID}}\t{{.Repository}}\t{{.Tag}}\t{{.Size}}'`
  * output into chroxy image records, dropping any whose repository is not in the
- * chroxy set (defense-in-depth) and `<none>` dangling rows with no usable ref.
+ * chroxy set (defense-in-depth). A `<none>` (dangling) tag is KEPT — those are
+ * prunable orphan layers — with `ref` falling back to the bare repository (it's
+ * display/exclusion-matching only; removal is always by image `id`, and a bare
+ * repo ref never collides with a retained `repo:tag` exclusion entry).
  *
  * @param {string} stdout
  * @returns {Array<{id: string, ref: string, repository: string, sizeBytes: number|null}>}
