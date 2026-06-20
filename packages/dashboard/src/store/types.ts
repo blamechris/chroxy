@@ -551,6 +551,21 @@ export interface RelayRerunResult {
   at: number;
 }
 
+/**
+ * #6134 (epic #5530) — outcome of the last container lifecycle action
+ * (stop / restart / destroy) for one environment, kept for inline display in
+ * its Containers row. A successful `containers_action_ack` records the echoed
+ * `action` + resulting `status` with `error: null`; a CONTAINER_ACTION_FAILED
+ * session_error records the message with `status: null`. `at` is the local
+ * receipt time (epoch ms).
+ */
+export interface ContainerActionResult {
+  action: string;
+  status: string | null;
+  error: string | null;
+  at: number;
+}
+
 export interface ConnectionState {
   // Connection
   connectionPhase: ConnectionPhase;
@@ -770,6 +785,20 @@ export interface ConnectionState {
    * the Integrations row. Replaced when the repo is re-run again.
    */
   relayRerunResults: Record<string, RelayRerunResult>;
+  /**
+   * #6134 (epic #5530) — environment ids with an in-flight `containers_action`
+   * (stop / restart / destroy): set when sendContainersAction is called,
+   * cleared on the `containers_action_ack` / CONTAINER_ACTION_FAILED
+   * session_error. Keyed by environmentId so each row's buttons disable
+   * independently while their action is on the wire.
+   */
+  containerActioningIds: Set<string>;
+  /**
+   * #6134 — last container lifecycle action outcome per environment id, for
+   * inline display in the Containers row. Replaced when the row is actioned
+   * again.
+   */
+  containerActionResults: Record<string, ContainerActionResult>;
 
   // Legacy flat state (used when server doesn't send session_list, i.e. PTY mode)
   claudeReady: boolean;
@@ -1367,6 +1396,17 @@ export interface ConnectionState {
   // `relayRerunResults` entry) ONLY when the message actually went on the
   // wire; an offline send (or a non-integer runId) returns false.
   sendRepoRelayRerun: (repoPath: string, runId: number) => boolean;
+
+  // #6134 (epic #5530): run a container lifecycle action (stop / restart /
+  // destroy) for one surveyed environment. Dispatches a `containers_action`
+  // tagged with a requestId the server echoes on the `containers_action_ack`
+  // / CONTAINER_ACTION_FAILED session_error. Marks the environment in
+  // `containerActioningIds` (and drops its stale `containerActionResults`
+  // entry) ONLY when the message actually went on the wire — an offline send
+  // (or an empty environmentId / unknown action) returns false without
+  // queuing, so the row can't strand mid-action. Destroy confirmation is the
+  // caller's responsibility (the UI gates it behind a ConfirmDialog).
+  sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy') => boolean;
 
   // #5547: request a server-side one-shot summary of a session's persisted
   // history (the sidebar "Summarize & start new session" action). Dispatches a

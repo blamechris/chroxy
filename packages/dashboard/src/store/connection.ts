@@ -516,6 +516,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #5502: relay Re-run pending/result buckets (separate from reindex).
   relayRerunningRepoPaths: new Set<string>(),
   relayRerunResults: {},
+  // #6134: container lifecycle action — in-flight environment ids + last
+  // outcome per environment for inline display (same lifecycle as reindex).
+  containerActioningIds: new Set<string>(),
+  containerActionResults: {},
   claudeReady: false,
   streamingMessageId: null,
   activeModel: null,
@@ -1069,6 +1073,32 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     delete results[repoPath];
     set({ relayRerunningRepoPaths: pending, relayRerunResults: results });
     wsSend(socket, { type: 'integration_action', action: 'repo_relay_rerun', repoPath, runId, requestId });
+    return true;
+  },
+
+  // #6134 (epic #5530): run a container lifecycle action (stop / restart /
+  // destroy) for one surveyed environment. Same wire-or-nothing contract as
+  // sendRepoMemoryReindex: tag the request with an opaque requestId the server
+  // echoes on the `containers_action_ack` / CONTAINER_ACTION_FAILED
+  // session_error, and mark the environment pending ONLY when the request is
+  // genuinely on the wire — never queued offline (an action that drains
+  // seconds later would strand the row mid-action with no ack arriving). The
+  // environmentId is the survey's own id; the server re-validates it against
+  // the live EnvironmentManager set before any exec. The row's previous inline
+  // result is dropped so a stale outcome can't sit next to the pending state.
+  // Destroy confirmation lives in the UI — this just sends.
+  sendContainersAction: (environmentId: string, action: 'stop' | 'restart' | 'destroy'): boolean => {
+    const { socket } = get();
+    if (!environmentId) return false;
+    if (action !== 'stop' && action !== 'restart' && action !== 'destroy') return false;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return false;
+    const requestId = `container-action-${nextMessageId()}`;
+    const pending = new Set(get().containerActioningIds);
+    pending.add(environmentId);
+    const results = { ...get().containerActionResults };
+    delete results[environmentId];
+    set({ containerActioningIds: pending, containerActionResults: results });
+    wsSend(socket, { type: 'containers_action', action, environmentId, requestId });
     return true;
   },
 
@@ -1850,6 +1880,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (get().relayRerunningRepoPaths.size > 0) {
         set({ relayRerunningRepoPaths: new Set<string>() });
       }
+      // #6134: ditto for in-flight container lifecycle actions — the ack/failure
+      // is socket-scoped, so clear pending rows on a drop. (The server-side
+      // action keeps running; the next survey refresh shows its effect.)
+      if (get().containerActioningIds.size > 0) {
+        set({ containerActioningIds: new Set<string>() });
+      }
 
       // Clear transient streaming/plan state so stale UI doesn't persist
       clearPermissionSplits();
@@ -2121,6 +2157,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5502: relay re-run pending/result state goes with it.
       relayRerunningRepoPaths: new Set<string>(),
       relayRerunResults: {},
+      // #6134: container lifecycle action pending/result state goes with it.
+      containerActioningIds: new Set<string>(),
+      containerActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,
@@ -2158,6 +2197,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5502: relay re-run pending/result state goes with it.
       relayRerunningRepoPaths: new Set<string>(),
       relayRerunResults: {},
+      // #6134: container lifecycle action pending/result state goes with it.
+      containerActioningIds: new Set<string>(),
+      containerActionResults: {},
       wsUrl: null,
       apiToken: null,
       serverMode: null,

@@ -650,6 +650,45 @@ describe('useConnectionStore', () => {
     expect(send).not.toHaveBeenCalled();
   });
 
+  it('#6134: sendContainersAction marks the env pending, clears its stale result, and sends', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({
+      socket: openSocket,
+      containerActioningIds: new Set(),
+      containerActionResults: { 'env-web': { action: 'stop', status: null, error: 'old failure', at: 1 } },
+    });
+
+    const result = useConnectionStore.getState().sendContainersAction('env-web', 'restart');
+
+    expect(result).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    const payload = JSON.parse((send.mock.calls[0]![0]) as string);
+    expect(payload.type).toBe('containers_action');
+    expect(payload.action).toBe('restart');
+    expect(payload.environmentId).toBe('env-web');
+    expect(typeof payload.requestId).toBe('string');
+    expect(useConnectionStore.getState().containerActioningIds.has('env-web')).toBe(true);
+    // A fresh request invalidates the previous inline result for the env.
+    expect(useConnectionStore.getState().containerActionResults['env-web']).toBeUndefined();
+  });
+
+  it('#6134: sendContainersAction is a no-op offline, with an empty id, or an unknown action', async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ socket: null, containerActioningIds: new Set(), containerActionResults: {} });
+    expect(useConnectionStore.getState().sendContainersAction('env-web', 'stop')).toBe(false);
+    expect(useConnectionStore.getState().containerActioningIds.has('env-web')).toBe(false);
+
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket });
+    // empty id and an out-of-enum action both reject without sending.
+    expect(useConnectionStore.getState().sendContainersAction('', 'stop')).toBe(false);
+    expect(useConnectionStore.getState().sendContainersAction('env-web', 'frob' as never)).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();

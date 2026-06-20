@@ -20,12 +20,25 @@
  *   - stopped/exited/error → warn/bad (amber/red)
  *   - anything else → neutral
  */
-import { useMemo } from 'react'
+import { useMemo, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
 import type { ServerContainersStatusSnapshotMessage } from '@chroxy/protocol'
+import type { ContainerActionResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
+import { ConfirmDialog } from './ConfirmDialog'
 
 type Accent = 'ok' | 'warn' | 'bad' | 'neutral'
+
+/** The lifecycle actions the Containers tab can dispatch. */
+type ContainerAction = 'stop' | 'restart' | 'destroy'
+
+/** Human label for a settled action result (success path). */
+function actionResultLabel(result: ContainerActionResult): string {
+  if (result.action === 'destroy') return 'destroyed'
+  if (result.action === 'stop') return result.status === 'stopped' ? 'stopped' : (result.status ?? 'stopped')
+  if (result.action === 'restart') return result.status === 'running' ? 'restarted' : (result.status ?? 'restarted')
+  return result.status ?? 'done'
+}
 
 type ContainerEntry = ServerContainersStatusSnapshotMessage['containers'][number]
 
@@ -120,7 +133,100 @@ function StatsCell({ container }: { container: ContainerEntry }) {
   )
 }
 
-function ContainerRow({ container }: { container: ContainerEntry }) {
+/**
+ * Per-row lifecycle actions (#6134). Stop / Restart are only meaningful for a
+ * single-container docker environment (the server rejects compose + backends
+ * that don't implement the lifecycle), so they're hidden for compose envs;
+ * Destroy is always offered (gated behind a confirmation in the section).
+ * Buttons disable while this row's action is on the wire or the socket is down;
+ * the settled outcome (or failure) renders inline.
+ */
+function ContainerActionsCell({
+  container,
+  pending,
+  result,
+  connected,
+  onAction,
+}: {
+  container: ContainerEntry
+  pending: boolean
+  result: ContainerActionResult | undefined
+  connected: boolean
+  onAction: (action: ContainerAction) => void
+}) {
+  const lifecycleSupported = Boolean(container.containerId) && !container.composeProject
+  const isRunning = container.status === 'running'
+  const baseDisabled = pending || !connected
+  return (
+    <td data-testid={`container-actions-${container.id}`}>
+      <div className="cr-actions">
+        {lifecycleSupported && (
+          <button
+            type="button"
+            className="cr-action"
+            data-testid={`container-stop-${container.id}`}
+            disabled={baseDisabled || !isRunning}
+            onClick={() => onAction('stop')}
+            title={isRunning ? 'Stop this container' : 'Container is not running'}
+          >
+            Stop
+          </button>
+        )}
+        {lifecycleSupported && (
+          <button
+            type="button"
+            className="cr-action"
+            data-testid={`container-restart-${container.id}`}
+            disabled={baseDisabled}
+            onClick={() => onAction('restart')}
+            title="Restart this container"
+          >
+            Restart
+          </button>
+        )}
+        <button
+          type="button"
+          className="cr-action cr-action-danger"
+          data-testid={`container-destroy-${container.id}`}
+          disabled={baseDisabled}
+          onClick={() => onAction('destroy')}
+          title="Destroy this environment"
+        >
+          Destroy
+        </button>
+      </div>
+      {pending ? (
+        <span className="cr-dim" data-testid={`container-action-pending-${container.id}`}>
+          Working…
+        </span>
+      ) : result ? (
+        result.error ? (
+          <span className="cr-bad" data-testid={`container-action-error-${container.id}`} role="alert">
+            {result.error}
+          </span>
+        ) : (
+          <span className="cr-ok" data-testid={`container-action-ok-${container.id}`}>
+            {actionResultLabel(result)}
+          </span>
+        )
+      ) : null}
+    </td>
+  )
+}
+
+function ContainerRow({
+  container,
+  pending,
+  result,
+  connected,
+  onAction,
+}: {
+  container: ContainerEntry
+  pending: boolean
+  result: ContainerActionResult | undefined
+  connected: boolean
+  onAction: (environmentId: string, action: ContainerAction) => void
+}) {
   return (
     <tr data-testid={`container-row-${container.id}`}>
       <td>
@@ -138,6 +244,13 @@ function ContainerRow({ container }: { container: ContainerEntry }) {
       </td>
       <td className="cr-dim">{formatUptime(container.uptimeMs)}</td>
       <StatsCell container={container} />
+      <ContainerActionsCell
+        container={container}
+        pending={pending}
+        result={result}
+        connected={connected}
+        onAction={(action) => onAction(container.id, action)}
+      />
     </tr>
   )
 }
@@ -162,17 +275,36 @@ function groupByCwd(containers: readonly ContainerEntry[]): CwdGroup[] {
   return order.map((cwd) => ({ cwd, containers: byCwd.get(cwd)! }))
 }
 
-function CwdGroupRows({ group }: { group: CwdGroup }) {
+function CwdGroupRows({
+  group,
+  actioningIds,
+  actionResults,
+  connected,
+  onAction,
+}: {
+  group: CwdGroup
+  actioningIds: Set<string>
+  actionResults: Record<string, ContainerActionResult>
+  connected: boolean
+  onAction: (environmentId: string, action: ContainerAction) => void
+}) {
   return (
     <>
       <tr className="runner-repo-row" data-testid={`container-cwd-${group.cwd}`}>
-        <td colSpan={6}>
+        <td colSpan={7}>
           <b className="runner-repo-name cr-mono">{group.cwd}</b>
           <span className="cr-dim"> · {group.containers.length} container{group.containers.length === 1 ? '' : 's'}</span>
         </td>
       </tr>
       {group.containers.map((c) => (
-        <ContainerRow key={c.id} container={c} />
+        <ContainerRow
+          key={c.id}
+          container={c}
+          pending={actioningIds.has(c.id)}
+          result={actionResults[c.id]}
+          connected={connected}
+          onAction={onAction}
+        />
       ))}
     </>
   )
@@ -187,6 +319,16 @@ export interface ContainersStatusSectionProps {
   connected?: boolean
   /** Refresh action. Defaults to the store's requestContainersStatus. */
   onRefresh?: () => void
+  /** Environment ids with an in-flight action. Defaults to the store set. */
+  actioningIds?: Set<string>
+  /** Per-environment last action outcome. Defaults to the store map. */
+  actionResults?: Record<string, ContainerActionResult>
+  /**
+   * Dispatch a container lifecycle action. Defaults to the store's
+   * sendContainersAction. Destroy is always routed through the confirmation
+   * dialog before this is called.
+   */
+  onAction?: (environmentId: string, action: ContainerAction) => void
   /** Injectable clock (epoch ms) for the "generated Nm ago" string. */
   now?: () => number
 }
@@ -196,17 +338,39 @@ export function ContainersStatusSection({
   loading: loadingProp,
   connected: connectedProp,
   onRefresh: onRefreshProp,
+  actioningIds: actioningIdsProp,
+  actionResults: actionResultsProp,
+  onAction: onActionProp,
   now = Date.now,
 }: ContainersStatusSectionProps = {}) {
   const storeSnapshot = useConnectionStore((s) => s.containersStatus)
   const storeLoading = useConnectionStore((s) => s.containersStatusLoading)
   const storeConnected = useConnectionStore((s) => s.connectionPhase === 'connected')
   const requestContainersStatus = useConnectionStore((s) => s.requestContainersStatus)
+  const storeActioningIds = useConnectionStore((s) => s.containerActioningIds)
+  const storeActionResults = useConnectionStore((s) => s.containerActionResults)
+  const sendContainersAction = useConnectionStore((s) => s.sendContainersAction)
 
   const snapshot = snapshotProp !== undefined ? snapshotProp : storeSnapshot
   const loading = loadingProp !== undefined ? loadingProp : storeLoading
   const connected = connectedProp !== undefined ? connectedProp : storeConnected
   const onRefresh = onRefreshProp ?? requestContainersStatus
+  const actioningIds = actioningIdsProp ?? storeActioningIds
+  const actionResults = actionResultsProp ?? storeActionResults
+  const onAction = onActionProp ?? sendContainersAction
+
+  // #6134: destroy is destructive — route it through a confirmation dialog,
+  // never straight to onAction. Holds the container awaiting confirmation
+  // (null = dialog closed). Stop/Restart dispatch immediately.
+  const [confirmDestroy, setConfirmDestroy] = useState<ContainerEntry | null>(null)
+  const handleRowAction = (environmentId: string, action: ContainerAction) => {
+    if (action === 'destroy') {
+      const target = snapshot?.containers.find((c) => c.id === environmentId) ?? null
+      setConfirmDestroy(target)
+      return
+    }
+    onAction(environmentId, action)
+  }
 
   const refreshDisabled = loading || !connected
   const handleRefresh = () => {
@@ -304,23 +468,54 @@ export function ContainersStatusSection({
                   <th>Sessions</th>
                   <th>Uptime</th>
                   <th>Resources</th>
+                  <th>Actions</th>
                 </tr>
               </thead>
               <tbody>
                 {snapshot.containers.length === 0 ? (
                   <tr data-testid="containers-none">
-                    <td colSpan={6} className="cr-dim">
+                    <td colSpan={7} className="cr-dim">
                       No chroxy-managed containers or environments.
                     </td>
                   </tr>
                 ) : (
-                  groups.map((group) => <CwdGroupRows key={group.cwd} group={group} />)
+                  groups.map((group) => (
+                    <CwdGroupRows
+                      key={group.cwd}
+                      group={group}
+                      actioningIds={actioningIds}
+                      actionResults={actionResults}
+                      connected={connected}
+                      onAction={handleRowAction}
+                    />
+                  ))
                 )}
               </tbody>
             </table>
           </section>
         </>
       )}
+
+      <ConfirmDialog
+        open={confirmDestroy !== null}
+        title="Destroy environment?"
+        danger
+        confirmLabel="Destroy"
+        message={
+          confirmDestroy ? (
+            <>
+              This permanently removes the container for{' '}
+              <b>{confirmDestroy.name || confirmDestroy.id}</b>
+              {confirmDestroy.cwd ? <> ({confirmDestroy.cwd})</> : null}. Any unsaved work inside it is lost.
+            </>
+          ) : null
+        }
+        onConfirm={() => {
+          if (confirmDestroy) onAction(confirmDestroy.id, 'destroy')
+          setConfirmDestroy(null)
+        }}
+        onCancel={() => setConfirmDestroy(null)}
+      />
     </div>
   )
 }
