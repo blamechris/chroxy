@@ -2002,16 +2002,31 @@ describe('wsl_action handler (#6138)', () => {
     assert.equal(ctx._send.lastCall[1].reason, 'unknown-distro')
   })
 
-  it('rejects starting an already-running distro', async () => {
+  it('rejects starting a non-stopped distro (default-closed gate, #6174)', async () => {
+    // Ubuntu is Running in SAMPLE_WSL → start requires explicitly Stopped.
     await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Ubuntu' }, ctx)
     assert.equal(ctx.runWslAction.callCount, 0)
-    assert.equal(ctx._send.lastCall[1].reason, 'already-running')
+    assert.equal(ctx._send.lastCall[1].reason, 'not-stopped')
   })
 
   it('rejects terminating a non-running distro', async () => {
     await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'terminate', distro: 'Debian' }, ctx)
     assert.equal(ctx.runWslAction.callCount, 0)
     assert.equal(ctx._send.lastCall[1].reason, 'not-running')
+  })
+
+  it('default-closed gates reject a transitional-state distro for BOTH actions (#6174)', async () => {
+    // A distro mid-transition (e.g. Installing) is neither Stopped nor Running →
+    // neither start nor terminate should poke wsl.exe.
+    ctx = makeWslCtx({ surveyWsl: createSpy(async () => ({
+      ...SAMPLE_WSL,
+      distros: [{ name: 'Fedora', state: 'Installing', version: 2, isDefault: false }],
+    })) })
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'start', distro: 'Fedora' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-stopped')
+    await controlRoomHandlers.wsl_action(ws, client, { type: 'wsl_action', action: 'terminate', distro: 'Fedora' }, ctx)
+    assert.equal(ctx._send.lastCall[1].reason, 'not-running')
+    assert.equal(ctx.runWslAction.callCount, 0)
   })
 
   it('rejects a session-bound (non-host) client without surveying', async () => {

@@ -2004,12 +2004,15 @@ async function handleWslAction(ws, client, msg, ctx) {
       wslActionError(ws, ctx, msg, 'unknown-distro', `distro does not name a surveyed WSL distro: ${distro}`)
       return
     }
-    const isRunning = device.state === 'Running'
-    if (action === 'start' && isRunning) {
-      wslActionError(ws, ctx, msg, 'already-running', `Distro ${distro} is already running`)
+    // State gates are DEFAULT-CLOSED (#6174, matching the emulator sibling): start
+    // only an explicitly Stopped distro, terminate only a Running one. A distro in
+    // a transitional state ("Installing"/"Converting"/…) matches neither, so we
+    // don't poke wsl.exe mid-transition.
+    if (action === 'start' && device.state !== 'Stopped') {
+      wslActionError(ws, ctx, msg, 'not-stopped', `Distro ${distro} is not stopped (state: ${device.state})`)
       return
     }
-    if (action === 'terminate' && !isRunning) {
+    if (action === 'terminate' && device.state !== 'Running') {
       wslActionError(ws, ctx, msg, 'not-running', `Distro ${distro} is not running (state: ${device.state})`)
       return
     }
