@@ -96,7 +96,11 @@ const MAX_TERMINAL_SIZE = 50_000;
  * #5204 — 'control-room' removed: it's a top-level tab now, not a view mode.
  * Any stale persisted 'control-room' value fails validation and falls back to
  * the default, which is the desired behaviour. */
-const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'system', 'console', 'environments', 'snapshots', 'pool', 'pages'] as const;
+// #6141: 'environments' retired — its UI converged into the Control Room
+// Containers section. A persisted 'environments' viewMode no longer validates
+// and falls back to the default, so a carried-over value can't render a
+// now-removed surface.
+const VALID_VIEW_MODES = ['chat', 'terminal', 'files', 'diff', 'system', 'console', 'snapshots', 'pool', 'pages'] as const;
 type ViewMode = (typeof VALID_VIEW_MODES)[number];
 
 function sessionMessagesKey(sessionId: string): string {

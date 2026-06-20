@@ -26,6 +26,7 @@ import type { ServerContainersStatusSnapshotMessage } from '@chroxy/protocol'
 import type { ContainerActionResult } from '../store/types'
 import { formatGeneratedAgo } from './ControlRoomSection'
 import { ConfirmDialog } from './ConfirmDialog'
+import { EnvironmentPanel } from './EnvironmentPanel'
 
 type Accent = 'ok' | 'warn' | 'bad' | 'neutral'
 
@@ -363,6 +364,10 @@ export function ContainersStatusSection({
   // never straight to onAction. Holds the container awaiting confirmation
   // (null = dialog closed). Stop/Restart dispatch immediately.
   const [confirmDestroy, setConfirmDestroy] = useState<ContainerEntry | null>(null)
+  // #6141 (epic #5530): the converged deep-management view. The standalone
+  // "Envs" view-tab is gone — environment create/list/destroy now lives here,
+  // behind a disclosure so the read-only survey above stays the overview.
+  const [showManage, setShowManage] = useState(false)
   const handleRowAction = (environmentId: string, action: ContainerAction) => {
     if (action === 'destroy') {
       const target = snapshot?.containers.find((c) => c.id === environmentId) ?? null
@@ -495,6 +500,25 @@ export function ContainersStatusSection({
           </section>
         </>
       )}
+
+      <section className="cr-manage-environments" data-testid="containers-manage">
+        <button
+          type="button"
+          className="cr-action"
+          data-testid="containers-manage-toggle"
+          aria-expanded={showManage}
+          aria-controls="containers-manage-panel-region"
+          onClick={() => setShowManage((v) => !v)}
+          title="Create or destroy persistent environments"
+        >
+          {showManage ? 'Hide environment management' : 'Manage environments'}
+        </button>
+        {showManage && (
+          <div id="containers-manage-panel-region" data-testid="containers-manage-panel">
+            <EnvironmentPanel />
+          </div>
+        )}
+      </section>
 
       <ConfirmDialog
         open={confirmDestroy !== null}

@@ -79,7 +79,6 @@ import { AgentMonitorPanel } from './components/AgentMonitorPanel'
 import { SessionLoadingSkeleton } from './components/SessionLoadingSkeleton'
 import { StartupErrorScreen } from './components/StartupErrorScreen'
 import { ConsolePage } from './components/ConsolePage'
-import { EnvironmentPanel } from './components/EnvironmentPanel'
 import { SnapshotsPanel } from './components/SnapshotsPanel'
 import { PoolStatsPanel } from './components/PoolStatsPanel'
 import { PagesPanel } from './components/PagesPanel'
@@ -2253,9 +2252,6 @@ export function App() {
                 )}
                 {viewMode === 'console' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <ConsolePage />
-                )}
-                {viewMode === 'environments' && connectionPhase !== 'connecting' && !isSwitchingSession && (
-                  <EnvironmentPanel />
                 )}
                 {viewMode === 'snapshots' && connectionPhase !== 'connecting' && !isSwitchingSession && (
                   <SnapshotsPanel />
