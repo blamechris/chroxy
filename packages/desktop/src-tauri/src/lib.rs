@@ -327,6 +327,55 @@ fn set_tunnel_mode(app: tauri::AppHandle, mode: String) -> Result<(), String> {
     Ok(())
 }
 
+/// #6184 (Control Room v2 phase 2 / #5964) — set the macOS dock-tile badge label.
+/// `None` clears it. Must run on the main thread (the command below dispatches via
+/// `run_on_main_thread`) — AppKit UI calls off the main thread are undefined
+/// behaviour. Mirrors the existing cocoa/objc usage (the NSApp window-menu setup).
+#[cfg(target_os = "macos")]
+fn set_dock_badge(label: Option<String>) {
+    use cocoa::appkit::NSApp;
+    use cocoa::base::{id, nil};
+    use cocoa::foundation::NSString;
+    use objc::{msg_send, sel, sel_impl};
+    unsafe {
+        let ns_app: id = NSApp();
+        let dock_tile: id = msg_send![ns_app, dockTile];
+        match label {
+            Some(text) => {
+                let ns_str: id = NSString::alloc(nil).init_str(&text);
+                let _: () = msg_send![dock_tile, setBadgeLabel: ns_str];
+            }
+            None => {
+                let _: () = msg_send![dock_tile, setBadgeLabel: nil];
+            }
+        }
+    }
+}
+
+/// #6184 — reflect the cross-session "needs me" count on the dock icon: a red
+/// badge with `blocked + failed` (cleared at zero). The dashboard computes the
+/// count from the shared `selectCrossSessionActivity` rollup (#6182) and invokes
+/// this whenever it changes. macOS only for now (Tauri v2's tray icon exposes no
+/// badge API; the dock tile is the native "count" surface); a no-op elsewhere.
+#[tauri::command]
+fn update_tray_badge(app: tauri::AppHandle, blocked: u32, failed: u32) -> Result<(), String> {
+    let count = blocked.saturating_add(failed);
+    #[cfg(target_os = "macos")]
+    {
+        let label = if count == 0 { None } else { Some(count.to_string()) };
+        // AppKit must be touched on the main thread.
+        app.run_on_main_thread(move || set_dock_badge(label))
+            .map_err(|e| format!("Failed to update dock badge: {}", e))?;
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        // No dock/tray badge surface on this platform yet — accept + ignore so the
+        // dashboard caller stays platform-agnostic.
+        let _ = (&app, count);
+    }
+    Ok(())
+}
+
 /// #5356 — current "expose on LAN" setting. False (loopback-only) is the
 /// default and the safe posture for the control socket.
 #[tauri::command]
@@ -860,6 +909,7 @@ pub fn run() {
             set_summon_hotkey,
             get_allow_auto_permission_mode,
             set_allow_auto_permission_mode,
+            update_tray_badge,
             #[cfg(target_os = "macos")]
             voice_available,
             #[cfg(target_os = "macos")]
