@@ -48,6 +48,7 @@ import { DeviceRuntimesSection } from './DeviceRuntimesSection'
 import { IntegrationsSection } from './IntegrationsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
+import { CrossSessionMissionControl } from './CrossSessionMissionControl'
 import { SettingsContent } from './SettingsPanel'
 import { useConnectionStore } from '../store/connection'
 import type { ConnectionState } from '../store/types'
@@ -222,6 +223,16 @@ export const CONTROL_ROOM_TABS = [
     loadingKey: 'mailboxStatusLoading',
     requestKey: 'requestMailboxStatus',
   },
+  // #6183 (Control Room v2 phase 2 / #5964): cross-session mission control — the
+  // aggregate, read-only view over EVERY session's activity tree, grouped by
+  // repo+worktree with running/blocked/failed rollups. `survey: false`: it reads
+  // the live activity reducer state already in the store (fed by the
+  // activity_snapshot/delta handlers), so there's no per-tab snapshot to fetch.
+  {
+    key: 'mission-control',
+    label: 'Mission control',
+    survey: false,
+  },
   // #5544: the Settings tab converges the scattered preference surfaces
   // (notification categories, appearance, session defaults, BYOK, Tauri desktop
   // options) into the Control Room. It embeds `SettingsContent` — the same body
@@ -296,6 +307,26 @@ function isStale(generatedAt: string | undefined): boolean {
   const ms = Date.parse(generatedAt)
   if (Number.isNaN(ms)) return true
   return Date.now() - ms >= CONTROL_ROOM_STALENESS_MS
+}
+
+/**
+ * #6183: thin store-connected wrapper for the cross-session mission-control view.
+ * Reads the live activity reducer state + the session list from the store and
+ * maps each SessionInfo to the selector's minimal `CrossSessionMeta`. Re-renders
+ * (recomputing the aggregate) whenever activity or the session list changes, so
+ * the rollups stay live. The pure `CrossSessionMissionControl` holds all the
+ * rendering/grouping logic and is tested in isolation.
+ */
+function MissionControlTab() {
+  const activity = useConnectionStore((s) => s.activity)
+  const sessions = useConnectionStore((s) => s.sessions)
+  const metas = sessions.map((s) => ({
+    sessionId: s.sessionId,
+    cwd: s.cwd,
+    name: s.name,
+    worktree: s.worktree,
+  }))
+  return <CrossSessionMissionControl activity={activity} sessions={metas} />
 }
 
 export interface ControlRoomViewProps {
@@ -451,6 +482,8 @@ export function ControlRoomView({
         <SkillsInventorySection />
       ) : tab === 'mailbox' ? (
         <MailboxPanel />
+      ) : tab === 'mission-control' ? (
+        <MissionControlTab />
       ) : (
         // #5544: scrollable wrapper so the (often long) settings body scrolls
         // inside the tab panel rather than the whole Control Room view. The
