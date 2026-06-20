@@ -9612,6 +9612,36 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-blue);
 }
 
+/*
+ * #6169 — accent variants for the Control Room callout. `.cr-callout-bad` is the
+ * degraded-survey banner used by all 11 survey sections (it was referenced but
+ * had no rule, so every banner fell back to the neutral blue `.cr-callout`);
+ * `.cr-callout-ok` is the Device-runtimes "Ready for Maestro" verdict. Both are
+ * defined after `.cr-callout` so their longhand border/colour overrides win at
+ * equal specificity. Tokens mirror the existing danger/success usage.
+ */
+.cr-callout-bad {
+  background: var(--danger-bg, rgba(220, 38, 38, 0.12));
+  border-color: var(--danger, #dc2626);
+  border-left-color: var(--danger, #dc2626);
+  color: var(--danger-fg, #f87171);
+}
+
+.cr-callout-bad b {
+  color: var(--danger-fg, #f87171);
+}
+
+.cr-callout-ok {
+  background: var(--success-bg, rgba(52, 208, 88, 0.12));
+  border-color: var(--success, #34d058);
+  border-left-color: var(--success, #34d058);
+  color: var(--success, #34d058);
+}
+
+.cr-callout-ok b {
+  color: var(--success, #34d058);
+}
+
 /* #5216 — repo-table view controls (filter chips + sort + visible count) */
 .cr-controls {
   display: flex;
