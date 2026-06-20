@@ -67,7 +67,10 @@ describe('CrossSessionMissionControl', () => {
       { sessionId: 'wt', cwd: '/home/u/.chroxy/worktrees/repo-a-feat', name: 'feat', worktree: true },
     ]} now={NOW} />)
     const groups = screen.getAllByTestId('mission-control-group')
-    // repo-a (named) sorts before the worktrees path; worktree badge only on the wt group.
+    // Two distinct cwds → two groups; the worktree badge appears on exactly the
+    // wt group (asserted by data-group-key below, not by order — the selector
+    // sorts by full cwd path so the `.chroxy/worktrees/...` path actually sorts
+    // before `/home/u/repo-a`, which is irrelevant to this assertion).
     const worktreeBadges = screen.getAllByTestId('mission-control-group-worktree')
     expect(worktreeBadges.length).toBe(1)
     // The flagged group is the one containing the wt session.
