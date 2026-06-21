@@ -2077,6 +2077,47 @@ function handleMailboxStatusRequest(ws, client, msg, ctx) {
   })
 }
 
+/**
+ * #5969 (epic #5422 phase 4) — reply to an `external_sessions_request` with a
+ * point-in-time snapshot of the LIVE external Claude Code sessions the daemon
+ * learned about over `POST /api/events` (sessions it did NOT launch). Read-only:
+ * mission control renders these alongside daemon-managed sessions but offers no
+ * control affordances (there is no PTY/handle for an external session). Reads
+ * in-memory SessionManager state only, so — like the mailbox survey — it is
+ * synchronous and has no in-flight guard.
+ *
+ * Host-level survey: a pairing-bound (share-a-session) token is rejected, like
+ * `host_status_request`. On refusal it still replies with a schema-valid empty
+ * snapshot carrying an additive `error` so the view renders the refusal rather
+ * than spin.
+ */
+function handleExternalSessionsRequest(ws, client, msg, ctx) {
+  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
+  const base = {
+    type: 'external_sessions_snapshot',
+    requestId,
+    generatedAt: new Date().toISOString(),
+    sessions: [],
+  }
+
+  if (client?.boundSessionId) {
+    ctx.transport.send(ws, {
+      ...base,
+      error: {
+        code: 'FORBIDDEN',
+        message: 'external_sessions_request requires host-level authority (a session-bound token cannot survey the host)',
+      },
+    })
+    return
+  }
+
+  const sm = ctx?.sessions?.sessionManager
+  ctx.transport.send(ws, {
+    ...base,
+    sessions: typeof sm?.getExternalSessions === 'function' ? sm.getExternalSessions() : [],
+  })
+}
+
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
@@ -2096,5 +2137,6 @@ export const controlRoomHandlers = {
   integration_status_request: handleIntegrationStatusRequest,
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,
+  external_sessions_request: handleExternalSessionsRequest,
   integration_action: handleIntegrationAction,
 }

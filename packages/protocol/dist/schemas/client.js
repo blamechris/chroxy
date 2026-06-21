@@ -906,6 +906,16 @@ export const MailboxStatusRequestSchema = z.object({
     type: z.literal('mailbox_status_request'),
     requestId: z.string().max(128).optional(),
 });
+// #5969 (epic #5422 phase 4): Control Room mission control — request a
+// point-in-time snapshot of the LIVE external Claude Code sessions the daemon
+// learned about via `POST /api/events` (sessions it did NOT launch). Host-level
+// survey (a session-bound token is rejected, like `host_status_request`).
+// Pull-on-open; the reply is a single `external_sessions_snapshot` (see
+// server.ts). The optional `requestId` lets the dashboard correlate the reply.
+export const ExternalSessionsRequestSchema = z.object({
+    type: z.literal('external_sessions_request'),
+    requestId: z.string().max(128).optional(),
+});
 // #5253: Control Room — request a self-hosted runner status survey. The server
 // scans the runner-install root, probes each runner's service, optionally
 // enriches via `gh`, and replies with a single `runner_status_snapshot` (see
@@ -1261,6 +1271,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     IntegrationStatusRequestSchema,
     SkillsInventoryRequestSchema,
     MailboxStatusRequestSchema,
+    ExternalSessionsRequestSchema,
     IntegrationActionSchema,
     ContainersActionSchema,
     ByokPoolActionSchema,

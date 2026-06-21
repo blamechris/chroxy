@@ -2,6 +2,7 @@ import { describe, it, expect, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import type { ActivityEntry, ActivityState, CrossSessionMeta } from '@chroxy/store-core'
 import { createEmptyActivityState, applyActivitySnapshot } from '@chroxy/store-core'
+import type { ExternalSessionEntry } from '@chroxy/protocol'
 import { CrossSessionMissionControl } from './CrossSessionMissionControl'
 
 const T0 = 1_800_000_000_000
@@ -121,5 +122,46 @@ describe('CrossSessionMissionControl', () => {
     rerender(<CrossSessionMissionControl activity={after} sessions={[SESSIONS[0]!]} now={NOW} />)
     expect(screen.getByTestId('mission-control-total-blocked').textContent).toContain('1')
     expect(screen.getByTestId('mission-control-total-running').textContent).toContain('0')
+  })
+
+  // #5969 — read-only external (/api/events) sessions.
+  const EXTERNAL: ExternalSessionEntry[] = [
+    { source: 'cli', sessionId: 'x1', name: 'chroxy', project: 'chroxy', cwd: '/home/u/chroxy', status: 'running', subagents: 2, lastActivityTs: T0 + 500 },
+    { source: 'cli', sessionId: 'x2', name: 'widget', project: null, cwd: '/home/u/widget', status: 'idle', subagents: 0, lastActivityTs: T0 },
+  ]
+
+  it('renders external sessions in their own read-only section', () => {
+    render(<CrossSessionMissionControl activity={createEmptyActivityState()} sessions={[]} external={EXTERNAL} now={NOW} />)
+    // Not the empty state — external sessions count as content.
+    expect(screen.queryByTestId('mission-control-empty')).toBeNull()
+    expect(screen.getByTestId('mission-control-external')).toBeTruthy()
+    expect(screen.getByTestId('mission-control-external-readonly').textContent).toContain('read-only')
+    expect(screen.getByTestId('mission-control-external-x1')).toBeTruthy()
+    expect(screen.getByTestId('mission-control-external-x2')).toBeTruthy()
+    expect(screen.getByTestId('mission-control-external-status-x1').textContent).toBe('Running')
+    expect(screen.getByTestId('mission-control-external-status-x2').textContent).toBe('Idle')
+    // Subagent count only when > 0.
+    expect(screen.getByTestId('mission-control-external-subagents-x1').textContent).toContain('2 subagents')
+    expect(screen.queryByTestId('mission-control-external-subagents-x2')).toBeNull()
+  })
+
+  it('offers no control affordance for external sessions (static row, no toggle)', () => {
+    render(<CrossSessionMissionControl activity={createEmptyActivityState()} sessions={[]} external={EXTERNAL} now={NOW} />)
+    // Managed sessions get a toggle button; external sessions must not.
+    expect(screen.queryByTestId('mission-control-session-toggle-x1')).toBeNull()
+    expect(screen.queryByTestId('mission-control-session-tree-x1')).toBeNull()
+  })
+
+  it('shows both managed groups and the external section together', () => {
+    const state = stateOf({ s1: [entry({ id: 'e1', status: 'running' })] })
+    render(<CrossSessionMissionControl activity={state} sessions={[SESSIONS[0]!]} external={EXTERNAL} now={NOW} />)
+    expect(screen.getByTestId('mission-control-group')).toBeTruthy()
+    expect(screen.getByTestId('mission-control-external')).toBeTruthy()
+  })
+
+  it('omits the external section when there are no external sessions', () => {
+    const state = stateOf({ s1: [entry({ id: 'e1', status: 'running' })] })
+    render(<CrossSessionMissionControl activity={state} sessions={[SESSIONS[0]!]} now={NOW} />)
+    expect(screen.queryByTestId('mission-control-external')).toBeNull()
   })
 })

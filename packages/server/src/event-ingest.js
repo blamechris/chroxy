@@ -444,6 +444,17 @@ export function handleEventIngest(server, req, res) {
         ? server._turnTracker.anyTurnInFlight(project)
         : (event.sessionId ? server._turnTracker.isInFlight(event.source, event.sessionId) : false)
 
+      // #5969 (epic #5422 phase 4): keep a point-in-time view of LIVE external
+      // sessions so the Control Room mission-control view can render them as
+      // read-only entries. Per-(source, sessionId), unlike the per-project
+      // counters above — mission control lists individual sessions. Pure
+      // observability; the SessionManager helper swallows its own errors.
+      server.sessionManager?.recordExternalSessionEvent?.(event.type, event.source, event.sessionId, {
+        project,
+        cwd: typeof data.cwd === 'string' ? data.cwd : null,
+        ts: typeof event.ts === 'number' ? event.ts : undefined,
+      })
+
       const title = typeof data.title === 'string' && data.title.length > 0 ? data.title : mapping.title
       let notifyBody = typeof data.message === 'string' && data.message.length > 0 ? data.message : mapping.body
       if (event.sessionId) {
