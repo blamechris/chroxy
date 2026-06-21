@@ -243,6 +243,33 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { added: [sysMsg('Cost budget override — session resumed')] },
   },
 
+  // 4c. user_question (#5618) — append the question prompt to its (resolved)
+  // session, else the global log. The `pushSessionNotification` side-effect is a
+  // UI concern OUTSIDE this store-state contract (no-op in the harness adapter),
+  // so only the message append is asserted — byte-identical on both clients.
+  {
+    name: 'user_question appends the question prompt to the target session',
+    type: 'user_question',
+    init: { sessions: { s1: {} } },
+    message: { type: 'user_question', sessionId: 's1', questions: [{ question: 'Proceed?' }] },
+    expect: {
+      sessions: { s1: { messages: [{ type: 'prompt', content: 'Proceed?' }] } },
+    },
+  },
+  {
+    name: 'user_question falls back to addMessage when no session resolves',
+    type: 'user_question',
+    message: { type: 'user_question', questions: [{ question: 'Proceed?' }] },
+    expect: { added: [{ type: 'prompt', content: 'Proceed?' }] },
+  },
+  {
+    name: 'user_question is a no-op when the questions payload is malformed',
+    type: 'user_question',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'user_question', questions: [] },
+    expect: { noop: true },
+  },
+
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
   // session was not paused; no-op when it was (budget_resumed already noted it)
   {

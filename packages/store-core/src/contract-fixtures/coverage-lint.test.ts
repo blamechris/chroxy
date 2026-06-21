@@ -114,7 +114,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'tool_input_delta',
   'tunnel_url_changed',
   'user_input',
-  'user_question',
+  // user_question — migrated to the shared dispatch table (#5618); now has a
+  // DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   'web_task_error',
 ])
 

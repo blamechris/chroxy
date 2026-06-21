@@ -132,6 +132,11 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
     getSessions: () => sessionList,
+    // #5618 — `pushSessionNotification` is a UI side-effect OUTSIDE the shared
+    // store-state contract (the app additionally mirrors into its mobile push
+    // store; the dashboard does not). Modelled as a no-op here, exactly like the
+    // app's `activityState` derivation above — no fixture asserts on it.
+    pushSessionNotification: () => {},
     // #5653 — only the APP opts its imperative-callback registry into the table.
     // Model it as "a callback IS registered for every channel" so the contract
     // can observe the invocation + payload. The DASHBOARD omits `getCallback`
