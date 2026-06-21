@@ -97,8 +97,6 @@ import {
   // agent_spawned / agent_completed / agent_event / background_work_changed /
   // mcp_servers / session_usage / web_task_list / web_feature_status migrated
   // to the shared dispatch table (#5556 slice 2)
-  handleAvailableModels as sharedAvailableModels,
-  handleCostUpdate as sharedCostUpdate,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
@@ -1229,6 +1227,14 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   getFollowMode: () => useMultiClientStore.getState().followMode,
   switchSession: (sessionId) => getStore().getState().switchSession(sessionId),
   setPrimaryClientId: (clientId) => useMultiClientStore.getState().setPrimaryClientId(clientId),
+  // #5618 Batch 5a — cost_update's app-only mirror: flat totalCost/costBudget +
+  // the useCostStore dual-write. (The shared per-session sessionCost patch is
+  // applied by the dispatch handler.) The app omits extendModelsPatch — it does
+  // not track availableModelsProvider (dashboard-only).
+  setCostUpdate: (totalCost, budget) => {
+    getStore().setState({ totalCost, costBudget: budget } as Partial<ConnectionState>);
+    useCostStore.getState().setCostUpdate(totalCost, budget);
+  },
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -2688,13 +2694,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // #5618 — model_changed migrated to the shared store-core dispatch table
     // (runDispatch handles it before this switch). Removed from here.
 
-    case 'available_models': {
-      if (Array.isArray(msg.models)) {
-        const { models, defaultModelId } = sharedAvailableModels(msg);
-        set({ availableModels: models, defaultModelId });
-      }
-      break;
-    }
+    // available_models — migrated to the shared dispatch table (#5618 Batch 5a;
+    // handled by runDispatch before this switch). Non-array payloads are a no-op
+    // that preserves the existing list. The app omits the dashboard-only
+    // availableModelsProvider extension.
+
 
     case 'permission_mode_changed': {
       const { mode } = sharedPermissionModeChanged(msg);
@@ -3226,18 +3230,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'cost_update': {
-      const result = sharedCostUpdate(msg, get().activeSessionId);
-      const totalCost = typeof msg.totalCost === 'number' ? msg.totalCost : null;
-      const budget = typeof msg.budget === 'number' ? msg.budget : null;
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => result.patch);
-      }
-      set({ totalCost, costBudget: budget });
-      // dual-write: remove after consumers migrate to CostStore
-      useCostStore.getState().setCostUpdate(totalCost, budget);
-      break;
-    }
+    // cost_update — migrated to the shared dispatch table (#5618 Batch 5a;
+    // handled by runDispatch before this switch). The shared per-session
+    // sessionCost patch runs in the table; the app's flat totalCost/costBudget +
+    // useCostStore dual-write ride on the `setCostUpdate` adapter hook.
 
     // session_usage / session_cost_threshold_crossed — migrated to the shared
     // dispatch table (#5556 slice 2)

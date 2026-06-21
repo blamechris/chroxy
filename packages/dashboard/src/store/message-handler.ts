@@ -91,9 +91,7 @@ import {
   // migrated to the shared dispatch table (#5556 slice 2)
   handleEnvironmentList as sharedEnvironmentList,
   handleEnvironmentError as sharedEnvironmentError,
-  handleAvailableModels as sharedAvailableModels,
   // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
-  handleCostUpdate as sharedCostUpdate,
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
@@ -1046,6 +1044,13 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   getMyClientId: () => getStore().getState().myClientId,
   getFollowMode: () => getStore().getState().followMode,
   switchSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  // #5618 Batch 5a — the dashboard tracks which provider the available_models
+  // list is for; contribute it to the single available_models patch. The app
+  // omits this hook (no availableModelsProvider field). The dashboard omits
+  // setCostUpdate (cost_update's flat/cost-store mirror is app-only).
+  extendModelsPatch: (msg) => ({
+    availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
+  }),
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -4291,14 +4296,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'available_models': {
-      if (Array.isArray(msg.models)) {
-        const { models, defaultModelId } = sharedAvailableModels(msg);
-        const availableModelsProvider = typeof msg.provider === 'string' ? msg.provider : null;
-        set({ availableModels: models, availableModelsProvider, defaultModelId });
-      }
-      break;
-    }
+    // available_models — migrated to the shared dispatch table (#5618 Batch 5a;
+    // handled by runDispatch before this switch). Non-array payloads are a no-op
+    // that preserves the existing list. The dashboard's availableModelsProvider
+    // rides on the `extendModelsPatch` adapter hook (single set).
 
     // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 
@@ -4771,13 +4772,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'cost_update': {
-      const result = sharedCostUpdate(msg, get().activeSessionId);
-      if (result.sessionId && get().sessionStates[result.sessionId]) {
-        updateSession(result.sessionId, () => result.patch);
-      }
-      break;
-    }
+    // cost_update — migrated to the shared dispatch table (#5618 Batch 5a;
+    // handled by runDispatch before this switch). The dashboard applies only the
+    // shared per-session sessionCost patch (it omits the app's setCostUpdate
+    // flat/cost-store mirror).
 
     // session_usage / session_cost_threshold_crossed / dev_preview /
     // dev_preview_stopped — migrated to the shared dispatch table (#5556 slice 2)
