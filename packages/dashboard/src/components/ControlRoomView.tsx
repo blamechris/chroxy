@@ -335,7 +335,22 @@ function MissionControlTab() {
   }))
   // A refusal snapshot carries an `error` + empty sessions — render nothing extra.
   const external = externalSnapshot?.sessions ?? []
-  return <CrossSessionMissionControl activity={activity} sessions={metas} external={external} />
+  // #6125 — control actions over the aggregate view: cancel a subagent in any
+  // session (sessionId threaded so the session-scoped cancel hits the right one)
+  // and jump-to-intervene (switch the active session to a blocked one).
+  const sendCancelActivity = useConnectionStore((s) => s.sendCancelActivity)
+  const switchSession = useConnectionStore((s) => s.switchSession)
+  const cancellingActivityIds = useConnectionStore((s) => s.cancellingActivityIds)
+  return (
+    <CrossSessionMissionControl
+      activity={activity}
+      sessions={metas}
+      external={external}
+      onCancelActivity={(activityId, sessionId) => sendCancelActivity(activityId, sessionId)}
+      cancellingActivityIds={cancellingActivityIds}
+      onJumpToSession={(sessionId) => switchSession(sessionId)}
+    />
+  )
 }
 
 export interface ControlRoomViewProps {
