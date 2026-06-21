@@ -534,12 +534,15 @@ export interface DispatchMessageMap {
   primary_changed: {
     type: 'primary_changed'
     sessionId?: string
-    clientId?: string
+    // null on the wire when the session is unclaimed (handlePrimaryChanged
+    // parses it via parseRawStringField → string | null).
+    clientId?: string | null
   }
   session_role: {
     type: 'session_role'
     sessionId?: string
-    primaryClientId?: string
+    // null when the session is unclaimed (handleSessionRole derives 'unclaimed').
+    primaryClientId?: string | null
   }
   client_focus_changed: {
     type: 'client_focus_changed'
