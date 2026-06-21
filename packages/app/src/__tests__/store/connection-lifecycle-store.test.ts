@@ -184,6 +184,27 @@ describe('useConnectionLifecycleStore', () => {
       warnSpy.mockRestore();
     });
 
+    it('allows connecting → server_down (#6023 — first-attempt terminal-down signal)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_down');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('allows server_restarting → server_down (#6023 — supervisor gives up mid-restart)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_restarting');
+      store.transitionPhase('server_down');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
     it('allows self-transitions for reconnecting (retry loop)', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
       const store = useConnectionLifecycleStore.getState();
