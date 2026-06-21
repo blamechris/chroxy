@@ -335,13 +335,23 @@ export function rotateServerIdentity({
   const next = createSigningKeyPair()
   // Mint the continuity cert WHILE the old secret is still loaded — old signs new.
   const rotationCert = signIdentityRotation(next.publicKey, current.secretKey)
-  // Persist the new secret in place of the old (keychain or fallback file).
-  const backend = persistServerIdentity(next, { keychain, filePath })
-  // Write the single-hop sidecar (overwrites any prior cert — only the most
-  // recent prev→current hop is retained). Public data (a signature + two public
-  // keys); reuse writeFileRestricted for its ATOMIC temp+rename write so a crash
-  // can't leave a half-written cert — the 0600 mode it also sets is incidental
-  // here (nothing secret), not a requirement.
+
+  // ORDER MATTERS (fail-safety): write the sidecar BEFORE swapping the secret.
+  //   - sidecar write fails → we throw here, the secret is STILL the old one →
+  //     the identity did not rotate at all (old pins keep verifying). Safe.
+  //   - sidecar ok but persist fails → we throw below, the secret is STILL old →
+  //     the daemon serves the OLD identity and the just-written sidecar names a
+  //     newIdentityKey ≠ the live identity, so resolveServerRotationCert IGNORES
+  //     it as stale. Safe.
+  // The dangerous order (persist secret first) could leave a ROTATED identity
+  // with no cert — forcing every pinned client to manually re-pair, the exact
+  // failure this feature exists to prevent.
+  //
+  // Single-hop: this overwrites any prior cert — only the most recent
+  // prev→current hop is retained. Public data (a signature + two public keys);
+  // reuse writeFileRestricted for its ATOMIC temp+rename write so a crash can't
+  // leave a half-written cert — the 0600 mode it also sets is incidental here
+  // (nothing secret), not a requirement.
   mkdirSync(dirname(rotationFilePath), { recursive: true })
   writeFileRestricted(
     rotationFilePath,
@@ -352,6 +362,8 @@ export function rotateServerIdentity({
       previousPublicKey: current.publicKey,
     }),
   )
+  // Persist the new secret in place of the old (keychain or fallback file).
+  const backend = persistServerIdentity(next, { keychain, filePath })
   log.info(`Rotated server identity (backend: ${backend}); continuity cert written for previous pin`)
   return { previousPublicKey: current.publicKey, newPublicKey: next.publicKey, backend }
 }

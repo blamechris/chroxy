@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join, dirname } from 'node:path'
 import {
@@ -289,6 +289,26 @@ describe('server identity rotation (#5616/#5976)', () => {
     withTempDir((filePath) => {
       const rotationFilePath = rotPath(filePath)
       assert.equal(loadServerRotationCert({ rotationFilePath }), null)
+    })
+  })
+
+  it('is fail-safe: a sidecar-write failure leaves the OLD identity un-rotated', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false })
+      const before = getOrCreateServerIdentity({ keychain: kc, filePath })
+      // Point the sidecar at a path UNDER an existing file → mkdirSync(dirname)
+      // throws ENOTDIR, simulating a sidecar-write failure. Because the sidecar
+      // is written BEFORE the secret is swapped, the rotation must abort with the
+      // OLD identity still persisted (not a rotated identity with no cert).
+      const blocker = join(dirname(filePath), 'blocker')
+      writeFileSync(blocker, 'x')
+      const badRotationPath = join(blocker, 'rotation.json')
+
+      assert.throws(() => rotateServerIdentity({ keychain: kc, filePath, rotationFilePath: badRotationPath }))
+
+      // The persisted secret is UNCHANGED — pinned clients still verify.
+      const after = loadServerIdentity({ keychain: kc, filePath })
+      assert.equal(after.publicKey, before.publicKey)
     })
   })
 })
