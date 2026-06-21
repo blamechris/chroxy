@@ -8,6 +8,7 @@
 import { describe, it, expect } from 'vitest'
 import {
   formatCostBadge,
+  formatCostOverview,
   formatCostBreakdown,
   formatPartialCostLine,
   formatTokens,
@@ -39,6 +40,28 @@ describe('formatCostBadge (#4123)', () => {
     expect(formatCostBadge(-0.5)).toBe('$0')
     expect(formatCostBadge(NaN)).toBe('$0')
     expect(formatCostBadge(Infinity)).toBe('$0')
+  })
+})
+
+describe('formatCostOverview (#6201)', () => {
+  it('returns "—" (em-dash) for null', () => {
+    expect(formatCostOverview(null)).toBe('—')
+  })
+
+  it('returns "—" (em-dash) for 0', () => {
+    expect(formatCostOverview(0)).toBe('—')
+  })
+
+  it('formats sub-cent amounts as <$0.01', () => {
+    expect(formatCostOverview(0.0042)).toBe('<$0.01')
+  })
+
+  it('formats values with 2 decimals', () => {
+    expect(formatCostOverview(1.234)).toBe('$1.23')
+  })
+
+  it('formats large amounts', () => {
+    expect(formatCostOverview(12.5)).toBe('$12.50')
   })
 })
 

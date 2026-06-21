@@ -12,6 +12,7 @@ import {
   Animated,
   type AlertButton,
 } from 'react-native';
+import { formatCostOverview } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import type { SessionInfo, SessionHealth, SessionState, SessionNotification } from '../store/types';
 import { Icon, type IconName } from './Icon';
@@ -38,13 +39,6 @@ export function getSessionStatus(input: StatusInput): SessionStatus {
   if (input.activeAgentCount > 0) return 'agents';
   if (input.isBusy) return 'busy';
   return 'idle';
-}
-
-/** Format cost for display */
-export function formatCost(cost: number | null): string {
-  if (cost === null || cost === 0) return '\u2014';
-  if (cost > 0 && cost < 0.01) return '<$0.01';
-  return `$${cost.toFixed(2)}`;
 }
 
 /** Get color pair for a session status */
@@ -200,7 +194,7 @@ function SessionCard({ session, sessionState, isActive, hasNotification, notific
         )}
         {sessionState?.sessionCost != null && sessionState.sessionCost > 0 && (
           <Text style={styles.costText}>
-            {formatCost(sessionState.sessionCost)}
+            {formatCostOverview(sessionState.sessionCost)}
           </Text>
         )}
         {sessionState?.sessionContext?.gitBranch && (
@@ -301,7 +295,7 @@ export function SessionOverview({ onClose }: SessionOverviewProps) {
         <View style={styles.headerMeta}>
           {totalCost != null && totalCost > 0 && (
             <Text style={styles.headerCost}>
-              Total: {formatCost(totalCost)}
+              Total: {formatCostOverview(totalCost)}
               {costBudget != null ? ` / $${costBudget.toFixed(0)}` : ''}
             </Text>
           )}
