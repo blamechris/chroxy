@@ -14,17 +14,7 @@
  */
 import { useEffect, useState } from 'react'
 import { useConnectionStore } from '../store/connection'
-
-function formatElapsed(ms: number): string {
-  if (ms < 1000) return 'just now'
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s`
-  const m = Math.floor(s / 60)
-  const remS = s % 60
-  if (m < 60) return remS === 0 ? `${m}m` : `${m}m ${remS}s`
-  const h = Math.floor(m / 60)
-  return `${h}h ${m % 60}m`
-}
+import { formatElapsedSince } from '@chroxy/store-core'
 
 export function CheckInChip() {
   // Each `inactivity_warning` from the server replaces the slot with a
@@ -76,7 +66,7 @@ export function CheckInChip() {
       </span>
       <span className="check-in-chip__dot" aria-hidden="true" />
       <span className="check-in-chip__label" aria-hidden="true">
-        Agent quiet for {formatElapsed(totalIdle)}
+        Agent quiet for {formatElapsedSince(totalIdle)}
       </span>
       <button
         type="button"

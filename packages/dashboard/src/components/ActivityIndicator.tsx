@@ -23,7 +23,7 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { formatDurationTerse, formatToolName } from '@chroxy/store-core'
+import { formatDurationTerse, formatElapsedAgo, formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
 
 /**
@@ -91,17 +91,6 @@ export function findInFlightToolUse(
 
 /** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754 / #3884) */
 const FALLBACK_TIMEOUT_MS = 30 * 60 * 1000
-
-function formatElapsed(ms: number): string {
-  if (ms < 1000) return 'just now'
-  const s = Math.floor(ms / 1000)
-  if (s < 60) return `${s}s ago`
-  const m = Math.floor(s / 60)
-  const remS = s % 60
-  if (m < 60) return remS === 0 ? `${m}m ago` : `${m}m ${remS}s ago`
-  const h = Math.floor(m / 60)
-  return `${h}h ${m % 60}m ago`
-}
 
 // #4308 — duration without the "ago" suffix, used for the "Running X · 12s"
 // label (the named tool is current, not past, so "ago" is wrong). #4510 / #6201
@@ -499,7 +488,7 @@ export function ActivityIndicator() {
   } else if (inFlightTool != null && inFlightStartedAt != null) {
     label = `Running ${formatToolName(inFlightTool, inFlightServerName ?? undefined)} · ${formatDurationTerse(now - inFlightStartedAt)}`
   } else {
-    label = `Working… last activity ${formatElapsed(elapsed)}`
+    label = `Working… last activity ${formatElapsedAgo(elapsed)}`
   }
 
   return (

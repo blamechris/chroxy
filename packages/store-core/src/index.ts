@@ -243,6 +243,13 @@ export type { ErrorPartialCost } from './cost-format'
 // re-inlining the same two registers.
 export { formatDurationTerse, formatDurationVerbose } from './duration'
 
+// #6201: shared elapsed-time formatters. `formatElapsedAgo` (the fine-grained
+// "Ns ago" form) was duplicated in the app + dashboard ActivityIndicator;
+// `formatElapsedSince` (the no-suffix terse form) in the app + dashboard
+// CheckInChip. Single-sourced here. (Distinct from device-format's coarse
+// `formatRelativeTime`, which does "1 min ago / 2 days ago" for last-seen.)
+export { formatElapsedSince, formatElapsedAgo } from './elapsed'
+
 export type {
   SessionVisualStatus,
   SessionVisualStatusInput,

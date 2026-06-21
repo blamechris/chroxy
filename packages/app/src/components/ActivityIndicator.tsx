@@ -25,24 +25,13 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { formatDurationTerse, formatToolName } from '@chroxy/store-core';
+import { formatDurationTerse, formatElapsedAgo, formatToolName } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
 
 /** Fallback default matching the server's BaseSession.DEFAULT_RESULT_TIMEOUT_MS (#3754 / #3884) */
 const FALLBACK_TIMEOUT_MS = 30 * 60 * 1000;
-
-function formatElapsed(ms: number): string {
-  if (ms < 1000) return 'just now';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s ago`;
-  const m = Math.floor(s / 60);
-  const remS = s % 60;
-  if (m < 60) return remS === 0 ? `${m}m ago` : `${m}m ${remS}s ago`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m ago`;
-}
 
 export function statusColor(elapsedMs: number, timeoutMs: number): string {
   if (elapsedMs >= timeoutMs - 60_000) return COLORS.accentRed500;
@@ -174,7 +163,7 @@ export function ActivityIndicator() {
   // in flight (e.g. waiting on assistant text between tool calls).
   const label = inFlight
     ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)} · ${formatDurationTerse(now - inFlight.startedAt)}`
-    : `Working… last activity ${formatElapsed(elapsed)}`;
+    : `Working… last activity ${formatElapsedAgo(elapsed)}`;
 
   return (
     <View style={styles.container}>
