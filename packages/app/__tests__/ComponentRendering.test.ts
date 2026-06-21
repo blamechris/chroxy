@@ -275,10 +275,6 @@ describe('SessionOverview component', () => {
     expect(sessionOverviewSrc).toMatch(/crashed.*permission.*attention.*agents.*busy.*idle/)
   })
 
-  test('exports formatCost helper', () => {
-    expect(sessionOverviewSrc).toMatch(/export\s+function\s+formatCost/)
-  })
-
   test('exports getStatusColor helper', () => {
     expect(sessionOverviewSrc).toMatch(/export\s+function\s+getStatusColor/)
   })
@@ -301,7 +297,7 @@ describe('SessionOverview component', () => {
   test('shows cost and budget in header', () => {
     expect(sessionOverviewSrc).toMatch(/totalCost/)
     expect(sessionOverviewSrc).toMatch(/costBudget/)
-    expect(sessionOverviewSrc).toMatch(/formatCost\(totalCost\)/)
+    expect(sessionOverviewSrc).toMatch(/formatCostOverview\(totalCost\)/)
   })
 
   test('displays git branch in session card footer', () => {
