@@ -3144,8 +3144,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // dispatch table (#5618 Batch 2; handled by runDispatch before this switch).
     // The app's secondary-conversation-store mirror (slash/agents) and
     // mapProviderList tightening now ride on the `syncSecondaryInventory` /
-    // `mapProviderList` adapter hooks. auth_bootstrap stays local — it folds all
-    // three lists into one connect-time frame with extra session-scope guarding.
+    // `mapProviderList` adapter hooks (auth_bootstrap, which folds the same lists
+    // into one connect-time frame, was migrated in #5618 Batch 5b — see below).
 
     // auth_bootstrap / tunnel_url_changed — migrated to the shared dispatch table
     // (#5618 Batch 5b; handled by runDispatch before this switch). auth_bootstrap

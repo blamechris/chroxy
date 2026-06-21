@@ -4613,8 +4613,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // The dashboard has no secondary conversation store and trusts the server
     // provider payload, so it supplies neither the `syncSecondaryInventory` nor
     // the `mapProviderList` adapter hook — the dispatch handlers perform the
-    // plain flat-state write, exactly as these cases did. auth_bootstrap stays
-    // local. file_list remains dashboard-only.
+    // plain flat-state write, exactly as these cases did. (auth_bootstrap, which
+    // folds the same lists into one connect-time frame, was migrated in #5618
+    // Batch 5b — see below.) file_list remains dashboard-only.
 
     case 'file_list': {
       const fileResult = sharedFileList(msg);
