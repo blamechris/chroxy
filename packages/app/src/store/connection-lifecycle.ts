@@ -24,11 +24,15 @@ import type { ConnectionPhase, SavedConnection } from './types';
  */
 const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
   disconnected: ['connecting'],
-  connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting'],
+  // #6023 — a first-attempt probe can read the supervisor terminal-down signal
+  // and latch 'server_down' straight from 'connecting' (no reconnect ladder yet).
+  connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting', 'server_down'],
   connected: ['disconnected', 'reconnecting', 'server_restarting'],
   // #5698 — the reconnect ladder gives up → terminal 'server_down'.
   reconnecting: ['reconnecting', 'connected', 'disconnected', 'server_restarting', 'server_down'],
-  server_restarting: ['connecting', 'reconnecting', 'disconnected'],
+  // #6023 — a restarting host whose next probe reads terminal-down goes
+  // straight to 'server_down' (supervisor gave up mid-restart).
+  server_restarting: ['connecting', 'reconnecting', 'disconnected', 'server_down'],
   // #5698 — terminal; only a user-initiated reconnect (→ connecting) or an
   // explicit disconnect leaves it.
   server_down: ['connecting', 'disconnected'],
