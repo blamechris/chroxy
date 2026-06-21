@@ -232,8 +232,10 @@ export interface RunConnectAttemptOptions {
    * #6023: the host served a terminal-down health signal (supervisor gave up).
    * Write the sticky `server_down` phase + the "server appears down" copy and
    * STOP — no retry is scheduled, since the daemon has explicitly given up.
-   * Optional so a client that omits it falls back to the legacy never-terminal
-   * behavior (the time-based ladder cap still latches server_down after N).
+   * Optional: a caller that omits it falls back to treating the signal as a
+   * failed probe — it climbs the connect-retry ladder and ends at
+   * `onProbeGaveUp` (terminal `disconnected`), i.e. pre-#6023 behavior. (Both
+   * shipping clients wire it; the fallback exists for tests / future callers.)
    */
   onTerminalDown?: (info: { reason: string }) => void
 
