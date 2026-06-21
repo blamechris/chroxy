@@ -147,6 +147,73 @@ describe('runConnectAttempt — success path', () => {
   })
 })
 
+describe('runConnectAttempt — terminal_down path (#6023)', () => {
+  it('latches server_down via onTerminalDown and stops — no retry, no socket', async () => {
+    const onTerminalDown = vi.fn()
+    const scheduleRetry = vi.fn()
+    const openSocket = vi.fn()
+    const onProbeFailed = vi.fn()
+    await runConnectAttempt({
+      attempt: 0,
+      resolveEndpoint: () => ENDPOINT,
+      probe: async () => ({ kind: 'terminal_down', reason: 'supervisor_gave_up' }),
+      isStale: () => false,
+      openSocket,
+      onRestarting: vi.fn(),
+      onProbeFailed,
+      onRestartGaveUp: vi.fn(),
+      onProbeGaveUp: vi.fn(),
+      onTerminalDown,
+      scheduleRetry,
+      jitter: noJitter,
+    })
+    expect(onTerminalDown).toHaveBeenCalledWith({ reason: 'supervisor_gave_up' })
+    expect(scheduleRetry).not.toHaveBeenCalled()
+    expect(openSocket).not.toHaveBeenCalled()
+    expect(onProbeFailed).not.toHaveBeenCalled()
+  })
+
+  it('does nothing when the attempt went stale during the probe', async () => {
+    const onTerminalDown = vi.fn()
+    await runConnectAttempt({
+      attempt: 0,
+      resolveEndpoint: () => ENDPOINT,
+      probe: async () => ({ kind: 'terminal_down', reason: 'supervisor_gave_up' }),
+      isStale: () => true,
+      openSocket: vi.fn(),
+      onRestarting: vi.fn(),
+      onProbeFailed: vi.fn(),
+      onRestartGaveUp: vi.fn(),
+      onProbeGaveUp: vi.fn(),
+      onTerminalDown,
+      scheduleRetry: vi.fn(),
+      jitter: noJitter,
+    })
+    expect(onTerminalDown).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the failed-probe ladder when onTerminalDown is omitted (legacy)', async () => {
+    const scheduleRetry = vi.fn()
+    const onProbeFailed = vi.fn()
+    await runConnectAttempt({
+      attempt: 0,
+      resolveEndpoint: () => ENDPOINT,
+      probe: async () => ({ kind: 'terminal_down', reason: 'supervisor_gave_up' }),
+      isStale: () => false,
+      openSocket: vi.fn(),
+      onRestarting: vi.fn(),
+      onProbeFailed,
+      onRestartGaveUp: vi.fn(),
+      onProbeGaveUp: vi.fn(),
+      // onTerminalDown intentionally omitted
+      scheduleRetry,
+      jitter: noJitter,
+    })
+    expect(onProbeFailed).toHaveBeenCalledWith('supervisor_gave_up')
+    expect(scheduleRetry).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('runConnectAttempt — restarting path', () => {
   it('signals restarting and schedules the next retry on the ladder', async () => {
     const onRestarting = vi.fn()

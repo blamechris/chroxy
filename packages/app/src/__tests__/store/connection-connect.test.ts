@@ -122,6 +122,24 @@ describe('connect() health check', () => {
     expect(state.shutdownReason).toBe('restart');
     expect(state.restartEtaMs).toBe(5000);
   });
+
+  it('latches server_down immediately on a terminal-down response (#6023)', async () => {
+    // Supervisor gave up — HTTP 200 { status: 'down', reason: 'supervisor_gave_up' }
+    // (#6022/#6130). The probe must stop the ladder and latch server_down now,
+    // not climb to onProbeGaveUp / disconnected.
+    const fetchSpy = jest.fn().mockResolvedValue(
+      mockResponse(200, { status: 'down', reason: 'supervisor_gave_up' }),
+    );
+    global.fetch = fetchSpy;
+
+    useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
+    await flushPromises();
+
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+    expect(useConnectionLifecycleStore.getState().connectionError).toBe('Server appears to be down');
+    // Terminal — no re-probe (a retry would call fetch again).
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+  });
 });
 
 describe('connect() retry exhaustion', () => {
