@@ -74,6 +74,13 @@ export interface AdapterResult {
    * separately.
    */
   infoNotifications: string[]
+  /**
+   * Sessions switched to via `switchSession` (#5618 Batch 4), in order — the
+   * client_focus_changed follow-mode auto-switch. BOTH clients call it
+   * identically (the accessor hides where presence state lives), so the contract
+   * asserts they switch to the same session(s).
+   */
+  switchedSessions: string[]
 }
 
 /** Which client an adapter models — drives the `updateSession` divergence. */
@@ -109,11 +116,14 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   }
   let activeSessionId = init?.activeSessionId ?? null
   let sessionList: SessionInfo[] = init?.sessionList ?? []
+  const myClientId = init?.myClientId ?? null
+  const followMode = init?.followMode ?? false
   const flat: Record<string, unknown> = {}
   const added: ChatMessage[] = []
   const callbacks: Array<{ name: string; payload: unknown }> = []
   const serverErrors: AdapterResult['serverErrors'] = []
   const infoNotifications: string[] = []
+  const switchedSessions: string[] = []
 
   // Reproduce each client's real `updateSession`. Both share the
   // "no-op on missing session / empty patch" guard; they diverge only in the
@@ -162,6 +172,13 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     addServerError: (message, opts) => {
       serverErrors.push({ message, ...(opts ?? {}) })
     },
+    // #5618 Batch 4 — multi-client accessors. BOTH clients supply them (the
+    // accessor hides where presence state lives — app multi-client store vs
+    // dashboard flat). `switchSession` is recorded so the client_focus_changed
+    // contract asserts both clients auto-switch to the same session.
+    getMyClientId: () => myClientId,
+    getFollowMode: () => followMode,
+    switchSession: (sessionId) => switchedSessions.push(sessionId),
     // #5653 — only the APP opts its imperative-callback registry into the table.
     // Model it as "a callback IS registered for every channel" so the contract
     // can observe the invocation + payload. The DASHBOARD omits `getCallback`
@@ -198,6 +215,12 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
           // a no-op here (no fixture asserts on it — the dispatch-table unit tests
           // cover the hook invocation directly).
           syncSecondaryInventory: () => {},
+          // #5618 Batch 4 — the app mirrors the primary pointer into its
+          // secondary multi-client store. Out of the shared contract (like
+          // pushSessionNotification); modelled as a no-op (the shared
+          // session/flat primaryClientId write IS asserted; the dispatch-table
+          // unit tests cover the hook invocation). The dashboard omits it.
+          setPrimaryClientId: () => {},
         }
       : {}),
     // #5618 Batch 3 — only the DASHBOARD shows the session_stopped info toast
@@ -212,7 +235,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   return {
     adapter,
     get result(): AdapterResult {
-      return { sessions, flat, added, callbacks, serverErrors, infoNotifications }
+      return { sessions, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions }
     },
     setActive: (id: string | null) => {
       activeSessionId = id

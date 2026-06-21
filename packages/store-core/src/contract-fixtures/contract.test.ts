@@ -69,6 +69,7 @@ function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: C
     expect(result.added, `${fx.name}: expected no addMessage`).toHaveLength(0)
     expect(result.serverErrors, `${fx.name}: expected no addServerError`).toHaveLength(0)
     expect(result.infoNotifications, `${fx.name}: expected no addInfoNotification`).toHaveLength(0)
+    expect(result.switchedSessions, `${fx.name}: expected no switchSession`).toHaveLength(0)
     // …and every seeded session is untouched beyond its shell: it must carry
     // only the keys it was seeded with (the `{ sessionId, messages }` shell plus
     // the fixture's own `init.sessions[id]` keys). A handler that wrote a NEW
@@ -118,6 +119,9 @@ function assertExpectation(result: AdapterResult, exp: FixtureExpectation, fx: C
   }
   if (exp.infoNotifications) {
     expect(result.infoNotifications, `${fx.name}: infoNotifications`).toEqual(exp.infoNotifications)
+  }
+  if (exp.switchedSessions) {
+    expect(result.switchedSessions, `${fx.name}: switchedSessions`).toEqual(exp.switchedSessions)
   }
 }
 

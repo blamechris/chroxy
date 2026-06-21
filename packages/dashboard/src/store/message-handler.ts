@@ -49,9 +49,6 @@ import {
   handleLogEntry as sharedLogEntry,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
-  handlePrimaryChanged as sharedPrimaryChanged,
-  handleSessionRole as sharedSessionRole,
-  handleClientFocusChanged as sharedClientFocusChanged,
   // conversation_id migrated to the shared dispatch table (#5556)
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
@@ -1042,6 +1039,13 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   addServerError: (message) => getStore().getState().addServerError(message),
   // #5618 Batch 3 — session_stopped's info toast (#4878). The app omits this hook.
   addInfoNotification: (message) => getStore().getState().addInfoNotification(message),
+  // #5618 Batch 4 — multi-client accessors for primary_changed / session_role /
+  // client_focus_changed. The dashboard keeps presence state flat (the app uses
+  // a dedicated useMultiClientStore); these accessors hide that divergence. The
+  // dashboard has no secondary presence store, so it OMITS setPrimaryClientId.
+  getMyClientId: () => getStore().getState().myClientId,
+  getFollowMode: () => getStore().getState().followMode,
+  switchSession: (sessionId) => getStore().getState().switchSession(sessionId),
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -4540,48 +4544,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'primary_changed': {
-      const { sessionId: primarySessionId, primaryClientId } = sharedPrimaryChanged(msg);
-      if (primarySessionId && get().sessionStates[primarySessionId]) {
-        updateSession(primarySessionId, () => ({
-          primaryClientId,
-        }));
-      } else if (!primarySessionId || primarySessionId === 'default') {
-        set({ primaryClientId });
-      }
-      break;
-    }
-
-    case 'session_role': {
-      // #5589 / #5281 — explicit primary-ownership. Derive THIS client's role
-      // by comparing the server-named primary to our own id (from auth_ok,
-      // stored flat as `myClientId`). Stored per-session on `sessionRole` to
-      // drive the ViewersIndicator's observer state + claim affordance, and we
-      // mirror `primaryClientId` so presence stays in sync without depending on
-      // a separate legacy `primary_changed`. Kept platform-local (not in the
-      // shared dispatch table) for the same reason `primary_changed` is — the
-      // app's dedicated multi-client store vs the dashboard's flat+per-session
-      // slots diverge (see dispatch-table.ts divergent-cases note).
-      const role = sharedSessionRole(msg, get().myClientId);
-      if (role.sessionId && get().sessionStates[role.sessionId]) {
-        updateSession(role.sessionId, () => ({
-          sessionRole: role.role,
-          primaryClientId: role.primaryClientId,
-        }));
-      }
-      break;
-    }
-
-    case 'client_focus_changed': {
-      const focus = sharedClientFocusChanged(msg);
-      if (!focus) break;
-      // Auto-switch if follow mode is on, event is from another client, target session exists locally, and not already on it
-      const { followMode, myClientId, activeSessionId, sessionStates } = get();
-      if (followMode && focus.clientId !== myClientId && focus.sessionId !== activeSessionId && sessionStates[focus.sessionId]) {
-        get().switchSession(focus.sessionId);
-      }
-      break;
-    }
+    // primary_changed / session_role / client_focus_changed — migrated to the
+    // shared dispatch table (#5618 Batch 4; handled by runDispatch before this
+    // switch). The dashboard's flat presence state (myClientId / followMode /
+    // switchSession) is reached through the getMyClientId / getFollowMode /
+    // switchSession adapter hooks, so the three cases are now fully shared. The
+    // dashboard omits setPrimaryClientId (no secondary presence store).
 
     case 'directory_listing': {
       const cb = get()._directoryListingCallback;

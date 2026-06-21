@@ -75,7 +75,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'checkpoint_list',
   'checkpoint_restored',
   'claude_ready',
-  'client_focus_changed',
+  // client_focus_changed — migrated to the shared dispatch table (#5618 Batch 4).
   'client_joined',
   'client_left',
   'conversations_list',
@@ -91,7 +91,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'permission_timeout',
   'plan_ready',
   'pong',
-  'primary_changed',
+  // primary_changed — migrated to the shared dispatch table (#5618 Batch 4).
   // provider_list — migrated to the shared dispatch table (#5618 Batch 2);
   // app/dashboard element-handling divergence locked by a divergent fixture.
   'raw',
@@ -106,7 +106,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // session_persist_failed / session_restore_failed / session_stopped — migrated
   // to the shared dispatch table (#5618 Batch 3); now have DISPATCH_FIXTURES
   // entries, so they leave the both-clients-switch universe.
-  'session_role',
+  // session_role — migrated to the shared dispatch table (#5618 Batch 4).
   'session_switched',
   'session_timeout',
   'session_warning',
@@ -152,15 +152,19 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
   const covered = new Set(SWITCH_FIXTURES.map((f) => f.type))
 
   it('derives a non-trivial both-clients switch universe (extraction sanity)', () => {
-    // Pin the extraction to a band AROUND the real count (~64) so a parser
+    // Pin the extraction to a band AROUND the real count (~52) so a parser
     // regression fails LOUDLY (#6032). The old `> 20` floor was so far under the
     // real universe that a parse dropping to ~25 passed vacuously — silently
     // shrinking `both` so the anti-drift assertions below stopped protecting the
-    // types that fell out. The band ratchets: a real new both-clients switch type
-    // (the universe grows past the ceiling) is a DELIBERATE bump — raise both
-    // bounds in the same PR that adds its fixture / PENDING entry.
-    expect(both.length).toBeGreaterThanOrEqual(55)
-    expect(both.length).toBeLessThanOrEqual(80)
+    // types that fell out. The band ratchets BOTH ways: a real new both-clients
+    // switch type (universe grows past the ceiling) is a DELIBERATE bump, and
+    // migrating types OUT to the shared dispatch table (universe shrinks below
+    // the floor) lowers it — adjust both bounds in the same PR. Keep the band
+    // TIGHT around the real count so the "fail loudly" intent stays sharp. Band
+    // last set for #5618 Batch 4 (primary_changed / session_role /
+    // client_focus_changed migrated out; universe 55→52).
+    expect(both.length).toBeGreaterThanOrEqual(48)
+    expect(both.length).toBeLessThanOrEqual(58)
   })
 
   it('every both-clients switch type has a fixture or an explicit PENDING entry', () => {

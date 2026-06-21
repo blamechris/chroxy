@@ -56,6 +56,7 @@ import type {
   QueuedSessionMessage,
   SessionIntervention,
   ServerErrorCategory,
+  SessionRole,
   WebTask,
 } from './types'
 import { nextMessageId } from './utils'
@@ -84,6 +85,10 @@ import {
   handleSessionStopped,
   handleSessionRestoreFailed,
   handleSessionPersistFailed,
+  // --- multi-client cases (#5618 Batch 4) ---
+  handlePrimaryChanged,
+  handleSessionRole,
+  handleClientFocusChanged,
   handleSessionUsage,
   handleSessionContext,
   handleModelChangedPatch,
@@ -176,6 +181,12 @@ export interface DispatchSessionBase {
   // `interventions` — read+rewritten by multi_question_intervention (dedup +
   // ring-cap). Both clients' real `SessionState` carry it (BaseSessionState).
   interventions?: SessionIntervention[]
+  // --- multi-client cases (#5618 Batch 4) ---
+  // `primaryClientId` — written by primary_changed / session_role.
+  // `sessionRole` — written by session_role (this client's derived role).
+  // Both clients' real `SessionState` carry these (multi-client presence, #5281).
+  primaryClientId?: string | null
+  sessionRole?: SessionRole | null
 }
 
 /**
@@ -321,6 +332,44 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * {@link ClientStoreAdapter.pushSessionNotification}.
    */
   addInfoNotification?(message: string): void
+  /**
+   * Read THIS client's own client id (#5618 Batch 4) — learned from `auth_ok`.
+   * Used by session_role (to derive this client's role) and client_focus_changed
+   * (to ignore self-focus events). The app reads it from its dedicated
+   * `useMultiClientStore`; the dashboard from flat state — the SOLE divergence
+   * these cases had, now hidden behind this accessor.
+   *
+   * OPTIONAL and DECLINE-capable: the session_role / client_focus_changed
+   * handlers return `false` when it is absent so a client that hasn't wired the
+   * multi-client accessors falls through to its own switch. Both real clients
+   * supply it, so both own those cases.
+   */
+  getMyClientId?(): string | null
+  /**
+   * Read the "follow mode" flag (#5618 Batch 4) — when on, this client
+   * auto-switches to whatever session another client focuses. Used only by
+   * client_focus_changed. App: `useMultiClientStore`; dashboard: flat state.
+   * OPTIONAL/DECLINE-capable (see {@link ClientStoreAdapter.getMyClientId}).
+   */
+  getFollowMode?(): boolean
+  /**
+   * Switch the active session (#5618 Batch 4) — the client's own
+   * session-switch action, invoked by client_focus_changed's follow-mode
+   * auto-switch. Both clients back it with their store's `switchSession`.
+   * OPTIONAL/DECLINE-capable (see {@link ClientStoreAdapter.getMyClientId}).
+   */
+  switchSession?(sessionId: string): void
+  /**
+   * Mirror the primary client id into a SECONDARY client store (#5618 Batch 4).
+   * The app keeps a dedicated `useMultiClientStore` whose `primaryClientId` the
+   * presence UI reads; primary_changed updates it in addition to the shared
+   * session/flat write. The dashboard has no such store and OMITS this hook.
+   * A platform-specific side-effect OUTSIDE the shared store-state contract,
+   * like {@link ClientStoreAdapter.pushSessionNotification}; primary_changed
+   * always OWNS the message (it never declines — the shared write applies
+   * regardless).
+   */
+  setPrimaryClientId?(clientId: string | null): void
 }
 
 /**
@@ -480,6 +529,25 @@ export interface DispatchMessageMap {
     type: 'session_persist_failed'
     sessionId?: string
     name?: string
+  }
+  // --- multi-client cases (#5618 Batch 4) ---
+  primary_changed: {
+    type: 'primary_changed'
+    sessionId?: string
+    // null on the wire when the session is unclaimed (handlePrimaryChanged
+    // parses it via parseRawStringField → string | null).
+    clientId?: string | null
+  }
+  session_role: {
+    type: 'session_role'
+    sessionId?: string
+    // null when the session is unclaimed (handleSessionRole derives 'unclaimed').
+    primaryClientId?: string | null
+  }
+  client_focus_changed: {
+    type: 'client_focus_changed'
+    clientId?: string
+    sessionId?: string
   }
   session_usage: {
     type: 'session_usage'
@@ -1078,6 +1146,69 @@ function dispatchSessionStopped<S extends DispatchSessionBase>(
   adapter.addInfoNotification?.(message)
 }
 
+// ---------------------------------------------------------------------------
+// Multi-client cases (#5618 Batch 4)
+//
+// primary_changed / session_role / client_focus_changed differed between the
+// clients ONLY in where the multi-client state lives (the app's dedicated
+// `useMultiClientStore` vs the dashboard's flat store) — the mutations were
+// identical. The `getMyClientId` / `getFollowMode` / `switchSession` accessors
+// hide that, so all three are now fully shared. primary_changed additionally
+// mirrors into the app's secondary store via the optional `setPrimaryClientId`
+// hook (out-of-contract). session_role / client_focus_changed DECLINE when the
+// multi-client accessors are absent (a client that hasn't opted in keeps its
+// local switch).
+// ---------------------------------------------------------------------------
+
+/** `primary_changed` — update the per-session / flat primary pointer (+ app mirror). */
+function dispatchPrimaryChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['primary_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, primaryClientId } = handlePrimaryChanged(msg as Record<string, unknown>)
+  // App mirrors the raw pointer into its multi-client presence store first
+  // (matches the prior inline order); the dashboard omits this hook.
+  adapter.setPrimaryClientId?.(primaryClientId)
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => ({ primaryClientId } as Partial<S>))
+  } else if (!sessionId || sessionId === 'default') {
+    adapter.setState({ primaryClientId } as Record<string, unknown>)
+  }
+}
+
+/** `session_role` — store this client's derived role + primary on the session. */
+function dispatchSessionRole<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_role'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  if (!adapter.getMyClientId) return false
+  const role = handleSessionRole(msg as Record<string, unknown>, adapter.getMyClientId())
+  if (role.sessionId && adapter.hasSession(role.sessionId)) {
+    adapter.updateSession(
+      role.sessionId,
+      () => ({ sessionRole: role.role, primaryClientId: role.primaryClientId } as Partial<S>),
+    )
+  }
+}
+
+/** `client_focus_changed` — follow-mode auto-switch to another client's session. */
+function dispatchClientFocusChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['client_focus_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  if (!adapter.getFollowMode || !adapter.getMyClientId || !adapter.switchSession) return false
+  const focus = handleClientFocusChanged(msg as Record<string, unknown>)
+  if (!focus) return
+  if (
+    adapter.getFollowMode() &&
+    focus.clientId !== adapter.getMyClientId() &&
+    focus.sessionId !== adapter.getActiveSessionId() &&
+    adapter.hasSession(focus.sessionId)
+  ) {
+    adapter.switchSession(focus.sessionId)
+  }
+}
+
 /**
  * `notification_prefs` — validate + store the notification-prefs snapshot.
  * Slice-2 RECONCILE: both clients now share `handleNotificationPrefs`. A failed
@@ -1292,6 +1423,10 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_stopped: dispatchSessionStopped,
     session_restore_failed: dispatchSessionRestoreFailed,
     session_persist_failed: dispatchSessionPersistFailed,
+    // --- multi-client cases (#5618 Batch 4) ---
+    primary_changed: dispatchPrimaryChanged,
+    session_role: dispatchSessionRole,
+    client_focus_changed: dispatchClientFocusChanged,
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
@@ -1366,6 +1501,10 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'session_stopped',
   'session_restore_failed',
   'session_persist_failed',
+  // --- multi-client cases (#5618 Batch 4) ---
+  'primary_changed',
+  'session_role',
+  'client_focus_changed',
   'session_usage',
   'session_context',
   'session_cost_threshold_crossed',

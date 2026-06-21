@@ -69,16 +69,32 @@ function makeAdapter(init?: {
    * message and applies its session patch either way.
    */
   infoToast?: boolean
+  /**
+   * When true, the adapter wires the multi-client accessors (#5618 Batch 4):
+   * `getMyClientId` / `getFollowMode` / `switchSession` (records into
+   * `switchedSessions`) and `setPrimaryClientId` (records into `primaryClientIds`).
+   * When omitted, the accessors are absent, so session_role / client_focus_changed
+   * DECLINE (`runDispatch` false). primary_changed never declines.
+   */
+  multiClient?: boolean
+  /** Seed for `getMyClientId` (only when `multiClient`). */
+  myClientId?: string | null
+  /** Seed for `getFollowMode` (only when `multiClient`). */
+  followMode?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
   let sessionList: SessionInfo[] = init?.sessionList ?? []
+  const myClientId = init?.myClientId ?? null
+  const followMode = init?.followMode ?? false
   const flat: Record<string, unknown> = {}
   const addedMessages: ChatMessage[] = []
   const notifications: Array<{ sessionId: string; eventType: string; message: string }> = []
   const inventorySyncs: Array<{ kind: string; list: unknown[] }> = []
   const serverErrors: Array<{ message: string; category?: string; sessionId?: string; recoverable?: boolean }> = []
   const infoNotifications: string[] = []
+  const switchedSessions: string[] = []
+  const primaryClientIds: Array<string | null> = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -115,6 +131,14 @@ function makeAdapter(init?: {
     ...(init?.infoToast
       ? { addInfoNotification: (message: string) => infoNotifications.push(message) }
       : {}),
+    ...(init?.multiClient
+      ? {
+          getMyClientId: () => myClientId,
+          getFollowMode: () => followMode,
+          switchSession: (sessionId: string) => switchedSessions.push(sessionId),
+          setPrimaryClientId: (clientId: string | null) => primaryClientIds.push(clientId),
+        }
+      : {}),
   }
 
   return {
@@ -126,6 +150,8 @@ function makeAdapter(init?: {
     inventorySyncs,
     serverErrors,
     infoNotifications,
+    switchedSessions,
+    primaryClientIds,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -539,6 +565,81 @@ describe('shared dispatch table', () => {
       const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } }, infoToast: true })
       dispatch(env, { type: 'session_stopped', sessionId: 's1', code: 0 })
       expect(env.infoNotifications).toEqual(['Session stopped.'])
+    })
+  })
+
+  describe('primary_changed / session_role / client_focus_changed (#5618 Batch 4)', () => {
+    it('primary_changed sets primaryClientId on the target session + mirrors into the app store', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } }, multiClient: true })
+      const handled = dispatch(env, { type: 'primary_changed', sessionId: 's1', clientId: 'c1' })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.primaryClientId).toBe('c1')
+      expect(env.primaryClientIds).toEqual(['c1']) // setPrimaryClientId mirror
+    })
+
+    it('primary_changed writes flat primaryClientId for the default scope, with NO mirror when the hook is absent', () => {
+      const env = makeAdapter() // no multiClient → no setPrimaryClientId hook
+      const handled = dispatch(env, { type: 'primary_changed', clientId: 'c1' })
+      expect(handled).toBe(true)
+      expect(env.flat.primaryClientId).toBe('c1')
+      expect(env.primaryClientIds).toEqual([])
+    })
+
+    it('session_role derives this client\'s role and stores it on the session', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } }, multiClient: true, myClientId: 'c1' })
+      const handled = dispatch(env, { type: 'session_role', sessionId: 's1', primaryClientId: 'c2' })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.sessionRole).toBe('observer')
+      expect(env.sessions.s1.primaryClientId).toBe('c2')
+    })
+
+    it('session_role DECLINES (runDispatch false) when getMyClientId is absent', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } } })
+      expect(dispatch(env, { type: 'session_role', sessionId: 's1', primaryClientId: 'c2' })).toBe(false)
+      expect(env.sessions.s1.sessionRole).toBeUndefined()
+    })
+
+    it('client_focus_changed auto-switches under follow mode (another client, local target, not active)', () => {
+      const env = makeAdapter({
+        sessions: { cur: { sessionId: 'cur', messages: [] }, other: { sessionId: 'other', messages: [] } },
+        activeSessionId: 'cur',
+        multiClient: true,
+        myClientId: 'me',
+        followMode: true,
+      })
+      const handled = dispatch(env, { type: 'client_focus_changed', clientId: 'them', sessionId: 'other' })
+      expect(handled).toBe(true)
+      expect(env.switchedSessions).toEqual(['other'])
+    })
+
+    it('client_focus_changed does NOT switch when follow mode is off / self / non-local / already active', () => {
+      const base = {
+        sessions: { cur: { sessionId: 'cur', messages: [] }, other: { sessionId: 'other', messages: [] } },
+        activeSessionId: 'cur',
+        multiClient: true,
+        myClientId: 'me',
+      }
+      const off = makeAdapter({ ...base, followMode: false })
+      dispatch(off, { type: 'client_focus_changed', clientId: 'them', sessionId: 'other' })
+      expect(off.switchedSessions).toEqual([])
+
+      const self = makeAdapter({ ...base, followMode: true })
+      dispatch(self, { type: 'client_focus_changed', clientId: 'me', sessionId: 'other' })
+      expect(self.switchedSessions).toEqual([])
+
+      const nonLocal = makeAdapter({ ...base, followMode: true })
+      dispatch(nonLocal, { type: 'client_focus_changed', clientId: 'them', sessionId: 'missing' })
+      expect(nonLocal.switchedSessions).toEqual([])
+
+      const alreadyActive = makeAdapter({ ...base, followMode: true })
+      dispatch(alreadyActive, { type: 'client_focus_changed', clientId: 'them', sessionId: 'cur' })
+      expect(alreadyActive.switchedSessions).toEqual([])
+    })
+
+    it('client_focus_changed DECLINES when the multi-client accessors are absent', () => {
+      const env = makeAdapter({ sessions: { other: { sessionId: 'other', messages: [] } } })
+      expect(dispatch(env, { type: 'client_focus_changed', clientId: 'them', sessionId: 'other' })).toBe(false)
+      expect(env.switchedSessions).toEqual([])
     })
   })
 

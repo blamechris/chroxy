@@ -59,6 +59,10 @@ export interface FixtureInitialState {
   sessions?: Record<string, Record<string, unknown>>
   /** Session list (for `session_updated`). */
   sessionList?: SessionInfo[]
+  /** This client's own id (#5618 Batch 4 — for session_role / client_focus_changed). */
+  myClientId?: string | null
+  /** Follow-mode flag (#5618 Batch 4 — for client_focus_changed auto-switch). */
+  followMode?: boolean
 }
 
 /**
@@ -94,6 +98,12 @@ export interface FixtureExpectation {
    * care".
    */
   infoNotifications?: string[]
+  /**
+   * Expected `switchSession` invocations (#5618 Batch 4), in order — the
+   * client_focus_changed follow-mode auto-switch. Both clients call it
+   * identically; an empty array asserts NO switch fired. Omit to "don't care".
+   */
+  switchedSessions?: string[]
   /** When true, assert NO mutation happened at all (state is untouched). */
   noop?: boolean
 }
@@ -468,6 +478,60 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     init: { sessions: { s1: {} } },
     message: { type: 'session_stopped', sessionId: 's1', code: 0 },
     expect: { sessions: { s1: { stoppedCode: 0 } } },
+  },
+
+  // 4g. multi-client cases (#5618 Batch 4). The clients diverged only in where
+  // presence state lives (app multi-client store vs dashboard flat) — hidden
+  // behind the getMyClientId / getFollowMode / switchSession accessors — so the
+  // mutations are identical. The app's extra setPrimaryClientId mirror is
+  // out-of-contract (covered by dispatch-table.test.ts units).
+  {
+    name: 'primary_changed sets primaryClientId on the explicit target session',
+    type: 'primary_changed',
+    init: { sessions: { s1: {} } },
+    message: { type: 'primary_changed', sessionId: 's1', clientId: 'c1' },
+    expect: { sessions: { s1: { primaryClientId: 'c1' } } },
+  },
+  {
+    name: 'primary_changed writes flat primaryClientId for the server-wide default',
+    type: 'primary_changed',
+    message: { type: 'primary_changed', clientId: 'c1' },
+    expect: { flat: { primaryClientId: 'c1' } },
+  },
+  {
+    name: 'session_role derives primary when the server names this client',
+    type: 'session_role',
+    init: { myClientId: 'c1', sessions: { s1: {} } },
+    message: { type: 'session_role', sessionId: 's1', primaryClientId: 'c1' },
+    expect: { sessions: { s1: { sessionRole: 'primary', primaryClientId: 'c1' } } },
+  },
+  {
+    name: 'session_role derives observer when another client is primary',
+    type: 'session_role',
+    init: { myClientId: 'c1', sessions: { s1: {} } },
+    message: { type: 'session_role', sessionId: 's1', primaryClientId: 'c2' },
+    expect: { sessions: { s1: { sessionRole: 'observer', primaryClientId: 'c2' } } },
+  },
+  {
+    name: 'client_focus_changed auto-switches when follow mode is on (another client, local target)',
+    type: 'client_focus_changed',
+    init: { myClientId: 'me', followMode: true, activeSessionId: 'cur', sessions: { cur: {}, other: {} } },
+    message: { type: 'client_focus_changed', clientId: 'them', sessionId: 'other' },
+    expect: { switchedSessions: ['other'] },
+  },
+  {
+    name: 'client_focus_changed does NOT switch when follow mode is off',
+    type: 'client_focus_changed',
+    init: { myClientId: 'me', followMode: false, activeSessionId: 'cur', sessions: { cur: {}, other: {} } },
+    message: { type: 'client_focus_changed', clientId: 'them', sessionId: 'other' },
+    expect: { noop: true },
+  },
+  {
+    name: 'client_focus_changed ignores self-focus events even with follow mode on',
+    type: 'client_focus_changed',
+    init: { myClientId: 'me', followMode: true, activeSessionId: 'cur', sessions: { cur: {}, other: {} } },
+    message: { type: 'client_focus_changed', clientId: 'me', sessionId: 'other' },
+    expect: { noop: true },
   },
 
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
