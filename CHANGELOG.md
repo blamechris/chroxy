@@ -14,7 +14,7 @@ A large release on three fronts. **A security and identity-rotation wave** lands
 ### Added
 
 - **Control Room Integrations tab (#5498):** per-repo repo-memory status with a Reindex action (#5503, #5504), repo-relay observability — workflow presence, version drift, run status (#5505) — re-running failed repo-relay runs (#5506), and surfacing repo-memory's top missed search queries (#6107).
-- **Control Room Settings tab (#5544):** single home for appearance, session defaults, shortcuts, provider credentials/BYOK, notification preferences, and desktop options; gear, Cmd+,, and Tauri menus redirect to it (#5549).
+- **Control Room Settings tab (#5544):** single home for appearance, session defaults, shortcuts, provider credentials/BYOK, notification preferences, and desktop options; the gear icon, the `Cmd+,` shortcut, and Tauri menus redirect to it (#5549).
 - **Control Room Skills tab (#5554):** skill inventory + usage history (#5574).
 - **Control Room Mailbox tab (#5919):** agent-to-agent mailbox observability.
 - **Control Room env/runtime control epic #5530** — the dashboard becomes a live ops surface:
