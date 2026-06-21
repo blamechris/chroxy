@@ -159,11 +159,12 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
     // types that fell out. The band ratchets BOTH ways: a real new both-clients
     // switch type (universe grows past the ceiling) is a DELIBERATE bump, and
     // migrating types OUT to the shared dispatch table (universe shrinks below
-    // the floor) lowers it — adjust both bounds in the same PR. Floor last
-    // lowered 55→45 for #5618 Batch 4 (primary_changed / session_role /
+    // the floor) lowers it — adjust both bounds in the same PR. Keep the band
+    // TIGHT around the real count so the "fail loudly" intent stays sharp. Band
+    // last set for #5618 Batch 4 (primary_changed / session_role /
     // client_focus_changed migrated out; universe 55→52).
-    expect(both.length).toBeGreaterThanOrEqual(45)
-    expect(both.length).toBeLessThanOrEqual(70)
+    expect(both.length).toBeGreaterThanOrEqual(48)
+    expect(both.length).toBeLessThanOrEqual(58)
   })
 
   it('every both-clients switch type has a fixture or an explicit PENDING entry', () => {
