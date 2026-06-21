@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -1001,6 +1001,15 @@ export interface ConnectionState {
    */
   wslStatus: ServerWslStatusSnapshotMessage | null;
   /**
+   * #5969 (epic #5422 phase 4) — Control Room mission control: the latest
+   * `external_sessions_snapshot` (live external sessions ingested via
+   * /api/events, read-only), or null before the first one lands. Replaced
+   * wholesale on each snapshot.
+   */
+  externalSessionsSnapshot: ServerExternalSessionsSnapshotMessage | null;
+  /** #5969 — true between dispatching an `external_sessions_request` and its snapshot. */
+  externalSessionsLoading: boolean;
+  /**
    * #6138 — true between dispatching a `wsl_status_request` and the matching
    * snapshot arriving (Refresh spinner). Cleared when a VALID snapshot lands (a
    * malformed payload is dropped and leaves this true).
@@ -1544,6 +1553,8 @@ export interface ConnectionState {
   // whether the message went on the wire (false = socket closed). Sets
   // `mailboxStatusLoading` while in flight.
   requestMailboxStatus: () => boolean;
+  /** #5969 — request the live external-session snapshot for mission control. */
+  requestExternalSessions: () => boolean;
 
   // #5553 — per-repo session preset surface (host-authority). Each returns
   // whether the message went on the wire. Replies arrive as

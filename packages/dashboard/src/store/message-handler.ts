@@ -152,7 +152,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2518,6 +2518,20 @@ function handleMailboxStatusSnapshot(msg: Record<string, unknown>, _get: MsgGet,
 }
 
 /**
+ * #5969 (epic #5422 phase 4) — mission-control external sessions
+ * `external_sessions_snapshot`: REPLACE the stored snapshot with the carried
+ * read-only external sessions and clear the in-flight loading flag. Same
+ * defensive pattern as the mailbox/host snapshots — Zod-validated, so a
+ * malformed payload is dropped rather than crashing the view, and the loading
+ * flag clears only on a successful parse.
+ */
+function handleExternalSessionsSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerExternalSessionsSnapshotSchema.safeParse(msg);
+  if (!parsed.success) return;
+  set({ externalSessionsSnapshot: parsed.data, externalSessionsLoading: false });
+}
+
+/**
  * #5553 — per-repo session-preset snapshot. The reply to session_preset_get /
  * _set / _approve / _revoke. Store the resolved preset keyed by cwd so the
  * create-session modal can disclose "repo preset applies" and the per-repo
@@ -3111,6 +3125,8 @@ const HANDLERS: Record<string, Handler> = {
   host_status_snapshot: handleHostStatusSnapshot,
   // Mailbox (#5914 follow-up): Control Room "Mailbox" tab survey snapshot.
   mailbox_status_snapshot: handleMailboxStatusSnapshot,
+  // #5969 (epic #5422 phase 4): mission-control external-session survey snapshot.
+  external_sessions_snapshot: handleExternalSessionsSnapshot,
   session_preset_snapshot: handleSessionPresetSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,

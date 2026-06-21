@@ -40,6 +40,9 @@ function resetStore(over: Record<string, unknown> = {}) {
     // #6183: the mission-control tab's wrapper reads these from the store.
     sessions: [],
     activity: { bySession: {} },
+    // #5969: mission control also pulls the external-session snapshot on open.
+    externalSessionsSnapshot: null,
+    requestExternalSessions: vi.fn(() => true),
     ...over,
   }
 }

@@ -489,6 +489,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // mailbox_status_snapshot handler. Null until the first survey lands.
   mailboxStatus: null,
   mailboxStatusLoading: false,
+  // #5969 (epic #5422 phase 4): mission-control external sessions (read-only,
+  // from /api/events), fed by the external_sessions_snapshot handler. Null
+  // until the first survey lands.
+  externalSessionsSnapshot: null,
+  externalSessionsLoading: false,
   // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
   sessionPresetSnapshots: {},
   // #5553: server-provided composer seeds keyed by sessionId (drained by App).
@@ -942,6 +947,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ mailboxStatusLoading: true });
       wsSend(socket, { type: 'mailbox_status_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #5969 (epic #5422 phase 4): request the live external-session snapshot for
+  // mission control. Mirrors requestMailboxStatus — sends
+  // `external_sessions_request`, flips `externalSessionsLoading`, returns false
+  // (without setting loading) when the socket is closed.
+  requestExternalSessions: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ externalSessionsLoading: true });
+      wsSend(socket, { type: 'external_sessions_request' });
       return true;
     }
     return false;

@@ -164,6 +164,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'integration_action_ack',     // Control Room Integrations action ack (#5500) — dashboard-only
   'integration_status_snapshot',// Control Room Integrations survey (#5499) — dashboard-only
   'mailbox_status_snapshot',    // Control Room Mailbox tab survey (#5914) — dashboard-only
+  'external_sessions_snapshot', // Control Room mission-control external-session survey (#5969, epic #5422) — dashboard-only (mobile parity tracked by #5968)
   'monthly_budget',             // monthly programmatic-credit meter (#5665) — dashboard sidebar
   'pair_pending',               // pairing-approval banner fan-out (#5510) — dashboard-only for v1
   'pair_resolved',              // pairing-approval banner retraction (#5510) — dashboard-only for v1

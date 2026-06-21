@@ -23,6 +23,7 @@ import { SkillsUsageRecorder } from './skills-usage.js'
 import { resolveSessionPreset, foldPreamble } from './session-preset.js'
 import { SessionPresetTrustStore } from './session-preset-trust.js'
 import { createLogger } from './logger.js'
+import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
 import {
@@ -510,6 +511,7 @@ export class SessionManager extends EventEmitter {
     this._sessions = new Map() // sessionId -> { session, name, cwd, createdAt, agentCommId? }
     this._agentCommIds = new Map() // agentCommId -> sessionId (mailbox live-interrupt routing)
     this._mailboxEvents = [] // bounded ring buffer of recent mailbox deliveries (Control Room observability)
+    this._externalSessions = new ExternalSessionRegistry() // #5969 — live external (/api/events) sessions for mission control
     this._sessionLastActivityAt = new Map() // sessionId -> last meaningful user/agent activity timestamp
     this._sessionCounter = 0   // monotonically incrementing; used for auto-naming
     this._locks = new SessionLockManager()
@@ -680,6 +682,28 @@ export class SessionManager extends EventEmitter {
   /** Recent mailbox delivery events, newest first (a copy — safe to serialize). */
   getMailboxEvents() {
     return [...this._mailboxEvents].reverse()
+  }
+
+  /**
+   * Fold one ingested external-session event (#5969) into the registry that
+   * backs the Control Room mission-control read-only section. Pure
+   * observability — never throws into the ingest path, so the caller
+   * (handleEventIngest) can fire-and-forget. Events without a sessionId are
+   * ignored by the registry.
+   * @param {string} type ingest event type (session_start, user_prompt_submit, stop, subagent_start, subagent_stop, session_end, …)
+   * @param {string} source the emitter source from the event envelope
+   * @param {string} sessionId the external session id
+   * @param {{ project?: string|null, cwd?: string|null, ts?: number }} [meta]
+   */
+  recordExternalSessionEvent(type, source, sessionId, meta) {
+    try {
+      this._externalSessions.record(type, source, sessionId, meta || {})
+    } catch { /* observability only — never disturb the ingest path */ }
+  }
+
+  /** Live external (/api/events) sessions for mission control, newest-activity first. */
+  getExternalSessions() {
+    return this._externalSessions.getSessions()
   }
 
   /**

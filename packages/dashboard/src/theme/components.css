@@ -1454,6 +1454,35 @@ button.sidebar-token-view-session-row:hover {
   flex-wrap: wrap;
   margin-left: auto;
 }
+/* #5969 — external (/api/events) sessions: a clearly-marked read-only section. */
+.mission-control-external {
+  border-top: 1px dashed var(--border-subtle, rgba(127, 127, 127, 0.25));
+  margin-top: 4px;
+  padding-top: 8px;
+}
+.mc-readonly-badge {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted, #888);
+  background: var(--accent-purple-light, rgba(127, 127, 127, 0.12));
+  border: 1px solid var(--border-subtle, rgba(127, 127, 127, 0.25));
+  border-radius: 4px;
+  padding: 1px 5px;
+  margin-left: 8px;
+}
+/* External rows are static (no drill-down): dim slightly + show a no-cursor. */
+.mission-control-external-session .control-room-entry.is-readonly {
+  cursor: default;
+  opacity: 0.92;
+}
+.mc-subagents {
+  font-size: 10px;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-muted, #888);
+  margin-left: auto;
+  margin-right: 8px;
+}
 .mc-chip {
   font-size: 10px;
   font-variant-numeric: tabular-nums;

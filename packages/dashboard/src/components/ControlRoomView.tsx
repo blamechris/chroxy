@@ -320,13 +320,22 @@ function isStale(generatedAt: string | undefined): boolean {
 function MissionControlTab() {
   const activity = useConnectionStore((s) => s.activity)
   const sessions = useConnectionStore((s) => s.sessions)
+  // #5969 — external (/api/events) sessions are a pull survey, not live store
+  // state: request a snapshot on open so they appear alongside managed ones.
+  const externalSnapshot = useConnectionStore((s) => s.externalSessionsSnapshot)
+  const requestExternalSessions = useConnectionStore((s) => s.requestExternalSessions)
+  useEffect(() => {
+    requestExternalSessions()
+  }, [requestExternalSessions])
   const metas = sessions.map((s) => ({
     sessionId: s.sessionId,
     cwd: s.cwd,
     name: s.name,
     worktree: s.worktree,
   }))
-  return <CrossSessionMissionControl activity={activity} sessions={metas} />
+  // A refusal snapshot carries an `error` + empty sessions — render nothing extra.
+  const external = externalSnapshot?.sessions ?? []
+  return <CrossSessionMissionControl activity={activity} sessions={metas} external={external} />
 }
 
 export interface ControlRoomViewProps {

@@ -1169,6 +1169,41 @@ export const ServerMailboxStatusSnapshotSchema = z.object({
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 })
 
+// ───────────────────────────────────────────────────────────────────────────
+// #5969 (epic #5422 phase 4) — Control Room mission control: LIVE external
+// Claude Code sessions ingested via `POST /api/events` (#5413), surfaced as
+// READ-ONLY entries. Fidelity is whatever the hook stream provides — no
+// PTY/control handle exists for a session chroxy didn't launch, so `status` is
+// only 'running' (a turn is in flight) or 'idle' (external sessions can't
+// surface 'blocked'/'failed').
+// ───────────────────────────────────────────────────────────────────────────
+
+/** One live external session (derived from the /api/events hook stream). */
+export const ExternalSessionEntrySchema = z.object({
+  /** Emitter source from the event envelope (e.g. 'cli', 'vscode'). */
+  source: z.string(),
+  sessionId: z.string(),
+  /** Display name: project → cwd basename → short session id. */
+  name: z.string(),
+  project: z.string().nullable(),
+  cwd: z.string().nullable(),
+  status: z.enum(['running', 'idle']),
+  /** Active subagent count folded from subagent_start/subagent_stop. */
+  subagents: z.number().int().nonnegative(),
+  /** Newest event time (epoch ms). */
+  lastActivityTs: z.number(),
+}).passthrough()
+
+export const ServerExternalSessionsSnapshotSchema = z.object({
+  type: z.literal('external_sessions_snapshot'),
+  /** Echoes the request's `requestId` when provided (null otherwise). */
+  requestId: z.string().nullable().optional(),
+  generatedAt: z.string().datetime(),
+  sessions: z.array(ExternalSessionEntrySchema),
+  /** Present only on a refusal (e.g. a session-bound token surveying the host). */
+  error: z.object({ code: z.string(), message: z.string() }).optional(),
+}).passthrough()
+
 // ---------------------------------------------------------------------------
 // #5553: per-repo session preset surfaces.
 //
@@ -3255,6 +3290,8 @@ export type RepoStatus = z.infer<typeof RepoStatusSchema>
 export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>
 export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>
 export type ServerMailboxStatusSnapshotMessage = z.infer<typeof ServerMailboxStatusSnapshotSchema>
+export type ExternalSessionEntry = z.infer<typeof ExternalSessionEntrySchema>
+export type ServerExternalSessionsSnapshotMessage = z.infer<typeof ServerExternalSessionsSnapshotSchema>
 export type MailboxRegistration = z.infer<typeof MailboxRegistrationSchema>
 export type MailboxDeliveryEvent = z.infer<typeof MailboxDeliveryEventSchema>
 

@@ -955,6 +955,42 @@ export declare const ServerMailboxStatusSnapshotSchema: z.ZodObject<{
         message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+/** One live external session (derived from the /api/events hook stream). */
+export declare const ExternalSessionEntrySchema: z.ZodObject<{
+    source: z.ZodString;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    project: z.ZodNullable<z.ZodString>;
+    cwd: z.ZodNullable<z.ZodString>;
+    status: z.ZodEnum<{
+        running: "running";
+        idle: "idle";
+    }>;
+    subagents: z.ZodNumber;
+    lastActivityTs: z.ZodNumber;
+}, z.core.$loose>;
+export declare const ServerExternalSessionsSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"external_sessions_snapshot">;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    generatedAt: z.ZodString;
+    sessions: z.ZodArray<z.ZodObject<{
+        source: z.ZodString;
+        sessionId: z.ZodString;
+        name: z.ZodString;
+        project: z.ZodNullable<z.ZodString>;
+        cwd: z.ZodNullable<z.ZodString>;
+        status: z.ZodEnum<{
+            running: "running";
+            idle: "idle";
+        }>;
+        subagents: z.ZodNumber;
+        lastActivityTs: z.ZodNumber;
+    }, z.core.$loose>>;
+    error: z.ZodOptional<z.ZodObject<{
+        code: z.ZodString;
+        message: z.ZodString;
+    }, z.core.$strip>>;
+}, z.core.$loose>;
 export declare const ServerSessionPresetDisclosureSchema: z.ZodObject<{
     source: z.ZodEnum<{
         daemon: "daemon";
@@ -3058,6 +3094,8 @@ export type RepoStatus = z.infer<typeof RepoStatusSchema>;
 export type HostStatusSummary = z.infer<typeof HostStatusSummarySchema>;
 export type ServerHostStatusSnapshotMessage = z.infer<typeof ServerHostStatusSnapshotSchema>;
 export type ServerMailboxStatusSnapshotMessage = z.infer<typeof ServerMailboxStatusSnapshotSchema>;
+export type ExternalSessionEntry = z.infer<typeof ExternalSessionEntrySchema>;
+export type ServerExternalSessionsSnapshotMessage = z.infer<typeof ServerExternalSessionsSnapshotSchema>;
 export type MailboxRegistration = z.infer<typeof MailboxRegistrationSchema>;
 export type MailboxDeliveryEvent = z.infer<typeof MailboxDeliveryEventSchema>;
 export type ServerSessionPresetDisclosure = z.infer<typeof ServerSessionPresetDisclosureSchema>;

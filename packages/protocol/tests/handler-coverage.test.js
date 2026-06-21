@@ -170,6 +170,7 @@ const PLATFORM_SPECIFIC = {
   'wsl_action_ack': 'dashboard', // Control Room WSL2 start/terminate action ack (#6138, epic #5530) — the dashboard consumes it to clear pending + record the outcome (handleWslActionAck). Windows-host-only surface.
   'skills_inventory_snapshot': 'dashboard', // Control Room Skills inventory survey reply (#5554, epic #5159) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'mailbox_status_snapshot': 'dashboard', // Control Room "Mailbox" tab survey reply (#5914 follow-up) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
+  'external_sessions_snapshot': 'dashboard', // Control Room mission-control external-session survey reply (#5969, epic #5422) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity is tracked by #5968
   'summarize_session_result': 'dashboard', // sidebar "Summarize & start new session" reply (#5547) — the sidebar context-menu idiom is dashboard-only; the mobile app is out of scope for v1 (the server endpoint is client-agnostic so the app can adopt later)
   'session_preset_snapshot': 'dashboard', // Control Room per-repo session-preset reply (#5553, epic #5159) — host-level surface (gear drawer + create-modal disclosure), dashboard-only; the server applies the preamble universally, so the mobile app needs no handler for v1 (explicitly out of scope per the issue)
   // 'agent_event' (#5016) is now handled by both dashboard and mobile
