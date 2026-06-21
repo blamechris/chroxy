@@ -73,8 +73,7 @@ export function registerIdentityCommand(program) {
     .option('--yes', 'Confirm the rotation (without this, the command only explains what it would do)')
     .action((options) => {
       try {
-        const { rotated } = runIdentityRotate(options)
-        if (!rotated) process.exitCode = 0
+        runIdentityRotate(options)
       } catch (err) {
         console.error(`identity rotate failed: ${err.message}`)
         process.exitCode = 1

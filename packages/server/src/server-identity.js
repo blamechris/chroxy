@@ -338,8 +338,10 @@ export function rotateServerIdentity({
   // Persist the new secret in place of the old (keychain or fallback file).
   const backend = persistServerIdentity(next, { keychain, filePath })
   // Write the single-hop sidecar (overwrites any prior cert — only the most
-  // recent prev→current hop is retained). Public data; mirror the secret file's
-  // directory creation. Not perm-restricted (nothing secret), but kept tidy.
+  // recent prev→current hop is retained). Public data (a signature + two public
+  // keys); reuse writeFileRestricted for its ATOMIC temp+rename write so a crash
+  // can't leave a half-written cert — the 0600 mode it also sets is incidental
+  // here (nothing secret), not a requirement.
   mkdirSync(dirname(rotationFilePath), { recursive: true })
   writeFileRestricted(
     rotationFilePath,

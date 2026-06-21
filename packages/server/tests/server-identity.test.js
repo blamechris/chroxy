@@ -2,8 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
-import { dirname } from 'node:path'
+import { join, dirname } from 'node:path'
 import {
   IDENTITY_KEY_SERVICE,
   IdentityUnavailableError,
