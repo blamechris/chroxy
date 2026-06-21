@@ -146,6 +146,33 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
           getCallback: ((name: string) => (payload: unknown) => {
             callbacks.push({ name, payload })
           }) as ClientStoreAdapter<FixtureSession>['getCallback'],
+          // #5618 Batch 2 — model the app's `mapProviderList` element-tightening
+          // (packages/app/src/store/message-handler.ts) so `provider_list`
+          // fixtures observe the REAL app filtering: drop non-object / nameless
+          // entries; copy only `name` / `capabilities` / `auth` (each kept only
+          // when a non-array object). The DASHBOARD omits this hook → writes the
+          // server payload verbatim. The divergence is locked by a `divergent`
+          // provider_list fixture.
+          mapProviderList: ((providers: unknown[]) =>
+            providers
+              .filter(
+                (p): p is { name: string; [k: string]: unknown } =>
+                  !!p && typeof p === 'object' && typeof (p as { name?: unknown }).name === 'string',
+              )
+              .map((p) => {
+                const entry: Record<string, unknown> = { name: p.name }
+                const caps = (p as { capabilities?: unknown }).capabilities
+                if (caps && typeof caps === 'object' && !Array.isArray(caps)) entry.capabilities = caps
+                const auth = (p as { auth?: unknown }).auth
+                if (auth && typeof auth === 'object' && !Array.isArray(auth)) entry.auth = auth
+                return entry
+              })) as ClientStoreAdapter<FixtureSession>['mapProviderList'],
+          // #5618 Batch 2 — the app mirrors slash/agent inventory into its
+          // secondary conversation store. Like `pushSessionNotification`, this is
+          // a UI side-effect OUTSIDE the shared store-state contract; modelled as
+          // a no-op here (no fixture asserts on it — the dispatch-table unit tests
+          // cover the hook invocation directly).
+          syncSecondaryInventory: () => {},
         }
       : {}),
   }

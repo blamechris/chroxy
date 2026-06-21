@@ -87,9 +87,6 @@ import {
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
-  handleSlashCommands as sharedSlashCommands,
-  handleAgentList as sharedAgentList,
-  handleProviderList as sharedProviderList,
   handleAuthBootstrap as sharedAuthBootstrap,
   handleTunnelUrlChanged as sharedTunnelUrlChanged,
   handleFileList as sharedFileList,
@@ -4667,30 +4664,17 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'slash_commands': {
-      const slashResult = sharedSlashCommands(msg, get().activeSessionId);
-      if (!slashResult) break;
-      set({ slashCommands: slashResult.commands as SlashCommand[] });
-      break;
-    }
+    // slash_commands / agent_list / provider_list — migrated to the shared
+    // dispatch table (#5618 Batch 2; handled by runDispatch before this switch).
+    // The dashboard has no secondary conversation store and trusts the server
+    // provider payload, so it supplies neither the `syncSecondaryInventory` nor
+    // the `mapProviderList` adapter hook — the dispatch handlers perform the
+    // plain flat-state write, exactly as these cases did. auth_bootstrap stays
+    // local. file_list remains dashboard-only.
 
     case 'file_list': {
       const fileResult = sharedFileList(msg);
       set({ filePickerFiles: fileResult.files as FilePickerItem[] });
-      break;
-    }
-
-    case 'agent_list': {
-      const agentResult = sharedAgentList(msg, get().activeSessionId);
-      if (!agentResult) break;
-      set({ customAgents: agentResult.agents as CustomAgent[] });
-      break;
-    }
-
-    case 'provider_list': {
-      const providerResult = sharedProviderList(msg);
-      if (!providerResult) break;
-      set({ availableProviders: providerResult.providers as ProviderInfo[] });
       break;
     }
 
