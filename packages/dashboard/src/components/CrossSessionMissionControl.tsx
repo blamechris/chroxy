@@ -1,7 +1,7 @@
 /**
  * CrossSessionMissionControl (#6183, Control Room v2 phase 2 / #5964) — the
- * aggregate, read-only mission-control view spanning ALL sessions, the promotion
- * of the v1 per-session ActivityTree (#5176) to "every session chroxy can see".
+ * aggregate mission-control view spanning ALL sessions, the promotion of the v1
+ * per-session ActivityTree (#5176) to "every session chroxy can see".
  *
  * Pure + prop-driven (same shape as ActivityTree): the parent passes the whole
  * `activity` reducer state + the session list; this component derives the
@@ -11,9 +11,12 @@
  * its v1 `ActivityTree`, so the per-session tree stays the single source of
  * truth (no regression) and this view is purely the aggregation layer on top.
  *
- * Read-only: no cancel affordance here (whole-turn / per-node control lives in
- * the per-session surfaces). The overall rollup is what the tray badge (#6184)
- * will consume off the same selector.
+ * Control actions (#6125, epic #5422 phase 1): when the parent supplies the
+ * optional `onCancelActivity` / `onJumpToSession` callbacks, each session's tree
+ * becomes actionable — cancel a subagent (session-scoped) or jump-to-intervene
+ * on a blocked session. Omit them and the view stays read-only. External
+ * (/api/events) sessions are always read-only — chroxy has no handle on those.
+ * The overall rollup is what the tray badge (#6184) consumes off the same selector.
  */
 import { useCallback, useState } from 'react'
 import type { ActivityState, CrossSessionMeta, SessionDerivedStatus } from '@chroxy/store-core'
