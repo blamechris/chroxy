@@ -220,6 +220,10 @@ export {
 // implementation avoids drift between the two surfaces.
 export {
   formatCostBadge,
+  // #6201: session-overview detail register (em-dash empty-state + "<$0.01"
+  // friendly label), moved out of the app's SessionOverview so all cost
+  // formatters live in this one module.
+  formatCostOverview,
   formatCostBreakdown,
   // #5039: error-path partial-cost helper shared by dashboard toast
   // sub-line and mobile Alert.alert body.

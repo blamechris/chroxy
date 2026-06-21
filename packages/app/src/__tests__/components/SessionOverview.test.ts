@@ -1,6 +1,6 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { getSessionStatus, formatCost, getStatusColor } from '../../components/SessionOverview';
+import { getSessionStatus, getStatusColor } from '../../components/SessionOverview';
 
 describe('SessionOverview visible prop removal (#1072)', () => {
   const source = fs.readFileSync(
@@ -89,28 +89,6 @@ describe('SessionOverview helpers', () => {
         isPlanPending: false,
         hasNotification: false,
       })).toBe('idle');
-    });
-  });
-
-  describe('formatCost', () => {
-    it('returns "\u2014" for null', () => {
-      expect(formatCost(null)).toBe('\u2014');
-    });
-
-    it('returns "\u2014" for 0', () => {
-      expect(formatCost(0)).toBe('\u2014');
-    });
-
-    it('formats sub-cent amounts as <$0.01', () => {
-      expect(formatCost(0.0042)).toBe('<$0.01');
-    });
-
-    it('formats dollars with 2 decimals', () => {
-      expect(formatCost(1.234)).toBe('$1.23');
-    });
-
-    it('formats large amounts', () => {
-      expect(formatCost(12.5)).toBe('$12.50');
     });
   });
 

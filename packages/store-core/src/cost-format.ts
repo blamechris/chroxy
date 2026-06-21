@@ -35,6 +35,27 @@ export function formatCostBadge(costUsd: number): string {
 }
 
 /**
+ * Format a USD value for the session-overview rows (per-session + total) —
+ * a DETAIL register distinct from `formatCostBadge`. The overview favours a
+ * clean "no spend yet" affordance and a friendly sub-cent label over always
+ * rendering a precise number:
+ *
+ *   `null` / `0`    → '—' (em-dash) — "no cost recorded yet", visually
+ *                     distinct from a real `$0.00`
+ *   `0 < x < $0.01` → '<$0.01' — human-friendly "basically free" label
+ *   `>= $0.01`      → 2 decimals (`$1.23`, `$12.50`)
+ *
+ * Used by the mobile SessionOverview screen. Kept here (not inlined in the
+ * component) so every cost formatter shares one home and the app/dashboard
+ * can't drift on cost display — the reason this module exists (#4123 / #6201).
+ */
+export function formatCostOverview(cost: number | null): string {
+  if (cost === null || cost === 0) return '—'
+  if (cost > 0 && cost < 0.01) return '<$0.01'
+  return `$${cost.toFixed(2)}`
+}
+
+/**
  * #5039: error-path partial-cost snapshot folded onto a server `error`
  * event when the failed turn ran any parent rounds + Task subagent
  * calls before the error fired. Shape returned by `handleError` and
