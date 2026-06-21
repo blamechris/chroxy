@@ -32,6 +32,7 @@ import { promisify } from 'util'
 import { readFile } from 'fs/promises'
 import { join } from 'path'
 import { resolveRepoSet } from './repo-set.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -577,7 +578,7 @@ function degradedRepo(repo, now, err) {
     attribution: null,
     onboarding: 'skipped — survey failed',
     lastTouched: now.toISOString(),
-    note: `Survey failed: ${err && err.message ? err.message : 'unknown error'}`,
+    note: `Survey failed: ${getErrorMessage(err, 'unknown error')}`,
   }
 }
 

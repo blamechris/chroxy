@@ -32,6 +32,7 @@
 
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -250,7 +251,7 @@ export async function surveyContainers(opts = {}) {
       statsById = await collectDockerStats(_execFile, runningIds)
     } catch (err) {
       // The inventory still returns; just no live resource numbers.
-      dockerStatsNote = `docker stats unavailable: ${err && err.message ? err.message : 'probe failed'}`
+      dockerStatsNote = `docker stats unavailable: ${getErrorMessage(err, 'probe failed')}`
     }
   }
 

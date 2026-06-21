@@ -20,6 +20,7 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import net from 'net'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -191,7 +192,7 @@ export async function surveySimulators(opts = {}) {
     // No xcrun (not macOS / no Xcode) or simctl failed — first-class "absent".
     return {
       ...base,
-      note: `iOS simulators are not available on this host (${err && err.message ? err.message : 'xcrun simctl failed'}).`,
+      note: `iOS simulators are not available on this host (${getErrorMessage(err, 'xcrun simctl failed')}).`,
     }
   }
 

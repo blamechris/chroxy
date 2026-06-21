@@ -47,6 +47,7 @@
 import { readFileSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { saveJsonState } from './json-state-file.js'
+import { getErrorMessage } from './utils/error-message.js'
 
 /**
  * @typedef {Object} TrustRecord
@@ -117,7 +118,7 @@ export class PathHashTrustLedger {
     try {
       parsed = JSON.parse(raw)
     } catch (err) {
-      this._log.warn(`Trust file is malformed JSON (${err && err.message ? err.message : err}); starting fresh`)
+      this._log.warn(`Trust file is malformed JSON (${getErrorMessage(err, err)}); starting fresh`)
       return empty
     }
 

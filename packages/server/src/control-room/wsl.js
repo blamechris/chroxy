@@ -21,6 +21,7 @@
 
 import { execFile } from 'child_process'
 import { promisify } from 'util'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -136,7 +137,7 @@ export async function surveyWsl(opts = {}) {
     // No wsl.exe / WSL not installed — first-class "absent".
     return {
       ...base,
-      note: `WSL is not available on this host (${err && err.message ? err.message : 'wsl.exe -l -v failed'}).`,
+      note: `WSL is not available on this host (${getErrorMessage(err, 'wsl.exe -l -v failed')}).`,
     }
   }
 

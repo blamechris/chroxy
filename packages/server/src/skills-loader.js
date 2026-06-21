@@ -66,6 +66,7 @@ import {
 import { dirname, join, relative, resolve, sep } from 'path'
 import { homedir } from 'os'
 import { createLogger } from './logger.js'
+import { getErrorMessage } from './utils/error-message.js'
 
 const log = createLogger('skills-loader')
 
@@ -528,7 +529,7 @@ export function loadActiveSkills(dir, opts = {}) {
               try {
                 onCommunityTrustPending({ name, author: communityAuthorC, source: source || null, description, path: realPath })
               } catch (err) {
-                log.warn(`onCommunityTrustPending callback threw for ${label}: ${err && err.message ? err.message : err}`)
+                log.warn(`onCommunityTrustPending callback threw for ${label}: ${getErrorMessage(err, err)}`)
               }
             }
             if (!includeInactive) continue
@@ -550,7 +551,7 @@ export function loadActiveSkills(dir, opts = {}) {
           try {
             inspectResult = trustStore.inspect(realPath, finalBody)
           } catch (err) {
-            log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+            log.warn(`Skill ${label}: trust inspect threw (${getErrorMessage(err, err)}); allowing skill`)
             inspectResult = null
           }
           if (inspectResult && inspectResult.status === 'mismatch') {
@@ -562,7 +563,7 @@ export function loadActiveSkills(dir, opts = {}) {
                   blocked: !!inspectResult.blocked, mode: trustStore.mode,
                 })
               } catch (err) {
-                log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+                log.warn(`onTrustMismatch callback threw for ${label}: ${getErrorMessage(err, err)}`)
               }
             }
             if (inspectResult.blocked) {
@@ -739,7 +740,7 @@ export function loadActiveSkills(dir, opts = {}) {
               try {
                 onCommunityTrustPending({ name, author: communityAuthorM, source: source || null, description, path: realPath2 })
               } catch (err) {
-                log.warn(`onCommunityTrustPending callback threw for ${label}: ${err && err.message ? err.message : err}`)
+                log.warn(`onCommunityTrustPending callback threw for ${label}: ${getErrorMessage(err, err)}`)
               }
             }
             if (!includeInactive) continue
@@ -761,7 +762,7 @@ export function loadActiveSkills(dir, opts = {}) {
           try {
             inspectResult = trustStore.inspect(realPath2, finalBody)
           } catch (err) {
-            log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+            log.warn(`Skill ${label}: trust inspect threw (${getErrorMessage(err, err)}); allowing skill`)
             inspectResult = null
           }
           if (inspectResult && inspectResult.status === 'mismatch') {
@@ -773,7 +774,7 @@ export function loadActiveSkills(dir, opts = {}) {
                   blocked: !!inspectResult.blocked, mode: trustStore.mode,
                 })
               } catch (err) {
-                log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+                log.warn(`onTrustMismatch callback threw for ${label}: ${getErrorMessage(err, err)}`)
               }
             }
             if (inspectResult.blocked) {
@@ -1086,7 +1087,7 @@ export function loadActiveSkills(dir, opts = {}) {
             try {
               onCommunityTrustPending({ name, author: communityAuthor, source: source || null, description, path: realPath })
             } catch (err) {
-              log.warn(`onCommunityTrustPending callback threw for ${label}: ${err && err.message ? err.message : err}`)
+              log.warn(`onCommunityTrustPending callback threw for ${label}: ${getErrorMessage(err, err)}`)
             }
           }
           if (!includeInactive) continue
@@ -1130,7 +1131,7 @@ export function loadActiveSkills(dir, opts = {}) {
           // and fall through. The `inspect` implementation owns logging
           // for normal cases; this branch only fires if the implementor
           // throws unexpectedly.
-          log.warn(`Skill ${label}: trust inspect threw (${err && err.message ? err.message : err}); allowing skill`)
+          log.warn(`Skill ${label}: trust inspect threw (${getErrorMessage(err, err)}); allowing skill`)
           inspectResult = null
         }
         if (inspectResult && inspectResult.status === 'mismatch') {
@@ -1154,7 +1155,7 @@ export function loadActiveSkills(dir, opts = {}) {
             } catch (err) {
               // Callback errors are swallowed — they shouldn't change the
               // load outcome. Pure observer concern.
-              log.warn(`onTrustMismatch callback threw for ${label}: ${err && err.message ? err.message : err}`)
+              log.warn(`onTrustMismatch callback threw for ${label}: ${getErrorMessage(err, err)}`)
             }
           }
           if (inspectResult.blocked) {

@@ -31,6 +31,7 @@ import { join } from 'path'
 import { parseDevContainer as realParseDevContainer } from '../devcontainer-config.js'
 import { DEFAULT_ALLOWED_DOCKER_IMAGES, imageMatchesAllowlist } from '../docker-image-allowlist.js'
 import { resolveEnvironmentBackend } from '../config.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 /** Isolation order is intrinsic to SessionManager (worktree created, then the
  *  worktree cwd is mounted into Docker) — there is no config knob for it. */
@@ -143,7 +144,7 @@ export function inspectRepo(repo, opts = {}) {
       error: null,
     }
   } catch (err) {
-    return { ...blank, error: err && err.message ? err.message : 'repo inspection failed' }
+    return { ...blank, error: getErrorMessage(err, 'repo inspection failed') }
   }
 }
 

@@ -22,6 +22,7 @@ import {
 } from '../config.js'
 import { validatePreset } from '../session-preset.js'
 import { validateCwdAllowed, sendSessionError } from '../handler-utils.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 /**
  * Reject a non-host (session-bound) client from a host-authority preset
@@ -229,7 +230,7 @@ function handleSessionPresetSet(ws, client, msg, ctx) {
     writeOverride(resolvedPath, toWrite, ctx.services.config?.configPath)
   } catch (err) {
     // Leak guard: never echo preset contents in the failure path.
-    sendSessionError(ws, ctx, `Failed to write session preset override: ${err && err.message ? err.message : 'error'}`)
+    sendSessionError(ws, ctx, `Failed to write session preset override: ${getErrorMessage(err, 'error')}`)
     return
   }
 

@@ -23,6 +23,7 @@
 import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import net from 'net'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -154,7 +155,7 @@ export async function surveyEmulators(opts = {}) {
     // No `emulator` binary (Android SDK absent) — first-class "absent".
     return {
       ...base,
-      note: `Android emulators are not available on this host (${err && err.message ? err.message : 'emulator -list-avds failed'}).`,
+      note: `Android emulators are not available on this host (${getErrorMessage(err, 'emulator -list-avds failed')}).`,
     }
   }
 
