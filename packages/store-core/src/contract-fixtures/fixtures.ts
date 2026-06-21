@@ -534,6 +534,58 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
 
+  // 4h. models / cost cases (#5618 Batch 5a). available_models shares the flat
+  // {availableModels, defaultModelId} write; the dashboard adds
+  // availableModelsProvider via extendModelsPatch (divergent). cost_update shares
+  // the per-session sessionCost patch; the app's flat/cost-store mirror is
+  // out-of-contract (covered by dispatch-table.test.ts units).
+  {
+    name: 'available_models replaces the flat list (app vs dashboard provider divergence)',
+    type: 'available_models',
+    message: {
+      type: 'available_models',
+      models: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+      defaultModel: 'opus',
+      provider: 'claude-tui',
+    },
+    divergent: {
+      app: {
+        flat: {
+          availableModels: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+          defaultModelId: 'opus',
+        },
+      },
+      dashboard: {
+        flat: {
+          availableModels: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+          defaultModelId: 'opus',
+          availableModelsProvider: 'claude-tui',
+        },
+      },
+      reason: 'dashboard tracks availableModelsProvider via extendModelsPatch; the app omits it',
+    },
+  },
+  {
+    name: 'available_models is a no-op for a non-array payload (preserves the existing list)',
+    type: 'available_models',
+    message: { type: 'available_models' },
+    expect: { noop: true },
+  },
+  {
+    name: 'cost_update applies the per-session sessionCost patch (explicit target)',
+    type: 'cost_update',
+    init: { sessions: { s1: {} } },
+    message: { type: 'cost_update', sessionId: 's1', sessionCost: 1.23 },
+    expect: { sessions: { s1: { sessionCost: 1.23 } } },
+  },
+  {
+    name: 'cost_update falls back to the active session when sessionId is omitted',
+    type: 'cost_update',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'cost_update', sessionCost: 0.5 },
+    expect: { sessions: { s1: { sessionCost: 0.5 } } },
+  },
+
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
   // session was not paused; no-op when it was (budget_resumed already noted it)
   {

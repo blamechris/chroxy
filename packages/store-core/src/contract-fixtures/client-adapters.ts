@@ -221,14 +221,27 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
           // session/flat primaryClientId write IS asserted; the dispatch-table
           // unit tests cover the hook invocation). The dashboard omits it.
           setPrimaryClientId: () => {},
+          // #5618 Batch 5a — cost_update's app-only flat/cost-store mirror. Out
+          // of the shared contract (the shared sessionCost patch IS asserted);
+          // modelled as a no-op, with the hook invocation covered by the
+          // dispatch-table unit tests. The dashboard omits it.
+          setCostUpdate: () => {},
         }
       : {}),
     // #5618 Batch 3 — only the DASHBOARD shows the session_stopped info toast
     // (#4878); the app OMITS `addInfoNotification` (#4879). Record it on the
     // dashboard side so a unit/contract assertion can observe the divergence;
     // the app's empty array IS the contract for that case.
+    // #5618 Batch 5a — only the DASHBOARD contributes availableModelsProvider to
+    // the available_models patch (the app omits the hook). Locked by a divergent
+    // fixture (dashboard flat carries the extra field; app's does not).
     ...(kind === 'dashboard'
-      ? { addInfoNotification: (message: string) => infoNotifications.push(message) }
+      ? {
+          addInfoNotification: (message: string) => infoNotifications.push(message),
+          extendModelsPatch: (msg: Record<string, unknown>) => ({
+            availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
+          }),
+        }
       : {}),
   }
 

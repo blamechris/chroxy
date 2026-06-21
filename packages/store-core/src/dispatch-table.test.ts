@@ -81,6 +81,18 @@ function makeAdapter(init?: {
   myClientId?: string | null
   /** Seed for `getFollowMode` (only when `multiClient`). */
   followMode?: boolean
+  /**
+   * When true, the adapter wires `extendModelsPatch` (the dashboard's
+   * availableModelsProvider contribution, #5618 Batch 5a). When omitted, the
+   * available_models patch carries only the shared fields (the app's behaviour).
+   */
+  extendModels?: boolean
+  /**
+   * When true, the adapter wires `setCostUpdate` (records into `costUpdates`) —
+   * cost_update's app-only flat/cost-store mirror (#5618 Batch 5a). When omitted,
+   * cost_update applies only the shared sessionCost patch (the dashboard).
+   */
+  costMirror?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -95,6 +107,7 @@ function makeAdapter(init?: {
   const infoNotifications: string[] = []
   const switchedSessions: string[] = []
   const primaryClientIds: Array<string | null> = []
+  const costUpdates: Array<{ totalCost: number | null; budget: number | null }> = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -139,6 +152,19 @@ function makeAdapter(init?: {
           setPrimaryClientId: (clientId: string | null) => primaryClientIds.push(clientId),
         }
       : {}),
+    ...(init?.extendModels
+      ? {
+          extendModelsPatch: (msg: Record<string, unknown>) => ({
+            availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
+          }),
+        }
+      : {}),
+    ...(init?.costMirror
+      ? {
+          setCostUpdate: (totalCost: number | null, budget: number | null) =>
+            costUpdates.push({ totalCost, budget }),
+        }
+      : {}),
   }
 
   return {
@@ -152,6 +178,7 @@ function makeAdapter(init?: {
     infoNotifications,
     switchedSessions,
     primaryClientIds,
+    costUpdates,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -640,6 +667,60 @@ describe('shared dispatch table', () => {
       const env = makeAdapter({ sessions: { other: { sessionId: 'other', messages: [] } } })
       expect(dispatch(env, { type: 'client_focus_changed', clientId: 'them', sessionId: 'other' })).toBe(false)
       expect(env.switchedSessions).toEqual([])
+    })
+  })
+
+  describe('available_models / cost_update (#5618 Batch 5a)', () => {
+    const modelsMsg = {
+      type: 'available_models',
+      models: [{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }],
+      defaultModel: 'opus',
+      provider: 'claude-tui',
+    }
+
+    it('available_models replaces the flat list + default (app: no provider field)', () => {
+      const env = makeAdapter()
+      const handled = dispatch(env, modelsMsg)
+      expect(handled).toBe(true)
+      expect(env.flat.availableModels).toEqual([{ id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' }])
+      expect(env.flat.defaultModelId).toBe('opus')
+      expect(env.flat.availableModelsProvider).toBeUndefined()
+    })
+
+    it('available_models adds availableModelsProvider when extendModelsPatch is wired (dashboard)', () => {
+      const env = makeAdapter({ extendModels: true })
+      dispatch(env, modelsMsg)
+      expect(env.flat.availableModelsProvider).toBe('claude-tui')
+    })
+
+    it('available_models is owned-but-no-op for a non-array payload (preserves the list)', () => {
+      const env = makeAdapter()
+      expect(dispatch(env, { type: 'available_models' })).toBe(true)
+      expect(env.flat.availableModels).toBeUndefined()
+      expect(env.flat.defaultModelId).toBeUndefined()
+    })
+
+    it('cost_update applies the per-session sessionCost patch + app mirror when wired', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } }, costMirror: true })
+      const handled = dispatch(env, { type: 'cost_update', sessionId: 's1', sessionCost: 1.23, totalCost: 9.9, budget: 20 })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.sessionCost).toBe(1.23)
+      expect(env.costUpdates).toEqual([{ totalCost: 9.9, budget: 20 }])
+    })
+
+    it('cost_update applies the session patch with NO mirror when setCostUpdate is absent (dashboard)', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } } })
+      const handled = dispatch(env, { type: 'cost_update', sessionId: 's1', sessionCost: 1.23, totalCost: 9.9 })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.sessionCost).toBe(1.23)
+      expect(env.costUpdates).toEqual([])
+    })
+
+    it('cost_update falls back to the active session and coerces non-number mirror fields to null', () => {
+      const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } }, costMirror: true })
+      dispatch(env, { type: 'cost_update', sessionCost: 0.5 })
+      expect(env.sessions.s1.sessionCost).toBe(0.5)
+      expect(env.costUpdates).toEqual([{ totalCost: null, budget: null }])
     })
   })
 

@@ -89,6 +89,9 @@ import {
   handlePrimaryChanged,
   handleSessionRole,
   handleClientFocusChanged,
+  // --- models / cost cases (#5618 Batch 5a) ---
+  handleAvailableModels,
+  handleCostUpdate,
   handleSessionUsage,
   handleSessionContext,
   handleModelChangedPatch,
@@ -187,6 +190,10 @@ export interface DispatchSessionBase {
   // Both clients' real `SessionState` carry these (multi-client presence, #5281).
   primaryClientId?: string | null
   sessionRole?: SessionRole | null
+  // --- cost_update (#5618 Batch 5a) ---
+  // `sessionCost` — written by cost_update (the per-session running cost).
+  // Both clients' real `SessionState` carry it (BaseSessionState).
+  sessionCost?: number | null
 }
 
 /**
@@ -370,6 +377,28 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * regardless).
    */
   setPrimaryClientId?(clientId: string | null): void
+  /**
+   * Contribute extra flat fields to the `available_models` patch (#5618 Batch 5a).
+   * The dashboard tracks which provider the model list is for
+   * (`availableModelsProvider`, parsed from `msg.provider`) and writes it in the
+   * SAME `set` as the models; the app store has no such field. The dispatcher
+   * spreads the returned object into the single `setState` patch, preserving the
+   * single-write behaviour.
+   *
+   * OPTIONAL: when omitted (the app), no extra fields are added. Returns the
+   * patch fragment (e.g. `{ availableModelsProvider }`); receives the raw wire
+   * message so the client parses only the fields it needs.
+   */
+  extendModelsPatch?(msg: Record<string, unknown>): Record<string, unknown>
+  /**
+   * Mirror a cost update into the client's flat state + cost store (#5618 Batch 5a).
+   * `cost_update`'s shared effect is the per-session `sessionCost` patch; the app
+   * ADDITIONALLY writes flat `totalCost`/`costBudget` and dual-writes the
+   * `useCostStore`. The dashboard does neither. A platform-specific side-effect
+   * OUTSIDE the shared store-state contract; cost_update always OWNS the message
+   * (the session patch applies regardless), so it never declines.
+   */
+  setCostUpdate?(totalCost: number | null, budget: number | null): void
 }
 
 /**
@@ -548,6 +577,22 @@ export interface DispatchMessageMap {
     type: 'client_focus_changed'
     clientId?: string
     sessionId?: string
+  }
+  // --- models / cost cases (#5618 Batch 5a) ---
+  available_models: {
+    type: 'available_models'
+    models?: unknown[]
+    defaultModel?: string
+    // dashboard-only: which provider the list is for (parsed at the call site).
+    provider?: string
+  }
+  cost_update: {
+    type: 'cost_update'
+    sessionId?: string
+    sessionCost?: number
+    // app-only flat/cost-store mirror fields (parsed at the call site).
+    totalCost?: number
+    budget?: number
   }
   session_usage: {
     type: 'session_usage'
@@ -1209,6 +1254,44 @@ function dispatchClientFocusChanged<S extends DispatchSessionBase>(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Models / cost cases (#5618 Batch 5a)
+//
+// available_models replaces the flat model list (+ the dashboard's extra
+// `availableModelsProvider` via `extendModelsPatch`). cost_update applies the
+// shared per-session `sessionCost` patch (+ the app's flat/cost-store mirror via
+// `setCostUpdate`). Both ALWAYS own the message — the optional hooks only carry
+// the platform-specific extra, never gate ownership.
+// ---------------------------------------------------------------------------
+
+/** `available_models` — replace the flat model list (skip entirely if not an array). */
+function dispatchAvailableModels<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['available_models'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  // Both clients guard on Array.isArray BEFORE writing — a non-array payload is a
+  // no-op that PRESERVES the existing list (NOT a clobber to []).
+  if (!Array.isArray(msg.models)) return
+  const { models, defaultModelId } = handleAvailableModels(msg as Record<string, unknown>)
+  const extra = adapter.extendModelsPatch ? adapter.extendModelsPatch(msg as Record<string, unknown>) : {}
+  adapter.setState({ availableModels: models, defaultModelId, ...extra } as Record<string, unknown>)
+}
+
+/** `cost_update` — per-session sessionCost patch (+ app flat/cost-store mirror). */
+function dispatchCostUpdate<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['cost_update'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const result = handleCostUpdate(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (result.sessionId && adapter.hasSession(result.sessionId)) {
+    adapter.updateSession(result.sessionId, () => result.patch as Partial<S>)
+  }
+  // App-only: flat totalCost/costBudget + the useCostStore dual-write.
+  const totalCost = typeof msg.totalCost === 'number' ? msg.totalCost : null
+  const budget = typeof msg.budget === 'number' ? msg.budget : null
+  adapter.setCostUpdate?.(totalCost, budget)
+}
+
 /**
  * `notification_prefs` — validate + store the notification-prefs snapshot.
  * Slice-2 RECONCILE: both clients now share `handleNotificationPrefs`. A failed
@@ -1427,6 +1510,9 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     primary_changed: dispatchPrimaryChanged,
     session_role: dispatchSessionRole,
     client_focus_changed: dispatchClientFocusChanged,
+    // --- models / cost cases (#5618 Batch 5a) ---
+    available_models: dispatchAvailableModels,
+    cost_update: dispatchCostUpdate,
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
@@ -1505,6 +1591,9 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'primary_changed',
   'session_role',
   'client_focus_changed',
+  // --- models / cost cases (#5618 Batch 5a) ---
+  'available_models',
+  'cost_update',
   'session_usage',
   'session_context',
   'session_cost_threshold_crossed',

@@ -70,7 +70,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'auth_bootstrap',
   'auth_fail',
   'auth_ok',
-  'available_models',
+  // available_models — migrated to the shared dispatch table (#5618 Batch 5a).
   'checkpoint_created',
   'checkpoint_list',
   'checkpoint_restored',
@@ -79,7 +79,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'client_joined',
   'client_left',
   'conversations_list',
-  'cost_update',
+  // cost_update — migrated to the shared dispatch table (#5618 Batch 5a).
   'history_replay_end',
   'key_exchange_ok',
   // multi_question_intervention — migrated to the shared dispatch table (#5618);
