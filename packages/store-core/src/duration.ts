@@ -6,9 +6,12 @@
  *   - `formatDurationTerse`   — "30s" / "5m" / "1h 2m"  (chip / inline labels)
  *   - `formatDurationVerbose` — "30 seconds" / "5 minutes" / "2 hours" (prose)
  *
- * Consolidated here (#6201 SOLID/DRY sweep) as the single cross-package source,
- * after living as private helpers inlined in `ActivityIndicator.tsx` (#4308) on
- * BOTH the app and dashboard plus `StreamStallChip.tsx` (#4497, PR #4505). The
+ * Consolidated here (#6201 SOLID/DRY sweep) as the single cross-package source.
+ * History: originally inlined as private helpers in `ActivityIndicator.tsx`
+ * (#4308) and `StreamStallChip.tsx` (#4497, PR #4505); the dashboard copies were
+ * then folded into `dashboard/src/utils/duration.ts` (#4510); #6201 promotes that
+ * dashboard module into store-core and retires the app's separate inlined copy,
+ * so the app + dashboard now share one source. The
  * terse form is wrong for natural-language sentences ("No response for 5m") and
  * the verbose form is wrong for compact chips ("Running Bash · 30 seconds"); we
  * keep both registers but ship them from one place so future consumers (app,
