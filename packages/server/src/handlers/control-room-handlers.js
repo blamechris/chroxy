@@ -45,6 +45,7 @@ import { surveyWsl, runWslAction, WSL_ACTIONS } from '../control-room/wsl.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
 import { makeSurveyHandler, makeSyncHostSurvey, makeActionError } from '../control-room/handler-factory.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const log = createLogger('ws')
 
@@ -160,7 +161,7 @@ const handleHostStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, prep, err }) => errorSnapshot(prep.root, requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'host status survey failed',
+    message: getErrorMessage(err, 'host status survey failed'),
   }),
   run: async ({ ctx, requestId, prep }) => {
     // Tests can inject `ctx.surveyRepos` / `ctx.resolveRepoSet` to stub the
@@ -219,7 +220,7 @@ const handleRunnerStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, prep, err }) => runnerErrorSnapshot(prep.root, requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'runner status survey failed',
+    message: getErrorMessage(err, 'runner status survey failed'),
   }),
   run: async ({ ctx, requestId, prep }) => {
     // Tests inject `ctx.surveyRunners` to stub the fs/exec calls.
@@ -278,7 +279,7 @@ const handleContainersStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, err }) => containersErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'containers status survey failed',
+    message: getErrorMessage(err, 'containers status survey failed'),
   }),
   run: async ({ ctx, requestId }) => {
     // Tests inject `ctx.surveyContainers` to stub the docker/exec calls.
@@ -368,7 +369,7 @@ const handleRepoRuntimeConfigRequest = makeSurveyHandler({
   }, hostRuntimeDefaults(ctx?.services?.config || {})),
   failed: ({ ctx, requestId, err }) => repoRuntimeConfigErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'repo runtime config survey failed',
+    message: getErrorMessage(err, 'repo runtime config survey failed'),
   }, hostRuntimeDefaults(ctx?.services?.config || {})),
   run: async ({ ctx, requestId }) => {
     const config = ctx?.services?.config || {}
@@ -436,7 +437,7 @@ const handleByokPoolStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, err }) => byokPoolErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'BYOK pool status survey failed',
+    message: getErrorMessage(err, 'BYOK pool status survey failed'),
   }),
   run: async ({ ctx, requestId }) => {
     // Tests inject `ctx.surveyByokPool` to stub the pool/stats singletons.
@@ -491,7 +492,7 @@ const handleIntegrationStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, prep, err }) => integrationErrorSnapshot(prep.root, requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'integration status survey failed',
+    message: getErrorMessage(err, 'integration status survey failed'),
   }),
   run: async ({ ctx, requestId, prep }) => {
     // Tests inject `ctx.resolveRepoSet` / `ctx.surveyIntegrations` to stub the
@@ -578,7 +579,7 @@ const handleSkillsInventoryRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, prep, err }) => skillsInventoryErrorSnapshot(prep.root, requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'skills inventory survey failed',
+    message: getErrorMessage(err, 'skills inventory survey failed'),
   }),
   run: async ({ ctx, requestId, prep }) => {
     // Tests inject `ctx.resolveRepoSet` / `ctx.surveySkillsInventory` to stub the
@@ -817,7 +818,7 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
     }
   } catch (err) {
     integrationActionError(ws, ctx, msg, 'repo-set-failed',
-      `Could not resolve the surveyed repo set: ${err && err.message ? err.message : 'unknown error'}`)
+      `Could not resolve the surveyed repo set: ${getErrorMessage(err, 'unknown error')}`)
     return
   }
   if (!isMember) {
@@ -854,7 +855,7 @@ async function handleIntegrationAction(ws, client, msg, ctx) {
       ...ackFields,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : `${action} failed`
+    const message = getErrorMessage(err, `${action} failed`)
     log.warn(`integration_action ${action} failed for ${targetKey}: ${message}`)
     const reason = err && typeof err.reason === 'string' && err.reason.length > 0
       ? err.reason
@@ -984,7 +985,7 @@ async function handleContainersAction(ws, client, msg, ctx) {
       status: typeof status === 'string' ? status : null,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : `${action} failed`
+    const message = getErrorMessage(err, `${action} failed`)
     log.warn(`containers_action ${action} failed for ${environmentId}: ${message}`)
     containerActionError(ws, ctx, msg, CONTAINER_ACTION_FAILURE_REASON[action], message)
   } finally {
@@ -1142,7 +1143,7 @@ async function handleByokPoolAction(ws, client, msg, ctx) {
     log.info(`byok_pool_action ${action} completed (client=${client?.id})`)
     ctx.transport.send(ws, ack)
   } catch (err) {
-    const message = err && err.message ? err.message : `${action} failed`
+    const message = getErrorMessage(err, `${action} failed`)
     log.warn(`byok_pool_action ${action} failed: ${message}`)
     byokPoolActionError(ws, ctx, msg, `${action}-failed`, message)
   } finally {
@@ -1188,7 +1189,7 @@ const handleHostPruneStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, err }) => hostPruneErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'host prune survey failed',
+    message: getErrorMessage(err, 'host prune survey failed'),
   }),
   run: async ({ ctx, requestId }) => {
     const surveyFn = typeof ctx?.surveyHostPrune === 'function' ? ctx.surveyHostPrune : surveyHostPrune
@@ -1267,7 +1268,7 @@ async function handleHostPruneAction(ws, client, msg, ctx) {
       failures: result.failures,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : 'host prune failed'
+    const message = getErrorMessage(err, 'host prune failed')
     log.warn(`host_prune_action ${kind} failed: ${message}`)
     hostPruneActionError(ws, ctx, msg, 'prune-failed', message)
   } finally {
@@ -1311,7 +1312,7 @@ const handleSimulatorStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, err }) => simulatorErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'simulator survey failed',
+    message: getErrorMessage(err, 'simulator survey failed'),
   }),
   run: async ({ ctx, requestId }) => {
     const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
@@ -1419,7 +1420,7 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
       snapshot = await surveyFn({})
     } catch (err) {
       simulatorActionError(ws, ctx, msg, 'survey-failed',
-        err && err.message ? err.message : 'simulator survey failed')
+        getErrorMessage(err, 'simulator survey failed'))
       return
     }
     if (!snapshot?.available) {
@@ -1458,7 +1459,7 @@ async function handleSimulatorAction(ws, client, msg, ctx) {
       status: typeof status === 'string' ? status : null,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : `${action} failed`
+    const message = getErrorMessage(err, `${action} failed`)
     log.warn(`simulator_action ${action} failed for ${udid}: ${message}`)
     simulatorActionError(ws, ctx, msg, SIMULATOR_ACTION_FAILURE_REASON[action], message)
   } finally {
@@ -1503,7 +1504,7 @@ const handleEmulatorStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, err }) => emulatorErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'emulator survey failed',
+    message: getErrorMessage(err, 'emulator survey failed'),
   }),
   run: async ({ ctx, requestId }) => {
     const surveyFn = typeof ctx?.surveyEmulators === 'function' ? ctx.surveyEmulators : surveyEmulators
@@ -1606,7 +1607,7 @@ async function handleEmulatorAction(ws, client, msg, ctx) {
       snapshot = await surveyFn({})
     } catch (err) {
       emulatorActionError(ws, ctx, msg, 'survey-failed',
-        err && err.message ? err.message : 'emulator survey failed')
+        getErrorMessage(err, 'emulator survey failed'))
       return
     }
     if (!snapshot?.available) {
@@ -1657,7 +1658,7 @@ async function handleEmulatorAction(ws, client, msg, ctx) {
       status: typeof status === 'string' ? status : null,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : `${action} failed`
+    const message = getErrorMessage(err, `${action} failed`)
     log.warn(`emulator_action ${action} failed for ${targetId}: ${message}`)
     emulatorActionError(ws, ctx, msg, EMULATOR_ACTION_FAILURE_REASON[action], message)
   } finally {
@@ -1703,7 +1704,7 @@ const handleWslStatusRequest = makeSurveyHandler({
   }),
   failed: ({ requestId, err }) => wslErrorSnapshot(requestId, {
     code: 'SURVEY_FAILED',
-    message: err && err.message ? err.message : 'WSL survey failed',
+    message: getErrorMessage(err, 'WSL survey failed'),
   }),
   run: async ({ ctx, requestId }) => {
     const surveyFn = typeof ctx?.surveyWsl === 'function' ? ctx.surveyWsl : surveyWsl
@@ -1797,7 +1798,7 @@ async function handleWslAction(ws, client, msg, ctx) {
     try {
       snapshot = await surveyFn({})
     } catch (err) {
-      wslActionError(ws, ctx, msg, 'survey-failed', err && err.message ? err.message : 'WSL survey failed')
+      wslActionError(ws, ctx, msg, 'survey-failed', getErrorMessage(err, 'WSL survey failed'))
       return
     }
     if (!snapshot?.available) {
@@ -1832,7 +1833,7 @@ async function handleWslAction(ws, client, msg, ctx) {
       status: typeof status === 'string' ? status : null,
     })
   } catch (err) {
-    const message = err && err.message ? err.message : `${action} failed`
+    const message = getErrorMessage(err, `${action} failed`)
     log.warn(`wsl_action ${action} failed for ${distro}: ${message}`)
     wslActionError(ws, ctx, msg, WSL_ACTION_FAILURE_REASON[action], message)
   } finally {

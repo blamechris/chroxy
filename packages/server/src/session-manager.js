@@ -26,6 +26,7 @@ import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
+import { getErrorMessage } from './utils/error-message.js'
 import {
   forwardPerSessionSettingsToProviderOpts,
   serializePerSessionSettings,
@@ -994,7 +995,7 @@ export class SessionManager extends EventEmitter {
         }
       } catch (err) {
         // Leak guard: never echo preset contents in the failure path.
-        log.warn(`Session preset resolution failed for session ${sessionId} (non-fatal): ${err && err.message ? err.message : 'error'}`)
+        log.warn(`Session preset resolution failed for session ${sessionId} (non-fatal): ${getErrorMessage(err, 'error')}`)
         presetDescriptor = null
         effectiveSessionPreamble = sessionPreamble
       }
@@ -1345,7 +1346,7 @@ export class SessionManager extends EventEmitter {
           this.skillsUsageRecorder?.record({ sessionId, repo: resolvedCwd, skills: activeSkills })
         }
       } catch (err) {
-        log.debug(`skills-usage: failed to record activation for ${sessionId} (non-fatal): ${err && err.message ? err.message : err}`)
+        log.debug(`skills-usage: failed to record activation for ${sessionId} (non-fatal): ${getErrorMessage(err, err)}`)
       }
     }
     // Flush synchronously — a new session must survive an abrupt shutdown,
@@ -1542,7 +1543,7 @@ export class SessionManager extends EventEmitter {
         configPath: this.presetConfigPath || undefined,
       })
     } catch (err) {
-      log.warn(`resolveSessionPresetForCwd failed (non-fatal): ${err && err.message ? err.message : 'error'}`)
+      log.warn(`resolveSessionPresetForCwd failed (non-fatal): ${getErrorMessage(err, 'error')}`)
       return null
     }
   }

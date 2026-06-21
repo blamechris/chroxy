@@ -26,6 +26,7 @@
  */
 import { createLogger } from '../logger.js'
 import { summarizeSession as defaultSummarizeSession } from '../summarize-session.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const log = createLogger('ws')
 
@@ -99,7 +100,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
     // text is logged server-side only (a thrown history-read error could carry
     // internal paths or unexpected text; keep the SUMMARIZE_FAILED surface
     // leak-safe, matching the model-call failure path below).
-    log.warn(`summarize_session history read failed for ${sessionId}: ${err && err.message ? err.message : 'unknown error'}`)
+    log.warn(`summarize_session history read failed for ${sessionId}: ${getErrorMessage(err, 'unknown error')}`)
     summarizeError(ws, ctx, sessionId, requestId, 'history-failed',
       'Could not read this session\'s history')
     return
@@ -143,7 +144,7 @@ async function handleSummarizeSession(ws, client, msg, ctx) {
     // thrown reason for the discriminator and a fixed message per reason.
     const reason = err && typeof err.reason === 'string' && err.reason.length > 0 ? err.reason : 'summarize-failed'
     const message = messageForReason(reason)
-    log.warn(`summarize_session failed for ${sessionId}: reason=${reason} (${err && err.message ? err.message : 'unknown error'})`)
+    log.warn(`summarize_session failed for ${sessionId}: reason=${reason} (${getErrorMessage(err, 'unknown error')})`)
     summarizeError(ws, ctx, sessionId, requestId, reason, message)
   } finally {
     summarizeInFlight.delete(sessionId)

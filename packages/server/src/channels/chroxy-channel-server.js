@@ -35,6 +35,7 @@ import { pathToFileURL } from 'url'
 import { Server } from '@modelcontextprotocol/sdk/server/index.js'
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema } from '@modelcontextprotocol/sdk/types.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 export const SERVER_NAME = 'chroxy-channel'
 export const SERVER_VERSION = '0.0.1'
@@ -185,7 +186,7 @@ export function startHttpControlSurface({ mcp, port = DEFAULT_PORT, log = (...a)
     // Body is read fully into memory: fine for a localhost debug prototype, not
     // for the real bridge. No size cap by design — the surface is trusted-local.
     req.on('error', err => {
-      log('request error:', err && err.message ? err.message : err)
+      log('request error:', getErrorMessage(err, err))
     })
     req.on('data', chunk => chunks.push(chunk))
     req.on('end', async () => {
@@ -206,7 +207,7 @@ export function startHttpControlSurface({ mcp, port = DEFAULT_PORT, log = (...a)
         res.writeHead(200, { 'Content-Type': 'text/plain' })
         res.end('ok')
       } catch (err) {
-        log('notification failed:', err && err.message ? err.message : err)
+        log('notification failed:', getErrorMessage(err, err))
         res.writeHead(502, { 'Content-Type': 'text/plain' })
         res.end('channel notification failed')
       }

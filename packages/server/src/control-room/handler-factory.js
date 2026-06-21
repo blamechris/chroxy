@@ -19,6 +19,7 @@
  * refactor is behaviour-preserving.
  */
 import { createLogger } from '../logger.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const log = createLogger('ws')
 
@@ -76,7 +77,7 @@ export function makeSurveyHandler({ inFlight, logName, prepare, forbidden, inPro
     try {
       ctx.transport.send(ws, await run(args))
     } catch (err) {
-      log.warn(`${logName} failed: ${err && err.message ? err.message : 'unknown error'}`)
+      log.warn(`${logName} failed: ${getErrorMessage(err, 'unknown error')}`)
       ctx.transport.send(ws, failed({ ...args, err }))
     } finally {
       inFlight.delete(client)

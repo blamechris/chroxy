@@ -3,6 +3,7 @@ import { createInterface } from 'readline'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 import { guardChildStreams } from './child-stream-guard.js'
+import { getErrorMessage } from './utils/error-message.js'
 
 const log = createLogger('jsonl-subprocess-session')
 
@@ -290,7 +291,7 @@ export class JsonlSubprocessSession extends BaseSession {
       // skills text. Reset busy state and surface the error to the caller.
       this._isBusy = false
       this.emit('error', {
-        message: err && err.message ? err.message : `Failed to spawn ${Klass.providerName}`,
+        message: getErrorMessage(err, `Failed to spawn ${Klass.providerName}`),
       })
       return
     }

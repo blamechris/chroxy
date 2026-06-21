@@ -45,6 +45,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createLogger } from './logger.js'
 import { loadJsonState, saveJsonState } from './json-state-file.js'
+import { getErrorMessage } from './utils/error-message.js'
 
 const log = createLogger('skills-usage')
 
@@ -278,7 +279,7 @@ export class SkillsUsageRecorder {
       }
       if (changed) this._scheduleSave()
     } catch (err) {
-      log.debug(`skills-usage: record failed (non-fatal): ${err && err.message ? err.message : err}`)
+      log.debug(`skills-usage: record failed (non-fatal): ${getErrorMessage(err, err)}`)
     }
   }
 
@@ -328,7 +329,7 @@ export class SkillsUsageRecorder {
       this._save(this._store, this._filePath)
       this._dirty = false
     } catch (err) {
-      log.warn(`skills-usage: save failed: ${err && err.message ? err.message : err}`)
+      log.warn(`skills-usage: save failed: ${getErrorMessage(err, err)}`)
     }
   }
 }

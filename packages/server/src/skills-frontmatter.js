@@ -21,6 +21,7 @@
  */
 import { readSync } from 'node:fs'
 import { createLogger } from './logger.js'
+import { getErrorMessage } from './utils/error-message.js'
 
 const log = createLogger('skills-loader')
 
@@ -96,7 +97,7 @@ export function parseFrontmatter(text) {
   try {
     frontmatter = _parseFrontmatterBody(yamlRaw)
   } catch (err) {
-    log.debug(`parseFrontmatter: malformed frontmatter — ${err && err.message ? err.message : err}`)
+    log.debug(`parseFrontmatter: malformed frontmatter — ${getErrorMessage(err, err)}`)
     return { frontmatter: null, body: text }
   }
 

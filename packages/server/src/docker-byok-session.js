@@ -145,6 +145,7 @@ import {
   sanitizeContainerEnv,
 } from './devcontainer-config.js'
 import { isOperatorTimeoutInRange } from './duration.js'
+import { getErrorMessage } from './utils/error-message.js'
 
 const log = createLogger('docker-byok')
 
@@ -1763,7 +1764,7 @@ export class DockerByokSession extends ClaudeByokSession {
         timeout: 10_000,
       })
     } catch (err) {
-      const wrapped = new Error(err && err.message ? err.message : String(err))
+      const wrapped = new Error(getErrorMessage(err, String(err)))
       wrapped.code = 'post_create_marker_write_failed'
       wrapped.cause = err
       throw wrapped

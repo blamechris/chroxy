@@ -36,6 +36,7 @@ import { promisify } from 'util'
 import { parseByteSize } from './containers.js'
 import { listSnapshots } from '../snapshots-store.js'
 import { CHROXY_MANAGED_LABEL } from '../environments/backends/docker.js'
+import { getErrorMessage } from '../utils/error-message.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -242,7 +243,7 @@ export async function surveyHostPrune(opts = {}) {
     return {
       ...base,
       dockerAvailable: false,
-      note: `docker is unavailable — host prune survey skipped (${err && err.message ? err.message : 'exec failed'}).`,
+      note: `docker is unavailable — host prune survey skipped (${getErrorMessage(err, 'exec failed')}).`,
     }
   }
   let byLabelLines = []
@@ -252,7 +253,7 @@ export async function surveyHostPrune(opts = {}) {
     ], EXEC_OPTS)
     byLabelLines = parseContainerLines(byLabel.stdout, { trusted: true })
   } catch (err) {
-    containerNote = `the labeled chroxy container set could not be listed (${err && err.message ? err.message : 'exec failed'}).`
+    containerNote = `the labeled chroxy container set could not be listed (${getErrorMessage(err, 'exec failed')}).`
   }
   {
     const seen = new Set()
@@ -291,14 +292,14 @@ export async function surveyHostPrune(opts = {}) {
       ], EXEC_OPTS)
       for (const img of parseImageLines(stdout, { trusted: true })) consider(img)
     } catch (err) {
-      imageNote = `the labeled chroxy image set could not be listed (${err && err.message ? err.message : 'exec failed'}).`
+      imageNote = `the labeled chroxy image set could not be listed (${getErrorMessage(err, 'exec failed')}).`
     }
     for (const repo of CHROXY_IMAGE_REPOS) {
       try {
         const { stdout } = await _execFile('docker', ['images', repo, '--format', imgFmt], EXEC_OPTS)
         for (const img of parseImageLines(stdout)) consider(img)
       } catch (err) {
-        imageNote = `some chroxy image repositories could not be listed (${err && err.message ? err.message : 'exec failed'}).`
+        imageNote = `some chroxy image repositories could not be listed (${getErrorMessage(err, 'exec failed')}).`
       }
     }
   }
@@ -368,7 +369,7 @@ export async function runHostPrune(opts = {}) {
         result.removedContainers += 1
         result.reclaimedBytes += Number.isFinite(c.sizeBytes) ? c.sizeBytes : 0
       } catch (err) {
-        result.failures.push({ ref: c.name || c.id, error: err && err.message ? err.message : 'docker rm failed' })
+        result.failures.push({ ref: c.name || c.id, error: getErrorMessage(err, 'docker rm failed') })
       }
     }
   }
@@ -379,7 +380,7 @@ export async function runHostPrune(opts = {}) {
         result.removedImages += 1
         result.reclaimedBytes += Number.isFinite(img.sizeBytes) ? img.sizeBytes : 0
       } catch (err) {
-        result.failures.push({ ref: img.ref || img.id, error: err && err.message ? err.message : 'docker rmi failed' })
+        result.failures.push({ ref: img.ref || img.id, error: getErrorMessage(err, 'docker rmi failed') })
       }
     }
   }
