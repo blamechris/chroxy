@@ -233,6 +233,12 @@ export {
 } from './cost-format'
 export type { ErrorPartialCost } from './cost-format'
 
+// #6201: shared duration formatters used by the app + dashboard activity
+// indicators (terse "Running Bash · 12s") and stream-stall chip (verbose
+// "No response for 5 minutes"). Single-sourced here to stop both surfaces
+// re-inlining the same two registers.
+export { formatDurationTerse, formatDurationVerbose } from './duration'
+
 export type {
   SessionVisualStatus,
   SessionVisualStatusInput,

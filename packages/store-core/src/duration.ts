@@ -1,23 +1,23 @@
 /**
- * Duration formatting utilities — #4510.
+ * Duration formatting utilities — #4510 / #6201.
  *
- * Two named exports cover the two display registers used across the
+ * Two named exports cover the two display registers used across the app and
  * dashboard:
  *   - `formatDurationTerse`   — "30s" / "5m" / "1h 2m"  (chip / inline labels)
  *   - `formatDurationVerbose` — "30 seconds" / "5 minutes" / "2 hours" (prose)
  *
- * Consolidated from two private helpers previously inlined in
- * `ActivityIndicator.tsx` (#4308) and `StreamStallChip.tsx` (#4497, PR #4505).
- * The terse form is wrong for natural-language sentences ("No response for
- * 5m") and the verbose form is wrong for compact chips ("Running Bash · 30
- * seconds"); we keep both registers but ship them from one place so future
- * consumers don't reinvent either.
+ * Consolidated here (#6201 SOLID/DRY sweep) as the single cross-package source,
+ * after living as private helpers inlined in `ActivityIndicator.tsx` (#4308) on
+ * BOTH the app and dashboard plus `StreamStallChip.tsx` (#4497, PR #4505). The
+ * terse form is wrong for natural-language sentences ("No response for 5m") and
+ * the verbose form is wrong for compact chips ("Running Bash · 30 seconds"); we
+ * keep both registers but ship them from one place so future consumers (app,
+ * dashboard, or any new surface) don't reinvent either.
  */
 
 /**
  * Terse "Ns" / "Nm" / "Nh Nm" form, suitable for inline chip labels where
- * vertical space and reading speed both matter more than grammar. Mirrors the
- * original ActivityIndicator helper byte-for-byte.
+ * vertical space and reading speed both matter more than grammar.
  */
 export function formatDurationTerse(ms: number): string {
   const s = Math.max(0, Math.floor(ms / 1000))
