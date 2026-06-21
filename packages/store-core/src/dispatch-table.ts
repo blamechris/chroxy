@@ -99,6 +99,8 @@ import {
   // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   handleMessageQueued,
   handleMessageDequeued,
+  // --- user_question (#5618) — byte-identical parse + append + notify ---
+  handleUserQuestion,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
@@ -159,6 +161,16 @@ export interface DispatchSessionBase {
 }
 
 /**
+ * The session-notification event kinds the dispatch handlers may raise (#5618).
+ * Deliberately the INTERSECTION both clients' `SessionNotification['eventType']`
+ * accept — the app's union also has `'plan'`, the dashboard's does not — so a
+ * value of this type is assignable to either client's real
+ * `pushSessionNotification` without a cast. `user_question` only ever passes
+ * `'question'`; widen this only to a kind BOTH clients accept.
+ */
+export type SessionNotificationEventType = 'permission' | 'question' | 'completed' | 'error'
+
+/**
  * The minimal store surface a dispatch-table handler needs. Each client
  * supplies an implementation backed by its own Zustand store. Generic over the
  * client's session-state type `S` so {@link ClientStoreAdapter.updateSession}'s
@@ -195,6 +207,18 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   addMessage(message: ChatMessage): void
   /** Read the current session list (for `session_updated`). */
   getSessions(): SessionInfo[]
+  /**
+   * Push a per-session notification for a BACKGROUND session event (#5618).
+   * Used by the `user_question` case to surface a question raised in a session
+   * that is not the active one. Each client backs this with its own
+   * `pushSessionNotification` — both dedup by `(sessionId, eventType)` and
+   * early-return when the target IS the active session; the APP additionally
+   * mirrors the row into its mobile push-notification store. That extra
+   * side-effect is platform-specific and lives in the app's impl, exactly like
+   * the app's `activityState` derivation — it is OUTSIDE the shared store-state
+   * contract, so the dispatch handler stays platform-agnostic.
+   */
+  pushSessionNotification(sessionId: string, eventType: SessionNotificationEventType, message: string): void
   /**
    * Resolve a one-shot imperative callback by name (#5653). Used by the
    * file-ops / git wrapper cases, whose only effect is to invoke a callback the
@@ -426,6 +450,17 @@ export interface DispatchMessageMap {
     // #5943 adds 'cancelled' (per-item cancel via cancel_queued) alongside the
     // slice-① 'flush'/'interrupted'. Mirrors ServerMessageDequeuedSchema.reason.
     reason: 'flush' | 'interrupted' | 'cancelled'
+  }
+  // --- user_question (#5618) — the question payload the shared parser reads ---
+  user_question: {
+    type: 'user_question'
+    sessionId?: string
+    toolUseId?: string
+    questions?: unknown[]
+    // #4613 — `handleUserQuestion` honours a wire `timestamp` (when a finite
+    // number) for history-replay ordering, falling back to append-time
+    // Date.now(). Documented here so the message shape matches the parser.
+    timestamp?: number
   }
 }
 
@@ -892,6 +927,37 @@ function dispatchWebTaskUpsert<S extends DispatchSessionBase>(
   })
 }
 
+/**
+ * `user_question` (#5618) — append the question prompt to its (resolved)
+ * session, falling back to the global log, then raise a background-session
+ * notification. Byte-identical between the two clients' switches: both parsed
+ * via the shared `handleUserQuestion`, appended the prompt, and called
+ * `pushSessionNotification(sessionId, 'question', questionText)`. The only
+ * divergence was inside each client's own `pushSessionNotification` (the app
+ * also hits its mobile push-notification store) — abstracted behind the
+ * adapter method, so this handler stays platform-agnostic.
+ */
+function dispatchUserQuestion<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['user_question'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const parsed = handleUserQuestion(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!parsed) return
+  const { sessionId, chatMessage, questionText } = parsed
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(
+      sessionId,
+      (ss) =>
+        ({
+          messages: [...ss.messages, chatMessage],
+        } as Partial<S>),
+    )
+  } else {
+    adapter.addMessage(chatMessage)
+  }
+  if (sessionId) adapter.pushSessionNotification(sessionId, 'question', questionText)
+}
+
 // ---------------------------------------------------------------------------
 // Table + runner
 // ---------------------------------------------------------------------------
@@ -962,6 +1028,8 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
     message_queued: dispatchQueuedMessages<S>(handleMessageQueued),
     message_dequeued: dispatchQueuedMessages<S>(handleMessageDequeued),
+    // --- user_question (#5618) — byte-identical append + notify ---
+    user_question: dispatchUserQuestion,
   }
 }
 
@@ -1010,6 +1078,8 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'message_dequeued',
   // --- reconciled divergent case (#5618) ---
   'model_changed',
+  // --- user_question (#5618) — byte-identical append + notify ---
+  'user_question',
 ]
 
 /**

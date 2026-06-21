@@ -114,7 +114,6 @@ import {
   // web_task_list / web_feature_status migrated to the shared dispatch table
   // (#5556 slice 2)
   handleSearchResults as sharedSearchResults,
-  handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
   // #5163 (epic #5159): Control Room activity reducer — snapshot replace +
@@ -1039,6 +1038,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
   getSessions: () => getStore().getState().sessions,
+  // #5618 — user_question raises a background-session notification via the
+  // dashboard's own helper (dedup by (sessionId, eventType); no push store).
+  pushSessionNotification: (sessionId, eventType, message) =>
+    pushSessionNotification(sessionId, eventType, message),
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -4480,22 +4483,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // permission_rules_updated — migrated to the shared dispatch table (#5556)
 
 
-    case 'user_question': {
-      const parsed = sharedUserQuestion(msg, get().activeSessionId);
-      if (!parsed) break;
-      const { sessionId: questionTargetId, chatMessage: questionMsg, questionText } = parsed;
-      if (questionTargetId && get().sessionStates[questionTargetId]) {
-        updateSession(questionTargetId, (ss) => ({
-          messages: [...ss.messages, questionMsg],
-        }));
-      } else {
-        get().addMessage(questionMsg);
-      }
-      if (questionTargetId) {
-        pushSessionNotification(questionTargetId, 'question', questionText);
-      }
-      break;
-    }
+    // user_question — migrated to the shared dispatch table (#5618)
 
     case 'server_status': {
       // Handle structured startup phase events (phase field present)

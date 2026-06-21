@@ -53,6 +53,7 @@ function makeAdapter(init?: {
   let sessionList: SessionInfo[] = init?.sessionList ?? []
   const flat: Record<string, unknown> = {}
   const addedMessages: ChatMessage[] = []
+  const notifications: Array<{ sessionId: string; eventType: string; message: string }> = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -66,6 +67,8 @@ function makeAdapter(init?: {
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => addedMessages.push(m),
     getSessions: () => sessionList,
+    pushSessionNotification: (sessionId, eventType, message) =>
+      notifications.push({ sessionId, eventType, message }),
     ...(init?.callbacks
       ? {
           getCallback: ((name: string) =>
@@ -79,6 +82,7 @@ function makeAdapter(init?: {
     sessions,
     flat,
     addedMessages,
+    notifications,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -217,6 +221,71 @@ describe('shared dispatch table', () => {
         type: 'system',
         content: 'Cost budget override — session resumed',
       })
+    })
+  })
+
+  describe('user_question (#5618)', () => {
+    it('appends the question prompt to the target session and notifies', () => {
+      const env = makeAdapter({
+        activeSessionId: 'other',
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      const handled = dispatch(env, {
+        type: 'user_question',
+        sessionId: 's1',
+        questions: [{ question: 'Proceed with the deploy?' }],
+      })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.messages).toHaveLength(1)
+      expect(env.sessions.s1.messages[0]).toMatchObject({
+        type: 'prompt',
+        content: 'Proceed with the deploy?',
+      })
+      expect(env.addedMessages).toHaveLength(0)
+      expect(env.notifications).toEqual([
+        { sessionId: 's1', eventType: 'question', message: 'Proceed with the deploy?' },
+      ])
+    })
+
+    it('honours a finite wire timestamp on the appended prompt (#4613)', () => {
+      const env = makeAdapter({
+        activeSessionId: 'other',
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'user_question',
+        sessionId: 's1',
+        questions: [{ question: 'Deploy now?' }],
+        timestamp: 1_700_000_000_000,
+      })
+      expect(env.sessions.s1.messages[0]).toMatchObject({
+        type: 'prompt',
+        content: 'Deploy now?',
+        timestamp: 1_700_000_000_000,
+      })
+    })
+
+    it('falls back to addMessage (global log) and skips notify when no session resolves', () => {
+      const env = makeAdapter() // no activeSessionId, no explicit sessionId
+      const handled = dispatch(env, {
+        type: 'user_question',
+        questions: [{ question: 'Anyone there?' }],
+      })
+      expect(handled).toBe(true)
+      expect(env.addedMessages).toHaveLength(1)
+      expect(env.addedMessages[0]).toMatchObject({ type: 'prompt', content: 'Anyone there?' })
+      // sessionId is null → no per-session notification.
+      expect(env.notifications).toHaveLength(0)
+    })
+
+    it('is handled (no mutation) when the questions payload is malformed', () => {
+      const env = makeAdapter({ activeSessionId: 's1', sessions: { s1: { sessionId: 's1', messages: [] } } })
+      const handled = dispatch(env, { type: 'user_question', questions: [] })
+      // The table OWNS the type (returns true) but the parser rejects it.
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.messages).toHaveLength(0)
+      expect(env.addedMessages).toHaveLength(0)
+      expect(env.notifications).toHaveLength(0)
     })
   })
 

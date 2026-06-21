@@ -118,7 +118,6 @@ import {
   // (#5556 slice 4); the app no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
   handleSearchResults as sharedSearchResults,
-  handleUserQuestion as sharedUserQuestion,
   applyOrphanDeltas,
   isActivityEvent,
   // #5039: shared partial-cost line helper — the same one the dashboard
@@ -1179,6 +1178,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
   getSessions: () => getStore().getState().sessions,
+  // #5618 — user_question raises a background-session notification via the
+  // app's own helper (which also mirrors the row into the mobile push store).
+  pushSessionNotification: (sessionId, eventType, message) =>
+    pushSessionNotification(sessionId, eventType, message),
   // #5653 — file-ops / git wrapper cases route through the shared dispatch
   // table; the app supplies its module-level imperative-callback registry so
   // the parsed payload reaches the UI's registered callback exactly as the
@@ -3060,22 +3063,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // permission_rules_updated — migrated to the shared dispatch table (#5556)
 
 
-    case 'user_question': {
-      const parsed = sharedUserQuestion(msg, get().activeSessionId);
-      if (!parsed) break;
-      const { sessionId: questionTargetId, chatMessage: questionMsg, questionText } = parsed;
-      if (questionTargetId && get().sessionStates[questionTargetId]) {
-        updateSession(questionTargetId, (ss) => ({
-          messages: [...ss.messages, questionMsg],
-        }));
-      } else {
-        get().addMessage(questionMsg);
-      }
-      if (questionTargetId) {
-        pushSessionNotification(questionTargetId, 'question', questionText);
-      }
-      break;
-    }
+    // user_question — migrated to the shared dispatch table (#5618)
 
     case 'server_status': {
       // Ignore structured startup phase events (phase field) — only the dashboard uses these
