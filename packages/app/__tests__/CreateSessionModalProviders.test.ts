@@ -12,6 +12,7 @@
 
 import fs from 'fs';
 import path from 'path';
+import { DISPATCH_TABLE_TYPES } from '@chroxy/store-core';
 
 const modalSrc = fs.readFileSync(
   path.resolve(__dirname, '../src/components/CreateSessionModal.tsx'),
@@ -90,8 +91,13 @@ describe('ConnectionState — providers fields (#2948)', () => {
 });
 
 describe('message-handler — provider_list + auth_ok (#2948)', () => {
-  test('handles provider_list message and stores providers', () => {
-    expect(messageHandlerSrc).toMatch(/case\s+['"]provider_list['"]/);
+  test('handles provider_list via the shared dispatch table (#5618 Batch 2)', () => {
+    // provider_list migrated out of the app's local switch into the shared
+    // store-core dispatch table; the handler routes through `runDispatch` first,
+    // and the app's element-tightening rides on the `mapProviderList` adapter hook.
+    expect(messageHandlerSrc).toMatch(/runDispatch\(/);
+    expect(messageHandlerSrc).toMatch(/mapProviderList/);
+    expect(DISPATCH_TABLE_TYPES).toContain('provider_list');
   });
 
   test('sends list_providers as a post-auth message', () => {

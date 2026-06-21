@@ -65,7 +65,8 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
   'agent_idle',
-  'agent_list',
+  // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
+  // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   'auth_bootstrap',
   'auth_fail',
   'auth_ok',
@@ -91,7 +92,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'plan_ready',
   'pong',
   'primary_changed',
-  'provider_list',
+  // provider_list — migrated to the shared dispatch table (#5618 Batch 2);
+  // app/dashboard element-handling divergence locked by a divergent fixture.
   'raw',
   'raw_background',
   'search_results',
@@ -108,7 +110,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'session_switched',
   'session_timeout',
   'session_warning',
-  'slash_commands',
+  // slash_commands — migrated to the shared dispatch table (#5618 Batch 2); now
+  // has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   'stream_delta',
   'terminal_output',
   'token_rotated',

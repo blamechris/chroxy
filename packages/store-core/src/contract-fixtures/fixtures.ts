@@ -305,6 +305,105 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
 
+  // 4e. slash_commands / agent_list / provider_list (#5618 Batch 2) — flat
+  // list-replacement. slash_commands / agent_list carry the broadcast-guard
+  // sessionId (skip when it targets a non-active session). The app additionally
+  // mirrors slash/agent lists into its secondary conversation store (out of the
+  // shared contract — a no-op here) and tightens provider elements via
+  // mapProviderList (LOCKED by the divergent provider fixture below).
+  {
+    name: 'slash_commands replaces the flat slash-command list (server-wide)',
+    type: 'slash_commands',
+    message: { type: 'slash_commands', commands: [{ name: '/compact' }, { name: '/clear' }] },
+    expect: { flat: { slashCommands: [{ name: '/compact' }, { name: '/clear' }] } },
+  },
+  {
+    name: 'slash_commands is dropped when it targets a non-active session',
+    type: 'slash_commands',
+    init: { activeSessionId: 'active' },
+    message: { type: 'slash_commands', sessionId: 'other', commands: [{ name: '/x' }] },
+    expect: { noop: true },
+  },
+  {
+    name: 'slash_commands is a no-op when commands is not an array',
+    type: 'slash_commands',
+    message: { type: 'slash_commands' },
+    expect: { noop: true },
+  },
+  {
+    name: 'agent_list replaces the flat custom-agent list (server-wide)',
+    type: 'agent_list',
+    message: { type: 'agent_list', agents: [{ name: 'reviewer' }, { name: 'planner' }] },
+    expect: { flat: { customAgents: [{ name: 'reviewer' }, { name: 'planner' }] } },
+  },
+  {
+    name: 'agent_list is dropped when it targets a non-active session',
+    type: 'agent_list',
+    init: { activeSessionId: 'active' },
+    message: { type: 'agent_list', sessionId: 'other', agents: [{ name: 'x' }] },
+    expect: { noop: true },
+  },
+  {
+    name: 'agent_list is a no-op when agents is not an array',
+    type: 'agent_list',
+    message: { type: 'agent_list' },
+    expect: { noop: true },
+  },
+  {
+    name: 'provider_list replaces the flat provider list (well-formed: identical in both)',
+    type: 'provider_list',
+    message: {
+      type: 'provider_list',
+      providers: [
+        { name: 'claude', capabilities: { streaming: true }, auth: { type: 'oauth' } },
+        { name: 'gemini', capabilities: { streaming: false } },
+      ],
+    },
+    expect: {
+      flat: {
+        availableProviders: [
+          { name: 'claude', capabilities: { streaming: true }, auth: { type: 'oauth' } },
+          { name: 'gemini', capabilities: { streaming: false } },
+        ],
+      },
+    },
+  },
+  {
+    name: 'provider_list element handling (app mapProviderList tightens; dashboard writes verbatim)',
+    type: 'provider_list',
+    message: {
+      type: 'provider_list',
+      providers: [
+        { name: 'claude', capabilities: { streaming: true }, extra: 'drop-me' },
+        { noName: true },
+      ],
+    },
+    divergent: {
+      app: {
+        // mapProviderList drops the nameless entry and the non-allow-listed
+        // `extra` field, keeping only name + (object) capabilities.
+        flat: { availableProviders: [{ name: 'claude', capabilities: { streaming: true } }] },
+      },
+      dashboard: {
+        // verbatim passthrough — both elements kept, `extra` field retained.
+        flat: {
+          availableProviders: [
+            { name: 'claude', capabilities: { streaming: true }, extra: 'drop-me' },
+            { noName: true },
+          ],
+        },
+      },
+      reason:
+        'app mapProviderList drops nameless entries + strips non-name/capabilities/auth fields; dashboard writes the payload verbatim',
+    },
+  },
+  {
+    name: 'provider_list is a no-op when providers is not an array',
+    type: 'provider_list',
+    message: { type: 'provider_list' },
+    expect: { noop: true },
+  },
+
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
   // session was not paused; no-op when it was (budget_resumed already noted it)
   {

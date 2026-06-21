@@ -47,6 +47,14 @@ function makeAdapter(init?: {
    * dashboard's behaviour — fall through to the local switch).
    */
   callbacks?: Partial<Record<string, ((payload: unknown) => void) | null>>
+  /**
+   * When true, the adapter wires the app-only inventory hooks (#5618 Batch 2):
+   * `syncSecondaryInventory` (records into `inventorySyncs`) and `mapProviderList`
+   * (a marker transform that proves the dispatcher writes the HOOK's output, not
+   * the raw payload). When omitted, both hooks are absent — the dashboard's
+   * verbatim behaviour (no secondary-store mirror; provider list written as-is).
+   */
+  inventoryHooks?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -54,6 +62,7 @@ function makeAdapter(init?: {
   const flat: Record<string, unknown> = {}
   const addedMessages: ChatMessage[] = []
   const notifications: Array<{ sessionId: string; eventType: string; message: string }> = []
+  const inventorySyncs: Array<{ kind: string; list: unknown[] }> = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -75,6 +84,15 @@ function makeAdapter(init?: {
             (init.callbacks?.[name] ?? null)) as ClientStoreAdapter<FakeSession>['getCallback'],
         }
       : {}),
+    ...(init?.inventoryHooks
+      ? {
+          syncSecondaryInventory: (kind, list) => inventorySyncs.push({ kind, list }),
+          // Marker transform: prepend a sentinel so a test can prove the flat
+          // write used the hook's RETURN value, not the raw `providers`. (The
+          // contract test models the real app `mapProviderList` filtering.)
+          mapProviderList: (providers) => ['__mapped__', ...providers],
+        }
+      : {}),
   }
 
   return {
@@ -83,6 +101,7 @@ function makeAdapter(init?: {
     flat,
     addedMessages,
     notifications,
+    inventorySyncs,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -339,6 +358,93 @@ describe('shared dispatch table', () => {
       expect(handled).toBe(true) // table OWNS the type; the parser rejects the payload
       expect(env.sessions.s1.interventions).toBeUndefined()
       expect(env.sessions.s1.messages).toHaveLength(0)
+    })
+  })
+
+  describe('slash_commands / agent_list / provider_list (#5618 Batch 2)', () => {
+    it('slash_commands replaces the flat list and mirrors into the secondary store (app)', () => {
+      const env = makeAdapter({ inventoryHooks: true })
+      const handled = dispatch(env, {
+        type: 'slash_commands',
+        commands: [{ name: '/compact' }, { name: '/clear' }],
+      })
+      expect(handled).toBe(true)
+      expect(env.flat.slashCommands).toEqual([{ name: '/compact' }, { name: '/clear' }])
+      expect(env.inventorySyncs).toEqual([
+        { kind: 'slashCommands', list: [{ name: '/compact' }, { name: '/clear' }] },
+      ])
+    })
+
+    it('slash_commands replaces the flat list with NO mirror when the hook is absent (dashboard)', () => {
+      const env = makeAdapter()
+      const handled = dispatch(env, { type: 'slash_commands', commands: [{ name: '/x' }] })
+      expect(handled).toBe(true)
+      expect(env.flat.slashCommands).toEqual([{ name: '/x' }])
+      expect(env.inventorySyncs).toEqual([])
+    })
+
+    it('slash_commands is owned-but-no-op when it targets a non-active session', () => {
+      const env = makeAdapter({ activeSessionId: 'active', inventoryHooks: true })
+      const handled = dispatch(env, {
+        type: 'slash_commands',
+        sessionId: 'other',
+        commands: [{ name: '/x' }],
+      })
+      expect(handled).toBe(true)
+      expect(env.flat.slashCommands).toBeUndefined()
+      expect(env.inventorySyncs).toEqual([])
+    })
+
+    it('slash_commands is owned-but-no-op when commands is not an array', () => {
+      const env = makeAdapter({ inventoryHooks: true })
+      expect(dispatch(env, { type: 'slash_commands' })).toBe(true)
+      expect(env.flat.slashCommands).toBeUndefined()
+      expect(env.inventorySyncs).toEqual([])
+    })
+
+    it('agent_list replaces the flat list and mirrors into the secondary store (app)', () => {
+      const env = makeAdapter({ inventoryHooks: true })
+      const handled = dispatch(env, {
+        type: 'agent_list',
+        agents: [{ name: 'reviewer' }],
+      })
+      expect(handled).toBe(true)
+      expect(env.flat.customAgents).toEqual([{ name: 'reviewer' }])
+      expect(env.inventorySyncs).toEqual([{ kind: 'customAgents', list: [{ name: 'reviewer' }] }])
+    })
+
+    it('agent_list is owned-but-no-op when agents is not an array', () => {
+      const env = makeAdapter({ inventoryHooks: true })
+      expect(dispatch(env, { type: 'agent_list' })).toBe(true)
+      expect(env.flat.customAgents).toBeUndefined()
+      expect(env.inventorySyncs).toEqual([])
+    })
+
+    it('provider_list writes the payload verbatim when no mapProviderList hook is set (dashboard)', () => {
+      const env = makeAdapter()
+      const handled = dispatch(env, {
+        type: 'provider_list',
+        providers: [{ name: 'claude' }, { name: 'gemini' }],
+      })
+      expect(handled).toBe(true)
+      expect(env.flat.availableProviders).toEqual([{ name: 'claude' }, { name: 'gemini' }])
+    })
+
+    it('provider_list writes the mapProviderList hook output when present (app)', () => {
+      const env = makeAdapter({ inventoryHooks: true })
+      const handled = dispatch(env, {
+        type: 'provider_list',
+        providers: [{ name: 'claude' }],
+      })
+      expect(handled).toBe(true)
+      // The marker proves the dispatcher wrote the HOOK's return value.
+      expect(env.flat.availableProviders).toEqual(['__mapped__', { name: 'claude' }])
+    })
+
+    it('provider_list is owned-but-no-op when providers is not an array', () => {
+      const env = makeAdapter()
+      expect(dispatch(env, { type: 'provider_list' })).toBe(true)
+      expect(env.flat.availableProviders).toBeUndefined()
     })
   })
 

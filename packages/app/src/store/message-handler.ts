@@ -95,9 +95,6 @@ import {
   handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
-  handleSlashCommands as sharedSlashCommands,
-  handleAgentList as sharedAgentList,
-  handleProviderList as sharedProviderList,
   handleAuthBootstrap as sharedAuthBootstrap,
   handleTunnelUrlChanged as sharedTunnelUrlChanged,
   // diff_result / git_status_result / git_branches_result / git_stage_result /
@@ -1191,6 +1188,21 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     getCallback(name as CallbackName) as
       | ((payload: DispatchCallbackPayload) => void)
       | null,
+  // #5618 Batch 2 — slash_commands / agent_list also mirror into the app's
+  // secondary conversation store for the composer UI, exactly as the prior
+  // inline `useConversationStore.getState().setSlashCommands(...)` /
+  // `setCustomAgents(...)` did. The dashboard omits this hook (no secondary store).
+  syncSecondaryInventory: (kind, list) => {
+    if (kind === 'slashCommands') {
+      useConversationStore.getState().setSlashCommands(list as SlashCommand[]);
+    } else {
+      useConversationStore.getState().setCustomAgents(list as CustomAgent[]);
+    }
+  },
+  // #5618 Batch 2 — the app tightens provider_list elements via mapProviderList
+  // before the flat-state write (drops nameless/non-object entries). The
+  // dashboard omits this hook and writes the server payload verbatim.
+  mapProviderList: (providers) => mapProviderList(providers),
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -3157,30 +3169,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // shared*(msg) → cb(payload)` wrapper; the table now parses and invokes the
     // imperative callback via `_dispatchAdapter.getCallback`.
 
-    case 'slash_commands': {
-      const slashResult = sharedSlashCommands(msg, get().activeSessionId);
-      if (!slashResult) break;
-      const slashCommands = slashResult.commands as SlashCommand[];
-      set({ slashCommands });
-      useConversationStore.getState().setSlashCommands(slashCommands);
-      break;
-    }
-
-    case 'provider_list': {
-      const providerResult = sharedProviderList(msg);
-      if (!providerResult) break;
-      set({ availableProviders: mapProviderList(providerResult.providers) });
-      break;
-    }
-
-    case 'agent_list': {
-      const agentResult = sharedAgentList(msg, get().activeSessionId);
-      if (!agentResult) break;
-      const customAgents = agentResult.agents as CustomAgent[];
-      set({ customAgents });
-      useConversationStore.getState().setCustomAgents(customAgents);
-      break;
-    }
+    // slash_commands / agent_list / provider_list — migrated to the shared
+    // dispatch table (#5618 Batch 2; handled by runDispatch before this switch).
+    // The app's secondary-conversation-store mirror (slash/agents) and
+    // mapProviderList tightening now ride on the `syncSecondaryInventory` /
+    // `mapProviderList` adapter hooks. auth_bootstrap stays local — it folds all
+    // three lists into one connect-time frame with extra session-scope guarding.
 
     case 'auth_bootstrap': {
       // #5555 — connect-time bootstrap burst folds the provider / slash-command

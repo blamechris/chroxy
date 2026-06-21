@@ -75,6 +75,10 @@ import {
   handlePlanStarted,
   handleInactivityWarning,
   handleMcpServers,
+  // --- inventory list-replacement cases (#5618 Batch 2) ---
+  handleSlashCommands,
+  handleAgentList,
+  handleProviderList,
   handleSessionUsage,
   handleSessionContext,
   handleModelChangedPatch,
@@ -245,6 +249,38 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * caller (which knows the concrete callback signature for `name`) narrows it.
    */
   getCallback?(name: DispatchCallbackName): ((payload: DispatchCallbackPayload) => void) | null | undefined
+  /**
+   * Mirror a server-wide inventory list into a SECONDARY client store (#5618
+   * Batch 2). The mobile app keeps a separate `useConversationStore` that also
+   * tracks the slash-command / custom-agent lists for its composer UI; after the
+   * `slash_commands` / `agent_list` dispatch handlers write the list into flat
+   * connection state, they call this to keep the secondary store in sync —
+   * exactly the app's prior inline
+   * `useConversationStore.getState().setSlashCommands(...)` / `setCustomAgents(...)`.
+   *
+   * OPTIONAL: a client without a secondary inventory store (the dashboard) omits
+   * it; the dispatch handler then performs only the flat-state write. This is a
+   * platform-specific side-effect OUTSIDE the shared store-state contract, in the
+   * same spirit as the app's extra push-store mirror in
+   * {@link ClientStoreAdapter.pushSessionNotification}.
+   */
+  syncSecondaryInventory?(kind: 'slashCommands' | 'customAgents', list: unknown[]): void
+  /**
+   * Map/validate the raw `provider_list` element array before it is written to
+   * flat state (#5618 Batch 2). The mobile app tightens each entry (drops
+   * non-object / nameless entries, copies only `name`/`capabilities`/`auth`) via
+   * its `mapProviderList`; the dashboard trusts the server payload and writes it
+   * verbatim.
+   *
+   * OPTIONAL: when omitted, the raw array is written unchanged (the dashboard's
+   * prior `set({ availableProviders: providers as ProviderInfo[] })`). When
+   * present, the returned array is written instead (the app's prior
+   * `set({ availableProviders: mapProviderList(providers) })`). For the
+   * well-formed payloads the server actually sends, the two are field-identical;
+   * the hook only diverges on malformed input, preserving each client's existing
+   * robustness behaviour.
+   */
+  mapProviderList?(providers: unknown[]): unknown[]
 }
 
 /**
@@ -368,6 +404,24 @@ export interface DispatchMessageMap {
     type: 'mcp_servers'
     sessionId?: string
     servers?: unknown[]
+  }
+  // --- inventory list-replacement cases (#5618 Batch 2) ---
+  // slash_commands / agent_list carry the broadcast-guard `sessionId`; the
+  // parser drops the message when it targets a non-active session. Element shape
+  // is validated downstream (the cast stays at the flat-state write).
+  slash_commands: {
+    type: 'slash_commands'
+    sessionId?: string
+    commands?: unknown[]
+  }
+  agent_list: {
+    type: 'agent_list'
+    sessionId?: string
+    agents?: unknown[]
+  }
+  provider_list: {
+    type: 'provider_list'
+    providers?: unknown[]
   }
   session_usage: {
     type: 'session_usage'
@@ -845,6 +899,53 @@ function dispatchWebTaskList<S extends DispatchSessionBase>(
   adapter.setState({ webTasks: tasks as WebTask[] } as Record<string, WebTask[]>)
 }
 
+// ---------------------------------------------------------------------------
+// Inventory list-replacement cases (#5618 Batch 2)
+//
+// slash_commands / agent_list / provider_list each replace a single flat
+// connection-state list. They share the base flat-state write across both
+// clients; the only divergences are platform-specific side-effects handled by
+// the OPTIONAL adapter hooks above (the app mirrors slash/agent lists into its
+// secondary `useConversationStore`, and tightens provider elements via
+// `mapProviderList`). With both hooks omitted, the dashboard's prior verbatim
+// behaviour is preserved exactly.
+// ---------------------------------------------------------------------------
+
+/** `slash_commands` — replace the flat slash-command list (broadcast-guarded). */
+function dispatchSlashCommands<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['slash_commands'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const result = handleSlashCommands(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!result) return
+  adapter.setState({ slashCommands: result.commands } as Record<string, unknown[]>)
+  adapter.syncSecondaryInventory?.('slashCommands', result.commands)
+}
+
+/** `agent_list` — replace the flat custom-agent list (broadcast-guarded). */
+function dispatchAgentList<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['agent_list'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const result = handleAgentList(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!result) return
+  adapter.setState({ customAgents: result.agents } as Record<string, unknown[]>)
+  adapter.syncSecondaryInventory?.('customAgents', result.agents)
+}
+
+/** `provider_list` — replace the flat provider list (server-wide; app tightens). */
+function dispatchProviderList<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['provider_list'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const result = handleProviderList(msg as Record<string, unknown>)
+  if (!result) return
+  const providers = adapter.mapProviderList
+    ? adapter.mapProviderList(result.providers)
+    : result.providers
+  adapter.setState({ availableProviders: providers } as Record<string, unknown[]>)
+}
+
 /**
  * `notification_prefs` — validate + store the notification-prefs snapshot.
  * Slice-2 RECONCILE: both clients now share `handleNotificationPrefs`. A failed
@@ -1051,6 +1152,10 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     plan_started: sessionPatchDispatcher<S>(handlePlanStarted),
     inactivity_warning: dispatchInactivityWarning,
     mcp_servers: sessionPatchDispatcher<S>(handleMcpServers),
+    // --- inventory list-replacement cases (#5618 Batch 2) ---
+    slash_commands: dispatchSlashCommands,
+    agent_list: dispatchAgentList,
+    provider_list: dispatchProviderList,
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
@@ -1117,6 +1222,10 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'plan_started',
   'inactivity_warning',
   'mcp_servers',
+  // --- inventory list-replacement cases (#5618 Batch 2) ---
+  'slash_commands',
+  'agent_list',
+  'provider_list',
   'session_usage',
   'session_context',
   'session_cost_threshold_crossed',

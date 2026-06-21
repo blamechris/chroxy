@@ -1,6 +1,7 @@
 import { describe, test, expect } from 'vitest'
 import fs from 'fs'
 import path from 'path'
+import { DISPATCH_TABLE_TYPES } from '@chroxy/store-core'
 
 const modalSrc = fs.readFileSync(
   path.resolve(__dirname, './CreateSessionModal.tsx'),
@@ -83,8 +84,11 @@ describe('Provider picker in session creation (#1366)', () => {
     expect(typesSrc).toMatch(/fetchProviders\s*:\s*\(\)\s*=>/)
   })
 
-  test('message handler processes provider_list message', () => {
-    expect(messageHandlerSrc).toMatch(/case\s+['"]provider_list['"]/)
+  test('message handler processes provider_list message (via the shared dispatch table, #5618 Batch 2)', () => {
+    // provider_list migrated out of the dashboard's local switch into the shared
+    // store-core dispatch table; the handler routes through `runDispatch` first.
+    expect(messageHandlerSrc).toMatch(/runDispatch\(/)
+    expect(DISPATCH_TABLE_TYPES).toContain('provider_list')
   })
 
   test('list_providers is fetched on auth_ok', () => {
