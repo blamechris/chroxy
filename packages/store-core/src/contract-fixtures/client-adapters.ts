@@ -59,6 +59,21 @@ export interface AdapterResult {
    * array on the dashboard side IS the contract for those cases.
    */
   callbacks: Array<{ name: string; payload: unknown }>
+  /**
+   * Errors surfaced via the `addServerError` hook (#5618 Batch 3), in order.
+   * BOTH clients record these — the contract asserts they receive the SAME
+   * structured error for `session_restore_failed` / `session_persist_failed`
+   * (each client renders it differently below the hook, which is out of scope).
+   */
+  serverErrors: Array<{ message: string; category?: string; sessionId?: string; recoverable?: boolean }>
+  /**
+   * Info toasts surfaced via the `addInfoNotification` hook (#5618 Batch 3), in
+   * order. Only the DASHBOARD records these — the app omits the hook
+   * (`session_stopped` shows no toast on mobile, #4879). An empty array on the
+   * app side IS the contract for that case; the shared session patch is asserted
+   * separately.
+   */
+  infoNotifications: string[]
 }
 
 /** Which client an adapter models — drives the `updateSession` divergence. */
@@ -97,6 +112,8 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   const flat: Record<string, unknown> = {}
   const added: ChatMessage[] = []
   const callbacks: Array<{ name: string; payload: unknown }> = []
+  const serverErrors: AdapterResult['serverErrors'] = []
+  const infoNotifications: string[] = []
 
   // Reproduce each client's real `updateSession`. Both share the
   // "no-op on missing session / empty patch" guard; they diverge only in the
@@ -137,6 +154,14 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // store; the dashboard does not). Modelled as a no-op here, exactly like the
     // app's `activityState` derivation above — no fixture asserts on it.
     pushSessionNotification: () => {},
+    // #5618 Batch 3 — BOTH clients surface recoverable errors via `addServerError`
+    // (the error-sink for session_restore_failed / session_persist_failed). Record
+    // the (message + structured opts) so the contract asserts both clients receive
+    // the SAME error. How each renders it (app structured ServerError + ring +
+    // notification store; dashboard string banner) is below the hook, out of scope.
+    addServerError: (message, opts) => {
+      serverErrors.push({ message, ...(opts ?? {}) })
+    },
     // #5653 — only the APP opts its imperative-callback registry into the table.
     // Model it as "a callback IS registered for every channel" so the contract
     // can observe the invocation + payload. The DASHBOARD omits `getCallback`
@@ -175,12 +200,19 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
           syncSecondaryInventory: () => {},
         }
       : {}),
+    // #5618 Batch 3 — only the DASHBOARD shows the session_stopped info toast
+    // (#4878); the app OMITS `addInfoNotification` (#4879). Record it on the
+    // dashboard side so a unit/contract assertion can observe the divergence;
+    // the app's empty array IS the contract for that case.
+    ...(kind === 'dashboard'
+      ? { addInfoNotification: (message: string) => infoNotifications.push(message) }
+      : {}),
   }
 
   return {
     adapter,
     get result(): AdapterResult {
-      return { sessions, flat, added, callbacks }
+      return { sessions, flat, added, callbacks, serverErrors, infoNotifications }
     },
     setActive: (id: string | null) => {
       activeSessionId = id

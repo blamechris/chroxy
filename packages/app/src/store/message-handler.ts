@@ -54,8 +54,6 @@ import {
   handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,
-  // #4879: quiet user-initiated Stop confirmation handler
-  handleSessionStopped as sharedSessionStopped,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   handlePrimaryChanged as sharedPrimaryChanged,
@@ -92,7 +90,6 @@ import {
   chunkSubscribeSessionIds as sharedChunkSubscribeSessionIds,
   SESSION_LIST_SUBSCRIBE_CHUNK_SIZE,
   handleSessionTimeout as sharedSessionTimeout,
-  handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
   handleAuthBootstrap as sharedAuthBootstrap,
@@ -1203,6 +1200,30 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // before the flat-state write (drops nameless/non-object entries). The
   // dashboard omits this hook and writes the server payload verbatim.
   mapProviderList: (providers) => mapProviderList(providers),
+  // #5618 Batch 3 — error-sink for session_restore_failed / session_persist_failed.
+  // The app builds a structured ServerError, ring-caps the flat `serverErrors`
+  // list, and mirrors into the mobile notification store. (The id prefix is now a
+  // unified server-error prefix rather than the prior per-case restore/persist
+  // prefixes — ids stay unique; the prefix is cosmetic, not used for render/dedup.)
+  addServerError: (message, opts) => {
+    const serverError: ServerError = {
+      id: nextMessageId('server-error'),
+      // opts.category is the closed ServerErrorCategory union (typed at the hook),
+      // so no cast is needed — fall back to 'general' when the caller omits it.
+      category: opts?.category ?? 'general',
+      message,
+      recoverable: opts?.recoverable ?? true,
+      timestamp: Date.now(),
+      ...(opts?.sessionId ? { sessionId: opts.sessionId } : {}),
+    };
+    getStore().setState((state: ConnectionState) => ({
+      serverErrors: [...state.serverErrors, serverError].slice(-10),
+    }));
+    useNotificationStore.getState().addServerError(serverError);
+  },
+  // #5618 Batch 3 — the app deliberately shows NO info toast for session_stopped
+  // (#4879 — the inline session banner carries the signal), so `addInfoNotification`
+  // is OMITTED. The dashboard supplies it (its #4878 info toast).
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -2244,33 +2265,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_stopped': {
-      // #4879: quiet, informational confirmation when CliSession exits
-      // cleanly after a user-initiated Stop. The wire path was wired in
-      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
-      // ServerSessionStoppedSchema). Distinct from `session_error` (which
-      // flips `health: 'crashed'` and surfaces a loud red banner): the
-      // operator tapped Stop, the child process did indeed stop.
-      //
-      // Sets `stoppedAt` + `stoppedCode` on the target session — the
-      // SessionScreen reads those fields to render a subtle, info-styled
-      // status strip ("Session stopped." / "Session stopped. (exit N)").
-      // Both fields are cleared automatically by `handleClaudeReady`
-      // (which returns `stoppedAt: null, stoppedCode: null`) when the
-      // server restarts the child after the operator's next input.
-      //
-      // NO Alert / push notification — this is intentionally NOT an
-      // error UX. The active session's inline banner carries the full
-      // signal; for inactive sessions the absence of a session_error
-      // already conveys "no crash, clean stop" and adding a notification
-      // here would just be noise.
-      const stoppedPatch = sharedSessionStopped(msg, get().activeSessionId);
-      const stoppedTarget = stoppedPatch.sessionId;
-      if (stoppedTarget && get().sessionStates[stoppedTarget]) {
-        updateSession(stoppedTarget, () => stoppedPatch.patch);
-      }
-      break;
-    }
+    // session_stopped — migrated to the shared dispatch table (#5618 Batch 3;
+    // handled by runDispatch before this switch). Sets stoppedAt/stoppedCode on
+    // the target session; the app deliberately shows NO toast (#4879), so it
+    // omits the `addInfoNotification` adapter hook the dashboard supplies.
 
     // --- History replay ---
 
@@ -3222,62 +3220,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_restore_failed': {
-      // Server couldn't restart a persisted session (e.g. missing API key).
-      // History is preserved on disk; surface this visibly instead of making
-      // the saved session look like it silently disappeared after restart.
-      const restoreFailed = sharedSessionRestoreFailed(msg);
-      const serverError: ServerError = {
-        id: nextMessageId('restore'),
-        category: 'session',
-        message: restoreFailed.systemMessage.content,
-        recoverable: true,
-        timestamp: Date.now(),
-        ...(restoreFailed.sessionId ? { sessionId: restoreFailed.sessionId } : {}),
-      };
-      set((state: ConnectionState) => ({
-        serverErrors: [...state.serverErrors, serverError].slice(-10),
-      }));
-      useNotificationStore.getState().addServerError(serverError);
-      // eslint-disable-next-line no-console
-      console.warn('[session_restore_failed]', {
-        sessionId: restoreFailed.sessionId,
-        name: restoreFailed.name,
-        provider: restoreFailed.provider,
-        cwd: restoreFailed.cwd,
-        model: restoreFailed.model,
-        permissionMode: restoreFailed.permissionMode,
-        errorCode: restoreFailed.errorCode,
-        errorMessage: restoreFailed.errorMessage,
-        historyLength: restoreFailed.historyLength,
-      });
-      break;
-    }
-
-    case 'session_persist_failed': {
-      // #5714/#5701: a session-list mutation (create/rename/destroy) could not be
-      // flushed to disk and will be lost on restart. The write is atomic so
-      // on-disk state isn't corrupted — surface a recoverable error so the user
-      // isn't left silently believing the change persisted.
-      const persistSid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const persistName = typeof msg.name === 'string' ? msg.name : null;
-      const label = persistName ? `"${persistName}"` : (persistSid ? `session ${persistSid}` : 'your session change');
-      const persistError: ServerError = {
-        id: nextMessageId('persist'),
-        category: 'session',
-        message: `Couldn't save ${label} — the change may be lost on restart. Check the daemon's disk space and write permissions.`,
-        recoverable: true,
-        timestamp: Date.now(),
-        ...(persistSid ? { sessionId: persistSid } : {}),
-      };
-      set((state: ConnectionState) => ({
-        serverErrors: [...state.serverErrors, persistError].slice(-10),
-      }));
-      useNotificationStore.getState().addServerError(persistError);
-      // eslint-disable-next-line no-console
-      console.warn('[session_persist_failed]', { sessionId: persistSid, name: persistName });
-      break;
-    }
+    // session_restore_failed / session_persist_failed — migrated to the shared
+    // dispatch table (#5618 Batch 3; handled by runDispatch before this switch).
+    // Both surface a recoverable error via the `addServerError` adapter hook (the
+    // app builds the structured ServerError + ring + notification-store mirror);
+    // the shared handlers own the message construction + console.warn.
 
     case 'checkpoint_created': {
       const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);

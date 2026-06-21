@@ -144,6 +144,39 @@ export function handleSessionRestoreFailed(
 }
 
 // ---------------------------------------------------------------------------
+// session_persist_failed
+// ---------------------------------------------------------------------------
+
+/** Parsed payload + user-facing message for a `session_persist_failed` message. */
+export interface SessionPersistFailedPayload {
+  sessionId: string | null
+  name: string | null
+  /** Human-readable, recoverable error message the caller surfaces to the user. */
+  message: string
+}
+
+/**
+ * Parse a `session_persist_failed` message (#5714/#5701).
+ *
+ * A session-list mutation (create/rename/destroy) could not be flushed to disk
+ * and will be lost on restart. The write is atomic so on-disk state isn't
+ * corrupted — this is purely the "your change wasn't saved" signal. Both clients
+ * built the identical `label` + message string inline; this centralises it.
+ */
+export function handleSessionPersistFailed(
+  msg: Record<string, unknown>,
+): SessionPersistFailedPayload {
+  const sessionId = parseRawStringField(msg, 'sessionId')
+  const name = parseRawStringField(msg, 'name')
+  const label = name ? `"${name}"` : sessionId ? `session ${sessionId}` : 'your session change'
+  return {
+    sessionId,
+    name,
+    message: `Couldn't save ${label} — the change may be lost on restart. Check the daemon's disk space and write permissions.`,
+  }
+}
+
+// ---------------------------------------------------------------------------
 // session_warning
 // ---------------------------------------------------------------------------
 

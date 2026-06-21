@@ -55,6 +55,20 @@ function makeAdapter(init?: {
    * verbatim behaviour (no secondary-store mirror; provider list written as-is).
    */
   inventoryHooks?: boolean
+  /**
+   * When true, the adapter wires `addServerError` (records into `serverErrors`) —
+   * the error-sink for session_restore_failed / session_persist_failed (#5618
+   * Batch 3). When omitted, the hook is absent, so those cases DECLINE
+   * (`runDispatch` returns false), matching a client that hasn't opted in.
+   */
+  errorSink?: boolean
+  /**
+   * When true, the adapter wires `addInfoNotification` (records into
+   * `infoNotifications`) — the dashboard's session_stopped info toast. When
+   * omitted, the app's behaviour (no toast); session_stopped still OWNS the
+   * message and applies its session patch either way.
+   */
+  infoToast?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -63,6 +77,8 @@ function makeAdapter(init?: {
   const addedMessages: ChatMessage[] = []
   const notifications: Array<{ sessionId: string; eventType: string; message: string }> = []
   const inventorySyncs: Array<{ kind: string; list: unknown[] }> = []
+  const serverErrors: Array<{ message: string; category?: string; sessionId?: string; recoverable?: boolean }> = []
+  const infoNotifications: string[] = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -93,6 +109,12 @@ function makeAdapter(init?: {
           mapProviderList: (providers) => ['__mapped__', ...providers],
         }
       : {}),
+    ...(init?.errorSink
+      ? { addServerError: (message, opts) => serverErrors.push({ message, ...(opts ?? {}) }) }
+      : {}),
+    ...(init?.infoToast
+      ? { addInfoNotification: (message: string) => infoNotifications.push(message) }
+      : {}),
   }
 
   return {
@@ -102,6 +124,8 @@ function makeAdapter(init?: {
     addedMessages,
     notifications,
     inventorySyncs,
+    serverErrors,
+    infoNotifications,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -445,6 +469,76 @@ describe('shared dispatch table', () => {
       const env = makeAdapter()
       expect(dispatch(env, { type: 'provider_list' })).toBe(true)
       expect(env.flat.availableProviders).toBeUndefined()
+    })
+  })
+
+  describe('session_restore_failed / session_persist_failed / session_stopped (#5618 Batch 3)', () => {
+    it('session_restore_failed surfaces a structured error when addServerError is wired', () => {
+      const env = makeAdapter({ errorSink: true })
+      const handled = dispatch(env, {
+        type: 'session_restore_failed',
+        sessionId: 's1',
+        name: 'My Session',
+        errorMessage: 'missing API key',
+      })
+      expect(handled).toBe(true)
+      expect(env.serverErrors).toEqual([
+        {
+          message: 'Failed to restore My Session: missing API key',
+          category: 'session',
+          sessionId: 's1',
+          recoverable: true,
+        },
+      ])
+    })
+
+    it('session_restore_failed DECLINES (runDispatch false) when addServerError is absent', () => {
+      const env = makeAdapter() // no error-sink hook (a client that hasn't opted in)
+      expect(dispatch(env, { type: 'session_restore_failed', sessionId: 's1' })).toBe(false)
+      expect(env.serverErrors).toEqual([])
+    })
+
+    it('session_persist_failed surfaces the "not saved" error when addServerError is wired', () => {
+      const env = makeAdapter({ errorSink: true })
+      const handled = dispatch(env, { type: 'session_persist_failed', sessionId: 's1', name: 'My Session' })
+      expect(handled).toBe(true)
+      expect(env.serverErrors).toEqual([
+        {
+          message:
+            'Couldn\'t save "My Session" — the change may be lost on restart. Check the daemon\'s disk space and write permissions.',
+          category: 'session',
+          sessionId: 's1',
+          recoverable: true,
+        },
+      ])
+    })
+
+    it('session_persist_failed DECLINES when addServerError is absent', () => {
+      const env = makeAdapter()
+      expect(dispatch(env, { type: 'session_persist_failed', sessionId: 's1' })).toBe(false)
+      expect(env.serverErrors).toEqual([])
+    })
+
+    it('session_stopped sets stoppedCode and fires the info toast (dashboard)', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } }, infoToast: true })
+      const handled = dispatch(env, { type: 'session_stopped', sessionId: 's1', code: 143 })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.stoppedCode).toBe(143)
+      expect(env.infoNotifications).toEqual(['Session stopped. (exit 143)'])
+    })
+
+    it('session_stopped applies the patch with NO toast when addInfoNotification is absent (app)', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } } })
+      const handled = dispatch(env, { type: 'session_stopped', sessionId: 's1', code: 0 })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.stoppedCode).toBe(0)
+      expect(env.infoNotifications).toEqual([])
+    })
+
+    it('session_stopped uses a bare toast message for a clean (code 0) exit', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } }, infoToast: true })
+      dispatch(env, { type: 'session_stopped', sessionId: 's1', code: 0 })
+      expect(env.infoNotifications).toEqual(['Session stopped.'])
     })
   })
 

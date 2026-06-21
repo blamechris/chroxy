@@ -103,10 +103,10 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'server_status',
   'session_error',
   'session_list',
-  'session_persist_failed',
-  'session_restore_failed',
+  // session_persist_failed / session_restore_failed / session_stopped — migrated
+  // to the shared dispatch table (#5618 Batch 3); now have DISPATCH_FIXTURES
+  // entries, so they leave the both-clients-switch universe.
   'session_role',
-  'session_stopped',
   'session_switched',
   'session_timeout',
   'session_warning',

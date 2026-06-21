@@ -583,9 +583,14 @@ export interface ServerErrorAction {
  * message. Callers slice an array of these into their `serverErrors` state
  * (typically capped at the most recent 10 entries).
  */
+/** Closed union of `ServerError` categories (#5618 Batch 3 — shared by the
+ * dispatch-table `addServerError` hook so callers can't pass an unsupported
+ * category that would break UI styling/filters). */
+export type ServerErrorCategory = 'tunnel' | 'session' | 'permission' | 'general';
+
 export interface ServerError {
   id: string;
-  category: 'tunnel' | 'session' | 'permission' | 'general';
+  category: ServerErrorCategory;
   message: string;
   recoverable: boolean;
   timestamp: number;

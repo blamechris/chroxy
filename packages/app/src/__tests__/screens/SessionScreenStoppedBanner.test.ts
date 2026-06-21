@@ -17,6 +17,7 @@
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { DISPATCH_TABLE_TYPES } from '@chroxy/store-core';
 
 const SessionScreenSrc = fs.readFileSync(
   path.resolve(__dirname, '../../screens/SessionScreen.tsx'),
@@ -85,20 +86,23 @@ describe('SessionScreen stopped status strip (#4879)', () => {
     expect(SessionScreenSrc).toMatch(/testID="session-stopped-banner-text"/);
   });
 
-  it('does NOT push a session notification or fire an Alert from the case branch', () => {
-    // The case branch in message-handler.ts must not show modal UI or
-    // push a notification — the inline strip carries the full signal.
+  it('shows no modal / notification / toast — migrated to the shared dispatch table (#5618 Batch 3)', () => {
+    // session_stopped moved out of the app's local switch into the shared
+    // store-core dispatch table; the app deliberately stays quiet (#4879 — the
+    // inline strip carries the full signal). It reproduces that by OMITTING the
+    // `addInfoNotification` adapter hook the dashboard supplies, so the
+    // dispatcher's `adapter.addInfoNotification?.(...)` is a no-op on mobile.
     const msgHandlerSrc = fs.readFileSync(
       path.resolve(__dirname, '../../store/message-handler.ts'),
       'utf-8',
     );
-    // Locate just the case body so we don't trip over unrelated Alert
-    // calls elsewhere in the dispatcher.
-    const caseBlock = msgHandlerSrc.match(/case 'session_stopped':\s*\{([\s\S]*?)\n {4}\}/);
-    expect(caseBlock).not.toBeNull();
-    const body = caseBlock![1];
-    expect(body).not.toMatch(/Alert\.alert/);
-    expect(body).not.toMatch(/pushSessionNotification/);
-    expect(body).not.toMatch(/addServerError/);
+    // No local case branch remains.
+    expect(msgHandlerSrc).not.toMatch(/case 'session_stopped':/);
+    // The app adapter does NOT wire the info-toast hook (the dashboard does) —
+    // i.e. no `addInfoNotification:` property in the adapter object (a comment
+    // mentioning the hook by name is fine; the property definition is not).
+    expect(msgHandlerSrc).not.toMatch(/addInfoNotification\s*:/);
+    // And the type is owned by the shared table.
+    expect(DISPATCH_TABLE_TYPES).toContain('session_stopped');
   });
 });
