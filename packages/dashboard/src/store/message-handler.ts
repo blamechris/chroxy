@@ -29,8 +29,6 @@ import {
   // migrated to the shared dispatch table (#5556 slice 2)
   handlePlanReady as sharedPlanReady,
   // #4653: chroxy-side multi-question deny intervention surfaced to the user
-  handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
-  applyInterventionBuilder,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
   handleToolInputDelta as sharedToolInputDelta,
@@ -4342,52 +4340,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
-
-    case 'multi_question_intervention': {
-      // #4653 — chroxy's permission-hook (#4648) just denied a multi-question
-      // AskUserQuestion. Append a SessionIntervention entry so the
-      // FooterBar counter ticks, and on the FIRST such intervention per
-      // session push a one-time system ChatMessage explaining what
-      // happened (without it the deny is invisible — see v0.9.24
-      // dogfood feedback on #4653).
-      //
-      // applyInterventionBuilder dedups by toolUseId (a stuck model
-      // re-emitting the same payload won't double-count) and tells us
-      // whether this was the session's first intervention so the inline
-      // notice only fires once.
-      const builder = sharedMultiQuestionIntervention(msg, get().activeSessionId);
-      if (!builder) break;
-      const targetId = builder.sessionId;
-      if (!targetId) break;
-      const targetState = get().sessionStates[targetId];
-      if (!targetState) break;
-      const { interventions: nextInterventions, isFirst } = applyInterventionBuilder(
-        builder,
-        targetState.interventions,
-      );
-      // Skip the state mutation if nothing changed (dedup'd repeat) so React
-      // doesn't re-render the footer counter on every stuck-model re-emit.
-      if (nextInterventions === targetState.interventions) break;
-      updateSession(targetId, (ss) => {
-        if (isFirst) {
-          return {
-            interventions: nextInterventions,
-            messages: [
-              ...ss.messages,
-              {
-                id: nextMessageId('system'),
-                type: 'system',
-                content:
-                  "chroxy intercepted a multi-question form and asked the agent to break it into single questions.",
-                timestamp: Date.now(),
-              },
-            ],
-          };
-        }
-        return { interventions: nextInterventions };
-      });
-      break;
-    }
 
     case 'permission_expired': {
       const { requestId: expiredRequestId, systemMessage: expiredSystemMsg } =

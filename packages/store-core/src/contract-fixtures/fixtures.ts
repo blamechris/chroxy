@@ -270,6 +270,41 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     expect: { noop: true },
   },
 
+  // 4d. multi_question_intervention (#5618) — append a dedup'd, ring-capped
+  // SessionIntervention to the target session, and on the FIRST one push a
+  // one-time system ChatMessage. Builder dedups by toolUseId (a stuck-model
+  // re-emit is a no-op) — byte-identical on both clients.
+  {
+    name: 'multi_question_intervention appends the intervention + first-time system notice',
+    type: 'multi_question_intervention',
+    init: { sessions: { s1: {} } },
+    message: { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu1', questionCount: 3 },
+    expect: {
+      sessions: {
+        s1: {
+          interventions: [{ kind: 'multi_question', toolUseId: 'tu1', count: 3 }],
+          messages: [
+            sysMsg('chroxy intercepted a multi-question form and asked the agent to break it into single questions.'),
+          ],
+        },
+      },
+    },
+  },
+  {
+    name: 'multi_question_intervention dedups a repeat toolUseId (no-op, no re-render)',
+    type: 'multi_question_intervention',
+    init: { sessions: { s1: { interventions: [{ kind: 'multi_question', toolUseId: 'tu1', count: 3, timestamp: 1 }] } } },
+    message: { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu1', questionCount: 3 },
+    expect: { noop: true },
+  },
+  {
+    name: 'multi_question_intervention is a no-op on a malformed payload (questionCount < 2)',
+    type: 'multi_question_intervention',
+    init: { sessions: { s1: {} } },
+    message: { type: 'multi_question_intervention', sessionId: 's1', toolUseId: 'tu1', questionCount: 1 },
+    expect: { noop: true },
+  },
+
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
   // session was not paused; no-op when it was (budget_resumed already noted it)
   {
