@@ -311,9 +311,14 @@ export class FakeHandshakeClient {
     const exchangePublicKey = authOk.serverPublicKey as string
     const serverKeySig = (authOk.serverKeySig as string | undefined) ?? null
     // #5616 — the rotation continuity cert, threaded into the pin decision
-    // exactly as the real clients do (app/dashboard message-handler.ts).
-    const newIdentityKey = (authOk.newIdentityKey as string | undefined) ?? null
-    const rotationCert = (authOk.rotationCert as string | undefined) ?? null
+    // exactly as the real clients do: the production parsers (handleAuthOk /
+    // handleKeyExchangeOk) normalise empty/non-string to null, so mirror that
+    // `typeof === 'string' && truthy ? v : null` guard here rather than a raw
+    // cast (which would treat '' / non-strings as present).
+    const newIdentityKey =
+      typeof authOk.newIdentityKey === 'string' && authOk.newIdentityKey ? authOk.newIdentityKey : null
+    const rotationCert =
+      typeof authOk.rotationCert === 'string' && authOk.rotationCert ? authOk.rotationCert : null
 
     // #5614 — the plaintext-downgrade gate runs FIRST, exactly as production does
     // (before the encryption branch / pin check). A pinned connection whose
