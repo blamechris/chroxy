@@ -1886,6 +1886,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         set({ connectionError: reason });
       },
       onTerminalDown: () => {
+        // Superseded by a newer attempt — don't clobber it (parity with
+        // scheduleRetry / onGaveUp + the app's onTerminalDown). Redundant with
+        // store-core's synchronous isStale() today, but guards against a future
+        // await sneaking in before this callback.
+        if (myAttemptId !== connectionAttemptId) return;
         // #6023: supervisor gave up — latch the terminal server_down state
         // immediately instead of climbing the full retry ladder. The reconnect
         // banner / footer already render this phase; retryConnection() resets it.
