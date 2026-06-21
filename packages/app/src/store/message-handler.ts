@@ -1489,6 +1489,13 @@ function verifyServerIdentityOrRefuse(
   ctx: ConnectionContext,
   exchangePublicKey: string,
   serverKeySig: string | null,
+  // #5616 — identity-rotation continuity cert from the handshake (auth_ok /
+  // key_exchange_ok). When the daemon rotated its identity, `newIdentityKey` is
+  // its current key and `rotationCert` is the old-signed-new cert; a pinned
+  // client whose pin no longer verifies chains forward instead of refusing.
+  // Both null on un-rotated daemons / older servers (refusal path unchanged).
+  newIdentityKey: string | null = null,
+  rotationCert: string | null = null,
 ): { refused: false; pinToPersist: string | null } | { refused: true } {
   const saved = useConnectionLifecycleStore.getState().savedConnection;
   const pinnedIdentityKey = saved?.pinnedIdentityKey ?? null;
@@ -1497,6 +1504,8 @@ function verifyServerIdentityOrRefuse(
     pairingIdentityKey: pendingPairingIdentityKey,
     exchangePublicKey,
     serverKeySig,
+    newIdentityKey,
+    rotationCert,
   });
   if (decision.action === 'refuse') {
     applyIdentityRefusal(ctx, decision.reason, decision.message);
@@ -1807,7 +1816,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // (or pairing-time) identity BEFORE deriving the shared key. On a
           // mismatch this closes the socket and surfaces the refusal; we abort
           // the handshake entirely (no key derived, no post-auth burst).
-          const verdict = verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig);
+          const verdict = verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig, auth.newIdentityKey, auth.rotationCert);
           if (verdict.refused) {
             _ctx.pendingKeyPair = null;
             _ctx.pendingSalt = null;
@@ -1880,7 +1889,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       // completion point can't leave a timer to fire spuriously. Idempotent.
       clearHandshakeTimer();
       if (_ctx.pendingKeyPair) {
-        const { publicKey: serverPublicKey, serverKeySig } = sharedKeyExchangeOk(msg);
+        const { publicKey: serverPublicKey, serverKeySig, newIdentityKey, rotationCert } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
@@ -1893,7 +1902,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // #5536 — verify the server's signed exchange key against the pinned (or
         // pairing-time) identity BEFORE deriving the shared key. On a mismatch
         // this closes the socket + surfaces the refusal; abort the handshake.
-        const verdict = verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig);
+        const verdict = verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig, newIdentityKey, rotationCert);
         if (verdict.refused) {
           _ctx.pendingKeyPair = null;
           _ctx.pendingSalt = null;
