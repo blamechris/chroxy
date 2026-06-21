@@ -10,6 +10,7 @@
     "web": "expo start --web",
     "test": "jest --coverage",
     "test:coverage": "jest --coverage --coverageReporters=text --coverageReporters=html",
+    "test:fast": "jest --coverage=false",
     "bundle-xterm": "node scripts/bundle-xterm.js",
     "postinstall": "node scripts/bundle-xterm.js"
   },
