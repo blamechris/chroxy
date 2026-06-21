@@ -82,6 +82,18 @@ export interface FixtureExpectation {
    * file-ops / git case, which DECLINES). Omit the slice to "don't care".
    */
   callbacks?: Array<{ name: string; payload: Record<string, unknown> }>
+  /**
+   * Expected `addServerError` invocations (#5618 Batch 3), in order. Each entry
+   * is a partial deep-equal of the structured error. An empty array asserts NO
+   * error was surfaced. Omit the slice to "don't care".
+   */
+  serverErrors?: Array<{ message?: string; category?: string; sessionId?: string; recoverable?: boolean }>
+  /**
+   * Expected `addInfoNotification` invocations (#5618 Batch 3), in order. Only
+   * the dashboard records these; the app's array is always empty. Omit to "don't
+   * care".
+   */
+  infoNotifications?: string[]
   /** When true, assert NO mutation happened at all (state is untouched). */
   noop?: boolean
 }
@@ -402,6 +414,60 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     type: 'provider_list',
     message: { type: 'provider_list' },
     expect: { noop: true },
+  },
+
+  // 4f. error-sink / session-status cases (#5618 Batch 3). restore/persist
+  // surface a recoverable error via the shared `addServerError` hook — both
+  // clients receive the SAME structured error (each renders it differently below
+  // the hook). session_stopped sets a shared session patch + a dashboard-only
+  // info toast (the app shows none).
+  {
+    name: 'session_restore_failed surfaces a recoverable session error in both clients',
+    type: 'session_restore_failed',
+    message: {
+      type: 'session_restore_failed',
+      sessionId: 's1',
+      name: 'My Session',
+      errorMessage: 'missing API key',
+    },
+    expect: {
+      serverErrors: [
+        { message: 'Failed to restore My Session: missing API key', category: 'session', sessionId: 's1', recoverable: true },
+      ],
+    },
+  },
+  {
+    name: 'session_persist_failed surfaces a recoverable "not saved" error in both clients',
+    type: 'session_persist_failed',
+    message: { type: 'session_persist_failed', sessionId: 's1', name: 'My Session' },
+    expect: {
+      serverErrors: [
+        {
+          message: 'Couldn\'t save "My Session" — the change may be lost on restart. Check the daemon\'s disk space and write permissions.',
+          category: 'session',
+          sessionId: 's1',
+          recoverable: true,
+        },
+      ],
+    },
+  },
+  {
+    name: 'session_stopped sets stoppedCode on the target session (shared patch; toast is dashboard-only)',
+    type: 'session_stopped',
+    init: { sessions: { s1: {} } },
+    message: { type: 'session_stopped', sessionId: 's1', code: 143 },
+    // stoppedAt is Date.now() (differs per client run) so it is not asserted;
+    // stoppedCode is deterministic. The dashboard's info toast is out of the
+    // shared contract (covered by dispatch-table.test.ts units), so this asserts
+    // only the shared session patch — identical in both clients.
+    expect: { sessions: { s1: { stoppedCode: 143 } } },
+  },
+  {
+    name: 'session_stopped with a clean exit (code 0) sets stoppedCode 0',
+    type: 'session_stopped',
+    init: { sessions: { s1: {} } },
+    message: { type: 'session_stopped', sessionId: 's1', code: 0 },
+    expect: { sessions: { s1: { stoppedCode: 0 } } },
   },
 
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the

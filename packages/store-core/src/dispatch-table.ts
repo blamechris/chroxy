@@ -79,6 +79,10 @@ import {
   handleSlashCommands,
   handleAgentList,
   handleProviderList,
+  // --- error-sink / session-status cases (#5618 Batch 3) ---
+  handleSessionStopped,
+  handleSessionRestoreFailed,
+  handleSessionPersistFailed,
   handleSessionUsage,
   handleSessionContext,
   handleModelChangedPatch,
@@ -281,6 +285,41 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * robustness behaviour.
    */
   mapProviderList?(providers: unknown[]): unknown[]
+  /**
+   * Surface a recoverable server-side error to the user (#5618 Batch 3). Used by
+   * the `session_restore_failed` / `session_persist_failed` cases, whose ONLY
+   * effect is to surface the error — there is no shared store mutation. Each
+   * client renders it its own way: the app builds a structured `ServerError`
+   * (ring-capped flat `serverErrors` list + mobile `useNotificationStore`); the
+   * dashboard calls its connection-store `addServerError(message)` (string
+   * banner, which builds its own envelope). The shared handler passes the
+   * already-constructed human-readable `message` plus structured metadata; a
+   * client uses whatever subset it needs (the dashboard ignores `opts`).
+   *
+   * OPTIONAL — and DECLINE-capable: when a client's adapter does NOT supply it,
+   * the restore/persist dispatch handlers return `false` so {@link runDispatch}
+   * falls through to that client's own switch (matching the
+   * imperative-callback / `getCallback` pattern — the error-sink IS the whole
+   * effect, so a client that hasn't wired it must keep handling the case
+   * locally). Both real clients supply it, so both OWN these cases.
+   */
+  addServerError?(
+    message: string,
+    opts?: { category?: string; sessionId?: string; recoverable?: boolean },
+  ): void
+  /**
+   * Surface a low-priority INFO notification (#5618 Batch 3). Used by
+   * `session_stopped` for the dashboard's "Session stopped." info toast
+   * (`addInfoNotification`). The app deliberately shows NO toast here (#4879 —
+   * the inline session banner carries the signal), so it OMITS this hook.
+   *
+   * OPTIONAL and out-of-contract: unlike `addServerError`, `session_stopped`
+   * ALSO performs a shared session patch (`stoppedAt`/`stoppedCode`), so its
+   * handler always OWNS the message and never declines — it just skips the toast
+   * when the hook is absent. This is a platform-specific side-effect like
+   * {@link ClientStoreAdapter.pushSessionNotification}.
+   */
+  addInfoNotification?(message: string): void
 }
 
 /**
@@ -422,6 +461,24 @@ export interface DispatchMessageMap {
   provider_list: {
     type: 'provider_list'
     providers?: unknown[]
+  }
+  // --- error-sink / session-status cases (#5618 Batch 3) ---
+  // The parsers read the raw fields; the map only needs `type` (+ the optional
+  // wire fields the handlers narrow themselves).
+  session_stopped: {
+    type: 'session_stopped'
+    sessionId?: string
+    code?: number
+  }
+  session_restore_failed: {
+    type: 'session_restore_failed'
+    sessionId?: string
+    name?: string
+  }
+  session_persist_failed: {
+    type: 'session_persist_failed'
+    sessionId?: string
+    name?: string
   }
   session_usage: {
     type: 'session_usage'
@@ -946,6 +1003,80 @@ function dispatchProviderList<S extends DispatchSessionBase>(
   adapter.setState({ availableProviders: providers } as Record<string, unknown[]>)
 }
 
+// ---------------------------------------------------------------------------
+// Error-sink / session-status cases (#5618 Batch 3)
+//
+// session_restore_failed / session_persist_failed surface a recoverable error
+// via the `addServerError` hook (their ONLY effect — no shared store mutation),
+// so they DECLINE when the adapter has no `addServerError` (matching the
+// file-ops / git `getCallback` pattern). session_stopped performs a shared
+// session patch (`stoppedAt`/`stoppedCode`) and ALSO fires the dashboard's
+// optional info toast, so it always OWNS the message.
+// ---------------------------------------------------------------------------
+
+/** `session_restore_failed` — surface the failure (app structured / dashboard banner). */
+function dispatchSessionRestoreFailed<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_restore_failed'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  if (!adapter.addServerError) return false
+  const r = handleSessionRestoreFailed(msg as Record<string, unknown>)
+  adapter.addServerError(r.systemMessage.content, {
+    category: 'session',
+    recoverable: true,
+    ...(r.sessionId ? { sessionId: r.sessionId } : {}),
+  })
+  // eslint-disable-next-line no-console
+  console.warn('[session_restore_failed]', {
+    sessionId: r.sessionId,
+    name: r.name,
+    provider: r.provider,
+    cwd: r.cwd,
+    model: r.model,
+    permissionMode: r.permissionMode,
+    errorCode: r.errorCode,
+    errorMessage: r.errorMessage,
+    historyLength: r.historyLength,
+  })
+}
+
+/** `session_persist_failed` — surface the "change not saved" error (#5714/#5701). */
+function dispatchSessionPersistFailed<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_persist_failed'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  if (!adapter.addServerError) return false
+  const r = handleSessionPersistFailed(msg as Record<string, unknown>)
+  adapter.addServerError(r.message, {
+    category: 'session',
+    recoverable: true,
+    ...(r.sessionId ? { sessionId: r.sessionId } : {}),
+  })
+  // eslint-disable-next-line no-console
+  console.warn('[session_persist_failed]', { sessionId: r.sessionId, name: r.name })
+}
+
+/** `session_stopped` — set stoppedAt/stoppedCode + optional dashboard info toast. */
+function dispatchSessionStopped<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['session_stopped'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { sessionId, patch } = handleSessionStopped(
+    msg as Record<string, unknown>,
+    adapter.getActiveSessionId(),
+  )
+  if (sessionId && adapter.hasSession(sessionId)) {
+    adapter.updateSession(sessionId, () => patch as Partial<S>)
+  }
+  // Dashboard-only info toast (#4878). The app omits the hook (#4879 — the
+  // inline session banner already carries the signal). Computed identically to
+  // the dashboard's prior inline message; fires regardless of session existence,
+  // matching the dashboard's prior unconditional `addInfoNotification`.
+  const code = (patch as { stoppedCode?: number | null }).stoppedCode
+  const message = code != null && code !== 0 ? `Session stopped. (exit ${code})` : 'Session stopped.'
+  adapter.addInfoNotification?.(message)
+}
+
 /**
  * `notification_prefs` — validate + store the notification-prefs snapshot.
  * Slice-2 RECONCILE: both clients now share `handleNotificationPrefs`. A failed
@@ -1156,6 +1287,10 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     slash_commands: dispatchSlashCommands,
     agent_list: dispatchAgentList,
     provider_list: dispatchProviderList,
+    // --- error-sink / session-status cases (#5618 Batch 3) ---
+    session_stopped: dispatchSessionStopped,
+    session_restore_failed: dispatchSessionRestoreFailed,
+    session_persist_failed: dispatchSessionPersistFailed,
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
@@ -1226,6 +1361,10 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'slash_commands',
   'agent_list',
   'provider_list',
+  // --- error-sink / session-status cases (#5618 Batch 3) ---
+  'session_stopped',
+  'session_restore_failed',
+  'session_persist_failed',
   'session_usage',
   'session_context',
   'session_cost_threshold_crossed',

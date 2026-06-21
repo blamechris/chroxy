@@ -68,7 +68,6 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
-  handleSessionStopped as sharedSessionStopped,
   handleCheckpointRestored as sharedCheckpointRestored,
   handleConversationsList as sharedConversationsList,
   handleRawOutput as sharedRawOutput,
@@ -84,7 +83,6 @@ import {
   buildSessionListPatches as sharedBuildSessionListPatches,
   cumulativeUsageEquals as sharedCumulativeUsageEquals,
   handleSessionTimeout as sharedSessionTimeout,
-  handleSessionRestoreFailed as sharedSessionRestoreFailed,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
   handleAuthBootstrap as sharedAuthBootstrap,
@@ -1037,6 +1035,13 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
     pushSessionNotification(sessionId, eventType, message),
+  // #5618 Batch 3 — error-sink for session_restore_failed / session_persist_failed.
+  // The dashboard's connection-store addServerError builds its own envelope
+  // (category 'general', id 'info', ring-capped serverErrors) from the message;
+  // it ignores the structured opts (its prior behaviour took only the string).
+  addServerError: (message) => getStore().getState().addServerError(message),
+  // #5618 Batch 3 — session_stopped's info toast (#4878). The app omits this hook.
+  addInfoNotification: (message) => getStore().getState().addInfoNotification(message),
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -4033,41 +4038,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_stopped': {
-      // #4878: quiet, informational confirmation when CliSession exits
-      // cleanly after a user-initiated Stop. The wire path was wired in
-      // #4868 (CliSession 'stopped' → SessionManager → ws-forwarding →
-      // ServerSessionStoppedSchema). Routed through `addInfoNotification`
-      // (info-level toast, not the red `addServerError` reserved for
-      // crashes / STREAM_ERROR / ABORT) so the operator gets a positive
-      // "you clicked Stop and the session did indeed stop" confirmation.
-      //
-      // A non-zero exit code is surfaced as a small diagnostic suffix
-      // (e.g. "Session stopped. (exit 143)" for SIGTERM). Code 0 is the
-      // common clean-exit case and gets no decoration — the bare
-      // "Session stopped." carries the full signal there. Missing code
-      // (future in-process providers per the #4756 follow-up) is also
-      // bare; surfacing "(exit undefined)" would be noisier than useful.
-      //
-      // #5454: parse + session patch shared via store-core (same handler the
-      // app uses; it also tightens the code guard with Number.isInteger so a
-      // fractional/NaN code renders bare instead of "(exit 1.5)"). The patch
-      // sets `stoppedAt`/`stoppedCode` on the target session — already part
-      // of the dashboard's BaseSessionState shape (#4879 parity) and cleared
-      // by `handleClaudeReady` exactly as on the app. The info toast stays
-      // dashboard-specific (#4878).
-      const stoppedPatch = sharedSessionStopped(msg, get().activeSessionId);
-      const stoppedTarget = stoppedPatch.sessionId;
-      if (stoppedTarget && get().sessionStates[stoppedTarget]) {
-        updateSession(stoppedTarget, () => stoppedPatch.patch);
-      }
-      const stoppedCode = stoppedPatch.patch.stoppedCode as number | null;
-      const stoppedMessage = stoppedCode != null && stoppedCode !== 0
-        ? `Session stopped. (exit ${stoppedCode})`
-        : 'Session stopped.';
-      get().addInfoNotification(stoppedMessage);
-      break;
-    }
+    // session_stopped — migrated to the shared dispatch table (#5618 Batch 3;
+    // handled by runDispatch before this switch). Sets stoppedAt/stoppedCode on
+    // the target session (shared with the app) and fires the dashboard-specific
+    // info toast (#4878) via the `addInfoNotification` adapter hook.
 
     // --- History replay ---
 
@@ -4821,43 +4795,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'session_restore_failed': {
-      // Server couldn't restart a persisted session (e.g. missing API key).
-      // History is preserved on disk; surface this visibly instead of making
-      // the saved session look like it silently disappeared after restart.
-      const restoreFailed = sharedSessionRestoreFailed(msg);
-      get().addServerError(restoreFailed.systemMessage.content);
-      // eslint-disable-next-line no-console
-      console.warn('[session_restore_failed]', {
-        sessionId: restoreFailed.sessionId,
-        name: restoreFailed.name,
-        provider: restoreFailed.provider,
-        cwd: restoreFailed.cwd,
-        model: restoreFailed.model,
-        permissionMode: restoreFailed.permissionMode,
-        errorCode: restoreFailed.errorCode,
-        errorMessage: restoreFailed.errorMessage,
-        historyLength: restoreFailed.historyLength,
-      });
-      break;
-    }
-
-    case 'session_persist_failed': {
-      // #5714/#5701: a session-list mutation (create/rename/destroy) could not be
-      // flushed to disk and will be lost on restart. The write is atomic so
-      // on-disk state isn't corrupted — this is purely the "your change wasn't
-      // saved" signal, surfaced as an error banner so the user isn't left
-      // silently believing it persisted.
-      const persistSid = typeof msg.sessionId === 'string' ? msg.sessionId : null;
-      const persistName = typeof msg.name === 'string' ? msg.name : null;
-      const label = persistName ? `"${persistName}"` : (persistSid ? `session ${persistSid}` : 'your session change');
-      get().addServerError(
-        `Couldn't save ${label} — the change may be lost on restart. Check the daemon's disk space and write permissions.`,
-      );
-      // eslint-disable-next-line no-console
-      console.warn('[session_persist_failed]', { sessionId: persistSid, name: persistName });
-      break;
-    }
+    // session_restore_failed / session_persist_failed — migrated to the shared
+    // dispatch table (#5618 Batch 3; handled by runDispatch before this switch).
+    // Both surface the error via the `addServerError` adapter hook (the dashboard
+    // forwards the message to its connection-store addServerError banner); the
+    // shared handlers own the message construction + console.warn.
 
     // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
