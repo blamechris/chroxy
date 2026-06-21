@@ -81,6 +81,13 @@ export interface AdapterResult {
    * asserts they switch to the same session(s).
    */
   switchedSessions: string[]
+  /**
+   * Tunnel-URL rotations applied via `applyRotatedTunnelUrl` (#5618 Batch 5b), in
+   * order — from tunnel_url_changed and the auth_bootstrap burst. BOTH clients
+   * call it (the persistence is platform-local below the hook), so the contract
+   * asserts they apply the SAME (url, previousUrl).
+   */
+  rotatedTunnelUrls: Array<{ url: string; previousUrl: string | null }>
 }
 
 /** Which client an adapter models — drives the `updateSession` divergence. */
@@ -124,6 +131,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   const serverErrors: AdapterResult['serverErrors'] = []
   const infoNotifications: string[] = []
   const switchedSessions: string[] = []
+  const rotatedTunnelUrls: AdapterResult['rotatedTunnelUrls'] = []
 
   // Reproduce each client's real `updateSession`. Both share the
   // "no-op on missing session / empty patch" guard; they diverge only in the
@@ -171,6 +179,13 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // notification store; dashboard string banner) is below the hook, out of scope.
     addServerError: (message, opts) => {
       serverErrors.push({ message, ...(opts ?? {}) })
+    },
+    // #5618 Batch 5b — BOTH clients repoint their persisted tunnel endpoint
+    // (storage is platform-local below the hook). Record (url, previousUrl) so the
+    // contract asserts both apply the same rotation for tunnel_url_changed /
+    // auth_bootstrap.
+    applyRotatedTunnelUrl: (url, previousUrl) => {
+      rotatedTunnelUrls.push({ url, previousUrl })
     },
     // #5618 Batch 4 — multi-client accessors. BOTH clients supply them (the
     // accessor hides where presence state lives — app multi-client store vs
@@ -248,7 +263,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   return {
     adapter,
     get result(): AdapterResult {
-      return { sessions, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions }
+      return { sessions, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions, rotatedTunnelUrls }
     },
     setActive: (id: string | null) => {
       activeSessionId = id

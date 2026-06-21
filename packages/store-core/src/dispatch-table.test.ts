@@ -93,6 +93,13 @@ function makeAdapter(init?: {
    * cost_update applies only the shared sessionCost patch (the dashboard).
    */
   costMirror?: boolean
+  /**
+   * When true, the adapter wires `applyRotatedTunnelUrl` (records into
+   * `rotatedTunnelUrls`) — tunnel_url_changed / auth_bootstrap (#5618 Batch 5b).
+   * When omitted, tunnel_url_changed DECLINES; auth_bootstrap still owns via its
+   * shared list writes (the optional-chained tunnel apply is skipped).
+   */
+  tunnel?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -108,6 +115,7 @@ function makeAdapter(init?: {
   const switchedSessions: string[] = []
   const primaryClientIds: Array<string | null> = []
   const costUpdates: Array<{ totalCost: number | null; budget: number | null }> = []
+  const rotatedTunnelUrls: Array<{ url: string; previousUrl: string | null }> = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -165,6 +173,12 @@ function makeAdapter(init?: {
             costUpdates.push({ totalCost, budget }),
         }
       : {}),
+    ...(init?.tunnel
+      ? {
+          applyRotatedTunnelUrl: (url: string, previousUrl: string | null) =>
+            rotatedTunnelUrls.push({ url, previousUrl }),
+        }
+      : {}),
   }
 
   return {
@@ -179,6 +193,7 @@ function makeAdapter(init?: {
     switchedSessions,
     primaryClientIds,
     costUpdates,
+    rotatedTunnelUrls,
     setActive: (id: string | null) => {
       activeSessionId = id
     },
@@ -721,6 +736,71 @@ describe('shared dispatch table', () => {
       dispatch(env, { type: 'cost_update', sessionCost: 0.5 })
       expect(env.sessions.s1.sessionCost).toBe(0.5)
       expect(env.costUpdates).toEqual([{ totalCost: null, budget: null }])
+    })
+  })
+
+  describe('tunnel_url_changed / auth_bootstrap (#5618 Batch 5b)', () => {
+    it('tunnel_url_changed applies the rotated URL when the hook is wired', () => {
+      const env = makeAdapter({ tunnel: true })
+      const handled = dispatch(env, { type: 'tunnel_url_changed', url: 'wss://new.x', previousUrl: 'wss://old.x' })
+      expect(handled).toBe(true)
+      expect(env.rotatedTunnelUrls).toEqual([{ url: 'wss://new.x', previousUrl: 'wss://old.x' }])
+    })
+
+    it('tunnel_url_changed DECLINES (runDispatch false) when applyRotatedTunnelUrl is absent', () => {
+      const env = makeAdapter()
+      expect(dispatch(env, { type: 'tunnel_url_changed', url: 'wss://new.x' })).toBe(false)
+      expect(env.rotatedTunnelUrls).toEqual([])
+    })
+
+    it('tunnel_url_changed is owned-but-no-op for a malformed (non-wss) url', () => {
+      const env = makeAdapter({ tunnel: true })
+      expect(dispatch(env, { type: 'tunnel_url_changed', url: 'http://nope' })).toBe(true)
+      expect(env.rotatedTunnelUrls).toEqual([])
+    })
+
+    it('auth_bootstrap applies providers + slash/agents + tunnel (app: mapped + mirrored)', () => {
+      const env = makeAdapter({ inventoryHooks: true, tunnel: true })
+      const handled = dispatch(env, {
+        type: 'auth_bootstrap',
+        providers: [{ name: 'claude' }],
+        slashCommands: [{ name: '/compact' }],
+        agents: [{ name: 'reviewer' }],
+        tunnelUrl: 'wss://boot.x',
+      })
+      expect(handled).toBe(true)
+      // app mapProviderList marker proves the hook ran on providers
+      expect(env.flat.availableProviders).toEqual(['__mapped__', { name: 'claude' }])
+      expect(env.flat.slashCommands).toEqual([{ name: '/compact' }])
+      expect(env.flat.customAgents).toEqual([{ name: 'reviewer' }])
+      expect(env.inventorySyncs).toEqual([
+        { kind: 'slashCommands', list: [{ name: '/compact' }] },
+        { kind: 'customAgents', list: [{ name: 'reviewer' }] },
+      ])
+      expect(env.rotatedTunnelUrls).toEqual([{ url: 'wss://boot.x', previousUrl: null }])
+    })
+
+    it('auth_bootstrap writes providers verbatim with no mirror when hooks are absent (dashboard)', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'auth_bootstrap', providers: [{ name: 'claude' }], slashCommands: [{ name: '/x' }], agents: [] })
+      expect(env.flat.availableProviders).toEqual([{ name: 'claude' }])
+      expect(env.flat.slashCommands).toEqual([{ name: '/x' }])
+      expect(env.inventorySyncs).toEqual([])
+      expect(env.rotatedTunnelUrls).toEqual([])
+    })
+
+    it('auth_bootstrap applies providers but SKIPS slash/agents for a stale session burst', () => {
+      const env = makeAdapter({ activeSessionId: 'active' })
+      dispatch(env, {
+        type: 'auth_bootstrap',
+        sessionId: 'stale',
+        providers: [{ name: 'claude' }],
+        slashCommands: [{ name: '/x' }],
+        agents: [{ name: 'a' }],
+      })
+      expect(env.flat.availableProviders).toEqual([{ name: 'claude' }])
+      expect(env.flat.slashCommands).toBeUndefined()
+      expect(env.flat.customAgents).toBeUndefined()
     })
   })
 

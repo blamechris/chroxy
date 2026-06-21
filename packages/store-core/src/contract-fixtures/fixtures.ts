@@ -104,6 +104,12 @@ export interface FixtureExpectation {
    * identically; an empty array asserts NO switch fired. Omit to "don't care".
    */
   switchedSessions?: string[]
+  /**
+   * Expected `applyRotatedTunnelUrl` invocations (#5618 Batch 5b), in order. Both
+   * clients call it identically; an empty array asserts NO rotation applied. Omit
+   * to "don't care".
+   */
+  rotatedTunnelUrls?: Array<{ url: string; previousUrl: string | null }>
   /** When true, assert NO mutation happened at all (state is untouched). */
   noop?: boolean
 }
@@ -584,6 +590,58 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     init: { activeSessionId: 's1', sessions: { s1: {} } },
     message: { type: 'cost_update', sessionCost: 0.5 },
     expect: { sessions: { s1: { sessionCost: 0.5 } } },
+  },
+
+  // 4i. connect-time burst / tunnel cases (#5618 Batch 5b). tunnel_url_changed's
+  // only effect is the platform-local apply via applyRotatedTunnelUrl (both
+  // clients call it identically). auth_bootstrap writes the shared flat lists
+  // (providers verbatim for well-formed input; the app's mapProviderList +
+  // syncSecondaryInventory extras are out-of-contract) + applies the tunnel URL.
+  {
+    name: 'tunnel_url_changed applies the rotated URL in both clients',
+    type: 'tunnel_url_changed',
+    message: { type: 'tunnel_url_changed', url: 'wss://new.example', previousUrl: 'wss://old.example' },
+    expect: { rotatedTunnelUrls: [{ url: 'wss://new.example', previousUrl: 'wss://old.example' }] },
+  },
+  {
+    name: 'tunnel_url_changed is a no-op when the url is missing/malformed',
+    type: 'tunnel_url_changed',
+    message: { type: 'tunnel_url_changed', url: 'http://not-wss' },
+    expect: { noop: true },
+  },
+  {
+    name: 'auth_bootstrap applies providers + slash/agent lists + the tunnel URL',
+    type: 'auth_bootstrap',
+    message: {
+      type: 'auth_bootstrap',
+      providers: [{ name: 'claude' }],
+      slashCommands: [{ name: '/compact' }],
+      agents: [{ name: 'reviewer' }],
+      tunnelUrl: 'wss://boot.example',
+    },
+    expect: {
+      flat: {
+        availableProviders: [{ name: 'claude' }],
+        slashCommands: [{ name: '/compact' }],
+        customAgents: [{ name: 'reviewer' }],
+      },
+      rotatedTunnelUrls: [{ url: 'wss://boot.example', previousUrl: null }],
+    },
+  },
+  {
+    name: 'auth_bootstrap applies providers but skips slash/agents for a stale session burst',
+    type: 'auth_bootstrap',
+    init: { activeSessionId: 'active' },
+    message: {
+      type: 'auth_bootstrap',
+      sessionId: 'stale',
+      providers: [{ name: 'claude' }],
+      slashCommands: [{ name: '/compact' }],
+      agents: [{ name: 'reviewer' }],
+    },
+    // Providers are server-wide (applied); the session-scoped slash/agent lists
+    // are skipped because the burst's sessionId no longer matches the active one.
+    expect: { flat: { availableProviders: [{ name: 'claude' }] } },
   },
 
   // 4b. budget_resume_ack (#5752) — quiet "nothing to resume" note when the
