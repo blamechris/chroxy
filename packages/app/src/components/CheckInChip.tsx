@@ -15,17 +15,7 @@ import { View, Text, Pressable, StyleSheet, AccessibilityInfo } from 'react-nati
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
-
-function formatElapsed(ms: number): string {
-  if (ms < 1000) return 'just now';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const remS = s % 60;
-  if (m < 60) return remS === 0 ? `${m}m` : `${m}m ${remS}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
+import { formatElapsedSince } from '@chroxy/store-core';
 
 export function CheckInChip() {
   // Each `inactivity_warning` from the server replaces the slot with a
@@ -79,7 +69,7 @@ export function CheckInChip() {
     <View style={styles.container} testID="check-in-chip">
       <View style={styles.dot} />
       <Text style={styles.label} accessibilityElementsHidden importantForAccessibility="no">
-        Agent quiet for {formatElapsed(totalIdle)}
+        Agent quiet for {formatElapsedSince(totalIdle)}
       </Text>
       <Pressable
         accessibilityRole="button"
