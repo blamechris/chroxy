@@ -56,9 +56,6 @@ import {
   handleSessionError as sharedSessionError,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
-  handlePrimaryChanged as sharedPrimaryChanged,
-  handleSessionRole as sharedSessionRole,
-  handleClientFocusChanged as sharedClientFocusChanged,
   // conversation_id migrated to the shared dispatch table (#5556)
   handleConversationsList as sharedConversationsList,
   handleHistoryReplayStart as sharedHistoryReplayStart,
@@ -1224,6 +1221,14 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // #5618 Batch 3 — the app deliberately shows NO info toast for session_stopped
   // (#4879 — the inline session banner carries the signal), so `addInfoNotification`
   // is OMITTED. The dashboard supplies it (its #4878 info toast).
+  // #5618 Batch 4 — multi-client accessors for primary_changed / session_role /
+  // client_focus_changed. The app reads presence state from its dedicated
+  // useMultiClientStore (the dashboard reads flat state); these accessors hide
+  // that divergence so the three cases are fully shared.
+  getMyClientId: () => useMultiClientStore.getState().myClientId,
+  getFollowMode: () => useMultiClientStore.getState().followMode,
+  switchSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  setPrimaryClientId: (clientId) => useMultiClientStore.getState().setPrimaryClientId(clientId),
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -3116,49 +3121,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'primary_changed': {
-      const { sessionId: primarySessionId, primaryClientId } = sharedPrimaryChanged(msg);
-      useMultiClientStore.getState().setPrimaryClientId(primaryClientId);
-      if (primarySessionId && get().sessionStates[primarySessionId]) {
-        updateSession(primarySessionId, () => ({
-          primaryClientId,
-        }));
-      } else if (!primarySessionId || primarySessionId === 'default') {
-        set({ primaryClientId });
-      }
-      break;
-    }
-
-    case 'session_role': {
-      // #5589 / #5281 — explicit primary-ownership. The server names the
-      // primary; we derive THIS client's role by comparing it to our own id
-      // (learned from auth_ok, canonical source: useMultiClientStore.myClientId).
-      // Stored per-session on `sessionRole` so the SessionScreen can surface an
-      // observer banner / claim affordance. We also mirror `primaryClientId`
-      // (the raw pointer) so the existing presence UI stays in sync without
-      // depending on a separate legacy `primary_changed` arriving.
-      const myClientId = useMultiClientStore.getState().myClientId;
-      const role = sharedSessionRole(msg, myClientId);
-      if (role.sessionId && get().sessionStates[role.sessionId]) {
-        updateSession(role.sessionId, () => ({
-          sessionRole: role.role,
-          primaryClientId: role.primaryClientId,
-        }));
-      }
-      break;
-    }
-
-    case 'client_focus_changed': {
-      const focus = sharedClientFocusChanged(msg);
-      if (!focus) break;
-      // Auto-switch if follow mode is on, event is from another client, target session exists locally, and not already on it
-      const mcState = useMultiClientStore.getState();
-      const { activeSessionId, sessionStates } = get();
-      if (mcState.followMode && focus.clientId !== mcState.myClientId && focus.sessionId !== activeSessionId && sessionStates[focus.sessionId]) {
-        get().switchSession(focus.sessionId);
-      }
-      break;
-    }
+    // primary_changed / session_role / client_focus_changed — migrated to the
+    // shared dispatch table (#5618 Batch 4; handled by runDispatch before this
+    // switch). The app's multi-client presence state (useMultiClientStore) is
+    // reached through the getMyClientId / getFollowMode / switchSession /
+    // setPrimaryClientId adapter hooks, so the three cases are now fully shared.
 
     // directory_listing / file_listing / file_content / write_file_result /
     // diff_result / git_status_result / git_branches_result / git_stage_result /
