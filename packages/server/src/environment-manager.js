@@ -94,6 +94,21 @@ export class EnvironmentManager extends EventEmitter {
   }
 
   /**
+   * Look up a tracked environment by id, throwing the canonical
+   * `Environment not found: <id>` error when it is absent. Callers that
+   * want a graceful miss (e.g. session add/remove) check `_environments`
+   * directly instead — this helper is only for the throw-on-missing paths.
+   *
+   * @param {string} envId
+   * @returns {Object} the environment record
+   */
+  _getEnvironmentOrThrow(envId) {
+    const env = this._environments.get(envId)
+    if (!env) throw new Error(`Environment not found: ${envId}`)
+    return env
+  }
+
+  /**
    * Create a new persistent environment.
    *
    * Starts a Docker container with security constraints, creates a non-root
@@ -267,8 +282,7 @@ export class EnvironmentManager extends EventEmitter {
   async snapshot(envId, { name } = {}) {
     const release = await this._acquireLock(envId)
     try {
-      const env = this._environments.get(envId)
-      if (!env) throw new Error(`Environment not found: ${envId}`)
+      const env = this._getEnvironmentOrThrow(envId)
       if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
       const snapshotId = 'snap-' + randomBytes(8).toString('hex')
       const timestamp = Date.now()
@@ -312,8 +326,7 @@ export class EnvironmentManager extends EventEmitter {
   async restore(envId, snapshotId) {
     const release = await this._acquireLock(envId)
     try {
-      const env = this._environments.get(envId)
-      if (!env) throw new Error(`Environment not found: ${envId}`)
+      const env = this._getEnvironmentOrThrow(envId)
 
       const snapshots = env.snapshots || []
       const snap = snapshots.find(s => s.id === snapshotId)
@@ -374,8 +387,7 @@ export class EnvironmentManager extends EventEmitter {
   async destroy(envId) {
     const release = await this._acquireLock(envId)
     try {
-      const env = this._environments.get(envId)
-      if (!env) throw new Error(`Environment not found: ${envId}`)
+      const env = this._getEnvironmentOrThrow(envId)
       log.info(`Destroying environment "${env.name}" (${envId})`)
 
       if (env.compose && env.composeProject) {
@@ -423,8 +435,7 @@ export class EnvironmentManager extends EventEmitter {
   async stop(envId) {
     const release = await this._acquireLock(envId)
     try {
-      const env = this._environments.get(envId)
-      if (!env) throw new Error(`Environment not found: ${envId}`)
+      const env = this._getEnvironmentOrThrow(envId)
       if (env.compose) throw new Error(`Stop is not supported for compose environments yet`)
       if (!env.containerId) throw new Error(`Environment "${env.name}" has no container to stop`)
       if (typeof this._backend.stopEnvironment !== 'function') {
@@ -450,8 +461,7 @@ export class EnvironmentManager extends EventEmitter {
   async restart(envId) {
     const release = await this._acquireLock(envId)
     try {
-      const env = this._environments.get(envId)
-      if (!env) throw new Error(`Environment not found: ${envId}`)
+      const env = this._getEnvironmentOrThrow(envId)
       if (env.compose) throw new Error(`Restart is not supported for compose environments yet`)
       if (!env.containerId) throw new Error(`Environment "${env.name}" has no container to restart`)
       if (typeof this._backend.restartEnvironment !== 'function') {
@@ -491,8 +501,7 @@ export class EnvironmentManager extends EventEmitter {
    * @returns {{ containerId: string, containerUser: string, containerCliPath: string }}
    */
   getContainerInfo(envId) {
-    const env = this._environments.get(envId)
-    if (!env) throw new Error(`Environment not found: ${envId}`)
+    const env = this._getEnvironmentOrThrow(envId)
     if (env.status !== 'running') throw new Error(`Environment "${env.name}" is not running (status: ${env.status})`)
     return {
       containerId: env.containerId,
