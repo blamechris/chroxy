@@ -1,19 +1,23 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, rmSync, existsSync, readFileSync, statSync } from 'node:fs'
+import { mkdtempSync, rmSync, existsSync, readFileSync, statSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, dirname } from 'node:path'
 import {
   IDENTITY_KEY_SERVICE,
   IdentityUnavailableError,
   getOrCreateServerIdentity,
   loadServerIdentity,
   persistServerIdentity,
+  rotateServerIdentity,
+  loadServerRotationCert,
+  resolveServerRotationCert,
 } from '../src/server-identity.js'
 import {
   createKeyPair,
   signExchangeKey,
   verifyExchangeKeySignature,
+  verifyIdentityRotation,
 } from '@chroxy/store-core/crypto'
 
 /**
@@ -196,6 +200,115 @@ describe('server identity (#5536)', () => {
       assert.equal(persistServerIdentity(kpFromFresh, { keychain: fakeKeychain({ available: true }), filePath }), 'keychain')
       // file fallback path
       assert.equal(persistServerIdentity(kpFromFresh, { keychain: fakeKeychain({ available: false }), filePath }), 'file')
+    })
+  })
+})
+
+describe('server identity rotation (#5616/#5976)', () => {
+  const rotPath = (filePath) => join(dirname(filePath), 'server-identity-rotation.json')
+
+  it('mints a NEW identity, replaces the secret, and writes a verifiable continuity cert', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false }) // file backend → assert on disk
+      const rotationFilePath = rotPath(filePath)
+      const before = getOrCreateServerIdentity({ keychain: kc, filePath })
+
+      const res = rotateServerIdentity({ keychain: kc, filePath, rotationFilePath })
+      assert.equal(res.previousPublicKey, before.publicKey)
+      assert.notEqual(res.newPublicKey, before.publicKey)
+
+      // The persisted secret is now the NEW identity.
+      const after = loadServerIdentity({ keychain: kc, filePath })
+      assert.equal(after.publicKey, res.newPublicKey)
+
+      // The sidecar cert is "old signs new" and verifies against the OLD pin.
+      const sidecar = loadServerRotationCert({ rotationFilePath })
+      assert.equal(sidecar.newIdentityKey, res.newPublicKey)
+      assert.equal(sidecar.previousPublicKey, before.publicKey)
+      assert.equal(
+        verifyIdentityRotation(sidecar.newIdentityKey, sidecar.rotationCert, sidecar.previousPublicKey),
+        true,
+      )
+      // A cert does NOT verify against an unrelated key (sanity).
+      assert.equal(
+        verifyIdentityRotation(sidecar.newIdentityKey, sidecar.rotationCert, createKeyPair().publicKey),
+        false,
+      )
+    })
+  })
+
+  it('resolveServerRotationCert returns the cert for the current identity, null when stale', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false })
+      const rotationFilePath = rotPath(filePath)
+      getOrCreateServerIdentity({ keychain: kc, filePath })
+      const res = rotateServerIdentity({ keychain: kc, filePath, rotationFilePath })
+
+      // Current identity matches the sidecar's newIdentityKey → cert resolves.
+      const resolved = resolveServerRotationCert(res.newPublicKey, { rotationFilePath })
+      assert.equal(resolved.previousPublicKey, res.previousPublicKey)
+      assert.ok(resolved.rotationCert)
+
+      // A different "current" identity (e.g. clean re-mint) → stale, ignored.
+      assert.equal(resolveServerRotationCert(createKeyPair().publicKey, { rotationFilePath }), null)
+    })
+  })
+
+  it('is single-hop — a second rotation overwrites the sidecar (only the latest hop)', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false })
+      const rotationFilePath = rotPath(filePath)
+      const gen1 = getOrCreateServerIdentity({ keychain: kc, filePath })
+      const r1 = rotateServerIdentity({ keychain: kc, filePath, rotationFilePath })
+      const r2 = rotateServerIdentity({ keychain: kc, filePath, rotationFilePath })
+
+      const sidecar = loadServerRotationCert({ rotationFilePath })
+      // Bridges gen2 → gen3, NOT gen1 → gen3.
+      assert.equal(sidecar.previousPublicKey, r1.newPublicKey)
+      assert.equal(sidecar.newIdentityKey, r2.newPublicKey)
+      assert.notEqual(sidecar.previousPublicKey, gen1.publicKey)
+      // So a client pinned to gen1 cannot verify (the cert was signed by gen2).
+      assert.equal(
+        verifyIdentityRotation(sidecar.newIdentityKey, sidecar.rotationCert, gen1.publicKey),
+        false,
+      )
+    })
+  })
+
+  it('throws when there is no existing identity to rotate from', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false })
+      assert.throws(
+        () => rotateServerIdentity({ keychain: kc, filePath, rotationFilePath: rotPath(filePath) }),
+        /No existing server identity/,
+      )
+    })
+  })
+
+  it('loadServerRotationCert returns null when the sidecar is absent or malformed', () => {
+    withTempDir((filePath) => {
+      const rotationFilePath = rotPath(filePath)
+      assert.equal(loadServerRotationCert({ rotationFilePath }), null)
+    })
+  })
+
+  it('is fail-safe: a sidecar-write failure leaves the OLD identity un-rotated', () => {
+    withTempDir((filePath) => {
+      const kc = fakeKeychain({ available: false })
+      const before = getOrCreateServerIdentity({ keychain: kc, filePath })
+      // Point the sidecar at a path UNDER an existing file → mkdirSync(dirname)
+      // throws ENOTDIR, simulating a sidecar-write failure. Because the sidecar
+      // is written BEFORE the secret is swapped, the rotation must abort with the
+      // OLD identity still persisted (not a rotated identity with no cert).
+      const blocker = join(dirname(filePath), 'blocker')
+      writeFileSync(blocker, 'x')
+      const badRotationPath = join(blocker, 'rotation.json')
+
+      assert.throws(() => rotateServerIdentity({ keychain: kc, filePath, rotationFilePath: badRotationPath }))
+
+      // The persisted secret is UNCHANGED — pinned clients still verify.
+      const after = loadServerIdentity({ keychain: kc, filePath })
+      assert.equal(after.publicKey, before.publicKey)
     })
   })
 })

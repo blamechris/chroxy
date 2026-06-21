@@ -448,6 +448,14 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // can verify it before keying off serverPublicKey. Absent when pinning is
     // unavailable; old clients ignore it.
     ...(eagerServerKeySig ? { serverKeySig: eagerServerKeySig } : {}),
+    // #5616/#5976 — identity-rotation continuity cert. Present only alongside a
+    // live exchange signature (the consume side needs BOTH the cert AND the new
+    // identity's live serverKeySig to chain forward), and only when the daemon
+    // was rotated (cert loaded at startup). Absent for un-rotated daemons / old
+    // clients ignore it; a pin-mismatched client with no cert still refuses.
+    ...(eagerServerKeySig && serverIdentity?.rotationCert
+      ? { newIdentityKey: serverIdentity.publicKey, rotationCert: serverIdentity.rotationCert }
+      : {}),
     ...extra,
   })
 
