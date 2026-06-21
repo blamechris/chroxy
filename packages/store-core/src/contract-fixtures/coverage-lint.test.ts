@@ -81,7 +81,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'cost_update',
   'history_replay_end',
   'key_exchange_ok',
-  'multi_question_intervention',
+  // multi_question_intervention — migrated to the shared dispatch table (#5618);
+  // now has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   'pair_fail',
   'permission_expired',
   'permission_mode_changed',

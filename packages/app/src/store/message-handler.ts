@@ -38,8 +38,6 @@ import {
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)
   handlePlanReady as sharedPlanReady,
-  handleMultiQuestionIntervention as sharedMultiQuestionIntervention,
-  applyInterventionBuilder,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
   handleToolInputDelta as sharedToolInputDelta,
@@ -2786,51 +2784,6 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     }
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
-
-    case 'multi_question_intervention': {
-      // #4764 — chroxy's permission-hook (#4648) just denied a multi-question
-      // AskUserQuestion. Mirrors the dashboard's #4758 handler: append a
-      // SessionIntervention entry so the session-header counter ticks, and on
-      // the FIRST such intervention per session push a one-time system
-      // ChatMessage explaining what happened (without it the deny is invisible
-      // on the chat surface).
-      //
-      // applyInterventionBuilder dedups by toolUseId (a stuck model re-emitting
-      // the same payload won't double-count) and tells us whether this was the
-      // session's first intervention so the inline notice only fires once.
-      const builder = sharedMultiQuestionIntervention(msg, get().activeSessionId);
-      if (!builder) break;
-      const interventionTargetId = builder.sessionId;
-      if (!interventionTargetId) break;
-      const targetState = get().sessionStates[interventionTargetId];
-      if (!targetState) break;
-      const { interventions: nextInterventions, isFirst } = applyInterventionBuilder(
-        builder,
-        targetState.interventions,
-      );
-      // Skip the state mutation if nothing changed (dedup'd repeat) so React
-      // doesn't re-render the header counter on every stuck-model re-emit.
-      if (nextInterventions === targetState.interventions) break;
-      updateSession(interventionTargetId, (ss) => {
-        if (isFirst) {
-          return {
-            interventions: nextInterventions,
-            messages: [
-              ...ss.messages,
-              {
-                id: nextMessageId('system'),
-                type: 'system',
-                content:
-                  "chroxy intercepted a multi-question form and asked the agent to break it into single questions.",
-                timestamp: Date.now(),
-              },
-            ],
-          };
-        }
-        return { interventions: nextInterventions };
-      });
-      break;
-    }
 
     case 'raw_background': {
       const { data: rawBgData } = sharedRawOutput(msg);

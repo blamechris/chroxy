@@ -289,6 +289,59 @@ describe('shared dispatch table', () => {
     })
   })
 
+  describe('multi_question_intervention (#5618)', () => {
+    it('appends the intervention and a first-time system notice', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } } })
+      const handled = dispatch(env, {
+        type: 'multi_question_intervention',
+        sessionId: 's1',
+        toolUseId: 'tu1',
+        questionCount: 3,
+      })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.interventions).toMatchObject([{ kind: 'multi_question', toolUseId: 'tu1', count: 3 }])
+      expect(env.sessions.s1.messages).toHaveLength(1)
+      expect(env.sessions.s1.messages[0]).toMatchObject({
+        type: 'system',
+        content: 'chroxy intercepted a multi-question form and asked the agent to break it into single questions.',
+      })
+    })
+
+    it('dedups a repeat toolUseId — no second intervention, no second notice', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            messages: [],
+            interventions: [{ kind: 'multi_question', toolUseId: 'tu1', count: 3, timestamp: 1 }],
+          } as unknown as FakeSession,
+        },
+      })
+      const handled = dispatch(env, {
+        type: 'multi_question_intervention',
+        sessionId: 's1',
+        toolUseId: 'tu1',
+        questionCount: 3,
+      })
+      expect(handled).toBe(true)
+      expect(env.sessions.s1.interventions).toHaveLength(1) // unchanged
+      expect(env.sessions.s1.messages).toHaveLength(0) // no repeat notice
+    })
+
+    it('is handled (no mutation) on a malformed payload (questionCount < 2)', () => {
+      const env = makeAdapter({ sessions: { s1: { sessionId: 's1', messages: [] } } })
+      const handled = dispatch(env, {
+        type: 'multi_question_intervention',
+        sessionId: 's1',
+        toolUseId: 'tu1',
+        questionCount: 1,
+      })
+      expect(handled).toBe(true) // table OWNS the type; the parser rejects the payload
+      expect(env.sessions.s1.interventions).toBeUndefined()
+      expect(env.sessions.s1.messages).toHaveLength(0)
+    })
+  })
+
   describe('budget_resume_ack', () => {
     it('appends a "nothing to resume" note when the session was not paused', () => {
       const env = makeAdapter({

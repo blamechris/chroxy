@@ -54,8 +54,10 @@ import type {
   DevPreview,
   PendingBackgroundShell,
   QueuedSessionMessage,
+  SessionIntervention,
   WebTask,
 } from './types'
+import { nextMessageId } from './utils'
 import {
   handleAvailablePermissionModes,
   handleSessionUpdated,
@@ -101,6 +103,9 @@ import {
   handleMessageDequeued,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
+  // --- multi_question_intervention (#5618) — byte-identical builder + append ---
+  handleMultiQuestionIntervention,
+  applyInterventionBuilder,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
@@ -158,6 +163,10 @@ export interface DispatchSessionBase {
   // carry it (the dashboard also mirrors the active session's value to flat
   // top-level state via its adapter).
   activeModel?: string | null
+  // --- multi_question_intervention (#5618) ---
+  // `interventions` — read+rewritten by multi_question_intervention (dedup +
+  // ring-cap). Both clients' real `SessionState` carry it (BaseSessionState).
+  interventions?: SessionIntervention[]
 }
 
 /**
@@ -460,6 +469,15 @@ export interface DispatchMessageMap {
     // #4613 — `handleUserQuestion` honours a wire `timestamp` (when a finite
     // number) for history-replay ordering, falling back to append-time
     // Date.now(). Documented here so the message shape matches the parser.
+    timestamp?: number
+  }
+  // --- multi_question_intervention (#5618) — the deny-event the builder reads ---
+  multi_question_intervention: {
+    type: 'multi_question_intervention'
+    sessionId?: string
+    toolUseId?: string
+    questionCount?: number
+    reason?: string
     timestamp?: number
   }
 }
@@ -958,6 +976,52 @@ function dispatchUserQuestion<S extends DispatchSessionBase>(
   if (sessionId) adapter.pushSessionNotification(sessionId, 'question', questionText)
 }
 
+/**
+ * `multi_question_intervention` (#5618/#4653) — chroxy's permission-hook denied a
+ * multi-question AskUserQuestion; append a {@link SessionIntervention} so the
+ * session-header/footer counter ticks, and on the FIRST intervention per session
+ * push a one-time system ChatMessage explaining the interception. Byte-identical
+ * between the two clients' switches (only a local var name + comment wording
+ * differed): both built the dedup-by-toolUseId, ring-capped builder via the
+ * shared `handleMultiQuestionIntervention`, ran `applyInterventionBuilder`, and
+ * skipped the write on a reference-equal (dedup'd repeat) result. The
+ * reference-equality skip is expressed as a `{}` no-op patch inside the updater
+ * (the same idiom the agent_* handlers use) so a stuck-model re-emit doesn't
+ * re-render the counter.
+ */
+function dispatchMultiQuestionIntervention<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['multi_question_intervention'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const builder = handleMultiQuestionIntervention(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!builder) return
+  const targetId = builder.sessionId
+  if (!targetId || !adapter.hasSession(targetId)) return
+  adapter.updateSession(targetId, (ss) => {
+    const current = ss.interventions ?? []
+    const { interventions: nextInterventions, isFirst } = applyInterventionBuilder(builder, current)
+    // Dedup'd repeat — nothing changed; return a no-op patch so React doesn't
+    // re-render the intervention counter on every stuck-model re-emit.
+    if (nextInterventions === current) return {} as Partial<S>
+    if (isFirst) {
+      return {
+        interventions: nextInterventions,
+        messages: [
+          ...ss.messages,
+          {
+            id: nextMessageId('system'),
+            type: 'system',
+            content:
+              'chroxy intercepted a multi-question form and asked the agent to break it into single questions.',
+            timestamp: Date.now(),
+          },
+        ],
+      } as Partial<S>
+    }
+    return { interventions: nextInterventions } as Partial<S>
+  })
+}
+
 // ---------------------------------------------------------------------------
 // Table + runner
 // ---------------------------------------------------------------------------
@@ -1030,6 +1094,8 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     message_dequeued: dispatchQueuedMessages<S>(handleMessageDequeued),
     // --- user_question (#5618) — byte-identical append + notify ---
     user_question: dispatchUserQuestion,
+    // --- multi_question_intervention (#5618) — byte-identical builder + append ---
+    multi_question_intervention: dispatchMultiQuestionIntervention,
   }
 }
 
@@ -1080,6 +1146,8 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'model_changed',
   // --- user_question (#5618) — byte-identical append + notify ---
   'user_question',
+  // --- multi_question_intervention (#5618) — byte-identical builder + append ---
+  'multi_question_intervention',
 ]
 
 /**
