@@ -603,6 +603,13 @@ export function handleKeyExchange(ctx, ws, msg) {
         type: 'key_exchange_ok',
         publicKey: serverKp.publicKey,
         ...(serverKeySig ? { serverKeySig } : {}),
+        // #5616/#5976 — identity-rotation continuity cert (discrete path). Same
+        // contract as the eager auth_ok path: present only alongside a live
+        // exchange signature and only when the daemon was rotated. Absent for
+        // un-rotated daemons; old clients ignore it.
+        ...(serverKeySig && serverIdentity?.rotationCert
+          ? { newIdentityKey: serverIdentity.publicKey, rotationCert: serverIdentity.rotationCert }
+          : {}),
       }))
     } catch (err) {
       // #5702 (8b): the client never received the exchange key, so we must NOT

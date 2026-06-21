@@ -29,7 +29,7 @@ const log = createLogger('cli')
 import { removeConnectionInfo } from './connection-info.js'
 import { TokenManager } from './token-manager.js'
 import { PairingManager } from './pairing.js'
-import { getOrCreateServerIdentity, IdentityUnavailableError } from './server-identity.js'
+import { getOrCreateServerIdentity, IdentityUnavailableError, resolveServerRotationCert } from './server-identity.js'
 import { getLanIp } from './lan-ip.js'
 import { resolveBindHost, isLoopbackHost, formatHostForUrl, maybeWarnNonLoopbackBind } from './bind-host.js'
 import { writeFileRestricted } from './platform.js'
@@ -864,6 +864,24 @@ export async function startCliServer(config) {
         log.warn(`Could not establish server identity key (${err.message}); E2E key pinning disabled — connections stay TOFU`)
         serverIdentity = null
       }
+    }
+  }
+
+  // #5616/#5976 — if the identity was rotated (admin ran `chroxy identity
+  // rotate`), attach the single-hop continuity cert so the handshake can offer
+  // it. The staleness guard inside resolveServerRotationCert ignores a sidecar
+  // that names a different identity than the one we just loaded (e.g. left over
+  // from before a clean re-mint). Best-effort: a missing/unreadable sidecar
+  // simply leaves pinning behaviour unchanged (rotated clients re-pair).
+  if (serverIdentity) {
+    try {
+      const cert = resolveServerRotationCert(serverIdentity.publicKey)
+      if (cert) {
+        serverIdentity = { ...serverIdentity, rotationCert: cert.rotationCert, previousPublicKey: cert.previousPublicKey }
+        log.info('Identity-rotation continuity cert loaded — pinned clients can chain forward without re-pairing')
+      }
+    } catch (err) {
+      log.warn(`Could not load identity-rotation cert (${err.message}); rotated clients will need to re-pair`)
     }
   }
 

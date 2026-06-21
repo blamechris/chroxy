@@ -34,7 +34,7 @@
 import { readFileSync, mkdirSync } from 'node:fs'
 import { join, dirname } from 'node:path'
 import { homedir } from 'node:os'
-import { createSigningKeyPair } from '@chroxy/store-core/crypto'
+import { createSigningKeyPair, signIdentityRotation } from '@chroxy/store-core/crypto'
 import nacl from 'tweetnacl'
 import * as realKeychain from './keychain.js'
 import { writeFileRestricted } from './platform.js'
@@ -69,6 +69,16 @@ export class IdentityUnavailableError extends Error {
 
 /** Default on-disk fallback location. Overridable for tests. */
 export const DEFAULT_IDENTITY_FILE = join(homedir(), '.chroxy', 'server-identity.json')
+
+/**
+ * #5616/#5976 — the identity-rotation continuity-cert sidecar. PUBLIC data only
+ * (a signature + two public keys), so it is a plaintext file regardless of where
+ * the SECRET key lives (keychain or fallback file) — there is nothing secret to
+ * protect here. Single-hop by design: each rotation OVERWRITES it, retaining
+ * only the most-recent `prev → current` cert. A client pinned ≥2 rotations back
+ * has no chain to follow and correctly falls back to manual re-pair.
+ */
+export const DEFAULT_IDENTITY_ROTATION_FILE = join(homedir(), '.chroxy', 'server-identity-rotation.json')
 
 const SECRET_KEY_BYTES = nacl.sign.secretKeyLength // 64
 
@@ -229,4 +239,117 @@ export function getOrCreateServerIdentity({ keychain = realKeychain, filePath = 
   const backend = persistServerIdentity(kp, { keychain, filePath })
   log.info(`Minted new server identity key (backend: ${backend})`)
   return { ...kp, created: true, backend }
+}
+
+/**
+ * Load the single-hop rotation continuity cert sidecar, or null when absent /
+ * malformed. Returns the public triple a rotated daemon presents at handshake:
+ * `{ newIdentityKey, rotationCert, previousPublicKey }`.
+ *
+ * The caller MUST guard against a STALE sidecar: after a clean reinstall the
+ * identity is re-minted but an old sidecar may linger, so only present the cert
+ * when `newIdentityKey` equals the daemon's CURRENT identity public key (a stale
+ * sidecar names a `newIdentityKey` the daemon no longer holds). {@link
+ * resolveServerRotationCert} does that check.
+ *
+ * @param {object} [opts]
+ * @param {string} [opts.rotationFilePath]
+ * @returns {{ newIdentityKey: string, rotationCert: string, previousPublicKey: string }|null}
+ */
+export function loadServerRotationCert({ rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE } = {}) {
+  try {
+    const parsed = JSON.parse(readFileSync(rotationFilePath, 'utf-8'))
+    const { newIdentityKey, rotationCert, previousPublicKey } = parsed ?? {}
+    if (
+      typeof newIdentityKey === 'string' && newIdentityKey &&
+      typeof rotationCert === 'string' && rotationCert &&
+      typeof previousPublicKey === 'string' && previousPublicKey
+    ) {
+      return { newIdentityKey, rotationCert, previousPublicKey }
+    }
+  } catch {
+    // Missing / unreadable / malformed → no cert to present.
+  }
+  return null
+}
+
+/**
+ * Resolve the rotation cert to present for a given CURRENT identity public key,
+ * applying the staleness guard: a sidecar whose `newIdentityKey` does not match
+ * the live identity (e.g. left over from before a clean re-mint) is ignored.
+ *
+ * @param {string} currentIdentityPublicKey - the daemon's live identity pubkey
+ * @param {object} [opts]
+ * @param {string} [opts.rotationFilePath]
+ * @returns {{ rotationCert: string, previousPublicKey: string }|null}
+ */
+export function resolveServerRotationCert(currentIdentityPublicKey, { rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE } = {}) {
+  const sidecar = loadServerRotationCert({ rotationFilePath })
+  if (!sidecar) return null
+  if (sidecar.newIdentityKey !== currentIdentityPublicKey) {
+    // Stale sidecar (identity re-minted since rotation) — do NOT present it; a
+    // cert for an identity the daemon no longer holds would never verify and
+    // could only confuse a pinned client.
+    log.warn('Ignoring stale identity-rotation cert (newIdentityKey ≠ current identity)')
+    return null
+  }
+  return { rotationCert: sidecar.rotationCert, previousPublicKey: sidecar.previousPublicKey }
+}
+
+/**
+ * Rotate the daemon's identity (#5616/#5976, admin-initiated via
+ * `chroxy identity rotate`): mint a NEW identity, sign it with the OLD secret to
+ * mint a continuity cert ("old signs new"), persist the new secret in place of
+ * the old, and write the single-hop sidecar. A previously-pinned client that
+ * reconnects then chains its pin forward automatically (no manual re-pair) by
+ * verifying the cert against its pinned (old) key + the new key's live exchange
+ * signature.
+ *
+ * The OLD secret is read FIRST (while it still exists) — this is the only moment
+ * a cert can be minted. After this returns, the persisted identity is the NEW
+ * one; a running daemon keeps its in-memory OLD identity until restarted, so the
+ * caller must restart the daemon to serve the new identity.
+ *
+ * Throws when there is no current identity to rotate FROM (nothing pinned yet —
+ * just start the daemon, which mints a first identity), or when the keychain
+ * read failed ({@link IdentityUnavailableError} propagates).
+ *
+ * @param {object} [opts]
+ * @param {object} [opts.keychain]
+ * @param {string} [opts.filePath] - secret-key store path (fallback file)
+ * @param {string} [opts.rotationFilePath] - cert sidecar path
+ * @returns {{ previousPublicKey: string, newPublicKey: string, backend: 'keychain'|'file' }}
+ */
+export function rotateServerIdentity({
+  keychain = realKeychain,
+  filePath = DEFAULT_IDENTITY_FILE,
+  rotationFilePath = DEFAULT_IDENTITY_ROTATION_FILE,
+} = {}) {
+  const current = loadServerIdentity({ keychain, filePath })
+  if (!current) {
+    throw new Error(
+      'No existing server identity to rotate. Start the daemon once to mint an ' +
+      'identity (which clients then pair + pin) before rotating.',
+    )
+  }
+  const next = createSigningKeyPair()
+  // Mint the continuity cert WHILE the old secret is still loaded — old signs new.
+  const rotationCert = signIdentityRotation(next.publicKey, current.secretKey)
+  // Persist the new secret in place of the old (keychain or fallback file).
+  const backend = persistServerIdentity(next, { keychain, filePath })
+  // Write the single-hop sidecar (overwrites any prior cert — only the most
+  // recent prev→current hop is retained). Public data; mirror the secret file's
+  // directory creation. Not perm-restricted (nothing secret), but kept tidy.
+  mkdirSync(dirname(rotationFilePath), { recursive: true })
+  writeFileRestricted(
+    rotationFilePath,
+    JSON.stringify({
+      v: 1,
+      newIdentityKey: next.publicKey,
+      rotationCert,
+      previousPublicKey: current.publicKey,
+    }),
+  )
+  log.info(`Rotated server identity (backend: ${backend}); continuity cert written for previous pin`)
+  return { previousPublicKey: current.publicKey, newPublicKey: next.publicKey, backend }
 }
