@@ -1274,7 +1274,9 @@ function dispatchAvailableModels<S extends DispatchSessionBase>(
   if (!Array.isArray(msg.models)) return
   const { models, defaultModelId } = handleAvailableModels(msg as Record<string, unknown>)
   const extra = adapter.extendModelsPatch ? adapter.extendModelsPatch(msg as Record<string, unknown>) : {}
-  adapter.setState({ availableModels: models, defaultModelId, ...extra } as Record<string, unknown>)
+  // Spread `extra` FIRST so the shared fields always win — the hook is for EXTRA
+  // flat fields only and must never override availableModels/defaultModelId.
+  adapter.setState({ ...extra, availableModels: models, defaultModelId } as Record<string, unknown>)
 }
 
 /** `cost_update` — per-session sessionCost patch (+ app flat/cost-store mirror). */
