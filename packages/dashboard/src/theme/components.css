@@ -1306,6 +1306,10 @@ button.sidebar-token-view-session-row:hover {
    with the activity content, then takes the danger accent. */
 .control-room-cancel-btn {
   flex-shrink: 0;
+  /* WCAG 2.2 SC 2.5.8 (AA): keep the tap target ≥ 24×24 CSS px (#6195). */
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
   padding: 2px 8px;
   font-size: 11px;
   background: transparent;
@@ -1326,6 +1330,10 @@ button.sidebar-token-view-session-row:hover {
    accent (action, not destructive). */
 .control-room-jump-btn {
   flex-shrink: 0;
+  /* WCAG 2.2 SC 2.5.8 (AA): keep the tap target ≥ 24×24 CSS px (#6195). */
+  min-height: 24px;
+  display: inline-flex;
+  align-items: center;
   padding: 2px 8px;
   font-size: 11px;
   background: transparent;
