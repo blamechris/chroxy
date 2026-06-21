@@ -1208,7 +1208,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   addServerError: (message, opts) => {
     const serverError: ServerError = {
       id: nextMessageId('server-error'),
-      category: (opts?.category ?? 'general') as ServerError['category'],
+      // opts.category is the closed ServerErrorCategory union (typed at the hook),
+      // so no cast is needed — fall back to 'general' when the caller omits it.
+      category: opts?.category ?? 'general',
       message,
       recoverable: opts?.recoverable ?? true,
       timestamp: Date.now(),

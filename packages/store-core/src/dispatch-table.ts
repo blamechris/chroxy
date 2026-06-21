@@ -55,6 +55,7 @@ import type {
   PendingBackgroundShell,
   QueuedSessionMessage,
   SessionIntervention,
+  ServerErrorCategory,
   WebTask,
 } from './types'
 import { nextMessageId } from './utils'
@@ -305,7 +306,7 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    */
   addServerError?(
     message: string,
-    opts?: { category?: string; sessionId?: string; recoverable?: boolean },
+    opts?: { category?: ServerErrorCategory; sessionId?: string; recoverable?: boolean },
   ): void
   /**
    * Surface a low-priority INFO notification (#5618 Batch 3). Used by
