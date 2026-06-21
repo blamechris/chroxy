@@ -457,6 +457,10 @@ export interface DispatchMessageMap {
     sessionId?: string
     toolUseId?: string
     questions?: unknown[]
+    // #4613 — `handleUserQuestion` honours a wire `timestamp` (when a finite
+    // number) for history-replay ordering, falling back to append-time
+    // Date.now(). Documented here so the message shape matches the parser.
+    timestamp?: number
   }
 }
 

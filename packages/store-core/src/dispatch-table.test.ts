@@ -247,6 +247,24 @@ describe('shared dispatch table', () => {
       ])
     })
 
+    it('honours a finite wire timestamp on the appended prompt (#4613)', () => {
+      const env = makeAdapter({
+        activeSessionId: 'other',
+        sessions: { s1: { sessionId: 's1', messages: [] } },
+      })
+      dispatch(env, {
+        type: 'user_question',
+        sessionId: 's1',
+        questions: [{ question: 'Deploy now?' }],
+        timestamp: 1_700_000_000_000,
+      })
+      expect(env.sessions.s1.messages[0]).toMatchObject({
+        type: 'prompt',
+        content: 'Deploy now?',
+        timestamp: 1_700_000_000_000,
+      })
+    })
+
     it('falls back to addMessage (global log) and skips notify when no session resolves', () => {
       const env = makeAdapter() // no activeSessionId, no explicit sessionId
       const handled = dispatch(env, {
