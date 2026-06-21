@@ -38,6 +38,16 @@ describe('getErrorMessage', () => {
     assert.equal(getErrorMessage({}), 'unknown error')
   })
 
+  it('returns a non-string fallback BY REFERENCE (not stringified)', () => {
+    // Several call sites pass a non-string fallback, e.g. getErrorMessage(err, err)
+    // to forward the raw value into a template. The helper must pass it through
+    // untouched — a future "stringify the fallback" refactor would break them.
+    const raw = { code: 'E', toString() { return 'stringified' } }
+    assert.strictEqual(getErrorMessage(null, raw), raw) // same reference, not 'stringified'
+    const errLike = { name: 'X' } // truthy, no .message → fallback returned as-is
+    assert.strictEqual(getErrorMessage(errLike, errLike), errLike)
+  })
+
   it('matches the original idiom across a value matrix', () => {
     const fallback = 'fb'
     const idiom = (err) => (err && err.message ? err.message : fallback)
