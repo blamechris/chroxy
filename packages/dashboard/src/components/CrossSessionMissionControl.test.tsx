@@ -1,4 +1,4 @@
-import { describe, it, expect, afterEach } from 'vitest'
+import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@testing-library/react'
 import type { ActivityEntry, ActivityState, CrossSessionMeta } from '@chroxy/store-core'
 import { createEmptyActivityState, applyActivitySnapshot } from '@chroxy/store-core'
@@ -163,5 +163,44 @@ describe('CrossSessionMissionControl', () => {
     const state = stateOf({ s1: [entry({ id: 'e1', status: 'running' })] })
     render(<CrossSessionMissionControl activity={state} sessions={[SESSIONS[0]!]} now={NOW} />)
     expect(screen.queryByTestId('mission-control-external')).toBeNull()
+  })
+
+  // #6125 — control actions wired into the aggregate view.
+  it('wires cancel + jump-to-intervene into each session tree', () => {
+    const onCancel = vi.fn()
+    const onJump = vi.fn()
+    const state = stateOf({ s1: [entry({ id: 'agent1', kind: 'agent', status: 'blocked' })] })
+    render(
+      <CrossSessionMissionControl
+        activity={state}
+        sessions={[SESSIONS[0]!]}
+        onCancelActivity={onCancel}
+        onJumpToSession={onJump}
+        now={NOW}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('mission-control-session-toggle-s1'))
+    // Cancel a subagent → carries the owning sessionId for the session-scoped cancel.
+    fireEvent.click(screen.getByTestId('control-room-cancel-agent1'))
+    expect(onCancel).toHaveBeenCalledWith('agent1', 's1')
+    // Jump-to-intervene on the blocked node → switches to that session.
+    fireEvent.click(screen.getByTestId('control-room-jump-agent1'))
+    expect(onJump).toHaveBeenCalledWith('s1')
+  })
+
+  it('scopes the ${sessionId}:${activityId} cancelling set down to each tree', () => {
+    const state = stateOf({ s1: [entry({ id: 'agent1', kind: 'agent', status: 'running' })] })
+    render(
+      <CrossSessionMissionControl
+        activity={state}
+        sessions={[SESSIONS[0]!]}
+        onCancelActivity={vi.fn()}
+        cancellingActivityIds={new Set(['s1:agent1', 's2:other'])}
+        now={NOW}
+      />,
+    )
+    fireEvent.click(screen.getByTestId('mission-control-session-toggle-s1'))
+    // The 's1:agent1' entry resolves to this tree's plain 'agent1' id → pending.
+    expect((screen.getByTestId('control-room-cancel-agent1') as HTMLButtonElement).textContent).toBe('Cancelling…')
   })
 })

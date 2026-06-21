@@ -241,6 +241,35 @@ describe('ActivityTree control actions (#5272)', () => {
     // expand the row's output.
     expect(screen.queryByTestId('control-room-output-a')).toBeNull()
   })
+
+  // #6125 — jump-to-intervene.
+  it('renders no jump button when onJumpToSession is omitted', () => {
+    const activity = buildActivity([entry('blk', { status: 'blocked' })])
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} />)
+    expect(screen.queryByTestId('control-room-jump-blk')).toBeNull()
+  })
+
+  it('shows a jump button only on BLOCKED nodes when onJumpToSession is supplied', () => {
+    const activity = buildActivity([
+      entry('blk', { status: 'blocked' }),
+      entry('run', { status: 'running' }),
+      entry('done', { status: 'done', endedAt: 2000 }),
+    ])
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} onJumpToSession={() => {}} />)
+    expect(screen.getByTestId('control-room-jump-blk')).toBeInTheDocument()
+    expect(screen.queryByTestId('control-room-jump-run')).toBeNull()
+    expect(screen.queryByTestId('control-room-jump-done')).toBeNull()
+  })
+
+  it('invokes onJumpToSession with this tree’s sessionId (and does not toggle expansion)', () => {
+    const onJump = vi.fn()
+    const activity = buildActivity([entry('blk', { status: 'blocked', outputRef: { kind: 'tool_use', id: 't1' } })])
+    render(<ActivityTree activity={activity} sessionId={SESSION_ID} now={() => 1000} onJumpToSession={onJump} />)
+    fireEvent.click(screen.getByTestId('control-room-jump-blk'))
+    expect(onJump).toHaveBeenCalledTimes(1)
+    expect(onJump).toHaveBeenCalledWith(SESSION_ID)
+    expect(screen.queryByTestId('control-room-output-blk')).toBeNull()
+  })
 })
 
 describe('formatElapsed', () => {

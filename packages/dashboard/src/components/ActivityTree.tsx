@@ -50,6 +50,14 @@ export interface ActivityTreeProps {
    * cancel_activity_ack (success) or CANCEL_ACTIVITY_FAILED (failure) lands.
    */
   cancellingActivityIds?: ReadonlySet<string>
+  /**
+   * #6125 (epic #5422 phase 1) — jump-to-intervene. When supplied, a "Jump to
+   * session" button appears on BLOCKED nodes (the ones that need the operator),
+   * switching the active session to this tree's `sessionId` so they can respond.
+   * Cross-session surfaces (mission control) wire this; omit it for read-only or
+   * already-active trees and no button renders.
+   */
+  onJumpToSession?: (sessionId: string) => void
 }
 
 // Stable empty tree for the null-session case so we don't allocate a new array
@@ -140,9 +148,10 @@ interface EntryRowProps {
   onToggleExpand: (id: string) => void
   onCancelActivity?: (activityId: string) => void
   cancellingActivityIds?: ReadonlySet<string>
+  onJump?: () => void
 }
 
-function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivity, cancellingActivityIds }: EntryRowProps) {
+function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivity, cancellingActivityIds, onJump }: EntryRowProps) {
   const terminal = isTerminal(entry.status)
   const blocked = entry.status === 'blocked'
   // Terminal entries freeze elapsed at endedAt; live entries tick from `now`.
@@ -220,6 +229,20 @@ function EntryRow({ entry, depth, now, expanded, onToggleExpand, onCancelActivit
             {isCancelling ? 'Cancelling…' : 'Cancel'}
           </button>
         )}
+        {onJump && blocked && (
+          // #6125: jump-to-intervene — a blocked node is waiting on the operator;
+          // switch the active session to this tree's session so they can respond.
+          <button
+            type="button"
+            className="control-room-jump-btn"
+            data-testid={`control-room-jump-${entry.id}`}
+            onClick={onJump}
+            title="Switch to this session to respond"
+            aria-label={`Jump to the session blocked on ${entry.label || KIND_LABEL[entry.kind]}`}
+          >
+            Jump to session
+          </button>
+        )}
       </div>
       {expanded && (
         <div
@@ -263,9 +286,10 @@ interface EntryTreeProps {
   onToggleExpand: (id: string) => void
   onCancelActivity?: (activityId: string) => void
   cancellingActivityIds?: ReadonlySet<string>
+  onJump?: () => void
 }
 
-function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelActivity, cancellingActivityIds }: EntryTreeProps) {
+function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelActivity, cancellingActivityIds, onJump }: EntryTreeProps) {
   return (
     <ul className="control-room-entry-list" data-testid={depth === 0 ? 'control-room-tree' : undefined}>
       {nodes.map((node) => (
@@ -279,6 +303,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelAct
               onToggleExpand={onToggleExpand}
               onCancelActivity={onCancelActivity}
               cancellingActivityIds={cancellingActivityIds}
+              onJump={onJump}
             />
           </ul>
           {node.children.length > 0 && (
@@ -290,6 +315,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelAct
               onToggleExpand={onToggleExpand}
               onCancelActivity={onCancelActivity}
               cancellingActivityIds={cancellingActivityIds}
+              onJump={onJump}
             />
           )}
         </li>
@@ -298,7 +324,7 @@ function EntryTree({ nodes, depth, now, expandedIds, onToggleExpand, onCancelAct
   )
 }
 
-export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActivity, cancellingActivityIds }: ActivityTreeProps) {
+export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActivity, cancellingActivityIds, onJumpToSession }: ActivityTreeProps) {
   // Only query the reducer for a real session — a null id has no tree, and
   // selecting with an empty-string id would do pointless work (and could match
   // a degenerate "" session key). The empty-state branch below renders for null.
@@ -343,6 +369,10 @@ export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActi
     )
   }
 
+  // #6125: bind the jump affordance to THIS tree's session once (sessionId is
+  // non-null here — the null branch returned above).
+  const onJump = onJumpToSession ? () => onJumpToSession(sessionId) : undefined
+
   return (
     <div className="control-room-panel" data-testid="control-room-panel">
       <EntryTree
@@ -353,6 +383,7 @@ export function ActivityTree({ activity, sessionId, now = Date.now, onCancelActi
         onToggleExpand={handleToggleExpand}
         onCancelActivity={onCancelActivity}
         cancellingActivityIds={cancellingActivityIds}
+        onJump={onJump}
       />
     </div>
   )

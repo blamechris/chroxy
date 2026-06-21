@@ -1322,6 +1322,25 @@ button.sidebar-token-view-session-row:hover {
   color: var(--danger, #dc2626);
 }
 
+/* #6125 — jump-to-intervene on a blocked node: same chip as cancel, but an
+   accent (action, not destructive). */
+.control-room-jump-btn {
+  flex-shrink: 0;
+  padding: 2px 8px;
+  font-size: 11px;
+  background: transparent;
+  border: 1px solid var(--border-subtle, var(--border, #444));
+  border-radius: 4px;
+  color: var(--text-muted);
+  cursor: pointer;
+}
+.control-room-jump-btn:hover,
+.control-room-jump-btn:focus-visible {
+  background: var(--accent-purple-light, rgba(124, 156, 255, 0.12));
+  border-color: var(--accent, #7c9cff);
+  color: var(--accent, #7c9cff);
+}
+
 .control-room-entry:hover,
 .control-room-entry:focus-visible {
   background: var(--bg-tertiary);
