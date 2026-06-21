@@ -23,9 +23,8 @@
  */
 import { useEffect, useId, useMemo, useRef, useState } from 'react'
 import { useShallow } from 'zustand/react/shallow'
-import { formatToolName } from '@chroxy/store-core'
+import { formatDurationTerse, formatToolName } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
-import { formatDurationTerse } from '../utils/duration'
 
 /**
  * #4420 — Tail-ellipsis truncation for the pending-shell command label. User-
@@ -105,9 +104,9 @@ function formatElapsed(ms: number): string {
 }
 
 // #4308 — duration without the "ago" suffix, used for the "Running X · 12s"
-// label (the named tool is current, not past, so "ago" is wrong). #4510 — the
-// implementation lives in `utils/duration.ts` (`formatDurationTerse`) so the
-// terse register is shared with any future consumer; ActivityIndicator
+// label (the named tool is current, not past, so "ago" is wrong). #4510 / #6201
+// — the implementation lives in `@chroxy/store-core` (`formatDurationTerse`) so
+// the terse register is shared across the app + dashboard; ActivityIndicator
 // continues to consume the terse form because the chip's compact pill layout
 // can't accommodate "5 minutes 12 seconds".
 function statusClass(elapsedMs: number, timeoutMs: number): string {

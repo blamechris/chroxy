@@ -25,7 +25,7 @@
  */
 import React, { useEffect, useMemo, useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { formatToolName } from '@chroxy/store-core';
+import { formatDurationTerse, formatToolName } from '@chroxy/store-core';
 import { useConnectionStore } from '../store/connection';
 import { useConnectionLifecycleStore } from '../store/connection-lifecycle';
 import { COLORS } from '../constants/colors';
@@ -42,19 +42,6 @@ function formatElapsed(ms: number): string {
   if (m < 60) return remS === 0 ? `${m}m ago` : `${m}m ${remS}s ago`;
   const h = Math.floor(m / 60);
   return `${h}h ${m % 60}m ago`;
-}
-
-// #4321 / #4308 — duration without the "ago" suffix, used for the
-// "Running X · 12s" label (the named tool is current, not past, so
-// "ago" is wrong). Mirrors the dashboard helper.
-function formatDuration(ms: number): string {
-  const s = Math.max(0, Math.floor(ms / 1000));
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  const remS = s % 60;
-  if (m < 60) return remS === 0 ? `${m}m` : `${m}m ${remS}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
 }
 
 export function statusColor(elapsedMs: number, timeoutMs: number): string {
@@ -186,7 +173,7 @@ export function ActivityIndicator() {
   // back to the original "Working… last activity" label when no tool is
   // in flight (e.g. waiting on assistant text between tool calls).
   const label = inFlight
-    ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)} · ${formatDuration(now - inFlight.startedAt)}`
+    ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)} · ${formatDurationTerse(now - inFlight.startedAt)}`
     : `Working… last activity ${formatElapsed(elapsed)}`;
 
   return (

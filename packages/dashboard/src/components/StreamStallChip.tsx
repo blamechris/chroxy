@@ -17,8 +17,7 @@
  * wires it to `setViewMode('system')`).
  */
 import { useCallback } from 'react'
-import { getProviderInfo } from '@chroxy/store-core'
-import { formatDurationVerbose } from '../utils/duration'
+import { formatDurationVerbose, getProviderInfo } from '@chroxy/store-core'
 
 export interface StreamStallChipProps {
   /** The raw error text from the server (e.g. "Stream stalled — no response for 5 minutes"). */
@@ -76,7 +75,7 @@ export interface StreamStallChipProps {
 }
 
 // #4497 — verbose duration humaniser tailored for the stall headline copy.
-// #4510 — implementation now lives in `utils/duration.ts`
+// #4510 / #6201 — implementation now lives in `@chroxy/store-core`
 // (`formatDurationVerbose`), shared with any other prose-register consumer.
 // Headline copy still reads "No response for ${verbose(ms)} — retry?".
 
