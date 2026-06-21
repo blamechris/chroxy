@@ -11,6 +11,7 @@
  */
 
 import type { SearchResult, WebTask } from '../types'
+import { parseRawStringField, parseUnknownArrayField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // web_task_created / web_task_updated (shared upsert)
@@ -120,7 +121,7 @@ export function handleWebTaskError(
       ? (msg.message as string)
       : null
   const errorMessage = messageText ?? 'Unknown error'
-  const code = typeof msg.code === 'string' ? (msg.code as string) : null
+  const code = parseRawStringField(msg, 'code')
   const boundSessionName =
     typeof msg.boundSessionName === 'string' &&
     (msg.boundSessionName as string).length > 0
@@ -145,7 +146,7 @@ export interface WebTaskListPayload {
 export function handleWebTaskList(
   msg: Record<string, unknown>,
 ): WebTaskListPayload {
-  return { tasks: Array.isArray(msg.tasks) ? (msg.tasks as unknown[]) : [] }
+  return { tasks: parseUnknownArrayField(msg, 'tasks') }
 }
 
 // ---------------------------------------------------------------------------
@@ -224,11 +225,8 @@ export function handleSearchResults(
   msg: Record<string, unknown>,
   currentQuery: string | null,
 ): SearchResultsPayload {
-  const results: SearchResult[] = Array.isArray(msg.results)
-    ? (msg.results as SearchResult[])
-    : []
-  const msgQuery: string | null =
-    typeof msg.query === 'string' ? (msg.query as string) : null
+  const results = parseUnknownArrayField(msg, 'results') as SearchResult[]
+  const msgQuery = parseRawStringField(msg, 'query')
   if (msgQuery !== null && currentQuery && msgQuery !== currentQuery) {
     return { results, shouldApply: false }
   }

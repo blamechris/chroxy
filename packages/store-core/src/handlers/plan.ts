@@ -8,7 +8,7 @@
  * lifecycle. See ./index.ts for the stateless-handler contract.
  */
 
-import { resolveSessionId } from './_shared'
+import { parseUnknownArrayField, resolveSessionId } from './_shared'
 import type { SessionPatch } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -75,9 +75,10 @@ export function handlePlanReady(
 ): SessionPatch {
   // Behaviour-preserving unsafe cast (see docstring above). `as unknown as`
   // makes it clear at the call site that the element shape isn't checked.
-  const prompts: PlanAllowedPrompt[] = Array.isArray(msg.allowedPrompts)
-    ? (msg.allowedPrompts as unknown as PlanAllowedPrompt[])
-    : []
+  const prompts = parseUnknownArrayField(
+    msg,
+    'allowedPrompts',
+  ) as PlanAllowedPrompt[]
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
     patch: {

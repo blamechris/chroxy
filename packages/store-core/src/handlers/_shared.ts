@@ -34,6 +34,18 @@ export function parseRawStringField(msg: Record<string, unknown>, field: string)
   return typeof val === 'string' ? val : null
 }
 
+/** Parse an unknown[] field, returning the array or [] when missing/non-array. */
+export function parseUnknownArrayField(msg: Record<string, unknown>, field: string): unknown[] {
+  const val = msg[field]
+  return Array.isArray(val) ? (val as unknown[]) : []
+}
+
+/** Parse a finite-number field, returning the value or `fallback` (default 0) when missing/non-finite. */
+export function parseFiniteNumberField(msg: Record<string, unknown>, field: string, fallback = 0): number {
+  const val = msg[field]
+  return typeof val === 'number' && Number.isFinite(val) ? val : fallback
+}
+
 /**
  * Build a small union-checking helper that returns the value when it matches
  * one of the provided literals, else null. Used for enum fields like

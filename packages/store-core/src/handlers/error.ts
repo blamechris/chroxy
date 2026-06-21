@@ -17,6 +17,7 @@ import type { ChatMessage, ServerError } from '../types'
 // PR #5037 partial-cost sub-line under the error toast.
 import type { ErrorPartialCost } from '../cost-format'
 import { nextMessageId, stripAnsi } from '../utils'
+import { parseRawStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // error
@@ -71,7 +72,7 @@ export function handleError(msg: Record<string, unknown>): {
   const rawMessage =
     typeof msg.message === 'string' ? stripAnsi(msg.message).trim() : ''
   const message = rawMessage.length > 0 ? rawMessage : DEFAULT_ERROR_MESSAGE
-  const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
+  const requestId = parseRawStringField(msg, 'requestId')
   // Strict boolean check — a typo (e.g. fatal: 'false' string) must NOT
   // degrade to a warning toast. Treat anything non-boolean as undefined.
   const fatal = typeof msg.fatal === 'boolean' ? msg.fatal : undefined

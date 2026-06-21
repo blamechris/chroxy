@@ -11,7 +11,7 @@
 
 import type { ChatMessage } from '../types'
 import { nextMessageId } from '../utils'
-import { parseStringField, resolveSessionId } from './_shared'
+import { parseRawStringField, parseStringField, resolveSessionId } from './_shared'
 import type { SessionPatch } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -34,10 +34,10 @@ export function handleSessionContext(
     sessionId: resolveSessionId(msg, activeSessionId),
     patch: {
       sessionContext: {
-        gitBranch: typeof msg.gitBranch === 'string' ? msg.gitBranch : null,
+        gitBranch: parseRawStringField(msg, 'gitBranch'),
         gitDirty: typeof msg.gitDirty === 'number' ? msg.gitDirty : 0,
         gitAhead: typeof msg.gitAhead === 'number' ? msg.gitAhead : 0,
-        projectName: typeof msg.projectName === 'string' ? msg.projectName : null,
+        projectName: parseRawStringField(msg, 'projectName'),
       },
     },
   }
@@ -113,14 +113,14 @@ export interface SessionRestoreFailedPayload {
 export function handleSessionRestoreFailed(
   msg: Record<string, unknown>,
 ): SessionRestoreFailedPayload {
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
-  const name = typeof msg.name === 'string' ? msg.name : null
-  const provider = typeof msg.provider === 'string' ? msg.provider : null
-  const cwd = typeof msg.cwd === 'string' ? msg.cwd : null
-  const model = typeof msg.model === 'string' ? msg.model : null
-  const permissionMode = typeof msg.permissionMode === 'string' ? msg.permissionMode : null
-  const errorCode = typeof msg.errorCode === 'string' ? msg.errorCode : null
-  const errorMessage = typeof msg.errorMessage === 'string' ? msg.errorMessage : null
+  const sessionId = parseRawStringField(msg, 'sessionId')
+  const name = parseRawStringField(msg, 'name')
+  const provider = parseRawStringField(msg, 'provider')
+  const cwd = parseRawStringField(msg, 'cwd')
+  const model = parseRawStringField(msg, 'model')
+  const permissionMode = parseRawStringField(msg, 'permissionMode')
+  const errorCode = parseRawStringField(msg, 'errorCode')
+  const errorMessage = parseRawStringField(msg, 'errorMessage')
   const historyLength = typeof msg.historyLength === 'number' ? msg.historyLength : null
   const label = name ?? sessionId ?? 'session'
   const reason = errorMessage ?? errorCode ?? 'unknown error'
@@ -249,8 +249,8 @@ export interface ClientFocusChanged {
 export function handleClientFocusChanged(
   msg: Record<string, unknown>,
 ): ClientFocusChanged | null {
-  const clientId = typeof msg.clientId === 'string' ? msg.clientId : null
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const clientId = parseRawStringField(msg, 'clientId')
+  const sessionId = parseRawStringField(msg, 'sessionId')
   if (!clientId || !sessionId) return null
   return { clientId, sessionId }
 }

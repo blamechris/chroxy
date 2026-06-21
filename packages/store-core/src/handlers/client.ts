@@ -9,6 +9,7 @@
  */
 
 import type { ConnectedClient, SessionRole } from '../types'
+import { parseRawStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // Multi-client coordination
@@ -117,8 +118,8 @@ export interface PrimaryChanged {
  */
 export function handlePrimaryChanged(msg: Record<string, unknown>): PrimaryChanged {
   return {
-    sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
-    primaryClientId: typeof msg.clientId === 'string' ? msg.clientId : null,
+    sessionId: parseRawStringField(msg, 'sessionId'),
+    primaryClientId: parseRawStringField(msg, 'clientId'),
   }
 }
 
@@ -166,9 +167,8 @@ export function handleSessionRole(
   msg: Record<string, unknown>,
   myClientId: string | null,
 ): SessionRoleInfo {
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
-  const primaryClientId =
-    typeof msg.primaryClientId === 'string' ? msg.primaryClientId : null
+  const sessionId = parseRawStringField(msg, 'sessionId')
+  const primaryClientId = parseRawStringField(msg, 'primaryClientId')
   let role: SessionRole
   if (!primaryClientId) {
     role = 'unclaimed'

@@ -15,6 +15,7 @@ import type {
   GitBranch,
   GitFileStatus,
 } from '../types'
+import { parseRawStringField, parseUnknownArrayField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // Git operation results (diff_result / git_status_result / git_branches_result /
@@ -173,10 +174,10 @@ export interface DiffResultPayload {
  * message). The `error` string passes through verbatim when present.
  */
 export function handleDiffResult(msg: Record<string, unknown>): DiffResultPayload {
-  const rawFiles = Array.isArray(msg.files) ? (msg.files as unknown[]) : []
+  const rawFiles = parseUnknownArrayField(msg, 'files')
   return {
     files: validateGitElements(rawFiles, isDiffFile, 'handleDiffResult.files'),
-    error: typeof msg.error === 'string' ? msg.error : null,
+    error: parseRawStringField(msg, 'error'),
   }
 }
 
@@ -207,13 +208,11 @@ export interface GitStatusResultPayload {
 export function handleGitStatusResult(
   msg: Record<string, unknown>,
 ): GitStatusResultPayload {
-  const rawStaged = Array.isArray(msg.staged) ? (msg.staged as unknown[]) : []
-  const rawUnstaged = Array.isArray(msg.unstaged) ? (msg.unstaged as unknown[]) : []
-  const rawUntracked = Array.isArray(msg.untracked)
-    ? (msg.untracked as unknown[])
-    : []
+  const rawStaged = parseUnknownArrayField(msg, 'staged')
+  const rawUnstaged = parseUnknownArrayField(msg, 'unstaged')
+  const rawUntracked = parseUnknownArrayField(msg, 'untracked')
   return {
-    branch: typeof msg.branch === 'string' ? msg.branch : null,
+    branch: parseRawStringField(msg, 'branch'),
     staged: validateGitElements(rawStaged, isGitFileStatus, 'handleGitStatusResult.staged'),
     unstaged: validateGitElements(rawUnstaged, isGitFileStatus, 'handleGitStatusResult.unstaged'),
     untracked: validateGitElements(
@@ -221,7 +220,7 @@ export function handleGitStatusResult(
       (v): v is string => typeof v === 'string',
       'handleGitStatusResult.untracked',
     ),
-    error: typeof msg.error === 'string' ? msg.error : null,
+    error: parseRawStringField(msg, 'error'),
   }
 }
 
@@ -247,17 +246,15 @@ export interface GitBranchesResultPayload {
 export function handleGitBranchesResult(
   msg: Record<string, unknown>,
 ): GitBranchesResultPayload {
-  const rawBranches = Array.isArray(msg.branches)
-    ? (msg.branches as unknown[])
-    : []
+  const rawBranches = parseUnknownArrayField(msg, 'branches')
   return {
     branches: validateGitElements(
       rawBranches,
       isGitBranch,
       'handleGitBranchesResult.branches',
     ),
-    currentBranch: typeof msg.currentBranch === 'string' ? msg.currentBranch : null,
-    error: typeof msg.error === 'string' ? msg.error : null,
+    currentBranch: parseRawStringField(msg, 'currentBranch'),
+    error: parseRawStringField(msg, 'error'),
   }
 }
 
@@ -282,7 +279,7 @@ export function handleGitStageResult(
   msg: Record<string, unknown>,
 ): GitStageResultPayload {
   return {
-    error: typeof msg.error === 'string' ? msg.error : null,
+    error: parseRawStringField(msg, 'error'),
   }
 }
 
@@ -307,9 +304,9 @@ export function handleGitCommitResult(
   msg: Record<string, unknown>,
 ): GitCommitResultPayload {
   return {
-    hash: typeof msg.hash === 'string' ? msg.hash : null,
-    message: typeof msg.message === 'string' ? msg.message : null,
-    error: typeof msg.error === 'string' ? msg.error : null,
+    hash: parseRawStringField(msg, 'hash'),
+    message: parseRawStringField(msg, 'message'),
+    error: parseRawStringField(msg, 'error'),
   }
 }
 

@@ -19,7 +19,7 @@ import type {
   PendingBackgroundShell,
   SessionInfo,
 } from '../types'
-import { resolveSessionId } from './_shared'
+import { parseUnknownArrayField, resolveSessionId } from './_shared'
 
 // ---------------------------------------------------------------------------
 // session_list
@@ -347,7 +347,7 @@ export function handleBackgroundWorkChanged(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): PendingBackgroundShellsBuilder {
-  const rawPending = Array.isArray(msg.pending) ? msg.pending : []
+  const rawPending = parseUnknownArrayField(msg, 'pending')
   const next: PendingBackgroundShell[] = []
   for (const raw of rawPending) {
     if (!raw || typeof raw !== 'object') continue

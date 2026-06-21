@@ -13,7 +13,7 @@
  * imports ./auth or ./index.
  */
 
-import { parseEnumField, parseRawStringField } from './_shared'
+import { parseEnumField, parseRawStringField, parseUnknownArrayField } from './_shared'
 import { handleAvailablePermissionModes } from './permission'
 import type { PermissionMode } from './permission'
 
@@ -327,9 +327,9 @@ export function handleAuthBootstrap(
   sessionId: string | null
   tunnelUrl: string | null
 } {
-  const providers: unknown[] = Array.isArray(msg.providers) ? (msg.providers as unknown[]) : []
-  const slashCommands: unknown[] = Array.isArray(msg.slashCommands) ? (msg.slashCommands as unknown[]) : []
-  const agents: unknown[] = Array.isArray(msg.agents) ? (msg.agents as unknown[]) : []
+  const providers = parseUnknownArrayField(msg, 'providers')
+  const slashCommands = parseUnknownArrayField(msg, 'slashCommands')
+  const agents = parseUnknownArrayField(msg, 'agents')
   const sessionId = typeof msg.sessionId === 'string' && msg.sessionId ? msg.sessionId : null
   // #5555 (sub-item 7): the server's live public tunnel URL, when a tunnel is
   // up. Lets a reconnecting client re-learn a URL that rotated while it was
@@ -394,7 +394,7 @@ export function handleTunnelUrlChanged(
  * browser URL.
  */
 export function handleTokenRotated(msg: Record<string, unknown>): { token: string | null } {
-  return { token: typeof msg.token === 'string' ? msg.token : null }
+  return { token: parseRawStringField(msg, 'token') }
 }
 
 // ---------------------------------------------------------------------------
