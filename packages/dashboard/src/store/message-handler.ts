@@ -1149,8 +1149,17 @@ function verifyServerIdentityOrRefuse(
     applyIdentityRefusal(ctx, decision.reason, decision.message);
     return false;
   }
-  // Connect — pin on first use, then clear the pairing identity.
-  if (decision.action === 'pin-and-connect' && activeServerId) {
+  // Connect — persist the offered identity as the new pin, then clear the
+  // pairing identity. #5616 (#5978 parity with the app): BOTH TOFU first-use
+  // ('pin-and-connect') AND a forward-chained rotation ('rotate-pin', where the
+  // old pinned identity signed the new one) re-pin. Without the explicit
+  // 'rotate-pin' arm the dashboard would connect this session but DROP the new
+  // pin, so the next connect re-enters the handoff every time and the user is
+  // locked out once the cert stops being offered.
+  if (
+    (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') &&
+    activeServerId
+  ) {
     getStore().getState().updateServer(activeServerId, { pinnedIdentityKey: decision.identityKey });
   }
   setPendingPairingIdentityKey(null);

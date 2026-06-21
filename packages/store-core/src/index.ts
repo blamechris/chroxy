@@ -177,6 +177,11 @@ export {
   createSigningKeyPair,
   signExchangeKey,
   verifyExchangeKeySignature,
+  // #5616 — identity-rotation continuity-cert primitives (produce + verify).
+  // Verify is used internally by key-pinning; both are part of the public
+  // rotation API the server (mint, #6198) and tests consume.
+  signIdentityRotation,
+  verifyIdentityRotation,
   deriveSharedKey,
   nonceFromCounter,
   encrypt,

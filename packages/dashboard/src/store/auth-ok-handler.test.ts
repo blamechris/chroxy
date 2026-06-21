@@ -36,6 +36,15 @@ import {
   setPendingKeyPair,
 } from './message-handler'
 import { createKeyPair, deriveSharedKey, deriveConnectionKey } from './crypto'
+// #5616 — REAL store-core crypto (NOT the mocked dashboard `./crypto` above) so
+// the rotation handoff runs through genuine signatures. `decideKeyPinWithPairingIdentity`
+// verifies against store-core's own crypto regardless of the `./crypto` mock.
+import {
+  createSigningKeyPair,
+  createKeyPair as realCreateKeyPair,
+  signExchangeKey,
+  signIdentityRotation,
+} from '@chroxy/store-core'
 import type { ConnectionState } from './types'
 
 // ---------------------------------------------------------------------------
@@ -687,6 +696,102 @@ describe('auth_ok handler', () => {
       const state = store.getState()
       expect(state.wsUrl).toBe('wss://my.server.com')
       expect(state.apiToken).toBe('my-tok')
+    })
+  })
+
+  // #5616 — the dashboard-specific consume half: a valid rotation cert must
+  // CHAIN THE PIN FORWARD in the server registry (not just connect this
+  // session). Regression guard for the missing `rotate-pin` persist arm — the
+  // handshake-e2e harness models the app's `pinToPersist` return shape, this
+  // exercises the dashboard's `updateServer` registry side effect end-to-end.
+  describe('identity-rotation pin handoff (#5616)', () => {
+    /** Seed a store whose active server is pinned to `pinnedKey`, tracking writes. */
+    function seedPinnedStore(pinnedKey: string) {
+      const s = createMockStore({
+        connectionPhase: 'connecting',
+        socket: null,
+        sessions: [],
+        activeSessionId: null,
+        sessionStates: {},
+        messages: [],
+        activeServerId: 'srv-1',
+        serverRegistry: [{ id: 'srv-1', name: 'Mac', wsUrl: 'wss://t', pinnedIdentityKey: pinnedKey }],
+      } as unknown as ConnectionState)
+      // Real registry semantics: updateServer patches the matching entry.
+      ;(s.getState() as unknown as { updateServer: unknown }).updateServer = (
+        id: string,
+        patch: Record<string, unknown>,
+      ) =>
+        s.setState((prev: ConnectionState) => ({
+          serverRegistry: (prev as unknown as { serverRegistry: Array<{ id: string }> }).serverRegistry.map(
+            (e) => (e.id === id ? { ...e, ...patch } : e),
+          ),
+        }) as Partial<ConnectionState>)
+      return s
+    }
+
+    function pinOf(s: ReturnType<typeof createMockStore>): string | undefined {
+      const reg = (s.getState() as unknown as { serverRegistry: Array<{ id: string; pinnedIdentityKey?: string }> })
+        .serverRegistry
+      return reg.find((e) => e.id === 'srv-1')?.pinnedIdentityKey
+    }
+
+    it('chains the registry pin forward to the new identity on a valid cert', () => {
+      const oldId = createSigningKeyPair()
+      const newId = createSigningKeyPair()
+      const exchange = realCreateKeyPair()
+      // The current (rotated) identity signs the LIVE exchange key; the OLD
+      // identity signs the new one (the continuity cert).
+      const serverKeySig = signExchangeKey(exchange.publicKey, newId.secretKey)
+      const rotationCert = signIdentityRotation(newId.publicKey, oldId.secretKey)
+
+      store = seedPinnedStore(oldId.publicKey)
+      setStore(store)
+      prepareEagerKeyExchange()
+
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({
+          encryption: 'required',
+          serverPublicKey: exchange.publicKey,
+          serverKeySig,
+          newIdentityKey: newId.publicKey,
+          rotationCert,
+        }),
+        ctx as any,
+      )
+
+      // Pin chained forward — NOT left at the old key (the #5978 silent-drop bug).
+      expect(pinOf(store)).toBe(newId.publicKey)
+    })
+
+    it('REFUSES and leaves the pin unchanged when the continuity cert is forged', () => {
+      const oldId = createSigningKeyPair()
+      const newId = createSigningKeyPair()
+      const attacker = createSigningKeyPair()
+      const exchange = realCreateKeyPair()
+      const serverKeySig = signExchangeKey(exchange.publicKey, newId.secretKey)
+      // Forged: signed by an unrelated key, not the pinned old identity.
+      const rotationCert = signIdentityRotation(newId.publicKey, attacker.secretKey)
+
+      store = seedPinnedStore(oldId.publicKey)
+      setStore(store)
+      prepareEagerKeyExchange()
+
+      const ctx = { url: 'wss://t', token: 'tok', socket: mockSocket, isReconnect: false, silent: false }
+      handleMessage(
+        createAuthOkMessage({
+          encryption: 'required',
+          serverPublicKey: exchange.publicKey,
+          serverKeySig,
+          newIdentityKey: newId.publicKey,
+          rotationCert,
+        }),
+        ctx as any,
+      )
+
+      // Fail closed: the old pin stays put, no silent forward-chain.
+      expect(pinOf(store)).toBe(oldId.publicKey)
     })
   })
 })
