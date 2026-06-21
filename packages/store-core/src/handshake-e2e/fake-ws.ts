@@ -28,6 +28,7 @@ import {
   createKeyPair,
   createSigningKeyPair,
   signExchangeKey,
+  signIdentityRotation,
   deriveSharedKey,
   deriveConnectionKey,
   generateConnectionSalt,
@@ -158,6 +159,18 @@ export interface FakeServerOptions {
   omitSignature?: boolean
   /** Sign with a DIFFERENT identity key than the one the client pinned (MITM). */
   forgeSignature?: boolean
+  /**
+   * #5616 — simulate a ROTATED daemon identity. When set to the PREVIOUS
+   * (pinned) identity keypair, auth_ok carries a continuity cert: `serverKeySig`
+   * is signed by the CURRENT identity (`this.identity`), `newIdentityKey` is the
+   * current public key, and `rotationCert` is the current key signed by this
+   * previous secret ("old signs new"). A client pinned to the previous public
+   * key chains forward instead of refusing. With `forgeRotationCert`, the cert
+   * is signed by an UNRELATED key (attacker who never held the old secret).
+   */
+  rotatedFrom?: SigningKeyPair
+  /** Sign the rotation cert with an unrelated key (forged-continuity attack). */
+  forgeRotationCert?: boolean
 }
 
 export interface ReplayEntrySpec {
@@ -205,10 +218,23 @@ export class FakeHandshakeServer {
           this.exchange.publicKey,
           this.opts.forgeSignature ? this.forgedIdentity.secretKey : this.identity.secretKey,
         )
+    // #5616 — when simulating a rotated identity, present the continuity cert:
+    // newIdentityKey = current public key; rotationCert = current key signed by
+    // the PREVIOUS secret ("old signs new"). forgeRotationCert signs with an
+    // unrelated key (an attacker who never held the old secret).
+    let rotationFields: Record<string, unknown> = {}
+    if (this.opts.rotatedFrom) {
+      const signer = this.opts.forgeRotationCert ? this.forgedIdentity : this.opts.rotatedFrom
+      rotationFields = {
+        newIdentityKey: this.identity.publicKey,
+        rotationCert: signIdentityRotation(this.identity.publicKey, signer.secretKey),
+      }
+    }
     return {
       type: 'auth_ok',
       serverPublicKey: this.exchange.publicKey,
       ...(serverKeySig ? { serverKeySig } : {}),
+      ...rotationFields,
       salt: this.salt,
       encryption: 'required',
       capabilities: { authBootstrap: true },
@@ -284,6 +310,15 @@ export class FakeHandshakeClient {
     this.phases.push('auth_ok')
     const exchangePublicKey = authOk.serverPublicKey as string
     const serverKeySig = (authOk.serverKeySig as string | undefined) ?? null
+    // #5616 — the rotation continuity cert, threaded into the pin decision
+    // exactly as the real clients do: the production parsers (handleAuthOk /
+    // handleKeyExchangeOk) normalise empty/non-string to null, so mirror that
+    // `typeof === 'string' && truthy ? v : null` guard here rather than a raw
+    // cast (which would treat '' / non-strings as present).
+    const newIdentityKey =
+      typeof authOk.newIdentityKey === 'string' && authOk.newIdentityKey ? authOk.newIdentityKey : null
+    const rotationCert =
+      typeof authOk.rotationCert === 'string' && authOk.rotationCert ? authOk.rotationCert : null
 
     // #5614 — the plaintext-downgrade gate runs FIRST, exactly as production does
     // (before the encryption branch / pin check). A pinned connection whose
@@ -311,6 +346,8 @@ export class FakeHandshakeClient {
       pairingIdentityKey: this.opts.pairingIdentityKey ?? null,
       exchangePublicKey,
       serverKeySig,
+      newIdentityKey,
+      rotationCert,
     })
 
     if (decision.action === 'refuse') {
@@ -319,7 +356,9 @@ export class FakeHandshakeClient {
       return decision
     }
 
-    if (decision.action === 'pin-and-connect') {
+    // #5616 — TOFU first-use AND a forward-chained rotation both persist the
+    // offered identity as the new pin (mirrors app/dashboard message-handler.ts).
+    if (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') {
       this.store.pin(decision.identityKey)
     }
 

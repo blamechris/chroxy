@@ -1123,6 +1123,13 @@ function verifyServerIdentityOrRefuse(
   ctx: { socket: WebSocket; silent: boolean },
   exchangePublicKey: string,
   serverKeySig: string | null,
+  // #5616 — identity-rotation continuity cert from the handshake (auth_ok /
+  // key_exchange_ok). When the daemon rotated its identity, `newIdentityKey` is
+  // its current key and `rotationCert` is the old-signed-new cert; a pinned
+  // client whose pin no longer verifies chains forward instead of refusing.
+  // Both null on un-rotated daemons / older servers (refusal path unchanged).
+  newIdentityKey: string | null = null,
+  rotationCert: string | null = null,
 ): boolean {
   const state = getStore().getState();
   const activeServerId = state.activeServerId;
@@ -1135,13 +1142,24 @@ function verifyServerIdentityOrRefuse(
     pairingIdentityKey: getPendingPairingIdentityKey(),
     exchangePublicKey,
     serverKeySig,
+    newIdentityKey,
+    rotationCert,
   });
   if (decision.action === 'refuse') {
     applyIdentityRefusal(ctx, decision.reason, decision.message);
     return false;
   }
-  // Connect — pin on first use, then clear the pairing identity.
-  if (decision.action === 'pin-and-connect' && activeServerId) {
+  // Connect — persist the offered identity as the new pin, then clear the
+  // pairing identity. #5616 (#5978 parity with the app): BOTH TOFU first-use
+  // ('pin-and-connect') AND a forward-chained rotation ('rotate-pin', where the
+  // old pinned identity signed the new one) re-pin. Without the explicit
+  // 'rotate-pin' arm the dashboard would connect this session but DROP the new
+  // pin, so the next connect re-enters the handoff every time and the user is
+  // locked out once the cert stops being offered.
+  if (
+    (decision.action === 'pin-and-connect' || decision.action === 'rotate-pin') &&
+    activeServerId
+  ) {
     getStore().getState().updateServer(activeServerId, { pinnedIdentityKey: decision.identityKey });
   }
   setPendingPairingIdentityKey(null);
@@ -3418,7 +3436,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // #5536 — verify the server's signed exchange key against the pinned
           // (or pairing-time) identity BEFORE deriving the shared key. On a
           // mismatch this closes the socket + surfaces the refusal; abort.
-          if (!verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig)) {
+          if (!verifyServerIdentityOrRefuse(ctx, auth.serverPublicKey, auth.serverKeySig, auth.newIdentityKey, auth.rotationCert)) {
             _pendingKeyPair = null;
             _pendingSalt = null;
             break;
@@ -3478,7 +3496,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     case 'key_exchange_ok': {
       if (_pendingKeyPair) {
-        const { publicKey: serverPublicKey, serverKeySig } = sharedKeyExchangeOk(msg);
+        const { publicKey: serverPublicKey, serverKeySig, newIdentityKey, rotationCert } = sharedKeyExchangeOk(msg);
         if (!serverPublicKey) {
           console.error('[crypto] Invalid publicKey in key_exchange_ok message', msg.publicKey);
           ctx.socket.close();
@@ -3490,7 +3508,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         // #5536 — verify the server's signed exchange key against the pinned (or
         // pairing-time) identity BEFORE deriving the shared key. On a mismatch
         // this closes the socket + surfaces the refusal; abort the handshake.
-        if (!verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig)) {
+        if (!verifyServerIdentityOrRefuse(ctx, serverPublicKey, serverKeySig, newIdentityKey, rotationCert)) {
           _pendingKeyPair = null;
           _pendingSalt = null;
           break;

@@ -146,6 +146,19 @@ export const ServerAuthOkSchema = z.object({
     // time before keying off `serverPublicKey`. Absent for unpinned daemons /
     // older servers — old clients ignore it (TOFU unchanged).
     serverKeySig: z.string().max(512).optional(),
+    // #5616 (identity-key rotation handoff) — continuity-cert fields, present on
+    // the eager path only when the daemon's identity has been rotated and a
+    // continuity cert was minted at rotation time. `newIdentityKey` is the
+    // daemon's CURRENT (post-rotation) base64 Ed25519 identity public key;
+    // `rotationCert` is the base64 detached signature of `newIdentityKey` made by
+    // the PREVIOUS (pinned) identity's secret key. A pinned client whose stored
+    // pin no longer matches `serverKeySig` uses the pair to chain its pin forward
+    // (verify old-signed-new + new signed THIS exchange key) instead of refusing.
+    // Absent for un-rotated daemons / older servers — clients ignore them and the
+    // pin-mismatch path is unchanged (refuse → manual re-pair). Same shape as
+    // `serverKeySig` so the existing 512-char base64 bound applies.
+    newIdentityKey: z.string().max(512).optional(),
+    rotationCert: z.string().max(512).optional(),
     // #5555 (auth_bootstrap) — fold the static permission-mode enum into auth_ok
     // so a new client reads it here instead of waiting for the discrete
     // `available_permission_modes` burst frame (still sent for older clients).

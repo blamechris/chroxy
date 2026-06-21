@@ -130,6 +130,23 @@ export interface AuthOkPayload {
    */
   serverKeySig: string | null
   /**
+   * #5616 (identity-key rotation handoff) — the daemon's CURRENT (post-rotation)
+   * base64 Ed25519 identity public key, present only when the daemon rotated its
+   * identity and minted a continuity cert. Paired with {@link rotationCert}. A
+   * pinned client whose stored pin no longer verifies `serverKeySig` re-pins to
+   * THIS key once the cert chain checks out. Null when absent (un-rotated daemon
+   * / older server) — same `typeof === 'string' && truthy` validation as
+   * `serverKeySig`.
+   */
+  newIdentityKey: string | null
+  /**
+   * #5616 — base64 Ed25519 detached signature of {@link newIdentityKey} made by
+   * the PREVIOUS (pinned) identity's secret key (the "old signs new" continuity
+   * cert, minted at rotation time). The client verifies it against its stored
+   * pin before chaining forward. Null when absent.
+   */
+  rotationCert: string | null
+  /**
    * #5555 (auth_bootstrap) — the static permission-mode enum folded into
    * auth_ok so a new client doesn't have to wait for the discrete
    * `available_permission_modes` burst frame. Validated with the same shape
@@ -213,6 +230,13 @@ export function handleAuthOk(msg: Record<string, unknown>): AuthOkPayload {
     // missing/empty/non-string (unpinned daemon / discrete path).
     serverKeySig:
       typeof msg.serverKeySig === 'string' && msg.serverKeySig ? msg.serverKeySig : null,
+    // #5616 — identity-rotation continuity cert. Null for missing/empty/non-
+    // string (un-rotated daemon / older server), exactly the "no cert → can't
+    // chain forward → refuse" signal the pin-decision keys off.
+    newIdentityKey:
+      typeof msg.newIdentityKey === 'string' && msg.newIdentityKey ? msg.newIdentityKey : null,
+    rotationCert:
+      typeof msg.rotationCert === 'string' && msg.rotationCert ? msg.rotationCert : null,
     // #5555 — reuse the discrete-frame parser on the folded field. Absent /
     // non-array → null so the consumer falls back to the discrete frame.
     availablePermissionModes: Array.isArray(msg.availablePermissionModes)
@@ -242,7 +266,12 @@ export function handleAuthFail(msg: Record<string, unknown>): { reason: string }
  * setting `_encryptionState`, sending post-auth WS messages) stay at the call
  * site — they touch crypto state and the websocket directly.
  */
-export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: string | null; serverKeySig: string | null } {
+export function handleKeyExchangeOk(msg: Record<string, unknown>): {
+  publicKey: string | null
+  serverKeySig: string | null
+  newIdentityKey: string | null
+  rotationCert: string | null
+} {
   const raw = msg.publicKey
   const sig = msg.serverKeySig
   return {
@@ -250,6 +279,12 @@ export function handleKeyExchangeOk(msg: Record<string, unknown>): { publicKey: 
     // #5536 — Ed25519 signature (base64) over publicKey, present when the daemon
     // has a pinned identity. Null when absent (unpinned daemon / older server).
     serverKeySig: typeof sig === 'string' && sig ? sig : null,
+    // #5616 — identity-rotation continuity cert on the discrete path. Same
+    // validation + null semantics as the eager (auth_ok) path.
+    newIdentityKey:
+      typeof msg.newIdentityKey === 'string' && msg.newIdentityKey ? msg.newIdentityKey : null,
+    rotationCert:
+      typeof msg.rotationCert === 'string' && msg.rotationCert ? msg.rotationCert : null,
   }
 }
 

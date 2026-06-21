@@ -97,6 +97,8 @@ export declare const ServerAuthOkSchema: z.ZodObject<{
     }, z.core.$strip>>;
     serverPublicKey: z.ZodOptional<z.ZodString>;
     serverKeySig: z.ZodOptional<z.ZodString>;
+    newIdentityKey: z.ZodOptional<z.ZodString>;
+    rotationCert: z.ZodOptional<z.ZodString>;
     availablePermissionModes: z.ZodOptional<z.ZodArray<z.ZodObject<{
         id: z.ZodString;
         label: z.ZodString;

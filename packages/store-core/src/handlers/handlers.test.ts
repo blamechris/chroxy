@@ -1461,6 +1461,9 @@ describe('handleAuthOk', () => {
       capabilities: { notificationPrefs: true, somethingElse: false },
       serverPublicKey: 'srv-pub-key',
       serverKeySig: 'srv-key-sig',
+      // #5616 — identity-rotation continuity cert.
+      newIdentityKey: 'new-id-key',
+      rotationCert: 'rotation-cert-sig',
       // #5555 — folded static permission-mode enum.
       availablePermissionModes: [
         { id: 'approve', label: 'Approve' },
@@ -1484,6 +1487,8 @@ describe('handleAuthOk', () => {
       serverCapabilities: { notificationPrefs: true, somethingElse: false },
       serverPublicKey: 'srv-pub-key',
       serverKeySig: 'srv-key-sig',
+      newIdentityKey: 'new-id-key',
+      rotationCert: 'rotation-cert-sig',
       availablePermissionModes: [
         { id: 'approve', label: 'Approve' },
         { id: 'auto', label: 'Auto' },
@@ -1503,6 +1508,21 @@ describe('handleAuthOk', () => {
     expect(handleAuthOk({ serverPublicKey: '' }).serverPublicKey).toBeNull()
     expect(handleAuthOk({ serverPublicKey: 42 }).serverPublicKey).toBeNull()
     expect(handleAuthOk({ serverPublicKey: null }).serverPublicKey).toBeNull()
+  })
+
+  // #5616 — identity-rotation continuity-cert fields.
+  it('extracts the rotation continuity cert (newIdentityKey + rotationCert)', () => {
+    const result = handleAuthOk({ newIdentityKey: 'new-id', rotationCert: 'cert-sig' })
+    expect(result.newIdentityKey).toBe('new-id')
+    expect(result.rotationCert).toBe('cert-sig')
+  })
+
+  it('returns null cert fields when absent, empty, or non-string (un-rotated/old server)', () => {
+    expect(handleAuthOk({}).newIdentityKey).toBeNull()
+    expect(handleAuthOk({}).rotationCert).toBeNull()
+    expect(handleAuthOk({ newIdentityKey: '', rotationCert: '' }).newIdentityKey).toBeNull()
+    expect(handleAuthOk({ newIdentityKey: 42, rotationCert: {} }).newIdentityKey).toBeNull()
+    expect(handleAuthOk({ newIdentityKey: null, rotationCert: null }).rotationCert).toBeNull()
   })
 
   it('rejects unknown serverMode values', () => {
@@ -1724,6 +1744,8 @@ describe('handleAuthOk', () => {
       serverCapabilities: {},
       serverPublicKey: null,
       serverKeySig: null,
+      newIdentityKey: null,
+      rotationCert: null,
       availablePermissionModes: null,
     })
   })
@@ -1849,34 +1871,51 @@ describe('handleAuthFail', () => {
 // handleKeyExchangeOk
 // ---------------------------------------------------------------------------
 describe('handleKeyExchangeOk', () => {
+  // #5616 — the no-cert baseline shape (all four keys, cert fields null).
+  const NO_CERT = { newIdentityKey: null, rotationCert: null }
+
   it('extracts publicKey string', () => {
     expect(handleKeyExchangeOk({ publicKey: 'base64key==' })).toEqual({
       publicKey: 'base64key==',
       serverKeySig: null,
+      ...NO_CERT,
     })
   })
 
   it('returns null publicKey when missing', () => {
-    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null, serverKeySig: null })
+    expect(handleKeyExchangeOk({})).toEqual({ publicKey: null, serverKeySig: null, ...NO_CERT })
   })
 
   it('returns null publicKey for non-string values', () => {
     // Matches inline guard: `if (!msg.publicKey || typeof msg.publicKey !== 'string')`
-    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null, serverKeySig: null })
-    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null, serverKeySig: null })
-    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null, serverKeySig: null })
+    expect(handleKeyExchangeOk({ publicKey: 42 })).toEqual({ publicKey: null, serverKeySig: null, ...NO_CERT })
+    expect(handleKeyExchangeOk({ publicKey: null })).toEqual({ publicKey: null, serverKeySig: null, ...NO_CERT })
+    expect(handleKeyExchangeOk({ publicKey: '' })).toEqual({ publicKey: null, serverKeySig: null, ...NO_CERT })
   })
 
   it('#5536 — extracts the serverKeySig when present', () => {
     expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: 'sig==' })).toEqual({
       publicKey: 'pk==',
       serverKeySig: 'sig==',
+      ...NO_CERT,
     })
   })
 
   it('#5536 — null serverKeySig for missing / empty / non-string', () => {
     expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: '' }).serverKeySig).toBe(null)
     expect(handleKeyExchangeOk({ publicKey: 'pk==', serverKeySig: 42 }).serverKeySig).toBe(null)
+  })
+
+  it('#5616 — extracts the rotation cert on the discrete path', () => {
+    expect(
+      handleKeyExchangeOk({ publicKey: 'pk==', newIdentityKey: 'new-id', rotationCert: 'cert==' }),
+    ).toEqual({ publicKey: 'pk==', serverKeySig: null, newIdentityKey: 'new-id', rotationCert: 'cert==' })
+  })
+
+  it('#5616 — null cert fields for missing / empty / non-string', () => {
+    expect(handleKeyExchangeOk({ publicKey: 'pk==' }).newIdentityKey).toBe(null)
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', newIdentityKey: '' }).newIdentityKey).toBe(null)
+    expect(handleKeyExchangeOk({ publicKey: 'pk==', rotationCert: 99 }).rotationCert).toBe(null)
   })
 })
 

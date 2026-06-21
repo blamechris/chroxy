@@ -17,6 +17,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
+import { createSigningKeyPair, type SigningKeyPair } from '../crypto'
 import {
   FakeHandshakeServer,
   FakeHandshakeClient,
@@ -34,6 +35,10 @@ interface RunOpts {
   pairingIdentityKey?: string | null
   omitSignature?: boolean
   forgeSignature?: boolean
+  /** #5616 — simulate a rotated daemon identity (the PREVIOUS keypair). */
+  rotatedFrom?: SigningKeyPair
+  /** #5616 — sign the rotation cert with an unrelated key (forged continuity). */
+  forgeRotationCert?: boolean
   /** Replay entries to deliver (encrypted), in order. */
   replay?: ReplayEntrySpec[]
   /** fullHistory flag on the replay-start frame. */
@@ -54,6 +59,8 @@ function fullSequence(opts: RunOpts) {
   const server = new FakeHandshakeServer({
     omitSignature: opts.omitSignature,
     forgeSignature: opts.forgeSignature,
+    rotatedFrom: opts.rotatedFrom,
+    forgeRotationCert: opts.forgeRotationCert,
   })
   const store = makeMemoryStore()
   if (opts.preSeed) {
@@ -293,6 +300,100 @@ describe('encrypted handshake — pinned-key verification matrix (#5556.6)', () 
     expect(decision.action).toBe('connect')
     if (decision.action === 'connect') expect(decision.reason).toBe('unpinned-no-identity')
     expect(store.state.encryptionActive).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// #5616 — identity-rotation continuity-cert handoff matrix
+// ---------------------------------------------------------------------------
+
+describe('encrypted handshake — identity-rotation handoff (#5616)', () => {
+  it('a pinned client CHAINS its pin forward on a valid rotation cert (no re-pair)', () => {
+    const prev = createSigningKeyPair()
+    // Server rotated: current identity is fresh; auth_ok carries newIdentityKey +
+    // a cert signed by `prev` (the key the client pinned before rotation).
+    const server = new FakeHandshakeServer({ rotatedFrom: prev })
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: prev.publicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+
+    const decision = client.handleAuthOk(server.authOk())
+    expect(decision.action).toBe('rotate-pin')
+    if (decision.action === 'rotate-pin') {
+      expect(decision.reason).toBe('identity-rotated')
+      // Re-pins to the CURRENT (post-rotation) identity, not the old one.
+      expect(decision.identityKey).toBe(server.identityPublicKey)
+    }
+    // The new identity is persisted and the connection proceeds (no refusal).
+    expect(store.state.pinnedIdentity).toBe(server.identityPublicKey)
+    expect(store.state.refusal).toBeNull()
+    expect(store.state.encryptionActive).toBe(true)
+  })
+
+  it('REFUSES a forged continuity cert (attacker who never held the old secret)', () => {
+    const prev = createSigningKeyPair()
+    // Cert is signed by an UNRELATED key, not `prev` — the old identity never
+    // actually signed this new one.
+    const server = new FakeHandshakeServer({ rotatedFrom: prev, forgeRotationCert: true })
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: prev.publicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+
+    const decision = client.handleAuthOk(server.authOk())
+    expect(decision.action).toBe('refuse')
+    expect(store.state.refusal).not.toBeNull()
+    expect(store.state.pinnedIdentity).toBeNull()
+    expect(store.state.encryptionActive).toBe(false)
+  })
+
+  it('REFUSES a replayed cert whose new identity did NOT sign the live exchange key', () => {
+    const prev = createSigningKeyPair()
+    // Valid continuity cert (prev signed current) BUT the live serverKeySig is
+    // forged (signed by neither current nor prev) — a captured cert replayed
+    // without the new identity's live signature. Liveness check must fail closed.
+    const server = new FakeHandshakeServer({ rotatedFrom: prev, forgeSignature: true })
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: prev.publicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+
+    const decision = client.handleAuthOk(server.authOk())
+    expect(decision.action).toBe('refuse')
+    expect(store.state.pinnedIdentity).toBeNull()
+    expect(store.state.encryptionActive).toBe(false)
+  })
+
+  it('IGNORES the cert when the pin already matches the current identity (no rotation needed)', () => {
+    const prev = createSigningKeyPair()
+    const server = new FakeHandshakeServer({ rotatedFrom: prev })
+    const store = makeMemoryStore()
+    // Client is already pinned to the CURRENT identity — serverKeySig verifies
+    // directly, so the offered cert is irrelevant; a plain connect, no re-pin.
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: server.identityPublicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+
+    const decision = client.handleAuthOk(server.authOk())
+    expect(decision.action).toBe('connect')
+    expect(store.state.refusal).toBeNull()
+    expect(store.state.encryptionActive).toBe(true)
+  })
+
+  it('an un-rotated daemon (no cert) still REFUSES a genuine pin mismatch', () => {
+    // No rotatedFrom → no cert offered; the daemon simply signs with a DIFFERENT
+    // identity than the client pinned (the classic MITM / lost-continuity case).
+    // Without a cert there is nothing to chain forward → refuse → manual re-pair.
+    const server = new FakeHandshakeServer({ forgeSignature: true })
+    const store = makeMemoryStore()
+    const client = new FakeHandshakeClient(store, { pinnedIdentityKey: createSigningKeyPair().publicKey })
+    const auth = client.sendAuth()
+    server.keyExchangeWithClient(auth.publicKey as string)
+
+    const decision = client.handleAuthOk(server.authOk())
+    expect(decision.action).toBe('refuse')
+    expect(store.state.encryptionActive).toBe(false)
   })
 })
 
