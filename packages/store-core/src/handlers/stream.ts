@@ -15,6 +15,7 @@ import { nextMessageId } from '../utils'
 import { isReplayDuplicate } from '../replay-dedup'
 import { resolveStreamId } from '../stream-id'
 import { isRateLimitMessage } from '@chroxy/protocol'
+import { parseRawStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // message
@@ -273,11 +274,11 @@ export function handleToolStart(
   receivingHistoryReplay: boolean,
   cachedMessages: readonly ChatMessage[],
 ): ToolStartPayload {
-  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const msgSessionId = parseRawStringField(msg, 'sessionId')
   const sessionId = msgSessionId || activeSessionId
   const tool = typeof msg.tool === 'string' ? msg.tool : undefined
   const toolName = tool || 'tool'
-  const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
+  const messageId = parseRawStringField(msg, 'messageId')
   const toolId = messageId || nextMessageId('tool')
   const toolUseId = typeof msg.toolUseId === 'string' ? msg.toolUseId : undefined
   const serverName = typeof msg.serverName === 'string' ? msg.serverName : undefined
@@ -427,7 +428,7 @@ export function handleToolResult(
 ): ToolResultPayload | null {
   if (typeof msg.toolUseId !== 'string' || !msg.toolUseId) return null
   const toolUseId = msg.toolUseId
-  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const msgSessionId = parseRawStringField(msg, 'sessionId')
   const sessionId = msgSessionId || activeSessionId
   const resultText = typeof msg.result === 'string' ? msg.result : ''
   const truncated = typeof msg.truncated === 'boolean' ? msg.truncated : false
@@ -556,7 +557,7 @@ export function handleToolInputDelta(
   if (typeof msg.partialJson !== 'string') return null
   const toolUseId = msg.toolUseId
   const partialJson = msg.partialJson
-  const msgSessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const msgSessionId = parseRawStringField(msg, 'sessionId')
   const sessionId = msgSessionId || activeSessionId
 
   return {
@@ -959,8 +960,7 @@ export function sharedStreamDelta(
   // / `handleToolStart`: a non-string value falls back to the active session
   // rather than coercing onto a Map key. `|| ctx.activeSessionId` also folds an
   // empty string into the fallback, preserving the prior `(as string) ||` shape.
-  const capturedSessionId =
-    (typeof msg.sessionId === 'string' ? msg.sessionId : null) || ctx.activeSessionId
+  const capturedSessionId = parseRawStringField(msg, 'sessionId') || ctx.activeSessionId
 
   // Forward delta text to terminal view (dashboard-only; app no-op).
   if (msg.delta.length > 0) {
@@ -1263,7 +1263,7 @@ export function handleStreamEnd(
   activeSessionId: string | null,
 ): StreamEndPayload {
   const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : activeSessionId
-  const messageId = typeof msg.messageId === 'string' ? msg.messageId : null
+  const messageId = parseRawStringField(msg, 'messageId')
   return { sessionId, messageId }
 }
 
@@ -1338,8 +1338,7 @@ export function handleResultUsage(
     typeof msg.cost === 'number' ? msg.cost : null
   const lastResultDuration =
     typeof msg.duration === 'number' ? msg.duration : null
-  const rawSessionId =
-    typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const rawSessionId = parseRawStringField(msg, 'sessionId')
   return {
     sessionId: rawSessionId || activeSessionId,
     contextUsage,

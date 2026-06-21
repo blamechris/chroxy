@@ -9,6 +9,7 @@
  */
 
 import type { CumulativeUsage } from '../types'
+import { parseRawStringField } from './_shared'
 import type { SessionPatch } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -42,8 +43,7 @@ export function handleCostUpdate(
 ): SessionPatch {
   const sessionCost =
     typeof msg.sessionCost === 'number' ? msg.sessionCost : null
-  const rawSessionId =
-    typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const rawSessionId = parseRawStringField(msg, 'sessionId')
   return {
     sessionId: rawSessionId || activeSessionId,
     patch: { sessionCost },
@@ -90,8 +90,7 @@ export function handleSessionUsage(
     costUsd: toFiniteNumber(raw.costUsd),
     turnsBilled: toFiniteNumber(raw.turnsBilled),
   }
-  const rawSessionId =
-    typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const rawSessionId = parseRawStringField(msg, 'sessionId')
   return {
     sessionId: rawSessionId || activeSessionId,
     patch: { cumulativeUsage },

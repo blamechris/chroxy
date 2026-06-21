@@ -9,6 +9,8 @@
  * downstream in the app/dashboard. See ./index.ts for the handler contract.
  */
 
+import { parseRawStringField, parseUnknownArrayField } from './_shared'
+
 // ---------------------------------------------------------------------------
 // environment_list / environment_error
 //
@@ -35,9 +37,7 @@
 export function handleEnvironmentList(
   msg: Record<string, unknown>,
 ): { environments: unknown[] } {
-  const environments: unknown[] = Array.isArray(msg.environments)
-    ? (msg.environments as unknown[])
-    : []
+  const environments = parseUnknownArrayField(msg, 'environments')
   return { environments }
 }
 
@@ -54,6 +54,6 @@ export function handleEnvironmentError(
   msg: Record<string, unknown>,
 ): { error: string | null } {
   return {
-    error: typeof msg.error === 'string' ? msg.error : null,
+    error: parseRawStringField(msg, 'error'),
   }
 }

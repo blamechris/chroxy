@@ -20,7 +20,7 @@
 
 import type { ChatMessage } from '../types'
 import { nextMessageId } from '../utils'
-import { parseStringField } from './_shared'
+import { parseRawStringField, parseStringField, parseUnknownArrayField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // permission_request / permission_resolved / permission_expired /
@@ -78,14 +78,14 @@ export interface PermissionRequestPayload {
 export function handlePermissionRequest(
   msg: Record<string, unknown>,
 ): PermissionRequestPayload {
-  const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
-  const tool = typeof msg.tool === 'string' ? msg.tool : null
-  const description = typeof msg.description === 'string' ? msg.description : null
+  const requestId = parseRawStringField(msg, 'requestId')
+  const tool = parseRawStringField(msg, 'tool')
+  const description = parseRawStringField(msg, 'description')
   const input =
     msg.input && typeof msg.input === 'object' && !Array.isArray(msg.input)
       ? (msg.input as Record<string, unknown>)
       : null
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const sessionId = parseRawStringField(msg, 'sessionId')
   const remainingMs = typeof msg.remainingMs === 'number' ? msg.remainingMs : null
   return { requestId, tool, description, input, sessionId, remainingMs }
 }
@@ -108,8 +108,8 @@ export function handlePermissionResolved(
   msg: Record<string, unknown>,
 ): PermissionResolvedPayload {
   return {
-    requestId: typeof msg.requestId === 'string' ? msg.requestId : null,
-    decision: typeof msg.decision === 'string' ? msg.decision : null,
+    requestId: parseRawStringField(msg, 'requestId'),
+    decision: parseRawStringField(msg, 'decision'),
   }
 }
 
@@ -128,7 +128,7 @@ export function handlePermissionExpired(msg: Record<string, unknown>): {
   requestId: string | null
   systemMessage: ChatMessage
 } {
-  const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
+  const requestId = parseRawStringField(msg, 'requestId')
   return {
     requestId,
     systemMessage: {
@@ -159,7 +159,7 @@ export function handlePermissionTimeout(msg: Record<string, unknown>): {
   tool: string
   systemMessage: ChatMessage
 } {
-  const requestId = typeof msg.requestId === 'string' ? msg.requestId : null
+  const requestId = parseRawStringField(msg, 'requestId')
   const tool = typeof msg.tool === 'string' ? msg.tool : 'permission'
   return {
     requestId,
@@ -193,10 +193,8 @@ export interface PermissionRulesUpdatedPayload {
 export function handlePermissionRulesUpdated(
   msg: Record<string, unknown>,
 ): PermissionRulesUpdatedPayload {
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
-  const rules: PermissionRule[] = Array.isArray(msg.rules)
-    ? (msg.rules as unknown as PermissionRule[])
-    : []
+  const sessionId = parseRawStringField(msg, 'sessionId')
+  const rules = parseUnknownArrayField(msg, 'rules') as PermissionRule[]
   return { sessionId, rules }
 }
 
@@ -268,7 +266,7 @@ export interface PendingPermissionConfirm {
 export function handleConfirmPermissionMode(
   msg: Record<string, unknown>,
 ): PendingPermissionConfirm | null {
-  const mode = typeof msg.mode === 'string' ? msg.mode : null
+  const mode = parseRawStringField(msg, 'mode')
   if (!mode) return null
   const warning = typeof msg.warning === 'string' ? msg.warning : 'Are you sure?'
   return { mode, warning }

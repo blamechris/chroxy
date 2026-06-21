@@ -14,7 +14,7 @@
 import type { ModelInfo } from '../types'
 // Established Zod-handler pattern (#3138).
 import { ServerAvailableModelsEntrySchema } from '@chroxy/protocol'
-import { parseStringField } from './_shared'
+import { parseRawStringField, parseStringField, parseUnknownArrayField } from './_shared'
 import type { SessionPatch } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -123,7 +123,7 @@ export function handleProviderList(
  * non-array (matches the dashboard's prior inline `Array.isArray(...) ? ... : []`).
  */
 export function handleFileList(msg: Record<string, unknown>): { files: unknown[] } {
-  const files: unknown[] = Array.isArray(msg.files) ? (msg.files as unknown[]) : []
+  const files = parseUnknownArrayField(msg, 'files')
   return { files }
 }
 
@@ -228,11 +228,8 @@ export function handleMcpServers(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): SessionPatch {
-  const servers: unknown[] = Array.isArray(msg.servers)
-    ? (msg.servers as unknown[])
-    : []
-  const rawSessionId =
-    typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const servers = parseUnknownArrayField(msg, 'servers')
+  const rawSessionId = parseRawStringField(msg, 'sessionId')
   return {
     sessionId: rawSessionId || activeSessionId,
     patch: { mcpServers: servers },

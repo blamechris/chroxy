@@ -10,7 +10,7 @@
  */
 
 import type { AgentInfo, ChatMessage } from '../types'
-import { resolveSessionId } from './_shared'
+import { parseRawStringField, resolveSessionId } from './_shared'
 
 // ---------------------------------------------------------------------------
 // agent_spawned / agent_completed
@@ -61,7 +61,7 @@ export function handleAgentSpawned(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): AgentInfoBuilder {
-  const toolUseId = typeof msg.toolUseId === 'string' ? msg.toolUseId : null
+  const toolUseId = parseRawStringField(msg, 'toolUseId')
   const rawDescription = typeof msg.description === 'string' ? msg.description : ''
   const description = rawDescription || 'Background task'
   const rawStartedAt = typeof msg.startedAt === 'number' ? msg.startedAt : 0
@@ -92,7 +92,7 @@ export function handleAgentCompleted(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): AgentInfoBuilder {
-  const toolUseId = typeof msg.toolUseId === 'string' ? msg.toolUseId : null
+  const toolUseId = parseRawStringField(msg, 'toolUseId')
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
     applyTo: (current) => {
@@ -162,9 +162,7 @@ export function handleAgentEvent(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): AgentEventBuilder {
-  const parentToolUseId = typeof msg.parentToolUseId === 'string'
-    ? msg.parentToolUseId
-    : null
+  const parentToolUseId = parseRawStringField(msg, 'parentToolUseId')
   const eventType = typeof msg.eventType === 'string' && msg.eventType
     ? msg.eventType
     : null

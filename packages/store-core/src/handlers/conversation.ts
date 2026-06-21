@@ -11,6 +11,7 @@
  */
 
 import type { ConversationSummary } from '../types'
+import { parseRawStringField, parseUnknownArrayField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // conversation_id
@@ -45,9 +46,8 @@ export function handleConversationId(
   msg: Record<string, unknown>,
 ): ConversationIdPayload {
   return {
-    sessionId: typeof msg.sessionId === 'string' ? msg.sessionId : null,
-    conversationId:
-      typeof msg.conversationId === 'string' ? msg.conversationId : null,
+    sessionId: parseRawStringField(msg, 'sessionId'),
+    conversationId: parseRawStringField(msg, 'conversationId'),
   }
 }
 
@@ -72,9 +72,10 @@ export function handleConversationId(
 export function handleConversationsList(msg: Record<string, unknown>): {
   conversations: ConversationSummary[]
 } {
-  const conversations: ConversationSummary[] = Array.isArray(msg.conversations)
-    ? (msg.conversations as ConversationSummary[])
-    : []
+  const conversations = parseUnknownArrayField(
+    msg,
+    'conversations',
+  ) as ConversationSummary[]
   return { conversations }
 }
 
@@ -139,8 +140,7 @@ export function handleHistoryReplayStart(
   msg: Record<string, unknown>,
   activeSessionId: string | null,
 ): HistoryReplayStartPayload {
-  const rawSessionId =
-    typeof msg.sessionId === 'string' ? msg.sessionId : null
+  const rawSessionId = parseRawStringField(msg, 'sessionId')
   return {
     receivingHistoryReplay: true,
     fullHistory: msg.fullHistory === true,

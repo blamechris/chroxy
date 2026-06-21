@@ -11,7 +11,7 @@
 
 import type { SessionInfo } from '../types'
 import { nextMessageId, stripAnsi } from '../utils'
-import { parseStringField, resolveSessionId } from './_shared'
+import { parseRawStringField, parseStringField, resolveSessionId } from './_shared'
 import type { SessionPatch } from './_shared'
 
 // ---------------------------------------------------------------------------
@@ -86,8 +86,8 @@ export function handleSessionError(
    */
   attemptedSessionId: string | null
 } {
-  const category = typeof msg.category === 'string' ? msg.category : null
-  const code = typeof msg.code === 'string' ? msg.code : null
+  const category = parseRawStringField(msg, 'category')
+  const code = parseRawStringField(msg, 'code')
   const boundSessionName =
     typeof msg.boundSessionName === 'string' && msg.boundSessionName.length > 0
       ? msg.boundSessionName
@@ -95,10 +95,7 @@ export function handleSessionError(
   // #4982 — only forward when present + a non-empty string. Defense in
   // depth against malformed wire payloads (matches the attemptedResumeId
   // trimming/guard branch in handleMessage).
-  const attemptedSessionId =
-    typeof msg.attemptedSessionId === 'string' && msg.attemptedSessionId.trim().length > 0
-      ? msg.attemptedSessionId.trim()
-      : null
+  const attemptedSessionId = parseStringField(msg, 'attemptedSessionId')
 
   if (category === 'crash') {
     return {

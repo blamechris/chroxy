@@ -9,6 +9,8 @@
  * module-level doc in ./index.ts for the stateless-handler contract.
  */
 
+import { parseRawStringField, parseUnknownArrayField } from './_shared'
+
 // ---------------------------------------------------------------------------
 // File operations: directory_listing / file_listing / file_content /
 // write_file_result
@@ -38,10 +40,10 @@ function extractEntriesPayload(
   error: string | null
 } {
   return {
-    path: typeof msg.path === 'string' ? msg.path : null,
-    parentPath: typeof msg.parentPath === 'string' ? msg.parentPath : null,
-    entries: Array.isArray(msg.entries) ? (msg.entries as unknown[]) : [],
-    error: typeof msg.error === 'string' ? msg.error : null,
+    path: parseRawStringField(msg, 'path'),
+    parentPath: parseRawStringField(msg, 'parentPath'),
+    entries: parseUnknownArrayField(msg, 'entries'),
+    error: parseRawStringField(msg, 'error'),
   }
 }
 
@@ -126,12 +128,12 @@ export interface FileContentPayload {
  */
 export function handleFileContent(msg: Record<string, unknown>): FileContentPayload {
   return {
-    path: typeof msg.path === 'string' ? msg.path : null,
-    content: typeof msg.content === 'string' ? msg.content : null,
-    language: typeof msg.language === 'string' ? msg.language : null,
+    path: parseRawStringField(msg, 'path'),
+    content: parseRawStringField(msg, 'content'),
+    language: parseRawStringField(msg, 'language'),
     size: typeof msg.size === 'number' ? msg.size : null,
     truncated: msg.truncated === true,
-    error: typeof msg.error === 'string' ? msg.error : null,
+    error: parseRawStringField(msg, 'error'),
   }
 }
 
@@ -154,7 +156,7 @@ export function handleWriteFileResult(
   msg: Record<string, unknown>,
 ): WriteFileResultPayload {
   return {
-    path: typeof msg.path === 'string' ? msg.path : null,
-    error: typeof msg.error === 'string' ? msg.error : null,
+    path: parseRawStringField(msg, 'path'),
+    error: parseRawStringField(msg, 'error'),
   }
 }

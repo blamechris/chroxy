@@ -12,6 +12,7 @@
 
 // Established Zod-handler pattern (#3138).
 import { ServerNotificationPrefsSchema } from '@chroxy/protocol'
+import { parseFiniteNumberField, parseRawStringField } from './_shared'
 
 // ---------------------------------------------------------------------------
 // session_cost_threshold_crossed (#4075)
@@ -42,13 +43,9 @@ export interface SessionCostThresholdCrossedPayload {
 export function handleSessionCostThresholdCrossed(
   msg: Record<string, unknown>,
 ): SessionCostThresholdCrossedPayload {
-  const sessionId = typeof msg.sessionId === 'string' ? msg.sessionId : null
-  const costUsd =
-    typeof msg.costUsd === 'number' && Number.isFinite(msg.costUsd) ? msg.costUsd : 0
-  const thresholdUsd =
-    typeof msg.thresholdUsd === 'number' && Number.isFinite(msg.thresholdUsd)
-      ? msg.thresholdUsd
-      : 0
+  const sessionId = parseRawStringField(msg, 'sessionId')
+  const costUsd = parseFiniteNumberField(msg, 'costUsd', 0)
+  const thresholdUsd = parseFiniteNumberField(msg, 'thresholdUsd', 0)
   return {
     sessionId,
     patch: { costThresholdWarning: { costUsd, thresholdUsd, dismissedAt: null } },
