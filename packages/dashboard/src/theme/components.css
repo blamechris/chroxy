@@ -1321,13 +1321,16 @@ button.sidebar-token-view-session-row:hover {
 
 .control-room-cancel-btn:hover,
 .control-room-cancel-btn:focus-visible {
-  background: var(--danger-bg, rgba(220, 38, 38, 0.12));
-  border-color: var(--danger, #dc2626);
-  color: var(--danger, #dc2626);
+  /* #6195 — canonical danger token (--accent-red family), not the undefined
+     --danger/--danger-bg, so the chip is theme-consistent (and theme-switchable). */
+  background: var(--accent-red-light);
+  border-color: var(--accent-red-border);
+  color: var(--accent-red);
 }
 
 /* #6125 — jump-to-intervene on a blocked node: same chip as cancel, but an
-   accent (action, not destructive). */
+   accent (action, not destructive). Uses the purple accent to match the
+   mission-control surface (worktree/read-only badges). */
 .control-room-jump-btn {
   flex-shrink: 0;
   /* WCAG 2.2 SC 2.5.8 (AA): keep the tap target ≥ 24×24 CSS px (#6195). */
@@ -1344,9 +1347,10 @@ button.sidebar-token-view-session-row:hover {
 }
 .control-room-jump-btn:hover,
 .control-room-jump-btn:focus-visible {
-  background: var(--accent-purple-light, rgba(124, 156, 255, 0.12));
-  border-color: var(--accent, #7c9cff);
-  color: var(--accent, #7c9cff);
+  /* #6195 — canonical accent tokens, not the undefined --accent. */
+  background: var(--accent-purple-light);
+  border-color: var(--accent-purple-border-strong);
+  color: var(--accent-purple);
 }
 
 .control-room-entry:hover,
