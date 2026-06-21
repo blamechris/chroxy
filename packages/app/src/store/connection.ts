@@ -1048,6 +1048,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
               const restartEtaMs = typeof body.restartEtaMs === 'number' ? body.restartEtaMs : null;
               return { kind: 'restarting', restartEtaMs };
             }
+            // #6023: the supervisor exhausted its restart budget and is serving a
+            // terminal-down health body (#6022/#6130). Stop the ladder now.
+            if (body.status === 'down') {
+              return { kind: 'terminal_down', reason: typeof body.reason === 'string' ? body.reason : 'supervisor_gave_up' };
+            }
           } catch (err) {
             console.log('[ws] Health check body unreadable:', err instanceof Error ? err.message : String(err));
           }
@@ -1075,6 +1080,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       },
       onProbeFailed: (reason) => {
         useConnectionLifecycleStore.getState().setConnectionError(reason, _retryCount);
+      },
+      onTerminalDown: () => {
+        // #6023: supervisor gave up — latch the terminal server_down state now
+        // (same sticky FSM phase the ladder cap uses, #5725/#5980) instead of
+        // climbing the full retry budget. retryConnection() resets it.
+        if (myAttemptId !== connectionAttemptId) return;
+        console.log('[ws] server served terminal-down (supervisor gave up) — server_down');
+        useConnectionLifecycleStore.getState().setConnectionPhase('server_down');
+        useConnectionLifecycleStore.getState().setConnectionError('Server appears to be down', 0);
       },
       scheduleRetry: (nextAttempt, delayMs) => {
         console.log(`[ws] Retrying in ${delayMs}ms...`);

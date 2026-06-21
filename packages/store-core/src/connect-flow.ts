@@ -118,6 +118,12 @@ export type ProbeResult =
   | { kind: 'ok' }
   | { kind: 'restarting'; restartEtaMs: number | null }
   | { kind: 'failed'; reason: string }
+  // #6023: the supervisor exhausted its restart budget and is serving a
+  // terminal `{ status: 'down', reason: 'supervisor_gave_up' }` health response
+  // (#6022/#6130). The daemon is NOT coming back on its own — stop the ladder
+  // immediately and latch the terminal `server_down` state, rather than spinning
+  // the full retry budget against a host that has explicitly given up.
+  | { kind: 'terminal_down'; reason: string }
 
 /**
  * The endpoint to connect to for a given attempt. Returned by
@@ -223,6 +229,15 @@ export interface RunConnectAttemptOptions {
   onProbeFailed: (reason: string) => void
 
   /**
+   * #6023: the host served a terminal-down health signal (supervisor gave up).
+   * Write the sticky `server_down` phase + the "server appears down" copy and
+   * STOP — no retry is scheduled, since the daemon has explicitly given up.
+   * Optional so a client that omits it falls back to the legacy never-terminal
+   * behavior (the time-based ladder cap still latches server_down after N).
+   */
+  onTerminalDown?: (info: { reason: string }) => void
+
+  /**
    * Retries are exhausted because the host is still restarting. Write the
    * terminal `disconnected` phase + the "restart timed out" copy/UX.
    */
@@ -274,6 +289,7 @@ export function runConnectAttempt(options: RunConnectAttemptOptions): Promise<vo
     onProbeFailed,
     onRestartGaveUp,
     onProbeGaveUp,
+    onTerminalDown,
     scheduleRetry,
     jitter = defaultJitter,
   } = options
@@ -292,6 +308,23 @@ export function runConnectAttempt(options: RunConnectAttemptOptions): Promise<vo
 
       if (result.kind === 'ok') {
         openSocket(endpoint)
+        return
+      }
+
+      // #6023: the supervisor gave up — terminal, no retry. Latch server_down.
+      // A client that didn't wire onTerminalDown falls through to treat it like a
+      // failed probe (climbs the ladder), preserving legacy behavior.
+      if (result.kind === 'terminal_down') {
+        if (onTerminalDown) {
+          onTerminalDown({ reason: result.reason })
+          return
+        }
+        onProbeFailed(result.reason)
+        if (attempt < maxRetries) {
+          scheduleRetry(attempt + 1, delayFor(attempt))
+        } else {
+          onProbeGaveUp()
+        }
         return
       }
 
