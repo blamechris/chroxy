@@ -44,6 +44,7 @@ import { surveyEmulators, runEmulatorAction, EMULATOR_ACTIONS } from '../control
 import { surveyWsl, runWslAction, WSL_ACTIONS } from '../control-room/wsl.js'
 import { surveyIntegrations, runRepoMemoryIndex, runRepoRelayRerun } from '../control-room/integrations.js'
 import { surveySkillsInventory } from '../control-room/skills-inventory.js'
+import { makeSurveyHandler, makeSyncHostSurvey, makeActionError } from '../control-room/handler-factory.js'
 
 const log = createLogger('ws')
 
@@ -134,70 +135,54 @@ function activeSessionCwds(sessionManager) {
   return [...out]
 }
 
-async function handleHostStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  const config = ctx?.services?.config || {}
+const handleHostStatusRequest = makeSurveyHandler({
+  inFlight,
+  logName: 'host_status_request',
   // Effective discovery root: the configured root, else resolveRepoSet's own
   // default (~/Projects). Resolve it HERE — not as an undefined passed down —
   // so the snapshot's `root` reports the directory we actually scanned rather
-  // than '' when controlRoomRoot is unset.
-  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
-    ? config.controlRoomRoot
-    : DEFAULT_CONTROL_ROOM_ROOT
-  const repos = Array.isArray(config.repos) ? config.repos : []
-
-  // Authority gate: host-wide survey is for host-level (unbound) clients only.
-  // A pairing-bound (share-a-session) token is scoped to one session.
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, errorSnapshot(root, requestId, {
-      code: 'FORBIDDEN',
-      message: 'host_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  // In-flight guard: one survey per client at a time.
-  if (inFlight.has(client)) {
-    ctx.transport.send(ws, errorSnapshot(root, requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A host status survey is already in progress for this client',
-    }))
-    return
-  }
-
-  // Tests can inject `ctx.surveyRepos` / `ctx.resolveRepoSet` to stub the
-  // filesystem + git/gh calls without patching modules. Production never sets
-  // them and falls through to the real implementations.
-  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
-  const surveyFn = typeof ctx?.surveyRepos === 'function' ? ctx.surveyRepos : surveyRepos
-
-  inFlight.add(client)
-  try {
-    const repoSet = resolveFn({ repos, root })
+  // than '' when controlRoomRoot is unset. Computed pre-gate so the degraded
+  // replies (incl. the FORBIDDEN one) report the real root.
+  prepare: ({ ctx }) => {
+    const config = ctx?.services?.config || {}
+    const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+      ? config.controlRoomRoot
+      : DEFAULT_CONTROL_ROOM_ROOT
+    return { root, repos: Array.isArray(config.repos) ? config.repos : [] }
+  },
+  forbidden: ({ requestId, prep }) => errorSnapshot(prep.root, requestId, {
+    code: 'FORBIDDEN',
+    message: 'host_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId, prep }) => errorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A host status survey is already in progress for this client',
+  }),
+  failed: ({ requestId, prep, err }) => errorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'host status survey failed',
+  }),
+  run: async ({ ctx, requestId, prep }) => {
+    // Tests can inject `ctx.surveyRepos` / `ctx.resolveRepoSet` to stub the
+    // filesystem + git/gh calls without patching modules. Production never sets
+    // them and falls through to the real implementations.
+    const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+    const surveyFn = typeof ctx?.surveyRepos === 'function' ? ctx.surveyRepos : surveyRepos
+    const repoSet = resolveFn({ repos: prep.repos, root: prep.root })
     const snapshot = await surveyFn(repoSet, {
       activeSessionCwds: activeSessionCwds(ctx?.sessions?.sessionManager),
-      root,
+      root: prep.root,
     })
-
-    ctx.transport.send(ws, {
+    return {
       type: 'host_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
       root: snapshot.root,
       summary: snapshot.summary,
       repos: snapshot.repos,
-    })
-  } catch (err) {
-    log.warn(`host_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, errorSnapshot(root, requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'host status survey failed',
-    }))
-  } finally {
-    inFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /** #5253 — `runner_status_snapshot` error reply — see {@link buildSurveyErrorSnapshot}. */
 function runnerErrorSnapshot(root, requestId, error) {
@@ -214,60 +199,46 @@ function runnerErrorSnapshot(root, requestId, error) {
  * exposes host-wide runner metadata, so it is served only to host-level
  * (unbound) clients, one survey per client at a time.
  */
-async function handleRunnerStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  const config = ctx?.services?.config || {}
-  const root = typeof config.controlRoomRunnerRoot === 'string' && config.controlRoomRunnerRoot.length > 0
-    ? config.controlRoomRunnerRoot
-    : DEFAULT_RUNNER_ROOT
-
-  // Authority gate: a host-wide runner survey is for host-level clients only.
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, runnerErrorSnapshot(root, requestId, {
-      code: 'FORBIDDEN',
-      message: 'runner_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  if (runnerInFlight.has(client)) {
-    ctx.transport.send(ws, runnerErrorSnapshot(root, requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A runner status survey is already in progress for this client',
-    }))
-    return
-  }
-
-  // Tests inject `ctx.surveyRunners` to stub the fs/exec calls.
-  const surveyFn = typeof ctx?.surveyRunners === 'function' ? ctx.surveyRunners : surveyRunners
-
-  // #5260: gh enrichment is on by default; an operator disables it (faster,
-  // local-only survey, or no `gh` auth) by setting controlRoomRunnerIncludeGithub
-  // false. Only an explicit `false` turns it off — unset/undefined stays true.
-  const includeGithub = config.controlRoomRunnerIncludeGithub !== false
-
-  runnerInFlight.add(client)
-  try {
-    const snapshot = await surveyFn({ root, includeGithub })
-    ctx.transport.send(ws, {
+const handleRunnerStatusRequest = makeSurveyHandler({
+  inFlight: runnerInFlight,
+  logName: 'runner_status_request',
+  prepare: ({ ctx }) => {
+    const config = ctx?.services?.config || {}
+    const root = typeof config.controlRoomRunnerRoot === 'string' && config.controlRoomRunnerRoot.length > 0
+      ? config.controlRoomRunnerRoot
+      : DEFAULT_RUNNER_ROOT
+    return { config, root }
+  },
+  forbidden: ({ requestId, prep }) => runnerErrorSnapshot(prep.root, requestId, {
+    code: 'FORBIDDEN',
+    message: 'runner_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId, prep }) => runnerErrorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A runner status survey is already in progress for this client',
+  }),
+  failed: ({ requestId, prep, err }) => runnerErrorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'runner status survey failed',
+  }),
+  run: async ({ ctx, requestId, prep }) => {
+    // Tests inject `ctx.surveyRunners` to stub the fs/exec calls.
+    const surveyFn = typeof ctx?.surveyRunners === 'function' ? ctx.surveyRunners : surveyRunners
+    // #5260: gh enrichment is on by default; an operator disables it (faster,
+    // local-only survey, or no `gh` auth) by setting controlRoomRunnerIncludeGithub
+    // false. Only an explicit `false` turns it off — unset/undefined stays true.
+    const includeGithub = prep.config.controlRoomRunnerIncludeGithub !== false
+    const snapshot = await surveyFn({ root: prep.root, includeGithub })
+    return {
       type: 'runner_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
       root: snapshot.root,
       summary: snapshot.summary,
       repos: snapshot.repos,
-    })
-  } catch (err) {
-    log.warn(`runner_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, runnerErrorSnapshot(root, requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'runner status survey failed',
-    }))
-  } finally {
-    runnerInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /**
  * #6133 — `containers_status_snapshot` error reply. The containers survey uses a
@@ -294,63 +265,47 @@ function containersErrorSnapshot(requestId, error) {
  * clients, one survey per client at a time. Surveys ONLY chroxy's own
  * EnvironmentManager records (never arbitrary host containers).
  */
-async function handleContainersStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  // Authority gate: a host-wide container survey is for host-level clients only.
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, containersErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'containers_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  if (containersInFlight.has(client)) {
-    ctx.transport.send(ws, containersErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A containers status survey is already in progress for this client',
-    }))
-    return
-  }
-
-  // Tests inject `ctx.surveyContainers` to stub the docker/exec calls.
-  const surveyFn = typeof ctx?.surveyContainers === 'function' ? ctx.surveyContainers : surveyContainers
-  // The EnvironmentManager may be absent (container support disabled) — degrade
-  // to an empty inventory rather than erroring.
-  const envManager = ctx?.services?.environmentManager || null
-
-  // #6133: `docker stats` enrichment is on by default; an operator on a slow or
-  // socketless docker disables it (inventory-only survey) by setting
-  // controlRoomContainersIncludeStats false. Only an explicit `false` turns it
-  // off — unset/undefined stays true. Mirrors the runner survey's includeGithub.
-  const config = ctx?.services?.config || {}
-  const includeStats = config.controlRoomContainersIncludeStats !== false
-
-  containersInFlight.add(client)
-  try {
+const handleContainersStatusRequest = makeSurveyHandler({
+  inFlight: containersInFlight,
+  logName: 'containers_status_request',
+  forbidden: ({ requestId }) => containersErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'containers_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId }) => containersErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A containers status survey is already in progress for this client',
+  }),
+  failed: ({ requestId, err }) => containersErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'containers status survey failed',
+  }),
+  run: async ({ ctx, requestId }) => {
+    // Tests inject `ctx.surveyContainers` to stub the docker/exec calls.
+    const surveyFn = typeof ctx?.surveyContainers === 'function' ? ctx.surveyContainers : surveyContainers
+    // The EnvironmentManager may be absent (container support disabled) — degrade
+    // to an empty inventory rather than erroring.
+    const envManager = ctx?.services?.environmentManager || null
+    // #6133: `docker stats` enrichment is on by default; an operator on a slow or
+    // socketless docker disables it (inventory-only survey) by setting
+    // controlRoomContainersIncludeStats false. Only an explicit `false` turns it
+    // off — unset/undefined stays true. Mirrors the runner survey's includeGithub.
+    const config = ctx?.services?.config || {}
+    const includeStats = config.controlRoomContainersIncludeStats !== false
     const snapshot = await surveyFn({
       listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
       includeStats,
     })
-    ctx.transport.send(ws, {
+    return {
       type: 'containers_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
       summary: snapshot.summary,
       containers: snapshot.containers,
       dockerStatsNote: snapshot.dockerStatsNote ?? null,
-    })
-  } catch (err) {
-    log.warn(`containers_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, containersErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'containers status survey failed',
-    }))
-  } finally {
-    containersInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /**
  * #6139 — `repo_runtime_config_snapshot` error reply. Like the containers
@@ -394,51 +349,42 @@ function repoRuntimeConfigErrorSnapshot(requestId, error, hostDefaults = null) {
  * backend/allowlist defaults), so it's served only to host-level (unbound)
  * clients, one survey per client at a time.
  */
-async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  // Authority gate: a host-wide runtime-config survey is for host-level clients.
+const handleRepoRuntimeConfigRequest = makeSurveyHandler({
+  inFlight: repoRuntimeConfigInFlight,
+  logName: 'repo_runtime_config_request',
   // FORBIDDEN replies use safe placeholders (no hostDefaults) — a session-bound
   // token must not learn the host's backend/allowlist.
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'repo_runtime_config_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  // Past the authority gate: this client is host-level, so degraded snapshots
-  // may carry the real config-derived host defaults (computed without touching
-  // the filesystem) rather than placeholders.
-  const config = ctx?.services?.config || {}
-  const hostDefaults = hostRuntimeDefaults(config)
-
-  if (repoRuntimeConfigInFlight.has(client)) {
-    ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A repo runtime config survey is already in progress for this client',
-    }, hostDefaults))
-    return
-  }
-
-  // Same repo-set resolution as host_status_request: configured root else the
-  // default, config.repos plus auto-discovered git repos.
-  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
-    ? config.controlRoomRoot
-    : DEFAULT_CONTROL_ROOM_ROOT
-  const repos = Array.isArray(config.repos) ? config.repos : []
-
-  // Tests inject `ctx.resolveRepoSet` / `ctx.surveyRepoRuntimeConfig` to stub
-  // the filesystem + devcontainer-parse touches.
-  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
-  const surveyFn = typeof ctx?.surveyRepoRuntimeConfig === 'function' ? ctx.surveyRepoRuntimeConfig : surveyRepoRuntimeConfig
-
-  repoRuntimeConfigInFlight.add(client)
-  try {
+  forbidden: ({ requestId }) => repoRuntimeConfigErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'repo_runtime_config_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  // Past the authority gate the client is host-level, so degraded snapshots may
+  // carry the real config-derived host defaults (computed without touching the
+  // filesystem) rather than placeholders. hostDefaults is resolved ONLY on these
+  // non-bound paths — never in `forbidden` — to preserve the leak boundary.
+  inProgress: ({ ctx, requestId }) => repoRuntimeConfigErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A repo runtime config survey is already in progress for this client',
+  }, hostRuntimeDefaults(ctx?.services?.config || {})),
+  failed: ({ ctx, requestId, err }) => repoRuntimeConfigErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'repo runtime config survey failed',
+  }, hostRuntimeDefaults(ctx?.services?.config || {})),
+  run: async ({ ctx, requestId }) => {
+    const config = ctx?.services?.config || {}
+    // Same repo-set resolution as host_status_request: configured root else the
+    // default, config.repos plus auto-discovered git repos.
+    const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+      ? config.controlRoomRoot
+      : DEFAULT_CONTROL_ROOM_ROOT
+    const repos = Array.isArray(config.repos) ? config.repos : []
+    // Tests inject `ctx.resolveRepoSet` / `ctx.surveyRepoRuntimeConfig` to stub
+    // the filesystem + devcontainer-parse touches.
+    const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+    const surveyFn = typeof ctx?.surveyRepoRuntimeConfig === 'function' ? ctx.surveyRepoRuntimeConfig : surveyRepoRuntimeConfig
     const repoSet = resolveFn({ repos, root })
     const snapshot = await surveyFn({ repoSet, config })
-    ctx.transport.send(ws, {
+    return {
       type: 'repo_runtime_config_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -448,17 +394,9 @@ async function handleRepoRuntimeConfigRequest(ws, client, msg, ctx) {
       allowlist: snapshot.allowlist,
       repos: snapshot.repos,
       summary: snapshot.summary,
-    })
-  } catch (err) {
-    log.warn(`repo_runtime_config_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, repoRuntimeConfigErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'repo runtime config survey failed',
-    }, hostDefaults))
-  } finally {
-    repoRuntimeConfigInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /**
  * #6135 — `byok_pool_status_snapshot` error reply. Flat shape (no `root`/`repos`
@@ -485,32 +423,26 @@ function byokPoolErrorSnapshot(requestId, error) {
  * clients, one survey per client at a time. The pool being OFF is a first-class
  * `enabled: false` snapshot, not an error.
  */
-async function handleByokPoolStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, byokPoolErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'byok_pool_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  if (byokPoolInFlight.has(client)) {
-    ctx.transport.send(ws, byokPoolErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A BYOK pool status survey is already in progress for this client',
-    }))
-    return
-  }
-
-  // Tests inject `ctx.surveyByokPool` to stub the pool/stats singletons.
-  const surveyFn = typeof ctx?.surveyByokPool === 'function' ? ctx.surveyByokPool : surveyByokPool
-
-  byokPoolInFlight.add(client)
-  try {
+const handleByokPoolStatusRequest = makeSurveyHandler({
+  inFlight: byokPoolInFlight,
+  logName: 'byok_pool_status_request',
+  forbidden: ({ requestId }) => byokPoolErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'byok_pool_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId }) => byokPoolErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A BYOK pool status survey is already in progress for this client',
+  }),
+  failed: ({ requestId, err }) => byokPoolErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'BYOK pool status survey failed',
+  }),
+  run: async ({ ctx, requestId }) => {
+    // Tests inject `ctx.surveyByokPool` to stub the pool/stats singletons.
+    const surveyFn = typeof ctx?.surveyByokPool === 'function' ? ctx.surveyByokPool : surveyByokPool
     const snapshot = await surveyFn()
-    ctx.transport.send(ws, {
+    return {
       type: 'byok_pool_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -518,17 +450,9 @@ async function handleByokPoolStatusRequest(ws, client, msg, ctx) {
       note: snapshot.note ?? null,
       limits: snapshot.limits ?? null,
       stats: snapshot.stats ?? null,
-    })
-  } catch (err) {
-    log.warn(`byok_pool_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, byokPoolErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'BYOK pool status survey failed',
-    }))
-  } finally {
-    byokPoolInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /** #5499 — `integration_status_snapshot` error reply — see {@link buildSurveyErrorSnapshot}. */
 function integrationErrorSnapshot(root, requestId, error) {
@@ -547,48 +471,41 @@ function integrationErrorSnapshot(root, requestId, error) {
  * at a time. The repo set is the same one the host survey resolves
  * (config.repos ∪ auto-discovered under controlRoomRoot).
  */
-async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  const config = ctx?.services?.config || {}
-  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
-    ? config.controlRoomRoot
-    : DEFAULT_CONTROL_ROOM_ROOT
-  const repos = Array.isArray(config.repos) ? config.repos : []
-
-  // Authority gate: a host-wide integrations survey is for host-level clients only.
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, integrationErrorSnapshot(root, requestId, {
-      code: 'FORBIDDEN',
-      message: 'integration_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  if (integrationInFlight.has(client)) {
-    ctx.transport.send(ws, integrationErrorSnapshot(root, requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'An integration status survey is already in progress for this client',
-    }))
-    return
-  }
-
-  // Tests inject `ctx.resolveRepoSet` / `ctx.surveyIntegrations` to stub the
-  // fs/exec calls without patching modules.
-  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
-  const surveyFn = typeof ctx?.surveyIntegrations === 'function' ? ctx.surveyIntegrations : surveyIntegrations
-
-  // Optional explicit repo-memory binary path — skips the PATH probe (useful
-  // when the daemon runs with a GUI/launchd PATH that misses npm globals).
-  const bin = typeof config.controlRoomRepoMemoryBin === 'string' && config.controlRoomRepoMemoryBin.length > 0
-    ? config.controlRoomRepoMemoryBin
-    : undefined
-
-  integrationInFlight.add(client)
-  try {
-    const repoSet = resolveFn({ repos, root })
-    const snapshot = await surveyFn(repoSet, { root, bin })
-    ctx.transport.send(ws, {
+const handleIntegrationStatusRequest = makeSurveyHandler({
+  inFlight: integrationInFlight,
+  logName: 'integration_status_request',
+  prepare: ({ ctx }) => {
+    const config = ctx?.services?.config || {}
+    const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+      ? config.controlRoomRoot
+      : DEFAULT_CONTROL_ROOM_ROOT
+    return { config, root, repos: Array.isArray(config.repos) ? config.repos : [] }
+  },
+  forbidden: ({ requestId, prep }) => integrationErrorSnapshot(prep.root, requestId, {
+    code: 'FORBIDDEN',
+    message: 'integration_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId, prep }) => integrationErrorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'An integration status survey is already in progress for this client',
+  }),
+  failed: ({ requestId, prep, err }) => integrationErrorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'integration status survey failed',
+  }),
+  run: async ({ ctx, requestId, prep }) => {
+    // Tests inject `ctx.resolveRepoSet` / `ctx.surveyIntegrations` to stub the
+    // fs/exec calls without patching modules.
+    const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+    const surveyFn = typeof ctx?.surveyIntegrations === 'function' ? ctx.surveyIntegrations : surveyIntegrations
+    // Optional explicit repo-memory binary path — skips the PATH probe (useful
+    // when the daemon runs with a GUI/launchd PATH that misses npm globals).
+    const bin = typeof prep.config.controlRoomRepoMemoryBin === 'string' && prep.config.controlRoomRepoMemoryBin.length > 0
+      ? prep.config.controlRoomRepoMemoryBin
+      : undefined
+    const repoSet = resolveFn({ repos: prep.repos, root: prep.root })
+    const snapshot = await surveyFn(repoSet, { root: prep.root, bin })
+    return {
       type: 'integration_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -598,17 +515,9 @@ async function handleIntegrationStatusRequest(ws, client, msg, ctx) {
       repoMemoryCli: snapshot.repoMemoryCli,
       // #5501: snapshot-level gh CLI note for the repo-relay columns.
       ghCli: snapshot.ghCli,
-    })
-  } catch (err) {
-    log.warn(`integration_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, integrationErrorSnapshot(root, requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'integration status survey failed',
-    }))
-  } finally {
-    integrationInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 // ───────────────────────────────────────────────────────────────────────────
 // #5554 (epic #5159) — Skills inventory survey handler.
@@ -649,49 +558,42 @@ function skillsInventoryErrorSnapshot(root, requestId, error) {
  * survey carries names / descriptions / metadata only (see
  * control-room/skills-inventory.js).
  */
-async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-
-  const config = ctx?.services?.config || {}
-  const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
-    ? config.controlRoomRoot
-    : DEFAULT_CONTROL_ROOM_ROOT
-  const repos = Array.isArray(config.repos) ? config.repos : []
-
-  // Authority gate: a host-wide skills inventory is for host-level clients only.
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
-      code: 'FORBIDDEN',
-      message: 'skills_inventory_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-
-  if (skillsInventoryInFlight.has(client)) {
-    ctx.transport.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A skills inventory survey is already in progress for this client',
-    }))
-    return
-  }
-
-  // Tests inject `ctx.resolveRepoSet` / `ctx.surveySkillsInventory` to stub the
-  // fs scans without patching modules.
-  const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
-  const surveyFn = typeof ctx?.surveySkillsInventory === 'function' ? ctx.surveySkillsInventory : surveySkillsInventory
-
-  // Per-skill usage aggregates from the recorder (when the daemon wired one).
-  // Absent → the inventory simply reports zeroed usage.
-  const recorder = ctx?.services?.skillsUsageRecorder
-  const usage = recorder && typeof recorder.aggregatesByName === 'function'
-    ? recorder.aggregatesByName()
-    : null
-
-  skillsInventoryInFlight.add(client)
-  try {
-    const repoSet = resolveFn({ repos, root })
-    const snapshot = await surveyFn(repoSet, { root, usage })
-    ctx.transport.send(ws, {
+const handleSkillsInventoryRequest = makeSurveyHandler({
+  inFlight: skillsInventoryInFlight,
+  logName: 'skills_inventory_request',
+  prepare: ({ ctx }) => {
+    const config = ctx?.services?.config || {}
+    const root = typeof config.controlRoomRoot === 'string' && config.controlRoomRoot.length > 0
+      ? config.controlRoomRoot
+      : DEFAULT_CONTROL_ROOM_ROOT
+    return { root, repos: Array.isArray(config.repos) ? config.repos : [] }
+  },
+  forbidden: ({ requestId, prep }) => skillsInventoryErrorSnapshot(prep.root, requestId, {
+    code: 'FORBIDDEN',
+    message: 'skills_inventory_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId, prep }) => skillsInventoryErrorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A skills inventory survey is already in progress for this client',
+  }),
+  failed: ({ requestId, prep, err }) => skillsInventoryErrorSnapshot(prep.root, requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'skills inventory survey failed',
+  }),
+  run: async ({ ctx, requestId, prep }) => {
+    // Tests inject `ctx.resolveRepoSet` / `ctx.surveySkillsInventory` to stub the
+    // fs scans without patching modules.
+    const resolveFn = typeof ctx?.resolveRepoSet === 'function' ? ctx.resolveRepoSet : resolveRepoSet
+    const surveyFn = typeof ctx?.surveySkillsInventory === 'function' ? ctx.surveySkillsInventory : surveySkillsInventory
+    // Per-skill usage aggregates from the recorder (when the daemon wired one).
+    // Absent → the inventory simply reports zeroed usage.
+    const recorder = ctx?.services?.skillsUsageRecorder
+    const usage = recorder && typeof recorder.aggregatesByName === 'function'
+      ? recorder.aggregatesByName()
+      : null
+    const repoSet = resolveFn({ repos: prep.repos, root: prep.root })
+    const snapshot = await surveyFn(repoSet, { root: prep.root, usage })
+    return {
       type: 'skills_inventory_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -699,17 +601,9 @@ async function handleSkillsInventoryRequest(ws, client, msg, ctx) {
       global: snapshot.global,
       globalError: snapshot.globalError ?? null,
       repos: snapshot.repos,
-    })
-  } catch (err) {
-    log.warn(`skills_inventory_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, skillsInventoryErrorSnapshot(root, requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'skills inventory survey failed',
-    }))
-  } finally {
-    skillsInventoryInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 // ───────────────────────────────────────────────────────────────────────────
 // #5500/#5502 (epic #5498) — integration_action: repo-memory Reindex and
@@ -747,18 +641,11 @@ export const MAX_CONCURRENT_INTEGRATION_ACTIONS = 2
  * plus `runId` for #5502 re-runs) echoed so the dashboard can clear the
  * exact row's pending state.
  */
-function integrationActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'INTEGRATION_ACTION_FAILED',
-    message,
-    reason,
-    action: typeof msg?.action === 'string' ? msg.action : null,
-    repoPath: typeof msg?.repoPath === 'string' ? msg.repoPath : null,
-    runId: Number.isInteger(msg?.runId) ? msg.runId : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const integrationActionError = makeActionError('INTEGRATION_ACTION_FAILED', (msg) => ({
+  action: typeof msg?.action === 'string' ? msg.action : null,
+  repoPath: typeof msg?.repoPath === 'string' ? msg.repoPath : null,
+  runId: Number.isInteger(msg?.runId) ? msg.runId : null,
+}))
 
 /**
  * #5500/#5502 — integration action registry. The shared handler below runs
@@ -999,17 +886,10 @@ export const MAX_CONCURRENT_CONTAINER_ACTIONS = 2
  * the request's correlation fields (`action` / `environmentId` / `requestId`)
  * echoed so the dashboard can clear the exact row's pending state.
  */
-function containerActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'CONTAINER_ACTION_FAILED',
-    message,
-    reason,
-    action: typeof msg?.action === 'string' ? msg.action : null,
-    environmentId: typeof msg?.environmentId === 'string' ? msg.environmentId : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const containerActionError = makeActionError('CONTAINER_ACTION_FAILED', (msg) => ({
+  action: typeof msg?.action === 'string' ? msg.action : null,
+  environmentId: typeof msg?.environmentId === 'string' ? msg.environmentId : null,
+}))
 
 /** #6134: failure `reason` discriminator per action (for CONTAINER_ACTION_FAILED). */
 const CONTAINER_ACTION_FAILURE_REASON = {
@@ -1130,17 +1010,10 @@ let byokPoolActionInFlight = false
  * `reason` discriminator, and the request's correlation fields (`action` / `key`
  * / `requestId`) echoed so the dashboard can clear the exact row's pending state.
  */
-function byokPoolActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'BYOK_POOL_ACTION_FAILED',
-    message,
-    reason,
-    action: typeof msg?.action === 'string' ? msg.action : null,
-    key: typeof msg?.key === 'string' ? msg.key : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const byokPoolActionError = makeActionError('BYOK_POOL_ACTION_FAILED', (msg) => ({
+  action: typeof msg?.action === 'string' ? msg.action : null,
+  key: typeof msg?.key === 'string' ? msg.key : null,
+}))
 
 /**
  * #6135 slice 2 (epic #5530) — `byok_pool_action` handler. Drain / recycle /
@@ -1302,30 +1175,28 @@ function hostPruneErrorSnapshot(requestId, error) {
  * in-flight + degraded-reply contract as the sibling surveys. Surveys ONLY
  * chroxy's own orphan resources (never arbitrary host containers/images).
  */
-async function handleHostPruneStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, hostPruneErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'host_prune_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-  if (hostPruneInFlight.has(client)) {
-    ctx.transport.send(ws, hostPruneErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A host prune survey is already in progress for this client',
-    }))
-    return
-  }
-  const surveyFn = typeof ctx?.surveyHostPrune === 'function' ? ctx.surveyHostPrune : surveyHostPrune
-  const envManager = ctx?.services?.environmentManager || null
-  hostPruneInFlight.add(client)
-  try {
+const handleHostPruneStatusRequest = makeSurveyHandler({
+  inFlight: hostPruneInFlight,
+  logName: 'host_prune_status_request',
+  forbidden: ({ requestId }) => hostPruneErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'host_prune_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId }) => hostPruneErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A host prune survey is already in progress for this client',
+  }),
+  failed: ({ requestId, err }) => hostPruneErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'host prune survey failed',
+  }),
+  run: async ({ ctx, requestId }) => {
+    const surveyFn = typeof ctx?.surveyHostPrune === 'function' ? ctx.surveyHostPrune : surveyHostPrune
+    const envManager = ctx?.services?.environmentManager || null
     const snapshot = await surveyFn({
       listEnvironments: () => (typeof envManager?.list === 'function' ? envManager.list() : []),
     })
-    ctx.transport.send(ws, {
+    return {
       type: 'host_prune_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -1334,17 +1205,9 @@ async function handleHostPruneStatusRequest(ws, client, msg, ctx) {
       containers: snapshot.containers,
       images: snapshot.images,
       summary: snapshot.summary,
-    })
-  } catch (err) {
-    log.warn(`host_prune_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, hostPruneErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'host prune survey failed',
-    }))
-  } finally {
-    hostPruneInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /**
  * #6140: a host prune mutates host-wide docker state, so a single global flag
@@ -1353,16 +1216,9 @@ async function handleHostPruneStatusRequest(ws, client, msg, ctx) {
 let hostPruneActionInFlight = false
 
 /** #6140: shared HOST_PRUNE_ACTION_FAILED reply (mirrors byokPoolActionError). */
-function hostPruneActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'HOST_PRUNE_ACTION_FAILED',
-    message,
-    reason,
-    kind: typeof msg?.kind === 'string' ? msg.kind : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const hostPruneActionError = makeActionError('HOST_PRUNE_ACTION_FAILED', (msg) => ({
+  kind: typeof msg?.kind === 'string' ? msg.kind : null,
+}))
 
 /**
  * #6140 (epic #5530) — `host_prune_action` handler. Removes reclaimable
@@ -1442,27 +1298,25 @@ function simulatorErrorSnapshot(requestId, error) {
  * in-flight + degraded-reply contract as the sibling surveys. Off macOS / no
  * xcrun, the survey itself returns a first-class `available:false` snapshot.
  */
-async function handleSimulatorStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, simulatorErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'simulator_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-  if (simulatorInFlight.has(client)) {
-    ctx.transport.send(ws, simulatorErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A simulator survey is already in progress for this client',
-    }))
-    return
-  }
-  const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
-  simulatorInFlight.add(client)
-  try {
+const handleSimulatorStatusRequest = makeSurveyHandler({
+  inFlight: simulatorInFlight,
+  logName: 'simulator_status_request',
+  forbidden: ({ requestId }) => simulatorErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'simulator_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId }) => simulatorErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A simulator survey is already in progress for this client',
+  }),
+  failed: ({ requestId, err }) => simulatorErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'simulator survey failed',
+  }),
+  run: async ({ ctx, requestId }) => {
+    const surveyFn = typeof ctx?.surveySimulators === 'function' ? ctx.surveySimulators : surveySimulators
     const snapshot = await surveyFn({})
-    ctx.transport.send(ws, {
+    return {
       type: 'simulator_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -1470,17 +1324,9 @@ async function handleSimulatorStatusRequest(ws, client, msg, ctx) {
       note: snapshot.note ?? null,
       devices: snapshot.devices,
       readyForMaestro: snapshot.readyForMaestro,
-    })
-  } catch (err) {
-    log.warn(`simulator_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, simulatorErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'simulator survey failed',
-    }))
-  } finally {
-    simulatorInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 // ───────────────────────────────────────────────────────────────────────────
 // #6136 slice 2 (epic #5530) — simulator_action: boot / shutdown an iOS sim.
@@ -1496,17 +1342,10 @@ const simulatorActionInFlight = new Map()
 export const MAX_CONCURRENT_SIMULATOR_ACTIONS = 2
 
 /** #6136 slice 2: shared SIMULATOR_ACTION_FAILED reply (mirrors containerActionError). */
-function simulatorActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'SIMULATOR_ACTION_FAILED',
-    message,
-    reason,
-    action: typeof msg?.action === 'string' ? msg.action : null,
-    udid: typeof msg?.udid === 'string' ? msg.udid : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const simulatorActionError = makeActionError('SIMULATOR_ACTION_FAILED', (msg) => ({
+  action: typeof msg?.action === 'string' ? msg.action : null,
+  udid: typeof msg?.udid === 'string' ? msg.udid : null,
+}))
 
 /** #6136 slice 2: failure `reason` discriminator per action (for SIMULATOR_ACTION_FAILED). */
 const SIMULATOR_ACTION_FAILURE_REASON = {
@@ -1651,27 +1490,25 @@ function emulatorErrorSnapshot(requestId, error) {
  * per-client in-flight + degraded-reply contract as the iOS sibling. No Android
  * SDK → the survey itself returns a first-class `available:false` snapshot.
  */
-async function handleEmulatorStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, emulatorErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'emulator_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-  if (emulatorInFlight.has(client)) {
-    ctx.transport.send(ws, emulatorErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'An emulator survey is already in progress for this client',
-    }))
-    return
-  }
-  const surveyFn = typeof ctx?.surveyEmulators === 'function' ? ctx.surveyEmulators : surveyEmulators
-  emulatorInFlight.add(client)
-  try {
+const handleEmulatorStatusRequest = makeSurveyHandler({
+  inFlight: emulatorInFlight,
+  logName: 'emulator_status_request',
+  forbidden: ({ requestId }) => emulatorErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'emulator_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId }) => emulatorErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'An emulator survey is already in progress for this client',
+  }),
+  failed: ({ requestId, err }) => emulatorErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'emulator survey failed',
+  }),
+  run: async ({ ctx, requestId }) => {
+    const surveyFn = typeof ctx?.surveyEmulators === 'function' ? ctx.surveyEmulators : surveyEmulators
     const snapshot = await surveyFn({})
-    ctx.transport.send(ws, {
+    return {
       type: 'emulator_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -1679,17 +1516,9 @@ async function handleEmulatorStatusRequest(ws, client, msg, ctx) {
       note: snapshot.note ?? null,
       devices: snapshot.devices,
       readyForMaestro: snapshot.readyForMaestro,
-    })
-  } catch (err) {
-    log.warn(`emulator_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, emulatorErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'emulator survey failed',
-    }))
-  } finally {
-    emulatorInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /**
  * #6137: per-target in-flight guard for emulator lifecycle actions, keyed by the
@@ -1701,18 +1530,11 @@ const emulatorActionInFlight = new Map()
 export const MAX_CONCURRENT_EMULATOR_ACTIONS = 2
 
 /** #6137: shared EMULATOR_ACTION_FAILED reply (mirrors simulatorActionError). */
-function emulatorActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'EMULATOR_ACTION_FAILED',
-    message,
-    reason,
-    action: typeof msg?.action === 'string' ? msg.action : null,
-    avd: typeof msg?.avd === 'string' ? msg.avd : null,
-    serial: typeof msg?.serial === 'string' ? msg.serial : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const emulatorActionError = makeActionError('EMULATOR_ACTION_FAILED', (msg) => ({
+  action: typeof msg?.action === 'string' ? msg.action : null,
+  avd: typeof msg?.avd === 'string' ? msg.avd : null,
+  serial: typeof msg?.serial === 'string' ? msg.serial : null,
+}))
 
 /** #6137: failure `reason` discriminator per action (for EMULATOR_ACTION_FAILED). */
 const EMULATOR_ACTION_FAILURE_REASON = {
@@ -1868,27 +1690,25 @@ function wslErrorSnapshot(requestId, error) {
  * per-client in-flight + degraded-reply contract as the iOS/Android siblings.
  * Off Windows / no wsl.exe, the survey itself returns available:false.
  */
-async function handleWslStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, wslErrorSnapshot(requestId, {
-      code: 'FORBIDDEN',
-      message: 'wsl_status_request requires host-level authority (a session-bound token cannot survey the host)',
-    }))
-    return
-  }
-  if (wslInFlight.has(client)) {
-    ctx.transport.send(ws, wslErrorSnapshot(requestId, {
-      code: 'SURVEY_IN_PROGRESS',
-      message: 'A WSL survey is already in progress for this client',
-    }))
-    return
-  }
-  const surveyFn = typeof ctx?.surveyWsl === 'function' ? ctx.surveyWsl : surveyWsl
-  wslInFlight.add(client)
-  try {
+const handleWslStatusRequest = makeSurveyHandler({
+  inFlight: wslInFlight,
+  logName: 'wsl_status_request',
+  forbidden: ({ requestId }) => wslErrorSnapshot(requestId, {
+    code: 'FORBIDDEN',
+    message: 'wsl_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  }),
+  inProgress: ({ requestId }) => wslErrorSnapshot(requestId, {
+    code: 'SURVEY_IN_PROGRESS',
+    message: 'A WSL survey is already in progress for this client',
+  }),
+  failed: ({ requestId, err }) => wslErrorSnapshot(requestId, {
+    code: 'SURVEY_FAILED',
+    message: err && err.message ? err.message : 'WSL survey failed',
+  }),
+  run: async ({ ctx, requestId }) => {
+    const surveyFn = typeof ctx?.surveyWsl === 'function' ? ctx.surveyWsl : surveyWsl
     const snapshot = await surveyFn({})
-    ctx.transport.send(ws, {
+    return {
       type: 'wsl_status_snapshot',
       requestId,
       generatedAt: snapshot.generatedAt,
@@ -1896,17 +1716,9 @@ async function handleWslStatusRequest(ws, client, msg, ctx) {
       note: snapshot.note ?? null,
       defaultDistro: snapshot.defaultDistro ?? null,
       distros: snapshot.distros,
-    })
-  } catch (err) {
-    log.warn(`wsl_status_request failed: ${err && err.message ? err.message : 'unknown error'}`)
-    ctx.transport.send(ws, wslErrorSnapshot(requestId, {
-      code: 'SURVEY_FAILED',
-      message: err && err.message ? err.message : 'WSL survey failed',
-    }))
-  } finally {
-    wslInFlight.delete(client)
-  }
-}
+    }
+  },
+})
 
 /**
  * #6138: per-distro in-flight guard for WSL lifecycle actions, keyed by distro
@@ -1918,17 +1730,10 @@ const wslActionInFlight = new Map()
 export const MAX_CONCURRENT_WSL_ACTIONS = 2
 
 /** #6138: shared WSL_ACTION_FAILED reply (mirrors emulatorActionError). */
-function wslActionError(ws, ctx, msg, reason, message) {
-  ctx.transport.send(ws, {
-    type: 'session_error',
-    code: 'WSL_ACTION_FAILED',
-    message,
-    reason,
-    action: typeof msg?.action === 'string' ? msg.action : null,
-    distro: typeof msg?.distro === 'string' ? msg.distro : null,
-    requestId: typeof msg?.requestId === 'string' ? msg.requestId : null,
-  })
-}
+const wslActionError = makeActionError('WSL_ACTION_FAILED', (msg) => ({
+  action: typeof msg?.action === 'string' ? msg.action : null,
+  distro: typeof msg?.distro === 'string' ? msg.distro : null,
+}))
 
 /** #6138: failure `reason` discriminator per action (for WSL_ACTION_FAILED). */
 const WSL_ACTION_FAILURE_REASON = {
@@ -2048,34 +1853,18 @@ async function handleWslAction(ws, client, msg, ctx) {
  * snapshot (empty arrays) carrying an additive `error` annotation so the tab can
  * render the refusal rather than spin forever.
  */
-function handleMailboxStatusRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-  const base = {
-    type: 'mailbox_status_snapshot',
-    requestId,
-    generatedAt: new Date().toISOString(),
-    registrations: [],
-    recentEvents: [],
-  }
-
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, {
-      ...base,
-      error: {
-        code: 'FORBIDDEN',
-        message: 'mailbox_status_request requires host-level authority (a session-bound token cannot survey the host)',
-      },
-    })
-    return
-  }
-
-  const sm = ctx?.sessions?.sessionManager
-  ctx.transport.send(ws, {
-    ...base,
-    registrations: typeof sm?.listAgentCommRegistrations === 'function' ? sm.listAgentCommRegistrations() : [],
-    recentEvents: typeof sm?.getMailboxEvents === 'function' ? sm.getMailboxEvents() : [],
-  })
-}
+const handleMailboxStatusRequest = makeSyncHostSurvey({
+  type: 'mailbox_status_snapshot',
+  emptyFields: { registrations: [], recentEvents: [] },
+  forbiddenMessage: 'mailbox_status_request requires host-level authority (a session-bound token cannot survey the host)',
+  resolve: (ctx) => {
+    const sm = ctx?.sessions?.sessionManager
+    return {
+      registrations: typeof sm?.listAgentCommRegistrations === 'function' ? sm.listAgentCommRegistrations() : [],
+      recentEvents: typeof sm?.getMailboxEvents === 'function' ? sm.getMailboxEvents() : [],
+    }
+  },
+})
 
 /**
  * #5969 (epic #5422 phase 4) — reply to an `external_sessions_request` with a
@@ -2091,32 +1880,17 @@ function handleMailboxStatusRequest(ws, client, msg, ctx) {
  * snapshot carrying an additive `error` so the view renders the refusal rather
  * than spin.
  */
-function handleExternalSessionsRequest(ws, client, msg, ctx) {
-  const requestId = typeof msg?.requestId === 'string' ? msg.requestId : null
-  const base = {
-    type: 'external_sessions_snapshot',
-    requestId,
-    generatedAt: new Date().toISOString(),
-    sessions: [],
-  }
-
-  if (client?.boundSessionId) {
-    ctx.transport.send(ws, {
-      ...base,
-      error: {
-        code: 'FORBIDDEN',
-        message: 'external_sessions_request requires host-level authority (a session-bound token cannot survey the host)',
-      },
-    })
-    return
-  }
-
-  const sm = ctx?.sessions?.sessionManager
-  ctx.transport.send(ws, {
-    ...base,
-    sessions: typeof sm?.getExternalSessions === 'function' ? sm.getExternalSessions() : [],
-  })
-}
+const handleExternalSessionsRequest = makeSyncHostSurvey({
+  type: 'external_sessions_snapshot',
+  emptyFields: { sessions: [] },
+  forbiddenMessage: 'external_sessions_request requires host-level authority (a session-bound token cannot survey the host)',
+  resolve: (ctx) => {
+    const sm = ctx?.sessions?.sessionManager
+    return {
+      sessions: typeof sm?.getExternalSessions === 'function' ? sm.getExternalSessions() : [],
+    }
+  },
+})
 
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
