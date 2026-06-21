@@ -92,6 +92,9 @@ import {
   // --- models / cost cases (#5618 Batch 5a) ---
   handleAvailableModels,
   handleCostUpdate,
+  // --- connect-time burst / tunnel cases (#5618 Batch 5b) ---
+  handleAuthBootstrap,
+  handleTunnelUrlChanged,
   handleSessionUsage,
   handleSessionContext,
   handleModelChangedPatch,
@@ -399,6 +402,21 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * (the session patch applies regardless), so it never declines.
    */
   setCostUpdate?(totalCost: number | null, budget: number | null): void
+  /**
+   * Repoint the client's persisted tunnel endpoint after a quick-tunnel URL
+   * rotation (#5618 Batch 5b). Used by `tunnel_url_changed` and the
+   * `auth_bootstrap` connect-time burst. The STORAGE is platform-local (mobile:
+   * the SecureStore-backed `SavedConnection.tunnelUrl`; dashboard: the
+   * localStorage server-registry entry's wsUrl), so each client wraps its own
+   * apply — the dashboard additionally consults `previousUrl` to match the right
+   * entry; the app ignores it.
+   *
+   * OPTIONAL: `tunnel_url_changed`'s ONLY effect is this apply, so that handler
+   * DECLINES when the hook is absent (the file-ops / getCallback pattern).
+   * `auth_bootstrap` calls it best-effort (optional-chained) and still OWNS the
+   * message via its shared list writes.
+   */
+  applyRotatedTunnelUrl?(url: string, previousUrl: string | null): void
 }
 
 /**
@@ -593,6 +611,22 @@ export interface DispatchMessageMap {
     // app-only flat/cost-store mirror fields (parsed at the call site).
     totalCost?: number
     budget?: number
+  }
+  // --- connect-time burst / tunnel cases (#5618 Batch 5b) ---
+  // The handlers parse the raw fields defensively; the map only needs `type`
+  // (+ the optional wire fields each parser reads).
+  tunnel_url_changed: {
+    type: 'tunnel_url_changed'
+    url?: string
+    previousUrl?: string
+  }
+  auth_bootstrap: {
+    type: 'auth_bootstrap'
+    sessionId?: string
+    providers?: unknown[]
+    slashCommands?: unknown[]
+    agents?: unknown[]
+    tunnelUrl?: string
   }
   session_usage: {
     type: 'session_usage'
@@ -1294,6 +1328,51 @@ function dispatchCostUpdate<S extends DispatchSessionBase>(
   adapter.setCostUpdate?.(totalCost, budget)
 }
 
+// ---------------------------------------------------------------------------
+// Connect-time burst / tunnel cases (#5618 Batch 5b)
+//
+// tunnel_url_changed's ONLY effect is repointing the persisted tunnel endpoint
+// (platform-local storage) — so it DECLINES without `applyRotatedTunnelUrl`.
+// auth_bootstrap folds the connect-time provider/slash/agent lists into one
+// frame; it reuses the Batch 2 `mapProviderList` / `syncSecondaryInventory` hooks
+// and applies the tunnel URL best-effort, so it always OWNS the message via its
+// shared flat writes.
+// ---------------------------------------------------------------------------
+
+/** `tunnel_url_changed` — repoint the persisted tunnel endpoint (platform-local apply). */
+function dispatchTunnelUrlChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['tunnel_url_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void | false {
+  if (!adapter.applyRotatedTunnelUrl) return false
+  const rotated = handleTunnelUrlChanged(msg as Record<string, unknown>)
+  if (rotated) adapter.applyRotatedTunnelUrl(rotated.url, rotated.previousUrl)
+}
+
+/** `auth_bootstrap` — connect-time burst: tunnel URL + provider/slash/agent lists. */
+function dispatchAuthBootstrap<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['auth_bootstrap'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const boot = handleAuthBootstrap(msg as Record<string, unknown>)
+  // Re-learn a tunnel URL that may have rotated while offline. Applied BEFORE the
+  // session-scope guard so a stale-session burst still refreshes the URL.
+  if (boot.tunnelUrl) adapter.applyRotatedTunnelUrl?.(boot.tunnelUrl, null)
+  // Providers — server-wide, no session guard. The app tightens elements via
+  // mapProviderList; the dashboard writes verbatim (the Batch 2 divergence).
+  const providers = adapter.mapProviderList ? adapter.mapProviderList(boot.providers) : boot.providers
+  adapter.setState({ availableProviders: providers } as Record<string, unknown>)
+  // Slash commands + agents are scoped to the connect-time active session: skip
+  // them (but keep providers) when a session switch already moved off the burst's
+  // sessionId — the post-switch flow re-requests them.
+  const activeId = adapter.getActiveSessionId()
+  if (boot.sessionId && activeId && boot.sessionId !== activeId) return
+  adapter.setState({ slashCommands: boot.slashCommands } as Record<string, unknown>)
+  adapter.syncSecondaryInventory?.('slashCommands', boot.slashCommands)
+  adapter.setState({ customAgents: boot.agents } as Record<string, unknown>)
+  adapter.syncSecondaryInventory?.('customAgents', boot.agents)
+}
+
 /**
  * `notification_prefs` — validate + store the notification-prefs snapshot.
  * Slice-2 RECONCILE: both clients now share `handleNotificationPrefs`. A failed
@@ -1515,6 +1594,9 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- models / cost cases (#5618 Batch 5a) ---
     available_models: dispatchAvailableModels,
     cost_update: dispatchCostUpdate,
+    // --- connect-time burst / tunnel cases (#5618 Batch 5b) ---
+    tunnel_url_changed: dispatchTunnelUrlChanged,
+    auth_bootstrap: dispatchAuthBootstrap,
     session_usage: sessionPatchDispatcher<S>(handleSessionUsage),
     session_context: sessionPatchDispatcher<S>(handleSessionContext),
     model_changed: sessionPatchDispatcher<S>(handleModelChangedPatch),
@@ -1596,6 +1678,9 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- models / cost cases (#5618 Batch 5a) ---
   'available_models',
   'cost_update',
+  // --- connect-time burst / tunnel cases (#5618 Batch 5b) ---
+  'tunnel_url_changed',
+  'auth_bootstrap',
   'session_usage',
   'session_context',
   'session_cost_threshold_crossed',

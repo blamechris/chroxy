@@ -89,8 +89,6 @@ import {
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
-  handleAuthBootstrap as sharedAuthBootstrap,
-  handleTunnelUrlChanged as sharedTunnelUrlChanged,
   // diff_result / git_status_result / git_branches_result / git_stage_result /
   // git_unstage_result / git_commit_result — migrated to the shared dispatch
   // table (#5556 slice 3 / #5653).
@@ -1235,6 +1233,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     getStore().setState({ totalCost, costBudget: budget } as Partial<ConnectionState>);
     useCostStore.getState().setCostUpdate(totalCost, budget);
   },
+  // #5618 Batch 5b — repoint the persisted (SecureStore) tunnel endpoint after a
+  // quick-tunnel rotation (tunnel_url_changed / auth_bootstrap). The app's apply
+  // ignores previousUrl (the dashboard uses it to match the right registry entry).
+  applyRotatedTunnelUrl: (url) => { applyRotatedTunnelUrl(url); },
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -3145,51 +3147,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // `mapProviderList` adapter hooks. auth_bootstrap stays local — it folds all
     // three lists into one connect-time frame with extra session-scope guarding.
 
-    case 'auth_bootstrap': {
-      // #5555 — connect-time bootstrap burst folds the provider / slash-command
-      // / agent lists into one server-initiated frame so the client skips its
-      // 3-request connect-time round trip. Apply each list through the SAME
-      // store mutations + element validation the discrete responses use, so the
-      // bootstrap and refresh paths are behaviourally identical.
-      const boot = sharedAuthBootstrap(msg);
-      // #5555 (sub-item 7): re-learn the live tunnel URL on every connect. If a
-      // quick-tunnel rotation happened while the app was offline (so it missed
-      // the live `tunnel_url_changed` push), this repoints the persisted record
-      // to the working endpoint. Applied before the session-scope guard below
-      // so a stale-session burst still refreshes the URL.
-      if (boot.tunnelUrl) applyRotatedTunnelUrl(boot.tunnelUrl);
-      // Providers (server-wide, no session guard).
-      set({ availableProviders: mapProviderList(boot.providers) });
-      // Slash commands + agents are scoped to the connect-time active session.
-      // Guard against a stale burst: if a session switch already moved the
-      // active id off the burst's `sessionId`, skip the session-scoped lists
-      // (the post-switch session_switched flow re-requests them) but keep the
-      // server-wide provider list applied above.
-      const activeId = get().activeSessionId;
-      if (boot.sessionId && activeId && boot.sessionId !== activeId) break;
-      const slashCommands = boot.slashCommands as SlashCommand[];
-      set({ slashCommands });
-      useConversationStore.getState().setSlashCommands(slashCommands);
-      const customAgents = boot.agents as CustomAgent[];
-      set({ customAgents });
-      useConversationStore.getState().setCustomAgents(customAgents);
-      break;
-    }
-
-    case 'tunnel_url_changed': {
-      // #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL.
-      // Repoint the persisted tunnel endpoint so the next reconnect dials the
-      // working URL instead of hammering the dead one (and survives an app
-      // restart — the record is SecureStore-backed).
-      //
-      // BEST-EFFORT for us: this client is connected THROUGH the tunnel, so the
-      // socket carrying this frame rode the now-dead old tunnel — we often will
-      // NOT receive it. The durable recovery is the `tunnelUrl` re-advertised in
-      // the `auth_bootstrap` burst on the next reconnect (handled above).
-      const rotated = sharedTunnelUrlChanged(msg);
-      if (rotated) applyRotatedTunnelUrl(rotated.url);
-      break;
-    }
+    // auth_bootstrap / tunnel_url_changed — migrated to the shared dispatch table
+    // (#5618 Batch 5b; handled by runDispatch before this switch). auth_bootstrap
+    // reuses the Batch 2 mapProviderList + syncSecondaryInventory hooks and the
+    // new applyRotatedTunnelUrl hook (session-scope guard preserved);
+    // tunnel_url_changed's apply rides on applyRotatedTunnelUrl alone.
 
     // session_restore_failed / session_persist_failed — migrated to the shared
     // dispatch table (#5618 Batch 3; handled by runDispatch before this switch).

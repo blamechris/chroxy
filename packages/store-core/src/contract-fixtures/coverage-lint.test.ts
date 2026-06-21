@@ -67,7 +67,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'agent_idle',
   // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
   // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
-  'auth_bootstrap',
+  // auth_bootstrap — migrated to the shared dispatch table (#5618 Batch 5b).
   'auth_fail',
   'auth_ok',
   // available_models — migrated to the shared dispatch table (#5618 Batch 5a).
@@ -116,7 +116,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'terminal_output',
   'token_rotated',
   'tool_input_delta',
-  'tunnel_url_changed',
+  // tunnel_url_changed — migrated to the shared dispatch table (#5618 Batch 5b).
   'user_input',
   // user_question — migrated to the shared dispatch table (#5618); now has a
   // DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
@@ -161,10 +161,10 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
     // migrating types OUT to the shared dispatch table (universe shrinks below
     // the floor) lowers it — adjust both bounds in the same PR. Keep the band
     // TIGHT around the real count so the "fail loudly" intent stays sharp. Band
-    // last set for #5618 Batch 4 (primary_changed / session_role /
-    // client_focus_changed migrated out; universe 55→52).
-    expect(both.length).toBeGreaterThanOrEqual(48)
-    expect(both.length).toBeLessThanOrEqual(58)
+    // last set for #5618 Batch 5b (available_models / cost_update / auth_bootstrap
+    // / tunnel_url_changed migrated out across Batch 5; universe down to ~48).
+    expect(both.length).toBeGreaterThanOrEqual(42)
+    expect(both.length).toBeLessThanOrEqual(54)
   })
 
   it('every both-clients switch type has a fixture or an explicit PENDING entry', () => {

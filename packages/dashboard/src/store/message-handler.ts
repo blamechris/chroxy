@@ -82,8 +82,6 @@ import {
   handleSessionTimeout as sharedSessionTimeout,
   handleSessionWarning as sharedSessionWarning,
   handleSessionSwitched as sharedSessionSwitched,
-  handleAuthBootstrap as sharedAuthBootstrap,
-  handleTunnelUrlChanged as sharedTunnelUrlChanged,
   handleFileList as sharedFileList,
   handleDiffResult as sharedDiffResult,
   handleGitStatusResult as sharedGitStatusResult,
@@ -158,7 +156,6 @@ import type {
   ChatMessage,
   ConnectionContext,
   ConnectionState,
-  CustomAgent,
   DirectoryEntry,
   EnvironmentInfo,
   EvaluatorRewriteMeta,
@@ -169,9 +166,7 @@ import type {
   SessionInfo,
   SessionNotification,
   SessionState,
-  SlashCommand,
   FilePickerItem,
-  ProviderInfo,
 } from './types';
 import { createEmptySessionState } from './utils';
 import { clearPersistedSession } from './persistence';
@@ -1051,6 +1046,12 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   extendModelsPatch: (msg) => ({
     availableModelsProvider: typeof msg.provider === 'string' ? msg.provider : null,
   }),
+  // #5618 Batch 5b — repoint the localStorage server-registry entry after a
+  // quick-tunnel rotation (tunnel_url_changed / auth_bootstrap). Consults
+  // previousUrl to match the right entry (the app ignores it).
+  applyRotatedTunnelUrl: (url, previousUrl) => {
+    applyRotatedTunnelUrlDashboard(getStore().getState, url, previousUrl);
+  },
 };
 
 const _dispatchTable = createDispatchTable<SessionState>();
@@ -4621,47 +4622,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'auth_bootstrap': {
-      // #5555 — connect-time bootstrap burst folds the provider / slash-command
-      // / agent lists into one server-initiated frame so the client skips its
-      // 3-request connect-time round trip. Apply each list through the SAME
-      // store mutations the discrete responses use.
-      const boot = sharedAuthBootstrap(msg);
-      // #5555 (sub-item 7): re-learn the live tunnel URL on every connect. If a
-      // quick-tunnel rotation happened while this dashboard was disconnected
-      // (so it missed the live `tunnel_url_changed` push), repoint the stored
-      // server entry to the working endpoint. No-op for the same-origin
-      // connection and for LAN entries.
-      if (boot.tunnelUrl) applyRotatedTunnelUrlDashboard(get, boot.tunnelUrl, null);
-      set({ availableProviders: boot.providers as ProviderInfo[] });
-      // Slash commands + agents are scoped to the connect-time active session.
-      // Guard against a stale burst: if a session switch already moved the
-      // active id off the burst's `sessionId`, skip the session-scoped lists
-      // (the post-switch flow re-requests them) but keep the server-wide
-      // provider list applied above.
-      const activeId = get().activeSessionId;
-      if (boot.sessionId && activeId && boot.sessionId !== activeId) break;
-      set({ slashCommands: boot.slashCommands as SlashCommand[] });
-      set({ customAgents: boot.agents as CustomAgent[] });
-      break;
-    }
-
-    case 'tunnel_url_changed': {
-      // #5555 (sub-item 7): a quick-tunnel recovery rotated the public URL.
-      // Repoint the active server-registry entry so the next reconnect dials
-      // the working URL (and survives a tab refresh — localStorage-backed).
-      //
-      // A localhost dashboard (served by the local daemon, activeServerId ===
-      // null) keeps its socket across the rotation and so RELIABLY receives
-      // this push — but it dials window.location, not the tunnel, so the
-      // helper is a no-op for it. A remote/LAN dashboard reaches the server
-      // THROUGH the tunnel, so it usually will NOT receive this frame (the old
-      // tunnel just died); its durable recovery is the `tunnelUrl` in the
-      // auth_bootstrap burst on the next reconnect (handled above).
-      const rotated = sharedTunnelUrlChanged(msg);
-      if (rotated) applyRotatedTunnelUrlDashboard(get, rotated.url, rotated.previousUrl);
-      break;
-    }
+    // auth_bootstrap / tunnel_url_changed — migrated to the shared dispatch table
+    // (#5618 Batch 5b; handled by runDispatch before this switch). auth_bootstrap
+    // applies the provider list (verbatim — dashboard omits mapProviderList) + the
+    // session-scope-guarded slash/agent lists + the tunnel URL via the
+    // applyRotatedTunnelUrl hook; tunnel_url_changed's apply rides on that hook
+    // alone (consulting previousUrl to match the registry entry).
 
     case 'byok_credentials_status': {
       // #4052: server replies after refresh / set / clear. The masked
