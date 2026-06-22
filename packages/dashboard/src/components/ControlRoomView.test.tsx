@@ -359,4 +359,99 @@ describe('ControlRoomView auto-fetch on activation (#5543)', () => {
       expect(scrollBy.mock.calls[0]![0].left).toBeCloseTo(210, 0)
     })
   })
+
+  // #6230 — harden the chevron-only path for mouse-only users: press-and-hold a
+  // chevron for continuous scroll, and drag the strip itself to scroll.
+  describe('#6230 press-and-hold + drag-to-scroll', () => {
+    function setGeometry(el: HTMLElement, g: { clientWidth: number; scrollWidth: number; scrollLeft: number }) {
+      Object.defineProperty(el, 'clientWidth', { value: g.clientWidth, configurable: true })
+      Object.defineProperty(el, 'scrollWidth', { value: g.scrollWidth, configurable: true })
+      Object.defineProperty(el, 'scrollLeft', { value: g.scrollLeft, writable: true, configurable: true })
+    }
+
+    it('press-and-hold on a chevron scrolls repeatedly until released, then swallows the trailing click', () => {
+      vi.useFakeTimers()
+      try {
+        render(<ControlRoomView />)
+        const tablist = screen.getByTestId('cr-tabs')
+        const scrollBy = vi.fn()
+        ;(tablist as unknown as { scrollBy: typeof scrollBy }).scrollBy = scrollBy
+        setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 0 })
+        fireEvent.scroll(tablist)
+        const right = screen.getByTestId('cr-tabs-chevron-right')
+
+        fireEvent.pointerDown(right)
+        // Before the hold threshold (350ms) nothing repeats.
+        vi.advanceTimersByTime(300)
+        expect(scrollBy).not.toHaveBeenCalled()
+        // Past the threshold, the repeat interval (120ms) nudges by ~18% width.
+        vi.advanceTimersByTime(50 + 120)
+        const callsAfterFirstTick = scrollBy.mock.calls.length
+        expect(callsAfterFirstTick).toBeGreaterThanOrEqual(1)
+        expect(scrollBy.mock.calls[0]![0].left).toBeCloseTo(54, 0) // 0.18 * 300
+        vi.advanceTimersByTime(120)
+        expect(scrollBy.mock.calls.length).toBeGreaterThan(callsAfterFirstTick)
+
+        // Release stops the repeat. The trailing click fires immediately (same
+        // task as pointerup, before the next-tick `didRepeatRef` reset) so it is
+        // swallowed — no extra single-jump.
+        fireEvent.pointerUp(right)
+        const callsAtRelease = scrollBy.mock.calls.length
+        fireEvent.click(right)
+        expect(scrollBy.mock.calls.length).toBe(callsAtRelease)
+
+        // After the next tick the marker clears and the repeat stays stopped, so
+        // no further scrolls happen on idle time.
+        vi.advanceTimersByTime(360)
+        expect(scrollBy.mock.calls.length).toBe(callsAtRelease)
+      } finally {
+        vi.useRealTimers()
+      }
+    })
+
+    it('dragging the strip past the threshold scrolls it', () => {
+      render(<ControlRoomView />)
+      const tablist = screen.getByTestId('cr-tabs')
+      setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 200 })
+      fireEvent.pointerDown(tablist, { button: 0, pointerType: 'mouse', clientX: 150, pointerId: 1 })
+      // A tiny move (≤5px) is treated as a click, not a drag.
+      fireEvent.pointerMove(tablist, { clientX: 153, pointerId: 1 })
+      expect(tablist.scrollLeft).toBe(200)
+      // A real drag left (pointer moves right→ content scrolls back) updates scrollLeft.
+      fireEvent.pointerMove(tablist, { clientX: 110, pointerId: 1 })
+      expect(tablist.scrollLeft).toBe(200 - (110 - 150)) // startScroll - dx = 240
+      fireEvent.pointerUp(tablist, { pointerId: 1 })
+    })
+
+    it('ignores a touch pointer (native pan-x handles it — no double-scroll)', () => {
+      render(<ControlRoomView />)
+      const tablist = screen.getByTestId('cr-tabs')
+      setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 200 })
+      fireEvent.pointerDown(tablist, { button: 0, pointerType: 'touch', clientX: 200, pointerId: 1 })
+      fireEvent.pointerMove(tablist, { clientX: 100, pointerId: 1 })
+      // Manual drag never engaged — scrollLeft is left to native panning.
+      expect(tablist.scrollLeft).toBe(200)
+    })
+
+    it('a drag does not switch tabs (the trailing tab-click is suppressed)', () => {
+      render(<ControlRoomView initialTab="repos" />)
+      const tablist = screen.getByTestId('cr-tabs')
+      setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 0 })
+      const repos = screen.getByTestId('cr-tab-repos')
+      const containers = screen.getByTestId('cr-tab-containers')
+      expect(repos.getAttribute('aria-selected')).toBe('true') // default tab
+      // Drag the strip, then the pointer-up lands a click on another tab.
+      fireEvent.pointerDown(tablist, { button: 0, pointerType: 'mouse', clientX: 200, pointerId: 1 })
+      fireEvent.pointerMove(tablist, { clientX: 120, pointerId: 1 })
+      fireEvent.pointerUp(tablist, { pointerId: 1 })
+      fireEvent.click(containers)
+      // Suppressed: repos stays selected, containers did not activate.
+      expect(repos.getAttribute('aria-selected')).toBe('true')
+      expect(containers.getAttribute('aria-selected')).toBe('false')
+      // A subsequent plain click (no drag) selects normally (the suppressed click
+      // reset the drag marker synchronously).
+      fireEvent.click(containers)
+      expect(containers.getAttribute('aria-selected')).toBe('true')
+    })
+  })
 })

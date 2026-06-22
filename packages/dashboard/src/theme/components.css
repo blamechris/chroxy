@@ -9553,6 +9553,15 @@ button.sidebar-token-view-session-row:hover {
   scroll-padding-inline: 40px;
   /* Hide the native scrollbar — the chevrons + trackpad are the affordance. */
   scrollbar-width: none; /* Firefox */
+  /* #6230: drag-to-scroll affordance. The grab cursor invites a press-drag;
+     `user-select: none` stops the drag from selecting tab-label text mid-scroll.
+     `touch-action: pan-x` keeps native horizontal panning on touch devices. */
+  cursor: grab;
+  user-select: none;
+  touch-action: pan-x;
+}
+.cr-tabs:active {
+  cursor: grabbing;
 }
 .cr-tabs::-webkit-scrollbar {
   display: none; /* WebKit/Chromium */
