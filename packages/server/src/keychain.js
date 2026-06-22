@@ -135,6 +135,58 @@ export function isKeychainBroken() {
 }
 
 /**
+ * @typedef {object} KeychainHealth
+ * @property {'usable'|'broken'|'disabled'|'unsupported'} status — keychain state.
+ * @property {'keychain'|'file'} backend — where credentials are ACTUALLY stored
+ *   right now (the file/env fallback whenever the keychain isn't usable).
+ * @property {string} detail — one-line human explanation of the status.
+ * @property {string} [repairHint] — present only for `broken`: how to fix it.
+ */
+
+/**
+ * Operator-facing keychain diagnosis for `chroxy doctor` (#6236) — a single
+ * non-prompting source of truth (no `find-/add-generic-password`, so no macOS
+ * modal) that classifies the keychain and reports which backend credentials land
+ * in. Mirrors the runtime gating in {@link isKeychainAvailable}:
+ *   - `disabled`    — `CHROXY_*_DISABLE_KEYCHAIN` set → file/env owns secrets.
+ *   - `unsupported` — no OS keychain on this platform (Windows/other) → file.
+ *   - `broken`      — mac/linux keychain present but unreadable/missing → file
+ *                     (this is the silent #6235 fallback the operator should see).
+ *   - `usable`      — secrets are in the OS keychain.
+ */
+export function keychainHealth() {
+  if (keychainDisabled()) {
+    return {
+      status: 'disabled',
+      backend: 'file',
+      detail: 'OS keychain disabled via CHROXY_DISABLE_KEYCHAIN — using the 0600 file/env fallback',
+    }
+  }
+  if (!isMac && !isLinux) {
+    return {
+      status: 'unsupported',
+      backend: 'file',
+      detail: 'no OS keychain on this platform — using the 0600 file/env fallback',
+    }
+  }
+  if (!keychainUsable()) {
+    return {
+      status: 'broken',
+      backend: 'file',
+      detail: 'OS login keychain is missing or unreadable — credentials fell back to the 0600 file',
+      repairHint: isMac
+        ? 'recreate the login keychain in Keychain Access (File ▸ New Keychain, or reset via "security" / a relogin), then re-store with `chroxy init`'
+        : 'ensure libsecret/`secret-tool` and a running secret service (e.g. gnome-keyring) are available, then re-store with `chroxy init`',
+    }
+  }
+  return {
+    status: 'usable',
+    backend: 'keychain',
+    detail: 'credentials are stored in the OS keychain',
+  }
+}
+
+/**
  * Get token from OS keychain.
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  * @param {string} [account] - Keychain account (default: 'api-token'). Other

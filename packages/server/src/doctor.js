@@ -11,6 +11,7 @@ import { registerAnthropicCompatibleProviders } from './anthropic-compatible-ses
 import { parseTunnelArg } from './tunnel/index.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from './claude-tui/tested-cli-version.js'
 import { detectSilentMeteredDefault } from './doctor-billing.js'
+import { keychainHealth } from './keychain.js'
 import {
   billingClassForProvider,
   billingDetailForClass,
@@ -369,6 +370,24 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // 5. Config check — appended after provider checks so per-provider
   // sections group together in the output report.
   checks.push(configCheck)
+
+  // 5.5 Credential storage (#6236). Surface WHERE the API token + credentials
+  // actually live and whether the OS keychain is healthy — the #6235 fallback to
+  // the 0600 file on a broken/missing login keychain is otherwise silent. A
+  // broken keychain is a WARN (secrets work but aren't in the keychain + the
+  // operator gets a repair hint); disabled/unsupported/usable are informational
+  // PASS. keychainHealth() is non-prompting, so this never pops the macOS modal.
+  const kh = keychainHealth()
+  checks.push({
+    name: 'Credential storage',
+    status: kh.status === 'broken' ? 'warn' : 'pass',
+    message:
+      kh.status === 'usable'
+        ? 'OS keychain'
+        : kh.repairHint
+          ? `file fallback — ${kh.detail} — fix: ${kh.repairHint}`
+          : `file fallback — ${kh.detail}`,
+  })
 
   // 5.6 Tunnel routability (#5328 WP-5.6). For a configured NAMED tunnel, probe
   // the hostname end-to-end so a broken DNS route / down tunnel is visible here

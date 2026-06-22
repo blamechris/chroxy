@@ -214,6 +214,43 @@ if (typeof mock.module !== 'function') {
         assert.equal(r.status, 'error', 'a broken keychain must NOT read as absent (would re-mint identity)')
         assert.equal(promptingCalls().length, 0)
       })
+
+      it('keychainHealth() reports broken + file backend + a repair hint (#6236)', () => {
+        brokenMock()
+        const h = keychain.keychainHealth()
+        assert.equal(h.status, 'broken')
+        assert.equal(h.backend, 'file')
+        assert.ok(h.detail && h.detail.length > 0, 'detail present')
+        assert.ok(h.repairHint && h.repairHint.length > 0, 'broken status carries a repair hint')
+        assert.equal(promptingCalls().length, 0, 'keychainHealth must not prompt')
+      })
+    })
+
+    // #6236 — keychainHealth() is the non-prompting source of truth chroxy doctor
+    // uses to surface where credentials live.
+    describe('keychainHealth (#6236)', () => {
+      it('reports usable + keychain backend when the default keychain exists', () => {
+        // Default mock: `security default-keychain` returns '' (inconclusive →
+        // usable per the probe), so health is usable.
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) =>
+          args && args[0] === 'default-keychain' ? '' : '',
+        )
+        const h = keychain.keychainHealth()
+        assert.equal(h.status, 'usable')
+        assert.equal(h.backend, 'keychain')
+        assert.equal(h.repairHint, undefined)
+      })
+
+      it('reports disabled + file backend when CHROXY_DISABLE_KEYCHAIN is set', () => {
+        process.env.CHROXY_DISABLE_KEYCHAIN = '1'
+        try {
+          const h = keychain.keychainHealth()
+          assert.equal(h.status, 'disabled')
+          assert.equal(h.backend, 'file')
+        } finally {
+          delete process.env.CHROXY_DISABLE_KEYCHAIN
+        }
+      })
     })
   })
 }
