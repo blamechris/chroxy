@@ -18,10 +18,9 @@ import { BackgroundShellTracker } from './background-shell-tracker.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { createLogger } from './logger.js'
 import { ActivityRegistry } from './activity-registry.js'
+import { ALLOWED_PERMISSION_MODE_IDS } from './handler-utils.js'
 
 const log = createLogger('base-session')
-
-const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
 
 // #3805: opt-in Chroxy context paragraph. Prepended to `_buildSystemPrompt()`
 // output when `chroxyContextHint` is true so the model knows it's running
@@ -1067,7 +1066,7 @@ export class BaseSession extends EventEmitter {
    * Returns true if the mode actually changed.
    */
   setPermissionMode(mode) {
-    if (!VALID_PERMISSION_MODES.includes(mode)) {
+    if (!ALLOWED_PERMISSION_MODE_IDS.has(mode)) {
       return false
     }
     // 'auto' is the panic-button: a user mid-turn (i.e. _isBusy=true)

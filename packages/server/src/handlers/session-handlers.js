@@ -6,7 +6,7 @@
  */
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { auditShellCreate } from '../shell-audit.js'
-import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession } from '../handler-utils.js'
+import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
@@ -107,9 +107,8 @@ function handleCreateSession(ws, client, msg, ctx) {
   const cwd = (typeof msg.cwd === 'string' && msg.cwd.trim()) ? msg.cwd.trim() : undefined
   const provider = (typeof msg.provider === 'string' && msg.provider.trim()) ? msg.provider.trim() : undefined
   const model = (typeof msg.model === 'string' && msg.model.trim()) ? msg.model.trim() : undefined
-  const VALID_PERMISSION_MODES = ['approve', 'auto', 'plan', 'acceptEdits']
   const rawPermMode = (typeof msg.permissionMode === 'string' && msg.permissionMode.trim()) ? msg.permissionMode.trim() : undefined
-  const permissionMode = rawPermMode && VALID_PERMISSION_MODES.includes(rawPermMode) ? rawPermMode : undefined
+  const permissionMode = rawPermMode && ALLOWED_PERMISSION_MODE_IDS.has(rawPermMode) ? rawPermMode : undefined
   const worktree = msg.worktree === true ? true : undefined
   const sandbox = (msg.sandbox && typeof msg.sandbox === 'object' && !Array.isArray(msg.sandbox)) ? msg.sandbox : undefined
   const environmentId = (typeof msg.environmentId === 'string' && msg.environmentId.trim()) ? msg.environmentId.trim() : undefined
