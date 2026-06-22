@@ -483,6 +483,83 @@ export function ControlRoomView({
     // scrollBy, and a missing scroll method must not throw.
     el.scrollBy?.({ left: dir * el.clientWidth * 0.7, behavior: 'smooth' })
   }, [])
+
+  // #6230: harden the chevron-only path for mouse-only users (no wheel-tilt).
+  // (a) PRESS-AND-HOLD a chevron → continuous scroll. A hold timer (350ms)
+  //     distinguishes a tap (→ the single-jump onClick below) from a hold
+  //     (→ a repeat interval that nudges the strip every 120ms while held).
+  //     `didRepeatRef` suppresses the trailing click that fires when a long
+  //     hold is released, so a hold doesn't tack on an extra jump.
+  const holdTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const repeatRef = useRef<ReturnType<typeof setInterval> | null>(null)
+  const didRepeatRef = useRef(false)
+  const stopHold = useCallback(() => {
+    if (holdTimerRef.current !== null) {
+      clearTimeout(holdTimerRef.current)
+      holdTimerRef.current = null
+    }
+    if (repeatRef.current !== null) {
+      clearInterval(repeatRef.current)
+      repeatRef.current = null
+    }
+  }, [])
+  const startHold = useCallback((dir: -1 | 1) => {
+    stopHold()
+    didRepeatRef.current = false
+    holdTimerRef.current = setTimeout(() => {
+      didRepeatRef.current = true
+      repeatRef.current = setInterval(() => {
+        const el = tablistRef.current
+        // Smaller, snappy nudges (no smooth easing) for a continuous feel.
+        el?.scrollBy?.({ left: dir * el.clientWidth * 0.18 })
+      }, 120)
+    }, 350)
+  }, [stopHold])
+  const handleChevronClick = useCallback((dir: -1 | 1) => {
+    // Swallow the click that trails a press-and-hold release (the hold already
+    // scrolled); a plain tap never set didRepeat, so it jumps as before.
+    if (didRepeatRef.current) {
+      didRepeatRef.current = false
+      return
+    }
+    scrollTabs(dir)
+  }, [scrollTabs])
+
+  // (b) DRAG-TO-SCROLL the strip with a pressed pointer. A small movement
+  //     threshold keeps a click-on-tab a click (drag only engages past 5px),
+  //     and `dragMovedRef` suppresses the tab's select-on-click after a drag so
+  //     dragging the strip never accidentally switches tabs.
+  const dragRef = useRef<{ active: boolean; startX: number; startScroll: number }>({
+    active: false,
+    startX: 0,
+    startScroll: 0,
+  })
+  const dragMovedRef = useRef(false)
+  const onStripPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.button !== 0) return
+    const el = tablistRef.current
+    if (!el) return
+    dragRef.current = { active: true, startX: e.clientX, startScroll: el.scrollLeft }
+    dragMovedRef.current = false
+  }, [])
+  const onStripPointerMove = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    const drag = dragRef.current
+    if (!drag.active) return
+    const el = tablistRef.current
+    if (!el) return
+    const dx = e.clientX - drag.startX
+    if (!dragMovedRef.current && Math.abs(dx) <= 5) return
+    dragMovedRef.current = true
+    el.setPointerCapture?.(e.pointerId)
+    el.scrollLeft = drag.startScroll - dx
+  }, [])
+  const endStripDrag = useCallback(() => {
+    dragRef.current.active = false
+  }, [])
+
+  // Clear any in-flight hold timer/interval on unmount so a press-and-hold that
+  // outlives the view never fires into a torn-down ref.
+  useEffect(() => stopHold, [stopHold])
   // Keep the active tab visible when it changes programmatically (deep-link,
   // forceTab, ArrowLeft/Right roving) — scroll it into view within the strip
   // only (inline:'nearest' won't scroll the page vertically).
@@ -506,7 +583,11 @@ export function ControlRoomView({
           aria-hidden={!scrollState.left}
           tabIndex={-1}
           data-testid="cr-tabs-chevron-left"
-          onClick={() => scrollTabs(-1)}
+          onClick={() => handleChevronClick(-1)}
+          onPointerDown={() => startHold(-1)}
+          onPointerUp={stopHold}
+          onPointerLeave={stopHold}
+          onPointerCancel={stopHold}
         >
           ‹
         </button>
@@ -517,6 +598,10 @@ export function ControlRoomView({
           data-testid="cr-tabs"
           ref={tablistRef}
           onScroll={updateScrollAffordance}
+          onPointerDown={onStripPointerDown}
+          onPointerMove={onStripPointerMove}
+          onPointerUp={endStripDrag}
+          onPointerCancel={endStripDrag}
         >
         {CONTROL_ROOM_TABS.map((t, i) => {
           const active = tab === t.key
@@ -532,7 +617,16 @@ export function ControlRoomView({
               tabIndex={active ? 0 : -1}
               className={`cr-tab${active ? ' cr-tab-active' : ''}`}
               data-testid={`cr-tab-${t.key}`}
-              onClick={() => selectTab(t.key)}
+              onClick={() => {
+                // #6230: a drag on the strip ends with a click on whatever tab
+                // was under the pointer — suppress that select so dragging never
+                // switches tabs. A plain click never set dragMoved.
+                if (dragMovedRef.current) {
+                  dragMovedRef.current = false
+                  return
+                }
+                selectTab(t.key)
+              }}
               onKeyDown={(e) => {
                 if (e.key !== 'ArrowRight' && e.key !== 'ArrowLeft') return
                 e.preventDefault()
@@ -560,7 +654,11 @@ export function ControlRoomView({
           aria-hidden={!scrollState.right}
           tabIndex={-1}
           data-testid="cr-tabs-chevron-right"
-          onClick={() => scrollTabs(1)}
+          onClick={() => handleChevronClick(1)}
+          onPointerDown={() => startHold(1)}
+          onPointerUp={stopHold}
+          onPointerLeave={stopHold}
+          onPointerCancel={stopHold}
         >
           ›
         </button>
