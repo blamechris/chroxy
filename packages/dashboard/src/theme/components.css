@@ -9437,14 +9437,34 @@ button.sidebar-token-view-session-row:hover {
   min-height: 0;
 }
 
-.cr-tabs {
-  display: flex;
-  gap: 4px;
-  padding: 10px 28px 0;
+/* #6218 — the tab strip overflows at common widths (many Control Room tabs),
+   so it scrolls horizontally. The wrapper owns the centred max-width + the
+   full-width underline and positions the edge chevrons; the inner .cr-tabs is
+   the scroll viewport. */
+.cr-tabs-wrap {
+  position: relative;
   max-width: 1100px;
   width: 100%;
   margin: 0 auto;
   border-bottom: 1px solid var(--border-secondary);
+}
+
+.cr-tabs {
+  display: flex;
+  flex-wrap: nowrap;
+  gap: 4px;
+  /* Horizontal padding (40px) must exceed the 36px chevron width so the
+     first/last tab never sits under a visible chevron (#6218 review). */
+  padding: 10px 40px 0;
+  overflow-x: auto;
+  scroll-behavior: smooth;
+  /* Keep a tab clear of the chevrons when scrolled into view. */
+  scroll-padding-inline: 40px;
+  /* Hide the native scrollbar — the chevrons + trackpad are the affordance. */
+  scrollbar-width: none; /* Firefox */
+}
+.cr-tabs::-webkit-scrollbar {
+  display: none; /* WebKit/Chromium */
 }
 
 .cr-tab {
@@ -9458,6 +9478,48 @@ button.sidebar-token-view-session-row:hover {
   font-weight: 600;
   cursor: pointer;
   margin-bottom: -1px;
+  /* Don't shrink/wrap — keep natural width so the row overflows (and scrolls)
+     instead of compressing labels (#6218). */
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+
+/* #6218 — edge chevrons. Absolutely positioned so showing/hiding them never
+   shifts the tab layout; a gradient fade keeps them legible over tabs. */
+.cr-tab-chevron {
+  position: absolute;
+  top: 0;
+  bottom: 1px;
+  width: 36px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  cursor: pointer;
+  color: var(--text-muted);
+  font-size: 20px;
+  line-height: 1;
+  z-index: 2;
+  transition: opacity 0.12s ease;
+}
+.cr-tab-chevron:hover {
+  color: var(--text-primary);
+}
+.cr-tab-chevron-left {
+  left: 0;
+  justify-content: flex-start;
+  padding-left: 6px;
+  background: linear-gradient(to right, var(--bg-secondary) 55%, transparent);
+}
+.cr-tab-chevron-right {
+  right: 0;
+  justify-content: flex-end;
+  padding-right: 6px;
+  background: linear-gradient(to left, var(--bg-secondary) 55%, transparent);
+}
+.cr-tab-chevron-hidden {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .cr-tab:hover {
