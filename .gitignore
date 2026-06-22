@@ -82,8 +82,12 @@ tests/screenshots/
 **/tests/screenshots/
 docs/audit-results/
 docs/audits/
+docs/project-audit/
 docs/qa-log.md
 docs/smoke-test.md
 
 # Stray autonomous-session scratch logs (never commit)
 autonomous-session-*.md
+
+# Generated visual-review / brief artifacts (never commit)
+.visual-review/
