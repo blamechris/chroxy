@@ -1,12 +1,17 @@
 /**
- * ChatSettingsDropdown — Model, Permission Mode, and Thinking Level selectors.
+ * ChatSettingsDropdown — Model, Permission Mode, and Thinking Level controls.
  *
- * Uses native <select> elements which render their dropdown menus via the OS
- * compositor, avoiding CSS overflow/z-index clipping issues in Tauri WKWebView.
+ * #6220: the Model control is a BUTTON that opens `ModelPickerModal` (the inline
+ * <select> couldn't hold the full per-provider model set). Permission Mode and
+ * Thinking Level remain native <select> elements, which render their menus via
+ * the OS compositor — avoiding CSS overflow/z-index clipping in Tauri WKWebView.
+ * The modal renders above everything via the shared `Modal` overlay, so it's
+ * likewise clipping-immune.
  */
-import { useCallback, useMemo } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
+import { ModelPickerModal } from './ModelPickerModal'
 
 /**
  * Compose the hover tooltip for the active-model select (#3888).
@@ -50,6 +55,8 @@ export interface ChatSettingsDropdownProps {
   // same as today's "availableModels=[]" behaviour for the transient
   // provider-switch case where we don't want a flash of a stale label.
   readOnlyModel?: string | null
+  // #6220: active provider label, shown as the group header in the modal picker.
+  providerLabel?: string | null
   // #4019: PermissionMode carries an optional `description` field server-side
   // (PERMISSION_MODES exports it for every mode). Use the typed import from
   // store-core so the title-attribute hint stays in lockstep with the wire shape.
@@ -83,18 +90,20 @@ export function ChatSettingsDropdown({
   thinkingLevel,
   onThinkingLevelChange,
   readOnlyModel = null,
+  providerLabel = null,
 }: ChatSettingsDropdownProps) {
-  const handleModelChange = useCallback((e: React.ChangeEvent<HTMLSelectElement>) => {
-    const v = e.target.value
-    if (v) {
-      onModelChange(v)
-    } else if (defaultModelId) {
-      const dm = availableModels.find(m => m.id === defaultModelId)
-      if (dm) onModelChange(dm.id)
-    } else if (availableModels[0]) {
-      onModelChange(availableModels[0].id)
-    }
-  }, [onModelChange, defaultModelId, availableModels])
+  // #6220: the model picker is now a button that opens a modal (was a native
+  // <select>). The select couldn't comfortably hold the full per-provider model
+  // set; the modal gives room for grouping, the default marker, and search.
+  const [pickerOpen, setPickerOpen] = useState(false)
+  // #6237 review: close the picker if the model list empties (a known transient
+  // during a provider switch — see readOnlyModel prop docs). The button/modal
+  // subtree is gated on `availableModels.length > 0`, so without this the modal
+  // unmounts while `pickerOpen` stays true and would silently reopen when models
+  // repopulate.
+  useEffect(() => {
+    if (availableModels.length === 0) setPickerOpen(false)
+  }, [availableModels.length])
 
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
@@ -124,37 +133,42 @@ export function ChatSettingsDropdown({
   // True only when the active model genuinely IS the server default — compared
   // on the normalized short id so a full-id activeModel still resolves.
   const activeIsDefault = defaultModelId != null && activeOptionValue === defaultModelId
-  // Render a synthetic option ONLY when the active model is set, isn't the
-  // default, and isn't already one of the listed options.
-  const needsSyntheticOption =
-    !activeIsDefault && !!activeModel && activeEntry === null
+  // Label shown in the trigger button (and for the "Default (…)" form): the
+  // default model's label, falling back to the first model, then 'recommended'.
+  const defaultLabel =
+    (defaultModelId
+      ? availableModels.find((m) => m.id === defaultModelId)?.label
+      : availableModels[0]?.label) ?? 'recommended'
 
   return (
     <>
-      {/* Model */}
+      {/* Model — #6220: a button that opens the modal picker. Reads
+          "Default (<label>)" when the active model is the server default, else
+          the active model's label. */}
       {availableModels.length > 0 && (
-        <select
-          data-testid="chat-settings-trigger"
-          data-kind="model"
-          value={activeIsDefault ? '' : activeOptionValue}
-          onChange={handleModelChange}
-          title={modelTitle}
-          aria-label={modelTitle}
-        >
-          <option value="">
-            Default ({(defaultModelId
-              ? availableModels.find(m => m.id === defaultModelId)?.label
-              : availableModels[0]?.label) ?? 'recommended'})
-          </option>
-          {needsSyntheticOption && (
-            <option value={activeOptionValue}>{activeModel}</option>
-          )}
-          {availableModels
-            .filter(m => m.id !== defaultModelId)
-            .map(m => (
-              <option key={m.id} value={m.id}>{m.label}</option>
-            ))}
-        </select>
+        <>
+          <button
+            type="button"
+            data-testid="chat-settings-trigger"
+            data-kind="model"
+            className="chat-settings-model-btn"
+            onClick={() => setPickerOpen(true)}
+            title={modelTitle}
+            aria-label={modelTitle}
+            aria-haspopup="dialog"
+          >
+            {activeIsDefault ? `Default (${defaultLabel})` : (activeEntry?.label ?? activeModel ?? `Default (${defaultLabel})`)}
+          </button>
+          <ModelPickerModal
+            open={pickerOpen}
+            onClose={() => setPickerOpen(false)}
+            availableModels={availableModels}
+            activeModel={activeModel}
+            defaultModelId={defaultModelId}
+            providerLabel={providerLabel}
+            onSelect={onModelChange}
+          />
+        </>
       )}
 
       {/* #4464: read-only badge for providers without modelSwitch (claude TUI).

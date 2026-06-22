@@ -202,6 +202,97 @@
   border-color: var(--accent-blue);
 }
 
+/* #6220 — model picker trigger button (replaces the model <select>). Mirrors the
+   select chrome + sizing so it sits cleanly in the same header slot. */
+.chat-settings-model-btn {
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  border: 1px solid var(--scrollbar-thumb);
+  border-radius: 6px;
+  padding: 4px 8px;
+  font-size: var(--text-base);
+  cursor: pointer;
+  text-align: left;
+  width: auto;
+  min-width: 160px;
+  max-width: 240px;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+.chat-settings-model-btn:hover {
+  border-color: var(--text-secondary);
+}
+.chat-settings-model-btn:focus-visible {
+  outline: none;
+  border-color: var(--accent-blue);
+}
+
+/* #6220 — modal model picker body (rendered inside the shared .modal-content). */
+.model-picker {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+.model-picker-search {
+  width: 100%;
+}
+.model-picker-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 50vh;
+  overflow-y: auto;
+}
+.model-picker-group {
+  font-size: var(--text-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 8px 8px 4px;
+}
+.model-picker-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  width: 100%;
+  background: transparent;
+  border: 1px solid transparent;
+  border-radius: 8px;
+  color: var(--text-primary);
+  padding: 9px 12px;
+  font-size: var(--text-base);
+  text-align: left;
+  cursor: pointer;
+}
+.model-picker-item:hover:not(:disabled),
+.model-picker-item:focus-visible {
+  outline: none;
+  background: var(--bg-secondary);
+  border-color: var(--scrollbar-thumb);
+}
+.model-picker-item-active {
+  background: var(--bg-secondary);
+  border-color: var(--accent-blue);
+}
+.model-picker-item:disabled {
+  color: var(--text-disabled);
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+.model-picker-item-check {
+  color: var(--accent-blue);
+  font-weight: 700;
+}
+.model-picker-empty {
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  padding: 12px 8px;
+}
+
 /* #4464: read-only model badge for TUI sessions (claude TUI declares
    modelSwitch: false). Mirrors the model <select>'s size + chrome so the
    pill sits cleanly in the same slot; the muted text/border + cursor:default
