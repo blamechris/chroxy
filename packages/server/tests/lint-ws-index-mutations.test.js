@@ -257,6 +257,17 @@ describe('lint-ws-index-mutations', () => {
     assert.match(stderr, /handlers[/\\]bad\.js:3/, 'should flag the nested offender with its path')
   })
 
+  test('skips skip-dirs nested below the src root', () => {
+    // The skip matches the directory's basename at every recursion level, not
+    // just a child of src/. A transitive `node_modules/` under a normal source
+    // dir must be skipped too — this pins the "skip at any depth" contract that a
+    // root-only skip would silently break (the offender sits two levels down).
+    const { dir, srcDir } = setupFixtureTree({ 'handlers/node_modules/dep/index.js': NODE_MODULE_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `a skip-dir nested below src/ must still be skipped\nstderr:\n${stderr}`)
+  })
+
   test('--dry-run reports offenders but exits 0', () => {
     const { dir, srcDir } = setupFixtureTree({ 'bad.js': BARE_ACTIVE_WRITE_SRC })
     cleanups.push(dir)
