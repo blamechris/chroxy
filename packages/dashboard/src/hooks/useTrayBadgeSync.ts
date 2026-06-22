@@ -36,15 +36,20 @@ export function useTrayBadgeSync(): void {
   // derived numbers fixes the clear path: the effect below fires whenever the
   // numbers change, including back to zero.
   // BLOCKED = cross-session pending permissions (the signal that drives "N pending").
+  // These run at RENDER time (not in the effect), so they must be total over a
+  // partially-populated store — an undefined `sessionStates`/`activity`/`sessions`
+  // during an early/transient render must not throw and white-screen the
+  // dashboard. `for..in` over undefined is a safe no-op, but the activity
+  // selector dereferences `state.bySession`, so default it explicitly.
   const blocked = useConnectionStore((s) =>
-    totalPendingPermissions(derivePendingPermissionCounts(s.sessionStates, Date.now())),
+    totalPendingPermissions(derivePendingPermissionCounts(s.sessionStates ?? {}, Date.now())),
   )
   // FAILED = activity-rollup failed sessions (best-effort).
   const failed = useConnectionStore(
     (s) =>
       selectCrossSessionActivity(
-        s.activity,
-        s.sessions.map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, name: x.name, worktree: x.worktree })),
+        s.activity ?? { bySession: {} },
+        (s.sessions ?? []).map((x) => ({ sessionId: x.sessionId, cwd: x.cwd, name: x.name, worktree: x.worktree })),
       ).total.failed,
   )
   // Last count pushed to the bridge ("blocked:failed"), so we only invoke on a
