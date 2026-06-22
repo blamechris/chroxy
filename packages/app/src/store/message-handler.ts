@@ -107,6 +107,12 @@ import {
   handleSearchResults as sharedSearchResults,
   applyOrphanDeltas,
   isActivityEvent,
+  // #5163 (epic #5159) — Control Room cross-session activity reducer:
+  // snapshot replace + self-healing delta upsert + terminal-retention prune.
+  // The mobile MissionControlScreen (#5968 / #6245) and the dashboard panel
+  // both consume this one implementation; #6246 wires the feeder here.
+  applyActivitySnapshot,
+  applyActivityDelta,
   // #5039: shared partial-cost line helper — the same one the dashboard
   // toast uses, so the mobile Alert and the dashboard sub-line can't
   // drift apart on copy/format.
@@ -142,6 +148,11 @@ import type {
   DispatchCallbackPayload,
 } from '@chroxy/store-core';
 import { PROTOCOL_VERSION } from '@chroxy/protocol';
+// #6246 — Control Room activity wire schemas. Validated defensively before the
+// store-core reducer so a malformed payload is dropped, not crashed on (same
+// pattern the dashboard feeder uses). Resolved via the jest moduleNameMapper
+// `^@chroxy/protocol/schemas$` and the protocol package's `./schemas` export.
+import { ServerActivitySnapshotSchema, ServerActivityDeltaSchema } from '@chroxy/protocol/schemas';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
@@ -3496,6 +3507,47 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
       Alert.alert('Server Error', alertBody);
       break;
+    }
+
+    // #5163 (epic #5159) / #6246 — Control Room `activity_snapshot`: REPLACE the
+    // target session's activity tree with the snapshot's entries via the
+    // store-core reducer. Emitted on subscribe / resync so a late-joining or
+    // reconnecting client reaches canonical state in one message. The wire shape
+    // is validated with the protocol Zod schema (same defensive pattern as the
+    // dashboard feeder) so a malformed payload is dropped rather than crashing
+    // the reducer. `applyActivitySnapshot` always builds a fresh state, so the
+    // `next === prev` guard below is a harmless defensive no-op here (it's the
+    // live short-circuit for activity_delta, whose reducer returns the SAME ref
+    // on a no-op); kept for symmetry with the delta case + the dashboard feeder.
+    // This makes #6245's read-only MissionControlScreen go live.
+    case 'activity_snapshot': {
+      const parsed = ServerActivitySnapshotSchema.safeParse(msg);
+      if (!parsed.success) return;
+      const prev = get().activity;
+      const next = applyActivitySnapshot(prev, parsed.data);
+      if (next === prev) return;
+      set({ activity: next });
+      return;
+    }
+
+    // #5163 (epic #5159) / #6246 — Control Room `activity_delta`: upsert the
+    // carried entry into its session by id. `op` is advisory — the full entry
+    // drives the result, so a dropped earlier delta is self-healed by the next
+    // one. Validated + `next === prev` no-op-short-circuited like the snapshot
+    // case above. NOTE: the dashboard ALSO bumps `lastClientActivityAt` / clears
+    // `inactivityWarning` for the delta's session here; that is DEFERRED for this
+    // slice — the dispatch-level activity bump at the top of handleMessage
+    // (`isActivityEvent`) does not yet include the activity_* types, so the
+    // "Working… last activity Ns ago" parity follow-up is intentionally out of
+    // scope for #6246.
+    case 'activity_delta': {
+      const parsed = ServerActivityDeltaSchema.safeParse(msg);
+      if (!parsed.success) return;
+      const prev = get().activity;
+      const next = applyActivityDelta(prev, parsed.data);
+      if (next === prev) return;
+      set({ activity: next });
+      return;
     }
 
     default: {

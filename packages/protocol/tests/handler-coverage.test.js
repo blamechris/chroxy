@@ -149,8 +149,10 @@ const PLATFORM_SPECIFIC = {
   // needed. Coverage passes because each handler has a `case 'terminal_output':`.
   'terminal_size': 'dashboard', // #5835 Phase 2 authoritative live-PTY grid size — the dashboard letterboxes the mirror to it (setTerminalSize); mobile applies resize from its own pane measurement (#5987) but does not yet consume the server's terminal_size echo, so still dashboard-only
   'session_activity': 'dashboard', // server-broadcast busy/idle flips (#4639) — dashboard syncs sessionStates[id].isIdle so the Working banner survives tab swap; mobile app exposure tracked alongside the rest of the dashboard-only handlers
-  'activity_snapshot': 'dashboard', // Control Room live activity tree (#5161 schema / #5160 server / #5162 reducer / #5163 dashboard panel) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5159
-  'activity_delta': 'dashboard',    // Control Room activity delta — see activity_snapshot above; dashboard-only for v1, mobile parity is Phase-2 per epic #5159
+  // 'activity_snapshot' / 'activity_delta' removed from PLATFORM_SPECIFIC — the
+  // mobile app now feeds them too (#6246/#6247, the Phase-2 mobile-parity
+  // fast-follow per epic #5159), so they are BOTH-CLIENTS and the coverage test
+  // passes because each handler has a `case 'activity_snapshot'/'activity_delta':`.
   'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
   'runner_status_snapshot': 'dashboard', // Control Room self-hosted runner survey reply (#5253) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'containers_status_snapshot': 'dashboard', // Control Room containers & environments survey reply (#6133, epic #5530) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
