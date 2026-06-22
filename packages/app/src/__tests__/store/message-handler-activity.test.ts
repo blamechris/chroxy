@@ -57,7 +57,7 @@ function entry(over: Partial<ActivityEntry> & Pick<ActivityEntry, 'id'>): Activi
 /** Minimal mock Zustand store seeding `activity` with an empty reducer state. */
 function createMockStore(
   initialActivity: ActivityState,
-  sessionStates: Record<string, Partial<{ lastClientActivityAt: number; inactivityWarning: unknown }>> = {},
+  sessionStates: Record<string, Record<string, unknown>> = {},
 ) {
   // sessionStates is present like the real store (the #6248 delta bump reads
   // get().sessionStates[sid]); default empty so the bump is simply skipped.
@@ -258,5 +258,58 @@ describe('activity feeder (#6246)', () => {
     ).not.toThrow();
     // The activity tree still updates; only the (absent) session bump is skipped.
     expect(current().activity.bySession.ghost!.byId.d1!.status).toBe('running');
+  });
+
+  // #6248 guardrail 1: a delta arriving while the session is REPLAYING history
+  // must NOT bump (a session-switch replay would otherwise reset the timestamp).
+  // The replaying set lives on the module-level _ctx and is populated via a real
+  // `history_replay_start` (the canonical path the production gate reads).
+  it('activity_delta does NOT bump while the session is replaying history', () => {
+    const { store, current } = createMockStore(createEmptyActivityState(), {
+      // `messages: []` so history_replay_start (which reads messages.length) runs.
+      s2: { messages: [], lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    // Put s2 into _ctx.replayingSessions via the real replay-start path.
+    _testMessageHandler.handle({ type: 'history_replay_start', sessionId: 's2' });
+    const before = (current().sessionStates as Record<string, { lastClientActivityAt?: number }>).s2.lastClientActivityAt;
+
+    _testMessageHandler.handle({
+      type: 'activity_delta',
+      sessionId: 's2',
+      schemaVersion: 1,
+      op: 'started',
+      entry: entry({ id: 'd1', status: 'running' }),
+    });
+
+    const ss = (current().sessionStates as Record<string, { lastClientActivityAt?: number }>).s2;
+    // Gated out: the delta did not bump the timestamp. The tree itself still upserts.
+    expect(ss.lastClientActivityAt).toBe(before);
+    expect(current().activity.bySession.s2!.byId.d1!.status).toBe('running');
+  });
+
+  // #6248 guardrail 2: activity_snapshot is a full-state RESYNC (on subscribe /
+  // reconnect), not fresh work — it must NOT bump lastClientActivityAt.
+  it('activity_snapshot does NOT bump lastClientActivityAt', () => {
+    const { store, current } = createMockStore(createEmptyActivityState(), {
+      s2: { lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'activity_snapshot',
+      sessionId: 's2',
+      schemaVersion: 1,
+      entries: [entry({ id: 'e1', status: 'running' })],
+    });
+
+    const ss = (current().sessionStates as Record<string, { lastClientActivityAt?: number; inactivityWarning?: unknown }>).s2;
+    expect(ss.lastClientActivityAt).toBe(1000); // unchanged — snapshot doesn't bump
+    expect(ss.inactivityWarning).toEqual({ remainingMs: 5000 });
+    // …but the activity tree IS replaced by the snapshot.
+    expect(current().activity.bySession.s2!.byId.e1!.status).toBe('running');
   });
 });
