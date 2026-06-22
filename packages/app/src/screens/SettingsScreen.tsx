@@ -427,6 +427,17 @@ export function SettingsScreen() {
           <Text style={styles.rowLabel}>Activity History</Text>
           <Text style={styles.rowValue}>View all</Text>
         </TouchableOpacity>
+        <View style={styles.separator} />
+        <TouchableOpacity
+          style={styles.row}
+          onPress={() => navigation.navigate('MissionControl')}
+          accessibilityRole="button"
+          accessibilityLabel="View mission control"
+          testID="settings-mission-control-row"
+        >
+          <Text style={styles.rowLabel}>Mission Control</Text>
+          <Text style={styles.rowValue}>View all</Text>
+        </TouchableOpacity>
       </View>
 
       <NotificationPrefsSection

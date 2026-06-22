@@ -13,6 +13,7 @@ import { SettingsScreen } from './screens/SettingsScreen';
 import { PermissionHistoryScreen } from './screens/PermissionHistoryScreen';
 import { HistoryScreen } from './screens/HistoryScreen';
 import ActivityScreen from './screens/ActivityScreen';
+import { MissionControlScreen } from './screens/MissionControlScreen';
 import { LockScreen } from './components/LockScreen';
 import { ConnectionAnnouncer } from './components/ConnectionAnnouncer';
 import { useConnectionStore } from './store/connection';
@@ -36,6 +37,7 @@ export type RootStackParamList = {
   PermissionHistory: undefined;
   History: undefined;
   Activity: undefined;
+  MissionControl: undefined;
 };
 
 const Stack = createNativeStackNavigator<RootStackParamList>();
@@ -187,6 +189,11 @@ export default function App() {
           name="Activity"
           component={ActivityScreen}
           options={{ title: 'Activity' }}
+        />
+        <Stack.Screen
+          name="MissionControl"
+          component={MissionControlScreen}
+          options={{ title: 'Mission Control' }}
         />
       </Stack.Navigator>
       {isLocked && <LockScreen onUnlock={unlock} />}

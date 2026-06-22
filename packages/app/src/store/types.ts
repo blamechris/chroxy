@@ -255,6 +255,13 @@ export interface MultiClientSessionData {
   sessions: SessionInfo[];
   activeSessionId: string | null;
   sessionStates: Record<string, SessionState>;
+  // #5968 — the store-core cross-session activity reducer state, consumed by the
+  // mobile MissionControlScreen via `selectCrossSessionActivity`. Imported inline
+  // to avoid colliding with the app's own `ActivityState` enum
+  // (store/session-activity.ts), re-exported above under the same name. The live
+  // feeder (dispatching activity_snapshot/activity_delta) is PR2; until it lands
+  // this stays at `createEmptyActivityState()` and the view shows its empty state.
+  activity: import('@chroxy/store-core').ActivityState;
   // Connected clients (multi-client awareness)
   myClientId: string | null;
   connectedClients: ConnectedClient[];
