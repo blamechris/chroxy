@@ -137,6 +137,9 @@ import { CLIENT_CAPABILITIES } from '@chroxy/protocol';
 import {
   getWsCloseMessage,
   getHealthCheckErrorMessage,
+  // #5968 — seed the cross-session activity reducer state consumed by the mobile
+  // MissionControlScreen. PR1 only initializes/resets it; the live feeder is PR2.
+  createEmptyActivityState,
   // #4875: shared typed predicate for the AskUserQuestion freeform shape.
   // Replaces the inline 5-condition check that previously diverged from
   // the looser SessionScreen variant; both call sites now narrow off the
@@ -510,6 +513,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
+  activity: createEmptyActivityState(),
   availableModels: [],
   defaultModelId: null,
   availablePermissionModes: [],
@@ -1570,6 +1574,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       sessions: [],
       activeSessionId: null,
       sessionStates: {},
+      activity: createEmptyActivityState(),
       viewingCachedSession: false,
       conversationHistory: [],
       conversationHistoryLoading: false,
