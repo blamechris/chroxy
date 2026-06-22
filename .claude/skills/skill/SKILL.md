@@ -1,5 +1,5 @@
 ---
-description: "The package manager for Claude Code skills — `npm`/`brew` for the skill registry at [`blamechris/skill-templates`](https://github.com/blamechris/skill-templa..."
+description: "The package manager for Claude Code skills — `npm`/`brew` for the skill registry at..."
 ---
 
 # /skill

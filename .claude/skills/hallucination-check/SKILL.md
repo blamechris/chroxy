@@ -1,5 +1,5 @@
 ---
-description: "Independently verify a claim — usually a message relayed from **another agent** — against this repo's ground truth, using a **context-isolated** subagent tha..."
+description: "Independently verify a claim — usually a message relayed from **another agent** — against this repo's ground truth, using a **context-isolated** subagent..."
 ---
 
 # /hallucination-check

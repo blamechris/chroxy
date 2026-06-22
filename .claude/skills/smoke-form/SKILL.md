@@ -1,5 +1,5 @@
 ---
-description: "Generate an interactive, **self-contained HTML smoke-test form** that guides a human through a manual verification pass — the hand-driven sibling of `/smoke-..."
+description: "Generate an interactive, **self-contained HTML smoke-test form** that guides a human through a manual verification pass — the hand-driven sibling of..."
 ---
 
 # /smoke-form

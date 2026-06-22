@@ -1,5 +1,5 @@
 ---
-description: "Orchestrate long-running autonomous dev sessions — work through GitHub issues sequentially with TDD, create PRs, run /full-review, and continue to the next i..."
+description: "Orchestrate long-running autonomous dev sessions — work through GitHub issues sequentially with TDD, create PRs, run /full-review, and continue to the next..."
 ---
 
 # /autonomous-dev-flow
