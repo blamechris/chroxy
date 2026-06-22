@@ -76,12 +76,22 @@ const SET_MUTATE_RE = /\.subscribedSessionIds\.(add|delete|clear)\s*\(/g
 // the activeSessionId field write. NOT `==` / `===` / `=>`.
 const SET_ASSIGN_RE = /\.subscribedSessionIds\s*=(?![=>])/g
 
+// Directories the walker must not descend into. `dashboard-next/` is the
+// Vite-built static bundle (gitignored, see .gitignore: it is never committed
+// and is rebuilt locally / by the Tauri bundler) — its minified output packs the
+// forbidden patterns onto dense lines and trips this lint with false positives
+// (#6255). `node_modules/` is vendored dependencies, equally out of scope. The
+// lint only governs hand-written source under src/.
+const SKIP_DIRS = new Set(['node_modules', 'dashboard-next'])
+
 function walk(dir, acc = []) {
   for (const ent of readdirSync(dir)) {
     const p = join(dir, ent)
     const st = statSync(p)
-    if (st.isDirectory()) walk(p, acc)
-    else if (st.isFile() && p.endsWith('.js')) acc.push(p)
+    if (st.isDirectory()) {
+      if (SKIP_DIRS.has(ent)) continue
+      walk(p, acc)
+    } else if (st.isFile() && p.endsWith('.js')) acc.push(p)
   }
   return acc
 }

@@ -116,12 +116,28 @@ export function note(client, s) {
 }
 `
 
+// A minified production bundle of the kind Vite emits into \`src/dashboard-next/\`
+// — gitignored build output, not hand-written source. It packs several forbidden
+// patterns onto one dense line, so if the walker descends into that directory it
+// trips ACTIVE_WRITE_RE and SET_MUTATE_RE and fails the lint with false positives
+// (#6255). The walker must skip the whole \`dashboard-next/\` directory.
+const MINIFIED_BUNDLE_SRC = `function r(e,t){e.activeSessionId=t;e.subscribedSessionIds.add(t);return e.subscribedSessionIds}\n`
+
+// A vendored third-party dependency under \`node_modules/\` — also full of bare
+// mutations the walker has no business linting. Same directory-skip requirement.
+const NODE_MODULE_SRC = `module.exports = function (c, s) { c.activeSessionId = s }\n`
+
+// `name` may contain a `/`-separated subpath (e.g. `dashboard-next/dist/x.js`);
+// the parent dirs are created so fixtures can exercise the walker's recursion
+// and directory-skip behavior, not just a flat tree.
 function setupFixtureTree(extraFiles = {}) {
   const dir = mkdtempSync(join(tmpdir(), 'chroxy-lint-ws-idx-'))
   const srcDir = join(dir, 'src')
   mkdirSync(srcDir, { recursive: true })
   for (const [name, src] of Object.entries(extraFiles)) {
-    writeFileSync(join(srcDir, name), src, 'utf8')
+    const filePath = join(srcDir, name)
+    mkdirSync(dirname(filePath), { recursive: true })
+    writeFileSync(filePath, src, 'utf8')
   }
   return { dir, srcDir }
 }
@@ -217,6 +233,39 @@ describe('lint-ws-index-mutations', () => {
     cleanups.push(dir)
     const { code, stderr } = runLint(srcDir)
     assert.equal(code, 0, `inline-comment references must not be flagged\nstderr:\n${stderr}`)
+  })
+
+  test('skips gitignored dashboard-next build artifacts', () => {
+    const { dir, srcDir } = setupFixtureTree({ 'dashboard-next/dist/bundle.js': MINIFIED_BUNDLE_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `gitignored dashboard-next/ must not be walked\nstderr:\n${stderr}`)
+  })
+
+  test('skips node_modules', () => {
+    const { dir, srcDir } = setupFixtureTree({ 'node_modules/dep/index.js': NODE_MODULE_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `node_modules must not be walked\nstderr:\n${stderr}`)
+  })
+
+  test('still recurses into ordinary subdirectories', () => {
+    const { dir, srcDir } = setupFixtureTree({ 'handlers/bad.js': BARE_ACTIVE_WRITE_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 1, 'a real offender in a normal subdir must still fail')
+    assert.match(stderr, /handlers[/\\]bad\.js:3/, 'should flag the nested offender with its path')
+  })
+
+  test('skips skip-dirs nested below the src root', () => {
+    // The skip matches the directory's basename at every recursion level, not
+    // just a child of src/. A transitive `node_modules/` under a normal source
+    // dir must be skipped too — this pins the "skip at any depth" contract that a
+    // root-only skip would silently break (the offender sits two levels down).
+    const { dir, srcDir } = setupFixtureTree({ 'handlers/node_modules/dep/index.js': NODE_MODULE_SRC })
+    cleanups.push(dir)
+    const { code, stderr } = runLint(srcDir)
+    assert.equal(code, 0, `a skip-dir nested below src/ must still be skipped\nstderr:\n${stderr}`)
   })
 
   test('--dry-run reports offenders but exits 0', () => {
