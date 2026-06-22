@@ -371,6 +371,23 @@ describe('AnthropicCompatibleSession factory', () => {
     assert.throws(() => createAnthropicCompatibleSessionClass({ id: 'x', baseUrl: 'https://e' }), /defaultModel/)
   })
 
+  it('field errors name the anthropicCompatible block, wording unchanged (#6253)', () => {
+    // The shared factory now threads a block label (openaiCompatible delegates
+    // here), but the default Anthropic path must keep its exact wording. Lock it.
+    assert.throws(
+      () => createAnthropicCompatibleSessionClass({ id: 'x' }),
+      /anthropicCompatible entry 'x' requires a baseUrl/,
+    )
+    assert.throws(
+      () => createAnthropicCompatibleSessionClass({ id: 'x', baseUrl: 'https://e' }),
+      /anthropicCompatible entry 'x' requires a defaultModel/,
+    )
+    assert.throws(
+      () => createAnthropicCompatibleSessionClass({}),
+      /createAnthropicCompatibleSessionClass requires an entry with a non-empty id/,
+    )
+  })
+
   describe('static metadata', () => {
     it('displayLabel uses the label, falling back to the id', () => {
       assert.equal(createAnthropicCompatibleSessionClass(makeEntry({ label: 'Z.ai GLM' })).displayLabel, 'Z.ai GLM')

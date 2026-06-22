@@ -187,17 +187,31 @@ function credentialHint(entry) {
  * embedders can pass a minimal raw entry.
  *
  * @param {object} rawEntry - Normalized config entry
+ * @param {object} [options] - Factory options
+ * @param {string} [options.blockLabel='anthropicCompatible'] - The config block
+ *   name that construction-error messages should reference. The OpenAI-compatible
+ *   factory delegates here and passes 'openaiCompatible' so a malformed
+ *   `providers.openaiCompatible` entry names its own block rather than this one
+ *   (#6253). Defaults to 'anthropicCompatible' so the Anthropic path's wording is
+ *   byte-for-byte unchanged.
  * @returns {typeof ClaudeByokSession} Provider session class for the registry
  */
-export function createAnthropicCompatibleSessionClass(rawEntry) {
+export function createAnthropicCompatibleSessionClass(rawEntry, { blockLabel = 'anthropicCompatible' } = {}) {
   if (typeof rawEntry !== 'object' || rawEntry === null || typeof rawEntry.id !== 'string' || rawEntry.id.length === 0) {
-    throw new Error('createAnthropicCompatibleSessionClass requires an entry with a non-empty id')
+    // The Anthropic block keeps its original (function-named) wording so its
+    // tests are unchanged; a delegated block (e.g. openaiCompatible) names
+    // itself, since there is no id to embed in the message here (#6253).
+    throw new Error(
+      blockLabel === 'anthropicCompatible'
+        ? 'createAnthropicCompatibleSessionClass requires an entry with a non-empty id'
+        : `${blockLabel} entry requires a non-empty id`,
+    )
   }
   if (typeof rawEntry.baseUrl !== 'string' || rawEntry.baseUrl.length === 0) {
-    throw new Error(`anthropicCompatible entry '${rawEntry.id}' requires a baseUrl`)
+    throw new Error(`${blockLabel} entry '${rawEntry.id}' requires a baseUrl`)
   }
   if (typeof rawEntry.defaultModel !== 'string' || rawEntry.defaultModel.length === 0) {
-    throw new Error(`anthropicCompatible entry '${rawEntry.id}' requires a defaultModel`)
+    throw new Error(`${blockLabel} entry '${rawEntry.id}' requires a defaultModel`)
   }
 
   // Defensive normalization (no-op for validator output).

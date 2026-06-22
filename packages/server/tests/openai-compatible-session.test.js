@@ -98,6 +98,32 @@ describe('createOpenAiCompatibleSessionClass', () => {
     assert.throws(() => createOpenAiCompatibleSessionClass(makeEntry({ defaultModel: '' })))
   })
 
+  it('construction errors name the openaiCompatible block, not anthropicCompatible (#6253)', () => {
+    // The factory delegates validation to createAnthropicCompatibleSessionClass.
+    // Without a threaded block label, a malformed openaiCompatible entry would
+    // throw "anthropicCompatible entry ... requires a baseUrl" and misdirect the
+    // operator to the wrong config key.
+    assert.throws(
+      () => createOpenAiCompatibleSessionClass(makeEntry({ baseUrl: '' })),
+      (err) => /openaiCompatible entry .* requires a baseUrl/.test(err.message)
+        && !/anthropicCompatible/.test(err.message),
+      'a missing baseUrl must name openaiCompatible and never anthropicCompatible',
+    )
+    assert.throws(
+      () => createOpenAiCompatibleSessionClass(makeEntry({ defaultModel: '' })),
+      (err) => /openaiCompatible entry .* requires a defaultModel/.test(err.message)
+        && !/anthropicCompatible/.test(err.message),
+      'a missing defaultModel must name openaiCompatible and never anthropicCompatible',
+    )
+    assert.throws(
+      () => createOpenAiCompatibleSessionClass(makeEntry({ id: '' })),
+      (err) => /openaiCompatible/.test(err.message)
+        && !/anthropicCompatible/.test(err.message)
+        && !/createAnthropicCompatibleSessionClass/.test(err.message),
+      'a missing id must name openaiCompatible, not the delegated factory',
+    )
+  })
+
   describe('seam overrides', () => {
     it('_defaultModel comes from the entry', () => {
       const Cls = createOpenAiCompatibleSessionClass(makeEntry())

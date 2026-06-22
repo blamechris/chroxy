@@ -57,7 +57,9 @@ const log = createLogger('openai-compatible')
 export function createOpenAiCompatibleSessionClass(rawEntry) {
   // Reuse the Anthropic-compatible factory wholesale: it validates id/baseUrl/
   // defaultModel, freezes the entry, and wires every seam except the client.
-  const AnthropicCompatibleSession = createAnthropicCompatibleSessionClass(rawEntry)
+  // Pass our own block label so a malformed entry's construction error names
+  // `openaiCompatible`, not the delegated `anthropicCompatible` factory (#6253).
+  const AnthropicCompatibleSession = createAnthropicCompatibleSessionClass(rawEntry, { blockLabel: 'openaiCompatible' })
   // The frozen, normalized entry the base factory built — single source of the
   // baseUrl the shim needs.
   const entry = AnthropicCompatibleSession.compatEntry
