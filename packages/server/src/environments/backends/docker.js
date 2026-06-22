@@ -1,5 +1,6 @@
 import { execFile, spawn } from 'child_process'
 import { createLogger } from '../../logger.js'
+import { VALID_USERNAME_RE } from '../../utils/validation-patterns.js'
 
 const log = createLogger('docker-backend')
 
@@ -279,10 +280,9 @@ export class DockerBackend {
       const execArgs = ['exec']
 
       if (user) {
-        // POSIX username pattern — same regex as docker-sdk-session.js
-        // and docker-byok-session.js. Refuse anything weirder so a
-        // caller-supplied string can't smuggle a flag.
-        if (!/^[a-z_][a-z0-9_-]{0,31}$/.test(user)) {
+        // Refuse anything but a POSIX username so a caller-supplied string
+        // can't smuggle a `docker exec` flag (VALID_USERNAME_RE is shared).
+        if (!VALID_USERNAME_RE.test(user)) {
           reject(new Error(`Invalid user "${user}" — must match POSIX username rules`))
           return
         }

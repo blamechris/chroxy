@@ -48,6 +48,7 @@ import { readFileSync } from 'fs'
 import { randomBytes } from 'crypto'
 import { saveJsonState } from './json-state-file.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { HEX64 } from './utils/validation-patterns.js'
 
 /**
  * @typedef {Object} TrustRecord
@@ -55,8 +56,6 @@ import { getErrorMessage } from './utils/error-message.js'
  * @property {string} firstSeen    ISO timestamp of first sight
  * @property {string} [approvalTs] The third timestamp (named per subclass)
  */
-
-const HEX64 = /^[0-9a-f]{64}$/
 
 export class PathHashTrustLedger {
   /**
@@ -310,5 +309,3 @@ export class PathHashTrustLedger {
     }
   }
 }
-
-export { HEX64 as _HEX64 }

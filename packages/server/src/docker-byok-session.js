@@ -146,11 +146,9 @@ import {
 } from './devcontainer-config.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
 
 const log = createLogger('docker-byok')
-
-/** POSIX username pattern — same shape as docker-sdk-session.js. */
-const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 
 const DEFAULT_IMAGE = 'node:22-slim'
 const DEFAULT_MEMORY_LIMIT = '2g'
