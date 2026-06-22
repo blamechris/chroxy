@@ -131,7 +131,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'user_input',
   // user_question — migrated to the shared dispatch table (#5618); now has a
   // DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
-  'web_task_error',
+  // web_task_error — now has a SWITCH_FIXTURES entry (#5619), so it leaves the
+  // pending allowlist (both clients append one identical `system` error bubble).
 ])
 
 // ---------------------------------------------------------------------------

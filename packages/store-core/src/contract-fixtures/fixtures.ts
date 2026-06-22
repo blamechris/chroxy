@@ -1586,4 +1586,28 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'before error' }] } },
     },
   },
+  {
+    // web_task_error (#5619): both clients parse via the shared
+    // `handleWebTaskError` and, on the common path, append ONE identical
+    // `system` bubble (content = the error message) to the ACTIVE session
+    // (`activeSessionId`). The message carries no session key of its own
+    // (its fields are taskId / message / code / boundSession*), so there is no
+    // per-session routing for the two clients to diverge on. The app
+    // additionally short-circuits to a native Alert (NO bubble) ONLY when
+    // `code === 'SESSION_TOKEN_MISMATCH' && boundSessionName` is set; a plain
+    // error message (no `code`/`boundSessionName`) never trips that, so both
+    // clients agree — a single `expect`, no `divergent` block. `taskId` is
+    // omitted deliberately: its presence drives a `webTasks` status update the
+    // fixture harness can't seed (init has no `webTasks` slice), and that update
+    // is a flat-state side effect OUTSIDE the asserted `messages` slice anyway.
+    name: 'web_task_error appends a system error bubble to the active session',
+    type: 'web_task_error',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'web_task_error', message: 'Web task failed: network timeout' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Web task failed: network timeout' }] },
+      },
+    },
+  },
 ]
