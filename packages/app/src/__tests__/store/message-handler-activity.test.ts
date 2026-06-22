@@ -16,6 +16,7 @@
  */
 import {
   _testMessageHandler,
+  _testResetStore,
   setStore,
 } from '../../store/message-handler';
 import { createEmptyActivityState } from '@chroxy/store-core';
@@ -89,6 +90,16 @@ function createMockContext() {
 
 beforeEach(() => {
   jest.clearAllMocks();
+});
+
+// #6247 review: the message-handler keeps module-level store + context refs.
+// Clear BOTH after each test so this suite can't leak state into other test
+// files (order-dependent failures). _testResetStore() drops the store; the
+// context is cleared so a later file that forgets to set it fails loudly
+// rather than reusing this suite's mock.
+afterEach(() => {
+  _testResetStore();
+  _testMessageHandler.setContext(null as never);
 });
 
 describe('activity feeder (#6246)', () => {

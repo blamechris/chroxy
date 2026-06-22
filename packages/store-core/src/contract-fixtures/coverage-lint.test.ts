@@ -65,6 +65,14 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
   'agent_idle',
+  // activity_snapshot / activity_delta — both clients now feed them through the
+  // store-core ACTIVITY reducer (applyActivitySnapshot/applyActivityDelta) from
+  // their own switch (#6246/#6247 added the mobile side; dashboard since #5163).
+  // They are NOT on the shared dispatch table (the reducer write is platform-local
+  // — each client owns its `activity` store field), so they stay PENDING rather
+  // than carrying a DISPATCH_FIXTURES entry.
+  'activity_snapshot',
+  'activity_delta',
   // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
   // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // auth_bootstrap — migrated to the shared dispatch table (#5618 Batch 5b).

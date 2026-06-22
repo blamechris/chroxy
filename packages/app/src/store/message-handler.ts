@@ -3515,8 +3515,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // reconnecting client reaches canonical state in one message. The wire shape
     // is validated with the protocol Zod schema (same defensive pattern as the
     // dashboard feeder) so a malformed payload is dropped rather than crashing
-    // the reducer. `applyActivitySnapshot` returns the SAME state reference on a
-    // no-op, so the `next === prev` short-circuit skips a needless re-render.
+    // the reducer. `applyActivitySnapshot` always builds a fresh state, so the
+    // `next === prev` guard below is a harmless defensive no-op here (it's the
+    // live short-circuit for activity_delta, whose reducer returns the SAME ref
+    // on a no-op); kept for symmetry with the delta case + the dashboard feeder.
     // This makes #6245's read-only MissionControlScreen go live.
     case 'activity_snapshot': {
       const parsed = ServerActivitySnapshotSchema.safeParse(msg);
