@@ -57,6 +57,7 @@ import { useShortcutRegistry } from './shortcuts/useShortcutRegistry'
 import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
 import { writeText as clipboardWriteText } from './utils/clipboard'
 import { useTauriEvents } from './hooks/useTauriEvents'
+import { useTrayBadgeSync } from './hooks/useTrayBadgeSync'
 import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
@@ -233,6 +234,10 @@ export function App() {
 
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
+
+  // #6184: mirror the cross-session blocked+failed count on the desktop dock
+  // badge (no-op in a plain browser tab).
+  useTrayBadgeSync()
 
   // Voice input mode is persisted on inputSettings (#4785). Default is
   // 'continuous' — click to start, click to stop, mic stays lit across
