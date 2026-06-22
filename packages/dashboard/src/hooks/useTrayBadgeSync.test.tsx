@@ -103,4 +103,19 @@ describe('useTrayBadgeSync (#6184)', () => {
     expect(invokeSpy).toHaveBeenCalledTimes(2)
     expect(invokeSpy).toHaveBeenLastCalledWith('update_tray_badge', { blocked: 0, failed: 0 })
   })
+
+  // #6227 — the dedup key is `${blocked}:${failed}`, so a change to the FAILED
+  // slice alone (blocked held constant) must also re-invoke. The other re-invoke
+  // test only varies `blocked`; this covers the failed-only edge.
+  it('re-invokes when only the failed count changes (blocked constant)', () => {
+    setStore({ activity: activityOf({ s1: 'running' }), sessions: [{ sessionId: 's1', cwd: '/r' }] })
+    const { rerender } = render(<Harness blocked={1} />)
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
+    expect(invokeSpy).toHaveBeenLastCalledWith('update_tray_badge', { blocked: 1, failed: 0 })
+    // Flip the session running -> failed; blocked stays 1 so only `failed` moves.
+    setStore({ activity: activityOf({ s1: 'failed' }), sessions: [{ sessionId: 's1', cwd: '/r' }] })
+    rerender(<Harness blocked={1} />)
+    expect(invokeSpy).toHaveBeenCalledTimes(2)
+    expect(invokeSpy).toHaveBeenLastCalledWith('update_tray_badge', { blocked: 1, failed: 1 })
+  })
 })
