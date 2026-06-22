@@ -1589,9 +1589,11 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
   {
     // web_task_error (#5619): both clients parse via the shared
     // `handleWebTaskError` and, on the common path, append ONE identical
-    // `system` bubble (content = the error message) to the ACTIVE session — both
-    // route by `activeSessionId`, not the wire `sessionId`. The app additionally
-    // short-circuits to a native Alert (NO bubble) ONLY when
+    // `system` bubble (content = the error message) to the ACTIVE session
+    // (`activeSessionId`). The message carries no session key of its own
+    // (its fields are taskId / message / code / boundSession*), so there is no
+    // per-session routing for the two clients to diverge on. The app
+    // additionally short-circuits to a native Alert (NO bubble) ONLY when
     // `code === 'SESSION_TOKEN_MISMATCH' && boundSessionName` is set; a plain
     // error message (no `code`/`boundSessionName`) never trips that, so both
     // clients agree — a single `expect`, no `divergent` block. `taskId` is
