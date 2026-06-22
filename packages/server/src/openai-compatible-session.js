@@ -21,8 +21,10 @@
  * (id/label/baseUrl/defaultModel/models?/apiKeyEnv?/credentialsKey?/pricing?/
  * contextWindow?/modelDiscovery?), validated by the same validator in
  * anthropic-compatible-config.js. The ONLY difference is the wire dialect of
- * `baseUrl`: it must point at an OpenAI chat-completions endpoint (the shim
- * appends `/chat/completions`) rather than an Anthropic `/v1/messages` one.
+ * `baseUrl`: it is the OpenAI API BASE URL — typically ending in `/v1` (e.g.
+ * `https://openrouter.ai/api/v1`, `http://localhost:1234/v1` for LM Studio) —
+ * which the `openai` SDK joins with `/chat/completions`, rather than an
+ * Anthropic `/v1/messages` base.
  *
  * Credentials never touch config.json: `apiKeyEnv` names an env var,
  * `credentialsKey` names a field in ~/.chroxy/credentials.json (mode 0600).

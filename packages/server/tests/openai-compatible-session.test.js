@@ -162,11 +162,11 @@ describe('registerOpenAiCompatibleProviders', () => {
   it('registers a valid entry into the live registry', () => {
     registeredIds = registerOpenAiCompatibleProviders({
       providers: {
-        openaiCompatible: [makeEntry({ id: 'openrouter-oai-test' })],
+        openaiCompatible: [makeEntry({ id: 'test-openrouter-oai' })],
       },
     })
-    assert.deepEqual(registeredIds, ['openrouter-oai-test'])
-    const Cls = getProvider('openrouter-oai-test')
+    assert.deepEqual(registeredIds, ['test-openrouter-oai'])
+    const Cls = getProvider('test-openrouter-oai')
     assert.ok(Cls)
     assert.ok(Cls.prototype instanceof ClaudeByokSession)
     assert.equal(Cls.compatEntry.baseUrl, 'https://openrouter.ai/api/v1')
