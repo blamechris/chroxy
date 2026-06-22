@@ -470,7 +470,9 @@ describe('message queue', () => {
     useConnectionStore.getState().sendPermissionResponse('req-a', 'allow');
 
     const after = useConnectionStore.getState().sessionStates;
-    expect(after.s1.messages.find((m) => m.requestId === 'req-a')?.answered).toBe('Allowed');
+    // Canonical decision TOKEN, not a display label — SettingsScreen /
+    // PermissionHistoryScreen tally `m.answered === 'allow' | 'deny' | ...`.
+    expect(after.s1.messages.find((m) => m.requestId === 'req-a')?.answered).toBe('allow');
     expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
 
     // beforeEach does not reset `socket`; clear it so the open mock doesn't bleed

@@ -1621,10 +1621,12 @@ describe('sendPermissionResponse clears pending-permission count (#6222)', () =>
     // separate markPromptAnswered call, exactly what PermissionPrompt does).
     useConnectionStore.getState().sendPermissionResponse('req-a', 'allow');
 
-    // After: the prompt is marked answered and the count clears.
+    // After: the prompt is marked answered with the canonical decision TOKEN
+    // (not a display label — consumers treat `answered` as a decision enum) and
+    // the count clears.
     const after = useConnectionStore.getState().sessionStates;
     const prompt = after.s1!.messages.find((m) => m.requestId === 'req-a');
-    expect(prompt?.answered).toBe('Allowed');
+    expect(prompt?.answered).toBe('allow');
     expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
   });
 
@@ -1644,7 +1646,7 @@ describe('sendPermissionResponse clears pending-permission count (#6222)', () =>
 
     const after = useConnectionStore.getState().sessionStates;
     const prompt = after.s1!.messages.find((m) => m.requestId === 'req-a');
-    expect(prompt?.answered).toBe('Denied');
+    expect(prompt?.answered).toBe('deny');
     expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
   });
 
@@ -1668,7 +1670,7 @@ describe('sendPermissionResponse clears pending-permission count (#6222)', () =>
     useConnectionStore.getState().sendPermissionResponse('req-b', 'allow');
 
     const after = useConnectionStore.getState().sessionStates;
-    expect(after.s2!.messages.find((m) => m.requestId === 'req-b')?.answered).toBe('Allowed');
+    expect(after.s2!.messages.find((m) => m.requestId === 'req-b')?.answered).toBe('allow');
     expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
   });
 });
