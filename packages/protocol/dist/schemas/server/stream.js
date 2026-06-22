@@ -1,0 +1,350 @@
+/**
+ * Streaming + tool-call wire: stream start/delta/end, tool start/result/input-delta, model/evaluator/preamble changes, agent lifecycle, background-work snapshots.
+ *
+ * Domain slice of the server→client schema surface; re-exported verbatim by
+ * ../server.ts (barrel). Split per #6201 Tier-3.
+ */
+import { z } from 'zod';
+import { MAX_SANE_DURATION_MS } from "./connection.js";
+// #5515 (epic #5514): optional, additive wall-clock (ms epoch) timestamp
+// stamped on stream messages and the pong reply at broadcast time. Clients use
+// it to measure server→render latency (token-to-render) and to split RTT into
+// uplink/downlink. Wall-clock (not monotonic) because it crosses machines;
+// consumers MUST treat raw cross-machine subtraction as skew-prone and derive
+// one-way numbers from the RTT-split method instead (see app/dashboard
+// latency-stats). Always optional so older servers/clients interop unchanged.
+const ServerTsSchema = z.number().int().nonnegative().finite().optional();
+export const ServerStreamStartSchema = z.object({
+    type: z.literal('stream_start'),
+    messageId: z.string(),
+    serverTs: ServerTsSchema,
+});
+export const ServerStreamDeltaSchema = z.object({
+    type: z.literal('stream_delta'),
+    messageId: z.string(),
+    delta: z.string(),
+    serverTs: ServerTsSchema,
+});
+export const ServerStreamEndSchema = z.object({
+    type: z.literal('stream_end'),
+    messageId: z.string(),
+    serverTs: ServerTsSchema,
+});
+export const ServerMessageSchema = z.object({
+    type: z.literal('message'),
+    messageType: z.string(),
+    content: z.string(),
+    tool: z.string().nullable().optional(),
+    options: z.any().optional(),
+    timestamp: z.number(),
+    code: z.string().max(64).optional(),
+    // #4947 / #5006: only set on `messageType: 'error'` envelopes whose
+    // `code` is one of the two resume-failure codes emitted by CliSession's
+    // `_handleChildClose` resume-failure path:
+    //   - `'resume_unknown'` (server PR #4944) — recoverable; CliSession has
+    //     already auto-fallen-back to a fresh conversation.
+    //   - `'resume_unknown_exhausted'` (server PR #5004) — terminal; the
+    //     post-fallback retry ALSO matched the unknown-resume pattern, the
+    //     server has stopped auto-respawning, and the user must start a
+    //     fresh session manually.
+    //   - `'cli_respawn_exhausted'` (#5698) — terminal; CliSession's bounded
+    //     auto-respawn budget (rolling rate cap or the consecutive max of 5) is
+    //     spent, the server has stopped respawning, and the session is being
+    //     dropped. Distinct from a transient error toast so the client can
+    //     render a final "session ended (flapping)" state. DockerSession (the
+    //     only CliSession subclass) inherits it; the other subprocess providers
+    //     have no auto-respawn loop, and the claude-tui PTY mirror emits the
+    //     sibling `pty_respawn_exhausted` / `resume_unknown_exhausted` codes for
+    //     the same terminal condition.
+    // Carries the conversation id chroxy passed to `claude --resume <id>`
+    // before the CLI rejected it; dashboards surface it under the affordance
+    // for operator correlation against the persisted state file
+    // (`resumeConversationId` in `~/.chroxy/session-state.json`). Optional +
+    // length-capped so a malformed producer can't pollute the wire with
+    // megabyte payloads.
+    attemptedResumeId: z.string().max(256).optional(),
+    // #5067: captured stdout/stderr from a failed docker-byok
+    // postCreateCommand. Only set on `messageType: 'error'` envelopes
+    // whose `code` is `'post_create_command_failed'`; the session layer
+    // (docker-byok-session.js) tail-caps each stream to 4 KiB before
+    // emitting, and event-normalizer.js re-caps at 8 KiB at the wire
+    // boundary. The 8192 ceiling here is the wire-schema bound;
+    // producers (the session layer) apply a tighter cap. Optional so
+    // existing error envelopes (resume_unknown, generic crashes) stay
+    // shape-compatible.
+    stdout: z.string().max(8192).optional(),
+    stderr: z.string().max(8192).optional(),
+});
+export const ServerToolStartSchema = z.object({
+    type: z.literal('tool_start'),
+    messageId: z.string(),
+    toolUseId: z.string(),
+    tool: z.string(),
+    input: z.any(),
+    serverName: z.string().optional(),
+});
+export const ServerToolResultSchema = z.object({
+    type: z.literal('tool_result'),
+    toolUseId: z.string(),
+    result: z.any(),
+    truncated: z.boolean().optional(),
+});
+// #4080 / #4081: incremental partial-JSON chunk for a streaming tool_use
+// `input`. Emitted between `tool_start` and `tool_result` while the
+// SDK's `input_json_delta` chunks arrive. `partialJson` is the raw
+// JSON fragment from that single SDK chunk — clients concatenate it
+// onto a per-toolUseId accumulator. Mid-stream partials are inherently
+// unparseable JSON; clients render verbatim until a chunk completes
+// the document or `tool_result` lands.
+export const ServerToolInputDeltaSchema = z.object({
+    type: z.literal('tool_input_delta'),
+    messageId: z.string(),
+    toolUseId: z.string(),
+    partialJson: z.string(),
+});
+export const ServerResultSchema = z.object({
+    type: z.literal('result'),
+    // #5630: `null` means "cost unknown" (pricing/usage couldn't be computed) —
+    // distinct from a genuine $0 turn. Subscription runs and any turn whose model
+    // pricing is unknown emit `null`; the dashboard renders "n/a" for it.
+    cost: z.number().nullable().optional(),
+    duration: z.number().optional(),
+    usage: z.any().optional(),
+    sessionId: z.string().nullable().optional(),
+});
+export const ServerModelChangedSchema = z.object({
+    type: z.literal('model_changed'),
+    model: z.string().nullable(),
+});
+// #3185: per-session promptEvaluator toggle changed. Broadcast to every
+// client bound to `sessionId` whenever the value actually flips. Clients
+// re-render the toggle and can refetch session_list for confirmation.
+export const ServerPromptEvaluatorChangedSchema = z.object({
+    type: z.literal('prompt_evaluator_changed'),
+    sessionId: z.string(),
+    value: z.boolean(),
+});
+// #3639: per-session promptEvaluatorSkipPattern changed. Broadcast to
+// every client bound to `sessionId` whenever the stored source string
+// actually changes (set, cleared, or rewritten). `value` is the
+// normalised stored value: a non-empty string source, or `null` when
+// the override is cleared. Empty string is normalised to null on the
+// server before broadcast.
+export const ServerPromptEvaluatorSkipPatternChangedSchema = z.object({
+    type: z.literal('prompt_evaluator_skip_pattern_changed'),
+    sessionId: z.string(),
+    value: z.union([z.string(), z.null()]),
+});
+// #3805: per-session Chroxy context hint toggle changed. Broadcast to
+// every client bound to `sessionId` whenever the value actually flips.
+// Mirrors ServerPromptEvaluatorChangedSchema — clients re-render the
+// toggle and may refetch session_list for confirmation.
+export const ServerChroxyContextHintChangedSchema = z.object({
+    type: z.literal('chroxy_context_hint_changed'),
+    sessionId: z.string(),
+    value: z.boolean(),
+});
+// #4660: per-session preamble changed. Broadcast to every client bound to
+// `sessionId` whenever the trimmed value actually differs from the
+// previous stored value. Multi-client UIs use this to keep their text
+// areas in sync without re-fetching session_list. Value is the stored
+// (post-trim) string the server actually injects, not the raw input —
+// matters when the client typed leading/trailing whitespace.
+export const ServerSessionPreambleChangedSchema = z.object({
+    type: z.literal('session_preamble_changed'),
+    sessionId: z.string(),
+    value: z.string(),
+});
+/**
+ * Schema for one entry of `available_models.models` (#3138).
+ *
+ * Matches the inferred `ModelInfo` type used by the dashboard / app model
+ * picker. `id`, `label`, and `fullId` are required strings; `contextWindow`
+ * is an optional positive number. The handler in `@chroxy/store-core` does
+ * additional empty-string rejection / capitalisation; this schema is the
+ * minimum well-formed shape for a wire-level `passthrough()` parse.
+ *
+ * **Established Zod-handler pattern (#3138)** — first migrated handler that
+ * pulls its element validation up to `@chroxy/protocol`. Future handler
+ * migrations should mirror this layout: declare a Zod schema next to the
+ * other server schemas, parse with `safeParse` inside the store-core
+ * handler, drop malformed entries fail-soft, and retain the handler's
+ * existing return shape so call sites need no changes.
+ */
+export const ServerAvailableModelsEntrySchema = z.object({
+    id: z.string(),
+    label: z.string(),
+    fullId: z.string(),
+    // `contextWindow` accepts any value at the schema level — the handler
+    // applies an additional `typeof === 'number' && > 0` filter so a bad
+    // value drops the field but does NOT reject the whole entry. Preserves
+    // prior behaviour: malformed `contextWindow` is tolerated, not fatal.
+    contextWindow: z.unknown().optional(),
+});
+export const ServerAvailableModelsSchema = z.object({
+    type: z.literal('available_models'),
+    models: z.array(z.unknown()).optional(),
+    defaultModel: z.string().optional(),
+});
+export const ServerPermissionModeChangedSchema = z.object({
+    type: z.literal('permission_mode_changed'),
+    mode: z.string(),
+});
+export const ServerPermissionRequestSchema = z.object({
+    type: z.literal('permission_request'),
+    requestId: z.string(),
+    tool: z.string(),
+    description: z.string().optional(),
+    input: z.any(),
+    remainingMs: z.number().int().nonnegative().finite().max(MAX_SANE_DURATION_MS).optional(),
+    // #2832/#2905: server includes the chroxy sessionId on permission_request
+    // payloads so the dashboard can route the prompt to the right session tab.
+    // Emitted by ws-permissions.js (resendPendingPermissions + HTTP fallback).
+    sessionId: z.string().optional(),
+});
+/**
+ * Single validated builder for the `permission_request` wire message (#6031).
+ *
+ * `permission_request` is the most security-relevant message on the wire — a
+ * dropped/misnamed binding field (e.g. `sessionId`) routes a prompt to the
+ * wrong session or strands it on the legacy resolver. It used to be hand-built
+ * as a raw object literal at 4+ emit sites (ws-permissions.js HTTP-fallback +
+ * two resend paths, event-normalizer.js), each free to drift its field set.
+ *
+ * This factory is the one place those sites construct the message, and it
+ * `safeParse`-validates against `ServerPermissionRequestSchema` so field drift
+ * (a missing required field, a wrong type) is caught instead of silently
+ * shipping a malformed prompt.
+ *
+ * Field hygiene:
+ *  - `type` is always set here — callers never pass it.
+ *  - Optional fields (`description`, `remainingMs`, `sessionId`) are omitted
+ *    entirely (absent, not `null`/`undefined`) when not provided, matching the
+ *    existing wire shape (clients fall back to the active session when
+ *    `sessionId` is absent).
+ *  - `input` is passed through as-is. Callers are responsible for redaction
+ *    (#6038: `description: redactValue(...)`, `input: sanitizeToolInput(...)`)
+ *    BEFORE handing values to this builder — it is a shape guard, not a
+ *    redaction layer, and must not re-process already-redacted values.
+ *
+ * Validation failures throw a descriptive `Error` (with the Zod issues) rather
+ * than returning a partial object, so a drift bug surfaces loudly at the emit
+ * site in dev/test/CI instead of corrupting the client prompt.
+ */
+export function buildPermissionRequestMessage(fields) {
+    const msg = {
+        type: 'permission_request',
+        requestId: fields.requestId,
+        tool: fields.tool,
+        input: fields.input,
+    };
+    // Omit optional fields when absent so the wire shape stays identical to the
+    // hand-built literals (clients fall back to the active session when
+    // `sessionId` is absent, not null).
+    if (fields.description !== undefined)
+        msg.description = fields.description;
+    if (fields.remainingMs !== undefined)
+        msg.remainingMs = fields.remainingMs;
+    if (fields.sessionId !== undefined)
+        msg.sessionId = fields.sessionId;
+    const result = ServerPermissionRequestSchema.safeParse(msg);
+    if (!result.success) {
+        throw new Error(`buildPermissionRequestMessage: invalid permission_request (${result.error.issues
+            .map((i) => `${i.path.join('.') || '<root>'}: ${i.message}`)
+            .join('; ')})`);
+    }
+    return result.data;
+}
+export const ServerUserQuestionSchema = z.object({
+    type: z.literal('user_question'),
+    toolUseId: z.string(),
+    questions: z.array(z.any()),
+});
+export const ServerAgentBusySchema = z.object({
+    type: z.literal('agent_busy'),
+});
+export const ServerAgentIdleSchema = z.object({
+    type: z.literal('agent_idle'),
+});
+export const ServerAgentSpawnedSchema = z.object({
+    type: z.literal('agent_spawned'),
+    toolUseId: z.string(),
+    description: z.string().optional(),
+    startedAt: z.number().optional(),
+});
+export const ServerAgentCompletedSchema = z.object({
+    type: z.literal('agent_completed'),
+    toolUseId: z.string(),
+});
+/**
+ * #5016 — Task subagent intermediate progress event.
+ *
+ * Carries a re-emit of a Task subagent's intermediate wire event
+ * (`tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`)
+ * tagged with the parent Task tool_use id so the dashboard can render
+ * the child's progress as nested sub-bubbles inside the parent's Task
+ * tool_call bubble.
+ *
+ * `parentToolUseId` — the id of the parent's `Task` tool_use block
+ *   (same id used for `agent_spawned` / `agent_completed`). Consumers
+ *   key the nested sub-bubble container off this id.
+ * `eventType` — the child's original event name (e.g. `'tool_start'`).
+ *   Consumers switch on this to render the wire event in the same
+ *   shape they would for a top-level event.
+ * `payload` — the verbatim child event payload. Fields are best-effort;
+ *   renderers MUST treat absence as a no-op.
+ *
+ * Nested Task: when a Task subagent itself dispatches a Task, the
+ * grand-child's events are forwarded up the chain re-tagged with the
+ * IMMEDIATE parent's `toolUseId`. The dashboard sees a flat stream
+ * — nested-nested rendering is intentionally not in v2.
+ */
+export const ServerAgentEventSchema = z.object({
+    type: z.literal('agent_event'),
+    parentToolUseId: z.string(),
+    eventType: z.string(),
+    payload: z.record(z.string(), z.unknown()),
+});
+/**
+ * #4307 — one entry per backgrounded `Bash` shell the session is still
+ * waiting on. Pushed when the agent dispatches a `Bash` tool call with
+ * `run_in_background: true` (the matching tool_result carries the
+ * canonical `Command running in background with ID: <id>` text); cleared
+ * when the agent calls `BashOutput` (acknowledged) or the session is
+ * destroyed.
+ *
+ * `shellId` is the short alphanumeric token Claude prints (e.g.
+ * `brk57kt6pm`). `command` is the original Bash command text the agent
+ * dispatched, stashed at tool_use time so the dashboard can render
+ * "waiting on `<command>`" without a separate roundtrip. `startedAt` is
+ * the server-side wall-clock at the moment the tool_result was parsed —
+ * lets the dashboard surface elapsed wait time without trusting the
+ * client clock.
+ */
+export const ServerPendingBackgroundShellSchema = z.object({
+    shellId: z.string(),
+    command: z.string(),
+    startedAt: z.number().int().nonnegative(),
+});
+/**
+ * #4307 — transient event: the pending-background-shells snapshot for a
+ * session changed. Emitted both on push (a new `run_in_background` shell
+ * was registered) and on clear (`BashOutput` acknowledged or the session
+ * was destroyed). The full snapshot is on the wire (not a delta) so a
+ * late-joining client sees canonical state.
+ *
+ * Why a full snapshot instead of an event per delta: pending work is a
+ * tiny set (typically 0 or 1 entries) and the event fires rarely, so
+ * the wire cost is negligible. A delta protocol would force every
+ * client to also reconcile against `pendingBackgroundShells` on the
+ * `session_list` snapshot — the full-snapshot shape avoids that.
+ *
+ * Late joiners: `session_list` carries the same `pendingBackgroundShells`
+ * field on each entry, so a client that connects between
+ * `background_work_changed` events catches up via the next snapshot.
+ */
+export const ServerBackgroundWorkChangedSchema = z.object({
+    type: z.literal('background_work_changed'),
+    sessionId: z.string(),
+    pending: z.array(ServerPendingBackgroundShellSchema),
+});
