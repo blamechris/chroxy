@@ -6,6 +6,7 @@ import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { writeFileRestricted } from './platform.js'
 import { createLogger } from './logger.js'
+import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
 import { DockerBackend } from './environments/backends/docker.js'
 import {
   parseDevContainer,
@@ -20,8 +21,6 @@ const DEFAULT_IMAGE = 'node:22-slim'
 const DEFAULT_MEMORY_LIMIT = '2g'
 const DEFAULT_CPU_LIMIT = '2'
 const DEFAULT_CONTAINER_USER = 'chroxy'
-
-const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 
 // Re-export `UNREACHABLE_STATUSES` from the dedicated constants module so
 // existing importers (tests, future consumers) continue to work. The

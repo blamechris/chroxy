@@ -4,14 +4,9 @@ import { createLogger } from './logger.js'
 import { classifyDockerError } from './docker-session.js'
 import { DockerBackend, FORWARDED_ENV_KEYS, DEFAULT_CONTAINER_CLI_PATH } from './environments/backends/docker.js'
 import { BILLING_CLASSES } from './billing-class.js'
+import { VALID_USERNAME_RE } from './utils/validation-patterns.js'
 
 const log = createLogger('docker-sdk')
-
-/**
- * Valid POSIX username: starts with lowercase letter or underscore,
- * followed by lowercase alphanumeric, underscore, or hyphen.
- */
-const VALID_USERNAME_RE = /^[a-z_][a-z0-9_-]{0,31}$/
 
 /**
  * DockerSdkSession runs Claude Code inside an isolated Docker container

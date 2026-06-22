@@ -105,6 +105,7 @@ import { join } from 'path'
 import { createHash } from 'crypto'
 import { createLogger } from './logger.js'
 import { PathHashTrustLedger } from './path-hash-trust-ledger.js'
+import { HEX64 } from './utils/validation-patterns.js'
 
 const log = createLogger('skills-trust')
 
@@ -282,7 +283,7 @@ export class SkillsTrustStore extends PathHashTrustLedger {
         && typeof v === 'object'
         && !Array.isArray(v)
         && typeof v.sha256 === 'string'
-        && /^[0-9a-f]{64}$/.test(v.sha256)
+        && HEX64.test(v.sha256)
         && typeof v.firstSeen === 'string'
     }
     if (Object.keys(parsed).some(looksLikeV1Entry)) {
