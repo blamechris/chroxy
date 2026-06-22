@@ -55,8 +55,13 @@ function entry(over: Partial<ActivityEntry> & Pick<ActivityEntry, 'id'>): Activi
 }
 
 /** Minimal mock Zustand store seeding `activity` with an empty reducer state. */
-function createMockStore(initialActivity: ActivityState) {
-  let state = { activity: initialActivity } as ConnectionState;
+function createMockStore(
+  initialActivity: ActivityState,
+  sessionStates: Record<string, Partial<{ lastClientActivityAt: number; inactivityWarning: unknown }>> = {},
+) {
+  // sessionStates is present like the real store (the #6248 delta bump reads
+  // get().sessionStates[sid]); default empty so the bump is simply skipped.
+  let state = { activity: initialActivity, sessionStates } as unknown as ConnectionState;
   return {
     store: {
       getState: () => state,
@@ -212,5 +217,46 @@ describe('activity feeder (#6246)', () => {
 
     expect(current().activity).toBe(seeded);
     expect(current().activity.bySession).toEqual({});
+  });
+
+  // #6248 — a live activity_delta counts as activity: it bumps the session's
+  // lastClientActivityAt and clears a stale inactivityWarning (parity with the
+  // dashboard feeder + the app's isActivityEvent bump).
+  it('activity_delta bumps lastClientActivityAt and clears inactivityWarning for its session', () => {
+    const { store, current } = createMockStore(createEmptyActivityState(), {
+      s2: { lastClientActivityAt: 1000, inactivityWarning: { remainingMs: 5000 } },
+    });
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    _testMessageHandler.handle({
+      type: 'activity_delta',
+      sessionId: 's2',
+      schemaVersion: 1,
+      op: 'started',
+      entry: entry({ id: 'd1', status: 'running' }),
+    });
+
+    const ss = (current().sessionStates as Record<string, { lastClientActivityAt?: number; inactivityWarning?: unknown }>).s2;
+    expect(ss.lastClientActivityAt).toBeGreaterThan(1000);
+    expect(ss.inactivityWarning).toBeNull();
+  });
+
+  it('activity_delta does NOT bump a session absent from sessionStates (no throw)', () => {
+    const { store, current } = createMockStore(createEmptyActivityState()); // empty sessionStates
+    setStore(store as any);
+    _testMessageHandler.setContext(createMockContext() as any);
+
+    expect(() =>
+      _testMessageHandler.handle({
+        type: 'activity_delta',
+        sessionId: 'ghost',
+        schemaVersion: 1,
+        op: 'started',
+        entry: entry({ id: 'd1', status: 'running' }),
+      }),
+    ).not.toThrow();
+    // The activity tree still updates; only the (absent) session bump is skipped.
+    expect(current().activity.bySession.ghost!.byId.d1!.status).toBe('running');
   });
 });
