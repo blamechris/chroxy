@@ -62,7 +62,7 @@
  */
 
 import { describe, it, expect } from 'vitest'
-import { readFileSync } from 'node:fs'
+import { readFileSync, readdirSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, resolve } from 'node:path'
 import {
@@ -72,7 +72,7 @@ import {
 import { DISPATCH_TABLE_TYPES } from '../dispatch-table'
 
 const here = dirname(fileURLToPath(import.meta.url))
-const serverSchemaPath = resolve(here, '../../../protocol/src/schemas/server.ts')
+const serverSchemaDir = resolve(here, '../../../protocol/src/schemas/server')
 const appHandlerPath = resolve(here, '../../../app/src/store/message-handler.ts')
 const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-handler.ts')
 
@@ -82,12 +82,17 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // The server schemas are individual `z.object({ type: z.literal('<type>'), … })`
 // shapes, not one discriminated union we can introspect (see the note in
 // dispatch-table.ts). The discriminator literal IS the per-type identity, so we
-// static-parse every `type: z.literal('<type>')` from schemas/server.ts. Static
-// text analysis (not a runtime import) keeps this cheap and matches how the
-// handler universes are extracted, so the comparison is apples-to-apples.
+// static-parse every `type: z.literal('<type>')` from the schemas/server/ domain
+// files (server.ts is a thin barrel since #6201 Tier-3 — the literals live in
+// the per-domain slices it re-exports). Static text analysis (not a runtime
+// import) keeps this cheap and matches how the handler universes are extracted,
+// so the comparison is apples-to-apples.
 // ---------------------------------------------------------------------------
 function serverSchemaTypes(): string[] {
-  const src = readFileSync(serverSchemaPath, 'utf-8')
+  const src = readdirSync(serverSchemaDir)
+    .filter((f) => f.endsWith('.ts'))
+    .map((f) => readFileSync(resolve(serverSchemaDir, f), 'utf-8'))
+    .join('\n')
   const types = new Set(
     // Permissive on quote style, identifier chars (digits/caps), and whitespace
     // so a reformat / double-quote / digit-bearing type can't silently slip the
