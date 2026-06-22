@@ -460,7 +460,11 @@ export function ControlRoomView({
     if (!el) return
     const { scrollLeft, scrollWidth, clientWidth } = el
     // 1px slack absorbs sub-pixel rounding so a fully-scrolled edge reads as 0.
-    setScrollState({ left: scrollLeft > 1, right: scrollLeft + clientWidth < scrollWidth - 1 })
+    const left = scrollLeft > 1
+    const right = scrollLeft + clientWidth < scrollWidth - 1
+    // Bail when nothing changed — scroll/ResizeObserver fire on every tick, so
+    // returning the previous object skips a re-render unless the booleans flip.
+    setScrollState((prev) => (prev.left === left && prev.right === right ? prev : { left, right }))
   }, [])
   useEffect(() => {
     const el = tablistRef.current

@@ -347,10 +347,16 @@ describe('ControlRoomView auto-fetch on activation (#5543)', () => {
       const tablist = screen.getByTestId('cr-tabs')
       const scrollBy = vi.fn()
       ;(tablist as unknown as { scrollBy: typeof scrollBy }).scrollBy = scrollBy
-      Object.defineProperty(tablist, 'clientWidth', { value: 300, configurable: true })
-      fireEvent.click(screen.getByTestId('cr-tabs-chevron-right'))
+      // Put the strip into an overflowing state first so the right chevron is
+      // actually visible (not pointer-events:none) — a realistic click.
+      setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 0 })
+      fireEvent.scroll(tablist)
+      const right = screen.getByTestId('cr-tabs-chevron-right')
+      expect(right.className).not.toContain('cr-tab-chevron-hidden')
+      fireEvent.click(right)
       expect(scrollBy).toHaveBeenCalledWith(expect.objectContaining({ left: expect.any(Number), behavior: 'smooth' }))
-      expect(scrollBy.mock.calls[0]![0].left).toBeGreaterThan(0)
+      // ~70% of the 300px viewport, scrolling right (positive delta).
+      expect(scrollBy.mock.calls[0]![0].left).toBeCloseTo(210, 0)
     })
   })
 })

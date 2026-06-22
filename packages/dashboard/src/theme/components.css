@@ -9453,9 +9453,13 @@ button.sidebar-token-view-session-row:hover {
   display: flex;
   flex-wrap: nowrap;
   gap: 4px;
-  padding: 10px 28px 0;
+  /* Horizontal padding (40px) must exceed the 36px chevron width so the
+     first/last tab never sits under a visible chevron (#6218 review). */
+  padding: 10px 40px 0;
   overflow-x: auto;
   scroll-behavior: smooth;
+  /* Keep a tab clear of the chevrons when scrolled into view. */
+  scroll-padding-inline: 40px;
   /* Hide the native scrollbar — the chevrons + trackpad are the affordance. */
   scrollbar-width: none; /* Firefox */
 }
