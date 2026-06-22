@@ -96,6 +96,23 @@ await test('falls back to a project label when there is no prose', async () => {
   assert(desc === 'Project skill: /my-skill', `got: ${JSON.stringify(desc)}`)
 })
 
+// --- Test 6: the 160-char cap boundary (passthrough at 160, cut at 161) ----
+// Pins the off-by-one most likely to regress on a future refactor of the cap:
+// a no-period string of exactly 160 chars is returned untouched (no ellipsis),
+// while 161 truncates on the word boundary and stays within the cap.
+await test('passes a 160-char string through but truncates at 161 on a word boundary', async () => {
+  const at160 = 'a'.repeat(80) + ' ' + 'b'.repeat(79) // length 160, no period
+  const passthrough = deriveDescription(at160, 'demo')
+  assert(passthrough === at160, `160-char string should pass through untouched, got length ${passthrough.length}`)
+  assert(!passthrough.endsWith('...'), '160-char string must not get an ellipsis')
+
+  const at161 = 'a'.repeat(80) + ' ' + 'b'.repeat(80) // length 161, no period
+  const truncated = deriveDescription(at161, 'demo')
+  assert(truncated.endsWith('...'), 'a 161-char string should be truncated')
+  assert(truncated.length <= 160, `truncated string should respect the cap, got length ${truncated.length}`)
+  assert(truncated === 'a'.repeat(80) + '...', `should cut at the word boundary, got: ${JSON.stringify(truncated)}`)
+})
+
 // --- summary --------------------------------------------------------------
 process.stdout.write(`\n${pass} passed, ${fail} failed\n`)
 if (fail > 0) {
