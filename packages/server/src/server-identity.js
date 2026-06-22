@@ -136,7 +136,8 @@ export function loadServerIdentity({ keychain = realKeychain, filePath = DEFAULT
     }
     // status === 'absent' (or malformed found) → continue to the file fallback.
   }
-  // Fallback file.
+  // Fallback file. Checked even when the keychain is unavailable (disabled OR
+  // broken): a valid file identity is authoritative and using it does NOT rotate.
   try {
     const raw = readFileSync(filePath, 'utf-8')
     const parsed = JSON.parse(raw)
@@ -144,6 +145,19 @@ export function loadServerIdentity({ keychain = realKeychain, filePath = DEFAULT
     if (kp) return kp
   } catch {
     // Missing / unreadable / malformed — treated as "no identity yet".
+  }
+  // #5615 (#6234 follow-up): no file identity, and the keychain is present but
+  // BROKEN/unreadable (not merely disabled). We cannot confirm there is no
+  // pinned identity sitting in the now-unreadable keychain, so minting a fresh
+  // one would false-MITM every already-pinned client. Fail safe — refuse to
+  // mint — exactly as the pre-#6234 keychain-read-error path did, but WITHOUT
+  // the macOS modal (the broken state is detected by the non-prompting probe).
+  // Disabled keychains (tests / CHROXY_DISABLE_KEYCHAIN) are NOT broken: they
+  // legitimately fall through to mint a first-run identity.
+  if (typeof keychain.isKeychainBroken === 'function' && keychain.isKeychainBroken()) {
+    throw new IdentityUnavailableError(
+      'server identity keychain is unavailable (broken/missing) and no fallback identity file exists; refusing to mint a replacement that would invalidate pinned clients',
+    )
   }
   return null
 }

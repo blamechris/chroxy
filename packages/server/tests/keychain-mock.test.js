@@ -45,11 +45,17 @@ if (typeof mock.module !== 'function') {
       // Default: simulate macOS
       platformMock.isMac = true
       platformMock.isLinux = false
+      // The usability probe (`security default-keychain`) is cached per-process;
+      // clear it so each test re-probes against its own mock (and a throw-all
+      // test doesn't poison `usable=false` for the next one).
+      keychain._resetKeychainHealthForTests()
     })
 
     describe('getToken failure handling', () => {
       it('returns null when execFileSync throws (macOS)', () => {
-        cpMock.execFileSync.mock.mockImplementation(() => {
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
+          // Let the usability probe pass so the op-under-test still runs.
+          if (args && args[0] === 'default-keychain') return ''
           throw new Error('security: SecKeychainSearchCopyNext failed')
         })
 
@@ -62,7 +68,9 @@ if (typeof mock.module !== 'function') {
       // verifies the same null-return contract with a Linux-style error message.
       // True Linux-path coverage requires a Linux CI environment.
       it('returns null when execFileSync throws (Linux-style error)', () => {
-        cpMock.execFileSync.mock.mockImplementation(() => {
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
+          // Let the usability probe pass so the op-under-test still runs.
+          if (args && args[0] === 'default-keychain') return ''
           throw new Error('secret-tool: No matching items found')
         })
 
@@ -73,7 +81,9 @@ if (typeof mock.module !== 'function') {
 
     describe('setToken error propagation', () => {
       it('throws when execFileSync throws (macOS)', () => {
-        cpMock.execFileSync.mock.mockImplementation(() => {
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
+          // Let the usability probe pass so the op-under-test still runs.
+          if (args && args[0] === 'default-keychain') return ''
           throw new Error('security: permission denied')
         })
 
@@ -87,7 +97,9 @@ if (typeof mock.module !== 'function') {
 
     describe('deleteToken error tolerance', () => {
       it('does not throw when execFileSync throws (macOS)', () => {
-        cpMock.execFileSync.mock.mockImplementation(() => {
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
+          // Let the usability probe pass so the op-under-test still runs.
+          if (args && args[0] === 'default-keychain') return ''
           throw new Error('security: item not found')
         })
 
@@ -101,7 +113,9 @@ if (typeof mock.module !== 'function') {
       // Note: same binding limitation as getToken — this verifies the error-swallow
       // contract with a Linux-style error message on the macOS code path.
       it('does not throw when execFileSync throws (Linux-style error)', () => {
-        cpMock.execFileSync.mock.mockImplementation(() => {
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
+          // Let the usability probe pass so the op-under-test still runs.
+          if (args && args[0] === 'default-keychain') return ''
           throw new Error('secret-tool: item not found')
         })
 
@@ -154,6 +168,51 @@ if (typeof mock.module !== 'function') {
         assert.equal(result.migrated, true, 'should return migrated:true on success')
         assert.equal(result.config.apiToken, undefined, 'token removed from config')
         assert.equal(result.config.port, 8765, 'other config keys preserved')
+      })
+    })
+
+    // Broken / missing login keychain: the `security default-keychain` probe
+    // reports a path that doesn't exist, so every op must short-circuit to the
+    // file fallback WITHOUT shelling out to the prompting find-/add-/delete-
+    // generic-password calls (which pop the "keychain cannot be found" modal).
+    describe('broken keychain (missing login keychain file) — no prompting ops', () => {
+      const MISSING = '/definitely/not/a/real/path/login.keychain-db'
+      function brokenMock() {
+        cpMock.execFileSync.mock.mockImplementation((cmd, args) => {
+          if (args && args[0] === 'default-keychain') return `"${MISSING}"`
+          // Any OTHER security call would be a prompting op — fail loudly so the
+          // test catches a regression that lets one through.
+          throw new Error(`unexpected prompting keychain call: ${args && args[0]}`)
+        })
+      }
+      const promptingCalls = () =>
+        cpMock.execFileSync.mock.calls.filter(
+          (c) => Array.isArray(c.arguments?.[1]) &&
+            ['find-generic-password', 'add-generic-password', 'delete-generic-password'].includes(c.arguments[1][0]),
+        )
+
+      it('isKeychainAvailable() is false when the default keychain file is missing', () => {
+        brokenMock()
+        assert.equal(keychain.isKeychainAvailable(), false)
+      })
+
+      it('getToken() returns null without a prompting find call', () => {
+        brokenMock()
+        assert.equal(keychain.getToken('test-service'), null)
+        assert.equal(promptingCalls().length, 0, 'must not call find-generic-password on a broken keychain')
+      })
+
+      it('setToken() no-ops (no throw, no prompting add call)', () => {
+        brokenMock()
+        assert.doesNotThrow(() => keychain.setToken('tok', 'test-service'))
+        assert.equal(promptingCalls().length, 0, 'must not call add-generic-password on a broken keychain')
+      })
+
+      it('getTokenStatus() returns "error" (fail-safe), not "absent" (#5615)', () => {
+        brokenMock()
+        const r = keychain.getTokenStatus('test-service')
+        assert.equal(r.status, 'error', 'a broken keychain must NOT read as absent (would re-mint identity)')
+        assert.equal(promptingCalls().length, 0)
       })
     })
   })
