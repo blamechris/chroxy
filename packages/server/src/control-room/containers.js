@@ -33,17 +33,10 @@
 import { execFile } from 'child_process'
 import { promisify } from 'util'
 import { getErrorMessage } from '../utils/error-message.js'
+import { EXEC_TIMEOUT_MS } from './constants.js'
 
 const execFileAsync = promisify(execFile)
 
-/**
- * #6133: bound the `docker stats` probe so a stuck docker daemon rejects in
- * finite time instead of hanging the survey forever (which would also pin the
- * handler's per-client in-flight guard). The survey tolerates a rejected probe
- * (degrades to null stats + a note), so a timeout just guarantees it rejects.
- * Kept consistent with the sibling surveys (runners.js EXEC_TIMEOUT_MS).
- */
-export const EXEC_TIMEOUT_MS = 20000
 /** Modest output cap — one stats line per container, all small. */
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024
 const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }

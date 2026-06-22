@@ -24,11 +24,10 @@ import { execFile, spawn } from 'child_process'
 import { promisify } from 'util'
 import net from 'net'
 import { getErrorMessage } from '../utils/error-message.js'
+import { EXEC_TIMEOUT_MS } from './constants.js'
 
 const execFileAsync = promisify(execFile)
 
-/** Bound each adb/emulator probe so a stuck daemon rejects in finite time. */
-export const EXEC_TIMEOUT_MS = 20000
 const EXEC_MAX_BUFFER = 16 * 1024 * 1024
 const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
 

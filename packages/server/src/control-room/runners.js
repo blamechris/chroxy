@@ -37,24 +37,13 @@ import { promisify } from 'util'
 import { readFile, readdir } from 'fs/promises'
 import { join, basename } from 'path'
 import { homedir } from 'os'
+import { DEFAULT_CONCURRENCY, EXEC_TIMEOUT_MS } from './constants.js'
 
 const execFileAsync = promisify(execFile)
 
 /** Default runner-install root scanned for `.runner` installs. */
 export const DEFAULT_RUNNER_ROOT = join(homedir(), 'github-runners')
 
-/** Default per-target concurrency cap for the survey. */
-export const DEFAULT_CONCURRENCY = 5
-
-/**
- * #5259: bound every probe subprocess so a stuck `gh`/`launchctl`/`systemctl`
- * (network blip, wedged service manager) rejects in finite time instead of
- * hanging the survey forever — which would also pin the handler's per-client
- * in-flight guard. The survey already tolerates a rejected probe (degrades to
- * not-running / null GitHub view), so a timeout just guarantees it rejects.
- * Kept consistent with the host survey (survey.js EXEC_TIMEOUT_MS).
- */
-export const EXEC_TIMEOUT_MS = 20000
 /** Modest output cap for probe subprocesses (runner JSON is small). */
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024
 /** Shared exec options for every probe. */

@@ -33,8 +33,8 @@ import {
   ghRunnersApiPath,
   parseGhRunners,
   classifyRunner,
-  EXEC_TIMEOUT_MS,
 } from '../src/control-room/runners.js'
+import { EXEC_TIMEOUT_MS } from '../src/control-room/constants.js'
 
 // A Dirent-like for the injected readdir seam.
 const dirent = (name, isDir = true) => ({ name, isDirectory: () => isDir })

@@ -37,11 +37,10 @@ import { parseByteSize } from './containers.js'
 import { listSnapshots } from '../snapshots-store.js'
 import { CHROXY_MANAGED_LABEL } from '../environments/backends/docker.js'
 import { getErrorMessage } from '../utils/error-message.js'
+import { EXEC_TIMEOUT_MS } from './constants.js'
 
 const execFileAsync = promisify(execFile)
 
-/** Bound the docker probes so a stuck daemon rejects in finite time. */
-export const EXEC_TIMEOUT_MS = 20000
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024
 const EXEC_OPTS = { timeout: EXEC_TIMEOUT_MS, maxBuffer: EXEC_MAX_BUFFER }
 
