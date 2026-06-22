@@ -194,15 +194,16 @@ describe('MODEL_PRICING table integrity', () => {
   // on a live Claude cost path today — CLIENT_ESTIMATED_COST_PROVIDERS is
   // {codex, gemini} — so this guards table correctness, not a rendered cost.)
   it('prices the current-generation Claude models (#5631)', () => {
-    for (const id of ['claude-opus-4-7', 'claude-sonnet-4-6', 'claude-haiku-4-5']) {
+    for (const id of ['claude-opus-4-8', 'claude-sonnet-4-6', 'claude-haiku-4-5']) {
       expect(MODEL_PRICING[id], `${id} missing`).toBeDefined()
       const cost = calculateCost(id, 1000, 1000)
       expect(cost, `${id} cost`).not.toBeNull()
       expect(cost, `${id} cost`).toBeGreaterThan(0)
     }
     // Rates mirror the server's authoritative table (USD/Mtok → USD/1k).
-    expect(MODEL_PRICING['claude-opus-4-7']!.inputPer1k).toBe(0.015)
-    expect(MODEL_PRICING['claude-opus-4-7']!.outputPer1k).toBe(0.075)
+    // #6233: Opus head is opus-4-8 since the registry bump (#6219).
+    expect(MODEL_PRICING['claude-opus-4-8']!.inputPer1k).toBe(0.015)
+    expect(MODEL_PRICING['claude-opus-4-8']!.outputPer1k).toBe(0.075)
     expect(MODEL_PRICING['claude-sonnet-4-6']!.inputPer1k).toBe(0.003)
     expect(MODEL_PRICING['claude-sonnet-4-6']!.outputPer1k).toBe(0.015)
     expect(MODEL_PRICING['claude-haiku-4-5']!.inputPer1k).toBe(0.001)
