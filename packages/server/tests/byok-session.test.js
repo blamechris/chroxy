@@ -174,14 +174,14 @@ describe('ClaudeByokSession', () => {
 
   describe('start()', () => {
     it('emits ready with model + empty tools when credentials present', async () => {
-      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
       const captured = captureEvents(session)
       // Inject a stub client BEFORE start to skip the real Anthropic constructor.
       session._client = { messages: { stream: () => fakeStream([]) } }
       await session.start()
       const ready = captured.find((e) => e.name === 'ready')
       assert.ok(ready, 'ready event must fire')
-      assert.equal(ready.payload.model, 'claude-opus-4-7')
+      assert.equal(ready.payload.model, 'claude-opus-4-8')
       assert.deepEqual(ready.payload.tools, [])
       await session.destroy()
     })
@@ -224,7 +224,7 @@ describe('ClaudeByokSession', () => {
       }))
       const session = new ClaudeByokSession({
         cwd: '/tmp',
-        model: 'claude-opus-4-7',
+        model: 'claude-opus-4-8',
         mcpConfigPath: configPath,
       })
       const captured = captureEvents(session)
@@ -491,7 +491,7 @@ describe('ClaudeByokSession', () => {
         messages: {
           stream: () =>
             fakeStream([
-              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-8' } },
               { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
               { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'Hello' } },
               { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: ', world' } },
@@ -539,11 +539,11 @@ describe('ClaudeByokSession', () => {
       // typeof === 'number' gate. Omitting it silently disables BYOK cost
       // accounting (#4056, blocks #4054).
       assert.equal(typeof results[0].payload.cost, 'number')
-      // Opus 4.7 default: 5 input * $15/Mtok + 4 output * $75/Mtok
+      // Opus 4.8 default: 5 input * $15/Mtok + 4 output * $75/Mtok
       //   = 0.000075 + 0.000300 = 0.000375 USD
       assert.ok(
         Math.abs(results[0].payload.cost - 0.000375) < 1e-9,
-        `expected cost ~= 0.000375 for 5in/4out on opus-4-7, got ${results[0].payload.cost}`,
+        `expected cost ~= 0.000375 for 5in/4out on opus-4-8, got ${results[0].payload.cost}`,
       )
       await session.destroy()
     })
@@ -586,7 +586,7 @@ describe('ClaudeByokSession', () => {
       // Accumulated usage: 10+7 input, 20+3 output.
       assert.equal(results[0].payload.usage.input_tokens, 17)
       assert.equal(results[0].payload.usage.output_tokens, 23)
-      // Accumulated cost (Opus 4.7): (17 * 15 + 23 * 75) / 1e6 = 0.001980
+      // Accumulated cost (Opus 4.8): (17 * 15 + 23 * 75) / 1e6 = 0.001980
       assert.ok(
         Math.abs(results[0].payload.cost - 0.001980) < 1e-9,
         `expected cost ~= 0.001980, got ${results[0].payload.cost}`,
@@ -655,7 +655,7 @@ describe('ClaudeByokSession', () => {
     it('resolves dated full model ids to family pricing (#4084)', async () => {
       // A user pinning to a dated revision must still get a non-zero
       // cost, not the silent cost: 0 + warn that pre-fix produced.
-      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7-20251201' })
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8-20251201' })
       session._client = {
         messages: {
           stream: () =>
@@ -671,7 +671,7 @@ describe('ClaudeByokSession', () => {
       await session.sendMessage('q')
       const result = captured.find((e) => e.name === 'result')
       assert.ok(result)
-      // Same math as the canonical happy-path test (5in/4out on opus-4-7
+      // Same math as the canonical happy-path test (5in/4out on opus-4-8
       // = 0.000375 USD). Same numeric expectation proves the family
       // resolution worked.
       assert.ok(Math.abs(result.payload.cost - 0.000375) < 1e-9,
@@ -717,7 +717,7 @@ describe('ClaudeByokSession', () => {
           stream: () =>
             fakeStream(
               [
-                { type: 'message_start', message: { id: 'msg', model: 'claude-opus-4-7' } },
+                { type: 'message_start', message: { id: 'msg', model: 'claude-opus-4-8' } },
                 { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'response' } },
                 { type: 'message_stop' },
               ],
@@ -1173,7 +1173,7 @@ describe('ClaudeByokSession', () => {
         messages: {
           stream: () =>
             fakeStream([
-              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-8' } },
               { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_42', name: 'Read', input: {} } },
               { type: 'content_block_stop', index: 0 },
               { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 1, output_tokens: 1 } },
@@ -1262,7 +1262,7 @@ describe('ClaudeByokSession', () => {
             round += 1
             if (round === 1) {
               return fakeStream([
-                { type: 'message_start', message: { id: 'msg_turn_1', model: 'claude-opus-4-7' } },
+                { type: 'message_start', message: { id: 'msg_turn_1', model: 'claude-opus-4-8' } },
                 { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_01aaa', name: 'Read', input: {} } },
                 { type: 'content_block_stop', index: 0 },
                 { type: 'content_block_start', index: 1, content_block: { type: 'tool_use', id: 'toolu_02bbb', name: 'Bash', input: {} } },
@@ -1279,7 +1279,7 @@ describe('ClaudeByokSession', () => {
               })
             }
             return fakeStream([
-              { type: 'message_start', message: { id: 'msg_turn_2', model: 'claude-opus-4-7' } },
+              { type: 'message_start', message: { id: 'msg_turn_2', model: 'claude-opus-4-8' } },
               { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
               { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'done' } },
               { type: 'content_block_stop', index: 0 },
@@ -1335,7 +1335,7 @@ describe('ClaudeByokSession', () => {
         messages: {
           stream: () =>
             fakeStream([
-              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-8' } },
               // No `id` on the content_block — translator emits toolUseId: undefined.
               { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', name: 'Read', input: {} } },
               { type: 'content_block_stop', index: 0 },
@@ -1540,7 +1540,7 @@ describe('ClaudeByokSession', () => {
         messages: {
           stream: () =>
             fakeStream([
-              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-7' } },
+              { type: 'message_start', message: { id: 'msg_1', model: 'claude-opus-4-8' } },
               { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'tu_42', name: 'Read', input: {} } },
               { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: '{"file_pa' } },
               { type: 'content_block_delta', index: 0, delta: { type: 'input_json_delta', partial_json: 'th":"/tm' } },
@@ -1776,7 +1776,7 @@ describe('ClaudeByokSession', () => {
             if (callCount === 1) {
               return fakeStream(
                 [
-                  { type: 'message_start', message: { id: 'msg', model: 'claude-opus-4-7' } },
+                  { type: 'message_start', message: { id: 'msg', model: 'claude-opus-4-8' } },
                   { type: 'content_block_start', index: 0, content_block: { type: 'tool_use', id: 'toolu_1', name: 'Read', input: {} } },
                   { type: 'message_delta', delta: { stop_reason: 'tool_use' } },
                   { type: 'message_stop' },
@@ -3291,7 +3291,7 @@ describe('ClaudeByokSession', () => {
     })
 
     it('attributes child usage + cost into the parent turn result', async () => {
-      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
       session.setPermissionMode('auto')
       const captured = captureEvents(session)
       setupParentEmittingTaskOnce(session, {
@@ -3310,7 +3310,7 @@ describe('ClaudeByokSession', () => {
       // Total: 1007in/507out
       assert.equal(result.payload.usage.input_tokens, 1007, 'child input tokens fold into parent total')
       assert.equal(result.payload.usage.output_tokens, 507, 'child output tokens fold into parent total')
-      // Cost (Opus 4.7): (1007 * 15 + 507 * 75) / 1e6
+      // Cost (Opus 4.8): (1007 * 15 + 507 * 75) / 1e6
       const expectedCost = (1007 * 15 + 507 * 75) / 1e6
       assert.ok(Math.abs(result.payload.cost - expectedCost) < 1e-9,
         `expected cost ~= ${expectedCost}, got ${result.payload.cost}`)
@@ -3325,7 +3325,7 @@ describe('ClaudeByokSession', () => {
       //
       // Pre-#5020: error event carried only { code, message } — child cost
       // was silently dropped at _finishTurn reset.
-      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
       session.setPermissionMode('auto')
       const captured = captureEvents(session)
       let parentRound = 0
@@ -3386,7 +3386,7 @@ describe('ClaudeByokSession', () => {
         'parent round-1 input + child input fold into error event')
       assert.equal(streamErr.payload.usage.output_tokens, 810,
         'parent round-1 output + child output fold into error event')
-      // Cost (Opus 4.7): (2010 * 15 + 810 * 75) / 1e6
+      // Cost (Opus 4.8): (2010 * 15 + 810 * 75) / 1e6
       const expectedCost = (2010 * 15 + 810 * 75) / 1e6
       assert.ok(typeof streamErr.payload.cost === 'number',
         'STREAM_ERROR must carry partial cost')
@@ -4445,7 +4445,7 @@ describe('ClaudeByokSession', () => {
     })
 
     it('setModel updates without restart (stateless SDK client)', async () => {
-      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
       session._client = { messages: { stream: () => fakeStream([]) } }
       await session.start()
       session.setModel('claude-sonnet-4-6')
@@ -4459,7 +4459,7 @@ describe('ClaudeByokSession', () => {
       // BUT MCP trust prompts MUST NOT persist via the bypass — they
       // get denied so ~/.chroxy/mcp-trust.json stays untouched.
       const { existsSync, readFileSync } = await import('node:fs')
-      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-7' })
+      const session = new ClaudeByokSession({ cwd: '/tmp', model: 'claude-opus-4-8' })
       session._client = { messages: { stream: () => fakeStream([]) } }
       await session.start()
 

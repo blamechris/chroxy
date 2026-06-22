@@ -77,7 +77,7 @@ describe('createModelsRegistry', () => {
       { value: 'claude-sonnet-4', displayName: 'Sonnet', description: '' },
     ])
     // opus is always merged from FALLBACK_MODELS, so it wins the preference.
-    assert.equal(registry.getDefaultModelId(), 'opus-4-7')
+    assert.equal(registry.getDefaultModelId(), 'opus-4-8') // #6219 — opus head 4-7 → 4-8
   })
 
   it('picks the first converted entry when no opus/sonnet family is present (#5631)', () => {
@@ -225,7 +225,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     const r1 = createModelsRegistry()
     r1.updateModels([
       { value: 'claude-sonnet-4-6', displayName: 'Default (Sonnet 4.6)', description: '' },
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
     const r1Models = r1.getModels()
     assert.equal(r1.saveCache(cachePath), true)
@@ -266,7 +266,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'sonnet' }, // missing fullId
-        { fullId: 'claude-opus-4-7' }, // missing id
+        { fullId: 'claude-opus-4-8' }, // missing id
         { id: 42, fullId: 'claude-x' }, // wrong type
       ],
     }))
@@ -277,12 +277,12 @@ describe('disk cache (loadCache / saveCache)', () => {
   it('loadCache re-hydrates missing label/contextWindow on valid entries', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
-        { id: 'opus-4-7', fullId: 'claude-opus-4-7' }, // no label, no contextWindow
+        { id: 'opus-4-8', fullId: 'claude-opus-4-8' }, // no label, no contextWindow
       ],
     }))
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
-    assert.equal(r.getModels()[0].label, 'Opus 4.7')
+    assert.equal(r.getModels()[0].label, 'Opus 4.8')
     assert.equal(r.getModels()[0].contextWindow, 1_000_000)
   })
 
@@ -302,7 +302,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 }, // retired
-        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+        { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
         { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
       ],
       defaultModelId: 'sonnet-4-6',
@@ -311,7 +311,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     assert.equal(r.loadCache(cachePath), true)
     const loaded = r.getModels().map(m => m.fullId)
     assert.ok(!loaded.includes('claude-opus-4-6'), `retired claude-opus-4-6 should be dropped, got ${loaded.join(',')}`)
-    assert.ok(loaded.includes('claude-opus-4-7'), 'current claude-opus-4-7 should be kept')
+    assert.ok(loaded.includes('claude-opus-4-8'), 'current claude-opus-4-8 should be kept')
     assert.ok(loaded.includes('claude-sonnet-4-6'), 'current claude-sonnet-4-6 should be kept')
     // FALLBACK_MODELS includes haiku-4-5 — it should be merged in even though
     // the cache didn't have it, so the picker always has the canonical aliases.
@@ -336,22 +336,22 @@ describe('disk cache (loadCache / saveCache)', () => {
   it('loadCache keeps dated and [1m] variants whose stem matches a FALLBACK family', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
-        { id: 'opus-4-7-20251201', fullId: 'claude-opus-4-7-20251201', label: 'Opus 4.7 (2025-12-01)', contextWindow: 1_000_000 },
-        { id: 'opus-4-7[1m]', fullId: 'claude-opus-4-7[1m]', label: 'Opus 4.7 (1M)', contextWindow: 1_000_000 },
+        { id: 'opus-4-8-20251201', fullId: 'claude-opus-4-8-20251201', label: 'Opus 4.8 (2025-12-01)', contextWindow: 1_000_000 },
+        { id: 'opus-4-8[1m]', fullId: 'claude-opus-4-8[1m]', label: 'Opus 4.8 (1M)', contextWindow: 1_000_000 },
       ],
     }))
     const r = createModelsRegistry()
     assert.equal(r.loadCache(cachePath), true)
     const loaded = r.getModels().map(m => m.fullId)
-    assert.ok(loaded.includes('claude-opus-4-7-20251201'), 'dated variant of current opus-4-7 should be kept')
-    assert.ok(loaded.includes('claude-opus-4-7[1m]'), '[1m] variant of current opus-4-7 should be kept')
+    assert.ok(loaded.includes('claude-opus-4-8-20251201'), 'dated variant of current opus-4-8 should be kept')
+    assert.ok(loaded.includes('claude-opus-4-8[1m]'), '[1m] variant of current opus-4-8 should be kept')
   })
 
   it('loadCache discards a defaultModelId that points to a stale entry', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
-        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+        { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
       ],
       defaultModelId: 'opus-4-6',
     }))
@@ -388,7 +388,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     writeFileSync(cachePath, JSON.stringify({
       models: [
         { id: 'opus-4-6', fullId: 'claude-opus-4-6', label: 'Opus 4.6', contextWindow: 1_000_000 },
-        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+        { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
       ],
     }))
     const beforeMtime = statSync(cachePath).mtimeMs
@@ -400,7 +400,7 @@ describe('disk cache (loadCache / saveCache)', () => {
     const afterRaw = JSON.parse(readFileSync(cachePath, 'utf-8'))
     const afterIds = afterRaw.models.map(m => m.fullId)
     assert.ok(!afterIds.includes('claude-opus-4-6'), 'disk file should no longer contain claude-opus-4-6')
-    assert.ok(afterIds.includes('claude-opus-4-7'), 'disk file should still contain claude-opus-4-7')
+    assert.ok(afterIds.includes('claude-opus-4-8'), 'disk file should still contain claude-opus-4-8')
     assert.ok(statSync(cachePath).mtimeMs >= beforeMtime, 'disk file should have been touched')
   })
 
@@ -412,9 +412,10 @@ describe('disk cache (loadCache / saveCache)', () => {
     // file and bump mtime.
     writeFileSync(cachePath, JSON.stringify({
       models: [
-        { id: 'opus-4-7', fullId: 'claude-opus-4-7', label: 'Opus 4.7', contextWindow: 1_000_000 },
+        // #6219 — exactly the current FALLBACK_MODELS set (no fable: removed +
+        // disallowed, so seeding it would make loadCache heal the file).
+        { id: 'opus-4-8', fullId: 'claude-opus-4-8', label: 'Opus 4.8', contextWindow: 1_000_000 },
         { id: 'sonnet-4-6', fullId: 'claude-sonnet-4-6', label: 'Sonnet 4.6', contextWindow: 200_000 },
-        { id: 'fable-5', fullId: 'claude-fable-5', label: 'Fable 5', contextWindow: 200_000 },
         { id: 'haiku-4-5', fullId: 'claude-haiku-4-5', label: 'Haiku 4.5', contextWindow: 200_000 },
       ],
     }))
@@ -537,7 +538,7 @@ describe('silent failure logging (#2830)', () => {
     // Shape drift — no `value` key
     r.updateModels([
       { id: 'claude-sonnet-4-6', name: 'Sonnet 4.6' },
-      { id: 'claude-opus-4-7', name: 'Opus 4.7' },
+      { id: 'claude-opus-4-8', name: 'Opus 4.8' },
     ])
     const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped'))
     const none = entries.find(e => e.level === 'warn' && e.message.includes('none matched'))
@@ -551,7 +552,7 @@ describe('silent failure logging (#2830)', () => {
     const r = createModelsRegistry()
     r.updateModels([
       { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
-      { id: 'claude-opus-4-7', name: 'Opus 4.7' }, // missing `value`
+      { id: 'claude-opus-4-8', name: 'Opus 4.8' }, // missing `value`
     ])
     const drop = entries.find(e => e.level === 'warn' && e.message.includes('dropped 1/2'))
     assert.ok(drop, `expected a warn about 1/2 dropped, got: ${JSON.stringify(entries.map(e => e.message))}`)

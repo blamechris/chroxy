@@ -26,8 +26,8 @@ const log = createLogger('prompt-evaluator')
 // opus because the evaluator's job is to catch things a cheaper session model
 // would miss — using a less capable evaluator defeats the point of the feature.
 // Kept in sync with the canonical Opus id used elsewhere in the server
-// (see packages/server/src/models.js — `claude-opus-4-7`).
-const DEFAULT_MODEL = 'claude-opus-4-7'
+// (see packages/server/src/models.js — `claude-opus-4-8`).
+const DEFAULT_MODEL = 'claude-opus-4-8'
 
 // Cap the response so a runaway evaluator can't burn the whole context window
 // on its 'reasoning' field.
@@ -163,7 +163,7 @@ export function _resetSkipPatternCache() {
  * @param {object} args
  * @param {string} args.draft - The user's draft message (required, non-empty)
  * @param {string} [args.cwd] - Session cwd, included in the user prompt for context
- * @param {string} [args.model] - Anthropic model id (default: claude-opus-4-7
+ * @param {string} [args.model] - Anthropic model id (default: claude-opus-4-8
  *   or value of CHROXY_EVALUATOR_MODEL)
  * @param {string} [args.apiKey] - Anthropic API key (default: ANTHROPIC_API_KEY env)
  * @param {object} [args.client] - Test seam: pre-built Anthropic client (skips

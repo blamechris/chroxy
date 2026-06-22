@@ -52,6 +52,16 @@ describe('registry.applyOverlay (#5932)', () => {
     assert.ok(reg.getAllowedModelIds().has('fable-9'))
   })
 
+  it('#6219 — a disallowed fullId (claude-fable-5) cannot be re-added via overlay', () => {
+    const reg = makeRegistry()
+    reg.applyOverlay(overlayMap({ 'claude-fable-5': { shortId: 'fable', label: 'Fable' } }))
+    assert.ok(!reg.getModels().some((m) => m.fullId === 'claude-fable-5'), 'disallowed overlay row must be skipped')
+    assert.ok(!reg.getAllowedModelIds().has('claude-fable-5'))
+    // An unrelated overlay id that merely uses `fable` as a label is unaffected.
+    reg.applyOverlay(overlayMap({ 'fable-9': { shortId: 'fable', label: 'Fable' } }))
+    assert.ok(reg.getModels().some((m) => m.fullId === 'fable-9'), 'non-disallowed overlay row still lands')
+  })
+
   it('overrides a base row label/contextWindow from the overlay', () => {
     const reg = makeRegistry()
     reg.applyOverlay(overlayMap({ 'base-1': { label: 'Renamed', contextWindow: 99000 } }))

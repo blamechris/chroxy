@@ -228,7 +228,7 @@ export class ClaudeByokSession extends BaseSession {
   /**
    * @param {object} [opts]
    * @param {string} [opts.cwd]            Working directory for tool execution.
-   * @param {string} [opts.model]          Anthropic model id; falls back to `claude-opus-4-7`.
+   * @param {string} [opts.model]          Anthropic model id; falls back to `claude-opus-4-8`.
    * @param {string} [opts.mcpConfigPath]  Path to a Claude-style MCP config (default: `~/.claude.json` or `$CHROXY_CLAUDE_CONFIG`).
    *   Canonical name (#4449). Only the `mcpServers` block is read — the rest of the
    *   file is ignored. A previous `opts.claudeConfigPath` alias was removed because
@@ -405,7 +405,7 @@ export class ClaudeByokSession extends BaseSession {
   // table — no fork, no re-implementation of the streaming + tool +
   // permission + MCP machinery.
   get _defaultModel() {
-    return 'claude-opus-4-7'
+    return 'claude-opus-4-8'
   }
 
   _resolveCredentials() {

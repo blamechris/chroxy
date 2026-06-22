@@ -109,7 +109,7 @@ const MODEL_METADATA = Object.freeze([
     pricing: { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
   }),
   Object.freeze({
-    shortId: 'opus', label: 'Opus', fullId: 'claude-opus-4-7',
+    shortId: 'opus', label: 'Opus', fullId: 'claude-opus-4-8',
     pricing: { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
     // #4087 — long-context (>200K input) premium tier. Below the 200K
     // threshold the rates match the base entry; above it the published premium
@@ -124,18 +124,38 @@ const MODEL_METADATA = Object.freeze([
       },
     },
   }),
-  // Fable falls through to the 200k DEFAULT_CONTEXT_WINDOW heuristic on purpose
-  // — the SDK's authoritative modelUsage.contextWindow ratchets it after the
-  // first turn; we don't invent a fable window here. No `pricing` block: chroxy
-  // doesn't ship unverified fable rates, so it costs "unknown" (null), not $0.
-  Object.freeze({
-    shortId: 'fable', label: 'Fable', fullId: 'claude-fable-5',
-  }),
+  // #6219 — Fable (claude-fable-5) is disallowed for chroxy and removed from the
+  // roster. It is also filtered out of any SDK-returned list (DISALLOWED_MODEL_IDS
+  // below) so it can't reappear in SDK/TUI modes, not just the CLI fallback.
   Object.freeze({
     shortId: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5',
     pricing: { input: 1.00, output: 5.00, cacheRead: 0.10, cacheWrite: 1.25 },
   }),
 ])
+
+// #6219 — fullIds chroxy disallows regardless of source: the CLI fallback (gone
+// already, removed from MODEL_METADATA), the Agent SDK's supportedModels() push,
+// the disk cache, AND a user models-overlay.json. Fable (claude-fable-5) is
+// currently the only one. Keyed on the FULL id (not the short `fable` alias) so
+// the precise disallowed model is dropped without false-positiving an unrelated
+// overlay/SDK entry that merely uses `fable` as a short label. The short alias
+// can't resurface anyway — it only ever resolved to claude-fable-5, now removed.
+// The `[1m]` variant is also matched. Exported for tests + future enforcement.
+export const DISALLOWED_MODEL_IDS = Object.freeze(new Set(['claude-fable-5']))
+
+/**
+ * True when a model id resolves to a disallowed fullId, normalising the same id
+ * shapes the rest of this module supports: a trailing `[1m]` long-context suffix
+ * and/or a trailing `-YYYYMMDD` date stamp (the SDK's `Model` enum surfaces dated
+ * forms like `claude-fable-5-20251201`). So `claude-fable-5`, `claude-fable-5[1m]`,
+ * `claude-fable-5-20251201`, and `claude-fable-5-20251201[1m]` all match.
+ */
+export function isDisallowedModelId(id) {
+  if (typeof id !== 'string') return false
+  let base = id.endsWith('[1m]') ? id.slice(0, -'[1m]'.length) : id
+  base = base.replace(/-\d{8}$/, '') // strip a trailing YYYYMMDD date stamp
+  return DISALLOWED_MODEL_IDS.has(base)
+}
 
 // Freeze a pricing block (incl. the nested longContext premium) IN PLACE so the
 // derived CLAUDE_PRICING_USD_PER_MTOK keeps the deep-frozen contract callers
@@ -669,6 +689,8 @@ export function createModelsRegistry(hooks = {}) {
     const overriddenBase = []
     const baseByFullId = new Map(baseFallbackModels.map((m) => [m.fullId, m]))
     for (const entry of overlayMap.values()) {
+      // #6219 — an overlay must not reintroduce a disallowed model (e.g. fable).
+      if (isDisallowedModelId(entry.shortId) || isDisallowedModelId(entry.fullId)) continue
       const baseRow = baseByFullId.get(entry.fullId)
       if (baseRow) {
         // Override the base row's label/window from the overlay when supplied.
@@ -758,9 +780,31 @@ export function createModelsRegistry(hooks = {}) {
   }
 
   function applyModels(models, nextDefault) {
-    activeModels = models
-    defaultModelId = nextDefault
-    rebuildLookups(models)
+    // #6219 — strip disallowed models (fable) from ANY source funnelled through
+    // here (SDK updateModels(), disk loadCache()), so they can't appear in
+    // SDK/TUI modes. Skip the allocation when nothing is disallowed (the common
+    // case). The CLI fallback is already clean (removed from MODEL_METADATA).
+    const filtered = models.some((m) => isDisallowedModelId(m.id) || isDisallowedModelId(m.fullId))
+      ? models.filter((m) => !isDisallowedModelId(m.id) && !isDisallowedModelId(m.fullId))
+      : models
+    activeModels = filtered
+    // #6219 review (#6232): never leave defaultModelId pointing at a model that
+    // isn't in the active list — e.g. the SDK marked the now-filtered disallowed
+    // model (fable) as "Default", so nextDefault is its short id which isn't in
+    // `filtered`. A dangling default can't be resolved by the picker. When
+    // nextDefault is absent from the filtered list, re-pick a stable family head
+    // (opus → sonnet) else the first model (mirrors updateModels' fallback). Only
+    // fires when filtering actually dropped the chosen default — a present
+    // nextDefault (the common case + loadCache's own discard result) is kept.
+    const defaultPresent =
+      nextDefault != null && filtered.some((m) => m.id === nextDefault || m.fullId === nextDefault)
+    if (nextDefault != null && !defaultPresent) {
+      const preferred = filtered.find((m) => m.id === 'opus' || m.id === 'sonnet')
+      defaultModelId = preferred?.id ?? filtered[0]?.id ?? null
+    } else {
+      defaultModelId = nextDefault
+    }
+    rebuildLookups(filtered)
   }
 
   function snapshotString() {

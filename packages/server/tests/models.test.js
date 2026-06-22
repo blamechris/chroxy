@@ -1,6 +1,6 @@
 import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider, registerProviderRegistry, resolveClaudeContextWindow, DEFAULT_CONTEXT_WINDOW } from '../src/models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider, registerProviderRegistry, resolveClaudeContextWindow, DEFAULT_CONTEXT_WINDOW, DISALLOWED_MODEL_IDS, isDisallowedModelId, getDefaultModelId } from '../src/models.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 // #5858: membership is now derived from `static claudeFamily` on the registered
 // provider classes (no hand-authored name literal). Importing providers.js
@@ -22,9 +22,9 @@ describe('FALLBACK_MODELS (default registry)', () => {
     }
   })
 
-  it('contains sonnet, opus, fable, and haiku aliases', () => {
+  it('contains sonnet, opus, and haiku aliases', () => {
     const ids = FALLBACK_MODELS.map(m => m.id).sort()
-    assert.deepEqual(ids, ['fable', 'haiku', 'opus', 'sonnet'])
+    assert.deepEqual(ids, ['haiku', 'opus', 'sonnet']) // #6219 — fable removed
   })
 
   it('each entry has id, label, fullId, and contextWindow', () => {
@@ -76,7 +76,7 @@ describe('resolveClaudeContextWindow (#5931 — version-aware opus heuristic)', 
     // not be parsed as minor=20250514 (which would wrongly map it to 1M).
     assert.equal(resolveClaudeContextWindow('claude-opus-4-20250514'), DEFAULT_CONTEXT_WINDOW)
     // But a VERSIONED + dated id keeps its real minor → opus 4.7 dated is 1M.
-    assert.equal(resolveClaudeContextWindow('claude-opus-4-7-20251201'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-8-20251201'), 1_000_000)
   })
 
   it('defaults non-opus families to 200k', () => {
@@ -181,7 +181,7 @@ describe('updateModels', () => {
     it('logs warn when a 1M variant is synthesized but no pricing entry exists', () => {
       // claude-opus-4-6 resolves to 1M context via the heuristic, but
       // CLAUDE_PRICING_USD_PER_MTOK doesn't carry a `claude-opus-4-6[1m]`
-      // entry (only opus-4-7[1m] exists today). The base `claude-opus-4-6`
+      // entry (only opus-4-8[1m] exists today). The base `claude-opus-4-6`
       // entry is also absent, so resolvePricingKey returns null and cost
       // would be 0 — the drift warn fires regardless of WHICH undercount
       // path applies, so operators notice before bills lie.
@@ -195,9 +195,9 @@ describe('updateModels', () => {
       )
     })
 
-    it('does not warn for the existing claude-opus-4-7[1m] (pricing entry exists)', () => {
+    it('does not warn for the existing claude-opus-4-8[1m] (pricing entry exists)', () => {
       updateModels([
-        { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+        { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
       ])
       const drift = warnings.filter(w => w.includes('pricing-table drift'))
       assert.equal(drift.length, 0, `unexpected drift warning: ${JSON.stringify(warnings)}`)
@@ -262,23 +262,24 @@ describe('updateModels', () => {
     assert.equal(result[1].fullId, 'claude-opus-4-6')
     assert.equal(result[1].contextWindow, 1_000_000)
 
-    // Fallback entries the SDK didn't list are appended (Opus 4.7, Fable, Haiku 4.5).
+    // Fallback entries the SDK didn't list are appended (Opus 4.8, Haiku 4.5).
+    // #6219 — fable removed from the roster, so it is no longer merged.
     const fullIds = result.map(m => m.fullId)
-    assert.ok(fullIds.includes('claude-opus-4-7'), 'opus 4.7 fallback should be merged in')
-    assert.ok(fullIds.includes('claude-fable-5'), 'fable fallback should be merged in')
+    assert.ok(fullIds.includes('claude-opus-4-8'), 'opus 4.8 fallback should be merged in')
+    assert.ok(!fullIds.includes('claude-fable-5'), 'fable must not be merged (disallowed)')
     assert.ok(fullIds.includes('claude-haiku-4-5'), 'haiku 4.5 fallback should be merged in')
 
     // 1M variants are synthesized for any 1M-context model that lacks one.
     assert.ok(fullIds.includes('claude-opus-4-6[1m]'), 'opus 4.6 [1m] variant should be synthesized')
-    assert.ok(fullIds.includes('claude-opus-4-7[1m]'), 'opus 4.7 [1m] variant should be synthesized')
+    assert.ok(fullIds.includes('claude-opus-4-8[1m]'), 'opus 4.8 [1m] variant should be synthesized')
 
     const models = getModels()
     assert.deepEqual(models, result)
   })
 
-  it('opus 4.7 gets a 1M context window', () => {
+  it('opus 4.8 gets a 1M context window', () => {
     const result = updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
     assert.equal(result[0].contextWindow, 1_000_000)
   })
@@ -372,16 +373,16 @@ describe('1M-context variants and fallback merge (regression for #3075)', () => 
 
   it('synthesizes [1m] chips for any model with a 1M context window', () => {
     const result = updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
     const fullIds = result.map(m => m.fullId)
-    assert.ok(fullIds.includes('claude-opus-4-7'), 'base model present')
-    assert.ok(fullIds.includes('claude-opus-4-7[1m]'), '1m variant synthesized')
+    assert.ok(fullIds.includes('claude-opus-4-8'), 'base model present')
+    assert.ok(fullIds.includes('claude-opus-4-8[1m]'), '1m variant synthesized')
 
-    const variant = result.find(m => m.fullId === 'claude-opus-4-7[1m]')
+    const variant = result.find(m => m.fullId === 'claude-opus-4-8[1m]')
     assert.equal(variant.contextWindow, 1_000_000)
-    assert.equal(variant.label, 'Opus 4.7 (1M)')
-    assert.equal(variant.id, 'opus-4-7[1m]')
+    assert.equal(variant.label, 'Opus 4.8 (1M)')
+    assert.equal(variant.id, 'opus-4-8[1m]')
   })
 
   it('does not duplicate a [1m] chip the SDK already reports', () => {
@@ -402,9 +403,9 @@ describe('1M-context variants and fallback merge (regression for #3075)', () => 
       'haiku has 200k context — must not get a 1m chip')
   })
 
-  it('merges fallback models the SDK omitted (Opus 4.7 missing → fallback merged)', () => {
+  it('merges fallback models the SDK omitted (Opus 4.8 missing → fallback merged)', () => {
     // Reproduces the exact bug from #3075: SDK only reports 4.6 family, but
-    // fallback knows about Opus 4.7 — the picker should show all of them.
+    // fallback knows about Opus 4.8 — the picker should show all of them.
     const result = updateModels([
       { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
       { value: 'claude-opus-4-6', displayName: 'Opus 4.6', description: '' },
@@ -412,21 +413,21 @@ describe('1M-context variants and fallback merge (regression for #3075)', () => 
     const fullIds = result.map(m => m.fullId)
     assert.ok(fullIds.includes('claude-sonnet-4-6'))
     assert.ok(fullIds.includes('claude-opus-4-6'))
-    assert.ok(fullIds.includes('claude-opus-4-7'), 'Opus 4.7 missing from SDK should be merged from fallback')
+    assert.ok(fullIds.includes('claude-opus-4-8'), 'Opus 4.8 missing from SDK should be merged from fallback')
     assert.ok(fullIds.includes('claude-haiku-4-5'))
     // And both 1M-context models get [1m] chips.
     assert.ok(fullIds.includes('claude-opus-4-6[1m]'))
-    assert.ok(fullIds.includes('claude-opus-4-7[1m]'))
+    assert.ok(fullIds.includes('claude-opus-4-8[1m]'))
   })
 
   it('1M variants are addressable via resolveModelId/toShortModelId', () => {
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
-    assert.equal(resolveModelId('opus-4-7[1m]'), 'claude-opus-4-7[1m]')
-    assert.equal(toShortModelId('claude-opus-4-7[1m]'), 'opus-4-7[1m]')
-    assert.ok(ALLOWED_MODEL_IDS.has('claude-opus-4-7[1m]'))
-    assert.ok(ALLOWED_MODEL_IDS.has('opus-4-7[1m]'))
+    assert.equal(resolveModelId('opus-4-8[1m]'), 'claude-opus-4-8[1m]')
+    assert.equal(toShortModelId('claude-opus-4-8[1m]'), 'opus-4-8[1m]')
+    assert.ok(ALLOWED_MODEL_IDS.has('claude-opus-4-8[1m]'))
+    assert.ok(ALLOWED_MODEL_IDS.has('opus-4-8[1m]'))
   })
 
   it('SDK-reported [1m] entries get the 1M context window via the heuristic', () => {
@@ -462,7 +463,7 @@ describe('short aliases survive updateModels', () => {
   it('keeps sonnet/opus/haiku in ALLOWED_MODEL_IDS after SDK list replaces getModels()', () => {
     updateModels([
       { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
       { value: 'claude-haiku-4-5', displayName: 'Haiku 4.5', description: '' },
     ])
 
@@ -471,7 +472,7 @@ describe('short aliases survive updateModels', () => {
     assert.ok(ALLOWED_MODEL_IDS.has('opus'))
     assert.ok(ALLOWED_MODEL_IDS.has('haiku'))
     assert.equal(resolveModelId('sonnet'), 'claude-sonnet-4-6')
-    assert.equal(resolveModelId('opus'), 'claude-opus-4-7')
+    assert.equal(resolveModelId('opus'), 'claude-opus-4-8')
     assert.equal(resolveModelId('haiku'), 'claude-haiku-4-5')
   })
 
@@ -505,19 +506,19 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
 
   it('overwrites the static fallback guess when SDK reports a different value', () => {
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
-    // Static heuristic guesses 1M for opus-4-7; verify we can correct it.
+    // Static heuristic guesses 1M for opus-4-8; verify we can correct it.
     assert.equal(getModels()[0].contextWindow, 1_000_000)
-    assert.equal(updateContextWindow('claude-opus-4-7', 200_000), true)
+    assert.equal(updateContextWindow('claude-opus-4-8', 200_000), true)
     assert.equal(getModels()[0].contextWindow, 200_000)
   })
 
   it('returns false and no-ops when the value already matches', () => {
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
-    assert.equal(updateContextWindow('claude-opus-4-7', 1_000_000), false)
+    assert.equal(updateContextWindow('claude-opus-4-8', 1_000_000), false)
   })
 
   it('matches short id as well as full id', () => {
@@ -534,11 +535,11 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
 
   it('rejects invalid context windows', () => {
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
-    assert.equal(updateContextWindow('claude-opus-4-7', 0), false)
-    assert.equal(updateContextWindow('claude-opus-4-7', -1), false)
-    assert.equal(updateContextWindow('claude-opus-4-7', 'big'), false)
+    assert.equal(updateContextWindow('claude-opus-4-8', 0), false)
+    assert.equal(updateContextWindow('claude-opus-4-8', -1), false)
+    assert.equal(updateContextWindow('claude-opus-4-8', 'big'), false)
   })
 
   it('override survives subsequent updateModels refreshes (regression for #2820)', () => {
@@ -546,27 +547,27 @@ describe('updateContextWindow (self-correcting from SDK usage)', () => {
     // updateModels() rebuild cannot clobber a value we already learned from
     // modelUsage — otherwise the self-correcting loop never converges.
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
     assert.equal(getModels()[0].contextWindow, 1_000_000) // static heuristic
-    updateContextWindow('claude-opus-4-7', 500_000)       // SDK-reported override
+    updateContextWindow('claude-opus-4-8', 500_000)       // SDK-reported override
     assert.equal(getModels()[0].contextWindow, 500_000)
 
     // Simulate the next supportedModels() refresh — same list.
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
     assert.equal(getModels()[0].contextWindow, 500_000, 'override must persist across refreshes')
   })
 
   it('resetModels clears overrides so next updateModels uses the heuristic again', () => {
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
-    updateContextWindow('claude-opus-4-7', 500_000)
+    updateContextWindow('claude-opus-4-8', 500_000)
     resetModels()
     updateModels([
-      { value: 'claude-opus-4-7', displayName: 'Opus 4.7', description: '' },
+      { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
     assert.equal(getModels()[0].contextWindow, 1_000_000)
   })
@@ -589,8 +590,8 @@ describe('getModelPricing()', () => {
   })
 
   it('returns base rates matching the default-window entry for the [1m] suffix below threshold (#4087)', () => {
-    const base = getModelPricing('claude-opus-4-7')
-    const long = getModelPricing('claude-opus-4-7[1m]')
+    const base = getModelPricing('claude-opus-4-8')
+    const long = getModelPricing('claude-opus-4-8[1m]')
     // The base rates on the [1m] entry match the default-window entry —
     // sub-200K turns on Opus 1M cost the same as default Opus.
     assert.equal(long.input, base.input)
@@ -600,7 +601,7 @@ describe('getModelPricing()', () => {
   })
 
   it('[1m] entry carries a longContext block with the >200K premium rates (#4087)', () => {
-    const long = getModelPricing('claude-opus-4-7[1m]')
+    const long = getModelPricing('claude-opus-4-8[1m]')
     assert.ok(long.longContext, '[1m] entry must declare premium rates')
     assert.equal(long.longContext.thresholdInputTokens, 200_000)
     // Anthropic's published 1M premium: 2× input, 2× output (verify on
@@ -616,17 +617,17 @@ describe('getModelPricing()', () => {
     // The default-window entry can't ever exceed 200K (the window itself
     // is 200K), so premium pricing is irrelevant and would be misleading
     // if present. Confirms the design: longContext lives on `[1m]` only.
-    const base = getModelPricing('claude-opus-4-7')
+    const base = getModelPricing('claude-opus-4-8')
     assert.equal(base.longContext, undefined)
   })
 
   it('returns family-head pricing for dated full ids (Anthropic SDK Model enum form, #4084)', () => {
-    // The SDK's Model enum surfaces forms like claude-opus-4-7-20251201
+    // The SDK's Model enum surfaces forms like claude-opus-4-8-20251201
     // that users may pin for reproducibility. Without this, a pinned user
     // silently emits cost: 0.
-    const base = getModelPricing('claude-opus-4-7')
+    const base = getModelPricing('claude-opus-4-8')
     assert.deepEqual(
-      getModelPricing('claude-opus-4-7-20251201'),
+      getModelPricing('claude-opus-4-8-20251201'),
       base,
       'dated full id must resolve to its family head pricing',
     )
@@ -638,11 +639,11 @@ describe('getModelPricing()', () => {
     // A user pinning to a dated long-context variant must still get the
     // longContext premium block — pre-#4107 this fell through to the base
     // family entry, silently undercounting >200K turns. The combined form
-    // walks: verbatim miss → strip [1m] → 'claude-opus-4-7-20251201' miss
-    // → strip date → 'claude-opus-4-7' HIT base. The [1m] re-attach then
-    // promotes 'claude-opus-4-7' → 'claude-opus-4-7[1m]'.
-    const longOpus = getModelPricing('claude-opus-4-7[1m]')
-    assert.deepEqual(getModelPricing('claude-opus-4-7-20251201[1m]'), longOpus)
+    // walks: verbatim miss → strip [1m] → 'claude-opus-4-8-20251201' miss
+    // → strip date → 'claude-opus-4-8' HIT base. The [1m] re-attach then
+    // promotes 'claude-opus-4-8' → 'claude-opus-4-8[1m]'.
+    const longOpus = getModelPricing('claude-opus-4-8[1m]')
+    assert.deepEqual(getModelPricing('claude-opus-4-8-20251201[1m]'), longOpus)
   })
 
   it('still returns null for genuinely unknown dated families (no false-positive resolution)', () => {
@@ -670,12 +671,12 @@ describe('getModelPricing()', () => {
     // family. Pin the negative cases so a "make the regex looser" refactor
     // fails loudly.
     assert.equal(
-      getModelPricing('claude-opus-4-7-2025'),
+      getModelPricing('claude-opus-4-8-2025'),
       null,
       '4-digit year fragment must not trigger date-strip',
     )
     assert.equal(
-      getModelPricing('claude-opus-4-7-1234567'),
+      getModelPricing('claude-opus-4-8-1234567'),
       null,
       '7-digit trailing number must not trigger date-strip',
     )
@@ -683,8 +684,8 @@ describe('getModelPricing()', () => {
     // bound is forgiving for future timestamp formats). Asserted here to
     // make the boundary explicit alongside the negative cases.
     assert.deepEqual(
-      getModelPricing('claude-opus-4-7-123456789'),
-      getModelPricing('claude-opus-4-7'),
+      getModelPricing('claude-opus-4-8-123456789'),
+      getModelPricing('claude-opus-4-8'),
       '9-digit trailing number must trigger date-strip (forgiving upper bound)',
     )
   })
@@ -704,9 +705,9 @@ describe('getModelPricing()', () => {
   describe('[1m] re-attach after fallback resolution (#4105 + #4107)', () => {
     it('short-form opus[1m] routes to the explicit [1m] entry (premium pricing preserved)', () => {
       // resolvePricingKey walks: verbatim miss → strip [1m] → 'opus' table
-      // miss → fallback m.id === 'opus' → fullId 'claude-opus-4-7'. Before
+      // miss → fallback m.id === 'opus' → fullId 'claude-opus-4-8'. Before
       // the fix, this returned the base entry (no longContext block);
-      // after, it re-attaches [1m] and returns 'claude-opus-4-7[1m]'
+      // after, it re-attaches [1m] and returns 'claude-opus-4-8[1m]'
       // with the longContext premium.
       const longOpus = getModelPricing('opus[1m]')
       assert.ok(longOpus, 'opus[1m] should resolve to a pricing entry')
@@ -715,11 +716,11 @@ describe('getModelPricing()', () => {
     })
 
     it('dated + [1m] combined form routes to the explicit [1m] entry', () => {
-      // claude-opus-4-7-20251201[1m] walks: verbatim miss → strip [1m] →
-      // 'claude-opus-4-7-20251201' miss → strip date → 'claude-opus-4-7'
+      // claude-opus-4-8-20251201[1m] walks: verbatim miss → strip [1m] →
+      // 'claude-opus-4-8-20251201' miss → strip date → 'claude-opus-4-8'
       // HIT (base entry). Before the fix, returned base. After, re-attaches
-      // [1m] → returns 'claude-opus-4-7[1m]'.
-      const pricing = getModelPricing('claude-opus-4-7-20251201[1m]')
+      // [1m] → returns 'claude-opus-4-8[1m]'.
+      const pricing = getModelPricing('claude-opus-4-8-20251201[1m]')
       assert.ok(pricing, 'dated [1m] form should resolve')
       assert.ok(pricing.longContext, 'dated + [1m] form must keep premium tier (was missed pre-#4107)')
     })
@@ -795,16 +796,16 @@ describe('computePromptCostUsd()', () => {
     assert.equal(cost, 0)
   })
 
-  it('matches Opus 4.7 rate for the canonical happy-path test in byok-session', () => {
-    const opus = getModelPricing('claude-opus-4-7')
-    // The byok-session test asserts cost = 0.000375 for 5in/4out on opus-4-7.
+  it('matches Opus 4.8 rate for the canonical happy-path test in byok-session', () => {
+    const opus = getModelPricing('claude-opus-4-8')
+    // The byok-session test asserts cost = 0.000375 for 5in/4out on opus-4-8.
     // If the rate ever changes, the byok-session test's literal must change too.
     const cost = computePromptCostUsd({ input_tokens: 5, output_tokens: 4 }, opus)
     assert.ok(Math.abs(cost - 0.000375) < 1e-9, `opus 5in/4out reference: expected 0.000375, got ${cost}`)
   })
 
   describe('long-context premium tier (#4087)', () => {
-    const longOpus = getModelPricing('claude-opus-4-7[1m]')
+    const longOpus = getModelPricing('claude-opus-4-8[1m]')
 
     it('uses BASE rates when total input is below 200K (Opus [1m])', () => {
       // 100K input, 50K output — both well below threshold.
@@ -845,7 +846,7 @@ describe('computePromptCostUsd()', () => {
       // A pathological usage report (claims 300K input on default-window
       // model) must still use base rates — there's no longContext block
       // to flip into.
-      const baseOpus = getModelPricing('claude-opus-4-7')
+      const baseOpus = getModelPricing('claude-opus-4-8')
       const cost = computePromptCostUsd({ input_tokens: 300_000, output_tokens: 0 }, baseOpus)
       // 300K * 15/Mtok = 4.5 (base)
       assert.ok(Math.abs(cost - 4.5) < 1e-6, `default-window must stay on base regardless, got ${cost}`)
@@ -952,5 +953,61 @@ describe('isClaudeProvider — Claude-family provider allowlist', () => {
     // A class with no flag falls through to the name resolution.
     class NoFlag {}
     assert.equal(isClaudeProvider('claude-tui', NoFlag), true)
+  })
+})
+
+// #6219 — Fable (claude-fable-5) is disallowed across ALL sources.
+describe('disallowed models (#6219)', () => {
+  beforeEach(() => resetModels())
+  afterEach(() => resetModels())
+
+  it('isDisallowedModelId matches claude-fable-5 (and its [1m] variant), not allowed models', () => {
+    assert.ok(DISALLOWED_MODEL_IDS.has('claude-fable-5'))
+    assert.equal(isDisallowedModelId('claude-fable-5'), true)
+    assert.equal(isDisallowedModelId('claude-fable-5[1m]'), true)
+    // Dated SDK forms (claude-*-YYYYMMDD) and dated+[1m] also normalise + match.
+    assert.equal(isDisallowedModelId('claude-fable-5-20251201'), true)
+    assert.equal(isDisallowedModelId('claude-fable-5-20251201[1m]'), true)
+    assert.equal(isDisallowedModelId('claude-opus-4-8'), false)
+    assert.equal(isDisallowedModelId('claude-opus-4-8-20251201'), false)
+    assert.equal(isDisallowedModelId('claude-sonnet-4-6'), false)
+    // The bare short alias is NOT keyed (avoids clobbering unrelated overlay
+    // ids that merely use `fable` as a label) — only the real fullId is.
+    assert.equal(isDisallowedModelId('fable'), false)
+    assert.equal(isDisallowedModelId(undefined), false)
+  })
+
+  it('fable is absent from FALLBACK_MODELS and the allowlist', () => {
+    assert.ok(!FALLBACK_MODELS.some((m) => m.fullId === 'claude-fable-5'))
+    assert.ok(!ALLOWED_MODEL_IDS.has('claude-fable-5'))
+    assert.ok(!ALLOWED_MODEL_IDS.has('fable'))
+  })
+
+  it('updateModels strips an SDK-returned claude-fable-5 (disallowed in SDK/TUI too)', () => {
+    updateModels([
+      { value: 'claude-sonnet-4-6', displayName: 'Default (Sonnet 4.6)', description: '' },
+      { value: 'claude-fable-5', displayName: 'Fable 5', description: '' },
+    ])
+    const fullIds = getModels().map((m) => m.fullId)
+    assert.ok(!fullIds.includes('claude-fable-5'), 'SDK-returned fable must be filtered out')
+    assert.ok(!ALLOWED_MODEL_IDS.has('claude-fable-5'), 'fable must not enter the allowlist')
+    // A legitimate SDK model alongside it still lands.
+    assert.ok(fullIds.includes('claude-sonnet-4-6'))
+  })
+
+  it('does not leave defaultModelId pointing at a filtered-out disallowed model (#6232)', () => {
+    // SDK marks the disallowed model as "Default" — after filtering it out the
+    // default must re-resolve to a real model, never a dangling fable id.
+    updateModels([
+      { value: 'claude-fable-5', displayName: 'Default (Fable 5)', description: '' },
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
+    ])
+    const def = getDefaultModelId()
+    const fullIds = getModels().map((m) => m.fullId)
+    assert.ok(!fullIds.includes('claude-fable-5'), 'fable filtered out')
+    assert.notEqual(def, 'fable', 'default must not be the filtered-out disallowed short id')
+    assert.notEqual(def, 'claude-fable-5', 'default must not be the filtered-out disallowed fullId')
+    // The re-picked default resolves to a model that is actually in the list.
+    assert.ok(def != null && getModels().some((m) => m.id === def || m.fullId === def), 'default resolves to a present model')
   })
 })
