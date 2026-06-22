@@ -1,0 +1,11 @@
+# Automatically generated - DO NOT EDIT!
+
+[[permission]]
+identifier = "allow-update-tray-badge"
+description = "Enables the update_tray_badge command without any pre-configured scope."
+commands.allow = ["update_tray_badge"]
+
+[[permission]]
+identifier = "deny-update-tray-badge"
+description = "Denies the update_tray_badge command without any pre-configured scope."
+commands.deny = ["update_tray_badge"]
