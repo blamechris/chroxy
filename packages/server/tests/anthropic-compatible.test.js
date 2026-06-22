@@ -349,8 +349,10 @@ describe('anthropic-compatible config validation', () => {
 
     it('warns on unknown sub-keys of the providers object', () => {
       const warnings = []
-      validateProvidersConfigBlock({ anthropicCompatible: [], openaiCompatible: [] }, warnings)
-      assert.ok(warnings.some((w) => w.includes("'providers.openaiCompatible'") && w.includes('ignored')))
+      // #5420: openaiCompatible is now a KNOWN key (not ignored); use a
+      // genuinely-unrecognized key to exercise the unknown-sub-key warning.
+      validateProvidersConfigBlock({ anthropicCompatible: [], openaiCompatible: [], bogusKey: [] }, warnings)
+      assert.ok(warnings.some((w) => w.includes("'providers.bogusKey'") && w.includes('ignored')))
     })
   })
 })

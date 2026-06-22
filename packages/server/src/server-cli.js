@@ -37,6 +37,7 @@ import { getToken, setToken, migrateToken, isKeychainAvailable } from './keychai
 import { maybeEncryptCredentialsAtRest } from './credential-store.js'
 import { registerDockerProvider, resolveProviderLabel, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
 import { loadModelsCache, getModels, watchModelsOverlay } from './models.js'
@@ -529,6 +530,12 @@ export async function startCliServer(config) {
   // `config.provider` can select one. Invalid entries are warned about
   // and skipped; valid siblings still register.
   registerAnthropicCompatibleProviders(config)
+  // #5420: register config-driven OpenAI-compatible endpoints from
+  // `providers.openaiCompatible` (OpenAI, OpenRouter, LM Studio, vLLM,
+  // llama.cpp, Together, Groq, custom). Same entry shape, but the session
+  // talks chat-completions via the Anthropic↔OpenAI shim. Registered right
+  // after the Anthropic-compatible block (collision-checked against it).
+  registerOpenAiCompatibleProviders(config)
 
   const providerType = config.provider || DEFAULT_PROVIDER
 
