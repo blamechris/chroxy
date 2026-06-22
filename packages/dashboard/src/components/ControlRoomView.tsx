@@ -502,6 +502,15 @@ export function ControlRoomView({
       clearInterval(repeatRef.current)
       repeatRef.current = null
     }
+    // #6241 review: clear the repeat marker on the NEXT tick, not now — the click
+    // that trails a hold-release fires after pointerup (same task) and must still
+    // be swallowed by `handleChevronClick`, but a hold that ends WITHOUT a click
+    // (pointerleave/cancel, or mouseup off the button) must not leave the flag set
+    // to swallow a later, unrelated click. (handleChevronClick also resets it
+    // synchronously on the swallow, so this only covers the no-trailing-click case.)
+    setTimeout(() => {
+      didRepeatRef.current = false
+    }, 0)
   }, [])
   const startHold = useCallback((dir: -1 | 1) => {
     stopHold()
@@ -536,7 +545,12 @@ export function ControlRoomView({
   })
   const dragMovedRef = useRef(false)
   const onStripPointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
-    if (e.button !== 0) return
+    // #6241 review: drag-to-scroll is a MOUSE affordance only — touch/pen get
+    // native horizontal panning (CSS `touch-action: pan-x`), so running the
+    // manual drag for them would double-scroll. Also resets `dragMovedRef` for
+    // EVERY pointerdown (a tab click bubbles here first), so a genuine tab click
+    // after a prior drag is never wrongly suppressed.
+    if (e.button !== 0 || e.pointerType !== 'mouse') return
     const el = tablistRef.current
     if (!el) return
     dragRef.current = { active: true, startX: e.clientX, startScroll: el.scrollLeft }
@@ -555,6 +569,13 @@ export function ControlRoomView({
   }, [])
   const endStripDrag = useCallback(() => {
     dragRef.current.active = false
+    // #6241 review: clear the drag marker on the next tick (same rationale as the
+    // hold marker) so a drag that ends WITHOUT a trailing tab-click — including a
+    // later keyboard activation of a tab, which fires a click with no preceding
+    // pointerdown to reset the flag — isn't wrongly suppressed.
+    setTimeout(() => {
+      dragMovedRef.current = false
+    }, 0)
   }, [])
 
   // Clear any in-flight hold timer/interval on unmount so a press-and-hold that
@@ -602,6 +623,7 @@ export function ControlRoomView({
           onPointerMove={onStripPointerMove}
           onPointerUp={endStripDrag}
           onPointerCancel={endStripDrag}
+          onPointerLeave={endStripDrag}
         >
         {CONTROL_ROOM_TABS.map((t, i) => {
           const active = tab === t.key
