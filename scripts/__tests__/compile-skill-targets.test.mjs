@@ -42,6 +42,11 @@ const assert = (cond, msg) => {
   if (!cond) throw new Error(msg || 'assertion failed')
 }
 
+// Count visible glyphs (grapheme clusters), not UTF-16 code units — the unit the
+// cap is measured in since #6261.
+const countGraphemes = (s) =>
+  [...new Intl.Segmenter('en', { granularity: 'grapheme' }).segment(s)].length
+
 // A long single sentence with no early period and clearly numbered words, so a
 // mid-word cut is detectable: "word001 word002 … word040" (8-char stride).
 const numberedWords = (n) =>
@@ -111,6 +116,38 @@ await test('passes a 160-char string through but truncates at 161 on a word boun
   assert(truncated.endsWith('...'), 'a 161-char string should be truncated')
   assert(truncated.length <= 160, `truncated string should respect the cap, got length ${truncated.length}`)
   assert(truncated === 'a'.repeat(80) + '...', `should cut at the word boundary, got: ${JSON.stringify(truncated)}`)
+})
+
+// --- Test 7: grapheme-aware cap — a ZWJ sequence counts as ONE glyph (#6261) -
+// A "family" emoji is a single grapheme cluster but 7 code points / 11 UTF-16
+// code units. 30 of them is 30 graphemes (well under the 160 cap) yet 330 code
+// units (well over it). A code-unit cap would wrongly truncate — and slice a
+// family mid-ZWJ-sequence; a grapheme cap leaves the string untouched.
+await test('counts a ZWJ emoji sequence as one glyph and does not truncate under the cap', async () => {
+  const family = '👨‍👩‍👧‍👦' // 1 grapheme, 7 code points, 11 UTF-16 code units
+  const body = family.repeat(30) // 30 graphemes / 330 code units
+  assert(countGraphemes(body) === 30 && body.length === 330, 'fixture sanity: 30 graphemes, 330 code units')
+  const desc = deriveDescription(body, 'demo')
+  assert(desc === body, `a 30-grapheme string must pass through untouched (a UTF-16 cap would truncate it), got length ${desc.length}`)
+  assert(!desc.endsWith('...'), 'must not truncate a 30-grapheme description')
+})
+
+// --- Test 8: grapheme-aware cut — a space-less emoji run never splits a pair --
+// 200 emoji with no spaces to break on must hard-cut on a cluster boundary. A
+// UTF-16 slice at 157 units would bisect emoji #79's surrogate pair and leak a
+// lone high surrogate; a grapheme cut keeps every emoji whole.
+await test('hard-cuts a space-less emoji run on a cluster boundary, never a lone surrogate', async () => {
+  const emoji = '😀' // 1 grapheme, 2 UTF-16 code units
+  const body = emoji.repeat(200)
+  const desc = deriveDescription(body, 'demo')
+  assert(desc.endsWith('...'), `should truncate a 200-emoji run, got: ${JSON.stringify(desc.slice(0, 12))}…`)
+  const visible = desc.slice(0, -3) // strip the ASCII ellipsis
+  // Strip valid surrogate PAIRS; any surviving surrogate code unit is a lone
+  // (split) surrogate — the signature of a mid-cluster cut.
+  const stripped = visible.replace(/[\uD800-\uDBFF][\uDC00-\uDFFF]/g, '')
+  assert(!/[\uD800-\uDFFF]/.test(stripped), 'a lone surrogate leaked — the cut sliced mid-cluster')
+  assert([...visible].every((ch) => ch === emoji), 'every visible glyph must be a whole emoji')
+  assert(countGraphemes(visible) <= 160, `visible text must respect the 160-grapheme cap, got ${countGraphemes(visible)}`)
 })
 
 // --- summary --------------------------------------------------------------

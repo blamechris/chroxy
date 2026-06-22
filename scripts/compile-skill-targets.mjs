@@ -68,6 +68,15 @@ function stripStamp(body) {
   return body.replace(/^<!--\s*skill-templates:.*?-->\s*$/gm, '').replace(/\n{3,}$/g, '\n').trimEnd() + '\n'
 }
 
+// Measure and cut descriptions on grapheme-cluster boundaries (not UTF-16 code
+// units) so a description dense in astral-plane characters (emoji, ZWJ sequences,
+// combining marks) caps by visible-glyph count and never slices mid-cluster
+// (#6261). Intl.Segmenter is built into Node — no dependency. For ASCII text every
+// grapheme is exactly one code unit, so the cap and cut points are byte-identical
+// to the old String.length / slice path.
+const GRAPHEME_SEG = new Intl.Segmenter('en', { granularity: 'grapheme' })
+const toGraphemes = (s) => Array.from(GRAPHEME_SEG.segment(s), (g) => g.segment)
+
 // First sentence of the first non-heading prose PARAGRAPH -> a clean one-line
 // description for menus. Accumulate the whole paragraph first (the source's first
 // sentence often wraps across several physical lines) so we don't return a dangling
@@ -85,16 +94,24 @@ export function deriveDescription(body, name) {
   if (!para) return `Project skill: /${name}`
   let desc = para.replace(/\s+/g, ' ').trim()
   const dot = desc.search(/\.(\s|$)/)
-  if (dot !== -1 && dot < 160) desc = desc.slice(0, dot + 1)
-  if (desc.length > 160) {
-    // Back off to the last word boundary at or before the 157-char cut so the
-    // visible text + ellipsis stays within 160 without slicing mid-word (#6259).
-    // A single pathological word longer than the cap has no space to break on —
-    // fall back to a hard cut so it still truncates.
+  // Keep just the first sentence when its terminating '.' falls within the cap.
+  // Measure the dot's position in graphemes — faithful to the old `dot < 160`
+  // UTF-16 check for ASCII, correct for astral text. '.' is its own grapheme, so
+  // the slice lands on a cluster boundary.
+  if (dot !== -1 && toGraphemes(desc.slice(0, dot)).length < 160) desc = desc.slice(0, dot + 1)
+  const graphemes = toGraphemes(desc)
+  if (graphemes.length > 160) {
+    // Back off to the last word boundary at or before the 157-grapheme cut so the
+    // visible text + ellipsis stays within 160 graphemes without slicing mid-word
+    // (#6259) or mid-cluster (#6261). A single pathological word longer than the
+    // cap has no space to break on — fall back to a hard 157-grapheme cut.
     let cut = 157
-    const lastSpace = desc.lastIndexOf(' ', cut)
+    let lastSpace = -1
+    for (let i = Math.min(cut, graphemes.length - 1); i >= 0; i--) {
+      if (graphemes[i] === ' ') { lastSpace = i; break }
+    }
     if (lastSpace > 0) cut = lastSpace
-    desc = desc.slice(0, cut).trimEnd() + '...'
+    desc = graphemes.slice(0, cut).join('').trimEnd() + '...'
   }
   return desc
 }
