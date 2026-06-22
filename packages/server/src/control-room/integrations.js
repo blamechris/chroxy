@@ -53,19 +53,10 @@ import { promisify } from 'util'
 import { readFile, stat } from 'fs/promises'
 import { join } from 'path'
 import { parseGithubOwnerRepo } from './survey.js'
+import { DEFAULT_CONCURRENCY, EXEC_TIMEOUT_MS } from './constants.js'
 
 const execFileAsync = promisify(execFile)
 
-/** Per-repo concurrency cap for the survey (matches the sibling surveys). */
-export const DEFAULT_CONCURRENCY = 5
-
-/**
- * Bound every subprocess so a stuck `which`/`repo-memory` rejects in finite
- * time instead of hanging the survey forever — which would also pin the
- * handler's per-client in-flight guard. Kept consistent with survey.js /
- * runners.js EXEC_TIMEOUT_MS.
- */
-export const EXEC_TIMEOUT_MS = 20000
 /** Output cap for the report subprocess (report JSON is small). */
 const EXEC_MAX_BUFFER = 8 * 1024 * 1024
 /** Shared exec options for every probe. */

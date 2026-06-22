@@ -46,9 +46,7 @@
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
 import { loadActiveSkills, findRepoSkillsDir, DEFAULT_SKILLS_DIR } from '../skills-loader.js'
-
-/** Per-repo concurrency cap (matches the sibling surveys). */
-export const DEFAULT_CONCURRENCY = 5
+import { DEFAULT_CONCURRENCY } from './constants.js'
 
 /**
  * Parse a `skills.lock` file into a name → { hash, installed } map. The lock
