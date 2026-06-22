@@ -235,10 +235,6 @@ export function App() {
   // Listen for Tauri desktop events (no-op in browser context)
   useTauriEvents()
 
-  // #6184: mirror the cross-session blocked+failed count on the desktop dock
-  // badge (no-op in a plain browser tab).
-  useTrayBadgeSync()
-
   // Voice input mode is persisted on inputSettings (#4785). Default is
   // 'continuous' — click to start, click to stop, mic stays lit across
   // silence gaps. Pre-#4785 behaviour ('auto-pause' on silence) available
@@ -1197,6 +1193,11 @@ export function App() {
   // the total and one click to reach the next waiting session (cyclically, in
   // visual tab order).
   const pendingPermissionTotal = totalPendingPermissions(pendingPermissionCounts)
+  // #6184/#6225: mirror the cross-session "needs me" count on the desktop dock
+  // badge (no-op in a plain browser tab). Reuses the pending total derived above
+  // for the header indicator so we don't scan every session's messages twice;
+  // the badge adds crashed-session count on top (failed slice, inside the hook).
+  useTrayBadgeSync(pendingPermissionTotal)
   const handleJumpToPending = useCallback(() => {
     const orderedIds = sessionTabs.map(t => t.sessionId)
     const next = selectNextPendingSession(orderedIds, pendingPermissionCounts, activeSessionId)
