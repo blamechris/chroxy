@@ -136,8 +136,9 @@ function clientCoverage(): { inApp: (t: string) => boolean; inDash: (t: string) 
 // pairing-approval banners, the prompt evaluator, the skills panel, the monthly
 // budget meter); mobile parity is a tracked follow-up under the cited epic.
 const DASHBOARD_ONLY = new Set<string>([
-  'activity_snapshot',          // Control Room activity tree (#5159)
-  'activity_delta',             // Control Room activity tree (#5159)
+  // activity_snapshot / activity_delta removed — the mobile app now feeds them
+  // too (#6246/#6247, the Phase-2 mobile-parity fast-follow per epic #5159), so
+  // they are no longer dashboard-only.
   'billing_canary',             // live billing-canary banner (#5821) — dashboard sidebar
   'byok_credentials_status',    // BYOK paste-API-key form (#4052) — dashboard-only for v1
   'cancel_activity_ack',        // Control Room cancel-click correlation ack (#5277)
