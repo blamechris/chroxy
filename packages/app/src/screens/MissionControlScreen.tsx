@@ -102,7 +102,7 @@ export function MissionControlBody({ activity, sessions }: MissionControlBodyPro
       </View>
 
       {cross.groups.map((group) => (
-        <View key={group.key} style={styles.group} testID={`mc-group-${group.key}`}>
+        <View key={group.key} style={styles.group} testID={`mc-group-${groupTestId(group.key)}`}>
           <View style={styles.groupHead}>
             <Text style={styles.groupLabel} testID="mission-control-group-label">
               {group.label}
@@ -141,6 +141,16 @@ export function MissionControlBody({ activity, sessions }: MissionControlBodyPro
 /** Maps a SessionInfo (store shape) to the selector's minimal CrossSessionMeta. */
 function toMeta(s: { sessionId: string; cwd?: string | null; name?: string; worktree?: boolean }): CrossSessionMeta {
   return { sessionId: s.sessionId, cwd: s.cwd, name: s.name, worktree: s.worktree };
+}
+
+/**
+ * Stable testID fragment for a group (#6245 review): the selector keys groups by
+ * raw cwd, which is '' for the Ungrouped bucket and can carry path separators /
+ * colons (Windows paths) — both make E2E selectors brittle. Map empty → 'ungrouped'
+ * and collapse any non-alphanumeric run to a single '-'.
+ */
+function groupTestId(key: string): string {
+  return key.replace(/[^a-zA-Z0-9]+/g, '-').replace(/^-+|-+$/g, '') || 'ungrouped';
 }
 
 /** The navigable screen: reads the store, delegates to the pure Body. */
