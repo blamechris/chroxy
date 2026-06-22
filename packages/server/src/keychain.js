@@ -77,9 +77,12 @@ function _probeKeychainUsable() {
       })
       // Output is the quoted path, e.g.  "/Users/x/Library/Keychains/login.keychain-db"
       const path = out.trim().replace(/^"(.*)"$/, '$1')
-      // Inconclusive (no path / mocked execFileSync) → assume usable; only a
-      // real, missing path is a definitive broken-keychain signal.
-      if (!path) return true
+      // INCONCLUSIVE → assume usable (preserve prior behaviour + keep mocked
+      // tests working): empty output, OR anything that isn't an absolute path
+      // (a mocked/stubbed value, an unexpected `security` format). Only an
+      // absolute path that is actually MISSING is a definitive broken-keychain
+      // signal — never run existsSync() on a non-path and mistake it for broken.
+      if (!path || !path.startsWith('/')) return true
       return existsSync(path)
     } catch {
       // `security` absent or errored → treat as not usable (file fallback).
@@ -189,20 +192,23 @@ export function getToken(service = DEFAULT_SERVICE, account = ACCOUNT) {
 export function getTokenStatus(service = DEFAULT_SERVICE) {
   // The explicit off-switch (tests) → 'absent': the file fallback owns identity.
   if (keychainDisabled()) return { status: 'absent', value: null, error: null }
-  // #5615 fail-safe: a BROKEN/missing keychain must read as 'error', NOT
-  // 'absent' — an identity caller that re-mints on 'absent' would false-MITM
-  // every already-pinned client. Reporting 'error' makes it fail safe (don't
-  // rotate) AND avoids the prompting find-generic-password call (no modal).
+  // Platforms with NO keychain backend (Windows/other) → 'absent': there is no
+  // keychain that could hold an identity, so the file legitimately owns it (the
+  // documented "other platforms" contract). This must come BEFORE the broken
+  // check — `keychainUsable()` is always false on those platforms, and reporting
+  // 'error' there would wrongly block identity loading.
+  if (!isMac && !isLinux) return { status: 'absent', value: null, error: null }
+  // #5615 fail-safe: on mac/linux a BROKEN/missing keychain reads as 'error',
+  // NOT 'absent' — an identity caller that re-mints on 'absent' would false-MITM
+  // every already-pinned client. 'error' fails safe (don't rotate) AND avoids
+  // the prompting find-generic-password call (no modal).
   if (!keychainUsable()) {
     return { status: 'error', value: null, error: 'keychain unavailable (missing or broken login keychain)' }
   }
   if (isMac) {
     return _macGetTokenStatus(service)
   }
-  if (isLinux) {
-    return _linuxGetTokenStatus(service)
-  }
-  return { status: 'absent', value: null, error: null }
+  return _linuxGetTokenStatus(service)
 }
 
 /**
