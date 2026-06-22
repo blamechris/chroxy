@@ -43,7 +43,9 @@ import {
   decodeEncryptionGate,
   handleServerMode as sharedServerMode,
   // checkpoint_created / checkpoint_list migrated to the shared dispatch table
-  // (#5618 Batch 6); the dashboard has no checkpoint_restored case.
+  // (#5618 Batch 6); checkpoint_restored is not migrated in this batch — the
+  // dashboard handles it via its HANDLERS map (handleCheckpointRestored), not
+  // this switch, so no shared import is needed here.
   handleError as sharedError,
   handleSessionError as sharedSessionError,
   handleLogEntry as sharedLogEntry,

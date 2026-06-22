@@ -50,7 +50,9 @@ import {
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
   // checkpoint_created / checkpoint_list migrated to the shared dispatch table
-  // (#5618 Batch 6); only checkpoint_restored stays app-local.
+  // (#5618 Batch 6); checkpoint_restored is not migrated in this batch — it
+  // stays platform-local (here as a switch case; the dashboard via its
+  // HANDLERS map), so this shared import remains.
   handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,

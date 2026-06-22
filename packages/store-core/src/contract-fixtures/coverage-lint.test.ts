@@ -73,8 +73,9 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // available_models — migrated to the shared dispatch table (#5618 Batch 5a).
   // checkpoint_created / checkpoint_list — migrated to the shared dispatch table
   // (#5618 Batch 6); both now have DISPATCH_FIXTURES entries, so they leave the
-  // both-clients-switch universe. checkpoint_restored stays app-only (no
-  // dashboard case), so it remains pending.
+  // both-clients-switch universe. checkpoint_restored is NOT migrated in this
+  // batch (both clients still handle it platform-locally — the app via a switch
+  // case, the dashboard via its HANDLERS map), so it remains pending.
   'checkpoint_restored',
   'claude_ready',
   // client_focus_changed — migrated to the shared dispatch table (#5618 Batch 4).
