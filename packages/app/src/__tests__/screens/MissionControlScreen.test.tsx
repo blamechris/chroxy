@@ -10,7 +10,6 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { Text } from 'react-native';
 import type { ActivityEntry, ActivityState, CrossSessionMeta } from '@chroxy/store-core';
 import { createEmptyActivityState, applyActivitySnapshot } from '@chroxy/store-core';
 import { MissionControlBody } from '../../screens/MissionControlScreen';
@@ -52,20 +51,32 @@ function findByTestId(root: ReactTestInstance, testID: string): ReactTestInstanc
 }
 
 function findAllByTestId(root: ReactTestInstance, testID: string): ReactTestInstance[] {
-  return root.findAll((n) => n.props?.testID === testID);
+  // Match HOST instances only (`type` is a string like 'Text'/'View'): an RN
+  // <Text testID> surfaces both a composite and a host instance carrying the
+  // same testID, so an unfiltered findAll double-counts each element.
+  return root.findAll((n) => n.props?.testID === testID && typeof n.type === 'string');
 }
 
 function textOf(node: ReactTestInstance | null): string {
   if (node === null) return '';
-  return node
-    .findAllByType(Text)
-    .map((n) => {
-      const c = n.props.children;
-      if (typeof c === 'string' || typeof c === 'number') return String(c);
-      if (Array.isArray(c)) return c.map((x) => (typeof x === 'string' || typeof x === 'number' ? String(x) : '')).join('');
-      return '';
-    })
-    .join(' ');
+  // Collect every string descendant of the node. Works whether `node` is a
+  // composite Text instance OR a host instance (a host <Text>'s children are
+  // raw strings, which findAllByType(Text) wouldn't reach) — so this is robust
+  // for both findByTestId (composite-first) and findAllByTestId (host-only).
+  const out: string[] = [];
+  const walk = (n: ReactTestInstance | string): void => {
+    if (typeof n === 'string') {
+      out.push(n);
+      return;
+    }
+    if (typeof n === 'number') {
+      out.push(String(n));
+      return;
+    }
+    for (const child of n.children ?? []) walk(child as ReactTestInstance | string);
+  };
+  walk(node);
+  return out.join('');
 }
 
 describe('MissionControlScreen (#5968 PR1)', () => {
