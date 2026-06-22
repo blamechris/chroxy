@@ -2,16 +2,14 @@
  * useTrayBadgeSync (#6184, Control Room v2 phase 2 / #5964) — reflect the
  * cross-session "needs me" count on the desktop dock badge.
  *
- * Data source (#6184 fix, 2026-06-21): the BLOCKED count is the cross-session
- * pending-permission total — the SAME signal that drives the header "N pending"
- * indicator (`derivePendingPermissionCounts` → `totalPendingPermissions` over
- * `sessionStates`). The original implementation read the Control Room
- * activity-tree `blocked` status (`selectCrossSessionActivity().total.blocked`),
- * but that slice does not reliably carry a `blocked` entry for a live permission
- * prompt, so the dock badge never lit up even with prompts pending. The
- * pending-permission derivation is proven to fire (it powers the visible
- * "N pending" header), so the badge now keys off it. FAILED/crashed sessions
- * still come from the activity rollup (best-effort).
+ * BLOCKED is passed in by the caller (#6225). App already derives the
+ * cross-session pending-permission total for the header "N pending" indicator
+ * (`derivePendingPermissionCounts` → `totalPendingPermissions`), so the badge
+ * reuses that single derivation rather than scanning every session's message
+ * array a second time. The badge is `blocked + failed`, where FAILED is the
+ * activity-rollup crashed-session count (best-effort, still derived here). The
+ * header indicator is blocked-only, so the two match exactly only when nothing
+ * is failed.
  *
  * Pushes `blocked + failed` to the Tauri `update_tray_badge` command, which sets
  * the macOS dock-tile badge (Tauri v2's tray icon has no badge API; the dock
@@ -19,36 +17,16 @@
  * no-op. Deduped: the command is invoked only when the count actually changes.
  */
 import { useEffect, useRef } from 'react'
-import {
-  selectCrossSessionActivity,
-  derivePendingPermissionCounts,
-  totalPendingPermissions,
-} from '@chroxy/store-core'
+import { selectCrossSessionActivity } from '@chroxy/store-core'
 import { useConnectionStore } from '../store/connection'
 import { getTauriInvoke } from '../utils/tauri-bridge'
 
-export function useTrayBadgeSync(): void {
-  // Compute the counts as REACTIVE selectors (recomputed on every store change,
-  // like the header "N pending" indicator) rather than inside an effect keyed on
-  // a store-slice reference. The permission-resolution update does not reliably
-  // change the `sessionStates` reference, so an effect dep'd on it never re-fired
-  // to push `blocked:0` — leaving the dock badge stuck (#6184). Selecting the
-  // derived numbers fixes the clear path: the effect below fires whenever the
-  // numbers change, including back to zero.
-  // BLOCKED = cross-session pending permissions (the signal that drives "N pending").
-  // The dock badge is `blocked + failed`, whereas the header "N pending"
-  // indicator (App.tsx) is blocked-only — they read the SAME blocked expression
-  // (so the pending portion never drifts) but the badge additionally surfaces
-  // crashed sessions, so the two match exactly only when nothing is failed.
-  // These run at RENDER time (not in the effect), so they must be total over a
-  // partially-populated store — an undefined `sessionStates`/`activity`/`sessions`
-  // during an early/transient render must not throw and white-screen the
-  // dashboard. `for..in` over undefined is a safe no-op, but the activity
-  // selector dereferences `state.bySession`, so default it explicitly.
-  const blocked = useConnectionStore((s) =>
-    totalPendingPermissions(derivePendingPermissionCounts(s.sessionStates ?? {}, Date.now())),
-  )
-  // FAILED = activity-rollup failed sessions (best-effort).
+export function useTrayBadgeSync(blocked: number): void {
+  // FAILED = activity-rollup failed sessions (best-effort). This runs at RENDER
+  // time, so it must be total over a partially-populated store — an undefined
+  // `activity`/`sessions` on an early/transient render must not throw and
+  // white-screen the dashboard (selectCrossSessionActivity dereferences
+  // `state.bySession`), so default them at the call site.
   const failed = useConnectionStore(
     (s) =>
       selectCrossSessionActivity(
