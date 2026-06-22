@@ -1228,6 +1228,52 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+
+  // 14. checkpoint_created / checkpoint_list (#5618 Batch 6) — flat checkpoint
+  // list write, broadcast-guarded on the active session. The app's extra mirror
+  // into its conversation store rides on `syncSecondaryCheckpoints` (OUTSIDE the
+  // shared contract, like syncSecondaryInventory) — covered by the dispatch-table
+  // unit tests, not asserted here. These pin the SHARED flat-state result.
+  {
+    name: 'checkpoint_created appends the checkpoint to the (empty) flat list',
+    type: 'checkpoint_created',
+    init: { activeSessionId: 's1' },
+    message: { type: 'checkpoint_created', sessionId: 's1', checkpoint: { id: 'cp1', label: 'first' } },
+    expect: { flat: { checkpoints: [{ id: 'cp1', label: 'first' }] } },
+  },
+  {
+    name: 'checkpoint_created is dropped when it targets a non-active session',
+    type: 'checkpoint_created',
+    init: { activeSessionId: 'active' },
+    message: { type: 'checkpoint_created', sessionId: 'other', checkpoint: { id: 'cp1' } },
+    expect: { noop: true },
+  },
+  {
+    name: 'checkpoint_created is a no-op when the checkpoint payload is missing/non-object',
+    type: 'checkpoint_created',
+    message: { type: 'checkpoint_created' },
+    expect: { noop: true },
+  },
+  {
+    name: 'checkpoint_list replaces the flat checkpoint list with the server array',
+    type: 'checkpoint_list',
+    init: { activeSessionId: 's1' },
+    message: { type: 'checkpoint_list', sessionId: 's1', checkpoints: [{ id: 'a' }, { id: 'b' }] },
+    expect: { flat: { checkpoints: [{ id: 'a' }, { id: 'b' }] } },
+  },
+  {
+    name: 'checkpoint_list is dropped when it targets a non-active session',
+    type: 'checkpoint_list',
+    init: { activeSessionId: 'active' },
+    message: { type: 'checkpoint_list', sessionId: 'other', checkpoints: [{ id: 'a' }] },
+    expect: { noop: true },
+  },
+  {
+    name: 'checkpoint_list is a no-op when checkpoints is not an array',
+    type: 'checkpoint_list',
+    message: { type: 'checkpoint_list' },
+    expect: { noop: true },
+  },
 ]
 
 // ---------------------------------------------------------------------------

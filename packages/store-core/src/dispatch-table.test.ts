@@ -12,6 +12,7 @@ import type {
   DevPreview,
   PendingBackgroundShell,
   QueuedSessionMessage,
+  Checkpoint,
 } from './types'
 import type { PermissionRule } from './handlers'
 
@@ -100,6 +101,18 @@ function makeAdapter(init?: {
    * shared list writes (the optional-chained tunnel apply is skipped).
    */
   tunnel?: boolean
+  /**
+   * Seed the flat `checkpoints` list so `checkpoint_created`'s read-modify-write
+   * (append) can be observed against a non-empty prior list (#5618 Batch 6).
+   */
+  checkpoints?: Checkpoint[]
+  /**
+   * When true, the adapter wires `syncSecondaryCheckpoints` (records into
+   * `checkpointSyncs`) — the app's secondary conversation-store mirror for
+   * checkpoint_created / checkpoint_list (#5618 Batch 6). When omitted, the hook
+   * is absent (the dashboard's behaviour: flat write only, no mirror).
+   */
+  checkpointMirror?: boolean
 }) {
   const sessions: Record<string, FakeSession> = init?.sessions ?? {}
   let activeSessionId = init?.activeSessionId ?? null
@@ -107,6 +120,7 @@ function makeAdapter(init?: {
   const myClientId = init?.myClientId ?? null
   const followMode = init?.followMode ?? false
   const flat: Record<string, unknown> = {}
+  if (init?.checkpoints) flat.checkpoints = init.checkpoints
   const addedMessages: ChatMessage[] = []
   const notifications: Array<{ sessionId: string; eventType: string; message: string }> = []
   const inventorySyncs: Array<{ kind: string; list: unknown[] }> = []
@@ -116,6 +130,9 @@ function makeAdapter(init?: {
   const primaryClientIds: Array<string | null> = []
   const costUpdates: Array<{ totalCost: number | null; budget: number | null }> = []
   const rotatedTunnelUrls: Array<{ url: string; previousUrl: string | null }> = []
+  const checkpointSyncs: Array<
+    { kind: 'append'; checkpoint: Checkpoint } | { kind: 'replace'; checkpoints: Checkpoint[] }
+  > = []
 
   const adapter: ClientStoreAdapter<FakeSession> = {
     getActiveSessionId: () => activeSessionId,
@@ -129,6 +146,7 @@ function makeAdapter(init?: {
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => addedMessages.push(m),
     getSessions: () => sessionList,
+    getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
     pushSessionNotification: (sessionId, eventType, message) =>
       notifications.push({ sessionId, eventType, message }),
     ...(init?.callbacks
@@ -179,6 +197,13 @@ function makeAdapter(init?: {
             rotatedTunnelUrls.push({ url, previousUrl }),
         }
       : {}),
+    ...(init?.checkpointMirror
+      ? {
+          syncSecondaryCheckpoints: (
+            op: { kind: 'append'; checkpoint: Checkpoint } | { kind: 'replace'; checkpoints: Checkpoint[] },
+          ) => checkpointSyncs.push(op),
+        }
+      : {}),
   }
 
   return {
@@ -187,6 +212,7 @@ function makeAdapter(init?: {
     flat,
     addedMessages,
     notifications,
+    checkpointSyncs,
     inventorySyncs,
     serverErrors,
     infoNotifications,
@@ -1527,6 +1553,75 @@ describe('shared dispatch table', () => {
       const env = makeAdapter()
       dispatch(env, { type: 'web_task_updated' })
       expect(env.flat.webTasks).toBeUndefined()
+    })
+  })
+
+  describe('checkpoint_created / checkpoint_list (#5618 Batch 6)', () => {
+    it('owns the message (runDispatch true) for both create and list', () => {
+      const env = makeAdapter()
+      expect(dispatch(env, { type: 'checkpoint_created', checkpoint: { id: 'cp1' } })).toBe(true)
+      expect(dispatch(env, { type: 'checkpoint_list', checkpoints: [] })).toBe(true)
+    })
+
+    it('checkpoint_created appends to the (empty) flat list', () => {
+      const env = makeAdapter({ activeSessionId: 's1' })
+      dispatch(env, { type: 'checkpoint_created', sessionId: 's1', checkpoint: { id: 'cp1', label: 'first' } })
+      expect(env.flat.checkpoints).toEqual([{ id: 'cp1', label: 'first' }])
+    })
+
+    it('checkpoint_created appends to a NON-empty prior list (read-modify-write via getCheckpoints)', () => {
+      const env = makeAdapter({ activeSessionId: 's1', checkpoints: [{ id: 'cp0' } as Checkpoint] })
+      dispatch(env, { type: 'checkpoint_created', sessionId: 's1', checkpoint: { id: 'cp1' } })
+      expect(env.flat.checkpoints).toEqual([{ id: 'cp0' }, { id: 'cp1' }])
+    })
+
+    it('checkpoint_created is dropped for a non-active session (no flat write)', () => {
+      const env = makeAdapter({ activeSessionId: 'active' })
+      dispatch(env, { type: 'checkpoint_created', sessionId: 'other', checkpoint: { id: 'cp1' } })
+      expect(env.flat.checkpoints).toBeUndefined()
+    })
+
+    it('checkpoint_created is a no-op when the checkpoint payload is missing/non-object', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'checkpoint_created' })
+      expect(env.flat.checkpoints).toBeUndefined()
+    })
+
+    it('checkpoint_list replaces the flat list with the server array', () => {
+      const env = makeAdapter({ activeSessionId: 's1', checkpoints: [{ id: 'old' } as Checkpoint] })
+      dispatch(env, { type: 'checkpoint_list', sessionId: 's1', checkpoints: [{ id: 'a' }, { id: 'b' }] })
+      expect(env.flat.checkpoints).toEqual([{ id: 'a' }, { id: 'b' }])
+    })
+
+    it('checkpoint_list is dropped for a non-active session', () => {
+      const env = makeAdapter({ activeSessionId: 'active' })
+      dispatch(env, { type: 'checkpoint_list', sessionId: 'other', checkpoints: [{ id: 'a' }] })
+      expect(env.flat.checkpoints).toBeUndefined()
+    })
+
+    it('checkpoint_list is a no-op when checkpoints is not an array', () => {
+      const env = makeAdapter()
+      dispatch(env, { type: 'checkpoint_list' })
+      expect(env.flat.checkpoints).toBeUndefined()
+    })
+
+    // The app's secondary conversation-store mirror rides on the optional
+    // syncSecondaryCheckpoints hook; the dashboard omits it (flat write only).
+    it('app mirror: syncSecondaryCheckpoints append on create, replace on list', () => {
+      const env = makeAdapter({ activeSessionId: 's1', checkpointMirror: true })
+      dispatch(env, { type: 'checkpoint_created', sessionId: 's1', checkpoint: { id: 'cp1' } })
+      dispatch(env, { type: 'checkpoint_list', sessionId: 's1', checkpoints: [{ id: 'a' }] })
+      expect(env.checkpointSyncs).toEqual([
+        { kind: 'append', checkpoint: { id: 'cp1' } },
+        { kind: 'replace', checkpoints: [{ id: 'a' }] },
+      ])
+    })
+
+    it('dashboard (no mirror hook) still writes flat state and never mirrors', () => {
+      const env = makeAdapter({ activeSessionId: 's1' }) // no checkpointMirror → hook absent
+      dispatch(env, { type: 'checkpoint_created', sessionId: 's1', checkpoint: { id: 'cp1' } })
+      expect(env.flat.checkpoints).toEqual([{ id: 'cp1' }])
+      expect(env.checkpointSyncs).toEqual([])
     })
   })
 })

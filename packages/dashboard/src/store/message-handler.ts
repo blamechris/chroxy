@@ -42,8 +42,8 @@ import {
   decideKeyPinWithPairingIdentity,
   decodeEncryptionGate,
   handleServerMode as sharedServerMode,
-  handleCheckpointCreated as sharedCheckpointCreated,
-  handleCheckpointList as sharedCheckpointList,
+  // checkpoint_created / checkpoint_list migrated to the shared dispatch table
+  // (#5618 Batch 6); the dashboard has no checkpoint_restored case.
   handleError as sharedError,
   handleSessionError as sharedSessionError,
   handleLogEntry as sharedLogEntry,
@@ -1021,6 +1021,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
   getSessions: () => getStore().getState().sessions,
+  // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
+  // The dashboard omits syncSecondaryCheckpoints (no secondary checkpoint store).
+  getCheckpoints: () => getStore().getState().checkpoints,
   // #5618 — user_question raises a background-session notification via the
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
@@ -4719,17 +4722,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // notification_prefs — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'checkpoint_created': {
-      const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
-      if (next) set({ checkpoints: next });
-      break;
-    }
-
-    case 'checkpoint_list': {
-      const next = sharedCheckpointList(msg, get().activeSessionId);
-      if (next) set({ checkpoints: next });
-      break;
-    }
+    // checkpoint_created / checkpoint_list — migrated to the shared dispatch
+    // table (#5618 Batch 6; handled by runDispatch before this switch). The
+    // dashboard has no secondary checkpoint store, so it omits the
+    // syncSecondaryCheckpoints adapter hook (the app implements it).
 
     // session_restore_failed / session_persist_failed — migrated to the shared
     // dispatch table (#5618 Batch 3; handled by runDispatch before this switch).
