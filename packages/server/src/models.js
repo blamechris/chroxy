@@ -143,10 +143,17 @@ const MODEL_METADATA = Object.freeze([
 // The `[1m]` variant is also matched. Exported for tests + future enforcement.
 export const DISALLOWED_MODEL_IDS = Object.freeze(new Set(['claude-fable-5']))
 
-/** True when a model id (with or without a trailing `[1m]`) is a disallowed fullId. */
+/**
+ * True when a model id resolves to a disallowed fullId, normalising the same id
+ * shapes the rest of this module supports: a trailing `[1m]` long-context suffix
+ * and/or a trailing `-YYYYMMDD` date stamp (the SDK's `Model` enum surfaces dated
+ * forms like `claude-fable-5-20251201`). So `claude-fable-5`, `claude-fable-5[1m]`,
+ * `claude-fable-5-20251201`, and `claude-fable-5-20251201[1m]` all match.
+ */
 export function isDisallowedModelId(id) {
   if (typeof id !== 'string') return false
-  const base = id.endsWith('[1m]') ? id.slice(0, -'[1m]'.length) : id
+  let base = id.endsWith('[1m]') ? id.slice(0, -'[1m]'.length) : id
+  base = base.replace(/-\d{8}$/, '') // strip a trailing YYYYMMDD date stamp
   return DISALLOWED_MODEL_IDS.has(base)
 }
 
@@ -781,7 +788,22 @@ export function createModelsRegistry(hooks = {}) {
       ? models.filter((m) => !isDisallowedModelId(m.id) && !isDisallowedModelId(m.fullId))
       : models
     activeModels = filtered
-    defaultModelId = nextDefault
+    // #6219 review (#6232): never leave defaultModelId pointing at a model that
+    // isn't in the active list — e.g. the SDK marked the now-filtered disallowed
+    // model (fable) as "Default", so nextDefault is its short id which isn't in
+    // `filtered`. A dangling default can't be resolved by the picker. When
+    // nextDefault is absent from the filtered list, re-pick a stable family head
+    // (opus → sonnet) else the first model (mirrors updateModels' fallback). Only
+    // fires when filtering actually dropped the chosen default — a present
+    // nextDefault (the common case + loadCache's own discard result) is kept.
+    const defaultPresent =
+      nextDefault != null && filtered.some((m) => m.id === nextDefault || m.fullId === nextDefault)
+    if (nextDefault != null && !defaultPresent) {
+      const preferred = filtered.find((m) => m.id === 'opus' || m.id === 'sonnet')
+      defaultModelId = preferred?.id ?? filtered[0]?.id ?? null
+    } else {
+      defaultModelId = nextDefault
+    }
     rebuildLookups(filtered)
   }
 

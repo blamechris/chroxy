@@ -1,6 +1,6 @@
 import { describe, it, before, beforeEach, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider, registerProviderRegistry, resolveClaudeContextWindow, DEFAULT_CONTEXT_WINDOW, DISALLOWED_MODEL_IDS, isDisallowedModelId } from '../src/models.js'
+import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, resolveModelId, toShortModelId, getModels, updateModels, updateContextWindow, resetModels, getModelPricing, computePromptCostUsd, isClaudeProvider, registerProviderRegistry, resolveClaudeContextWindow, DEFAULT_CONTEXT_WINDOW, DISALLOWED_MODEL_IDS, isDisallowedModelId, getDefaultModelId } from '../src/models.js'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 // #5858: membership is now derived from `static claudeFamily` on the registered
 // provider classes (no hand-authored name literal). Importing providers.js
@@ -46,7 +46,7 @@ describe('FALLBACK_MODELS (default registry)', () => {
 describe('resolveClaudeContextWindow (#5931 — version-aware opus heuristic)', () => {
   it('maps the existing opus 4.6/4.7/4.8 minors to 1M (no behavior change)', () => {
     assert.equal(resolveClaudeContextWindow('claude-opus-4-6'), 1_000_000)
-    assert.equal(resolveClaudeContextWindow('claude-opus-4-8'), 1_000_000)
+    assert.equal(resolveClaudeContextWindow('claude-opus-4-7'), 1_000_000)
     assert.equal(resolveClaudeContextWindow('claude-opus-4-8'), 1_000_000)
     assert.equal(resolveClaudeContextWindow('claude-opus-4.8'), 1_000_000)
   })
@@ -277,7 +277,7 @@ describe('updateModels', () => {
     assert.deepEqual(models, result)
   })
 
-  it('opus 4.7 gets a 1M context window', () => {
+  it('opus 4.8 gets a 1M context window', () => {
     const result = updateModels([
       { value: 'claude-opus-4-8', displayName: 'Opus 4.8', description: '' },
     ])
@@ -965,7 +965,11 @@ describe('disallowed models (#6219)', () => {
     assert.ok(DISALLOWED_MODEL_IDS.has('claude-fable-5'))
     assert.equal(isDisallowedModelId('claude-fable-5'), true)
     assert.equal(isDisallowedModelId('claude-fable-5[1m]'), true)
+    // Dated SDK forms (claude-*-YYYYMMDD) and dated+[1m] also normalise + match.
+    assert.equal(isDisallowedModelId('claude-fable-5-20251201'), true)
+    assert.equal(isDisallowedModelId('claude-fable-5-20251201[1m]'), true)
     assert.equal(isDisallowedModelId('claude-opus-4-8'), false)
+    assert.equal(isDisallowedModelId('claude-opus-4-8-20251201'), false)
     assert.equal(isDisallowedModelId('claude-sonnet-4-6'), false)
     // The bare short alias is NOT keyed (avoids clobbering unrelated overlay
     // ids that merely use `fable` as a label) — only the real fullId is.
@@ -989,5 +993,21 @@ describe('disallowed models (#6219)', () => {
     assert.ok(!ALLOWED_MODEL_IDS.has('claude-fable-5'), 'fable must not enter the allowlist')
     // A legitimate SDK model alongside it still lands.
     assert.ok(fullIds.includes('claude-sonnet-4-6'))
+  })
+
+  it('does not leave defaultModelId pointing at a filtered-out disallowed model (#6232)', () => {
+    // SDK marks the disallowed model as "Default" — after filtering it out the
+    // default must re-resolve to a real model, never a dangling fable id.
+    updateModels([
+      { value: 'claude-fable-5', displayName: 'Default (Fable 5)', description: '' },
+      { value: 'claude-sonnet-4-6', displayName: 'Sonnet 4.6', description: '' },
+    ])
+    const def = getDefaultModelId()
+    const fullIds = getModels().map((m) => m.fullId)
+    assert.ok(!fullIds.includes('claude-fable-5'), 'fable filtered out')
+    assert.notEqual(def, 'fable', 'default must not be the filtered-out disallowed short id')
+    assert.notEqual(def, 'claude-fable-5', 'default must not be the filtered-out disallowed fullId')
+    // The re-picked default resolves to a model that is actually in the list.
+    assert.ok(def != null && getModels().some((m) => m.id === def || m.fullId === def), 'default resolves to a present model')
   })
 })
