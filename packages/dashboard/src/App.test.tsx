@@ -704,20 +704,23 @@ describe('App', () => {
       ],
     }
 
-    it('calls setModel with model id when a specific model is selected', () => {
+    // #6220 — the model picker is now a button that opens a modal; selecting a
+    // model in the modal calls setModel with that model's id.
+    it('calls setModel with the model id when a model is picked from the modal', () => {
       const setModelFn = vi.fn()
       stateOverrides = { ...modelsState, setModel: setModelFn }
       render(<App />)
-      const select = screen.getByTestId('chat-settings-trigger')
-      fireEvent.change(select, { target: { value: 'claude-opus' } })
+      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+      fireEvent.click(screen.getByTestId('model-picker-item-claude-opus'))
       expect(setModelFn).toHaveBeenCalledWith('claude-opus')
     })
 
-    it('calls setModel with first model id when Default is selected', () => {
+    it('calls setModel with the default model id when the default-marked model is picked', () => {
       const setModelFn = vi.fn()
       stateOverrides = {
         ...modelsState,
         setModel: setModelFn,
+        defaultModelId: 'claude-sonnet',
         getActiveSessionState: () => ({
           messages: [],
           streamingMessageId: null,
@@ -731,8 +734,10 @@ describe('App', () => {
         }),
       }
       render(<App />)
-      const select = screen.getByTestId('chat-settings-trigger')
-      fireEvent.change(select, { target: { value: '' } })
+      fireEvent.click(screen.getByTestId('chat-settings-trigger'))
+      // The default model is rendered with a "(default)" marker; picking it
+      // switches to it explicitly.
+      fireEvent.click(screen.getByTestId('model-picker-item-claude-sonnet'))
       expect(setModelFn).toHaveBeenCalledWith('claude-sonnet')
     })
   })

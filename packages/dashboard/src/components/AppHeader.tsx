@@ -145,6 +145,7 @@ export function AppHeader(props: AppHeaderProps) {
           defaultModelId={props.defaultModelId}
           onModelChange={props.onModelChange}
           readOnlyModel={props.readOnlyModel}
+          providerLabel={props.provider}
           availablePermissionModes={props.availablePermissionModes}
           permissionMode={props.permissionMode}
           onPermissionModeChange={props.onPermissionModeChange}
