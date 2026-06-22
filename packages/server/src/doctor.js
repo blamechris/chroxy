@@ -8,6 +8,7 @@ import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
+import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { parseTunnelArg } from './tunnel/index.js'
 import { TESTED_CLAUDE_TUI_CLI_VERSION } from './claude-tui/tested-cli-version.js'
 import { detectSilentMeteredDefault } from './doctor-billing.js'
@@ -340,6 +341,10 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
       // Invalid entries are warned about (and surface again through
       // validateConfig below) and skipped.
       registerAnthropicCompatibleProviders(config)
+      // #5420: register config-driven OpenAI-compatible endpoints too, same
+      // rationale as above — a config.provider pointing at one preflights its
+      // credential spec instead of failing as "Unknown provider".
+      registerOpenAiCompatibleProviders(config)
       const { valid, warnings } = validateConfig(config)
       if (valid) {
         configCheck = { name: 'Config', status: 'pass', message: CONFIG_FILE }

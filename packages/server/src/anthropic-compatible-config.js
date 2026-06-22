@@ -433,11 +433,46 @@ function validateEntry(raw, path, seenIds, reservedIds, warnings) {
  *   defaultModel, models|null, pricing|null, contextWindow|null }`.
  */
 export function validateAnthropicCompatibleProviders(value, opts = {}) {
+  return validateCompatibleProviders('anthropicCompatible', value, opts)
+}
+
+/**
+ * Validate + normalize the `providers.openaiCompatible` array (#5420).
+ *
+ * The OpenAI-compatible sibling of the Anthropic-compatible block: the entry
+ * shape is identical (id/label/baseUrl/apiKeyEnv/credentialsKey/defaultModel/
+ * models/pricing/contextWindow/modelDiscovery) — only the wire dialect of the
+ * registered session differs (chat-completions via the shim vs Anthropic
+ * `/v1/messages`). It therefore reuses `validateEntry` 1:1; only the warning
+ * path prefix differs so operators see the right config key.
+ *
+ * Never throws. Invalid entries are dropped (with a warning each); valid
+ * siblings survive.
+ *
+ * @param {*} value - The raw `providers.openaiCompatible` value
+ * @param {{ reservedIds?: Iterable<string> }} [opts]
+ * @returns {{ entries: Array<object>, warnings: string[] }}
+ */
+export function validateOpenAiCompatibleProviders(value, opts = {}) {
+  return validateCompatibleProviders('openaiCompatible', value, opts)
+}
+
+/**
+ * Shared implementation behind both compatible-provider validators. Identical
+ * entry validation (`validateEntry`); only the `providers.<key>` path prefix in
+ * the warnings differs, so an operator's startup log names the block they wrote.
+ *
+ * @param {string} configKey - 'anthropicCompatible' | 'openaiCompatible'
+ * @param {*} value
+ * @param {{ reservedIds?: Iterable<string> }} opts
+ * @returns {{ entries: Array<object>, warnings: string[] }}
+ */
+function validateCompatibleProviders(configKey, value, opts = {}) {
   const warnings = []
   const entries = []
 
   if (!Array.isArray(value)) {
-    warnings.push(`Invalid value for 'providers.anthropicCompatible': expected an array of endpoint entries, got ${typeName(value)}`)
+    warnings.push(`Invalid value for 'providers.${configKey}': expected an array of endpoint entries, got ${typeName(value)}`)
     return { entries, warnings }
   }
 
@@ -448,7 +483,7 @@ export function validateAnthropicCompatibleProviders(value, opts = {}) {
 
   const seenIds = new Set()
   for (let i = 0; i < value.length; i++) {
-    const normalized = validateEntry(value[i], `providers.anthropicCompatible[${i}]`, seenIds, reservedIds, warnings)
+    const normalized = validateEntry(value[i], `providers.${configKey}[${i}]`, seenIds, reservedIds, warnings)
     if (normalized) entries.push(normalized)
   }
 
@@ -465,13 +500,18 @@ export function validateAnthropicCompatibleProviders(value, opts = {}) {
  * @param {string[]} warnings - Accumulator the caller logs/returns
  */
 export function validateProvidersConfigBlock(providers, warnings) {
+  const KNOWN_PROVIDER_BLOCK_KEYS = new Set(['anthropicCompatible', 'openaiCompatible'])
   for (const key of Object.keys(providers)) {
-    if (key !== 'anthropicCompatible') {
+    if (!KNOWN_PROVIDER_BLOCK_KEYS.has(key)) {
       warnings.push(`Unknown key 'providers.${key}' (will be ignored)`)
     }
   }
   if (Object.prototype.hasOwnProperty.call(providers, 'anthropicCompatible')) {
     const { warnings: entryWarnings } = validateAnthropicCompatibleProviders(providers.anthropicCompatible)
+    warnings.push(...entryWarnings)
+  }
+  if (Object.prototype.hasOwnProperty.call(providers, 'openaiCompatible')) {
+    const { warnings: entryWarnings } = validateOpenAiCompatibleProviders(providers.openaiCompatible)
     warnings.push(...entryWarnings)
   }
 }
