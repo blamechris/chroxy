@@ -83,7 +83,13 @@
       ],
       "expo-secure-store",
       "expo-localization",
-      "expo-live-activity"
+      "expo-live-activity",
+      [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "Allow Chroxy to use Face ID to unlock the app."
+        }
+      ]
     ],
     "extra": {
       "eas": {
