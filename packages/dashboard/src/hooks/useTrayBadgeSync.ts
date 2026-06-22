@@ -36,6 +36,10 @@ export function useTrayBadgeSync(): void {
   // derived numbers fixes the clear path: the effect below fires whenever the
   // numbers change, including back to zero.
   // BLOCKED = cross-session pending permissions (the signal that drives "N pending").
+  // The dock badge is `blocked + failed`, whereas the header "N pending"
+  // indicator (App.tsx) is blocked-only — they read the SAME blocked expression
+  // (so the pending portion never drifts) but the badge additionally surfaces
+  // crashed sessions, so the two match exactly only when nothing is failed.
   // These run at RENDER time (not in the effect), so they must be total over a
   // partially-populated store — an undefined `sessionStates`/`activity`/`sessions`
   // during an early/transient render must not throw and white-screen the
