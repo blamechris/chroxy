@@ -23,19 +23,22 @@ import {
 // Verbatim pre-consolidation FALLBACK_MODELS (contextWindow values inlined to
 // what resolveClaudeContextWindow returned at authoring time, so a regression in
 // the heuristic ALSO trips this test, not just a far-away window test).
+// #6219 updated the intended roster: Opus head bumped 4-7 → 4-8, and Fable
+// (disallowed) removed. The snapshot tracks the CURRENT intended set — the proof
+// is still "the derived table deep-equals the declared literal", just against the
+// post-#6219 roster, not the original #5930 freeze.
 const FALLBACK_MODELS_SNAPSHOT = [
   { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', contextWindow: 200_000 },
-  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-7', contextWindow: 1_000_000 },
-  { id: 'fable', label: 'Fable', fullId: 'claude-fable-5', contextWindow: 200_000 },
+  { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8', contextWindow: 1_000_000 },
   { id: 'haiku', label: 'Haiku', fullId: 'claude-haiku-4-5', contextWindow: 200_000 },
 ]
 
-// Verbatim pre-consolidation CLAUDE_PRICING_USD_PER_MTOK. Fable is intentionally
-// ABSENT (chroxy ships no verified fable rates → cost "unknown", never $0).
+// CLAUDE_PRICING_USD_PER_MTOK snapshot. Fable is ABSENT (removed in #6219;
+// chroxy never shipped verified fable rates anyway — cost "unknown", never $0).
 const CLAUDE_PRICING_SNAPSHOT = {
   'claude-sonnet-4-6': { input: 3.00, output: 15.00, cacheRead: 0.30, cacheWrite: 3.75 },
-  'claude-opus-4-7': { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
-  'claude-opus-4-7[1m]': {
+  'claude-opus-4-8': { input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75 },
+  'claude-opus-4-8[1m]': {
     input: 15.00, output: 75.00, cacheRead: 1.50, cacheWrite: 18.75,
     longContext: {
       thresholdInputTokens: 200_000,
@@ -61,14 +64,14 @@ describe('#5930 model-metadata consolidation is a pure restructure', () => {
   it('FALLBACK_MODELS preserves the exact roster + order', () => {
     assert.deepStrictEqual(
       FALLBACK_MODELS.map((m) => m.id),
-      ['sonnet', 'opus', 'fable', 'haiku'],
+      ['sonnet', 'opus', 'haiku'],
     )
   })
 
   it('the opus row derives its 1M window via the heuristic path', () => {
     const opus = FALLBACK_MODELS.find((m) => m.id === 'opus')
     assert.equal(opus.contextWindow, 1_000_000)
-    assert.equal(opus.contextWindow, resolveClaudeContextWindow('claude-opus-4-7'))
+    assert.equal(opus.contextWindow, resolveClaudeContextWindow('claude-opus-4-8'))
   })
 
   it('FALLBACK_MODELS stays deep-frozen', () => {
@@ -82,14 +85,15 @@ describe('#5930 model-metadata consolidation is a pure restructure', () => {
     }
   })
 
-  it('preserves the intentional fable pricing gap (cost unknown, not $0)', () => {
+  it('fable is fully removed (#6219) — not in the roster, no pricing', () => {
+    assert.ok(!FALLBACK_MODELS.some((m) => m.id === 'fable' || m.fullId === 'claude-fable-5'))
     assert.equal(getModelPricing('claude-fable-5'), null)
   })
 
   it('keeps pricing entries (incl. the nested longContext premium) deep-frozen', () => {
-    const opus = getModelPricing('claude-opus-4-7')
+    const opus = getModelPricing('claude-opus-4-8')
     assert.ok(Object.isFrozen(opus), 'opus base frozen')
-    const opus1m = getModelPricing('claude-opus-4-7[1m]')
+    const opus1m = getModelPricing('claude-opus-4-8[1m]')
     assert.ok(Object.isFrozen(opus1m), 'opus[1m] frozen')
     assert.ok(Object.isFrozen(opus1m.longContext), 'opus[1m].longContext frozen')
   })

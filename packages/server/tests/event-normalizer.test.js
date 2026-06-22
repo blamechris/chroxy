@@ -154,7 +154,7 @@ describe('EventNormalizer', () => {
           cwd: '/tmp',
         }),
       })
-      const result = normalizer.normalize('ready', { model: 'claude-opus-4-7' }, ctx)
+      const result = normalizer.normalize('ready', { model: 'claude-opus-4-8' }, ctx)
       assert.equal(result.messages[1].msg.type, 'model_changed')
       assert.equal(result.messages[1].msg.model, 'opus')
     })
@@ -167,14 +167,14 @@ describe('EventNormalizer', () => {
           cwd: '/tmp',
         }),
       })
-      const result = normalizer.normalize('ready', { model: 'claude-opus-4-7' }, ctx)
+      const result = normalizer.normalize('ready', { model: 'claude-opus-4-8' }, ctx)
       assert.equal(result.messages[1].msg.model, 'opus')
     })
 
     it('falls back to bootedModel when data.model is missing (early ready emit)', () => {
       const ctx = makeCtx({
         getSessionEntry: () => ({
-          session: { model: null, bootedModel: 'claude-opus-4-7', permissionMode: 'approve' },
+          session: { model: null, bootedModel: 'claude-opus-4-8', permissionMode: 'approve' },
           name: 'Test',
           cwd: '/tmp',
         }),
@@ -204,7 +204,7 @@ describe('EventNormalizer', () => {
     it('prefers session.model over bootedModel when both are set and data.model is missing', () => {
       const ctx = makeCtx({
         getSessionEntry: () => ({
-          session: { model: 'claude-opus-4-7', bootedModel: 'claude-sonnet-4-6', permissionMode: 'approve' },
+          session: { model: 'claude-opus-4-8', bootedModel: 'claude-sonnet-4-6', permissionMode: 'approve' },
           name: 'Test',
           cwd: '/tmp',
         }),

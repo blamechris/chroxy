@@ -58,7 +58,7 @@ describe('sendSessionInfo — bootedModel fallback (#3691)', () => {
     // originally booted on opus. Precedence: explicit override wins.
     const session = sessionsMap.get('sess-1').session
     session.model = 'claude-sonnet-4-6'
-    session.bootedModel = 'claude-opus-4-7'
+    session.bootedModel = 'claude-opus-4-8'
 
     const ws = makeFakeWs()
     const ctx = makeCtx({ sessionManager: manager })
@@ -80,7 +80,7 @@ describe('sendSessionInfo — bootedModel fallback (#3691)', () => {
     // so tab switches don't blank out the picker.
     const session = sessionsMap.get('sess-1').session
     session.model = null
-    session.bootedModel = 'claude-opus-4-7'
+    session.bootedModel = 'claude-opus-4-8'
 
     const ws = makeFakeWs()
     const ctx = makeCtx({ sessionManager: manager })
@@ -100,7 +100,7 @@ describe('sendSessionInfo — bootedModel fallback (#3691)', () => {
     ])
     const session = sessionsMap.get('sess-1').session
     session.model = ''
-    session.bootedModel = 'claude-opus-4-7'
+    session.bootedModel = 'claude-opus-4-8'
 
     const ws = makeFakeWs()
     const ctx = makeCtx({ sessionManager: manager })
@@ -198,7 +198,7 @@ describe('sendPostAuthInfo — legacy cliSession bootedModel fallback (#3691)', 
       cwd: '/tmp',
       isReady: true,
       model: 'claude-sonnet-4-6',
-      bootedModel: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-8',
       permissionMode: 'approve',
     }
     const ctx = makeLegacyCtx(cliSession)
@@ -215,7 +215,7 @@ describe('sendPostAuthInfo — legacy cliSession bootedModel fallback (#3691)', 
       cwd: '/tmp',
       isReady: true,
       model: null,
-      bootedModel: 'claude-opus-4-7',
+      bootedModel: 'claude-opus-4-8',
       permissionMode: 'approve',
     }
     const ctx = makeLegacyCtx(cliSession)
@@ -283,7 +283,7 @@ describe('SessionManager.listSessions — bootedModel fallback (#3691)', () => {
 
   it('reports session.model when an explicit override is set', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    attachSession(mgr, 's-override', { model: 'claude-sonnet-4-6', bootedModel: 'claude-opus-4-7' })
+    attachSession(mgr, 's-override', { model: 'claude-sonnet-4-6', bootedModel: 'claude-opus-4-8' })
 
     const [entry] = mgr.listSessions()
     assert.equal(entry.sessionId, 's-override')
@@ -293,10 +293,10 @@ describe('SessionManager.listSessions — bootedModel fallback (#3691)', () => {
 
   it('falls back to session.bootedModel when session.model is null (#3691 core case)', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    attachSession(mgr, 's-fallback', { model: null, bootedModel: 'claude-opus-4-7' })
+    attachSession(mgr, 's-fallback', { model: null, bootedModel: 'claude-opus-4-8' })
 
     const [entry] = mgr.listSessions()
-    assert.equal(entry.model, 'claude-opus-4-7',
+    assert.equal(entry.model, 'claude-opus-4-8',
       'session_list payload must surface the running model when no override is set')
   })
 
@@ -311,10 +311,10 @@ describe('SessionManager.listSessions — bootedModel fallback (#3691)', () => {
 
   it('falls back when session.model is an empty string', () => {
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    attachSession(mgr, 's-empty-str', { model: '', bootedModel: 'claude-opus-4-7' })
+    attachSession(mgr, 's-empty-str', { model: '', bootedModel: 'claude-opus-4-8' })
 
     const [entry] = mgr.listSessions()
-    assert.equal(entry.model, 'claude-opus-4-7',
+    assert.equal(entry.model, 'claude-opus-4-8',
       'empty string is treated as "no override" by the `||` chain')
   })
 
@@ -324,14 +324,14 @@ describe('SessionManager.listSessions — bootedModel fallback (#3691)', () => {
     // fallback into a shared field — every entry must keep its own
     // precedence result.
     const mgr = new SessionManager({ skipPreflight: true, maxSessions: 5, stateFilePath: tmpStateFile() })
-    attachSession(mgr, 's-a', { model: 'claude-sonnet-4-6', bootedModel: 'claude-opus-4-7', name: 'A' })
-    attachSession(mgr, 's-b', { model: null, bootedModel: 'claude-opus-4-7', name: 'B' })
+    attachSession(mgr, 's-a', { model: 'claude-sonnet-4-6', bootedModel: 'claude-opus-4-8', name: 'A' })
+    attachSession(mgr, 's-b', { model: null, bootedModel: 'claude-opus-4-8', name: 'B' })
     attachSession(mgr, 's-c', { model: null, bootedModel: null, name: 'C' })
 
     const list = mgr.listSessions()
     const byId = Object.fromEntries(list.map(e => [e.sessionId, e]))
     assert.equal(byId['s-a'].model, 'claude-sonnet-4-6')
-    assert.equal(byId['s-b'].model, 'claude-opus-4-7')
+    assert.equal(byId['s-b'].model, 'claude-opus-4-8')
     assert.equal(byId['s-c'].model, null)
   })
 })
