@@ -83,13 +83,16 @@ describe('useTrayBadgeSync (#6184)', () => {
     expect(invokeSpy).toHaveBeenCalledWith('update_tray_badge', { blocked: 0, failed: 0 })
   })
 
-  it('does not re-invoke when the count is unchanged across re-renders (deduped)', () => {
+  it('does not re-invoke when blocked + failed are unchanged across re-renders', () => {
     setStore({})
     const { rerender } = render(<Harness blocked={1} />)
     expect(invokeSpy).toHaveBeenCalledTimes(1)
     setStore({})
     rerender(<Harness blocked={1} />)
-    expect(invokeSpy).toHaveBeenCalledTimes(1) // deduped — count didn't change
+    // No second invoke: the effect's [blocked, failed] deps are unchanged so the
+    // effect doesn't re-run (and the lastSentRef key-guard would suppress a
+    // duplicate anyway if it did, e.g. under StrictMode's double-invoke).
+    expect(invokeSpy).toHaveBeenCalledTimes(1)
   })
 
   it('re-invokes when the blocked count changes (e.g. a permission is answered)', () => {
