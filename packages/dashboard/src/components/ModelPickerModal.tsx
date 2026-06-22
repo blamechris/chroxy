@@ -88,6 +88,30 @@ export function ModelPickerModal({
     items[nextIdx]?.focus()
   }, [])
 
+  // #6238: the search <input> is a sibling of the listbox, so its keydowns don't
+  // bubble into `handleListKeyDown`. Wire the search-then-arrow flow directly:
+  // ArrowDown jumps focus to the first enabled result; Enter selects when the
+  // filter has narrowed to exactly one enabled match (type-to-pick).
+  const handleSearchKeyDown = useCallback(
+    (e: React.KeyboardEvent<HTMLInputElement>) => {
+      if (e.key === 'ArrowDown') {
+        e.preventDefault()
+        listRef.current
+          ?.querySelector<HTMLButtonElement>('[role="option"]:not([disabled])')
+          ?.focus()
+        return
+      }
+      if (e.key === 'Enter') {
+        const enabled = filtered.filter((m) => (m as PickerModel).disabled !== true)
+        if (enabled.length === 1) {
+          e.preventDefault()
+          handleSelect(enabled[0]!.id)
+        }
+      }
+    },
+    [filtered, handleSelect],
+  )
+
   return (
     <Modal open={open} onClose={onClose} title="Select model" maxWidth="520px" closeOnBackdrop>
       <div className="model-picker" data-testid="model-picker">
@@ -97,6 +121,7 @@ export function ModelPickerModal({
           placeholder="Search models…"
           value={query}
           onChange={(e) => setQuery(e.target.value)}
+          onKeyDown={handleSearchKeyDown}
           aria-label="Search models"
           data-testid="model-picker-search"
         />

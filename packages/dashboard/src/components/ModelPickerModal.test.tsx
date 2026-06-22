@@ -103,4 +103,46 @@ describe('ModelPickerModal (#6220)', () => {
     fireEvent.keyDown(screen.getByTestId('model-picker-list'), { key: 'ArrowUp' })
     expect(document.activeElement).toBe(sonnet)
   })
+
+  // #6238 — search-then-arrow: ArrowDown from the search field jumps into the
+  // first (enabled) result without an intermediate Tab.
+  it('ArrowDown from the search field focuses the first result row', () => {
+    renderModal()
+    const search = screen.getByTestId('model-picker-search')
+    search.focus()
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByTestId('model-picker-item-sonnet'))
+  })
+
+  it('ArrowDown from search skips a disabled first row to the first enabled one', () => {
+    const models = [
+      { id: 'sonnet', label: 'Sonnet', fullId: 'claude-sonnet-4-6', disabled: true },
+      { id: 'opus', label: 'Opus', fullId: 'claude-opus-4-8' },
+    ]
+    renderModal({ availableModels: models as ModelPickerModalProps['availableModels'] })
+    const search = screen.getByTestId('model-picker-search')
+    search.focus()
+    fireEvent.keyDown(search, { key: 'ArrowDown' })
+    expect(document.activeElement).toBe(screen.getByTestId('model-picker-item-opus'))
+  })
+
+  it('Enter in the search field selects when the filter narrows to exactly one match', () => {
+    const onSelect = vi.fn()
+    const onClose = vi.fn()
+    renderModal({ onSelect, onClose })
+    const search = screen.getByTestId('model-picker-search')
+    fireEvent.change(search, { target: { value: 'opus' } })
+    fireEvent.keyDown(search, { key: 'Enter' })
+    expect(onSelect).toHaveBeenCalledWith('opus')
+    expect(onClose).toHaveBeenCalled()
+  })
+
+  it('Enter in the search field does NOT select when more than one match remains', () => {
+    const onSelect = vi.fn()
+    renderModal({ onSelect })
+    const search = screen.getByTestId('model-picker-search')
+    // Empty query → all three models match; Enter must not pick arbitrarily.
+    fireEvent.keyDown(search, { key: 'Enter' })
+    expect(onSelect).not.toHaveBeenCalled()
+  })
 })
