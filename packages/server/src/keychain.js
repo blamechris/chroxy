@@ -7,6 +7,7 @@
  * - Windows/fallback: returns null (caller falls back to chmod 600 file)
  */
 import { execFileSync } from 'child_process'
+import { existsSync } from 'node:fs'
 import { isMac, isLinux } from './platform.js'
 
 const DEFAULT_SERVICE = 'chroxy'
@@ -34,23 +35,54 @@ function keychainDisabled() {
 }
 
 /**
- * macOS `security` exit code for errSecItemNotFound — the item genuinely is not
- * in the keychain (a clean "absent"). Any OTHER non-zero exit (locked keychain,
- * interaction-not-allowed, keychain not found, auth denied, …) is a READ FAILURE
- * we must NOT confuse with absence — see getTokenStatus / #5615.
+ * Cached, NON-PROMPTING "is the OS keychain actually usable" probe.
+ *
+ * The previous `isKeychainAvailable()` only ran `security help`, which succeeds
+ * even on a box whose LOGIN keychain is missing/corrupt ("keychain cannot be
+ * found"). So the daemon then shelled out to `security find-/add-generic-password`
+ * — and macOS answers an inaccessible keychain with a BLOCKING MODAL before
+ * returning an error. This probe verifies, without opening the keychain (no
+ * modal), that the configured default keychain file actually exists (macOS) or
+ * that the backend CLI is present (Linux). When it can't prove the keychain is
+ * usable, callers fall back to file/env storage silently.
+ *
+ * `security default-keychain` only PRINTS the configured path (it does not open
+ * the keychain → no prompt); `existsSync` then confirms the file is there. An
+ * empty/unparseable path is treated as INCONCLUSIVE → usable, so prior behaviour
+ * and mocked tests (which stub execFileSync) are preserved — only a NON-EMPTY
+ * path that is missing is a definitive "broken keychain".
+ *
+ * Cached per-process: the result is stable for a daemon's lifetime (repair the
+ * keychain → restart to pick it up). Reset in tests via the export below.
  */
-const MAC_ERR_SEC_ITEM_NOT_FOUND = 44
+let _keychainUsableCache = null
 
-/**
- * Check if OS keychain is available on this system.
- */
-export function isKeychainAvailable() {
-  if (keychainDisabled()) return false
+/** Test-only: clear the cached usability probe so a test can re-toggle it. */
+export function _resetKeychainHealthForTests() {
+  _keychainUsableCache = null
+}
+
+function keychainUsable() {
+  if (_keychainUsableCache !== null) return _keychainUsableCache
+  _keychainUsableCache = _probeKeychainUsable()
+  return _keychainUsableCache
+}
+
+function _probeKeychainUsable() {
   if (isMac) {
     try {
-      execFileSync('security', ['help'], { stdio: 'pipe' })
-      return true
+      const out = execFileSync('security', ['default-keychain', '-d', 'user'], {
+        encoding: 'utf-8',
+        stdio: ['pipe', 'pipe', 'pipe'],
+      })
+      // Output is the quoted path, e.g.  "/Users/x/Library/Keychains/login.keychain-db"
+      const path = out.trim().replace(/^"(.*)"$/, '$1')
+      // Inconclusive (no path / mocked execFileSync) → assume usable; only a
+      // real, missing path is a definitive broken-keychain signal.
+      if (!path) return true
+      return existsSync(path)
     } catch {
+      // `security` absent or errored → treat as not usable (file fallback).
       return false
     }
   }
@@ -66,6 +98,26 @@ export function isKeychainAvailable() {
 }
 
 /**
+ * macOS `security` exit code for errSecItemNotFound — the item genuinely is not
+ * in the keychain (a clean "absent"). Any OTHER non-zero exit (locked keychain,
+ * interaction-not-allowed, keychain not found, auth denied, …) is a READ FAILURE
+ * we must NOT confuse with absence — see getTokenStatus / #5615.
+ */
+const MAC_ERR_SEC_ITEM_NOT_FOUND = 44
+
+/**
+ * Check if OS keychain is available on this system.
+ */
+export function isKeychainAvailable() {
+  if (keychainDisabled()) return false
+  // Gate on the non-prompting usability probe (CLI present AND the default
+  // keychain file actually exists) so a broken/missing login keychain reports
+  // unavailable instead of letting callers trigger the macOS "keychain cannot
+  // be found" modal.
+  return keychainUsable()
+}
+
+/**
  * Get token from OS keychain.
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  * @param {string} [account] - Keychain account (default: 'api-token'). Other
@@ -75,7 +127,9 @@ export function isKeychainAvailable() {
  * @returns {string|null} Token or null if not found
  */
 export function getToken(service = DEFAULT_SERVICE, account = ACCOUNT) {
-  if (keychainDisabled()) return null
+  // Gate on usability (disabled OR broken keychain) so a missing login keychain
+  // never reaches the prompting `security find-generic-password` call.
+  if (!isKeychainAvailable()) return null
   if (isMac) {
     return _macGetToken(service, account)
   }
@@ -119,7 +173,15 @@ export function getToken(service = DEFAULT_SERVICE, account = ACCOUNT) {
  * @returns {KeychainReadResult}
  */
 export function getTokenStatus(service = DEFAULT_SERVICE) {
+  // The explicit off-switch (tests) → 'absent': the file fallback owns identity.
   if (keychainDisabled()) return { status: 'absent', value: null, error: null }
+  // #5615 fail-safe: a BROKEN/missing keychain must read as 'error', NOT
+  // 'absent' — an identity caller that re-mints on 'absent' would false-MITM
+  // every already-pinned client. Reporting 'error' makes it fail safe (don't
+  // rotate) AND avoids the prompting find-generic-password call (no modal).
+  if (!keychainUsable()) {
+    return { status: 'error', value: null, error: 'keychain unavailable (missing or broken login keychain)' }
+  }
   if (isMac) {
     return _macGetTokenStatus(service)
   }
@@ -135,7 +197,9 @@ export function getTokenStatus(service = DEFAULT_SERVICE) {
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  */
 export function setToken(token, service = DEFAULT_SERVICE) {
-  if (keychainDisabled()) return
+  // Gate on usability so a broken keychain never reaches the prompting
+  // `security add-generic-password` call (the "store API token" modal).
+  if (!isKeychainAvailable()) return
   if (isMac) {
     _macSetToken(service, token)
   } else if (isLinux) {
@@ -148,7 +212,7 @@ export function setToken(token, service = DEFAULT_SERVICE) {
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  */
 export function deleteToken(service = DEFAULT_SERVICE) {
-  if (keychainDisabled()) return
+  if (!isKeychainAvailable()) return
   if (isMac) {
     _macDeleteToken(service)
   } else if (isLinux) {
