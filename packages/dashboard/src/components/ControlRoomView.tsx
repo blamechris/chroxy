@@ -448,9 +448,72 @@ export function ControlRoomView({
     request()
   }, [connected, descriptor, request, loading, snapshot])
 
+  // #6218: the tab strip has more tabs than fit at common widths, so it scrolls
+  // horizontally with edge-chevron affordances. `scrollState` tracks whether
+  // there's clipped content on either side (so the chevrons only show when they
+  // do something); recomputed on scroll, on resize (ResizeObserver), and after
+  // the tab set changes.
+  const tablistRef = useRef<HTMLDivElement>(null)
+  const [scrollState, setScrollState] = useState<{ left: boolean; right: boolean }>({ left: false, right: false })
+  const updateScrollAffordance = useCallback(() => {
+    const el = tablistRef.current
+    if (!el) return
+    const { scrollLeft, scrollWidth, clientWidth } = el
+    // 1px slack absorbs sub-pixel rounding so a fully-scrolled edge reads as 0.
+    setScrollState({ left: scrollLeft > 1, right: scrollLeft + clientWidth < scrollWidth - 1 })
+  }, [])
+  useEffect(() => {
+    const el = tablistRef.current
+    if (!el) return
+    updateScrollAffordance()
+    if (typeof ResizeObserver === 'undefined') return
+    const ro = new ResizeObserver(updateScrollAffordance)
+    ro.observe(el)
+    return () => ro.disconnect()
+  }, [updateScrollAffordance])
+  const scrollTabs = useCallback((dir: -1 | 1) => {
+    const el = tablistRef.current
+    if (!el) return
+    // Scroll by ~70% of the visible width so a click reveals a fresh page of
+    // tabs while keeping one for context. Optional-call: jsdom doesn't implement
+    // scrollBy, and a missing scroll method must not throw.
+    el.scrollBy?.({ left: dir * el.clientWidth * 0.7, behavior: 'smooth' })
+  }, [])
+  // Keep the active tab visible when it changes programmatically (deep-link,
+  // forceTab, ArrowLeft/Right roving) — scroll it into view within the strip
+  // only (inline:'nearest' won't scroll the page vertically).
+  useEffect(() => {
+    const el = tablistRef.current
+    if (!el) return
+    const active = el.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')
+    // Optional-call: jsdom doesn't implement scrollIntoView; a missing method
+    // must not throw during render.
+    active?.scrollIntoView?.({ inline: 'nearest', block: 'nearest' })
+    updateScrollAffordance()
+  }, [tab, updateScrollAffordance])
+
   return (
     <div className="cr-view" data-testid="control-room-view">
-      <div className="cr-tabs" role="tablist" aria-label="Control Room sections" data-testid="cr-tabs">
+      <div className="cr-tabs-wrap">
+        <button
+          type="button"
+          className={`cr-tab-chevron cr-tab-chevron-left${scrollState.left ? '' : ' cr-tab-chevron-hidden'}`}
+          aria-label="Scroll tabs left"
+          aria-hidden={!scrollState.left}
+          tabIndex={-1}
+          data-testid="cr-tabs-chevron-left"
+          onClick={() => scrollTabs(-1)}
+        >
+          ‹
+        </button>
+        <div
+          className="cr-tabs"
+          role="tablist"
+          aria-label="Control Room sections"
+          data-testid="cr-tabs"
+          ref={tablistRef}
+          onScroll={updateScrollAffordance}
+        >
         {CONTROL_ROOM_TABS.map((t, i) => {
           const active = tab === t.key
           return (
@@ -485,6 +548,18 @@ export function ControlRoomView({
             </button>
           )
         })}
+        </div>
+        <button
+          type="button"
+          className={`cr-tab-chevron cr-tab-chevron-right${scrollState.right ? '' : ' cr-tab-chevron-hidden'}`}
+          aria-label="Scroll tabs right"
+          aria-hidden={!scrollState.right}
+          tabIndex={-1}
+          data-testid="cr-tabs-chevron-right"
+          onClick={() => scrollTabs(1)}
+        >
+          ›
+        </button>
       </div>
       {tab === 'repos' ? (
         <ControlRoomSection onInvestigate={onInvestigate} onOpenSession={onOpenSession} onConfigureRepo={onConfigureRepo} />

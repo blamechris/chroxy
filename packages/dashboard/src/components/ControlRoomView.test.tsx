@@ -308,4 +308,49 @@ describe('ControlRoomView auto-fetch on activation (#5543)', () => {
     expect(requestRunnerStatusMock).not.toHaveBeenCalled()
     expect(requestIntegrationStatusMock).not.toHaveBeenCalled()
   })
+
+  // #6218 — the tab strip scrolls horizontally with edge-chevron affordances.
+  // jsdom has no layout, so we simulate the scroll geometry on the tablist.
+  describe('#6218 overflow scroll + chevrons', () => {
+    function setGeometry(el: HTMLElement, g: { clientWidth: number; scrollWidth: number; scrollLeft: number }) {
+      Object.defineProperty(el, 'clientWidth', { value: g.clientWidth, configurable: true })
+      Object.defineProperty(el, 'scrollWidth', { value: g.scrollWidth, configurable: true })
+      Object.defineProperty(el, 'scrollLeft', { value: g.scrollLeft, writable: true, configurable: true })
+    }
+
+    it('renders both edge chevrons, hidden when the strip is not overflowing', () => {
+      render(<ControlRoomView />)
+      expect(screen.getByTestId('cr-tabs-chevron-left').className).toContain('cr-tab-chevron-hidden')
+      expect(screen.getByTestId('cr-tabs-chevron-right').className).toContain('cr-tab-chevron-hidden')
+    })
+
+    it('shows the right chevron when content is clipped to the right (at the start)', () => {
+      render(<ControlRoomView />)
+      const tablist = screen.getByTestId('cr-tabs')
+      setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 0 })
+      fireEvent.scroll(tablist)
+      expect(screen.getByTestId('cr-tabs-chevron-right').className).not.toContain('cr-tab-chevron-hidden')
+      expect(screen.getByTestId('cr-tabs-chevron-left').className).toContain('cr-tab-chevron-hidden')
+    })
+
+    it('shows the left chevron (and hides the right) once scrolled to the end', () => {
+      render(<ControlRoomView />)
+      const tablist = screen.getByTestId('cr-tabs')
+      setGeometry(tablist, { clientWidth: 300, scrollWidth: 900, scrollLeft: 600 })
+      fireEvent.scroll(tablist)
+      expect(screen.getByTestId('cr-tabs-chevron-left').className).not.toContain('cr-tab-chevron-hidden')
+      expect(screen.getByTestId('cr-tabs-chevron-right').className).toContain('cr-tab-chevron-hidden')
+    })
+
+    it('clicking the right chevron scrolls the strip to the right', () => {
+      render(<ControlRoomView />)
+      const tablist = screen.getByTestId('cr-tabs')
+      const scrollBy = vi.fn()
+      ;(tablist as unknown as { scrollBy: typeof scrollBy }).scrollBy = scrollBy
+      Object.defineProperty(tablist, 'clientWidth', { value: 300, configurable: true })
+      fireEvent.click(screen.getByTestId('cr-tabs-chevron-right'))
+      expect(scrollBy).toHaveBeenCalledWith(expect.objectContaining({ left: expect.any(Number), behavior: 'smooth' }))
+      expect(scrollBy.mock.calls[0]![0].left).toBeGreaterThan(0)
+    })
+  })
 })
