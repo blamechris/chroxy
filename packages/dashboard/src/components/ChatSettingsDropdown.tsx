@@ -1,10 +1,14 @@
 /**
- * ChatSettingsDropdown — Model, Permission Mode, and Thinking Level selectors.
+ * ChatSettingsDropdown — Model, Permission Mode, and Thinking Level controls.
  *
- * Uses native <select> elements which render their dropdown menus via the OS
- * compositor, avoiding CSS overflow/z-index clipping issues in Tauri WKWebView.
+ * #6220: the Model control is a BUTTON that opens `ModelPickerModal` (the inline
+ * <select> couldn't hold the full per-provider model set). Permission Mode and
+ * Thinking Level remain native <select> elements, which render their menus via
+ * the OS compositor — avoiding CSS overflow/z-index clipping in Tauri WKWebView.
+ * The modal renders above everything via the shared `Modal` overlay, so it's
+ * likewise clipping-immune.
  */
-import { useMemo, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import type { ModelInfo } from '../store/types'
 import type { PermissionMode } from '@chroxy/store-core'
 import { ModelPickerModal } from './ModelPickerModal'
@@ -92,6 +96,14 @@ export function ChatSettingsDropdown({
   // <select>). The select couldn't comfortably hold the full per-provider model
   // set; the modal gives room for grouping, the default marker, and search.
   const [pickerOpen, setPickerOpen] = useState(false)
+  // #6237 review: close the picker if the model list empties (a known transient
+  // during a provider switch — see readOnlyModel prop docs). The button/modal
+  // subtree is gated on `availableModels.length > 0`, so without this the modal
+  // unmounts while `pickerOpen` stays true and would silently reopen when models
+  // repopulate.
+  useEffect(() => {
+    if (availableModels.length === 0) setPickerOpen(false)
+  }, [availableModels.length])
 
   // #3888: hover tooltip on the active-model pill so users can see the full
   // model id and its context window without expanding the dropdown.
