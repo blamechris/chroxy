@@ -1,5 +1,5 @@
 ---
-description: "A reload-resilient north star for an unattended, multi-wave backlog-clearing marathon — a compact, self-contained constitution you re-invoke after every cont..."
+description: "A reload-resilient north star for an unattended, multi-wave backlog-clearing marathon — a compact, self-contained constitution you re-invoke after every..."
 ---
 
 # /prime-directive

@@ -771,3 +771,6 @@ jobs:
 
       - name: Run flush-and-exit.mjs tests
         run: node scripts/__tests__/flush-and-exit.test.mjs
+
+      - name: Run compile-skill-targets.mjs tests
+        run: node scripts/__tests__/compile-skill-targets.test.mjs

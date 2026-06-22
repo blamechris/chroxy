@@ -1,5 +1,5 @@
 ---
-description: "Run an unattended marathon session that works through GitHub issues across multiple waves until convergence — all issues are resolved, or all remaining issue..."
+description: "Run an unattended marathon session that works through GitHub issues across multiple waves until convergence — all issues are resolved, or all remaining..."
 ---
 
 # /tackle-issues

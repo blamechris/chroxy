@@ -19,8 +19,9 @@
 //
 // Exit non-zero on emit failure so /skill and CI can gate on it.
 import { readdirSync, readFileSync, writeFileSync, mkdirSync, existsSync, rmSync } from 'node:fs'
-import { join, dirname } from 'node:path'
+import { join, dirname, resolve } from 'node:path'
 import { homedir } from 'node:os'
+import { fileURLToPath } from 'node:url'
 
 const ALL_TARGETS = ['claude', 'gemini', 'codex']
 
@@ -71,7 +72,7 @@ function stripStamp(body) {
 // description for menus. Accumulate the whole paragraph first (the source's first
 // sentence often wraps across several physical lines) so we don't return a dangling
 // half-sentence. Capped; ellipsis only when truncated.
-function deriveDescription(body, name) {
+export function deriveDescription(body, name) {
   let para = ''
   for (const raw of body.split('\n')) {
     const line = raw.trim()
@@ -85,7 +86,16 @@ function deriveDescription(body, name) {
   let desc = para.replace(/\s+/g, ' ').trim()
   const dot = desc.search(/\.(\s|$)/)
   if (dot !== -1 && dot < 160) desc = desc.slice(0, dot + 1)
-  if (desc.length > 160) desc = desc.slice(0, 157).trimEnd() + '...'
+  if (desc.length > 160) {
+    // Back off to the last word boundary at or before the 157-char cut so the
+    // visible text + ellipsis stays within 160 without slicing mid-word (#6259).
+    // A single pathological word longer than the cap has no space to break on —
+    // fall back to a hard cut so it still truncates.
+    let cut = 157
+    const lastSpace = desc.lastIndexOf(' ', cut)
+    if (lastSpace > 0) cut = lastSpace
+    desc = desc.slice(0, cut).trimEnd() + '...'
+  }
   return desc
 }
 
@@ -245,4 +255,8 @@ function main() {
   console.log(`\nDone.${skipped ? ` ${skipped} target(s) skipped (logged above — not emitted).` : ''}`)
 }
 
-main()
+// Run the CLI only when invoked directly (`node compile-skill-targets.mjs`), not
+// when a test imports this module for unit coverage of deriveDescription().
+if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main()
+}
