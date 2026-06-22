@@ -117,7 +117,11 @@ describe('createOpenAiCompatibleSessionClass', () => {
     )
     assert.throws(
       () => createOpenAiCompatibleSessionClass(makeEntry({ id: '' })),
-      (err) => /openaiCompatible/.test(err.message)
+      // Pin the exact wording of the delegated-block id message — it is the one
+      // string this fix introduces (the `${blockLabel} entry requires a non-empty
+      // id` branch), so lock it the way the baseUrl/defaultModel messages are and
+      // assert it never leaks the anthropic block or the function-named fallback.
+      (err) => /openaiCompatible entry requires a non-empty id/.test(err.message)
         && !/anthropicCompatible/.test(err.message)
         && !/createAnthropicCompatibleSessionClass/.test(err.message),
       'a missing id must name openaiCompatible, not the delegated factory',
