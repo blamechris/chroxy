@@ -1,0 +1,261 @@
+/**
+ * Streaming + tool-call wire: stream start/delta/end, tool start/result/input-delta, model/evaluator/preamble changes, agent lifecycle, background-work snapshots.
+ *
+ * Domain slice of the server→client schema surface; re-exported verbatim by
+ * ../server.ts (barrel). Split per #6201 Tier-3.
+ */
+import { z } from 'zod';
+import type { ServerPermissionRequestMessage } from './messages.ts';
+export declare const ServerStreamStartSchema: z.ZodObject<{
+    type: z.ZodLiteral<"stream_start">;
+    messageId: z.ZodString;
+    serverTs: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ServerStreamDeltaSchema: z.ZodObject<{
+    type: z.ZodLiteral<"stream_delta">;
+    messageId: z.ZodString;
+    delta: z.ZodString;
+    serverTs: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ServerStreamEndSchema: z.ZodObject<{
+    type: z.ZodLiteral<"stream_end">;
+    messageId: z.ZodString;
+    serverTs: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ServerMessageSchema: z.ZodObject<{
+    type: z.ZodLiteral<"message">;
+    messageType: z.ZodString;
+    content: z.ZodString;
+    tool: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    options: z.ZodOptional<z.ZodAny>;
+    timestamp: z.ZodNumber;
+    code: z.ZodOptional<z.ZodString>;
+    attemptedResumeId: z.ZodOptional<z.ZodString>;
+    stdout: z.ZodOptional<z.ZodString>;
+    stderr: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerToolStartSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tool_start">;
+    messageId: z.ZodString;
+    toolUseId: z.ZodString;
+    tool: z.ZodString;
+    input: z.ZodAny;
+    serverName: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerToolResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tool_result">;
+    toolUseId: z.ZodString;
+    result: z.ZodAny;
+    truncated: z.ZodOptional<z.ZodBoolean>;
+}, z.core.$strip>;
+export declare const ServerToolInputDeltaSchema: z.ZodObject<{
+    type: z.ZodLiteral<"tool_input_delta">;
+    messageId: z.ZodString;
+    toolUseId: z.ZodString;
+    partialJson: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"result">;
+    cost: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+    duration: z.ZodOptional<z.ZodNumber>;
+    usage: z.ZodOptional<z.ZodAny>;
+    sessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$strip>;
+export declare const ServerModelChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"model_changed">;
+    model: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerPromptEvaluatorChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"prompt_evaluator_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodBoolean;
+}, z.core.$strip>;
+export declare const ServerPromptEvaluatorSkipPatternChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"prompt_evaluator_skip_pattern_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodUnion<readonly [z.ZodString, z.ZodNull]>;
+}, z.core.$strip>;
+export declare const ServerChroxyContextHintChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"chroxy_context_hint_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodBoolean;
+}, z.core.$strip>;
+export declare const ServerSessionPreambleChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_preamble_changed">;
+    sessionId: z.ZodString;
+    value: z.ZodString;
+}, z.core.$strip>;
+/**
+ * Schema for one entry of `available_models.models` (#3138).
+ *
+ * Matches the inferred `ModelInfo` type used by the dashboard / app model
+ * picker. `id`, `label`, and `fullId` are required strings; `contextWindow`
+ * is an optional positive number. The handler in `@chroxy/store-core` does
+ * additional empty-string rejection / capitalisation; this schema is the
+ * minimum well-formed shape for a wire-level `passthrough()` parse.
+ *
+ * **Established Zod-handler pattern (#3138)** — first migrated handler that
+ * pulls its element validation up to `@chroxy/protocol`. Future handler
+ * migrations should mirror this layout: declare a Zod schema next to the
+ * other server schemas, parse with `safeParse` inside the store-core
+ * handler, drop malformed entries fail-soft, and retain the handler's
+ * existing return shape so call sites need no changes.
+ */
+export declare const ServerAvailableModelsEntrySchema: z.ZodObject<{
+    id: z.ZodString;
+    label: z.ZodString;
+    fullId: z.ZodString;
+    contextWindow: z.ZodOptional<z.ZodUnknown>;
+}, z.core.$strip>;
+export declare const ServerAvailableModelsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"available_models">;
+    models: z.ZodOptional<z.ZodArray<z.ZodUnknown>>;
+    defaultModel: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerPermissionModeChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"permission_mode_changed">;
+    mode: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerPermissionRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"permission_request">;
+    requestId: z.ZodString;
+    tool: z.ZodString;
+    description: z.ZodOptional<z.ZodString>;
+    input: z.ZodAny;
+    remainingMs: z.ZodOptional<z.ZodNumber>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+/**
+ * Single validated builder for the `permission_request` wire message (#6031).
+ *
+ * `permission_request` is the most security-relevant message on the wire — a
+ * dropped/misnamed binding field (e.g. `sessionId`) routes a prompt to the
+ * wrong session or strands it on the legacy resolver. It used to be hand-built
+ * as a raw object literal at 4+ emit sites (ws-permissions.js HTTP-fallback +
+ * two resend paths, event-normalizer.js), each free to drift its field set.
+ *
+ * This factory is the one place those sites construct the message, and it
+ * `safeParse`-validates against `ServerPermissionRequestSchema` so field drift
+ * (a missing required field, a wrong type) is caught instead of silently
+ * shipping a malformed prompt.
+ *
+ * Field hygiene:
+ *  - `type` is always set here — callers never pass it.
+ *  - Optional fields (`description`, `remainingMs`, `sessionId`) are omitted
+ *    entirely (absent, not `null`/`undefined`) when not provided, matching the
+ *    existing wire shape (clients fall back to the active session when
+ *    `sessionId` is absent).
+ *  - `input` is passed through as-is. Callers are responsible for redaction
+ *    (#6038: `description: redactValue(...)`, `input: sanitizeToolInput(...)`)
+ *    BEFORE handing values to this builder — it is a shape guard, not a
+ *    redaction layer, and must not re-process already-redacted values.
+ *
+ * Validation failures throw a descriptive `Error` (with the Zod issues) rather
+ * than returning a partial object, so a drift bug surfaces loudly at the emit
+ * site in dev/test/CI instead of corrupting the client prompt.
+ */
+export declare function buildPermissionRequestMessage(fields: {
+    requestId: string;
+    tool: string;
+    input: unknown;
+    description?: string;
+    remainingMs?: number;
+    sessionId?: string;
+}): ServerPermissionRequestMessage;
+export declare const ServerUserQuestionSchema: z.ZodObject<{
+    type: z.ZodLiteral<"user_question">;
+    toolUseId: z.ZodString;
+    questions: z.ZodArray<z.ZodAny>;
+}, z.core.$strip>;
+export declare const ServerAgentBusySchema: z.ZodObject<{
+    type: z.ZodLiteral<"agent_busy">;
+}, z.core.$strip>;
+export declare const ServerAgentIdleSchema: z.ZodObject<{
+    type: z.ZodLiteral<"agent_idle">;
+}, z.core.$strip>;
+export declare const ServerAgentSpawnedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"agent_spawned">;
+    toolUseId: z.ZodString;
+    description: z.ZodOptional<z.ZodString>;
+    startedAt: z.ZodOptional<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ServerAgentCompletedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"agent_completed">;
+    toolUseId: z.ZodString;
+}, z.core.$strip>;
+/**
+ * #5016 — Task subagent intermediate progress event.
+ *
+ * Carries a re-emit of a Task subagent's intermediate wire event
+ * (`tool_start` / `tool_result` / `tool_input_delta` / `stream_delta`)
+ * tagged with the parent Task tool_use id so the dashboard can render
+ * the child's progress as nested sub-bubbles inside the parent's Task
+ * tool_call bubble.
+ *
+ * `parentToolUseId` — the id of the parent's `Task` tool_use block
+ *   (same id used for `agent_spawned` / `agent_completed`). Consumers
+ *   key the nested sub-bubble container off this id.
+ * `eventType` — the child's original event name (e.g. `'tool_start'`).
+ *   Consumers switch on this to render the wire event in the same
+ *   shape they would for a top-level event.
+ * `payload` — the verbatim child event payload. Fields are best-effort;
+ *   renderers MUST treat absence as a no-op.
+ *
+ * Nested Task: when a Task subagent itself dispatches a Task, the
+ * grand-child's events are forwarded up the chain re-tagged with the
+ * IMMEDIATE parent's `toolUseId`. The dashboard sees a flat stream
+ * — nested-nested rendering is intentionally not in v2.
+ */
+export declare const ServerAgentEventSchema: z.ZodObject<{
+    type: z.ZodLiteral<"agent_event">;
+    parentToolUseId: z.ZodString;
+    eventType: z.ZodString;
+    payload: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+}, z.core.$strip>;
+/**
+ * #4307 — one entry per backgrounded `Bash` shell the session is still
+ * waiting on. Pushed when the agent dispatches a `Bash` tool call with
+ * `run_in_background: true` (the matching tool_result carries the
+ * canonical `Command running in background with ID: <id>` text); cleared
+ * when the agent calls `BashOutput` (acknowledged) or the session is
+ * destroyed.
+ *
+ * `shellId` is the short alphanumeric token Claude prints (e.g.
+ * `brk57kt6pm`). `command` is the original Bash command text the agent
+ * dispatched, stashed at tool_use time so the dashboard can render
+ * "waiting on `<command>`" without a separate roundtrip. `startedAt` is
+ * the server-side wall-clock at the moment the tool_result was parsed —
+ * lets the dashboard surface elapsed wait time without trusting the
+ * client clock.
+ */
+export declare const ServerPendingBackgroundShellSchema: z.ZodObject<{
+    shellId: z.ZodString;
+    command: z.ZodString;
+    startedAt: z.ZodNumber;
+}, z.core.$strip>;
+/**
+ * #4307 — transient event: the pending-background-shells snapshot for a
+ * session changed. Emitted both on push (a new `run_in_background` shell
+ * was registered) and on clear (`BashOutput` acknowledged or the session
+ * was destroyed). The full snapshot is on the wire (not a delta) so a
+ * late-joining client sees canonical state.
+ *
+ * Why a full snapshot instead of an event per delta: pending work is a
+ * tiny set (typically 0 or 1 entries) and the event fires rarely, so
+ * the wire cost is negligible. A delta protocol would force every
+ * client to also reconcile against `pendingBackgroundShells` on the
+ * `session_list` snapshot — the full-snapshot shape avoids that.
+ *
+ * Late joiners: `session_list` carries the same `pendingBackgroundShells`
+ * field on each entry, so a client that connects between
+ * `background_work_changed` events catches up via the next snapshot.
+ */
+export declare const ServerBackgroundWorkChangedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"background_work_changed">;
+    sessionId: z.ZodString;
+    pending: z.ZodArray<z.ZodObject<{
+        shellId: z.ZodString;
+        command: z.ZodString;
+        startedAt: z.ZodNumber;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
