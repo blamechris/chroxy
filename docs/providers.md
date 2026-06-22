@@ -16,7 +16,7 @@ Nine first-party providers ship built-in (one, `claude-channel`, is a research-p
 
 Three additional providers register automatically when `environments.enabled=true` and Docker is available: `docker-cli` and `docker-sdk` run their `claude-cli` / `claude-sdk` provider inside the container, while `docker-byok` keeps the `claude-byok` agent loop on the host and redirects only built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) into the container.
 
-Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven).
+Beyond the built-ins, any service or local server that exposes an **Anthropic-compatible Messages API** (Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp server, vLLM, OpenRouter, custom proxies) can be registered straight from `config.json` — no code required. See [Anthropic-compatible endpoints (config-driven)](#anthropic-compatible-endpoints-config-driven). Endpoints that speak the **OpenAI Chat Completions API** instead (OpenAI, OpenRouter, LM Studio, vLLM, Together, Groq, …) register the same way under a sibling block — see [OpenAI-compatible endpoints (config-driven)](#openai-compatible-endpoints-config-driven).
 
 ## Setting credentials from the dashboard
 
@@ -44,6 +44,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
 | *(config-driven)* | `@anthropic-ai/sdk` → any Anthropic-compatible endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.anthropicCompatible` (config.json): Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom. Full BYOK agent loop. See [below](#anthropic-compatible-endpoints-config-driven) |
+| *(config-driven)* | `openai` SDK → any OpenAI chat-completions endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.openaiCompatible` (config.json): OpenAI, OpenRouter, LM Studio, vLLM, llama.cpp, Together, Groq, DeepInfra, custom. Same BYOK agent loop, OpenAI wire format. See [below](#openai-compatible-endpoints-config-driven) |
 | `docker-cli` | Docker image + `claude` inside | Inherits Claude env from container | Inherits `claude-cli` | Same as `claude-cli` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-byok` | Docker image; agent loop stays on the host via `@anthropic-ai/sdk` | Same as `claude-byok` | Inherits `claude-byok` | Same as `claude-byok` | Only registered when `environments.enabled=true` and Docker daemon is reachable; built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) runs inside the container |
@@ -522,6 +523,91 @@ OpenRouter's models endpoint reports per-token pricing. Chroxy converts it to it
 
 - The same young-compatibility-layer caveats as any [Anthropic-compatible endpoint](#caveats) apply; tool-use quality depends on the model you route to.
 - `modelDiscovery` generalizes beyond OpenRouter: any aggregator or local server exposing an OpenAI-format `/v1/models` (LM Studio, vLLM) can opt in with `"format": "openai"` (ids only, no pricing).
+
+## OpenAI-compatible endpoints (config-driven)
+
+The sibling of the [Anthropic-compatible block](#anthropic-compatible-endpoints-config-driven) for services that speak the **OpenAI Chat Completions API** instead of Anthropic's Messages API: **OpenAI** itself, **OpenRouter**, **LM Studio**, **vLLM**, **llama.cpp server**, **Together**, **Groq**, **DeepInfra**, or any custom proxy. Declare them under `providers.openaiCompatible` in `~/.chroxy/config.json` — each entry registers a first-class provider at startup that drives the same agent loop as `claude-byok` (streaming, tools, permission prompts, MCP servers, history, cost). Chroxy translates between its Anthropic-shaped agent loop and the OpenAI wire format internally, so the experience is identical to any other BYOK provider.
+
+The entry shape is **identical** to [`providers.anthropicCompatible`](#anthropic-compatible-endpoints-config-driven) (validated by the same rules). The one operator-visible difference is the wire dialect of `baseUrl`:
+
+- **`anthropicCompatible`** → `baseUrl` is an Anthropic base; the SDK appends `/v1/messages`. Example: `https://api.z.ai/api/anthropic`.
+- **`openaiCompatible`** → `baseUrl` is an **OpenAI API base, typically ending in `/v1`**; the `openai` SDK appends `/chat/completions`. Examples: `https://openrouter.ai/api/v1`, `http://localhost:1234/v1` (LM Studio).
+
+Pick the block that matches the dialect your endpoint actually serves. Some services (OpenRouter, LM Studio, vLLM, llama.cpp) expose **both** surfaces — either block works, so choose whichever you prefer; the only thing that changes is the `baseUrl` suffix.
+
+### Entry shape
+
+```json
+{
+  "providers": {
+    "openaiCompatible": [
+      {
+        "id": "openrouter-oai",
+        "label": "OpenRouter (OpenAI API)",
+        "baseUrl": "https://openrouter.ai/api/v1",
+        "apiKeyEnv": "OPENROUTER_API_KEY",
+        "credentialsKey": "openrouterApiKey",
+        "defaultModel": "openai/gpt-4o-mini",
+        "models": ["openai/gpt-4o", "openai/gpt-4o-mini"],
+        "pricing": { "input": 0.15, "output": 0.6 },
+        "contextWindow": 128000,
+        "modelDiscovery": { "url": "https://openrouter.ai/api/v1/models", "format": "openrouter" }
+      }
+    ]
+  }
+}
+```
+
+| Field | Required | Meaning |
+|-------|:--------:|---------|
+| `id` | yes | Provider id (lowercase letters, digits, dashes; must start with a letter). Must not collide with a built-in id. Select it via `--provider openrouter-oai`, `CHROXY_PROVIDER`, or the dashboard. |
+| `label` | no | Dashboard display label. Defaults to `id`. |
+| `baseUrl` | yes | `http(s)` **OpenAI API base** URL, typically ending in `/v1`. The `openai` SDK appends `/chat/completions` itself. No embedded `user:pass@`. |
+| `apiKeyEnv` | no | **NAME** of the environment variable holding the API key (e.g. `OPENROUTER_API_KEY`). |
+| `credentialsKey` | no | **NAME** of a field in `~/.chroxy/credentials.json` (mode `0600`) holding the key (e.g. `openrouterApiKey`). Env var wins when both are set. Omit both for keyless local servers. |
+| `defaultModel` | yes | Model used when none is selected. |
+| `models` | no | Model **allowlist** for live model switching. Omit entirely for an unrestricted endpoint (any model id is passed through verbatim; an unknown id surfaces as the endpoint's own error). |
+| `pricing` | no | USD per million tokens: `{ "input", "output", "cacheRead", "cacheWrite" }` (missing rates default to 0). Omit for free/local endpoints — cost reports an honest $0. |
+| `contextWindow` | no | Context window in tokens (dashboard chip). Omit when unknown — Chroxy never fabricates a window; the chip is simply hidden. |
+| `modelDiscovery` | no | Live model-catalog discovery: `{ "url", "format" }`. `format` is `openai` (bare `GET /v1/models`, ids only — LM Studio, vLLM) or `openrouter` (`GET /api/v1/models`, OpenAI-ish list with per-token pricing). A discovered catalog feeds the dashboard picker, **replaces** the static `models` allowlist for validation, and (openrouter) autofills per-model cost. |
+
+**Secrets never go in `config.json`.** `apiKeyEnv` / `credentialsKey` name *where* the key lives; an entry carrying a literal key (an `apiKey`/`token` field, a value that looks like `sk-...`, or `user:pass@` in the URL) is rejected at startup with a pointed warning. Invalid entries are skipped; valid siblings still register. A malformed `openaiCompatible` entry names **its own block** in the error (not `anthropicCompatible`), so the message points you at the right config key.
+
+### Worked example: LM Studio (keyless local server)
+
+LM Studio serves an OpenAI-compatible `/v1/chat/completions` locally. vLLM and llama.cpp server (`llama-server`) expose the same surface — just change `baseUrl` (still ending in `/v1`) and `defaultModel`:
+
+```json
+{
+  "providers": {
+    "openaiCompatible": [
+      {
+        "id": "lm-studio-oai",
+        "label": "LM Studio (OpenAI API)",
+        "baseUrl": "http://localhost:1234/v1",
+        "defaultModel": "qwen3-coder-30b",
+        "modelDiscovery": { "url": "http://localhost:1234/v1/models", "format": "openai" }
+      }
+    ]
+  }
+}
+```
+
+No `apiKeyEnv` / `credentialsKey` → no credential gate (a placeholder key is sent on the wire, which local servers ignore); no `pricing` → cost is always $0; no `models` (the `openai` `modelDiscovery` above instead lists whatever models are loaded); no `contextWindow` → decided by the local model, so no chip is shown.
+
+### Use
+
+```bash
+OPENROUTER_API_KEY=sk-or-... npx chroxy start --provider openrouter-oai
+npx chroxy start --provider lm-studio-oai
+```
+
+### Caveats
+
+- There is **no `providers add` preset** for the OpenAI block yet — hand-write the entry as above. (The [`providers add openrouter`](#openrouter) preset writes an **Anthropic-format** entry; OpenRouter accepts both dialects, so prefer that preset unless you specifically want the OpenAI wire format.)
+- OpenAI-compatibility varies by server — probe streamed tool calls (`tool_calls` deltas), parallel tool calls, and usage accounting against your specific endpoint before relying on them.
+- Tool-use quality depends entirely on the model behind the endpoint (same caveat as Ollama and the Anthropic-compatible block).
+- Capabilities are identical to `claude-byok` by construction — see the [capability matrix](#capability-matrix) note.
 
 ## Selecting a provider
 
