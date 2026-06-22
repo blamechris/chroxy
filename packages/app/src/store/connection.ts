@@ -1813,6 +1813,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
     wsSend(socket, payload);
     const result: 'sent' | 'queued' | false = 'sent';
+    // #6222: mark the prompt ChatMessage `answered` so the shared pending-count
+    // derivation (`isLivePermissionPrompt` keys on `m.answered`) clears. Without
+    // this, answering from the cross-session SessionNotificationBanner (which
+    // calls only sendPermissionResponse) left the prompt counted as pending. The
+    // SessionScreen path marks answered with the same decision AFTER this call.
+    // Store the canonical decision TOKEN ('allow' | 'deny' | 'allowSession'), not
+    // a display label — SettingsScreen/PermissionHistoryScreen tally
+    // `m.answered === 'allow' | 'allowAlways' | 'allowSession' | 'deny'`.
+    get().markPromptAnsweredByRequestId(requestId, decision);
     // Auto-switch to the session that owns this prompt (if different from active).
     // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
     // fall back to scanning sessionStates messages.

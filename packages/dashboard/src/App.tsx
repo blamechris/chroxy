@@ -559,7 +559,6 @@ export function App() {
   // re-render unrelated chrome.
   const markSessionNotificationRead = useConnectionStore(s => s.markSessionNotificationRead)
   const markAllSessionNotificationsRead = useConnectionStore(s => s.markAllSessionNotificationsRead)
-  const markPromptAnsweredByRequestId = useConnectionStore(s => s.markPromptAnsweredByRequestId)
   const conversationHistory = useConnectionStore(s => s.conversationHistory)
   const fetchConversationHistory = useConnectionStore(s => s.fetchConversationHistory)
   const resumeConversation = useConnectionStore(s => s.resumeConversation)
@@ -1674,17 +1673,23 @@ export function App() {
     return result
   }, [sendUserQuestionResponse])
 
+  // #6222/#6224: respondToPermission (sendPermissionResponse) now marks the
+  // prompt answered with the canonical decision token itself — only when the
+  // answer actually went over the wire (after the disconnected-socket guard).
+  // The previous explicit markPromptAnsweredByRequestId(requestId, 'Allowed')
+  // here was both wrong-format (a display label, not the 'allow'/'deny' token
+  // consumers expect) and unconditional (it ran even when the send was refused
+  // while disconnected, falsely clearing the prompt). Dropped in favour of the
+  // single choke point.
   const handleBannerApprove = useCallback((requestId: string, notificationId: string) => {
     respondToPermission(requestId, 'allow')
-    markPromptAnsweredByRequestId(requestId, 'Allowed')
     dismissSessionNotification(notificationId)
-  }, [respondToPermission, markPromptAnsweredByRequestId, dismissSessionNotification])
+  }, [respondToPermission, dismissSessionNotification])
 
   const handleBannerDeny = useCallback((requestId: string, notificationId: string) => {
     respondToPermission(requestId, 'deny')
-    markPromptAnsweredByRequestId(requestId, 'Denied')
     dismissSessionNotification(notificationId)
-  }, [respondToPermission, markPromptAnsweredByRequestId, dismissSessionNotification])
+  }, [respondToPermission, dismissSessionNotification])
 
   // Retry reconnects to the *active* server (remote registry entry or local),
   // not unconditionally to local — see retryConnection / #5284.

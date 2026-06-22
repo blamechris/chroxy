@@ -13,6 +13,7 @@ import {
 } from '../../store/connection';
 import { useConnectionLifecycleStore } from '../../store/connection-lifecycle';
 import { clearAllCallbacks, getCallback } from '../../store/imperative-callbacks';
+import { derivePendingPermissionCounts, totalPendingPermissions } from '@chroxy/store-core';
 import {
   prepareEagerKeyExchange,
   setPendingKeyPair,
@@ -441,6 +442,42 @@ describe('message queue', () => {
     }
     // 11th should fail
     expect(store.sendInput('overflow')).toBe(false);
+  });
+
+  // #6222: answering a permission must clear the shared pending-permission count
+  // (isLivePermissionPrompt keys on m.answered). The cross-session
+  // SessionNotificationBanner calls only sendPermissionResponse, so without the
+  // fix that path left the prompt counted as pending.
+  it('sendPermissionResponse marks the prompt answered so the pending count clears (#6222)', () => {
+    const mockSocket = { readyState: 1, send: () => {} } as unknown as WebSocket;
+    const livePrompt: ChatMessage = {
+      id: 'm1',
+      type: 'prompt',
+      content: 'Allow?',
+      timestamp: 1,
+      requestId: 'req-a',
+      expiresAt: Date.now() + 5 * 60_000,
+    };
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: { s1: { ...createEmptySessionState(), messages: [livePrompt] } },
+      socket: mockSocket,
+    });
+
+    const before = useConnectionStore.getState().sessionStates;
+    expect(totalPendingPermissions(derivePendingPermissionCounts(before, Date.now()))).toBe(1);
+
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'allow');
+
+    const after = useConnectionStore.getState().sessionStates;
+    // Canonical decision TOKEN, not a display label — SettingsScreen /
+    // PermissionHistoryScreen tally `m.answered === 'allow' | 'deny' | ...`.
+    expect(after.s1.messages.find((m) => m.requestId === 'req-a')?.answered).toBe('allow');
+    expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
+
+    // beforeEach does not reset `socket`; clear it so the open mock doesn't bleed
+    // into later tests that assume a disconnected socket.
+    useConnectionStore.setState({ socket: null });
   });
 
   it('does not queue excluded message types (setModel)', () => {

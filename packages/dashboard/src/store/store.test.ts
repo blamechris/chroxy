@@ -1580,6 +1580,102 @@ describe('permission response auto-switch', () => {
 });
 
 // ---------------------------------------------------------------------------
+// #6222 — answering a permission clears the pending-permission count
+// ---------------------------------------------------------------------------
+describe('sendPermissionResponse clears pending-permission count (#6222)', () => {
+  const futureExpiry = () => Date.now() + 5 * 60_000;
+
+  const makeLivePrompt = (id: string, reqId: string) => ({
+    id,
+    type: 'prompt' as const,
+    content: 'Allow?',
+    timestamp: 1,
+    requestId: reqId,
+    // requestId + future expiresAt are what make isLivePermissionPrompt count it
+    // as a live *permission* prompt (vs an AskUserQuestion, which carries neither).
+    expiresAt: futureExpiry(),
+  });
+
+  afterEach(async () => {
+    const { useConnectionStore } = await import('./connection');
+    useConnectionStore.setState({ sessions: [], activeSessionId: null, sessionStates: {}, socket: null });
+  });
+
+  it('marks the prompt answered so derivePendingPermissionCounts drops to 0 (inline chat Allow path)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { derivePendingPermissionCounts, totalPendingPermissions } = await import('@chroxy/store-core');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeLivePrompt('m1', 'req-a')] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    // Before: one live pending permission.
+    const before = useConnectionStore.getState().sessionStates;
+    expect(totalPendingPermissions(derivePendingPermissionCounts(before, Date.now()))).toBe(1);
+
+    // Answer it via the inline-chat path (sendPermissionResponse only — no
+    // separate markPromptAnswered call, exactly what PermissionPrompt does).
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'allow');
+
+    // After: the prompt is marked answered with the canonical decision TOKEN
+    // (not a display label — consumers treat `answered` as a decision enum) and
+    // the count clears.
+    const after = useConnectionStore.getState().sessionStates;
+    const prompt = after.s1!.messages.find((m) => m.requestId === 'req-a');
+    expect(prompt?.answered).toBe('allow');
+    expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
+  });
+
+  it('records a denial as the answered decision (deny path)', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { derivePendingPermissionCounts, totalPendingPermissions } = await import('@chroxy/store-core');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [makeLivePrompt('m1', 'req-a')] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    useConnectionStore.getState().sendPermissionResponse('req-a', 'deny');
+
+    const after = useConnectionStore.getState().sessionStates;
+    const prompt = after.s1!.messages.find((m) => m.requestId === 'req-a');
+    expect(prompt?.answered).toBe('deny');
+    expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
+  });
+
+  it('clears a prompt owned by a background (non-active) session', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const { derivePendingPermissionCounts, totalPendingPermissions } = await import('@chroxy/store-core');
+
+    useConnectionStore.setState({
+      activeSessionId: 's1',
+      sessionStates: {
+        s1: { ...createEmptySessionState(), messages: [] },
+        s2: { ...createEmptySessionState(), messages: [makeLivePrompt('m2', 'req-b')] },
+      },
+      socket: { readyState: 1, send: () => {} } as unknown as WebSocket,
+    });
+
+    expect(
+      totalPendingPermissions(derivePendingPermissionCounts(useConnectionStore.getState().sessionStates, Date.now())),
+    ).toBe(1);
+
+    useConnectionStore.getState().sendPermissionResponse('req-b', 'allow');
+
+    const after = useConnectionStore.getState().sessionStates;
+    expect(after.s2!.messages.find((m) => m.requestId === 'req-b')?.answered).toBe('allow');
+    expect(totalPendingPermissions(derivePendingPermissionCounts(after, Date.now()))).toBe(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // Resolved-permission persistence + Allow for Session (#2833, #2834)
 // ---------------------------------------------------------------------------
 describe('resolvedPermissions + Allow for Session (#2833, #2834)', () => {
