@@ -3534,12 +3534,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // carried entry into its session by id. `op` is advisory — the full entry
     // drives the result, so a dropped earlier delta is self-healed by the next
     // one. Validated + `next === prev` no-op-short-circuited like the snapshot
-    // case above. NOTE: the dashboard ALSO bumps `lastClientActivityAt` / clears
-    // `inactivityWarning` for the delta's session here; that is DEFERRED for this
-    // slice — the dispatch-level activity bump at the top of handleMessage
-    // (`isActivityEvent`) does not yet include the activity_* types, so the
-    // "Working… last activity Ns ago" parity follow-up is intentionally out of
-    // scope for #6246.
+    // case above.
     case 'activity_delta': {
       const parsed = ServerActivityDeltaSchema.safeParse(msg);
       if (!parsed.success) return;
@@ -3547,6 +3542,23 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       const next = applyActivityDelta(prev, parsed.data);
       if (next === prev) return;
       set({ activity: next });
+      // #6248 — a delta is a genuine live state change (a background shell /
+      // subagent / tool started, progressed, or ended), so it counts as
+      // activity: bump `lastClientActivityAt` and clear any `inactivityWarning`
+      // for the delta's session, mirroring the dashboard feeder + the app's
+      // `isActivityEvent` bump (activity_delta isn't in ACTIVITY_EVENT_TYPES, so
+      // it's done here). Gated on `replayingSessions` exactly like that bump so a
+      // session-switch history replay doesn't reset the "Working… last activity
+      // Ns ago" timestamp (#4512). activity_snapshot deliberately does NOT bump —
+      // it's a full-state resync on subscribe/reconnect, not fresh work.
+      const deltaSid = parsed.data.sessionId;
+      if (get().sessionStates[deltaSid] && !_ctx.replayingSessions.has(deltaSid)) {
+        updateSession(deltaSid, (ss) => {
+          const patch: Partial<SessionState> = { lastClientActivityAt: Date.now() };
+          if (ss.inactivityWarning) patch.inactivityWarning = null;
+          return patch;
+        });
+      }
       return;
     }
 
