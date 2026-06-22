@@ -371,7 +371,7 @@ export async function runDoctorChecks({ port, providers, verbose: _verbose, pkgD
   // sections group together in the output report.
   checks.push(configCheck)
 
-  // 5.5 Credential storage (#6236). Surface WHERE the API token + credentials
+  // Credential storage (#6236). Surface WHERE the API token + credentials
   // actually live and whether the OS keychain is healthy — the #6235 fallback to
   // the 0600 file on a broken/missing login keychain is otherwise silent. A
   // broken keychain is a WARN (secrets work but aren't in the keychain + the

@@ -148,7 +148,7 @@ export function isKeychainBroken() {
  * non-prompting source of truth (no `find-/add-generic-password`, so no macOS
  * modal) that classifies the keychain and reports which backend credentials land
  * in. Mirrors the runtime gating in {@link isKeychainAvailable}:
- *   - `disabled`    — `CHROXY_*_DISABLE_KEYCHAIN` set → file/env owns secrets.
+ *   - `disabled`    — `CHROXY_DISABLE_KEYCHAIN=1` set → file/env owns secrets.
  *   - `unsupported` — no OS keychain on this platform (Windows/other) → file.
  *   - `broken`      — mac/linux keychain present but unreadable/missing → file
  *                     (this is the silent #6235 fallback the operator should see).
@@ -173,7 +173,9 @@ export function keychainHealth() {
     return {
       status: 'broken',
       backend: 'file',
-      detail: 'OS login keychain is missing or unreadable — credentials fell back to the 0600 file',
+      detail: isMac
+        ? 'macOS login keychain is missing or unreadable — credentials fell back to the 0600 file'
+        : 'Linux secret service (secret-tool/libsecret) is unavailable — credentials fell back to the 0600 file',
       repairHint: isMac
         ? 'recreate the login keychain in Keychain Access (File ▸ New Keychain, or reset via "security" / a relogin), then re-store with `chroxy init`'
         : 'ensure libsecret/`secret-tool` and a running secret service (e.g. gnome-keyring) are available, then re-store with `chroxy init`',
