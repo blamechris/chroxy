@@ -49,8 +49,10 @@ import {
   handleAuthFail as sharedAuthFail,
   handleKeyExchangeOk as sharedKeyExchangeOk,
   handleServerMode as sharedServerMode,
-  handleCheckpointCreated as sharedCheckpointCreated,
-  handleCheckpointList as sharedCheckpointList,
+  // checkpoint_created / checkpoint_list migrated to the shared dispatch table
+  // (#5618 Batch 6); checkpoint_restored is not migrated in this batch — it
+  // stays platform-local (here as a switch case; the dashboard via its
+  // HANDLERS map), so this shared import remains.
   handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,
@@ -143,7 +145,6 @@ import { PROTOCOL_VERSION } from '@chroxy/protocol';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
-  Checkpoint,
   ConnectionContext,
   ConnectionState,
   CustomAgent,
@@ -1163,6 +1164,8 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
   getSessions: () => getStore().getState().sessions,
+  // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
+  getCheckpoints: () => getStore().getState().checkpoints,
   // #5618 — user_question raises a background-session notification via the
   // app's own helper (which also mirrors the row into the mobile push store).
   pushSessionNotification: (sessionId, eventType, message) =>
@@ -1187,6 +1190,17 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       useConversationStore.getState().setSlashCommands(list as SlashCommand[]);
     } else {
       useConversationStore.getState().setCustomAgents(list as CustomAgent[]);
+    }
+  },
+  // #5618 Batch 6 — checkpoint_created / checkpoint_list also mirror into the
+  // app's secondary conversation store (its checkpoint timeline UI), exactly as
+  // the prior inline `useConversationStore.getState().addCheckpoint(...)` /
+  // `setCheckpoints(...)` did. The dashboard omits this hook (no secondary store).
+  syncSecondaryCheckpoints: (op) => {
+    if (op.kind === 'append') {
+      useConversationStore.getState().addCheckpoint(op.checkpoint);
+    } else {
+      useConversationStore.getState().setCheckpoints(op.checkpoints);
     }
   },
   // #5618 Batch 2 — the app tightens provider_list elements via mapProviderList
@@ -3159,26 +3173,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // app builds the structured ServerError + ring + notification-store mirror);
     // the shared handlers own the message construction + console.warn.
 
-    case 'checkpoint_created': {
-      const next = sharedCheckpointCreated(msg, get().checkpoints, get().activeSessionId);
-      if (next) {
-        set({ checkpoints: next });
-        // Side effect: dual-write into the conversation store. The shared
-        // handler validated the payload, so we can safely treat the appended
-        // entry as the message's `checkpoint` field.
-        useConversationStore.getState().addCheckpoint(msg.checkpoint as Checkpoint);
-      }
-      break;
-    }
-
-    case 'checkpoint_list': {
-      const next = sharedCheckpointList(msg, get().activeSessionId);
-      if (next) {
-        set({ checkpoints: next });
-        useConversationStore.getState().setCheckpoints(next);
-      }
-      break;
-    }
+    // checkpoint_created / checkpoint_list — migrated to the shared dispatch
+    // table (#5618 Batch 6; handled by runDispatch before this switch). The
+    // app's secondary conversation-store mirror (addCheckpoint / setCheckpoints)
+    // now rides on the `syncSecondaryCheckpoints` adapter hook below; the
+    // dashboard omits that hook (no secondary checkpoint store).
 
     case 'checkpoint_restored': {
       // Server created a new session at the checkpoint state.

@@ -58,6 +58,7 @@ import type {
   ServerErrorCategory,
   SessionRole,
   WebTask,
+  Checkpoint,
 } from './types'
 import { nextMessageId } from './utils'
 import {
@@ -126,6 +127,9 @@ import {
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   handleMultiQuestionIntervention,
   applyInterventionBuilder,
+  // --- checkpoint cases (#5618 Batch 6) ---
+  handleCheckpointCreated,
+  handleCheckpointList,
   resolveSessionId,
   type PermissionMode,
   type PermissionRule,
@@ -247,6 +251,14 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   /** Read the current session list (for `session_updated`). */
   getSessions(): SessionInfo[]
   /**
+   * Read the current flat checkpoint list (#5618 Batch 6). `checkpoint_created`
+   * is a read-modify-write (append to the existing list), so the dispatch
+   * handler needs the prior array — mirrors the inline `get().checkpoints` both
+   * clients read before this migration. Both back it with their flat connection
+   * state's `checkpoints` field.
+   */
+  getCheckpoints(): Checkpoint[]
+  /**
    * Push a per-session notification for a BACKGROUND session event (#5618).
    * Used by the `user_question` case to surface a question raised in a session
    * that is not the active one. Each client backs this with its own
@@ -291,6 +303,23 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * {@link ClientStoreAdapter.pushSessionNotification}.
    */
   syncSecondaryInventory?(kind: 'slashCommands' | 'customAgents', list: unknown[]): void
+  /**
+   * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
+   * The mobile app keeps a separate `useConversationStore` whose checkpoint list
+   * powers its timeline UI; after the `checkpoint_created` / `checkpoint_list`
+   * dispatch handlers write the flat connection-state list, they call this to
+   * keep that store in sync — exactly the app's prior inline
+   * `useConversationStore.getState().addCheckpoint(...)` (append) /
+   * `setCheckpoints(...)` (replace). The `kind` discriminates which call.
+   *
+   * OPTIONAL: a client without a secondary checkpoint store (the dashboard)
+   * omits it; the dispatch handler then performs only the flat-state write. A
+   * platform-specific side-effect OUTSIDE the shared store-state contract, in
+   * the same spirit as {@link ClientStoreAdapter.syncSecondaryInventory}.
+   */
+  syncSecondaryCheckpoints?(
+    op: { kind: 'append'; checkpoint: Checkpoint } | { kind: 'replace'; checkpoints: Checkpoint[] },
+  ): void
   /**
    * Map/validate the raw `provider_list` element array before it is written to
    * flat state (#5618 Batch 2). The mobile app tightens each entry (drops
@@ -738,6 +767,19 @@ export interface DispatchMessageMap {
     questionCount?: number
     reason?: string
     timestamp?: number
+  }
+  // --- checkpoint cases (#5618 Batch 6) ---
+  // Both carry the broadcast-guard `sessionId`; the active-session gate +
+  // payload validation live in handleCheckpointCreated / handleCheckpointList.
+  checkpoint_created: {
+    type: 'checkpoint_created'
+    sessionId?: string
+    checkpoint?: unknown
+  }
+  checkpoint_list: {
+    type: 'checkpoint_list'
+    sessionId?: string
+    checkpoints?: unknown[]
   }
 }
 
@@ -1474,6 +1516,43 @@ function dispatchWebTaskUpsert<S extends DispatchSessionBase>(
 }
 
 /**
+ * `checkpoint_created` (#5618 Batch 6) — append the new checkpoint to the
+ * active-session list. Byte-identical between the clients' switches modulo the
+ * app's extra mirror into its `useConversationStore` (abstracted behind
+ * `syncSecondaryCheckpoints`, which the dashboard omits). Reads the prior list
+ * via `getCheckpoints()` and only writes on a non-null handler result — matching
+ * each client's prior `if (next) { set(...) }` guard (no no-op state churn).
+ */
+function dispatchCheckpointCreated<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['checkpoint_created'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const next = handleCheckpointCreated(
+    msg as Record<string, unknown>,
+    adapter.getCheckpoints(),
+    adapter.getActiveSessionId(),
+  )
+  if (!next) return
+  adapter.setState({ checkpoints: next } as Record<string, Checkpoint[]>)
+  adapter.syncSecondaryCheckpoints?.({ kind: 'append', checkpoint: msg.checkpoint as Checkpoint })
+}
+
+/**
+ * `checkpoint_list` (#5618 Batch 6) — replace the active-session checkpoint list
+ * with the server array. Pure flat write (no prior state needed); the app also
+ * mirrors the replacement into its secondary store via `syncSecondaryCheckpoints`.
+ */
+function dispatchCheckpointList<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['checkpoint_list'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const next = handleCheckpointList(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (!next) return
+  adapter.setState({ checkpoints: next } as Record<string, Checkpoint[]>)
+  adapter.syncSecondaryCheckpoints?.({ kind: 'replace', checkpoints: next })
+}
+
+/**
  * `user_question` (#5618) — append the question prompt to its (resolved)
  * session, falling back to the global log, then raise a background-session
  * notification. Byte-identical between the two clients' switches: both parsed
@@ -1642,6 +1721,9 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     user_question: dispatchUserQuestion,
     // --- multi_question_intervention (#5618) — byte-identical builder + append ---
     multi_question_intervention: dispatchMultiQuestionIntervention,
+    // --- checkpoint cases (#5618 Batch 6) ---
+    checkpoint_created: dispatchCheckpointCreated,
+    checkpoint_list: dispatchCheckpointList,
   }
 }
 
@@ -1712,6 +1794,9 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'user_question',
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
   'multi_question_intervention',
+  // --- checkpoint cases (#5618 Batch 6) ---
+  'checkpoint_created',
+  'checkpoint_list',
 ]
 
 /**

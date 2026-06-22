@@ -33,7 +33,7 @@ import {
   runDispatch,
   type ClientStoreAdapter,
 } from '../dispatch-table'
-import type { ChatMessage, SessionInfo } from '../types'
+import type { ChatMessage, SessionInfo, Checkpoint } from '../types'
 import type { FixtureInitialState } from './fixtures'
 
 /** A loose session shape — superset of the table's `DispatchSessionBase`. */
@@ -167,6 +167,10 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
     getSessions: () => sessionList,
+    // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
+    // Both clients back it with their flat `checkpoints`; modelled as a read of
+    // the live `flat` ref so the checkpoint fixtures observe identical results.
+    getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
     // #5618 — `pushSessionNotification` is a UI side-effect OUTSIDE the shared
     // store-state contract (the app additionally mirrors into its mobile push
     // store; the dashboard does not). Modelled as a no-op here, exactly like the
@@ -241,6 +245,12 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
           // modelled as a no-op, with the hook invocation covered by the
           // dispatch-table unit tests. The dashboard omits it.
           setCostUpdate: () => {},
+          // #5618 Batch 6 — checkpoint_created / checkpoint_list mirror into the
+          // app's secondary conversation store. Out of the shared contract (the
+          // shared flat `checkpoints` write IS asserted); modelled as a no-op,
+          // with the hook invocation covered by the dispatch-table unit tests.
+          // The dashboard omits it.
+          syncSecondaryCheckpoints: () => {},
         }
       : {}),
     // #5618 Batch 3 — only the DASHBOARD shows the session_stopped info toast
