@@ -61,6 +61,14 @@
       "hash": "ebdb14e",
       "installed": "2026-06-02"
     },
+    "prime-directive": {
+      "hash": "a6758e7",
+      "installed": "2026-06-22",
+      "targets": [
+        "claude",
+        "gemini"
+      ]
+    },
     "project-audit": {
       "hash": "aae4d65",
       "installed": "2026-06-06"
