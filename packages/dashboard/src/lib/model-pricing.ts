@@ -34,10 +34,14 @@ const CLAUDE_PRICING: Record<string, ModelPricing> = {
   // Claude rows are not currently on any live cost path (Claude cost is
   // server-authoritative). They exist to remove the stale 3.x-era data and
   // keep the table right for any future consumer / if Claude is ever added to
-  // that set. (opus-4-8 + fable-5 are intentionally absent — the server
-  // doesn't price them yet either; tracked under #5631. The drift-warn in
-  // calculateCost surfaces any offered-but-unpriced model.)
-  'claude-opus-4-7': { inputPer1k: 0.015, outputPer1k: 0.075, label: 'Claude Opus 4.7' },
+  // that set. (#6233: the Opus head is claude-opus-4-8, matching the server
+  // registry since #6219. fable-5 is intentionally absent — the server ships it
+  // without verified pricing, so it has no pricing key either; tracked under
+  // #5631. The `[1m]` long-context variants are also absent: this flat
+  // USD/1k table can't represent the >200K premium tier the server models in
+  // its `oneM.longContext` block (#4087), and no model carries a [1m] row here.
+  // The drift-warn in calculateCost surfaces any offered-but-unpriced model.)
+  'claude-opus-4-8': { inputPer1k: 0.015, outputPer1k: 0.075, label: 'Claude Opus 4.8' },
   'claude-sonnet-4-6': { inputPer1k: 0.003, outputPer1k: 0.015, label: 'Claude Sonnet 4.6' },
   'claude-haiku-4-5': { inputPer1k: 0.001, outputPer1k: 0.005, label: 'Claude Haiku 4.5' },
   // Claude Sonnet 4.5 — previously mislabeled "Claude 3.7 Sonnet" (the rate
