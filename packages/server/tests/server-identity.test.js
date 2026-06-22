@@ -26,10 +26,14 @@ import {
  * dir so the real ~/.chroxy/ tree is never written (per the test-state rule).
  */
 
-function fakeKeychain({ available = true, readError = null } = {}) {
+function fakeKeychain({ available = true, readError = null, broken = false } = {}) {
   const store = new Map()
   return {
     isKeychainAvailable: () => available,
+    // #6234 — a BROKEN keychain is present-but-unusable (distinct from disabled).
+    // The identity loader fails safe (throws) on broken + no file rather than
+    // minting a replacement that would invalidate pinned clients.
+    isKeychainBroken: () => broken,
     getToken: (service) => store.get(service) ?? null,
     // #5615 — distinguishes absent from a read failure. When `readError` is set
     // the read FAILS (simulating a locked keychain) rather than reporting absence.
@@ -176,6 +180,38 @@ describe('server identity (#5536)', () => {
         const id = getOrCreateServerIdentity({ keychain: kc, filePath })
         assert.equal(id.created, true)
         assert.equal(id.secretKey.length, 64)
+      })
+    })
+
+    // #6234 — a BROKEN/missing keychain (distinct from disabled). The no-modal
+    // fix must NOT trade the modal for a silent rotation.
+    it('(d) broken keychain + a valid fallback FILE identity → loads the file (no rotation, no throw)', () => {
+      withTempDir((filePath) => {
+        // Mint to the FILE (keychain disabled at mint time → file fallback).
+        const minted = getOrCreateServerIdentity({ keychain: fakeKeychain({ available: false }), filePath })
+        assert.equal(existsSync(filePath), true)
+        // Keychain later goes BROKEN: the file is authoritative — load it unchanged.
+        const broken = fakeKeychain({ available: false, broken: true })
+        const loaded = loadServerIdentity({ keychain: broken, filePath })
+        assert.ok(loaded, 'must load the file identity rather than throw')
+        assert.equal(loaded.publicKey, minted.publicKey, 'same identity — no rotation')
+      })
+    })
+
+    it('(e) broken keychain + NO fallback file → throws IdentityUnavailableError (refuses to mint)', () => {
+      withTempDir((filePath) => {
+        const broken = fakeKeychain({ available: false, broken: true })
+        // Can't confirm there is no pinned identity in the unreadable keychain →
+        // fail safe rather than mint a replacement that false-MITMs pinned clients.
+        assert.throws(
+          () => loadServerIdentity({ keychain: broken, filePath }),
+          (err) => err instanceof IdentityUnavailableError,
+        )
+        assert.throws(
+          () => getOrCreateServerIdentity({ keychain: broken, filePath }),
+          IdentityUnavailableError,
+        )
+        assert.equal(existsSync(filePath), false, 'must not write a fresh file identity')
       })
     })
   })

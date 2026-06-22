@@ -118,6 +118,20 @@ export function isKeychainAvailable() {
 }
 
 /**
+ * True when the keychain is present-but-UNUSABLE (broken/missing login keychain),
+ * as DISTINCT from explicitly disabled (`CHROXY_DISABLE_KEYCHAIN=1`).
+ *
+ * The server-identity loader (#5615) needs this distinction: a broken keychain
+ * must not silently rotate the identity. It uses `isKeychainBroken()` to fail
+ * safe — refuse to mint a replacement when it can't confirm there's no pinned
+ * identity in the (now unreadable) keychain AND no fallback file exists. The
+ * probe is non-prompting, so this never triggers the macOS modal.
+ */
+export function isKeychainBroken() {
+  return !keychainDisabled() && !keychainUsable()
+}
+
+/**
  * Get token from OS keychain.
  * @param {string} [service] - Keychain service name (default: 'chroxy')
  * @param {string} [account] - Keychain account (default: 'api-token'). Other
