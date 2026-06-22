@@ -2941,6 +2941,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // Persist the decision in the store so PermissionPrompt renders its
     // answered state across remounts (#2833 — tab switch regression).
     get().markPermissionResolved(requestId, decision);
+    // #6222: also mark the prompt ChatMessage `answered`. markPermissionResolved
+    // only records the decision in the `resolvedPermissions` map — which flips
+    // the bubble's answered UI but is NOT consulted by the shared pending-count
+    // derivation (`isLivePermissionPrompt` keys on `m.answered`). Without this,
+    // answering a permission FROM THE CHAT STREAM (the inline PermissionPrompt,
+    // which calls only sendPermissionResponse) left the "N pending" header
+    // indicator (#5667) and the dock badge (#6184) stuck. The banner and
+    // AskUserQuestion paths already call markPromptAnswered*, so this makes
+    // sendPermissionResponse the single choke point that clears the count for
+    // every caller (the banner's own call becomes idempotent). Additive to the
+    // bubble — PermissionPrompt reads answered from resolvedPermissions, not this.
+    get().markPromptAnsweredByRequestId(requestId, decision === 'deny' ? 'Denied' : 'Allowed');
     // Auto-switch to the session that owns this prompt (if different from active).
     // Prefer sessionNotifications lookup (covers prompts stored before sessionStates[sid] existed),
     // fall back to scanning sessionStates messages.
