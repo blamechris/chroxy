@@ -1879,11 +1879,15 @@ function handleStreamStart(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
         _deltaIdRemaps.set(out.remap.from, out.remap.to);
       }
       if (!out.isNewMessage) {
-        // Reuse existing response message (reconnect replay dedup)
-        return { streamingMessageId: out.streamingMessageId };
+        // Reuse existing response message (reconnect replay dedup). #6302 — the
+        // 'pending' sentinel is now adopted by a real stream id, so null the
+        // faked-fresh-turn owner (owner is non-null only while 'pending').
+        return { streamingMessageId: out.streamingMessageId, pendingClientMessageId: null };
       }
       return {
         streamingMessageId: out.streamingMessageId,
+        // #6302 — real id adopts the turn; clear the faked-fresh-turn owner.
+        pendingClientMessageId: null,
         messages: [...filterThinking(ss.messages), out.newMessage!],
       };
     });
@@ -2104,6 +2108,9 @@ function handleToolStart(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet
       // the next stream_start will overwrite with the response id.
       if (ss.streamingMessageId === 'pending') {
         patch.streamingMessageId = toolMsg.id;
+        // #6302 — a tool-led turn just adopted the 'pending' sentinel with a real
+        // id, so clear the faked-fresh-turn owner (it never queued).
+        patch.pendingClientMessageId = null;
       }
       // #4308 — track the in-flight tool in activeTools[]. Same-reference
       // no-op (dedup by toolUseId) is honoured so a duplicate broadcast
@@ -2414,6 +2421,9 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     updateSession(errSessionId, (ss) => ({
       messages: filterThinking([...ss.messages, errorMsg]),
       streamingMessageId: null,
+      // #6302 — clear the pending-turn owner with the sentinel (parity with the
+      // app's server_error clear) so a stale owner can't mis-gate a reconcile.
+      pendingClientMessageId: null,
     }));
   } else {
     const activeErrId = get().activeSessionId;
@@ -2421,6 +2431,7 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
       updateActiveSession((ss) => ({
         messages: filterThinking([...ss.messages, errorMsg]),
         streamingMessageId: null,
+        pendingClientMessageId: null,
       }));
     } else {
       set({ streamingMessageId: null });
@@ -4060,6 +4071,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateSession(conflictSessionId, (ss) => ({
             messages: dropGhost(ss.messages),
             streamingMessageId: ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+            // #6302 — the optimistic turn is being torn down (server rejected the
+            // send); drop its owner alongside the 'pending' sentinel.
+            ...(ss.streamingMessageId === 'pending' ? { pendingClientMessageId: null } : {}),
           }));
         } else {
           // Root-level (CLI single-session) store mode: addUserMessage put the

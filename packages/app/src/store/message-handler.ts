@@ -2321,6 +2321,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             messages: [...dropGhost(ss.messages), noticeMsg],
             streamingMessageId:
               ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+            // #6302 — clear the pending-turn owner alongside the sentinel so a
+            // stale owner can't mis-gate a later reconcile (parity with the
+            // dashboard's input_conflict teardown).
+            pendingClientMessageId:
+              ss.streamingMessageId === 'pending' ? null : ss.pendingClientMessageId,
           }));
         } else {
           get().addMessage(noticeMsg);
@@ -2501,8 +2506,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             _ctx.deltaIdRemaps.set(out.remap.from, out.remap.to);
           }
           if (!out.isNewMessage) {
-            // Reuse existing response message (reconnect replay dedup)
-            return { streamingMessageId: out.streamingMessageId };
+            // Reuse existing response message (reconnect replay dedup). #6302 —
+            // the 'pending' sentinel has now been adopted by a real stream id, so
+            // null the faked-fresh-turn owner to keep the invariant (owner is
+            // non-null only while streamingMessageId === 'pending').
+            return { streamingMessageId: out.streamingMessageId, pendingClientMessageId: null };
           }
           // #5938 — insert the new assistant message BEFORE any trailing queued
           // follow-up bubbles. A message queued during the pending window (before
@@ -2520,6 +2528,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           while (insertAt > 0 && queuedIdSet.has(base[insertAt - 1].id)) insertAt--;
           return {
             streamingMessageId: out.streamingMessageId,
+            // #6302 — real id adopts the turn; clear the faked-fresh-turn owner.
+            pendingClientMessageId: null,
             messages: [...base.slice(0, insertAt), out.newMessage!, ...base.slice(insertAt)],
           };
         });
@@ -2673,6 +2683,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           // no-ops; the next stream_start will overwrite with the response id.
           if (ss.streamingMessageId === 'pending') {
             patch.streamingMessageId = toolMsg.id;
+            // #6302 — a tool-led turn just adopted the 'pending' sentinel with a
+            // real id, so clear the faked-fresh-turn owner (it never queued).
+            patch.pendingClientMessageId = null;
           }
           return patch;
         });
@@ -3388,6 +3401,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         updateSession(errSessionId, (ss) => ({
           messages: filterThinking([...ss.messages, errorMsg]),
           streamingMessageId: null,
+          // #6302 — clearing the stream tears down any faked-fresh turn; drop its
+          // owner so a stale id can't linger past the 'pending' window.
+          pendingClientMessageId: null,
         }));
       } else {
         const activeErrId = get().activeSessionId;
@@ -3395,6 +3411,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
           updateActiveSession((ss) => ({
             messages: filterThinking([...ss.messages, errorMsg]),
             streamingMessageId: null,
+            pendingClientMessageId: null,
           }));
         }
         // No session context on app — the error is already surfaced via

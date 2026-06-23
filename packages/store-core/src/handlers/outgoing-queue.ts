@@ -37,12 +37,22 @@ import { resolveSessionId } from './_shared'
 export interface FakedFreshTurnState {
   streamingMessageId: string | null
   messages: ChatMessage[]
+  /**
+   * #6302 — the `clientMessageId` that OWNS the current 'pending' optimistic
+   * turn (set by the client alongside `streamingMessageId: 'pending'`). The
+   * reconcile fires ONLY when the incoming `message_queued`'s `clientMessageId`
+   * matches this — so another client's broadcast queued send (an id this client
+   * doesn't own) can never retire this client's own optimistic turn.
+   */
+  pendingClientMessageId: string | null
 }
 
 /** The patch a faked-fresh-turn reconcile produces (omitted fields are unchanged). */
 export interface FakedFreshTurnPatch {
   streamingMessageId?: string | null
   messages?: ChatMessage[]
+  /** #6302 — null the pending-turn owner when the optimistic turn is retired. */
+  pendingClientMessageId?: string | null
 }
 
 /**
@@ -232,9 +242,21 @@ export function handleMessageQueued(
     // (it never sets streamingMessageId to a real clientMessageId before
     // stream_start), so this fires only for a faked-fresh turn — a genuinely live
     // turn carries a real stream id and is left untouched.
-    reconcileFakedFreshTurn: ({ streamingMessageId, messages }) => {
+    //
+    // #6302 — and ONLY for OUR OWN optimistic send: the reconcile fires only when
+    // this `message_queued`'s clientMessageId matches the session's
+    // `pendingClientMessageId` (the id that owns the 'pending' turn). In a
+    // multi-client session another client's mid-turn send is broadcast as a
+    // `message_queued` too; without this owner check that broadcast would clear
+    // THIS client's pending turn early. A 'a user bubble with this id exists'
+    // check is insufficient — mid-turn sends are echoed across clients, so this
+    // client also holds bubbles for other clients' ids. When the queued send has
+    // no clientMessageId at all (legacy/idless), it can't be correlated to any
+    // owner, so it never retires a faked-fresh turn.
+    reconcileFakedFreshTurn: ({ streamingMessageId, messages, pendingClientMessageId }) => {
       if (streamingMessageId !== 'pending') return null
-      const patch: FakedFreshTurnPatch = { streamingMessageId: null }
+      if (!clientMessageId || clientMessageId !== pendingClientMessageId) return null
+      const patch: FakedFreshTurnPatch = { streamingMessageId: null, pendingClientMessageId: null }
       // Strip the optimistic 'thinking' bubble by its singleton id (matching the
       // canonical filterThinking in utils.ts) — NOT by type, which would also
       // delete real persisted thinking content that carries a non-'thinking' id.

@@ -1673,6 +1673,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     updateActiveSession((ss) => ({
       messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
       streamingMessageId: 'pending',
+      // #6302 — record WHICH send owns this 'pending' optimistic turn so a later
+      // message_queued only retires it when its clientMessageId matches (the
+      // owner check that protects this turn from another client's broadcast
+      // queued send in a multi-client session).
+      pendingClientMessageId: userMsg.id,
     }));
 
     // Safety net: if no stream_start arrives, clear the pending state for THIS
@@ -1691,6 +1696,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       updateSession(armedSessionId, (s) => ({
         messages: filterThinking(s.messages),
         streamingMessageId: null,
+        pendingClientMessageId: null,
       }));
     }, safetyNetMs);
   },

@@ -222,28 +222,34 @@ describe('handleMessageQueued', () => {
   })
 })
 
-describe('handleMessageQueued — faked-fresh-turn reconcile (#6291)', () => {
+describe('handleMessageQueued — faked-fresh-turn reconcile (#6291 / #6302)', () => {
   const userMsg = (id: string): ChatMessage => ({ id, type: 'user_input', content: 'hi', timestamp: 0 })
   const thinkingMsg = (): ChatMessage => ({ id: 'thinking', type: 'thinking', content: '', timestamp: 0 })
 
-  it('clears a pending streamingMessageId and strips the thinking bubble in one step', () => {
+  it('clears a pending streamingMessageId and strips the thinking bubble in one step (owner matches)', () => {
     const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
     const patch = builder.reconcileFakedFreshTurn!({
       streamingMessageId: 'pending',
       messages: [userMsg('uin-1'), thinkingMsg()],
+      pendingClientMessageId: 'uin-1',
     })
-    expect(patch).toEqual({ streamingMessageId: null, messages: [userMsg('uin-1')] })
+    expect(patch).toEqual({
+      streamingMessageId: null,
+      pendingClientMessageId: null,
+      messages: [userMsg('uin-1')],
+    })
   })
 
   it('does NOT strip a real (non-thinking) message when there is no thinking bubble', () => {
     const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
     // streamingMessageId is still the 'pending' sentinel (no stream_start yet) but
-    // the thinking bubble was already removed — clear the id, leave messages alone.
+    // the thinking bubble was already removed — clear the id + owner, leave messages.
     const patch = builder.reconcileFakedFreshTurn!({
       streamingMessageId: 'pending',
       messages: [userMsg('uin-1')],
+      pendingClientMessageId: 'uin-1',
     })
-    expect(patch).toEqual({ streamingMessageId: null })
+    expect(patch).toEqual({ streamingMessageId: null, pendingClientMessageId: null })
     expect(patch).not.toHaveProperty('messages')
   })
 
@@ -253,13 +259,52 @@ describe('handleMessageQueued — faked-fresh-turn reconcile (#6291)', () => {
     const patch = builder.reconcileFakedFreshTurn!({
       streamingMessageId: 'resp-7',
       messages: [userMsg('uin-1'), thinkingMsg()],
+      pendingClientMessageId: 'uin-2',
     })
     expect(patch).toBeNull()
   })
 
   it('is a no-op (null) when nothing is streaming', () => {
     const builder = handleMessageQueued({ sessionId: 's1', text: 'hi' }, null)!
-    expect(builder.reconcileFakedFreshTurn!({ streamingMessageId: null, messages: [] })).toBeNull()
+    expect(
+      builder.reconcileFakedFreshTurn!({ streamingMessageId: null, messages: [], pendingClientMessageId: null }),
+    ).toBeNull()
+  })
+
+  it('#6302 — is a no-op (null) when ANOTHER client\'s queued send arrives (owner mismatch)', () => {
+    // Multi-client: this client faked a fresh turn for uin-1 (it owns the pending
+    // turn). A DIFFERENT client's mid-turn send (uin-2) is broadcast as a
+    // message_queued — even though streamingMessageId is still 'pending', the
+    // owner ids differ, so this client's optimistic turn must stay intact.
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-2', text: 'theirs' }, null)!
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [userMsg('uin-1'), thinkingMsg()],
+      pendingClientMessageId: 'uin-1',
+    })
+    expect(patch).toBeNull()
+  })
+
+  it('#6302 — is a no-op (null) when the queued send has no clientMessageId (uncorrelatable)', () => {
+    // An idless queued send can't be matched to any owner, so it never retires a
+    // faked-fresh turn — even with a 'pending' sentinel outstanding.
+    const builder = handleMessageQueued({ sessionId: 's1', text: 'idless' }, null)!
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [userMsg('uin-1'), thinkingMsg()],
+      pendingClientMessageId: 'uin-1',
+    })
+    expect(patch).toBeNull()
+  })
+
+  it('#6302 — is a no-op (null) when no owner is recorded (pendingClientMessageId null)', () => {
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [userMsg('uin-1'), thinkingMsg()],
+      pendingClientMessageId: null,
+    })
+    expect(patch).toBeNull()
   })
 
   it('strips ONLY the singleton thinking placeholder, preserving real persisted thinking content', () => {
@@ -271,8 +316,13 @@ describe('handleMessageQueued — faked-fresh-turn reconcile (#6291)', () => {
     const patch = builder.reconcileFakedFreshTurn!({
       streamingMessageId: 'pending',
       messages: [realThinking, userMsg('uin-1'), thinkingMsg()],
+      pendingClientMessageId: 'uin-1',
     })
-    expect(patch).toEqual({ streamingMessageId: null, messages: [realThinking, userMsg('uin-1')] })
+    expect(patch).toEqual({
+      streamingMessageId: null,
+      pendingClientMessageId: null,
+      messages: [realThinking, userMsg('uin-1')],
+    })
   })
 })
 

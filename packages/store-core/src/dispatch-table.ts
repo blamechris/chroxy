@@ -172,6 +172,11 @@ export interface DispatchSessionBase {
   // reconcile (#6291). Both clients' real `SessionState` carry it
   // (BaseSessionState).
   streamingMessageId?: string | null
+  // `pendingClientMessageId` — read+cleared alongside streamingMessageId by the
+  // faked-fresh-turn reconcile (#6302): the queued echo only retires the
+  // optimistic turn when its clientMessageId matches this owner. Both clients'
+  // real `SessionState` carry it (BaseSessionState).
+  pendingClientMessageId?: string | null
   conversationId?: string | null
   sessionRules?: PermissionRule[]
   isIdle?: boolean
@@ -1059,14 +1064,22 @@ function dispatchQueuedMessages<S extends DispatchSessionBase>(
         // message_queued confirms the send the server actually queued. This makes
         // the spinner→badge swap happen in one step immediately instead of waiting
         // for the client's 5s stream-stall safety net.
+        // #6302 — thread the pending-turn OWNER so the reconcile fires only for
+        // this client's own optimistic send (queued echo's clientMessageId ===
+        // pendingClientMessageId), not another client's broadcast queued send.
         const turnPatch = builder.reconcileFakedFreshTurn?.({
           streamingMessageId: ss.streamingMessageId ?? null,
           messages: ss.messages,
+          pendingClientMessageId: ss.pendingClientMessageId ?? null,
         })
         if (turnPatch) {
           if ('streamingMessageId' in turnPatch) {
             ;(patch as { streamingMessageId?: string | null }).streamingMessageId =
               turnPatch.streamingMessageId
+          }
+          if ('pendingClientMessageId' in turnPatch) {
+            ;(patch as { pendingClientMessageId?: string | null }).pendingClientMessageId =
+              turnPatch.pendingClientMessageId
           }
           if (turnPatch.messages) {
             ;(patch as { messages?: ChatMessage[] }).messages = turnPatch.messages
