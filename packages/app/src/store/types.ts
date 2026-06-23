@@ -577,7 +577,10 @@ export interface FileGitDiffActions {
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
   setFileWriteCallback: (cb: ((result: FileWriteResult) => void) | null) => void;
-  requestFileWrite: (path: string, content: string) => void;
+  // Returns false when the socket is closed (frame not sent) so callers can
+  // surface a "not connected" error instead of arming a never-resolving
+  // callback / timeout (#6288).
+  requestFileWrite: (path: string, content: string) => boolean;
   // Git operations
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
   setGitBranchesCallback: (cb: ((result: GitBranchesResult) => void) | null) => void;
@@ -585,9 +588,12 @@ export interface FileGitDiffActions {
   setGitCommitCallback: (cb: ((result: GitCommitResult) => void) | null) => void;
   requestGitStatus: () => void;
   requestGitBranches: () => void;
-  requestGitStage: (paths: string[]) => void;
-  requestGitUnstage: (paths: string[]) => void;
-  requestGitCommit: (message: string) => void;
+  // Return false when the socket is closed (frame not sent) so callers can
+  // surface a "not connected" error instead of arming a never-resolving
+  // callback (#6288).
+  requestGitStage: (paths: string[]) => boolean;
+  requestGitUnstage: (paths: string[]) => boolean;
+  requestGitCommit: (message: string) => boolean;
   // Diff viewer
   setDiffCallback: (cb: ((result: DiffResult) => void) | null) => void;
   requestDiff: (base?: string) => void;

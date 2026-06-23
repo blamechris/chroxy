@@ -113,9 +113,21 @@ export function FileEditor({ visible, filePath, initialContent, onClose, onSave 
 
             writeCallbackRef.current = cb;
             setFileWriteCallback(cb);
-            requestFileWrite(filePath, content);
+            if (!requestFileWrite(filePath, content)) {
+              // Socket closed — the write_file frame never went out, so the
+              // response callback would never fire. Surface an accurate error
+              // immediately instead of arming a 10s timer that resolves with a
+              // misleading "Request timed out" (#6288). The form stays open and
+              // re-submittable.
+              setSaving(false);
+              setFileWriteCallback(null);
+              writeCallbackRef.current = null;
+              Alert.alert('Save Failed', 'Not connected to server');
+              return;
+            }
 
-            // Timeout after 10 seconds
+            // Timeout after 10 seconds — only for a genuinely in-flight save
+            // that the server never answers.
             saveTimeoutRef.current = setTimeout(() => {
               saveTimeoutRef.current = null;
               if (writeCallbackRef.current === cb) {
