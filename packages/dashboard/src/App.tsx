@@ -70,7 +70,6 @@ import { useQrModal } from './hooks/useQrModal'
 import { useSidebarOrdering } from './hooks/useSidebarOrdering'
 import { useControlRoomState } from './hooks/useControlRoomState'
 import { useMessageRenderer } from './hooks/useMessageRenderer'
-import { useChatKeyboard } from './hooks/useChatKeyboard'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
@@ -1695,21 +1694,6 @@ export function App() {
     if (result !== false) setScrollToBottomSignal(n => n + 1)
     return result
   }, [sendPermissionResponse])
-
-  // #6287 — a SINGLE document-level keyboard listener for the permission
-  // shortcuts, scoped to the FIRST unanswered prompt in the active session.
-  // Replaces the per-instance keydown effect that PermissionPrompt used to
-  // register: with multiple live prompts, Cmd+Y / Cmd+Shift+Y / Escape fired on
-  // EVERY mounted prompt at once, answering all pending requests from one
-  // keystroke (a security hazard). Answering the primary advances to the next.
-  useChatKeyboard({
-    storeMessages,
-    resolvedPermissions,
-    sendPermissionResponse: respondToPermission,
-    activeSessionProvider,
-    availableProviders,
-    connected: connectionPhase === 'connected',
-  })
 
   const respondToUserQuestion = useCallback<typeof sendUserQuestionResponse>((...args) => {
     const result = sendUserQuestionResponse(...args)

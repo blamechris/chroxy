@@ -181,7 +181,7 @@ vi.mock('./store/connection', () => {
     switchSession: vi.fn(),
     destroySession: vi.fn(),
     renameSession: vi.fn(),
-    createSession: vi.fn(),
+    createSession: vi.fn(() => true),
     setViewMode: vi.fn(),
     setModel: vi.fn(),
     setPermissionMode: vi.fn(),
@@ -2445,7 +2445,7 @@ describe('App', () => {
         sessions: oneSessionWithCwd,
         activeSessionId: 's1',
         hostStatus: snapshotWithInvestigate(),
-        createSession: vi.fn(),
+        createSession: vi.fn(() => true),
       }
     }
 
