@@ -70,6 +70,7 @@ import { useQrModal } from './hooks/useQrModal'
 import { useSidebarOrdering } from './hooks/useSidebarOrdering'
 import { useControlRoomState } from './hooks/useControlRoomState'
 import { useMessageRenderer } from './hooks/useMessageRenderer'
+import { useChatKeyboard } from './hooks/useChatKeyboard'
 import { SplitPane } from './components/SplitPane'
 import { ViewSwitcher } from './components/ViewSwitcher'
 import { DEFAULT_PROVIDER, USER_SHELL_PROVIDER } from '@chroxy/protocol'
@@ -1045,6 +1046,19 @@ export function App() {
     }
   }, [serverErrors, isCreatingSession])
 
+  // #6285 — clear a stranded "Creating…" spinner if the socket drops mid-create.
+  // The socket onclose only resets ~12 transient flags, NOT isCreatingSession, and
+  // a closed-socket createSession is a silent no-op — so a drop between Create-click
+  // and the server's session_created/session_error reply would wedge the spinner
+  // forever. Reset it and surface a retryable error the moment connectionPhase
+  // leaves 'connected' while a create is in flight.
+  useEffect(() => {
+    if (isCreatingSession && connectionPhase !== 'connected') {
+      setIsCreatingSession(false)
+      setSessionCreateError('Connection lost — try again')
+    }
+  }, [connectionPhase, isCreatingSession])
+
   // #4770: chat-message pipeline (filter system events + group activity
   // runs + apply streaming overlay + flatten to ChatViewMessage[]) is
   // extracted to `useChatMessages` so the derivations are independently
@@ -1582,8 +1596,17 @@ export function App() {
 
   const handleCreateSession = useCallback((data: { name: string; cwd: string; provider?: string; permissionMode?: string; model?: string; worktree?: boolean; skipPermissions?: boolean }) => {
     setSessionCreateError(null)
-    setIsCreatingSession(true)
-    createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree, skipPermissions: data.skipPermissions })
+    // #6285 — only latch the "Creating…" spinner when the request actually went
+    // on the wire. createSession is a silent no-op when the socket is closed; if
+    // we latched unconditionally the spinner would wedge forever (no
+    // session_created / session_error reply ever arrives to clear it). On a
+    // closed socket, surface a retryable error instead.
+    const sent = createSession({ name: data.name, cwd: data.cwd || undefined, provider: data.provider, model: data.model, permissionMode: data.permissionMode, worktree: data.worktree, skipPermissions: data.skipPermissions })
+    if (sent) {
+      setIsCreatingSession(true)
+    } else {
+      setSessionCreateError('Connection lost — try again')
+    }
   }, [createSession])
 
   const handlePlanApprove = useCallback(() => {
@@ -1672,6 +1695,21 @@ export function App() {
     if (result !== false) setScrollToBottomSignal(n => n + 1)
     return result
   }, [sendPermissionResponse])
+
+  // #6287 — a SINGLE document-level keyboard listener for the permission
+  // shortcuts, scoped to the FIRST unanswered prompt in the active session.
+  // Replaces the per-instance keydown effect that PermissionPrompt used to
+  // register: with multiple live prompts, Cmd+Y / Cmd+Shift+Y / Escape fired on
+  // EVERY mounted prompt at once, answering all pending requests from one
+  // keystroke (a security hazard). Answering the primary advances to the next.
+  useChatKeyboard({
+    storeMessages,
+    resolvedPermissions,
+    sendPermissionResponse: respondToPermission,
+    activeSessionProvider,
+    availableProviders,
+    connected: connectionPhase === 'connected',
+  })
 
   const respondToUserQuestion = useCallback<typeof sendUserQuestionResponse>((...args) => {
     const result = sendUserQuestionResponse(...args)

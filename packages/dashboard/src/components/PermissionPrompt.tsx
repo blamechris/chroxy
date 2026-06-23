@@ -142,36 +142,12 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     onRespond(requestId, effective)
   }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected])
 
-  // Keyboard shortcuts:
-  //   Cmd/Ctrl+Y         -> allow
-  //   Cmd/Ctrl+Shift+Y   -> allowSession (rule-eligible tools only, #2834)
-  //   Escape             -> deny (skipped when a Modal overlay is open, #1230)
-  useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Skip when focus is in an input, textarea, or select
-      const tag = (e.target as HTMLElement)?.tagName
-      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return
-
-      if (e.key.toLowerCase() === 'y' && (e.metaKey || e.ctrlKey)) {
-        e.preventDefault()
-        if (e.shiftKey) {
-          // Allow for Session — no-op when the tool is not rule-eligible (#2834)
-          // or the active provider doesn't support session rules (#3072).
-          if (isRuleEligibleTool(tool) && providerSupportsRules) {
-            respond('allowSession')
-          }
-        } else {
-          respond('allow')
-        }
-      } else if (e.key === 'Escape') {
-        // Skip if a modal overlay is open — let Modal handle Escape (#1230)
-        if (document.querySelector('[data-modal-overlay]')) return
-        respond('deny')
-      }
-    }
-    document.addEventListener('keydown', handleKeyDown)
-    return () => document.removeEventListener('keydown', handleKeyDown)
-  }, [respond, tool, providerSupportsRules])
+  // #6287 — the Cmd/Ctrl+Y / Cmd/Ctrl+Shift+Y / Escape keyboard shortcuts moved
+  // to a SINGLE document-level listener (useChatKeyboard, wired in App.tsx) that
+  // targets only the FIRST unanswered prompt in the active session. Each
+  // PermissionPrompt previously registered its own keydown listener, so with
+  // multiple live prompts one keystroke answered EVERY mounted prompt at once (a
+  // security hazard). The buttons below still call `respond` directly.
 
   const isExpired = remaining <= 0
   const isUrgent = remaining > 0 && remaining <= 30000
