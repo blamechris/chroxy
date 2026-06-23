@@ -1,0 +1,194 @@
+/**
+ * #6308 — closing-socket TOCTOU: wsSend's false return must not be ignored.
+ *
+ * #6293 hardened wsSend to catch the InvalidStateError socket.send() throws when
+ * the socket flips OPEN → CLOSING mid-send over a flaky tunnel, returning `false`
+ * instead of throwing. sendInput was taught to check that (fall back to enqueue),
+ * but four sibling call sites kept reporting success while mutating local state —
+ * a "sent it and nothing happened" silent failure (the durability north star).
+ *
+ * These tests pin the fixed behaviour: when the send throws (modelled by a socket
+ * whose readyState is OPEN but whose send() throws), each action must NOT report a
+ * plain 'sent' and must NOT leave the UI asserting something the server never saw.
+ */
+jest.mock('expo-secure-store', () => ({
+  getItemAsync: jest.fn(() => Promise.resolve(null)),
+  setItemAsync: jest.fn(() => Promise.resolve()),
+  deleteItemAsync: jest.fn(() => Promise.resolve()),
+}));
+
+jest.mock('../../utils/haptics', () => ({
+  hapticLight: jest.fn(),
+  hapticMedium: jest.fn(),
+  hapticWarning: jest.fn(),
+  hapticSuccess: jest.fn(),
+}));
+
+import { useConnectionStore } from '../../store/connection';
+import type { SessionState } from '../../store/types';
+
+interface FakeSocket {
+  readyState: number;
+  send: jest.Mock;
+}
+
+const OPEN = 1; // WebSocket.OPEN
+
+/** A socket that passes the readyState===OPEN check but throws on send() —
+ *  the exact TOCTOU #6293/#6308 guard against. The real wsSend catches the throw,
+ *  warns, and returns false. */
+function closingSocket(): FakeSocket {
+  return {
+    readyState: OPEN,
+    send: jest.fn(() => {
+      throw new Error('InvalidStateError: socket is closing');
+    }),
+  };
+}
+
+function liveSocket(): FakeSocket {
+  return { readyState: OPEN, send: jest.fn() };
+}
+
+function seedSession(overrides: Partial<SessionState> = {}): void {
+  const base = {
+    messages: [],
+    queuedMessages: [],
+    streamingMessageId: null,
+    claudeReady: true,
+  } as unknown as SessionState;
+  useConnectionStore.setState({
+    activeSessionId: 'sess-1',
+    sessions: [{ sessionId: 'sess-1', name: 'sess-1', provider: 'claude-sdk' }],
+    sessionStates: { 'sess-1': { ...base, ...overrides } },
+    sessionNotifications: [],
+    socket: null,
+  } as never);
+}
+
+function activeState(): SessionState {
+  return useConnectionStore.getState().sessionStates['sess-1'];
+}
+
+describe('#6308 — sendCancelQueued does not lie on a closing socket', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+
+  it('returns false and preserves the queued entry + bubble when the send throws', () => {
+    const socket = closingSocket();
+    seedSession({
+      messages: [{ id: 'cmid-1', type: 'user_input', content: 'a', timestamp: 1 }],
+      queuedMessages: [{ clientMessageId: 'cmid-1', text: 'a', queuedAt: 1, status: 'confirmed' }],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    const result = useConnectionStore.getState().sendCancelQueued('cmid-1');
+
+    // The send was attempted, but reported failure rather than a phantom 'sent'.
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    // Nothing was optimistically dropped — the server still holds the queued
+    // message, so the bubble + entry must stay so the cancel is retryable and the
+    // turn is not orphaned.
+    expect(activeState().queuedMessages.map((m) => m.clientMessageId)).toEqual(['cmid-1']);
+    expect(activeState().messages.map((m) => m.id)).toEqual(['cmid-1']);
+  });
+
+  it('still drops the entry on a healthy send (happy-path regression guard)', () => {
+    const socket = liveSocket();
+    seedSession({
+      messages: [{ id: 'cmid-1', type: 'user_input', content: 'a', timestamp: 1 }],
+      queuedMessages: [{ clientMessageId: 'cmid-1', text: 'a', queuedAt: 1, status: 'confirmed' }],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    expect(useConnectionStore.getState().sendCancelQueued('cmid-1')).toBe('sent');
+    expect(activeState().queuedMessages).toHaveLength(0);
+    expect(activeState().messages).toHaveLength(0);
+  });
+});
+
+describe('#6308 — sendInterrupt does not report a phantom send on a closing socket', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+
+  it('falls back to the offline queue (returns queued, not sent) when the send throws', () => {
+    const socket = closingSocket();
+    seedSession({
+      streamingMessageId: 'live-1',
+      messages: [{ id: 'live-1', type: 'response', content: '…', timestamp: 1 }],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    const result = useConnectionStore.getState().sendInterrupt();
+
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    // The interrupt is queueable (5s TTL) — a failed live send routes to the
+    // offline queue so it retries on reconnect, instead of the pre-fix 'sent' lie.
+    expect(result).toBe('queued');
+    expect(result).not.toBe('sent');
+  });
+});
+
+describe('#6308 — sendPermissionResponse does not mark answered on a closing socket', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+
+  it('returns false and leaves the prompt un-answered when the send throws', () => {
+    const socket = closingSocket();
+    seedSession({
+      messages: [{ id: 'p1', type: 'prompt', requestId: 'req-1', tool: 'Read', timestamp: 1 }],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    const result = useConnectionStore.getState().sendPermissionResponse('req-1', 'allow');
+
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    // The prompt must stay actionable — marking it 'Allowed' while the server never
+    // saw the frame (and auto-denies on timeout) is the #5699 silent-loss symptom.
+    const prompt = activeState().messages.find((m) => m.requestId === 'req-1');
+    expect(prompt?.answered).toBeUndefined();
+  });
+
+  it('marks the prompt answered on a healthy send (happy-path regression guard)', () => {
+    const socket = liveSocket();
+    seedSession({
+      messages: [{ id: 'p1', type: 'prompt', requestId: 'req-1', tool: 'Read', timestamp: 1 }],
+    } as unknown as Partial<SessionState>);
+    useConnectionStore.setState({ socket } as never);
+
+    expect(useConnectionStore.getState().sendPermissionResponse('req-1', 'allow')).toBe('sent');
+    const prompt = activeState().messages.find((m) => m.requestId === 'req-1');
+    expect(prompt?.answered).toBe('allow');
+  });
+});
+
+describe('#6308 — sendUserQuestionResponse does not lie on a closing socket', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+
+  it('returns false when the send throws (answer tied to a live request)', () => {
+    const socket = closingSocket();
+    seedSession();
+    useConnectionStore.setState({ socket } as never);
+
+    const result = useConnectionStore.getState().sendUserQuestionResponse('Option A', 'tool-1');
+
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+  });
+
+  it('returns sent on a healthy send (happy-path regression guard)', () => {
+    const socket = liveSocket();
+    seedSession();
+    useConnectionStore.setState({ socket } as never);
+
+    expect(useConnectionStore.getState().sendUserQuestionResponse('Option A', 'tool-1')).toBe('sent');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+  });
+});

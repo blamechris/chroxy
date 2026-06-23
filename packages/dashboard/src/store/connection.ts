@@ -2859,8 +2859,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, payload);
-      return 'sent';
+      // #6308: wsSend can return false on a closing socket (see app sendInterrupt);
+      // fall through to the offline queue so the interrupt retries on reconnect
+      // rather than reporting a 'sent' that never reached the server.
+      if (wsSend(socket, payload)) return 'sent';
     }
     return enqueueMessage('interrupt', payload);
   },
@@ -2880,16 +2882,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const payload: Record<string, unknown> = { type: 'cancel_activity', activityId, requestId };
     if (sid) payload.sessionId = sid;
     if (sid && socket && socket.readyState === WebSocket.OPEN) {
-      // Only mark "cancelling" once the request is genuinely sent — otherwise an
-      // offline send (cancel_activity isn't in QUEUE_TTLS, so enqueue drops it)
-      // would strand the node "Cancelling…" with no ack/failure ever arriving.
+      // #6308: send BEFORE marking the node "cancelling" — wsSend can throw and
+      // return false on a closing socket, and marking first would strand the node
+      // "Cancelling…" with no ack/failure ever arriving (the same hazard the offline
+      // branch below avoids for non-queueable cancel_activity). Only mark once the
+      // frame is genuinely on the wire.
+      if (!wsSend(socket, payload)) return false;
       // Key by `${sessionId}:${activityId}` — activity ids (toolUseIds) are only
       // unique within a session, so a global activityId-only set would let one
       // session's cancel disable/clear another's identically-ided node (#5277).
       const cancelling = new Set(get().cancellingActivityIds);
       cancelling.add(`${sid}:${activityId}`);
       set({ cancellingActivityIds: cancelling });
-      wsSend(socket, payload);
       return 'sent';
     }
     return enqueueMessage('cancel_activity', payload);
@@ -2907,6 +2911,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!(socket && socket.readyState === WebSocket.OPEN)) return false;
     const payload: Record<string, unknown> = { type: 'cancel_queued', clientMessageId };
     if (sid) payload.sessionId = sid;
+    // #6308: cancel_queued is NOT offline-queueable — send BEFORE the optimistic drop
+    // and bail on a closing-socket failure (wsSend → false). Dropping first then
+    // failing would strand the server's queued message (it flushes next turn) while
+    // the local bubble is gone — an orphaned turn. Leaving it keeps the cancel retryable.
+    if (!wsSend(socket, payload)) return false;
     // Optimistically remove from the TARGET session's queue (updateSession, not
     // updateActiveSession) so a future cross-session cancel — `sid` resolved
     // from an explicit sessionId rather than the active one — clears the right
@@ -2920,7 +2929,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         messages: ss.messages.filter((m) => m.id !== clientMessageId),
       }));
     }
-    wsSend(socket, payload);
     return 'sent';
   },
 
@@ -2973,7 +2981,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // (the schema only accepts 'allow' | 'allowAlways' | 'deny').
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
     const payload = { type: 'permission_response', requestId, decision: wireDecision };
-    wsSend(socket, payload);
+    // #6308: the socket can flip OPEN → CLOSING before this synchronous send (wsSend
+    // → false). Bail BEFORE markPermissionResolved/markPromptAnswered — otherwise the
+    // bubble flips to "answered" while the server never saw the frame and auto-denies
+    // on timeout, exactly the #5699 silent-loss symptom this function's disconnected
+    // guard above was written to prevent. Returning false keeps the prompt actionable.
+    if (!wsSend(socket, payload)) return false;
     const result: 'sent' | 'queued' | false = 'sent';
     // Persist the decision in the store so PermissionPrompt renders its
     // answered state across remounts (#2833 — tab switch regression).
@@ -3169,8 +3182,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       });
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, payload);
-      return 'sent';
+      // #6308: wsSend can return false on a closing socket; fall through to the
+      // offline queue so the answer retries on reconnect rather than reporting a
+      // 'sent' that never reached the server while the optimistic isIdle/activeTools
+      // flips above already make the form look resolved.
+      if (wsSend(socket, payload)) return 'sent';
     }
     return enqueueMessage('user_question_response', payload);
   },
