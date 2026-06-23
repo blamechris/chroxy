@@ -2321,6 +2321,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
             messages: [...dropGhost(ss.messages), noticeMsg],
             streamingMessageId:
               ss.streamingMessageId === 'pending' ? null : ss.streamingMessageId,
+            // #6302 — clear the pending-turn owner alongside the sentinel so a
+            // stale owner can't mis-gate a later reconcile (parity with the
+            // dashboard's input_conflict teardown).
+            pendingClientMessageId:
+              ss.streamingMessageId === 'pending' ? null : ss.pendingClientMessageId,
           }));
         } else {
           get().addMessage(noticeMsg);

@@ -2421,6 +2421,9 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
     updateSession(errSessionId, (ss) => ({
       messages: filterThinking([...ss.messages, errorMsg]),
       streamingMessageId: null,
+      // #6302 — clear the pending-turn owner with the sentinel (parity with the
+      // app's server_error clear) so a stale owner can't mis-gate a reconcile.
+      pendingClientMessageId: null,
     }));
   } else {
     const activeErrId = get().activeSessionId;
@@ -2428,6 +2431,7 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
       updateActiveSession((ss) => ({
         messages: filterThinking([...ss.messages, errorMsg]),
         streamingMessageId: null,
+        pendingClientMessageId: null,
       }));
     } else {
       set({ streamingMessageId: null });
