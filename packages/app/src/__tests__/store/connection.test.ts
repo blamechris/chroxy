@@ -389,6 +389,28 @@ describe('message queue', () => {
     expect(result).toBe('queued');
   });
 
+  // #6283: the socket can flip OPEN → CLOSING between the readyState check and
+  // the synchronous send over a flaky tunnel, so socket.send throws
+  // InvalidStateError. wsSend swallows the throw and returns false; sendInput
+  // must fall through to the offline queue so the frame retries on reconnect
+  // instead of leaving a permanently 'sent'-looking bubble.
+  it('re-queues input when an OPEN socket.send throws mid-turn (#6283)', () => {
+    const throwingSocket = {
+      readyState: 1,
+      send: () => {
+        // Mirrors the browser's InvalidStateError on a CLOSING socket.
+        throw new Error('InvalidStateError: socket is not open');
+      },
+      // No-op close so the suite's beforeEach disconnect() can safely tear this
+      // mock down without throwing — no manual socket cleanup needed.
+      close: () => {},
+    } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: throwingSocket });
+
+    const result = useConnectionStore.getState().sendInput('hello');
+    expect(result).toBe('queued');
+  });
+
   it('REFUSES permission_response when socket is not connected (#5699 — never queued)', () => {
     // The server expires the pending request on disconnect, so a queued
     // response would drain into the void on reconnect while the prompt could

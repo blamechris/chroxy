@@ -417,15 +417,44 @@ function mapProviderList(rawProviders: unknown[]): ProviderInfo[] {
 /**
  * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
  * Use this instead of raw `socket.send(JSON.stringify(...))`.
+ *
+ * Returns `true` when the frame was handed to `socket.send` without throwing,
+ * `false` when the send threw. #6283: the caller checks `readyState === OPEN`,
+ * but the socket can flip to CLOSING before this synchronous send and throw
+ * `InvalidStateError` — a flaky-tunnel TOCTOU window. Swallowing the throw and
+ * signalling failure lets delivery-critical callers (`sendInput`) fall back to
+ * the offline queue instead of leaving a permanently 'sent'-looking bubble that
+ * never reached the server. Mirrors the server-side sender (#5721, see
+ * `packages/server/src/ws-client-sender.js`: catch → log → return false).
+ * Most callers ignore the result (a closed socket was already a silent no-op).
  */
-export function wsSend(socket: WebSocket, payload: Record<string, unknown>): void {
-  if (_ctx.encryptionState) {
-    const envelope = encrypt(JSON.stringify(payload), _ctx.encryptionState.sharedKey, _ctx.encryptionState.sendNonce, DIRECTION_CLIENT);
-    _ctx.encryptionState.sendNonce++;
-    socket.send(JSON.stringify(envelope));
-  } else {
-    socket.send(JSON.stringify(payload));
+export function wsSend(socket: WebSocket, payload: Record<string, unknown>): boolean {
+  // Serialize/encrypt OUTSIDE the try so a JSON/crypto bug still throws loudly
+  // (it's a real defect, not a transient send failure) rather than being
+  // swallowed, logged as a "send threw", and re-queued forever. The nonce is
+  // consumed for THIS frame here but only advanced after a successful send. (#6283)
+  const data = _ctx.encryptionState
+    ? JSON.stringify(
+        encrypt(
+          JSON.stringify(payload),
+          _ctx.encryptionState.sharedKey,
+          _ctx.encryptionState.sendNonce,
+          DIRECTION_CLIENT,
+        ),
+      )
+    : JSON.stringify(payload);
+  try {
+    socket.send(data);
+  } catch (err) {
+    // #6283 — the socket flipped to CLOSING after the readyState check (flaky
+    // tunnel TOCTOU). Don't advance sendNonce: the frame never went out, so the
+    // next send must reuse this nonce (reconnect forces a fresh key exchange,
+    // but a same-socket retry must not desync).
+    console.warn('[wsSend] socket.send threw — frame not delivered:', err);
+    return false;
   }
+  if (_ctx.encryptionState) _ctx.encryptionState.sendNonce++;
+  return true;
 }
 
 /**

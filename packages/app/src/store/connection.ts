@@ -1729,8 +1729,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     let result: 'sent' | 'queued' | false;
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticLight();
-      wsSend(socket, payload);
-      result = 'sent';
+      // #6283: socket.readyState can flip OPEN → CLOSING before this synchronous
+      // send over a flaky tunnel, so wsSend can throw and return false. Fall
+      // through to the offline queue so the frame retries on reconnect instead
+      // of leaving a permanently 'sent'-looking bubble that never reached the
+      // server.
+      result = wsSend(socket, payload) ? 'sent' : enqueueMessage('input', payload);
     } else {
       result = enqueueMessage('input', payload);
     }
