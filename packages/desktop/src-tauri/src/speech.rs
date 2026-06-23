@@ -7,13 +7,19 @@
 //! child process. The helper streams JSON lines to stdout for each partial
 //! and final transcription. Sending "stop\n" to its stdin ends recording.
 
+use std::collections::VecDeque;
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
 
 use serde::{Deserialize, Serialize};
 use tauri::Emitter;
+
+/// How many trailing stderr lines from the helper to retain for error
+/// surfacing — enough to capture a failure reason without unbounded growth.
+const STDERR_TAIL_LINES: usize = 20;
 
 /// Payload emitted as `voice_transcription` event.
 #[derive(Clone, Serialize)]
@@ -42,12 +48,17 @@ struct HelperOutput {
 /// State for managing the speech helper process.
 pub struct SpeechState {
     child: Arc<Mutex<Option<Child>>>,
+    /// Set true when the user explicitly stops (or the 3s safety-net fires) so
+    /// the reader thread doesn't surface a clean/forced shutdown as an error.
+    /// Reset to false on each `start()`. (#5668)
+    stopping: Arc<AtomicBool>,
 }
 
 impl SpeechState {
     pub fn new() -> Self {
         Self {
             child: Arc::new(Mutex::new(None)),
+            stopping: Arc::new(AtomicBool::new(false)),
         }
     }
 }
@@ -99,6 +110,14 @@ pub fn is_available() -> bool {
     }
 }
 
+/// Whether an unexpected helper death should be surfaced to the user as a
+/// `voice_error`. Stays silent on the clean-stop / forced-kill path
+/// (`user_requested_stop`), when the helper already reported an error on stdout
+/// (`emitted_error`), and on a successful exit (`exit_failed == false`). (#5668)
+fn should_surface_failure(emitted_error: bool, user_requested_stop: bool, exit_failed: bool) -> bool {
+    !emitted_error && !user_requested_stop && exit_failed
+}
+
 /// Start recording and recognizing speech. Streams results as Tauri events.
 pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> {
     let mut child_lock = state.child.lock().unwrap();
@@ -111,21 +130,54 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
         .arg("start")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null())
+        // #5668 — capture stderr instead of discarding it. If the helper spawns
+        // OK but then dies writing its failure reason to stderr (rather than as
+        // an error-JSON on stdout), this is the only place that reason survives.
+        .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("Failed to start speech helper: {}", e))?;
 
     let stdout = child.stdout.take()
         .ok_or("Failed to capture speech helper stdout")?;
+    let stderr = child.stderr.take()
+        .ok_or("Failed to capture speech helper stderr")?;
+
+    // Fresh session — this run hasn't been asked to stop yet.
+    state.stopping.store(false, Ordering::SeqCst);
 
     *child_lock = Some(child);
     drop(child_lock);
 
+    // Drain stderr on its own thread into a bounded tail buffer. A dedicated
+    // drainer means a chatty/crashing helper never blocks on a full pipe, and
+    // the failure reason is retained for the exit handler below. (#5668)
+    let stderr_handle = thread::spawn(move || {
+        let reader = BufReader::new(stderr);
+        let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
+        for line in reader.lines() {
+            match line {
+                Ok(l) => {
+                    if l.is_empty() {
+                        continue
+                    }
+                    if tail.len() >= STDERR_TAIL_LINES {
+                        tail.pop_front();
+                    }
+                    tail.push_back(l);
+                }
+                Err(_) => break,
+            }
+        }
+        tail.into_iter().collect::<Vec<_>>().join("\n")
+    });
+
     // Spawn reader thread — clears child handle when helper exits
     let app_handle = app.clone();
     let child_ref = Arc::clone(&state.child);
+    let stopping = Arc::clone(&state.stopping);
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
+        let mut emitted_error = false;
         for line in reader.lines() {
             let line = match line {
                 Ok(l) => l,
@@ -139,6 +191,7 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
             match serde_json::from_str::<HelperOutput>(&line) {
                 Ok(output) => {
                     if let Some(error) = output.error {
+                        emitted_error = true;
                         let _ = app_handle.emit("voice_error", VoiceErrorEvent {
                             message: error,
                         });
@@ -156,12 +209,34 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
             }
         }
 
-        // Helper exited — reap the child process and clear the handle
-        if let Ok(mut lock) = child_ref.lock() {
-            if let Some(ref mut child) = *lock {
-                let _ = child.wait();
-            }
+        // Helper exited — reap the child process, capture its exit status, and
+        // clear the handle.
+        let exit_status = if let Ok(mut lock) = child_ref.lock() {
+            let status = lock.as_mut().and_then(|child| child.wait().ok());
             *lock = None;
+            status
+        } else {
+            None
+        };
+
+        // Collect whatever the helper wrote to stderr before exiting.
+        let stderr_tail = stderr_handle.join().unwrap_or_default();
+
+        // #5668 — surface an *unexpected* death so it isn't a silent button
+        // revert. Only when: the helper exited on its own (not via stop() and
+        // not the 3s safety-net SIGTERM), with a failure status, and it didn't
+        // already report an error on stdout. This deliberately stays silent on
+        // the clean-stop and forced-kill paths to avoid false positives.
+        let user_requested_stop = stopping.load(Ordering::SeqCst);
+        let failed = exit_status.map(|s| !s.success()).unwrap_or(false);
+        if should_surface_failure(emitted_error, user_requested_stop, failed) {
+            let message = if stderr_tail.is_empty() {
+                "Voice helper exited unexpectedly. Speech recognition may be unavailable — try reinstalling Chroxy."
+                    .to_string()
+            } else {
+                format!("Voice helper failed: {}", stderr_tail)
+            };
+            let _ = app_handle.emit("voice_error", VoiceErrorEvent { message });
         }
 
         let _ = app_handle.emit("voice_stopped", ());
@@ -172,6 +247,10 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
 
 /// Stop recording and finalize recognition.
 pub fn stop(state: &SpeechState) {
+    // Mark this as an intentional stop so the reader thread treats the
+    // resulting exit (clean, or a 3s safety-net SIGTERM) as expected and does
+    // not surface it as a voice_error. (#5668)
+    state.stopping.store(true, Ordering::SeqCst);
     let mut child_lock = state.child.lock().unwrap();
     if let Some(ref mut child) = *child_lock {
         // Send "stop" to the helper's stdin — triggers clean shutdown
@@ -223,5 +302,35 @@ This usually means the helper crashed or hung — voice transcription may have s
                 });
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_surface_failure;
+
+    #[test]
+    fn surfaces_unexpected_failure() {
+        // Helper died on its own with a failure status and no prior error.
+        assert!(should_surface_failure(false, false, true));
+    }
+
+    #[test]
+    fn silent_on_user_requested_stop() {
+        // A clean stop (or the 3s safety-net SIGTERM) must never raise an error,
+        // even though the forced exit reports as a failure.
+        assert!(!should_surface_failure(false, true, true));
+    }
+
+    #[test]
+    fn silent_when_error_already_emitted() {
+        // The helper already reported its error on stdout — don't double-report.
+        assert!(!should_surface_failure(true, false, true));
+    }
+
+    #[test]
+    fn silent_on_clean_exit() {
+        // Exited successfully on its own — nothing to surface.
+        assert!(!should_surface_failure(false, false, false));
     }
 }
