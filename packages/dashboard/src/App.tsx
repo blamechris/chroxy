@@ -459,6 +459,7 @@ export function App() {
   const connect = useConnectionStore(s => s.connect)
   const retryConnection = useConnectionStore(s => s.retryConnection)
   const sendInput = useConnectionStore(s => s.sendInput)
+  const addInfoNotification = useConnectionStore(s => s.addInfoNotification)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
   const sendCancelQueued = useConnectionStore(s => s.sendCancelQueued)
   // #5939: stable cancel callback so the memoized message rows skip re-render.
@@ -1512,7 +1513,15 @@ export function App() {
     const blocks = sid ? pastedTextBlocksRef.current.get(sid) ?? [] : []
     const blockMap = new Map(blocks.map(b => [b.id, b.content]))
     const expanded = blockMap.size > 0 ? expandPasteMarkers(text, blockMap) : text
-    sendInput(expanded, wire.length > 0 ? wire : undefined)
+    const sendResult = sendInput(expanded, wire.length > 0 ? wire : undefined)
+    // #6295 — parity with the mobile app (SessionScreen handleSend): when the
+    // socket is closed the send falls through to the offline queue and returns
+    // 'queued'. Surface a transient info notice so the operator knows the
+    // message will go out on reconnect, rather than seeing a plain "sent"-
+    // looking bubble during the disconnected window.
+    if (sendResult === 'queued') {
+      addInfoNotification('Message queued — will send on reconnect.')
+    }
     // #5780 — sending is an explicit "show me the latest" action: snap the
     // chat to the bottom even if the user had scrolled up before typing.
     setScrollToBottomSignal(n => n + 1)
@@ -1528,7 +1537,7 @@ export function App() {
     setInputDraftValue('')
     setPastedTextBlocks([])
     setInspectedPastedTextId(null)
-  }, [sendInput, fileAttachments, imageAttachments, activeSessionId])
+  }, [sendInput, addInfoNotification, fileAttachments, imageAttachments, activeSessionId])
 
   const handleInterrupt = useCallback(() => {
     sendInterrupt()
