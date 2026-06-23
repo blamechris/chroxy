@@ -58,6 +58,7 @@ import { buildShortcutEntries } from './shortcuts/buildShortcutEntries'
 import { writeText as clipboardWriteText } from './utils/clipboard'
 import { useTauriEvents } from './hooks/useTauriEvents'
 import { useTrayBadgeSync } from './hooks/useTrayBadgeSync'
+import { useChatKeyboard } from './hooks/useChatKeyboard'
 import { useTauriMenuWiring } from './hooks/useTauriMenuWiring'
 import { isTauri } from './utils/tauri'
 import { startServer, revealInFinder } from './hooks/useTauriIPC'
@@ -1703,6 +1704,21 @@ export function App() {
     if (result !== false) setScrollToBottomSignal(n => n + 1)
     return result
   }, [sendPermissionResponse])
+
+  // #6287 — a SINGLE document-level keyboard listener for the permission
+  // shortcuts, scoped to the FIRST unanswered prompt in the active session.
+  // Replaces the per-instance keydown effect that PermissionPrompt used to
+  // register: with multiple live prompts, Cmd+Y / Cmd+Shift+Y / Escape fired on
+  // EVERY mounted prompt at once, answering all pending requests from one
+  // keystroke (a security hazard). Answering the primary advances to the next.
+  useChatKeyboard({
+    storeMessages,
+    resolvedPermissions,
+    sendPermissionResponse: respondToPermission,
+    activeSessionProvider,
+    availableProviders,
+    connected: connectionPhase === 'connected',
+  })
 
   const respondToUserQuestion = useCallback<typeof sendUserQuestionResponse>((...args) => {
     const result = sendUserQuestionResponse(...args)

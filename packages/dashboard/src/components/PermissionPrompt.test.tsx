@@ -8,7 +8,6 @@ import { describe, it, expect, vi, afterEach, beforeEach } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { PermissionPrompt } from './PermissionPrompt'
 import { PlanApproval } from './PlanApproval'
-import { Modal } from './Modal'
 import type { PermissionDecision } from '../store/types'
 
 // Mock the store so the component can read `resolvedPermissions[requestId]`
@@ -334,188 +333,6 @@ describe('PermissionPrompt', () => {
     expect(screen.getByText('Allowed')).toBeInTheDocument()
   })
 
-  it('allows with Cmd+Y keyboard shortcut (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
-
-  it('allows with Ctrl+Y keyboard shortcut (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', ctrlKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
-
-  it('denies with Escape keyboard shortcut (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
-  })
-
-  it('allows with Cmd+Shift+Y (caps) keyboard shortcut (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'Y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
-
-  it('ignores shortcuts when focus is in a textarea (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <textarea data-testid="input" />
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    const textarea = screen.getByTestId('input')
-    textarea.focus()
-    fireEvent.keyDown(textarea, { key: 'y', metaKey: true, bubbles: true })
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
-  it('ignores shortcuts when focus is in a select (#1190)', () => {
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <select data-testid="model-select"><option>opus</option></select>
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    const sel = screen.getByTestId('model-select')
-    sel.focus()
-    fireEvent.keyDown(sel, { key: 'Escape', bubbles: true })
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
-  it('does not fire shortcut after already answered (#1190)', () => {
-    // The resolved state now lives in the store (#2833), so simulate the
-    // store update that the parent would normally perform.
-    const onRespond = vi.fn((reqId: string, decision: PermissionDecision) => {
-      mockStoreState.resolvedPermissions = { ...mockStoreState.resolvedPermissions, [reqId]: decision }
-    })
-    const { rerender } = render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.click(screen.getByText('Allow'))
-    rerender(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    onRespond.mockClear()
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
-  it('ignores Escape when a modal overlay is open (#1230)', () => {
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <div data-modal-overlay data-testid="modal-overlay" />
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
-  it('still allows Cmd+Y when a modal overlay is open (#1230)', () => {
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <div data-modal-overlay data-testid="modal-overlay" />
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
-
-  it('cleans up keyboard listener on unmount (#1190)', () => {
-    const onRespond = vi.fn()
-    const { unmount } = render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    unmount()
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
   // #2852: double-click / key-repeat race
   it('ignores a second Allow click while first is in flight (#2852)', () => {
     const onRespond = vi.fn()
@@ -550,23 +367,6 @@ describe('PermissionPrompt', () => {
     fireEvent.click(screen.getByText('Deny'))
     expect(onRespond).toHaveBeenCalledTimes(1)
     expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
-
-  it('ignores repeated Cmd+Y shortcuts while respond is in flight (#2852)', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledTimes(1)
   })
 
   it('disables all action buttons after first click (#2852)', () => {
@@ -617,116 +417,11 @@ describe('PermissionPrompt', () => {
 
   // #5699 (review): the keyboard shortcuts must ALSO be gated. A disconnected
   // keypress that reached respond() would latch `submitting` and wedge the prompt
-  // permanently (submitting never resets), so it must be a complete no-op.
-  it('ignores keyboard shortcuts while disconnected and does not wedge the prompt (#5699)', () => {
-    mockStoreState.connectionPhase = 'reconnecting'
-    const onRespond = vi.fn()
-    const { rerender } = render(
-      <PermissionPrompt
-        requestId="req-kbd"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })   // Cmd+Y allow
-    fireEvent.keyDown(document, { key: 'Escape' })             // deny
-    expect(onRespond).not.toHaveBeenCalled()
-
-    // Reconnect: the prompt must still be actionable (not wedged on a latched
-    // `submitting`). A keypress now answers for real.
-    mockStoreState.connectionPhase = 'connected'
-    rerender(
-      <PermissionPrompt
-        requestId="req-kbd"
-        tool="Write"
-        description="test"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-kbd', 'allow')
-  })
 })
 
 // ---------------------------------------------------------------------------
 // Integration: Modal + PermissionPrompt Escape interaction (#1241)
 // ---------------------------------------------------------------------------
-describe('Modal + PermissionPrompt integration', () => {
-  beforeEach(() => {
-    vi.useFakeTimers()
-  })
-
-  afterEach(() => {
-    vi.useRealTimers()
-  })
-
-  it('Escape closes Modal without denying PermissionPrompt (#1241)', () => {
-    const onClose = vi.fn()
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <Modal open={true} onClose={onClose} title="Settings">
-          <p>Modal content</p>
-        </Modal>
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onClose).toHaveBeenCalled()
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
-  it('Escape denies PermissionPrompt when no Modal is open (#1241)', () => {
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <Modal open={false} onClose={vi.fn()} title="Settings">
-          <p>Modal content</p>
-        </Modal>
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    fireEvent.keyDown(document, { key: 'Escape' })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
-  })
-
-  it('Cmd+Y allows PermissionPrompt even with Modal open (#1241)', () => {
-    const onClose = vi.fn()
-    const onRespond = vi.fn()
-    render(
-      <div>
-        <Modal open={true} onClose={onClose} title="Settings">
-          <p>Modal content</p>
-        </Modal>
-        <PermissionPrompt
-          requestId="req-1"
-          tool="Write"
-          description="test"
-          remainingMs={60000}
-          onRespond={onRespond}
-        />
-      </div>
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
-})
-
 describe('PlanApproval', () => {
   it('renders plan content', () => {
     render(
@@ -962,65 +657,6 @@ describe('PermissionPrompt — Allow for Session button (#2834)', () => {
     expect(screen.queryByTestId('btn-allow-session')).not.toBeInTheDocument()
   })
 
-  it('Cmd+Shift+Y triggers allowSession for rule-eligible tools', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Read"
-        description="t"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true, shiftKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession')
-  })
-
-  it('Ctrl+Shift+Y triggers allowSession for rule-eligible tools', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Write"
-        description="t"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', ctrlKey: true, shiftKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession')
-  })
-
-  it('Cmd+Shift+Y is a no-op for tools that are not rule-eligible', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Bash"
-        description="t"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true, shiftKey: true })
-    expect(onRespond).not.toHaveBeenCalled()
-  })
-
-  it('Cmd+Y (no shift) still triggers allow on rule-eligible tools', () => {
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Read"
-        description="t"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true })
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
-  })
 })
 
 // ---------------------------------------------------------------------------
@@ -1064,23 +700,6 @@ describe('PermissionPrompt — provider capability gate (#3072)', () => {
       />
     )
     expect(screen.queryByTestId('btn-allow-session')).not.toBeInTheDocument()
-  })
-
-  it('Cmd+Shift+Y is a no-op when the provider does not support sessionRules', () => {
-    mockStoreState.sessions = [{ sessionId: 's1', provider: 'codex' }]
-    mockStoreState.availableProviders = [{ name: 'codex', capabilities: { sessionRules: false } }]
-    const onRespond = vi.fn()
-    render(
-      <PermissionPrompt
-        requestId="req-1"
-        tool="Read"
-        description="t"
-        remainingMs={60000}
-        onRespond={onRespond}
-      />
-    )
-    fireEvent.keyDown(document, { key: 'y', metaKey: true, shiftKey: true })
-    expect(onRespond).not.toHaveBeenCalled()
   })
 
   it('coerces a click on a stale allowSession decision to plain allow when provider lacks support', () => {
