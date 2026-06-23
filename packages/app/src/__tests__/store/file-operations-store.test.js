@@ -163,4 +163,48 @@ describe('FileOperationsStore', () => {
     useFileOperationsStore.getState().requestGitStatus()
     expect(wsSendCalls).toHaveLength(0)
   })
+
+  // --- Closed-socket boolean contract (#6288) ---
+  //
+  // The file/git request methods that surface a "not connected" error
+  // (requestFileWrite / requestGitStage / requestGitUnstage / requestGitCommit)
+  // must RETURN sendIfOpen's boolean so GitView/FileEditor can tear down the
+  // in-progress spinner instead of arming a never-resolving callback.
+
+  it('requestFileWrite returns true when the socket is open', () => {
+    expect(
+      useFileOperationsStore.getState().requestFileWrite('/tmp/a.txt', 'x'),
+    ).toBe(true)
+  })
+
+  it('requestFileWrite returns false (no send) when the socket is closed', () => {
+    mockSocket.readyState = 3 // WebSocket.CLOSED
+    const sent = useFileOperationsStore.getState().requestFileWrite('/tmp/a.txt', 'x')
+    expect(sent).toBe(false)
+    expect(wsSendCalls).toHaveLength(0)
+  })
+
+  it('requestGitStage returns true when open, false (no send) when closed', () => {
+    expect(useFileOperationsStore.getState().requestGitStage(['a.ts'])).toBe(true)
+    mockSocket.readyState = 3
+    wsSendCalls.length = 0
+    expect(useFileOperationsStore.getState().requestGitStage(['a.ts'])).toBe(false)
+    expect(wsSendCalls).toHaveLength(0)
+  })
+
+  it('requestGitUnstage returns true when open, false (no send) when closed', () => {
+    expect(useFileOperationsStore.getState().requestGitUnstage(['a.ts'])).toBe(true)
+    mockSocket.readyState = 3
+    wsSendCalls.length = 0
+    expect(useFileOperationsStore.getState().requestGitUnstage(['a.ts'])).toBe(false)
+    expect(wsSendCalls).toHaveLength(0)
+  })
+
+  it('requestGitCommit returns true when open, false (no send) when closed', () => {
+    expect(useFileOperationsStore.getState().requestGitCommit('msg')).toBe(true)
+    mockSocket.readyState = 3
+    wsSendCalls.length = 0
+    expect(useFileOperationsStore.getState().requestGitCommit('msg')).toBe(false)
+    expect(wsSendCalls).toHaveLength(0)
+  })
 })

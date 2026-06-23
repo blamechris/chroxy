@@ -2148,7 +2148,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestFileWrite: (path: string, content: string) => {
-    sendIfOpen({ type: 'write_file', path, content });
+    return sendIfOpen({ type: 'write_file', path, content });
   },
 
   // Diff viewer
@@ -2179,15 +2179,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   },
 
   requestGitStage: (paths: string[]) => {
-    sendIfOpen({ type: 'git_stage', files: paths });
+    return sendIfOpen({ type: 'git_stage', files: paths });
   },
 
   requestGitUnstage: (paths: string[]) => {
-    sendIfOpen({ type: 'git_unstage', files: paths });
+    return sendIfOpen({ type: 'git_unstage', files: paths });
   },
 
   requestGitCommit: (message: string) => {
-    sendIfOpen({ type: 'git_commit', message });
+    return sendIfOpen({ type: 'git_commit', message });
   },
 
   fetchProviders: () => {

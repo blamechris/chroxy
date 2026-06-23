@@ -225,7 +225,14 @@ export function GitView({ visible, onClose }: GitViewProps) {
 
     stageCallbackRef.current = cb;
     setGitStageCallback(cb);
-    requestGitStage(paths);
+    if (!requestGitStage(paths)) {
+      // Socket closed — the response callback would never fire, leaving the
+      // spinner stuck forever. Tear down and surface an accurate error (#6288).
+      setGitStageCallback(null);
+      stageCallbackRef.current = null;
+      setStagingInProgress(false);
+      Alert.alert('Not connected', 'Stage not sent — reconnect and try again');
+    }
   }, [selectedPaths, unstaged, untracked, setGitStageCallback, requestGitStage, setGitStatusCallback, requestGitStatus]);
 
   const handleUnstageSelected = useCallback(() => {
@@ -259,7 +266,14 @@ export function GitView({ visible, onClose }: GitViewProps) {
 
     stageCallbackRef.current = cb;
     setGitStageCallback(cb);
-    requestGitUnstage(paths);
+    if (!requestGitUnstage(paths)) {
+      // Socket closed — the response callback would never fire, leaving the
+      // spinner stuck forever. Tear down and surface an accurate error (#6288).
+      setGitStageCallback(null);
+      stageCallbackRef.current = null;
+      setStagingInProgress(false);
+      Alert.alert('Not connected', 'Unstage not sent — reconnect and try again');
+    }
   }, [selectedPaths, staged, setGitStageCallback, requestGitUnstage, setGitStatusCallback, requestGitStatus]);
 
   const handleCommit = useCallback(() => {
@@ -296,7 +310,16 @@ export function GitView({ visible, onClose }: GitViewProps) {
           };
           commitCallbackRef.current = cb;
           setGitCommitCallback(cb);
-          requestGitCommit(msg);
+          if (!requestGitCommit(msg)) {
+            // Socket closed — the response callback would never fire, so the
+            // commit box would never clear and the spinner would hang. Tear
+            // down and surface an accurate error; the form stays
+            // re-submittable (#6288).
+            setGitCommitCallback(null);
+            commitCallbackRef.current = null;
+            setCommitting(false);
+            Alert.alert('Not connected', 'Commit not sent — reconnect and try again');
+          }
         },
       },
     ]);
