@@ -54,6 +54,14 @@ describe('FileEditor', () => {
       expect(source).toContain('Request timed out');
     });
 
+    it('surfaces a not-connected error on a closed-socket save and skips the timer (#6288)', () => {
+      // requestFileWrite returns false when the socket is closed; the editor
+      // must Alert immediately and return before arming the 10s timeout so it
+      // never shows the misleading "Request timed out".
+      expect(source).toContain('if (!requestFileWrite(filePath, content))');
+      expect(source).toContain("Alert.alert('Save Failed', 'Not connected to server')");
+    });
+
     it('has Cancel editing and Save file accessibility labels', () => {
       expect(source).toContain('Cancel editing');
       expect(source).toContain('Save file');

@@ -38,13 +38,19 @@ interface FileOperationsActions {
   requestDirectoryListing: (path?: string) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
-  requestFileWrite: (path: string, content: string) => void;
+  // Returns false when the socket is closed (frame not sent) so callers can
+  // surface a "not connected" error instead of arming a never-resolving
+  // callback / timeout (#6288).
+  requestFileWrite: (path: string, content: string) => boolean;
   requestDiff: (base?: string) => void;
   requestGitStatus: () => void;
   requestGitBranches: () => void;
-  requestGitStage: (paths: string[]) => void;
-  requestGitUnstage: (paths: string[]) => void;
-  requestGitCommit: (message: string) => void;
+  // Return false when the socket is closed (frame not sent) so callers can
+  // surface a "not connected" error instead of arming a never-resolving
+  // callback (#6288).
+  requestGitStage: (paths: string[]) => boolean;
+  requestGitUnstage: (paths: string[]) => boolean;
+  requestGitCommit: (message: string) => boolean;
 }
 
 export const useFileOperationsStore = create<FileOperationsActions>(() => ({
@@ -77,7 +83,7 @@ export const useFileOperationsStore = create<FileOperationsActions>(() => ({
   },
 
   requestFileWrite: (path: string, content: string) => {
-    sendIfOpen({ type: 'write_file', path, content });
+    return sendIfOpen({ type: 'write_file', path, content });
   },
 
   requestDiff: (base?: string) => {
@@ -95,14 +101,14 @@ export const useFileOperationsStore = create<FileOperationsActions>(() => ({
   },
 
   requestGitStage: (paths: string[]) => {
-    sendIfOpen({ type: 'git_stage', files: paths });
+    return sendIfOpen({ type: 'git_stage', files: paths });
   },
 
   requestGitUnstage: (paths: string[]) => {
-    sendIfOpen({ type: 'git_unstage', files: paths });
+    return sendIfOpen({ type: 'git_unstage', files: paths });
   },
 
   requestGitCommit: (message: string) => {
-    sendIfOpen({ type: 'git_commit', message });
+    return sendIfOpen({ type: 'git_commit', message });
   },
 }));
