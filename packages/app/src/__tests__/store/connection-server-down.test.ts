@@ -171,8 +171,9 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
   it('keeps server_down sticky against the paired onerror/onclose of the same drop', async () => {
     // Regression: RN fires error → close (or close → error) for ONE transport
     // drop. The give-up sets server_down on the first event; the paired second
-    // event must NOT clobber it back to reconnecting/disconnected (transitionPhase
-    // only warns on the illegal transition — it still applies it).
+    // event must NOT clobber it back to reconnecting/disconnected. Two layers
+    // hold the line: the handlers' early-return on server_down, and (since #6286)
+    // the FSM rejecting the illegal exit instead of applying it.
     const ws = installMockWebSocket();
     await openConnectedSocket(ws);
     const socket = ws.instances[ws.instances.length - 1];

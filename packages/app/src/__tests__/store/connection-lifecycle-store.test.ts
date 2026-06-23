@@ -139,7 +139,7 @@ describe('useConnectionLifecycleStore', () => {
       expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
     });
 
-    it('warns on illegal transition and still applies the phase', () => {
+    it('#6286 — warns on an illegal transition and REJECTS it (phase unchanged)', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
       const store = useConnectionLifecycleStore.getState();
       // disconnected → connected is not a valid transition
@@ -147,12 +147,12 @@ describe('useConnectionLifecycleStore', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('[ConnectionFSM] Illegal transition: disconnected → connected')
       );
-      // Phase is still applied so production never silently breaks
-      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
+      // The FSM now fails CLOSED: the phase is left unchanged.
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
       warnSpy.mockRestore();
     });
 
-    it('warns on illegal transition: connected → connecting (must go via disconnected or reconnecting first)', () => {
+    it('#6286 — rejects illegal transition: connected → connecting (phase unchanged)', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
       const store = useConnectionLifecycleStore.getState();
       store.transitionPhase('connecting');
@@ -161,7 +161,73 @@ describe('useConnectionLifecycleStore', () => {
       expect(warnSpy).toHaveBeenCalledWith(
         expect.stringContaining('[ConnectionFSM] Illegal transition: connected → connecting')
       );
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
       warnSpy.mockRestore();
+    });
+
+    it('#6286 — terminal server_down stays put under an illegal transition (e.g. paired error→close)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_down');
+      // server_down → reconnecting is illegal (the clobber #5980 cured) — reject it.
+      store.transitionPhase('reconnecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[ConnectionFSM] Illegal transition: server_down → reconnecting')
+      );
+      warnSpy.mockRestore();
+    });
+
+    it('#6286 — { force: true } applies an otherwise-illegal transition (the one legitimate forced exit)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_down');
+      // server_down → reconnecting is illegal, but force pushes it through.
+      store.transitionPhase('reconnecting', { force: true });
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('reconnecting');
+      // A forced (intentional) exit logs informationally, NOT as a violation warning.
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Forced transition'));
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it('#6286 — { force: true } does not warn on an already-legal transition', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_down');
+      // server_down → connecting is legal (retryConnection's real exit); force is a
+      // no-op on the validation but must still apply cleanly with no warning.
+      store.transitionPhase('connecting', { force: true });
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('#6286 — allows disconnected → reconnecting (app-resume / network-change re-dial)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      // connect() computes 'reconnecting' (not 'connecting') when re-dialing a
+      // previously-connected URL whose lastConnectedUrl survived a non-user
+      // drop. From a 'disconnected' ConnectScreen that edge MUST be legal, or a
+      // live authenticated socket wedges (the regression caught reviewing #6286).
+      store.transitionPhase('reconnecting');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('reconnecting');
+      expect(warnSpy).not.toHaveBeenCalled();
+      warnSpy.mockRestore();
+    });
+
+    it('#6286 — the resume re-dial sequence disconnected → reconnecting → connected does not wedge', () => {
+      const store = useConnectionLifecycleStore.getState();
+      // Reproduces the app-resume path end to end: a re-dial from the
+      // ConnectScreen enters the reconnect ladder and auth_ok completes it.
+      store.transitionPhase('reconnecting');
+      store.transitionPhase('connected');
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
     });
 
     it('allows connecting → reconnecting (retry escalation)', () => {
@@ -238,11 +304,14 @@ describe('useConnectionLifecycleStore', () => {
 
     it('setConnectionPhase delegates to transitionPhase (validates)', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
-      // Illegal path via the public setConnectionPhase API
-      useConnectionLifecycleStore.getState().setConnectionPhase('reconnecting');
+      // Illegal path via the public setConnectionPhase API. From the initial
+      // 'disconnected', → 'connected' is illegal (the legal exits are
+      // 'connecting' and 'reconnecting'), so it must warn and be rejected.
+      useConnectionLifecycleStore.getState().setConnectionPhase('connected');
       expect(warnSpy).toHaveBeenCalledWith(
-        expect.stringContaining('[ConnectionFSM] Illegal transition: disconnected → reconnecting')
+        expect.stringContaining('[ConnectionFSM] Illegal transition: disconnected → connected')
       );
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
       warnSpy.mockRestore();
     });
   });

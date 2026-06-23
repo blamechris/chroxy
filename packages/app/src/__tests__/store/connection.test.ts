@@ -1005,6 +1005,14 @@ describe('WS message handler (direct)', () => {
   afterEach(() => _testMessageHandler.clearContext());
 
   describe('auth_ok', () => {
+    // auth_ok only ever arrives over an open socket — i.e. after connect() has
+    // moved the FSM to 'connecting'/'reconnecting'. Seed that realistic phase so
+    // the legal 'connecting → connected' edge applies (the FSM now rejects the
+    // unrealistic 'disconnected → connected' shortcut). (#6286)
+    beforeEach(() => {
+      useConnectionLifecycleStore.setState({ connectionPhase: 'connecting' });
+    });
+
     it('parses connectedClients with isSelf detection via clientId', () => {
       _testMessageHandler.handle({
         type: 'auth_ok',

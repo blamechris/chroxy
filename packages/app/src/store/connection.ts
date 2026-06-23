@@ -971,7 +971,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       existing.onmessage = null;
       existing.close();
     }
-    const phase = isReconnect || _retryCount > 0 ? 'reconnecting' : 'connecting';
+    // #6286 — re-dialing over a still-`connected` phase (the resume/network
+    // liveness paths, or switching servers while connected) is a RECONNECT, not
+    // a fresh connect: `connected → connecting` is an illegal FSM exit and the
+    // FSM now rejects it (leaving the phase stuck on the old `connected`). Treat
+    // an already-connected phase as a reconnect so the legal `connected →
+    // reconnecting` edge is taken. `isReconnect`/`_retryCount` keep their meaning.
+    const wasConnectedPhase =
+      useConnectionLifecycleStore.getState().connectionPhase === 'connected';
+    const phase =
+      isReconnect || _retryCount > 0 || wasConnectedPhase ? 'reconnecting' : 'connecting';
     set({ socket: null });
     useConnectionLifecycleStore.getState().setConnectionPhase(phase);
     useConnectionLifecycleStore.getState().setConnectionError(
@@ -1364,9 +1373,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // #5725 (#5698) — terminal: the reconnect ladder already gave up
       // (server_down). The PAIRED event of this same transport drop (RN fires
       // error → close, or close → error) must NOT clobber server_down back to
-      // reconnecting/disconnected — transitionPhase only WARNS on the illegal
-      // transition, it still applies it, which would revert the terminal banner
-      // to the infinite spinner this state exists to kill. Keep it sticky.
+      // reconnecting/disconnected. Since #6286 the FSM itself rejects those
+      // illegal exits, so this early-return is belt-and-suspenders — it also
+      // skips the scheduleReconnect()/error writes below that the bare phase
+      // guard wouldn't.
       if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
         return;
       }
@@ -1418,7 +1428,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
 
       // #5725 (#5698) — terminal server_down is sticky against the paired event
       // of this drop (mirrors the onclose guard above): once the ladder gave up,
-      // a close→error (or error after a give-up) must not clobber it back.
+      // a close→error (or error after a give-up) must not clobber it back. Since
+      // #6286 the FSM rejects the illegal exit too; this early-return remains as
+      // belt-and-suspenders (it also skips the scheduleReconnect()/error writes).
       if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') {
         return;
       }
@@ -1551,12 +1563,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const lifecycle = useConnectionLifecycleStore.getState();
     // #5725 — leave the terminal server_down phase explicitly BEFORE dialing.
     // connect() sets 'reconnecting' when re-dialing the same URL (isReconnect),
-    // and `server_down -> reconnecting` is an illegal FSM transition (warns +
-    // still applies + carries the stale "Server appears to be down" error
-    // forward). `server_down -> connecting` is the legal exit; clearing the error
-    // here keeps the banner from leaking into the fresh attempt.
+    // and `server_down -> reconnecting` is an illegal FSM transition. Move to
+    // 'connecting' first; clearing the error here keeps the stale "Server
+    // appears to be down" banner from leaking into the fresh attempt.
+    // #6286 — the FSM now REJECTS illegal transitions instead of applying them,
+    // so this user-initiated terminal exit opts in via { force: true }: it is
+    // the ONLY deliberately-flagged way to leave a terminal phase.
     if (lifecycle.connectionPhase === 'server_down') {
-      lifecycle.setConnectionPhase('connecting');
+      lifecycle.transitionPhase('connecting', { force: true });
       lifecycle.setConnectionError(null, 0);
     }
     const saved = lifecycle.savedConnection;
