@@ -557,6 +557,104 @@ describe('useConnectionStore', () => {
       // Local entry untouched — no optimistic removal without a real send.
       expect(useConnectionStore.getState().sessionStates.s1!.queuedMessages).toHaveLength(1);
     });
+
+    it('#5938: sendCancelQueued also drops the never-sent optimistic bubble (not just the badge)', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            // The bubble id IS the clientMessageId for a queued send.
+            messages: [
+              { id: 'uin-1', type: 'user_input', content: 'a', timestamp: 1 },
+              { id: 'uin-2', type: 'user_input', content: 'b', timestamp: 2 },
+            ],
+            queuedMessages: [
+              { clientMessageId: 'uin-1', text: 'a', queuedAt: 1, status: 'confirmed' },
+              { clientMessageId: 'uin-2', text: 'b', queuedAt: 2, status: 'confirmed' },
+            ],
+          },
+        },
+      });
+
+      useConnectionStore.getState().sendCancelQueued('uin-1');
+
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // Badge cleared AND the phantom bubble removed — only uin-2 lingers.
+      expect(ss.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-2']);
+      expect(ss.messages.map(m => m.id)).toEqual(['uin-2']);
+    });
+
+    it('#5938: sendInterrupt clears the queue and drops every never-sent queued bubble', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's1',
+        sessionStates: {
+          s1: {
+            ...createEmptySessionState(),
+            streamingMessageId: 'm-live',
+            messages: [
+              // A bubble belonging to the live (already-sent) turn must survive.
+              { id: 'uin-live', type: 'user_input', content: 'live', timestamp: 1 },
+              { id: 'uin-q1', type: 'user_input', content: 'q1', timestamp: 2 },
+              { id: 'uin-q2', type: 'user_input', content: 'q2', timestamp: 3 },
+            ],
+            queuedMessages: [
+              { clientMessageId: 'uin-q1', text: 'q1', queuedAt: 2, status: 'confirmed' },
+              { clientMessageId: 'uin-q2', text: 'q2', queuedAt: 3, status: 'confirmed' },
+            ],
+          },
+        },
+      });
+
+      const result = useConnectionStore.getState().sendInterrupt();
+
+      expect(result).toBe('sent');
+      const payload = JSON.parse(send.mock.calls[0]![0] as string);
+      expect(payload.type).toBe('interrupt');
+      const ss = useConnectionStore.getState().sessionStates.s1!;
+      // Queue emptied; both queued bubbles dropped; the live-turn bubble stays.
+      expect(ss.queuedMessages).toHaveLength(0);
+      expect(ss.messages.map(m => m.id)).toEqual(['uin-live']);
+    });
+
+    it('#5938: sendInterrupt with an explicit sessionId clears THAT session queue + bubbles', async () => {
+      const { useConnectionStore, createEmptySessionState } = await import('./connection');
+      const send = vi.fn();
+      const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+      useConnectionStore.setState({
+        socket: openSocket,
+        activeSessionId: 's-active',
+        sessionStates: {
+          's-active': {
+            ...createEmptySessionState(),
+            messages: [{ id: 'uin-a', type: 'user_input', content: 'a', timestamp: 1 }],
+            queuedMessages: [{ clientMessageId: 'uin-a', text: 'a', queuedAt: 1, status: 'confirmed' }],
+          },
+          's-other': {
+            ...createEmptySessionState(),
+            messages: [{ id: 'uin-b', type: 'user_input', content: 'b', timestamp: 1 }],
+            queuedMessages: [{ clientMessageId: 'uin-b', text: 'b', queuedAt: 1, status: 'confirmed' }],
+          },
+        },
+      });
+
+      useConnectionStore.getState().sendInterrupt('s-other');
+
+      const states = useConnectionStore.getState().sessionStates;
+      // The target session is cleared; the ACTIVE session is untouched.
+      expect(states['s-other']!.queuedMessages).toHaveLength(0);
+      expect(states['s-other']!.messages).toHaveLength(0);
+      expect(states['s-active']!.queuedMessages.map(m => m.clientMessageId)).toEqual(['uin-a']);
+      expect(states['s-active']!.messages.map(m => m.id)).toEqual(['uin-a']);
+    });
   });
 
   it('#5710: destroySession sends force:true only when forced', async () => {
