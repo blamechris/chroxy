@@ -87,9 +87,16 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // the per-domain slices it re-exports). Static text analysis (not a runtime
 // import) keeps this cheap and matches how the handler universes are extracted,
 // so the comparison is apples-to-apples.
+//
+// The read is RECURSIVE: #6272 sub-split `control-room.ts` into
+// `control-room/<tab>.ts` behind a sub-barrel, so ~22 of the literals now live
+// one level down. A non-recursive read would silently miss the whole
+// control-room surface (tsc stays green — only this lint catches it), so we walk
+// the tree and keep every nested `.ts`.
 // ---------------------------------------------------------------------------
 function serverSchemaTypes(): string[] {
-  const src = readdirSync(serverSchemaDir)
+  const src = readdirSync(serverSchemaDir, { recursive: true })
+    .map((f) => f.toString())
     .filter((f) => f.endsWith('.ts'))
     .map((f) => readFileSync(resolve(serverSchemaDir, f), 'utf-8'))
     .join('\n')
