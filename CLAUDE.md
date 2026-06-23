@@ -25,7 +25,7 @@ chroxy/
 ```
 
 **Current Status (v0.9.46):**
-- Server works: CLI headless mode, multi-provider registry (Claude SDK/CLI/TUI, BYOK, Gemini, Codex, DeepSeek, Ollama, config-driven Anthropic-compatible endpoints), WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications + Discord status-embed sink, external-session event ingest (`POST /api/events` + ingest secret), session management, model switching, plan mode detection, background agent tracking, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, K8s/Rancher backends, permission rule engine, encrypted credentials at rest (OS keychain), extensible provider/handler system
+- Server works: CLI headless mode, multi-provider registry (Claude SDK/CLI/TUI, BYOK, Gemini, Codex, DeepSeek, Ollama, config-driven Anthropic-compatible + OpenAI-compatible endpoints), WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications + Discord status-embed sink, external-session event ingest (`POST /api/events` + ingest secret), session management, model switching, plan mode detection, background agent tracking, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, K8s/Rancher backends (config-driven selection; live-cluster validation pending #6275), embedded user-shell terminal, daemon identity-key rotation (`chroxy identity rotate`), Control Room env/runtime management, queue-while-processing (mid-turn send + auto-flush), permission rule engine, encrypted credentials at rest (OS keychain), extensible provider/handler system
 - Desktop works: Tauri tray app, multi-host LAN client (server picker, mDNS discovery, shared-session join), web dashboard with syntax highlighting, xterm.js terminal, Control Room, notifications, session tabs, voice-to-text (macOS), console page, environment management panel, startup-failure surfacing with retry
 - App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input, session rules UI, worktree toggle
 - Claude-hooks works: `chroxy-hooks install` registers six stateless emitters in Claude Code settings so plain (non-chroxy) sessions feed the daemon's notification pipeline — see `docs/guides/discord-notifications.md`
@@ -58,7 +58,7 @@ npx chroxy tunnel setup
 
 ### Triage Runbooks
 
-- [`docs/troubleshooting/session-token-mismatch.md`](docs/troubleshooting/session-token-mismatch.md) — how to enable the `[session-binding-*]` debug logs and correlate a `SESSION_TOKEN_MISMATCH` failure by `requestId` (active #2832 investigation path).
+- [`docs/troubleshooting/session-token-mismatch.md`](docs/troubleshooting/session-token-mismatch.md) — how to enable the `[session-binding-*]` debug logs and correlate a `SESSION_TOKEN_MISMATCH` failure by `requestId` (runbook from the resolved #2832 investigation).
 
 ## Session Start Protocol
 
@@ -411,5 +411,5 @@ For detailed component tables, WebSocket protocol messages, file listings, and s
 
 ---
 
-*Last Updated: 2026-06-13*
+*Last Updated: 2026-06-22*
 *Version: 0.9.46*
