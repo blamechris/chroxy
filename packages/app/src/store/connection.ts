@@ -1793,8 +1793,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
     if (socket && socket.readyState === WebSocket.OPEN) {
       hapticMedium();
-      wsSend(socket, payload);
-      return 'sent';
+      // #6308: the socket can flip OPEN → CLOSING before this synchronous send, so
+      // wsSend can throw and return false. Fall through to the offline queue so the
+      // interrupt retries on reconnect instead of reporting a 'sent' that never
+      // reached the server (the optimistic queue-drop above already matches the
+      // offline path's behaviour).
+      if (wsSend(socket, payload)) return 'sent';
     }
     return enqueueMessage('interrupt', payload);
   },
@@ -1812,6 +1816,13 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!(socket && socket.readyState === WebSocket.OPEN)) return false;
     const payload: Record<string, unknown> = { type: 'cancel_queued', clientMessageId };
     if (sid) payload.sessionId = sid;
+    hapticLight();
+    // #6308: cancel_queued is NOT offline-queueable, so send BEFORE the optimistic
+    // drop and bail if the socket threw on a closing send (wsSend → false). Dropping
+    // first then failing would strand the server's queued message (it flushes on the
+    // next turn) while the local bubble is already gone — an orphaned turn with no
+    // recovery path. Leaving the bubble in place keeps the cancel retryable.
+    if (!wsSend(socket, payload)) return false;
     if (sid && get().sessionStates[sid]) {
       updateSession(sid, (ss) => ({
         queuedMessages: removeQueuedMessage(ss.queuedMessages ?? [], clientMessageId),
@@ -1821,8 +1832,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         messages: ss.messages.filter((m) => m.id !== clientMessageId),
       }));
     }
-    hapticLight();
-    wsSend(socket, payload);
     return 'sent';
   },
 
@@ -1840,7 +1849,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
     const payload = { type: 'permission_response', requestId, decision: wireDecision };
     if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
-    wsSend(socket, payload);
+    // #6308: the socket can flip OPEN → CLOSING before this synchronous send, so
+    // wsSend can throw and return false. Bail BEFORE marking the prompt answered —
+    // otherwise the UI shows "Allowed"/"Denied" while the server (never having seen
+    // the frame) auto-denies on timeout. Returning false keeps the prompt actionable,
+    // identical to the disconnected guard above (the #5699 contract).
+    if (!wsSend(socket, payload)) return false;
     const result: 'sent' | 'queued' | false = 'sent';
     // #6222: mark the prompt ChatMessage `answered` so the shared pending-count
     // derivation (`isLivePermissionPrompt` keys on `m.answered`) clears. Without
@@ -1932,8 +1946,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // stays actionable and the caller gives clear feedback (the form also gates
     // on connectionPhase in the UI).
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
-    wsSend(socket, payload);
-    return 'sent';
+    // #6308: the answer is tied to a live pending AskUserQuestion the server expires
+    // on disconnect; like sendPermissionResponse, report failure (not 'sent') when
+    // wsSend throws on a closing socket so the caller leaves the form actionable
+    // rather than marking it answered against a request the server never received.
+    return wsSend(socket, payload) ? 'sent' : false;
   },
 
   markPromptAnswered: (messageId: string, answer: string) => {
