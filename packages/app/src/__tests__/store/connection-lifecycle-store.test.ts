@@ -179,31 +179,50 @@ describe('useConnectionLifecycleStore', () => {
       warnSpy.mockRestore();
     });
 
-    it('#6286 — { force: true } applies an otherwise-illegal transition (the one legitimate forced exit)', () => {
+    it('#6296 — { force: true } is REJECTED on a non-whitelisted illegal transition (phase unchanged)', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
       const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
       const store = useConnectionLifecycleStore.getState();
       store.transitionPhase('connecting');
       store.transitionPhase('server_down');
-      // server_down → reconnecting is illegal, but force pushes it through.
+      // server_down → reconnecting is illegal AND not whitelisted in
+      // FORCEABLE_TRANSITIONS. Pre-#6296 force pushed ANY illegal edge through
+      // (the latent footgun this issue removes); now it is rejected even forced,
+      // so terminal server_down stickiness cannot be bypassed.
       store.transitionPhase('reconnecting', { force: true });
-      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('reconnecting');
-      // A forced (intentional) exit logs informationally, NOT as a violation warning.
-      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Forced transition'));
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+      expect(warnSpy).toHaveBeenCalledWith(
+        expect.stringContaining('[ConnectionFSM] Illegal transition: server_down → reconnecting')
+      );
+      // A rejected force must NOT log the informational "Forced transition" line.
+      expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('Forced transition'));
+      warnSpy.mockRestore();
+      logSpy.mockRestore();
+    });
+
+    it('#6296 — { force: true } applies a whitelisted forced exit (server_down → connecting)', () => {
+      const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
+      const logSpy = jest.spyOn(console, 'log').mockImplementation(() => {});
+      const store = useConnectionLifecycleStore.getState();
+      store.transitionPhase('connecting');
+      store.transitionPhase('server_down');
+      // server_down → connecting is the one whitelisted forceable terminal exit
+      // (the retryConnection intent). It applies with no violation warning.
+      store.transitionPhase('connecting', { force: true });
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
       expect(warnSpy).not.toHaveBeenCalled();
       warnSpy.mockRestore();
       logSpy.mockRestore();
     });
 
-    it('#6286 — { force: true } does not warn on an already-legal transition', () => {
+    it('#6296 — { force: true } is a clean no-op on an already-legal transition (no warn)', () => {
       const warnSpy = jest.spyOn(console, 'warn').mockImplementation(() => {});
       const store = useConnectionLifecycleStore.getState();
       store.transitionPhase('connecting');
-      store.transitionPhase('server_down');
-      // server_down → connecting is legal (retryConnection's real exit); force is a
-      // no-op on the validation but must still apply cleanly with no warning.
-      store.transitionPhase('connecting', { force: true });
-      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connecting');
+      // connecting → connected is already legal; force must apply it cleanly with
+      // no warning (force never penalises a legal transition).
+      store.transitionPhase('connected', { force: true });
+      expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('connected');
       expect(warnSpy).not.toHaveBeenCalled();
       warnSpy.mockRestore();
     });

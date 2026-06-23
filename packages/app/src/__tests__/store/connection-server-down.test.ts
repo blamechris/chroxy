@@ -164,6 +164,11 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     expect(reconnectAttempt).toBe(0);
     // …and a fresh dial was attempted (connectAuto → connect → WebSocket).
     expect(ws.instances.length).toBeGreaterThan(before);
+    // #6296 — and the terminal phase was actually left: retryConnection's
+    // `transitionPhase('connecting', { force: true })` exit is a whitelisted
+    // forceable edge (server_down → connecting), so the FSM applied it rather
+    // than rejecting it. (Tightening force to a whitelist must not wedge here.)
+    expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
 
     ws.restore();
   });
