@@ -235,10 +235,12 @@ export function handleMessageQueued(
     reconcileFakedFreshTurn: ({ streamingMessageId, messages }) => {
       if (streamingMessageId !== 'pending') return null
       const patch: FakedFreshTurnPatch = { streamingMessageId: null }
-      // Strip the optimistic 'thinking' bubble (id 'thinking') if present; keep
-      // the array reference (and omit the field) when there's nothing to remove
-      // so the dispatcher can elide a needless re-render.
-      const stripped = messages.filter((m) => m.type !== 'thinking')
+      // Strip the optimistic 'thinking' bubble by its singleton id (matching the
+      // canonical filterThinking in utils.ts) — NOT by type, which would also
+      // delete real persisted thinking content that carries a non-'thinking' id.
+      // Keep the array reference (and omit the field) when there's nothing to
+      // remove so the dispatcher can elide a needless re-render.
+      const stripped = messages.filter((m) => m.id !== 'thinking')
       if (stripped.length !== messages.length) patch.messages = stripped
       return patch
     },

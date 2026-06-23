@@ -261,6 +261,19 @@ describe('handleMessageQueued — faked-fresh-turn reconcile (#6291)', () => {
     const builder = handleMessageQueued({ sessionId: 's1', text: 'hi' }, null)!
     expect(builder.reconcileFakedFreshTurn!({ streamingMessageId: null, messages: [] })).toBeNull()
   })
+
+  it('strips ONLY the singleton thinking placeholder, preserving real persisted thinking content', () => {
+    // Real thinking content carries a non-'thinking' id (e.g. 'th1') even though
+    // its type is 'thinking'; only the optimistic placeholder uses id 'thinking'.
+    // Filtering by id (not type) must keep the real content. (#6291 review)
+    const realThinking: ChatMessage = { id: 'th1', type: 'thinking', content: 'reasoning…', timestamp: 0 }
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [realThinking, userMsg('uin-1'), thinkingMsg()],
+    })
+    expect(patch).toEqual({ streamingMessageId: null, messages: [realThinking, userMsg('uin-1')] })
+  })
 })
 
 describe('handleMessageDequeued', () => {
