@@ -401,15 +401,14 @@ describe('message queue', () => {
         // Mirrors the browser's InvalidStateError on a CLOSING socket.
         throw new Error('InvalidStateError: socket is not open');
       },
+      // No-op close so the suite's beforeEach disconnect() can safely tear this
+      // mock down without throwing — no manual socket cleanup needed.
+      close: () => {},
     } as unknown as WebSocket;
     useConnectionStore.setState({ socket: throwingSocket });
 
     const result = useConnectionStore.getState().sendInput('hello');
     expect(result).toBe('queued');
-
-    // beforeEach does not reset `socket`; clear it so the throwing mock doesn't
-    // bleed into later tests that assume a disconnected socket.
-    useConnectionStore.setState({ socket: null });
   });
 
   it('REFUSES permission_response when socket is not connected (#5699 — never queued)', () => {
