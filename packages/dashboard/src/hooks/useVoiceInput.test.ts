@@ -550,6 +550,31 @@ describe('useVoiceInput', () => {
         expect(result.current.isRecording).toBe(false)
       })
 
+      // #6290: exhausting the restart budget previously flipped the mic off
+      // silently — the user kept "dictating" into a dead recogniser. The cap
+      // path must now surface a visible error so the InputBar banner shows it.
+      it('surfaces a voice error when the restart budget is exhausted (#6290)', async () => {
+        const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
+
+        await waitFor(() => expect(result.current.isAvailable).toBe(true))
+
+        act(() => {
+          result.current.start()
+        })
+        const recognition = lastRecognition!
+
+        // No error before the budget runs out.
+        expect(result.current.error).toBeNull()
+
+        // Fire onend until the restart counter passes MAX_CONTINUOUS_RESTARTS.
+        for (let i = 0; i < 10; i++) {
+          act(() => { recognition.onend?.() })
+        }
+
+        expect(result.current.isRecording).toBe(false)
+        expect(result.current.error).toMatch(/stopped unexpectedly|tap the mic/i)
+      })
+
       it('successful onresult resets the restart counter (long sessions stay healthy)', async () => {
         const { result } = renderHook(() => useVoiceInput({ mode: 'continuous' }))
 
