@@ -428,6 +428,13 @@ export function useVoiceInput(options: UseVoiceInputOptions = {}): UseVoiceInput
             // the tail of the previous session; fall through to stop.
           }
         }
+        // #6290: in continuous mode, if we land here without the user pressing
+        // stop, the restart budget is exhausted (or a restart threw) — the mic
+        // is reverting to off mid-dictation. Surface a hard error so the
+        // InputBar banner tells the user instead of silently going quiet.
+        if (modeRef.current === 'continuous' && !userStoppedRef.current) {
+          setError('Voice recognition stopped unexpectedly — tap the mic to retry.')
+        }
         setIsRecording(false)
       }
 
