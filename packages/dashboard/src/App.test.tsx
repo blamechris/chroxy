@@ -100,6 +100,11 @@ vi.mock('./components/CreateSessionModal', () => ({
   CreateSessionModal: (props: {
     open: boolean
     onCreate?: (data: { name: string; cwd: string }) => void
+    // #6301 — surface the create spinner + retryable error so the
+    // #6285 App-layer branches (create-confirm effect / not-sent
+    // else-branch) are directly assertable from the modal's DOM.
+    isCreating?: boolean
+    serverError?: string
   }) =>
     props.open ? (
       <div data-testid="create-session-modal-mock">
@@ -108,6 +113,10 @@ vi.mock('./components/CreateSessionModal', () => ({
           data-testid="create-session-modal-confirm"
           onClick={() => props.onCreate?.({ name: 'New Session', cwd: '/tmp/new' })}
         />
+        {props.isCreating ? <div data-testid="create-session-modal-creating" /> : null}
+        {props.serverError ? (
+          <div data-testid="create-session-modal-error">{props.serverError}</div>
+        ) : null}
       </div>
     ) : null,
 }))
@@ -174,6 +183,9 @@ vi.mock('./store/connection', () => {
     }),
     connect: vi.fn(),
     sendInput: vi.fn(),
+    // #6295 — queued-send notice path. App.handleSend surfaces a transient
+    // info notification when sendInput falls through to the offline queue.
+    addInfoNotification: vi.fn(),
     sendInterrupt: vi.fn(),
     sendPermissionResponse: vi.fn(),
     sendUserQuestionResponse: vi.fn(),
@@ -2504,6 +2516,72 @@ describe('App', () => {
       confirmCreate()             // create — must NOT seed
       expect(viewSessionComposer().value).toBe('')
     })
+  })
+})
+
+// #6301 — App-layer coverage for the #6285 create-spinner reset. #6285 made
+// createSession return a boolean and added two App.tsx branches that the
+// store-level tests only cover transitively:
+//   (a) the create-confirm-window guard (#6285 effect): if the socket drops
+//       mid-create (connectionPhase leaves 'connected' while isCreatingSession),
+//       the stranded "Creating…" spinner is cleared and a retryable error is
+//       surfaced — otherwise no session_created/session_error reply ever clears
+//       it and the spinner wedges forever.
+//   (b) the not-sent else-branch in handleCreateSession: clicking Create while
+//       the socket is closed (createSession returns false) surfaces the
+//       'Connection lost' error WITHOUT latching the spinner.
+// The modal mock surfaces `isCreating` / `serverError` as testID nodes so both
+// branches are directly assertable.
+describe('#6301 create-session spinner reset (#6285 App-layer branches)', () => {
+  // Fresh-session create: connected, no sessions yet, no active session. The
+  // WelcomeScreen renders its New Session button, and crucially activeSessionId
+  // stays null so the create-confirm effect (which closes the modal once the
+  // server adopts a session) does NOT fire — leaving the spinner observable.
+  const freshConnectedState = (createSession: () => boolean) => ({
+    connectionPhase: 'connected' as const,
+    sessions: [],
+    activeSessionId: null,
+    createSession: vi.fn(createSession),
+  })
+
+  function openCreateViaWelcome() {
+    fireEvent.click(screen.getByTestId('welcome-new-session'))
+    expect(screen.getByTestId('create-session-modal-mock')).toBeInTheDocument()
+  }
+
+  it('(a) clears the spinner and surfaces a retryable error when the socket drops mid-create', () => {
+    stateOverrides = freshConnectedState(() => true)
+    const { rerender } = render(<App />)
+    openCreateViaWelcome()
+
+    // Confirm — createSession returned true, so the spinner latches and no
+    // error shows yet (the server reply is still pending).
+    fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+    expect(screen.getByTestId('create-session-modal-creating')).toBeInTheDocument()
+    expect(screen.queryByTestId('create-session-modal-error')).not.toBeInTheDocument()
+
+    // Socket drops before the server replies: connectionPhase leaves 'connected'
+    // while isCreatingSession is still true. The #6285 effect must clear the
+    // spinner and surface the retryable 'Connection lost' error.
+    stateOverrides = { ...freshConnectedState(() => true), connectionPhase: 'reconnecting' as const }
+    rerender(<App />)
+
+    expect(screen.queryByTestId('create-session-modal-creating')).not.toBeInTheDocument()
+    expect(screen.getByTestId('create-session-modal-error').textContent).toMatch(/Connection lost/i)
+  })
+
+  it('(b) shows the Connection lost error and does NOT latch the spinner when Create is clicked on a closed socket', () => {
+    // createSession returns false (closed-socket no-op). The modal is still
+    // open (it was opened while connected), but the confirm hits the not-sent
+    // else-branch: surface the error, never latch the spinner.
+    stateOverrides = freshConnectedState(() => false)
+    render(<App />)
+    openCreateViaWelcome()
+
+    fireEvent.click(screen.getByTestId('create-session-modal-confirm'))
+
+    expect(screen.queryByTestId('create-session-modal-creating')).not.toBeInTheDocument()
+    expect(screen.getByTestId('create-session-modal-error').textContent).toMatch(/Connection lost/i)
   })
 })
 
