@@ -67,6 +67,7 @@ export function createEmptyBaseSessionState(): BaseSessionState {
   return {
     messages: [],
     streamingMessageId: null,
+    pendingClientMessageId: null,
     claudeReady: false,
     activeModel: null,
     permissionMode: null,

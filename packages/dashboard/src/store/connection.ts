@@ -2664,6 +2664,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       updateActiveSession((ss) => ({
         messages: [...filterThinking(ss.messages), userMsg, thinkingMsg],
         streamingMessageId: 'pending',
+        // #6302 — record WHICH send owns this 'pending' optimistic turn so a later
+        // message_queued only retires it when its clientMessageId matches (the
+        // owner check that protects this turn from another client's broadcast
+        // queued send in a multi-client session). Flat-state fallback below has no
+        // per-session owner (legacy PTY mode, single client) so it omits this.
+        pendingClientMessageId: messageId,
       }));
     } else {
       set((state) => ({
@@ -2680,6 +2686,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         updateActiveSession((ss) => ({
           messages: filterThinking(ss.messages),
           streamingMessageId: null,
+          pendingClientMessageId: null,
         }));
       } else {
         set((s) => ({

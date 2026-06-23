@@ -1179,16 +1179,18 @@ describe('shared dispatch table', () => {
       expect(env.sessions.s1.queuedMessages).toEqual([])
     })
 
-    it('reconciles a faked-fresh turn → clears streamingMessageId + strips thinking bubble in one step (#6291)', () => {
+    it('reconciles a faked-fresh turn → clears streamingMessageId + owner + strips thinking bubble in one step (#6291 / #6302)', () => {
       // The client judged 'not busy', faked a fresh working turn (a 'thinking'
-      // bubble + streamingMessageId: 'pending') for uin-1; the server queues it
-      // instead. The message_queued must retire that optimistic turn in the SAME
-      // state update that confirms the queued entry — not 5s later.
+      // bubble + streamingMessageId: 'pending', pendingClientMessageId: uin-1) for
+      // uin-1; the server queues it instead. The message_queued must retire that
+      // optimistic turn in the SAME state update that confirms the queued entry —
+      // not 5s later.
       const env = makeAdapter({
         sessions: {
           s1: {
             sessionId: 's1',
             streamingMessageId: 'pending',
+            pendingClientMessageId: 'uin-1',
             messages: [
               { id: 'uin-1', type: 'user_input', content: 'hi', timestamp: 0 },
               { id: 'thinking', type: 'thinking', content: '', timestamp: 0 },
@@ -1199,11 +1201,43 @@ describe('shared dispatch table', () => {
       })
       dispatch(env, { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-1', text: 'hi', queueLength: 1 })
       expect(env.sessions.s1.streamingMessageId).toBeNull()
+      expect(env.sessions.s1.pendingClientMessageId).toBeNull()
       expect(env.sessions.s1.messages).toEqual([
         { id: 'uin-1', type: 'user_input', content: 'hi', timestamp: 0 },
       ])
       expect(env.sessions.s1.queuedMessages).toMatchObject([
         { clientMessageId: 'uin-1', text: 'hi', status: 'confirmed' },
+      ])
+    })
+
+    it('#6302 — another client\'s queued send leaves THIS client\'s pending turn intact (owner mismatch)', () => {
+      // Multi-client: this client owns the pending turn for uin-1. A DIFFERENT
+      // client's mid-turn send (uin-2) is broadcast as message_queued. Even though
+      // streamingMessageId is still 'pending', the owner ids differ — so this
+      // client's spinner + thinking bubble must survive; only the queue grows.
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            streamingMessageId: 'pending',
+            pendingClientMessageId: 'uin-1',
+            messages: [
+              { id: 'uin-1', type: 'user_input', content: 'hi', timestamp: 0 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 0 },
+            ],
+            queuedMessages: [],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-2', text: 'theirs', queueLength: 1 })
+      expect(env.sessions.s1.streamingMessageId).toBe('pending')
+      expect(env.sessions.s1.pendingClientMessageId).toBe('uin-1')
+      expect(env.sessions.s1.messages).toEqual([
+        { id: 'uin-1', type: 'user_input', content: 'hi', timestamp: 0 },
+        { id: 'thinking', type: 'thinking', content: '', timestamp: 0 },
+      ])
+      expect(env.sessions.s1.queuedMessages).toMatchObject([
+        { clientMessageId: 'uin-2', text: 'theirs', status: 'confirmed' },
       ])
     })
 

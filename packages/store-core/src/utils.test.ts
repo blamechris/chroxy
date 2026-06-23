@@ -12,6 +12,7 @@ describe('createEmptyBaseSessionState', () => {
     expect(state).toEqual({
       messages: [],
       streamingMessageId: null,
+      pendingClientMessageId: null,
       claudeReady: false,
       activeModel: null,
       permissionMode: null,

@@ -310,6 +310,22 @@ export type SessionRole = 'primary' | 'observer' | 'unclaimed';
 export interface BaseSessionState {
   messages: ChatMessage[];
   streamingMessageId: string | null;
+  /**
+   * #6302 — the `clientMessageId` of the send that OWNS the current optimistic
+   * "working" turn (the faked-fresh path that sets `streamingMessageId:
+   * 'pending'` + a `'thinking'` bubble before any `stream_start` arrives). Set
+   * alongside that sentinel and cleared (to null) wherever `streamingMessageId`
+   * leaves `'pending'` — the 5s stream-stall safety net, the faked-fresh-turn
+   * reconcile, a real `stream_start`/`tool_start` adopting a real id.
+   *
+   * Load-bearing in a MULTI-CLIENT session: mid-turn sends are echoed across
+   * clients, so a client holds queued/user bubbles for OTHER clients' ids too.
+   * The faked-fresh-turn reconcile (`reconcileFakedFreshTurn`) must therefore
+   * fire only when an incoming `message_queued`'s `clientMessageId` matches THIS
+   * field — another client's broadcast queued send must not retire this client's
+   * own optimistic turn. Null whenever no faked-fresh turn is outstanding.
+   */
+  pendingClientMessageId: string | null;
   claudeReady: boolean;
   activeModel: string | null;
   permissionMode: string | null;
