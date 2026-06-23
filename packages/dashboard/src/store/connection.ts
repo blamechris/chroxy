@@ -2216,7 +2216,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         'hostStatusLoading', 'runnerStatusLoading', 'containersStatusLoading',
         'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
         'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
-        'skillsInventoryLoading', 'mailboxStatusLoading',
+        'skillsInventoryLoading', 'mailboxStatusLoading', 'externalSessionsLoading',
       ] as const;
       const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
       for (const key of surveyLoadingKeys) {
@@ -3709,7 +3709,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId, skipPermissions }) => {
+  // #6285 — return whether the create request actually went on the wire. When
+  // the socket is closed the create is a silent no-op, so the caller must NOT
+  // latch its "Creating…" spinner (it would wedge forever — nothing arrives to
+  // clear it). Mirrors revokeToken's not-open guard: false = nothing sent.
+  createSession: ({ name, cwd, provider, model, permissionMode, worktree, environmentId, skipPermissions }): boolean => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'create_session' };
@@ -3728,7 +3732,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       // `chroxy start --dangerously-skip-permissions` via #4209).
       if (typeof skipPermissions === 'boolean') msg.skipPermissions = skipPermissions;
       wsSend(socket, msg);
+      return true;
     }
+    console.warn('[chroxy] createSession: socket not open — create request not sent');
+    return false;
   },
 
   // #6006 — operator panic button. Ask the server to immediately revoke the

@@ -1381,7 +1381,12 @@ export interface ConnectionState {
    * resulting `session_role` broadcast is the authoritative role update.
    */
   claimPrimary: (sessionId: string, options?: { force?: boolean }) => void;
-  createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean }) => void;
+  /**
+   * #6285 — returns whether the create_session request went on the wire.
+   * `false` means the socket was closed and nothing was sent, so the caller
+   * must skip latching its "Creating…" spinner (no reply will arrive to clear it).
+   */
+  createSession: (opts: { name: string; cwd?: string; provider?: string; model?: string; permissionMode?: string; worktree?: boolean; environmentId?: string; skipPermissions?: boolean }) => boolean;
   destroySession: (sessionId: string, force?: boolean) => void;
   /** #6006 — operator panic button: request an immediate token revoke (primary-token only). */
   revokeToken: () => void;

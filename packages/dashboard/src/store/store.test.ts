@@ -803,6 +803,22 @@ describe('useConnectionStore', () => {
     expect(useConnectionStore.getState().repoRuntimeConfigLoading).toBe(false);
   });
 
+  it('#6285: createSession returns true when sent, false when the socket is closed', async () => {
+    const { useConnectionStore } = await import('./connection');
+    const send = vi.fn();
+    const openSocket = { readyState: WebSocket.OPEN, send } as unknown as WebSocket;
+    useConnectionStore.setState({ socket: openSocket });
+    expect(useConnectionStore.getState().createSession({ name: 'demo' })).toBe(true);
+    expect(send).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(send.mock.calls[0]![0] as string).type).toBe('create_session');
+
+    // Closed socket: silent no-op, returns false so the caller skips its spinner.
+    send.mockClear();
+    useConnectionStore.setState({ socket: null });
+    expect(useConnectionStore.getState().createSession({ name: 'demo' })).toBe(false);
+    expect(send).not.toHaveBeenCalled();
+  });
+
   it('exposes all required actions', async () => {
     const { useConnectionStore } = await import('./connection');
     const state = useConnectionStore.getState();
@@ -3616,6 +3632,23 @@ describe('server_error toast scope filtering', () => {
         const after = useConnectionStore.getState().sessionStates;
         expect(after.s1!.pendingTrustGrants).toEqual([]);
         expect(after.s2!.pendingTrustGrants).toEqual([]);
+      } finally {
+        teardown();
+      }
+    });
+
+    // #6289: externalSessionsLoading was absent from the #6153 onclose survey
+    // sweep, so a refresh in flight when the socket dropped left the mission-
+    // control survey's Refresh button disabled forever (refreshDisabled = loading
+    // || !connected, and no reconnect path could re-issue the request).
+    it('clears externalSessionsLoading when onclose fires (#6289)', async () => {
+      const { useConnectionStore } = await import('./connection');
+      const { socket, teardown } = await setupCapturedSocket();
+
+      try {
+        useConnectionStore.setState({ externalSessionsLoading: true });
+        socket.onclose!();
+        expect(useConnectionStore.getState().externalSessionsLoading).toBe(false);
       } finally {
         teardown();
       }
