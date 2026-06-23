@@ -26,7 +26,13 @@ import type { ConnectionPhase, SavedConnection } from './types';
  *    allowed so that recursive retry calls do not generate spurious warnings.
  */
 const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
-  disconnected: ['connecting'],
+  // #6286 — `connecting` is a fresh dial; `reconnecting` is an app-resume /
+  // network-change re-dial of a previously-connected URL (connect() computes
+  // 'reconnecting' when `isReconnect`/`lastConnectedUrl` survives a non-user
+  // drop). Both MUST be legal exits from `disconnected`, or the resume re-dial
+  // is rejected and a live authenticated socket wedges on the ConnectScreen
+  // (disconnected → reconnecting → connected never completes).
+  disconnected: ['connecting', 'reconnecting'],
   // #6023 — a first-attempt probe can read the supervisor terminal-down signal
   // and latch 'server_down' straight from 'connecting' (no reconnect ladder yet).
   connecting: ['connecting', 'connected', 'disconnected', 'reconnecting', 'server_restarting', 'server_down'],
@@ -177,12 +183,16 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
       // the terminal `server_down` phase back to the reconnect spinner (#5980).
       // The ONE legitimate forced exit (user-initiated retry leaving
       // server_down) passes `{ force: true }`; everything else stays put.
-      console.warn(
-        `[ConnectionFSM] Illegal transition: ${from} → ${to}. ` +
-          `Allowed from ${from}: [${allowed.join(', ')}]` +
-          (opts?.force ? ' — applying anyway (force)' : ' — rejected')
-      );
-      if (!opts?.force) return;
+      if (opts?.force) {
+        // Intentional, flagged escape — informational, not a violation.
+        console.log(`[ConnectionFSM] Forced transition: ${from} → ${to}`);
+      } else {
+        console.warn(
+          `[ConnectionFSM] Illegal transition: ${from} → ${to}. ` +
+            `Allowed from ${from}: [${allowed.join(', ')}] — rejected`
+        );
+        return;
+      }
     }
     set({ connectionPhase: to });
   },
