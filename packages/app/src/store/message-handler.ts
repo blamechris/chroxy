@@ -417,14 +417,30 @@ function mapProviderList(rawProviders: unknown[]): ProviderInfo[] {
 /**
  * Send a JSON message over WebSocket, encrypting if E2E encryption is active.
  * Use this instead of raw `socket.send(JSON.stringify(...))`.
+ *
+ * Returns `true` when the frame was handed to `socket.send` without throwing,
+ * `false` when the send threw. #6283: the caller checks `readyState === OPEN`,
+ * but the socket can flip to CLOSING before this synchronous send and throw
+ * `InvalidStateError` — a flaky-tunnel TOCTOU window. Swallowing the throw and
+ * signalling failure lets delivery-critical callers (`sendInput`) fall back to
+ * the offline queue instead of leaving a permanently 'sent'-looking bubble that
+ * never reached the server. Mirrors the server-side sender (#5721, see
+ * `packages/server/src/ws-client-sender.js`: catch → log → return false).
+ * Most callers ignore the result (a closed socket was already a silent no-op).
  */
-export function wsSend(socket: WebSocket, payload: Record<string, unknown>): void {
-  if (_ctx.encryptionState) {
-    const envelope = encrypt(JSON.stringify(payload), _ctx.encryptionState.sharedKey, _ctx.encryptionState.sendNonce, DIRECTION_CLIENT);
-    _ctx.encryptionState.sendNonce++;
-    socket.send(JSON.stringify(envelope));
-  } else {
-    socket.send(JSON.stringify(payload));
+export function wsSend(socket: WebSocket, payload: Record<string, unknown>): boolean {
+  try {
+    if (_ctx.encryptionState) {
+      const envelope = encrypt(JSON.stringify(payload), _ctx.encryptionState.sharedKey, _ctx.encryptionState.sendNonce, DIRECTION_CLIENT);
+      _ctx.encryptionState.sendNonce++;
+      socket.send(JSON.stringify(envelope));
+    } else {
+      socket.send(JSON.stringify(payload));
+    }
+    return true;
+  } catch (err) {
+    console.warn('[wsSend] socket.send threw — frame not delivered:', err);
+    return false;
   }
 }
 
