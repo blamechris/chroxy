@@ -206,21 +206,37 @@ describe('#6308 — dashboard sendInterrupt / sendUserQuestionResponse', () => {
     const result = useConnectionStore.getState().sendInterrupt('sess-1')
 
     expect(sendCalls(socket)).toHaveLength(1)
-    expect(result).not.toBe('sent')
+    // interrupt is offline-queueable (5s TTL) — a failed live send falls through
+    // to the queue (retries on reconnect), never the pre-fix phantom 'sent'.
+    expect(result).toBe('queued')
   })
 
-  it('sendUserQuestionResponse does NOT report a plain sent when the send throws', async () => {
+  it('sendUserQuestionResponse falls through to the queue (optimistic flips run) when the send throws', async () => {
     const { useConnectionStore, createEmptySessionState } = await import('./connection')
     const socket = closingSocket()
     useConnectionStore.setState({
       activeSessionId: 'sess-1',
-      sessionStates: { 'sess-1': createEmptySessionState() },
+      sessionStates: {
+        'sess-1': {
+          ...createEmptySessionState(),
+          isIdle: true,
+          activeTools: [{ toolUseId: 'tool-1' }],
+          messages: [{ id: 'tool-1', type: 'tool_use', tool: 'AskUserQuestion', timestamp: 1 }],
+        } as unknown as SessionState,
+      },
       socket,
     } as never)
 
     const result = useConnectionStore.getState().sendUserQuestionResponse('Option A', 'tool-1')
 
     expect(sendCalls(socket)).toHaveLength(1)
-    expect(result).not.toBe('sent')
+    // user_question_response IS offline-queueable in the dashboard, so a failed
+    // live send falls through to the queue rather than reporting a phantom 'sent'.
+    expect(result).toBe('queued')
+    // The optimistic isIdle/activeTools flips run before the send and are kept on
+    // the queue fallback (identical to the offline path; the server reconciles).
+    const ss = useConnectionStore.getState().sessionStates['sess-1']!
+    expect(ss.isIdle).toBe(false)
+    expect(ss.activeTools.find((t) => t.toolUseId === 'tool-1')).toBeUndefined()
   })
 })
