@@ -16,8 +16,13 @@ import type { ConnectionPhase, SavedConnection } from './types';
  * only via its two declared legal edges — `connecting` (a user-initiated
  * retry, see `retryConnection`) or `disconnected` (an explicit disconnect).
  * `transitionPhase(to, { force: true })` is a deliberately-flagged escape
- * hatch that applies an otherwise-illegal transition; it is currently used
- * only by `retryConnection` and must stay confined to audited call sites.
+ * hatch that applies an otherwise-illegal transition — but ONLY for the
+ * edges enumerated in `FORCEABLE_TRANSITIONS` (#6296). `force` is NOT a
+ * blanket override: an illegal transition that is not whitelisted is
+ * rejected even with `force`, so a future caller cannot accidentally
+ * bypass terminal-phase stickiness (the #5980 clobber protection #6286
+ * added). It is currently used only by `retryConnection` and must stay
+ * confined to audited call sites.
  *
  * Notes on non-obvious entries:
  *  - connecting → server_restarting: health check returns "restarting" during the
@@ -48,6 +53,24 @@ const VALID_TRANSITIONS: Record<ConnectionPhase, ConnectionPhase[]> = {
   // explicit disconnect leaves it.
   server_down: ['connecting', 'disconnected'],
 };
+
+/**
+ * #6296 — the allow-list of otherwise-illegal transitions that `{ force: true }`
+ * is permitted to apply. `force` only escapes the FSM for an edge listed here;
+ * any other illegal transition is rejected even when forced, so a future caller
+ * cannot weaponise `force` to clobber a terminal phase (the #5980 regression
+ * #6286 fixed).
+ *
+ * Today this documents exactly one legitimate intent: leaving the terminal
+ * `server_down` phase on a user-initiated retry (`retryConnection`). That edge
+ * also happens to be legal in `VALID_TRANSITIONS`, so the current call site
+ * never actually needs the escape hatch — the whitelist records the intent so
+ * the edge stays force-safe even if its `VALID_TRANSITIONS` membership ever
+ * changes. Encoded as `"from→to"` strings for cheap membership checks.
+ */
+const FORCEABLE_TRANSITIONS: ReadonlySet<string> = new Set<string>([
+  'server_down→connecting',
+]);
 
 interface ServerInfo {
   serverMode?: 'cli' | null;
@@ -183,15 +206,20 @@ export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set
       // Previously the FSM warned then mutated unconditionally ("fail open"),
       // so the paired error→close events of one transport drop could clobber
       // the terminal `server_down` phase back to the reconnect spinner (#5980).
-      // The ONE legitimate forced exit (user-initiated retry leaving
-      // server_down) passes `{ force: true }`; everything else stays put.
-      if (opts?.force) {
-        // Intentional, flagged escape — informational, not a violation.
+      // #6296 — `{ force: true }` is NOT a blanket override: it only applies an
+      // illegal transition that is whitelisted in FORCEABLE_TRANSITIONS. The
+      // ONE legitimate forced exit (user-initiated retry leaving server_down →
+      // connecting) is whitelisted; every other illegal transition stays put
+      // even when forced, so `force` can never be used to bypass terminal
+      // stickiness.
+      if (opts?.force && FORCEABLE_TRANSITIONS.has(`${from}→${to}`)) {
+        // Intentional, whitelisted escape — informational, not a violation.
         console.log(`[ConnectionFSM] Forced transition: ${from} → ${to}`);
       } else {
         console.warn(
           `[ConnectionFSM] Illegal transition: ${from} → ${to}. ` +
-            `Allowed from ${from}: [${allowed.join(', ')}] — rejected`
+            `Allowed from ${from}: [${allowed.join(', ')}]` +
+            `${opts?.force ? ' (force is not whitelisted for this edge)' : ''} — rejected`
         );
         return;
       }
