@@ -478,8 +478,13 @@ export function sendIfOpen(payload: Record<string, unknown>): boolean {
   if (!_store) return false;
   const socket = getStore().getState().socket;
   if (socket && socket.readyState === WebSocket.OPEN) {
-    wsSend(socket, payload);
-    return true;
+    // #6288 — propagate wsSend's boolean rather than assuming OPEN ⇒ sent. The
+    // socket can flip to CLOSING between the readyState check and the synchronous
+    // send (the TOCTOU window wsSend guards), so wsSend may swallow an
+    // InvalidStateError and return false. Callers that gate on this result
+    // (Git/File ops) must see that false, or they arm a callback/spinner that
+    // never resolves.
+    return wsSend(socket, payload);
   }
   return false;
 }

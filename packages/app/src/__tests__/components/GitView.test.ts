@@ -79,6 +79,29 @@ describe('GitView source scan', () => {
     expect(SRC).toContain('accessibilityState');
   });
 
+  // Closed-socket handling (#6288): a request that no-ops on a closed socket
+  // must tear down the in-progress spinner and surface a "not connected" error
+  // instead of arming a callback that never resolves.
+  it('checks the requestGitStage result and surfaces a not-connected error', () => {
+    expect(SRC).toContain('if (!requestGitStage(paths))');
+    expect(SRC).toMatch(/Alert\.alert\('Not connected', 'Stage not sent/);
+  });
+
+  it('checks the requestGitUnstage result and surfaces a not-connected error', () => {
+    expect(SRC).toContain('if (!requestGitUnstage(paths))');
+    expect(SRC).toMatch(/Alert\.alert\('Not connected', 'Unstage not sent/);
+  });
+
+  it('checks the requestGitCommit result and surfaces a not-connected error', () => {
+    expect(SRC).toContain('if (!requestGitCommit(msg))');
+    expect(SRC).toMatch(/Alert\.alert\('Not connected', 'Commit not sent/);
+  });
+
+  it('clears the staging/committing spinner on a closed-socket send', () => {
+    expect(SRC).toContain('setStagingInProgress(false)');
+    expect(SRC).toContain('setCommitting(false)');
+  });
+
   // Type safety
   it('imports git types from store/types', () => {
     expect(SRC).toContain('GitFileStatus');
