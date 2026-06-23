@@ -2831,8 +2831,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // linger as phantom "sent" messages (the bubble id IS the clientMessageId);
     // the server's per-item message_dequeued{interrupted} then no-ops against
     // the cleared queue.
-    if (sid && get().sessionStates[sid]) {
-      const queued = get().sessionStates[sid].queuedMessages ?? [];
+    const interruptState = sid ? get().sessionStates[sid] : undefined;
+    if (sid && interruptState) {
+      const queued = interruptState.queuedMessages ?? [];
       if (queued.length > 0) {
         const queuedIds = new Set(
           queued.map((q) => q.clientMessageId).filter((id): id is string => !!id),
