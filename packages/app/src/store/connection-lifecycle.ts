@@ -12,10 +12,12 @@ import type { ConnectionPhase, SavedConnection } from './types';
  * Finite state machine: maps each phase to the set of phases it may
  * legally transition into.  Any transition not listed here is invalid and
  * is REJECTED — `transitionPhase` warns and leaves `connectionPhase`
- * unchanged (#6286). The single legitimate forced exit (leaving the
- * terminal `server_down` on a user-initiated retry) opts in via
- * `transitionPhase(to, { force: true })`; nothing else may leave a
- * terminal phase.
+ * unchanged (#6286). `server_down` is the one terminal phase; it is left
+ * only via its two declared legal edges — `connecting` (a user-initiated
+ * retry, see `retryConnection`) or `disconnected` (an explicit disconnect).
+ * `transitionPhase(to, { force: true })` is a deliberately-flagged escape
+ * hatch that applies an otherwise-illegal transition; it is currently used
+ * only by `retryConnection` and must stay confined to audited call sites.
  *
  * Notes on non-obvious entries:
  *  - connecting → server_restarting: health check returns "restarting" during the
