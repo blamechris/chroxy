@@ -11,8 +11,11 @@ import type { ConnectionPhase, SavedConnection } from './types';
 /**
  * Finite state machine: maps each phase to the set of phases it may
  * legally transition into.  Any transition not listed here is invalid and
- * will be logged as a warning (but still applied so production never
- * silently breaks).
+ * is REJECTED — `transitionPhase` warns and leaves `connectionPhase`
+ * unchanged (#6286). The single legitimate forced exit (leaving the
+ * terminal `server_down` on a user-initiated retry) opts in via
+ * `transitionPhase(to, { force: true })`; nothing else may leave a
+ * terminal phase.
  *
  * Notes on non-obvious entries:
  *  - connecting → server_restarting: health check returns "restarting" during the
@@ -124,7 +127,7 @@ interface ConnectionLifecycleState {
 
   // Actions
   setConnectionPhase: (phase: ConnectionPhase) => void;
-  transitionPhase: (to: ConnectionPhase) => void;
+  transitionPhase: (to: ConnectionPhase, opts?: { force?: boolean }) => void;
   setConnectionDetails: (url: string, token: string) => void;
   setServerInfo: (info: ServerInfo) => void;
   setConnectionQuality: (latencyMs: number | null, quality: 'good' | 'fair' | 'poor' | null) => void;
@@ -164,14 +167,22 @@ const initialState = {
 export const useConnectionLifecycleStore = create<ConnectionLifecycleState>((set, get) => ({
   ...initialState,
 
-  transitionPhase: (to) => {
+  transitionPhase: (to, opts) => {
     const from = get().connectionPhase;
     const allowed = VALID_TRANSITIONS[from];
     if (!allowed.includes(to)) {
+      // #6286 — ENFORCE: an illegal transition is rejected, not applied.
+      // Previously the FSM warned then mutated unconditionally ("fail open"),
+      // so the paired error→close events of one transport drop could clobber
+      // the terminal `server_down` phase back to the reconnect spinner (#5980).
+      // The ONE legitimate forced exit (user-initiated retry leaving
+      // server_down) passes `{ force: true }`; everything else stays put.
       console.warn(
         `[ConnectionFSM] Illegal transition: ${from} → ${to}. ` +
-          `Allowed from ${from}: [${allowed.join(', ')}]`
+          `Allowed from ${from}: [${allowed.join(', ')}]` +
+          (opts?.force ? ' — applying anyway (force)' : ' — rejected')
       );
+      if (!opts?.force) return;
     }
     set({ connectionPhase: to });
   },
