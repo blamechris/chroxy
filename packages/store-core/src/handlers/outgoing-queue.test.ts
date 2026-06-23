@@ -6,7 +6,7 @@ import {
   removeQueuedMessage,
   reconcileQueueLength,
 } from './outgoing-queue'
-import type { QueuedSessionMessage } from '../types'
+import type { ChatMessage, QueuedSessionMessage } from '../types'
 
 /**
  * #5937 (epic #5935 slice ②) — unit coverage for the shared store-core
@@ -219,6 +219,60 @@ describe('handleMessageQueued', () => {
     const next = builder.applyTo(current).queuedMessages
     expect(next).toHaveLength(2)
     expect(next[1]).toMatchObject({ text: 'b', status: 'confirmed', clientMessageId: undefined })
+  })
+})
+
+describe('handleMessageQueued — faked-fresh-turn reconcile (#6291)', () => {
+  const userMsg = (id: string): ChatMessage => ({ id, type: 'user_input', content: 'hi', timestamp: 0 })
+  const thinkingMsg = (): ChatMessage => ({ id: 'thinking', type: 'thinking', content: '', timestamp: 0 })
+
+  it('clears a pending streamingMessageId and strips the thinking bubble in one step', () => {
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [userMsg('uin-1'), thinkingMsg()],
+    })
+    expect(patch).toEqual({ streamingMessageId: null, messages: [userMsg('uin-1')] })
+  })
+
+  it('does NOT strip a real (non-thinking) message when there is no thinking bubble', () => {
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
+    // streamingMessageId is still the 'pending' sentinel (no stream_start yet) but
+    // the thinking bubble was already removed — clear the id, leave messages alone.
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [userMsg('uin-1')],
+    })
+    expect(patch).toEqual({ streamingMessageId: null })
+    expect(patch).not.toHaveProperty('messages')
+  })
+
+  it('is a no-op (null) when a genuinely live turn owns a real stream id', () => {
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-2', text: 'hi' }, null)!
+    // A live turn carries a real stream id, not the 'pending' sentinel — leave it.
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'resp-7',
+      messages: [userMsg('uin-1'), thinkingMsg()],
+    })
+    expect(patch).toBeNull()
+  })
+
+  it('is a no-op (null) when nothing is streaming', () => {
+    const builder = handleMessageQueued({ sessionId: 's1', text: 'hi' }, null)!
+    expect(builder.reconcileFakedFreshTurn!({ streamingMessageId: null, messages: [] })).toBeNull()
+  })
+
+  it('strips ONLY the singleton thinking placeholder, preserving real persisted thinking content', () => {
+    // Real thinking content carries a non-'thinking' id (e.g. 'th1') even though
+    // its type is 'thinking'; only the optimistic placeholder uses id 'thinking'.
+    // Filtering by id (not type) must keep the real content. (#6291 review)
+    const realThinking: ChatMessage = { id: 'th1', type: 'thinking', content: 'reasoning…', timestamp: 0 }
+    const builder = handleMessageQueued({ sessionId: 's1', clientMessageId: 'uin-1', text: 'hi' }, null)!
+    const patch = builder.reconcileFakedFreshTurn!({
+      streamingMessageId: 'pending',
+      messages: [realThinking, userMsg('uin-1'), thinkingMsg()],
+    })
+    expect(patch).toEqual({ streamingMessageId: null, messages: [realThinking, userMsg('uin-1')] })
   })
 })
 

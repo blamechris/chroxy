@@ -23,8 +23,27 @@
  * Re-exported from ./index (the barrel) so the public surface is unchanged.
  */
 
-import type { QueuedSessionMessage } from '../types'
+import type { ChatMessage, QueuedSessionMessage } from '../types'
 import { resolveSessionId } from './_shared'
+
+/**
+ * Subset of session-state the queue handlers read to reconcile a faked-fresh
+ * optimistic turn (#6291). The client may OPTIMISTICALLY show a live "working"
+ * turn (a `'thinking'` bubble + `streamingMessageId: 'pending'`) for a send it
+ * judged would start a turn; when the server instead QUEUES that send, the
+ * `message_queued` echo must atomically retire that optimistic turn as the entry
+ * flips to confirmed-queued. Both clients' `BaseSessionState` carry these fields.
+ */
+export interface FakedFreshTurnState {
+  streamingMessageId: string | null
+  messages: ChatMessage[]
+}
+
+/** The patch a faked-fresh-turn reconcile produces (omitted fields are unchanged). */
+export interface FakedFreshTurnPatch {
+  streamingMessageId?: string | null
+  messages?: ChatMessage[]
+}
 
 /**
  * Builder result for the queue handlers, mirroring `SessionInterventionBuilder`
@@ -37,6 +56,17 @@ export interface QueuedMessagesBuilder {
   sessionId: string | null
   /** Apply against the session's current queue; returns the next queue patch. */
   applyTo: (current: QueuedSessionMessage[]) => { queuedMessages: QueuedSessionMessage[] }
+  /**
+   * #6291 — reconcile a client-faked optimistic "working" turn in the SAME state
+   * update that confirms this queued entry. Only `handleMessageQueued` populates
+   * this. Given the session's current `{ streamingMessageId, messages }`, returns
+   * a patch that clears the `'pending'` streamingMessageId and strips the
+   * optimistic `'thinking'` bubble when this `message_queued` corresponds to that
+   * optimistic turn; returns `null` (no patch) otherwise so the spinner→badge
+   * swap happens in one step immediately rather than after the client's 5s
+   * stream-stall safety net.
+   */
+  reconcileFakedFreshTurn?: (state: FakedFreshTurnState) => FakedFreshTurnPatch | null
 }
 
 /**
@@ -193,6 +223,27 @@ export function handleMessageQueued(
 
   return {
     sessionId: resolveSessionId(msg, activeSessionId),
+    // #6291 — when the client optimistically faked a fresh "working" turn for
+    // this send (streamingMessageId === 'pending' + a 'thinking' bubble) but the
+    // server queued it instead, retire that optimistic turn atomically as the
+    // entry confirms. Without this the live turn evaporates and re-labels itself
+    // "Queued" ~5s later when the client's stream-stall safety net fires, with no
+    // user action. We key off the literal 'pending' sentinel the client writes
+    // (it never sets streamingMessageId to a real clientMessageId before
+    // stream_start), so this fires only for a faked-fresh turn — a genuinely live
+    // turn carries a real stream id and is left untouched.
+    reconcileFakedFreshTurn: ({ streamingMessageId, messages }) => {
+      if (streamingMessageId !== 'pending') return null
+      const patch: FakedFreshTurnPatch = { streamingMessageId: null }
+      // Strip the optimistic 'thinking' bubble by its singleton id (matching the
+      // canonical filterThinking in utils.ts) — NOT by type, which would also
+      // delete real persisted thinking content that carries a non-'thinking' id.
+      // Keep the array reference (and omit the field) when there's nothing to
+      // remove so the dispatcher can elide a needless re-render.
+      const stripped = messages.filter((m) => m.id !== 'thinking')
+      if (stripped.length !== messages.length) patch.messages = stripped
+      return patch
+    },
     applyTo: (current) => {
       // #5950 — reconcile the result against the server's authoritative
       // queueLength so a leftover CONFIRMED orphan (from a dropped earlier

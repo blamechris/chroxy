@@ -122,6 +122,7 @@ import {
   // --- outgoing-message queue mirror (#5937, epic #5935 part ②) ---
   handleMessageQueued,
   handleMessageDequeued,
+  type QueuedMessagesBuilder,
   // --- user_question (#5618) — byte-identical parse + append + notify ---
   handleUserQuestion,
   // --- multi_question_intervention (#5618) — byte-identical builder + append ---
@@ -167,6 +168,10 @@ import {
  */
 export interface DispatchSessionBase {
   messages: ChatMessage[]
+  // `streamingMessageId` — read+cleared by message_queued's faked-fresh-turn
+  // reconcile (#6291). Both clients' real `SessionState` carry it
+  // (BaseSessionState).
+  streamingMessageId?: string | null
   conversationId?: string | null
   sessionRules?: PermissionRule[]
   isIdle?: boolean
@@ -1036,7 +1041,7 @@ function dispatchQueuedMessages<S extends DispatchSessionBase>(
   handle: (
     msg: Record<string, unknown>,
     activeSessionId: string | null,
-  ) => { sessionId: string | null; applyTo: (current: QueuedSessionMessage[]) => { queuedMessages: QueuedSessionMessage[] } } | null,
+  ) => QueuedMessagesBuilder | null,
 ): (msg: Record<string, unknown>, adapter: ClientStoreAdapter<S>) => void {
   return (msg, adapter) => {
     const builder = handle(msg, adapter.getActiveSessionId())
@@ -1047,9 +1052,27 @@ function dispatchQueuedMessages<S extends DispatchSessionBase>(
         // when the builder returned the same array AND the field already held it,
         // skip the write so React's referential check elides a re-render. When the
         // field was undefined, `next` is a fresh array (!== undefined) → write.
-        return next === ss.queuedMessages
-          ? ({} as Partial<S>)
-          : ({ queuedMessages: next } as Partial<S>)
+        const patch: Partial<S> =
+          next === ss.queuedMessages ? ({} as Partial<S>) : ({ queuedMessages: next } as Partial<S>)
+        // #6291 — in the SAME update, retire a client-faked optimistic "working"
+        // turn (streamingMessageId: 'pending' + 'thinking' bubble) when this
+        // message_queued confirms the send the server actually queued. This makes
+        // the spinner→badge swap happen in one step immediately instead of waiting
+        // for the client's 5s stream-stall safety net.
+        const turnPatch = builder.reconcileFakedFreshTurn?.({
+          streamingMessageId: ss.streamingMessageId ?? null,
+          messages: ss.messages,
+        })
+        if (turnPatch) {
+          if ('streamingMessageId' in turnPatch) {
+            ;(patch as { streamingMessageId?: string | null }).streamingMessageId =
+              turnPatch.streamingMessageId
+          }
+          if (turnPatch.messages) {
+            ;(patch as { messages?: ChatMessage[] }).messages = turnPatch.messages
+          }
+        }
+        return patch
       })
     }
   }

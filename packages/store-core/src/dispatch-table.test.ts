@@ -1178,6 +1178,54 @@ describe('shared dispatch table', () => {
       dispatch(env, { type: 'message_dequeued', sessionId: 's1', clientMessageId: 'uin-1', queueLength: 0, reason: 'flush' })
       expect(env.sessions.s1.queuedMessages).toEqual([])
     })
+
+    it('reconciles a faked-fresh turn → clears streamingMessageId + strips thinking bubble in one step (#6291)', () => {
+      // The client judged 'not busy', faked a fresh working turn (a 'thinking'
+      // bubble + streamingMessageId: 'pending') for uin-1; the server queues it
+      // instead. The message_queued must retire that optimistic turn in the SAME
+      // state update that confirms the queued entry — not 5s later.
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            streamingMessageId: 'pending',
+            messages: [
+              { id: 'uin-1', type: 'user_input', content: 'hi', timestamp: 0 },
+              { id: 'thinking', type: 'thinking', content: '', timestamp: 0 },
+            ],
+            queuedMessages: [],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-1', text: 'hi', queueLength: 1 })
+      expect(env.sessions.s1.streamingMessageId).toBeNull()
+      expect(env.sessions.s1.messages).toEqual([
+        { id: 'uin-1', type: 'user_input', content: 'hi', timestamp: 0 },
+      ])
+      expect(env.sessions.s1.queuedMessages).toMatchObject([
+        { clientMessageId: 'uin-1', text: 'hi', status: 'confirmed' },
+      ])
+    })
+
+    it('leaves a genuinely live turn (real stream id) untouched on message_queued (#6291)', () => {
+      const env = makeAdapter({
+        sessions: {
+          s1: {
+            sessionId: 's1',
+            streamingMessageId: 'resp-7',
+            messages: [{ id: 'thinking', type: 'thinking', content: '', timestamp: 0 }],
+            queuedMessages: [],
+          },
+        },
+      })
+      dispatch(env, { type: 'message_queued', sessionId: 's1', clientMessageId: 'uin-2', text: 'follow-up', queueLength: 1 })
+      // A real live turn keeps its stream id and thinking bubble; only the queue grows.
+      expect(env.sessions.s1.streamingMessageId).toBe('resp-7')
+      expect(env.sessions.s1.messages).toEqual([
+        { id: 'thinking', type: 'thinking', content: '', timestamp: 0 },
+      ])
+      expect(env.sessions.s1.queuedMessages).toHaveLength(1)
+    })
   })
 
   describe('plan_started', () => {
