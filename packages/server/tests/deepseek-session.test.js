@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { DeepSeekSession } from '../src/deepseek-session.js'
 import { ClaudeByokSession } from '../src/byok-session.js'
+import { computePromptCostUsd } from '../src/models.js'
 
 /**
  * Tests for DeepSeekSession (#4656).
@@ -265,5 +266,54 @@ describe('DeepSeekSession (#4656)', () => {
       assert.equal(events[0].kind, 'ready')
       assert.equal(session._apiKeySource, 'file')
     })
+  })
+})
+
+/**
+ * #6201 (OCP) — DeepSeek pricing was relocated verbatim from models.js's central
+ * tables onto this provider class (`_getPricing`). The pre-existing suite did not
+ * value-cover DeepSeek rates (only the `getFallbackModels`/metadata shape), so this
+ * characterization test pins the exact published rates + the end-to-end cost through
+ * the shared `computePromptCostUsd`, making the relocation provably pure. `_getPricing`
+ * is `this`-free, so it's exercised straight off the prototype.
+ */
+describe('DeepSeekSession pricing (#6201 OCP characterization)', () => {
+  const getPricing = (id) => DeepSeekSession.prototype._getPricing(id)
+
+  it('returns the exact published rates (USD per million tokens)', () => {
+    assert.deepEqual(getPricing('deepseek-chat'), {
+      input: 0.27,
+      output: 1.10,
+      cacheRead: 0.07,
+      cacheWrite: 0,
+    })
+    assert.deepEqual(getPricing('deepseek-reasoner'), {
+      input: 0.55,
+      output: 2.19,
+      cacheRead: 0.14,
+      cacheWrite: 0,
+    })
+  })
+
+  it('returns null for unknown / empty / non-string ids (verbatim-only lookup)', () => {
+    assert.equal(getPricing('deepseek-unknown'), null)
+    assert.equal(getPricing('deepseek-chat-20250101'), null) // no date-strip retry
+    assert.equal(getPricing(''), null)
+    assert.equal(getPricing(null), null)
+    assert.equal(getPricing(undefined), null)
+  })
+
+  it('feeds the shared computePromptCostUsd to the expected USD cost', () => {
+    // 2M input + 1M output at deepseek-chat rates → 2*0.27 + 1*1.10 = 1.64.
+    const cost = computePromptCostUsd(
+      {
+        input_tokens: 2_000_000,
+        output_tokens: 1_000_000,
+        cache_read_input_tokens: 0,
+        cache_creation_input_tokens: 0,
+      },
+      getPricing('deepseek-chat'),
+    )
+    assert.ok(typeof cost === 'number' && Math.abs(cost - 1.64) < 1e-6, `got ${cost}`)
   })
 })
