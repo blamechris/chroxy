@@ -192,3 +192,15 @@ export declare const ServerClientLeftSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_left">;
     clientId: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerKeyExchangeOkSchema: z.ZodObject<{
+    type: z.ZodLiteral<"key_exchange_ok">;
+    publicKey: z.ZodString;
+    serverKeySig: z.ZodOptional<z.ZodString>;
+    newIdentityKey: z.ZodOptional<z.ZodString>;
+    rotationCert: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+export declare const ServerRateLimitedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"rate_limited">;
+    retryAfterMs: z.ZodNumber;
+    message: z.ZodString;
+}, z.core.$strip>;

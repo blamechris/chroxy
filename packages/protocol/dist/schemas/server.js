@@ -15,4 +15,5 @@ export * from "./server/control-room.js";
 export * from "./server/session.js";
 export * from "./server/billing.js";
 export * from "./server/file-ops.js";
+export * from "./server/environment.js";
 export * from "./server/messages.js";
