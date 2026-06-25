@@ -29,6 +29,14 @@ describe('buildSpawnEnv', () => {
       })
     })
 
+    it('strips the primary API_TOKEN from child env (#6311)', () => {
+      withEnv({ API_TOKEN: 'primary-bearer-token', OPENAI_API_KEY: 'sk-openai' }, () => {
+        const env = buildSpawnEnv('codex')
+        assert.equal(env.API_TOKEN, undefined,
+          'the daemon primary bearer token (API_TOKEN) must not leak to codex child')
+      })
+    })
+
     it('passes OPENAI_API_KEY to child env', () => {
       withEnv({ OPENAI_API_KEY: 'sk-openai-123' }, () => {
         const env = buildSpawnEnv('codex')
@@ -106,6 +114,14 @@ describe('buildSpawnEnv', () => {
       })
     })
 
+    it('strips the primary API_TOKEN from child env (#6311)', () => {
+      withEnv({ API_TOKEN: 'primary-bearer-token', GEMINI_API_KEY: 'g' }, () => {
+        const env = buildSpawnEnv('gemini')
+        assert.equal(env.API_TOKEN, undefined,
+          'the daemon primary bearer token (API_TOKEN) must not leak to gemini child')
+      })
+    })
+
     it('passes GEMINI_API_KEY to child env', () => {
       withEnv({ GEMINI_API_KEY: 'gemini-123' }, () => {
         const env = buildSpawnEnv('gemini')
@@ -168,6 +184,25 @@ describe('buildSpawnEnv', () => {
         const env = buildSpawnEnv('claude')
         assert.equal(env.PATH, '/usr/bin')
         assert.equal(env.HOME, '/home/x')
+      })
+    })
+
+    it('strips the primary API_TOKEN even though denylist mode forwards arbitrary keys (#6311)', () => {
+      withEnv({ API_TOKEN: 'primary-bearer-token', CHROXY_TEST_PASSTHROUGH: 'ok' }, () => {
+        const env = buildSpawnEnv('claude')
+        assert.equal(env.API_TOKEN, undefined,
+          'the full-authority primary API_TOKEN must never reach the claude child env')
+        assert.equal(env.CHROXY_TEST_PASSTHROUGH, 'ok',
+          'non-secret operator env still passes through (denylist mode preserved)')
+      })
+    })
+
+    it('keeps the scoped CHROXY_HOOK_SECRET (passed via extras) while stripping API_TOKEN (#6311)', () => {
+      withEnv({ API_TOKEN: 'primary-bearer-token' }, () => {
+        const env = buildSpawnEnv('claude', { CHROXY_HOOK_SECRET: 'scoped-secret' })
+        assert.equal(env.API_TOKEN, undefined, 'primary token stripped')
+        assert.equal(env.CHROXY_HOOK_SECRET, 'scoped-secret',
+          'the scoped per-session hook secret is the only chroxy secret the child should get')
       })
     })
   })

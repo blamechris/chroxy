@@ -6989,4 +6989,72 @@ describe('ClaudeTuiSession — monotonic watchdog clocks (#5332)', () => {
     ])
     assert.equal(ready, false, 'loop exits not-ready via the monotonic deadline (did not hang on the frozen wall clock)')
   })
+
+  describe('_buildPtyEnv secret stripping (#6311)', () => {
+    let envSkillsDir
+    let envSession
+
+    beforeEach(() => {
+      envSkillsDir = mkdtempSync(join(tmpdir(), 'chroxy-tui-env-'))
+    })
+
+    afterEach(async () => {
+      if (envSession) {
+        try { await envSession.destroy() } catch { /* ignore */ }
+        envSession = null
+      }
+      if (envSkillsDir) rmSync(envSkillsDir, { recursive: true, force: true })
+      envSkillsDir = null
+    })
+
+    it('strips the primary API_TOKEN from the spawned TUI env', () => {
+      const prev = process.env.API_TOKEN
+      process.env.API_TOKEN = 'primary-bearer-token'
+      try {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(true)
+        assert.equal(env.API_TOKEN, undefined,
+          'the full-authority primary API_TOKEN must never reach a tool/MCP/subagent the TUI runs')
+      } finally {
+        if (prev === undefined) delete process.env.API_TOKEN
+        else process.env.API_TOKEN = prev
+      }
+    })
+
+    it('still strips ANTHROPIC_API_KEY (OAuth-only invariant preserved)', () => {
+      const prev = process.env.ANTHROPIC_API_KEY
+      process.env.ANTHROPIC_API_KEY = 'sk-ant-leak'
+      try {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(true)
+        assert.equal(env.ANTHROPIC_API_KEY, undefined,
+          'ANTHROPIC_API_KEY stays stripped so the TUI keeps using OAuth/subscription auth')
+      } finally {
+        if (prev === undefined) delete process.env.ANTHROPIC_API_KEY
+        else process.env.ANTHROPIC_API_KEY = prev
+      }
+    })
+
+    it('passes the scoped CHROXY_HOOK_SECRET when permissions are enabled', () => {
+      envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+      const env = envSession._buildPtyEnv(true)
+      assert.equal(env.CHROXY_HOOK_SECRET, envSession._hookSecret,
+        'the per-session hook secret is the only chroxy secret the child legitimately needs')
+      assert.equal(env.TERM, 'xterm-256color')
+    })
+
+    it('forwards non-secret operator env (denylist semantics preserved)', () => {
+      const prev = process.env.CHROXY_TUI_ENV_PASSTHROUGH
+      process.env.CHROXY_TUI_ENV_PASSTHROUGH = 'visible-to-tools'
+      try {
+        envSession = new ClaudeTuiSession({ cwd: '/tmp', port: 12345, skillsDir: envSkillsDir, repoSkillsDir: null })
+        const env = envSession._buildPtyEnv(false)
+        assert.equal(env.CHROXY_TUI_ENV_PASSTHROUGH, 'visible-to-tools',
+          'the TUI still inherits the full operator shell env minus secrets')
+      } finally {
+        if (prev === undefined) delete process.env.CHROXY_TUI_ENV_PASSTHROUGH
+        else process.env.CHROXY_TUI_ENV_PASSTHROUGH = prev
+      }
+    })
+  })
 })

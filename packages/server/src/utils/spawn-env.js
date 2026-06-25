@@ -7,8 +7,9 @@
  *     (ANTHROPIC_API_KEY, CHROXY_HOOK_SECRET, arbitrary DB creds, etc.) never
  *     leak into their subprocess environment.
  *   - "denylist" mode: the full parent env is forwarded minus a small set of
- *     keys that would be harmful (ANTHROPIC_API_KEY). Used for the Claude CLI
- *     where the user's full environment is expected to be available.
+ *     keys that would be harmful (ANTHROPIC_API_KEY, plus the chroxy-owned
+ *     daemon secrets in CHROXY_SECRET_DENYLIST). Used for the Claude CLI where
+ *     the user's full environment is expected to be available.
  *
  * Centralising the pattern here means future providers get safe-by-default
  * env handling automatically.
@@ -66,6 +67,23 @@ const STANDARD_ALLOWLIST = [
   'https_proxy',
   'no_proxy',
   'all_proxy',
+]
+
+// Chroxy-owned daemon secrets that must NEVER reach any spawned child process,
+// regardless of provider or mode (#6311). API_TOKEN is the full-authority
+// primary bearer token (docs/security/bearer-token-authority.md §1/§3): a tool,
+// MCP server, subagent, or shell command the agent runs could read it from
+// process.env and gain full control of the daemon — every session's history,
+// input, model switching and settings — over the WebSocket/HTTP control surface.
+// The narrowly-scoped per-session CHROXY_HOOK_SECRET is passed explicitly via
+// `extras` instead; it only authorises POST /permission, so it is safe to hand
+// to the child.
+//
+// Allowlist-mode providers (codex, gemini) already exclude these by omission;
+// this set is the belt-and-braces guarantee for denylist-mode providers (claude)
+// and is re-used by the claude-tui PTY spawn path (claude-tui-session.js).
+export const CHROXY_SECRET_DENYLIST = [
+  'API_TOKEN',
 ]
 
 const PROVIDERS = {
@@ -148,9 +166,13 @@ export function buildSpawnEnv(provider, extras = {}) {
     return { ...env, ...extras }
   }
 
-  // denylist mode: start from full parent env, remove sensitive keys
+  // denylist mode: start from full parent env, remove sensitive keys.
+  // #6311: always strip the chroxy-owned daemon secrets in addition to the
+  // provider's own denylist, so the full-authority API_TOKEN never reaches a
+  // denylist-mode child (the parent env is otherwise forwarded wholesale).
+  const effectiveDenylist = [...config.denylist, ...CHROXY_SECRET_DENYLIST]
   const parentEnv = { ...process.env }
-  for (const key of config.denylist) {
+  for (const key of effectiveDenylist) {
     delete parentEnv[key]
   }
   // #3855: inject ONLY this provider's own credential-store keys that the
@@ -159,7 +181,7 @@ export function buildSpawnEnv(provider, extras = {}) {
   // secrets (OPENAI_API_KEY, GEMINI_API_KEY) never leak into this subprocess.
   // ANTHROPIC_API_KEY is excluded from storeInjectKeys AND denylisted, so the
   // CLI keeps using subscription/OAuth auth.
-  const denySet = new Set(config.denylist)
+  const denySet = new Set(effectiveDenylist)
   for (const key of config.storeInjectKeys || []) {
     if (denySet.has(key)) continue
     if (!isKnownCredentialKey(key)) continue
