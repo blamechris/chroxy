@@ -348,3 +348,17 @@ export const ServerBackgroundWorkChangedSchema = z.object({
     sessionId: z.string(),
     pending: z.array(ServerPendingBackgroundShellSchema),
 });
+// #6323 (batch 1 of #6314): the live PTY mirror channel (#5835). `terminal_output`
+// is raw coalesced ANSI bytes (transient — no history/replay); `terminal_size` is
+// the authoritative grid the server broadcasts so observers letterbox to it.
+export const ServerTerminalOutputSchema = z.object({
+    type: z.literal('terminal_output'),
+    sessionId: z.string(),
+    data: z.string(),
+});
+export const ServerTerminalSizeSchema = z.object({
+    type: z.literal('terminal_size'),
+    sessionId: z.string(),
+    cols: z.number().int(),
+    rows: z.number().int(),
+});

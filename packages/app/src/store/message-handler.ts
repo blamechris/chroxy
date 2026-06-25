@@ -27,17 +27,13 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
-  handlePermissionModeChanged as sharedPermissionModeChanged,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
-  handleAgentIdle as sharedAgentIdle,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
-  handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)
-  handlePlanReady as sharedPlanReady,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
   handleToolInputDelta as sharedToolInputDelta,
@@ -53,13 +49,11 @@ import {
   // (#5618 Batch 6); checkpoint_restored is not migrated in this batch — it
   // stays platform-local (here as a switch case; the dashboard via its
   // HANDLERS map), so this shared import remains.
-  handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   // conversation_id migrated to the shared dispatch table (#5556)
-  handleConversationsList as sharedConversationsList,
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
   // #5555.3 / #5555.4 — lastSeq cursor + no-blank-flash reconcile.
@@ -99,12 +93,10 @@ import {
   // to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
-  handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the app no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
-  handleSearchResults as sharedSearchResults,
   applyOrphanDeltas,
   isActivityEvent,
   // #5163 (epic #5159) — Control Room cross-session activity reducer:
@@ -167,6 +159,7 @@ import type {
   SlashCommand,
   ProviderInfo,
   ConversationSummary,
+  SearchResult,
   PermissionRule,
 } from './types';
 import { createEmptySessionState } from './utils';
@@ -1215,6 +1208,44 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // app's own helper (which also mirrors the row into the mobile push store).
   pushSessionNotification: (sessionId, eventType, message) =>
     pushSessionNotification(sessionId, eventType, message),
+  // #5618 — permission_mode_changed clears the app's pending optimistic-revert
+  // tracker for the broadcast's target session (the dashboard has no equivalent
+  // per-session tracker and omits this hook).
+  clearPendingPermissionModeRequests: (sessionId) =>
+    clearPendingPermissionModeRequestsForSession(sessionId),
+  // #5618 — budget_warning (and future notice types) surface a transient alert
+  // via the app's React-Native Alert.
+  alert: (title, message) => Alert.alert(title, message),
+  // #5618 — plan_ready raises the app's 'plan' background-session notification
+  // (the dashboard has no equivalent surface and omits this hook).
+  notifyPlanReady: (sessionId) =>
+    pushSessionNotification(sessionId, 'plan', 'Plan ready for approval'),
+  // #5618 — server_shutdown mirrors the shutdown patch into the app's mobile
+  // notification store (the dashboard omits this hook).
+  applyShutdownNotification: (payload) =>
+    useNotificationStore
+      .getState()
+      .setShutdown(payload.shutdownReason, payload.restartEtaMs, payload.restartingSince),
+  // #5618 — checkpoint_restored auto-switches with the app's no-notify/no-haptic
+  // options (the server already re-homed this client; an auto-switch shouldn't buzz).
+  switchToRestoredSession: (sessionId) =>
+    getStore().getState().switchSession(sessionId, { serverNotify: false, haptic: false }),
+  // #5618 — conversations_list clears the app-only conversationHistoryError flag and
+  // mirrors the list into the secondary conversation store (the dashboard omits this).
+  applyConversationsListExtras: (conversations) => {
+    getStore().setState({ conversationHistoryError: null });
+    useConversationStore.getState().setConversationHistory(conversations as ConversationSummary[]);
+  },
+  // #5618 — search_results staleness gate reads the live flat searchQuery.
+  getSearchQuery: () => getStore().getState().searchQuery,
+  // #5618 — search_results clears the app-only searchError flag and mirrors the
+  // results (with the live query) into the secondary conversation store (dashboard omits).
+  applySearchResultsExtras: (results) => {
+    getStore().setState({ searchError: null });
+    useConversationStore
+      .getState()
+      .setSearchResults(results as SearchResult[], getStore().getState().searchQuery);
+  },
   // #5653 — file-ops / git wrapper cases route through the shared dispatch
   // table; the app supplies its module-level imperative-callback registry so
   // the parsed payload reaches the UI's registered callback exactly as the
@@ -2774,29 +2805,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // availableModelsProvider extension.
 
 
-    case 'permission_mode_changed': {
-      const { mode } = sharedPermissionModeChanged(msg);
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      {
-        const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
-        if (effectiveId && get().sessionStates[effectiveId]) {
-          updateSession(effectiveId, () => ({ permissionMode: mode }));
-        }
-        // Server doesn't echo back the originating requestId on
-        // permission_mode_changed broadcasts (multi-client safe), so clear any
-        // pending tracker entries for the message's resolved target. Use
-        // `targetId` (the session the broadcast is *for*) rather than
-        // `effectiveId`, which can fall back to `activeSessionId` and would
-        // wrongly clear pending entries on a different session if the broadcast
-        // arrived for a session that isn't currently in `sessionStates`.
-        if (targetId) {
-          clearPendingPermissionModeRequestsForSession(targetId);
-        }
-      }
-      // Clear pending confirm if mode change arrived (confirmation was accepted)
-      set({ pendingPermissionConfirm: null });
-      break;
-    }
+    // permission_mode_changed — migrated to the shared dispatch table (#5618;
+    // runDispatch). Now uses targetId-direct resolution (Decision A) instead of the
+    // app's prior effectiveId-retry; the app's clearPendingPermissionModeRequests is
+    // preserved via the _dispatchAdapter hook, and pendingPermissionConfirm is cleared
+    // via setState. Behaviour is unchanged in normal operation (sessionStates always
+    // holds the target session) — see dispatchPermissionModeChanged for the rationale.
 
     // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 
@@ -2848,13 +2862,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'agent_idle': {
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => sharedAgentIdle());
-      }
-      break;
-    }
+    // agent_idle — migrated to the shared dispatch table (#5618; handled by
+    // runDispatch before this switch). The app has no flat idle fallback (it
+    // derives isIdle from the active session), so it omits the
+    // applyNoSessionFallback adapter hook — behaviour unchanged.
 
     // agent_busy — migrated to the shared dispatch table (#5556)
 
@@ -2862,19 +2873,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_spawned / agent_completed / agent_event / background_work_changed /
     // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'plan_ready': {
-      const planReady = sharedPlanReady(msg, get().activeSessionId);
-      if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
-        updateSession(planReady.sessionId, () => planReady.patch);
-      }
-      // Platform-specific UX: app surfaces a session notification on
-      // plan-ready (the dashboard has no equivalent surface). Kept at the
-      // call site so the shared handler stays free of platform concerns.
-      if (planReady.sessionId) {
-        pushSessionNotification(planReady.sessionId, 'plan', 'Plan ready for approval');
-      }
-      break;
-    }
+    // plan_ready — migrated to the shared dispatch table (#5618; runDispatch). The
+    // app's plan session-notification rides the optional notifyPlanReady adapter hook.
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
@@ -3136,18 +3136,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'server_shutdown': {
-      const shutdownPatch = sharedServerShutdown(msg);
-      set(shutdownPatch);
-      useNotificationStore
-        .getState()
-        .setShutdown(
-          shutdownPatch.shutdownReason,
-          shutdownPatch.restartEtaMs,
-          shutdownPatch.restartingSince,
-        );
-      break;
-    }
+    // rate_limited (#6334) — migrated to the shared dispatch table (#5618;
+    // runDispatch). Byte-identical active-session notice; no per-client hook.
+
+    // server_shutdown — migrated to the shared dispatch table (#5618; runDispatch).
+    // The app's setShutdown notification rides the optional applyShutdownNotification hook.
 
     // --- Multi-client awareness ---
 
@@ -3237,15 +3230,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // now rides on the `syncSecondaryCheckpoints` adapter hook below; the
     // dashboard omits that hook (no secondary checkpoint store).
 
-    case 'checkpoint_restored': {
-      // Server created a new session at the checkpoint state.
-      // Auto-switch to it; session_list update follows from server.
-      const restored = sharedCheckpointRestored(msg);
-      if (restored) {
-        get().switchSession(restored.newSessionId, { serverNotify: false, haptic: false });
-      }
-      break;
-    }
+    // checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
+    // The auto-switch (with the app's no-notify/no-haptic opts) rides the required
+    // switchToRestoredSession adapter hook.
 
     // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
@@ -3257,19 +3244,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // session_usage / session_cost_threshold_crossed — migrated to the shared
     // dispatch table (#5556 slice 2)
 
-    case 'budget_warning': {
-      const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
-      Alert.alert('Budget Warning', warningMessage);
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => ({
-          messages: [...ss.messages, systemMessage],
-        }));
-      } else {
-        get().addMessage(systemMessage);
-      }
-      break;
-    }
+    // budget_warning — migrated to the shared dispatch table (#5618; runDispatch).
+    // The alert rides the new adapter.alert primitive; routing is byte-identical.
 
     case 'budget_exceeded': {
       const { exceededMessage, systemMessage } = sharedBudgetExceeded(msg);
@@ -3363,24 +3339,13 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // web_task_list — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'conversations_list': {
-      // Parser shared via store-core; app-only state mirroring (loading/error
-      // flags + useConversationStore) stays here.
-      const { conversations } = sharedConversationsList(msg);
-      set({ conversationHistory: conversations, conversationHistoryLoading: false, conversationHistoryError: null });
-      useConversationStore.getState().setConversationHistory(conversations);
-      break;
-    }
+    // conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
+    // The app's error-clear + useConversationStore mirror ride the optional
+    // applyConversationsListExtras adapter hook.
 
-    case 'search_results': {
-      const currentQuery = (get() as ConnectionState).searchQuery;
-      const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
-      if (!shouldApply) break; // Stale response for an older query — ignore
-      // results is already typed as SearchResult[] from store-core (#3146).
-      set({ searchResults: results, searchLoading: false, searchError: null });
-      useConversationStore.getState().setSearchResults(results, currentQuery);
-      break;
-    }
+    // search_results — migrated to the shared dispatch table (#5618; runDispatch).
+    // The staleness gate reads searchQuery via getSearchQuery; the app's searchError
+    // clear + useConversationStore mirror ride the optional applySearchResultsExtras hook.
 
     // notification_prefs — migrated to the shared dispatch table (#5556 slice
     // 2). The app previously hand-maintained a byte-identical inline Zod parse

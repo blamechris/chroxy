@@ -63,6 +63,12 @@ export interface FixtureInitialState {
   myClientId?: string | null
   /** Follow-mode flag (#5618 Batch 4 — for client_focus_changed auto-switch). */
   followMode?: boolean
+  /**
+   * Flat `webTasks` slice (#6268) — both clients' `web_task_error` handler maps
+   * over `state.webTasks` to flip a matching task to `failed`, so a fixture that
+   * exercises the `taskId` path must seed the task it targets.
+   */
+  webTasks?: Array<Record<string, unknown>>
 }
 
 /**
@@ -110,6 +116,13 @@ export interface FixtureExpectation {
    * to "don't care".
    */
   rotatedTunnelUrls?: Array<{ url: string; previousUrl: string | null }>
+  /**
+   * Expected ordered `appendTerminalData` call args (#6345) — the terminal-mirror
+   * writes a fixture drives (raw / raw_background / terminal_output). Both harnesses
+   * capture the strings passed to the store's `appendTerminalData`; this asserts
+   * them in order. Omit the slice to "don't care".
+   */
+  terminalWrites?: string[]
   /** When true, assert NO mutation happened at all (state is untouched). */
   noop?: boolean
 }
@@ -125,6 +138,13 @@ export interface ContractFixture {
   type: string
   /** Starting store snapshot. */
   init?: FixtureInitialState
+  /**
+   * Optional ordered wire messages dispatched through the SAME real handleMessage
+   * BEFORE `message`, to establish context a single message can't (#6344) — e.g. a
+   * `history_replay_start` that seeds the rebuild baseline `history_replay_end`
+   * resolves against. The harness asserts only the post-`message` state.
+   */
+  prelude?: Array<Record<string, unknown>>
   /** The raw wire message handed to the dispatch path. */
   message: Record<string, unknown>
   /**
@@ -1274,6 +1294,180 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     message: { type: 'checkpoint_list' },
     expect: { noop: true },
   },
+  {
+    // #5618 — agent_idle migrated from SWITCH to the shared dispatch table. The
+    // seeded-session path flips the session to idle ({ isIdle: true,
+    // streamingMessageId: null, activeTools: [] }) via the shared dispatchAgentIdle
+    // → updateSession. (The no-session FLAT fallback is preserved per-client by the
+    // optional applyNoSessionFallback adapter hook — dashboard implements, app
+    // omits — and is exercised by each client's own tests, not the shared contract.)
+    name: 'agent_idle flips the seeded session to idle and clears the streaming id (both clients)',
+    type: 'agent_idle',
+    init: { activeSessionId: 's1', sessions: { s1: { isIdle: false, streamingMessageId: 'live-1' } } },
+    message: { type: 'agent_idle', sessionId: 's1' },
+    expect: {
+      sessions: { s1: { isIdle: true, streamingMessageId: null } },
+    },
+  },
+  {
+    // #5618 — permission_mode_changed migrated from SWITCH to the shared dispatch
+    // table. The seeded-session path sets the session field permissionMode via the
+    // shared dispatchPermissionModeChanged (targetId-direct resolution, Decision A).
+    // The no-session flat fallback + the app-only clearPending tracker are per-client
+    // adapter hooks, exercised by each client's own tests, not this shared contract.
+    name: 'permission_mode_changed updates the seeded session permissionMode (both clients)',
+    type: 'permission_mode_changed',
+    init: { activeSessionId: 's1', sessions: { s1: { permissionMode: 'default' } } },
+    message: { type: 'permission_mode_changed', sessionId: 's1', mode: 'plan' },
+    expect: {
+      sessions: { s1: { permissionMode: 'plan' } },
+    },
+  },
+  {
+    // #5618 — budget_warning migrated SWITCH→DISPATCH. Both clients append the SAME
+    // system note to the target session (the alert rides the shared adapter.alert,
+    // not asserted here).
+    name: 'budget_warning appends the warning system bubble to the target session (both clients)',
+    type: 'budget_warning',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'budget_warning', sessionId: 's1', message: 'Approaching cost budget limit' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Approaching cost budget limit' }] },
+      },
+    },
+  },
+  {
+    // #5618 — plan_ready migrated SWITCH→DISPATCH. Both clients flip the session to
+    // plan-pending and store the allowed prompts (the app's plan notification rides
+    // the optional notifyPlanReady hook, not asserted here).
+    name: 'plan_ready flips plan state to ready and stores the allowed prompts (both clients)',
+    type: 'plan_ready',
+    init: { sessions: { s1: { isPlanPending: false, planAllowedPrompts: [] } } },
+    message: {
+      type: 'plan_ready',
+      sessionId: 's1',
+      allowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
+    },
+    expect: {
+      sessions: {
+        s1: {
+          isPlanPending: true,
+          planAllowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
+        },
+      },
+    },
+  },
+  {
+    // #5618 — server_shutdown migrated SWITCH→DISPATCH. Both clients write the shared
+    // patch to flat state (the app's setShutdown notification rides applyShutdownNotification).
+    name: 'server_shutdown writes shutdownReason + restartEtaMs to the flat store (both clients)',
+    type: 'server_shutdown',
+    message: { type: 'server_shutdown', reason: 'restart', restartEtaMs: 30000 },
+    expect: {
+      flat: { shutdownReason: 'restart', restartEtaMs: 30000 },
+    },
+  },
+  {
+    // #5618 — rate_limited (#6334) migrated SWITCH→DISPATCH. Both clients append a
+    // system throttle notice (with a retry hint) to the active session.
+    name: 'rate_limited appends a system throttle notice with a retry hint (both clients)',
+    type: 'rate_limited',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'rate_limited', retryAfterMs: 2000, message: 'Too many messages. Please slow down.' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Too many messages. Please slow down. Retry in 2s.' }] },
+      },
+    },
+  },
+  {
+    // #5618 — checkpoint_restored migrated SWITCH→DISPATCH. Both clients auto-switch
+    // to the new checkpoint session via the required switchToRestoredSession hook;
+    // the converged flat effect is activeSessionId = newSessionId (the DISPATCH test
+    // adapter models the switch as writing activeSessionId, like the real stores).
+    name: 'checkpoint_restored re-homes the active session to the new checkpoint session (both clients)',
+    type: 'checkpoint_restored',
+    init: { activeSessionId: 'old-sid', sessions: { 'old-sid': {} } },
+    message: { type: 'checkpoint_restored', checkpointId: 'cp-1', newSessionId: 'cp-new-sid', name: 'Rewind: cp-1' },
+    expect: { flat: { activeSessionId: 'cp-new-sid' } },
+  },
+  {
+    // #5618 — conversations_list migrated SWITCH→DISPATCH. Both clients write the flat
+    // conversationHistory from the parsed array (the app's error-clear + secondary-store
+    // mirror ride the optional applyConversationsListExtras hook, not asserted here).
+    name: 'conversations_list replaces the flat conversationHistory list (both clients)',
+    type: 'conversations_list',
+    message: {
+      type: 'conversations_list',
+      conversations: [
+        {
+          conversationId: 'conv-1',
+          project: '/proj',
+          projectName: 'proj',
+          modifiedAt: '2026-06-24T00:00:00Z',
+          modifiedAtMs: 1750000000000,
+          sizeBytes: 1024,
+          preview: 'first turn',
+          cwd: '/proj',
+        },
+        {
+          conversationId: 'conv-2',
+          project: null,
+          projectName: 'other',
+          modifiedAt: '2026-06-23T00:00:00Z',
+          modifiedAtMs: 1749900000000,
+          sizeBytes: 2048,
+          preview: null,
+          cwd: null,
+        },
+      ],
+    },
+    expect: {
+      flat: {
+        conversationHistory: [
+          { conversationId: 'conv-1', projectName: 'proj', preview: 'first turn' },
+          { conversationId: 'conv-2', projectName: 'other', preview: null },
+        ],
+      },
+    },
+  },
+  {
+    // #5618 — search_results migrated SWITCH→DISPATCH. Both clients write the flat
+    // searchResults + searchLoading:false (the staleness gate reads searchQuery via
+    // getSearchQuery — unseeded here → apply). The app's searchError clear + secondary
+    // store mirror ride the optional applySearchResultsExtras hook (not asserted).
+    name: 'search_results replaces the flat searchResults list (both clients)',
+    type: 'search_results',
+    message: {
+      type: 'search_results',
+      query: 'auth',
+      results: [
+        {
+          conversationId: 'conv-1',
+          projectName: 'chroxy',
+          project: 'chroxy',
+          cwd: '/Users/me/chroxy',
+          preview: 'auth handler',
+          snippet: 'ws-auth.js validates the bearer token',
+          matchCount: 3,
+        },
+      ],
+    },
+    expect: {
+      flat: {
+        searchResults: [
+          {
+            conversationId: 'conv-1',
+            projectName: 'chroxy',
+            preview: 'auth handler',
+            matchCount: 3,
+          },
+        ],
+        searchLoading: false,
+      },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -1384,20 +1578,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       // Both clients attach the result onto the same bubble; assert the bubble
       // is still a single tool_use entry carrying the result text.
       sessions: { s1: { messages: [{ type: 'tool_use', toolUseId: 'tu-1' }] } },
-    },
-  },
-  {
-    // budget_warning is a both-clients switch case (#5619): both clients append
-    // the SAME system note to the target session's messages when it exists.
-    // `msg.message` is echoed verbatim into the bubble content.
-    name: 'budget_warning appends the warning system bubble to the target session',
-    type: 'budget_warning',
-    init: { activeSessionId: 's1', sessions: { s1: {} } },
-    message: { type: 'budget_warning', sessionId: 's1', message: 'Approaching cost budget limit' },
-    expect: {
-      sessions: {
-        s1: { messages: [{ type: 'system', content: 'Approaching cost budget limit' }] },
-      },
     },
   },
   {
@@ -1609,5 +1789,651 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
         s1: { messages: [{ type: 'system', content: 'Web task failed: network timeout' }] },
       },
     },
+  },
+  {
+    // #6325 (drain #6314): the server broadcasts `user_input` to all OTHER
+    // clients when one client sends a message — a multi-client live echo. Both
+    // clients route it through the shared `sharedUserInput`/parseUserInputMessage
+    // path: it builds a `user_input`-typed bubble (content from `text`, id from
+    // the server's stable `messageId`) and appends it. The gate skips a message
+    // from THIS client (clientId === myClientId), so the fixture uses a different
+    // sender. The dashboard additionally writes the prompt to its terminal buffer
+    // (a mocked side effect outside the asserted `messages` slice).
+    name: 'user_input echoes another client’s message as a user_input bubble',
+    type: 'user_input',
+    init: { activeSessionId: 's1', myClientId: 'me', sessions: { s1: {} } },
+    message: {
+      type: 'user_input',
+      sessionId: 's1',
+      clientId: 'other-device',
+      messageId: 'ui-1',
+      text: 'hello from another device',
+      timestamp: 1000,
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'ui-1', type: 'user_input', content: 'hello from another device' }] },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a pending permission expired/could-not-route. Both
+    // clients call the shared handlePermissionExpired, which appends a fixed
+    // "(Expired — …)" suffix to the matching `prompt` bubble IN PLACE (matched by
+    // requestId + type==='prompt') and clears its options (options is dropped by
+    // the harness normalize, so not asserted). Target = msg.sessionId ||
+    // activeSessionId; no-op if requestId is null or the session/prompt is absent
+    // — so the fixture seeds a prompt carrying the requestId. The dashboard's
+    // #2833 already-resolved early-return is gated on `resolvedPermissions`, which
+    // FixtureInitialState can't seed, so both clients take the same path → single
+    // expect. The banner-drain is a sessionNotifications side effect outside the
+    // asserted messages slice.
+    name: 'permission_expired appends the expired suffix to the matching prompt in place (both clients)',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x\n(Expired — this permission was already handled or timed out)',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): streaming partial tool input. Both clients delegate to
+    // the shared handleToolInputDelta, which locates the in-flight tool_use bubble
+    // by toolUseId and appends `partialJson` onto its `toolInputPartial`
+    // accumulator (seeded undefined → ''), leaving a single tool_use entry. The
+    // assertion on `toolInputPartial` requires that field in the harness
+    // `normalize()` whitelist (added in this PR for both clients).
+    name: 'tool_input_delta accumulates the partial JSON onto its in-flight tool_use bubble',
+    type: 'tool_input_delta',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'tool-tu-1',
+              type: 'tool_use',
+              tool: 'Bash',
+              toolUseId: 'tu-1',
+              content: '',
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'tool_input_delta',
+      sessionId: 's1',
+      toolUseId: 'tu-1',
+      partialJson: '{"command":"ls',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'tool_use', toolUseId: 'tu-1', toolInputPartial: '{"command":"ls' }] },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): session ready. Both clients apply the shared
+    // handleClaudeReady patch ({ claudeReady: true, stoppedAt: null,
+    // stoppedCode: null }) onto the session — no message bubble. With no
+    // backgroundTasks on the wire, the app (calls it with no msg arg) and the
+    // dashboard (calls it with msg) produce the identical scalar patch → single
+    // expect. Asserts the session-scalar field via the #6325 harness extension.
+    name: 'claude_ready sets the session claudeReady flag (both clients)',
+    type: 'claude_ready',
+    init: { activeSessionId: 's1', sessions: { s1: { claudeReady: false } } },
+    message: { type: 'claude_ready', sessionId: 's1' },
+    expect: {
+      sessions: { s1: { claudeReady: true } },
+    },
+  },
+  {
+    // #6325 (drain #6314): a session crashed. Both clients (shared handleSessionError,
+    // category 'crash') flip the target session's `health` to 'crashed'. crashedId
+    // resolves to the active session, so the pushSessionNotification side effect
+    // early-returns (sessionId === activeSessionId) and never hits the mocked store.
+    // Non-vacuous: seeds health:'ok' so the handler must flip it.
+    name: 'session_error (crash) flips the target session health to crashed (both clients)',
+    type: 'session_error',
+    init: { activeSessionId: 's1', sessions: { s1: { health: 'ok' } } },
+    message: { type: 'session_error', category: 'crash', sessionId: 's1' },
+    expect: { sessions: { s1: { health: 'crashed' } } },
+  },
+  {
+    // #6325 (drain #6314): a legacy server_status (no phase) — both clients append
+    // the ANSI-stripped status message as a `system` bubble to the active session.
+    name: 'server_status (legacy, no phase) appends the status message to the active session (both clients)',
+    type: 'server_status',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'seed-1', type: 'user', content: 'hello', timestamp: 1 } as unknown as ChatMessage] } },
+    },
+    message: { type: 'server_status', message: 'Tunnel reconnected' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'user', content: 'hello' },
+            { type: 'system', content: 'Tunnel reconnected' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a stream_delta buffers behind the coalescing flush timer,
+    // then applyDeltaBatch appends the text onto the in-flight response bubble's
+    // content on flush. The contract harness drains the timer before asserting, so
+    // the concatenated content is observable. Seeds non-empty content so the append
+    // is non-vacuous.
+    name: 'stream_delta appends the delta text onto its in-flight response bubble (both clients)',
+    type: 'stream_delta',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'Hello' } as unknown as ChatMessage],
+          streamingMessageId: 'resp-1',
+        },
+      },
+    },
+    message: { type: 'stream_delta', sessionId: 's1', messageId: 'resp-1', delta: ', world' },
+    expect: {
+      sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'Hello, world' }] } },
+    },
+  },
+  {
+    // #6325 (drain #6314): a live-activity delta. Its PRIMARY effect (the flat
+    // `activity` tree) isn't switch-harness-assertable, but it has a deterministic
+    // both-clients session-scalar side effect: clearing the target session's
+    // inactivityWarning to null (live activity = the user is back). lastClientActivityAt
+    // is also written but is Date.now() (non-deterministic) → deliberately not asserted.
+    name: 'activity_delta clears any inactivityWarning on its target session (live-activity bump)',
+    type: 'activity_delta',
+    init: { sessions: { s1: { inactivityWarning: { idleMs: 60000, prefab: 'Still there?', receivedAt: 1000 } } } },
+    message: {
+      type: 'activity_delta',
+      sessionId: 's1',
+      schemaVersion: 1,
+      op: 'started',
+      entry: { id: 'a1', kind: 'shell', label: 'npm test', status: 'running', startedAt: 1000 },
+    },
+    expect: { sessions: { s1: { inactivityWarning: null } } },
+  },
+  {
+    // #6325 (drain #6314): another client connected. With ONE seeded (active)
+    // session the app's active-only append and the dashboard's all-sessions append
+    // converge → a plain expect (the divergence is only observable with 2+ seeded
+    // sessions). Seeds a prior bubble so the 2-entry expect is non-vacuous.
+    name: 'client_joined appends a connected-device system bubble to the active session',
+    type: 'client_joined',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'seed-1', type: 'response', content: 'prior' } as unknown as ChatMessage] } },
+    },
+    message: {
+      type: 'client_joined',
+      client: { clientId: 'c2', deviceName: 'iPhone 16 Pro', deviceType: 'phone', platform: 'ios' },
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'seed-1', type: 'response', content: 'prior' },
+            { type: 'system', content: 'iPhone 16 Pro connected' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a pending permission auto-denied after the server
+    // timeout. Both clients (shared handlePermissionTimeout) scan sessionStates for
+    // the matching `prompt` (requestId + type==='prompt') and append a fixed
+    // '(Auto-denied — permission timed out)' suffix in place (options cleared, not
+    // asserted). Targeting is by requestId alone, so the fixture seeds the prompt.
+    name: 'permission_timeout appends the auto-denied suffix to the matching prompt in place (both clients)',
+    type: 'permission_timeout',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: { type: 'permission_timeout', requestId: 'req-1', tool: 'Bash' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'prompt-req-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x\n(Auto-denied — permission timed out)', tool: 'Bash' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a server-side error tagged to a session. Both clients
+    // (shared handleServerError) append an `error` bubble to the tagged session and
+    // clear streamingMessageId + pendingClientMessageId. The serverErrors ring +
+    // notification toast are off the sessions[id] slice.
+    name: 'server_error appends an error bubble to the tagged session and clears the live stream (both clients)',
+    type: 'server_error',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'working' } as unknown as ChatMessage],
+          streamingMessageId: 'live-1',
+          pendingClientMessageId: 'uin-1',
+        },
+      },
+    },
+    message: { type: 'server_error', sessionId: 's1', category: 'session', message: 'Disk write failed', recoverable: true },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'resp-1', type: 'response', content: 'working' },
+            { type: 'error', content: 'Disk write failed' },
+          ],
+          streamingMessageId: null,
+          pendingClientMessageId: null,
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a session_list refresh patches conversationId onto a
+    // pre-existing session (the patch loop skips ids not already in sessionStates).
+    // Seeds a different starting conversationId so the patch is non-vacuous.
+    name: 'session_list patches conversationId onto a pre-existing session (both clients)',
+    type: 'session_list',
+    init: { activeSessionId: 's1', sessions: { s1: { conversationId: 'conv-OLD' } } },
+    message: {
+      type: 'session_list',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Session 1',
+          cwd: '/tmp',
+          type: 'cli',
+          hasTerminal: false,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 0,
+          conversationId: 'conv-NEW',
+        },
+      ],
+    },
+    expect: { sessions: { s1: { conversationId: 'conv-NEW' } } },
+  },
+  {
+    // #6325 (drain #6314): a session_warning legitimately DIVERGES. The dashboard
+    // pushes a `system` warning bubble into the target session's messages; the app
+    // instead writes the warning to its flat `timeoutWarning` banner slot and leaves
+    // messages untouched. Target = the active session so the dashboard's
+    // non-active-session Alert side effect doesn't fire.
+    name: 'session_warning diverges: dashboard appends a warning bubble; the app keeps messages untouched',
+    type: 'session_warning',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'session_warning',
+      sessionId: 's1',
+      name: 'My Session',
+      reason: 'idle_timeout',
+      message: 'Session will time out in 2 minutes',
+      remainingMs: 120000,
+    },
+    divergent: {
+      reason:
+        'the dashboard pushes the shared system ChatMessage into the target session’s messages; the app writes the parsed ' +
+        'warning into the flat timeoutWarning slot (banner UI) + useNotificationStore and leaves sessions[id].messages untouched. ' +
+        'Target = the active session so the dashboard’s non-active-session Alert side effect does not fire.',
+      app: { sessions: { s1: { messages: [] } } },
+      dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'Session will time out in 2 minutes' }] } } },
+    },
+  },
+  {
+    // #6325 (bucket-B flat-assert): an activity_snapshot REPLACES the target
+    // session's flat `activity` tree ({byId, order} per session) — both clients run
+    // the same applyActivitySnapshot + set({ activity }). A snapshot is a full-state
+    // resync, so (unlike activity_delta) it does NOT touch any session scalar. The
+    // harness seeds activity:{bySession:{}}, so populate-from-empty is non-vacuous.
+    name: "activity_snapshot replaces the target session's flat activity tree",
+    type: 'activity_snapshot',
+    message: {
+      type: 'activity_snapshot',
+      sessionId: 's1',
+      schemaVersion: 1,
+      entries: [
+        { id: 'a1', kind: 'shell', label: 'npm test', status: 'running', startedAt: 1000 },
+        { id: 'a2', kind: 'agent', label: 'review', status: 'done', startedAt: 1000, endedAt: 2000 },
+      ],
+    },
+    expect: {
+      flat: {
+        activity: {
+          bySession: {
+            s1: {
+              byId: {
+                a1: { id: 'a1', kind: 'shell', label: 'npm test', status: 'running', startedAt: 1000 },
+                a2: { id: 'a2', kind: 'agent', label: 'review', status: 'done', startedAt: 1000, endedAt: 2000 },
+              },
+              order: ['a1', 'a2'],
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    // #6325 (bucket-B): another client disconnected. With ONE seeded (active)
+    // session the app's active-only append and the dashboard's all-sessions append
+    // converge → a plain expect (mirrors client_joined). The bubble label is
+    // 'A device' (not the wire id): handleClientLeft looks the departing client up
+    // in connectedClients, which the harness seeds to [] → fallback 'A device'. The
+    // roster flat effect ([]→[]) is vacuous, so we assert the bubble, not the roster.
+    name: 'client_left appends a disconnected-device system bubble to the active session',
+    type: 'client_left',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'seed-1', type: 'response', content: 'prior' } as unknown as ChatMessage] } },
+    },
+    message: { type: 'client_left', clientId: 'c2' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'seed-1', type: 'response', content: 'prior' },
+            { type: 'system', content: 'A device disconnected' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (bucket-B): server_mode legitimately DIVERGES. The dashboard sets the
+    // flat main-store `serverMode`; the app routes it into the mocked
+    // useConnectionLifecycleStore (setServerInfo) and only conditionally sets
+    // viewMode (guarded on viewMode==='terminal', never seeded) — so the app makes
+    // no observable main-store mutation. Dashboard asserts flat serverMode; app no-op.
+    name: 'server_mode sets the flat serverMode on the dashboard; the app routes it to the mocked lifecycle store (divergent)',
+    type: 'server_mode',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'server_mode', mode: 'cli' },
+    divergent: {
+      reason:
+        "the dashboard writes the flat main-store field serverMode (set({serverMode:'cli'})); the app routes serverMode into the " +
+        'secondary useConnectionLifecycleStore (mocked here) and only conditionally sets viewMode (guarded on a terminal viewMode the ' +
+        'harness never seeds), so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { serverMode: 'cli' } },
+    },
+  },
+  {
+    // #6325 (bucket-B): the active session switched. Both clients (shared
+    // handleSessionSwitched) set the flat activeSessionId to the new id and lazily
+    // init sessionStates[newId], stamping conversationId. Seeds a different starting
+    // activeSessionId so the flip is non-vacuous; the switched-to session is created
+    // by the handler. fetchSlashCommands/fetchCustomAgents at the tail are stubbed.
+    name: 'session_switched flips activeSessionId and initialises the switched-to session with its conversationId (both clients)',
+    type: 'session_switched',
+    init: { activeSessionId: 's-old', sessions: { 's-old': {} } },
+    message: { type: 'session_switched', sessionId: 's-new', conversationId: 'conv-7' },
+    expect: {
+      flat: { activeSessionId: 's-new' },
+      sessions: { 's-new': { conversationId: 'conv-7' } },
+    },
+  },
+  {
+    // #6325 (bucket-B): session_timeout deletes the timed-out session and, when it
+    // was active, reassigns the flat activeSessionId to the first remaining session.
+    // s1 (active) times out, s2 survives → both set activeSessionId 's2'. The deleted
+    // session is NOT listed under expect.sessions (the harness does toBeDefined()
+    // per id); only the flat activeSessionId effect is asserted (both agree).
+    name: 'session_timeout removes the active session and switches activeSessionId to the next remaining session',
+    type: 'session_timeout',
+    init: { activeSessionId: 's1', sessions: { s1: {}, s2: {} } },
+    message: { type: 'session_timeout', sessionId: 's1', name: 'Old Session' },
+    expect: {
+      flat: { activeSessionId: 's2' },
+    },
+  },
+  {
+    // #6325 (auth_ok close-out): the handshake-complete frame. Both clients run the
+    // shared handleAuthOk parser, then write a SHARED slice onto the flat main store
+    // via set(connectedState): the boolean-coerced webFeatures map AND the
+    // shutdown-state clear (shutdownReason/restartEtaMs/restartingSince → null, "clear
+    // shutdown on a successful connect"). The dashboard ALSO writes serverMode/version/
+    // etc. flat; the app routes those into the mocked lifecycle/multi-client stores —
+    // so those DIVERGE and are not asserted. webFeatures (unseeded; the wire carries
+    // mixed-truthy values the parser coerces to strict booleans) + the shutdown trio
+    // (unseeded → the null clear) are the non-vacuous both-clients flat slice.
+    name: 'auth_ok writes the shared webFeatures map and clears shutdown state on the flat main store (both clients)',
+    type: 'auth_ok',
+    message: {
+      type: 'auth_ok',
+      webFeatures: { available: 1, remote: true, teleport: 0 },
+    },
+    expect: {
+      flat: {
+        webFeatures: { available: true, remote: true, teleport: false },
+        shutdownReason: null,
+        restartEtaMs: null,
+        restartingSince: null,
+      },
+    },
+  },
+  {
+    // #6325 (auth_fail close-out): the server rejected the bearer token. Both clients
+    // close the socket and tear down, but record the phase in DIFFERENT stores: the
+    // dashboard writes the flat main-store connectionPhase (set({ connectionPhase:
+    // 'disconnected', socket: null }), seeded 'connected' → non-vacuous); the app keeps
+    // connectionPhase in the secondary useConnectionLifecycleStore (mocked) and only
+    // writes socket: null (a WebSocket ref, not a meaningful assert) — so no observable
+    // main-store mutation. Same divergence shape as server_mode.
+    name: 'auth_fail flips the dashboard flat connectionPhase to disconnected; the app routes the phase to the mocked lifecycle store (divergent)',
+    type: 'auth_fail',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'auth_fail', reason: 'expired token' },
+    divergent: {
+      reason:
+        "the dashboard writes the flat main-store field connectionPhase via set({ connectionPhase: 'disconnected', socket: null }) " +
+        '(seeded connected → non-vacuous); the app keeps connectionPhase in the secondary useConnectionLifecycleStore (mocked here) and ' +
+        'writes only socket: null to the main store, so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
+  {
+    // #6325 (pair_fail close-out): pairing rejected — same divergence as auth_fail.
+    // The dashboard flips the flat connectionPhase to disconnected; the app routes the
+    // phase into the mocked lifecycle store and only does the vacuous set({socket:null}).
+    // Default reason 'unknown' (no reason field) skips the dashboard's requires_approval
+    // branch; activeServerId is unseeded so removeServer is never called.
+    name: 'pair_fail flips the dashboard flat connectionPhase to disconnected; the app routes the phase to the mocked lifecycle store (divergent)',
+    type: 'pair_fail',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'pair_fail' },
+    divergent: {
+      reason:
+        "the dashboard writes the flat main-store field connectionPhase via set({ connectionPhase: 'disconnected', socket: null }) " +
+        '(seeded connected → non-vacuous); the app routes the phase into the secondary useConnectionLifecycleStore (mocked here) and ' +
+        'only does the vacuous set({ socket: null }), so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
+  {
+    // #6344 (multi-message): history_replay_end's observable effect is the deferred
+    // atomic swap that slices off the pre-baseline prefix. That's only non-vacuous
+    // when (a) a full-rebuild baseline exists AND (b) entries were appended after it,
+    // so this fixture uses a prelude: history_replay_start(fullHistory) records the
+    // baseline at the seeded prefix length (1, no wipe — the #5555.4 contract), then
+    // a replayed `message` envelope appends after it. history_replay_end then swaps
+    // to the post-baseline tail → the seeded 'stale' prefix is removed, leaving only
+    // the replayed turn (1 in → 1 DIFFERENT out; a no-op would leave both = 2).
+    name: 'history_replay_end swaps to the replayed tail, dropping the pre-baseline prefix (multi-message)',
+    type: 'history_replay_end',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'old-1', type: 'response', content: 'stale' } as unknown as ChatMessage] } },
+    },
+    prelude: [
+      { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+      { type: 'message', sessionId: 's1', messageType: 'response', messageId: 'replayed-1', content: 'authoritative replayed turn', timestamp: 2000 },
+    ],
+    message: { type: 'history_replay_end', sessionId: 's1', latestSeq: 1 },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'replayed-1', type: 'response', content: 'authoritative replayed turn' }] },
+      },
+    },
+  },
+  {
+    // #6344 (multi-message): key_exchange_ok's only store-writing branch is the
+    // invalid-publicKey error path, gated behind `if (_pendingKeyPair)` — so alone
+    // it's a total no-op. The prelude auth_ok (encryption:'required', no
+    // serverPublicKey, unpinned→TOFU) takes the discrete-handshake fallback and
+    // stashes _pendingKeyPair; the asserted key_exchange_ok (publicKey omitted →
+    // null) then enters the guard and runs the error teardown. The divergence is the
+    // same shape as auth_fail/pair_fail: the dashboard flips the flat main-store
+    // connectionPhase; the app routes phase to the mocked lifecycle store (no
+    // observable main-store change).
+    name: 'key_exchange_ok (invalid server key) flips the dashboard flat connectionPhase; the app routes it to the mocked lifecycle store (divergent, multi-message)',
+    type: 'key_exchange_ok',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    prelude: [{ type: 'auth_ok', encryption: 'required' }],
+    message: { type: 'key_exchange_ok' },
+    divergent: {
+      reason:
+        "key_exchange_ok's only store-writing branch is the invalid-publicKey error path, gated behind if (_pendingKeyPair) — so " +
+        'without the prelude the handler is a pure no-op. The prelude auth_ok (encryption required, no serverPublicKey, unpinned→TOFU) ' +
+        'stashes _pendingKeyPair via the discrete-handshake fallback; the asserted key_exchange_ok (publicKey null) then runs the error ' +
+        'teardown. The dashboard writes the flat connectionPhase (seeded connected → non-vacuous); the app keeps phase in the mocked ' +
+        'lifecycle store and writes only socket: null, so it makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
+  {
+    // #6268: web_task_error carrying a taskId flips the matching flat webTask to
+    // `failed` with the error text — identical in both clients (the shared
+    // state.webTasks.map). Seeds a 'running' task so the transition is non-vacuous;
+    // updatedAt is Date.now() so it is deliberately not asserted. (The common
+    // taskId-less bubble path is pinned by the existing web_task_error fixture.)
+    name: 'web_task_error with a taskId flips the matching webTask to failed (both clients)',
+    type: 'web_task_error',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: {} },
+      webTasks: [{ taskId: 't1', status: 'running', prompt: 'do the thing' }],
+    },
+    message: { type: 'web_task_error', taskId: 't1', message: 'task blew up' },
+    expect: {
+      flat: { webTasks: [{ taskId: 't1', status: 'failed', error: 'task blew up' }] },
+    },
+  },
+  {
+    // #6268: web_task_error with code SESSION_TOKEN_MISMATCH + boundSessionName
+    // legitimately DIVERGES (#2944). The app short-circuits to a native Alert and
+    // appends NO bubble (this device is paired to a different session); the
+    // dashboard has no such guard and always appends the system bubble. No taskId,
+    // so the webTasks slice is untouched. Target = the active session.
+    name: 'web_task_error SESSION_TOKEN_MISMATCH diverges: app shows an Alert with no bubble; the dashboard appends the bubble',
+    type: 'web_task_error',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'web_task_error',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionName: 'My Session',
+      message: 'This action is bound to another session',
+    },
+    divergent: {
+      reason:
+        'on a SESSION_TOKEN_MISMATCH with a boundSessionName the app short-circuits to showBoundSessionMismatchAlert and appends NO ' +
+        'bubble (#2944), while the dashboard has no such guard and always appends the system error bubble. The Alert is a side effect ' +
+        'outside the asserted messages slice.',
+      app: { sessions: { s1: { messages: [] } } },
+      dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'This action is bound to another session' }] } } },
+    },
+  },
+  {
+    // #6345: raw PTY output. Both clients pass the shared handleRawOutput data
+    // (msg.data verbatim, '' on non-string) to get().appendTerminalData —
+    // unconditionally (no sessionId/active gate). The app also mirrors into the
+    // mocked useTerminalStore, but only the main-store write is captured, so both
+    // see exactly one identical write → a single terminalWrites expect. (Plain
+    // ASCII data — the contract is "verbatim pass-through"; the byte content is
+    // irrelevant and ANSI escapes only invite source-mangling.)
+    name: 'raw writes the PTY chunk to the terminal mirror, unconditionally (both clients)',
+    type: 'raw',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'raw', sessionId: 's1', data: 'raw-pty-chunk' },
+    expect: { terminalWrites: ['raw-pty-chunk'] },
+  },
+  {
+    // #6345: background-agent PTY output. Same as raw — unconditional verbatim
+    // get().appendTerminalData write in both clients; no gate, no init needed.
+    name: 'raw_background writes the decoded PTY chunk to the terminal mirror (both clients)',
+    type: 'raw_background',
+    message: { type: 'raw_background', data: 'background-agent-output' },
+    expect: { terminalWrites: ['background-agent-output'] },
+  },
+  {
+    // #6345: the opt-in live-PTY mirror channel (#5835). Both clients gate on
+    // typeof msg.data === 'string' AND msg.sessionId === activeSessionId, then write
+    // msg.data verbatim to get().appendTerminalData. Seed activeSessionId === the
+    // message sessionId so the active-id guard passes.
+    name: 'terminal_output writes the PTY chunk to the mirror for the active session (both clients)',
+    type: 'terminal_output',
+    init: { activeSessionId: 's1' },
+    message: { type: 'terminal_output', sessionId: 's1', data: 'term-line file.txt' },
+    expect: { terminalWrites: ['term-line file.txt'] },
   },
 ]

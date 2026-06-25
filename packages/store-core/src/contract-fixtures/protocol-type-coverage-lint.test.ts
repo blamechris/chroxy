@@ -151,6 +151,19 @@ const DASHBOARD_ONLY = new Set<string>([
   // activity_snapshot / activity_delta removed — the mobile app now feeds them
   // too (#6246/#6247, the Phase-2 mobile-parity fast-follow per epic #5159), so
   // they are no longer dashboard-only.
+  // #6323 (batch 1 of #6314): schemaing these surfaced an existing asymmetry —
+  // both are handled by the dashboard only today (the app has no `case`). Not
+  // introduced here; the schema just made the lint see them.
+  'session_activity',           // per-session busy/idle + cost ping — dashboard activity tree only
+  'terminal_size',              // authoritative PTY grid for letterboxing — app terminal parity is still partial (#5987)
+  // #6332 (batch 2b of #6314): the container/worktree environment lifecycle —
+  // dashboard-only by design (the app has no environment surface). Schemaing
+  // them surfaced the existing asymmetry; not introduced here.
+  'environment_created',        // env lifecycle (dashboard relies on the environment_list that follows)
+  'environment_destroyed',      // env lifecycle (dashboard relies on the following environment_list)
+  'environment_error',          // env op error — dashboard console-errors it; app has no env surface
+  'environment_info',           // single-env descriptor — dashboard-only
+  'environment_list',           // env survey — dashboard Control Room only
   'billing_canary',             // live billing-canary banner (#5821) — dashboard sidebar
   'byok_credentials_status',    // BYOK paste-API-key form (#4052) — dashboard-only for v1
   'cancel_activity_ack',        // Control Room cancel-click correlation ack (#5277)
@@ -207,6 +220,9 @@ const APP_ONLY = new Set<string>([
 // short-lived socket), so neither client's main switch covers them. Mirrors
 // handler-coverage's INTENTIONALLY_UNHANDLED.
 const UNHANDLED_BY_DESIGN = new Set<string>([
+  // rate_limited — now handled in both clients' switch (#6334): a system throttle
+  // notice (handleRateLimited), with a both-clients SWITCH_FIXTURES entry. Removed
+  // from this set (it has a real handler + contract fixture now).
   'extension_message',                    // routed to the extension framework, not the main switch
   'pair_request_pending',                 // pairing-approval primitive (#5510) — consumed by the requester's
                                           //   dedicated request-pairing socket, not the main dispatch

@@ -774,3 +774,95 @@ jobs:
 
       - name: Run compile-skill-targets.mjs tests
         run: node scripts/__tests__/compile-skill-targets.test.mjs
+
+  dashboard-smoke:
+    name: Dashboard Smoke (Playwright)
+    # #6315: a UI-regression gate. Runs the Playwright dashboard smoke
+    # (packages/server/tests/smoke-test.mjs) against a server it starts, and fails
+    # the run on a non-zero exit. Pinned to a GitHub-HOSTED ubuntu runner (x86_64)
+    # for first-class Playwright/chromium support, independent of the self-hosted
+    # ARM64 pool the unit suites use (the smoke spawns chromium + a full daemon, so
+    # the hosted, disposable, x86_64 environment is the right fit).
+    #
+    # DEFERRED — the Maestro APP E2E half of #6315: it needs a booted iOS simulator
+    # + a dev-client build + Metro, which only a self-hosted macOS runner can host
+    # and is too costly per-PR. Run it locally via
+    # packages/app/.maestro/scripts/run-all-sequential.sh (documented in CLAUDE.md);
+    # wiring it into CI (likely a nightly subset) remains tracked under #6315.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build dashboard
+        run: npm run build -w @chroxy/dashboard
+
+      - name: Install Playwright chromium
+        working-directory: packages/server
+        run: npx playwright install --with-deps chromium
+
+      - name: Seed local server config
+        # A fixed token + externalUrl: the externalUrl makes server-cmd skip the
+        # Cloudflare tunnel (so cloudflared isn't needed), while keeping auth on so
+        # the dashboard WebSocket actually connects (the --no-auth path leaves the
+        # WS disconnected). The smoke reads this token to build the dashboard URL.
+        run: |
+          mkdir -p "$HOME/.chroxy"
+          printf '{ "apiToken": "ci-smoke-token", "externalUrl": "http://localhost:8765", "tunnel": "quick" }\n' > "$HOME/.chroxy/config.json"
+
+      - name: Stub the `claude` binary
+        # The daemon auto-creates a default claude-tui session on boot, whose
+        # preflight requires a `claude` binary on PATH — which a hosted CI runner
+        # doesn't have. The smoke never drives a real turn, so a no-op stub that
+        # just stays alive in the PTY satisfies the existence check (preflight.js
+        # isExecutableFile) and lets the daemon start. ~/.local/bin is both a
+        # checked candidate path AND added to PATH for subsequent steps.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          printf '#!/usr/bin/env bash\nexec cat >/dev/null\n' > "$HOME/.local/bin/claude"
+          chmod +x "$HOME/.local/bin/claude"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Start chroxy server (background, no tunnel)
+        working-directory: packages/server
+        # CHROXY_ALLOW_UNPINNED_BOOT=1 lets the daemon boot without an identity
+        # keychain (a fresh CI HOME has none) instead of refusing to start;
+        # --skip-checks drops the preflight (cloudflared isn't installed and isn't
+        # needed without a tunnel). The smoke test then FINDS this server on :8765.
+        env:
+          CHROXY_ALLOW_UNPINNED_BOOT: '1'
+        run: |
+          node src/cli.js start --skip-checks > /tmp/chroxy-server.log 2>&1 &
+          echo "CHROXY_SERVER_PID=$!" >> "$GITHUB_ENV"
+          # Wait up to 40s for the HTTP server to accept connections on :8765.
+          for i in $(seq 1 40); do
+            code="$(curl -s -o /dev/null -w '%{http_code}' http://localhost:8765/ || true)"
+            if [ "$code" = "200" ] || [ "$code" = "403" ]; then echo "server up ($code)"; exit 0; fi
+            sleep 1
+          done
+          echo "::error::chroxy server did not come up within 40s"; tail -50 /tmp/chroxy-server.log; exit 1
+
+      - name: Run dashboard smoke test
+        working-directory: packages/server
+        run: node tests/smoke-test.mjs
+
+      - name: Stop chroxy server
+        if: always()
+        run: |
+          tail -30 /tmp/chroxy-server.log 2>/dev/null || true
+          kill "$CHROXY_SERVER_PID" 2>/dev/null || true
+
+      - name: Upload smoke screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: dashboard-smoke-screenshots
+          path: packages/server/tests/screenshots/
+          if-no-files-found: ignore

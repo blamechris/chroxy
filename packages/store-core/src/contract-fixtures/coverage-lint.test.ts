@@ -63,76 +63,144 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // both-clients case — add a real contract fixture instead. New entries are
 // only legitimate when retro-fitting a pre-existing case, with a note.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// #5618 dispatch-table migration — PHASE COMPLETE (closed 2026-06-25).
+//
+// The cleanly-beneficial migrations are done (~67 types now route through the
+// shared store-core dispatch table). The both-clients-switch types that REMAIN in
+// the universe below are INTENTIONALLY switch-local — do NOT re-attempt migrating
+// them onto the dispatch table without re-deciding (the triage map's "zero-change-
+// via-hooks" rating is misleading for them). Their `handleX` PARSER already lives in
+// store-core and both clients call it; what's left in each switch is genuinely
+// per-client ORCHESTRATION, not incidental duplication — so migrating it would wrap
+// that orchestration behind 2–4 new adapter hooks each, adding ~as much surface as
+// the dedup removes, with real regression risk. Representative cases:
+//   - permission_resolved / permission_timeout / permission_expired — thin shared
+//     prompt-mark updater; thick divergence (all-sessions scan, dashboard flat-message
+//     fallback, app `remove` vs dashboard #5008 `mark-read` notifications, app-only
+//     ServerError banner).
+//   - budget_exceeded — whole behaviour diverges by design (#5619): app manual Resume
+//     button vs dashboard auto-resume + modified message + toast.
+//   - server_status / server_mode / session_warning — thin shared core, thick divergence.
+//   - message / server_error / web_task_error / tool_* / stream_* / session_switched /
+//     session_timeout / client_joined / client_left / pair_fail, plus the hard four
+//     (error / session_list / auth_ok / key_exchange_ok).
+// These keep their SWITCH_FIXTURES (still behaviour-verified through each client's real
+// handler), so they are NOT NO_SWITCH_CONTRACT_BY_DESIGN exemptions. See the #5618
+// close comment for the full rationale.
+// ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
-  'agent_idle',
+  // EMPTY — the both-clients SWITCH_FIXTURES backlog is fully drained. Every
+  // both-clients switch type now has a behaviour-verified fixture (incl. the last
+  // two via the #6344 multi-message prelude: history_replay_end resolves against a
+  // history_replay_start baseline; key_exchange_ok runs after an encryption auth_ok
+  // stashes the pending key pair) OR is a documented NO_SWITCH_CONTRACT_BY_DESIGN
+  // exemption. Re-add a type here ONLY when retro-fitting a pre-existing case that
+  // genuinely can't be fixtured yet, with a note — prefer a real fixture.
+  // agent_idle — now has a SWITCH_FIXTURES entry (#6325); the contract-switch
+  // harness was extended to assert session-scalar fields (isIdle, …).
   // activity_snapshot / activity_delta — both clients now feed them through the
   // store-core ACTIVITY reducer (applyActivitySnapshot/applyActivityDelta) from
   // their own switch (#6246/#6247 added the mobile side; dashboard since #5163).
   // They are NOT on the shared dispatch table (the reducer write is platform-local
   // — each client owns its `activity` store field), so they stay PENDING rather
   // than carrying a DISPATCH_FIXTURES entry.
-  'activity_snapshot',
-  'activity_delta',
+  // activity_snapshot — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // activity_delta — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
   // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // auth_bootstrap — migrated to the shared dispatch table (#5618 Batch 5b).
-  'auth_fail',
-  'auth_ok',
+  // auth_fail — now has a SWITCH_FIXTURES entry (#6325 close-out).
+  // auth_ok — now has a SWITCH_FIXTURES entry (#6325 close-out).
   // available_models — migrated to the shared dispatch table (#5618 Batch 5a).
   // checkpoint_created / checkpoint_list — migrated to the shared dispatch table
   // (#5618 Batch 6); both now have DISPATCH_FIXTURES entries, so they leave the
   // both-clients-switch universe. checkpoint_restored is NOT migrated in this
   // batch (both clients still handle it platform-locally — the app via a switch
   // case, the dashboard via its HANDLERS map), so it remains pending.
-  'checkpoint_restored',
-  'claude_ready',
+  // checkpoint_restored — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // claude_ready — now has a SWITCH_FIXTURES entry (#6325, session-scalar assert).
   // client_focus_changed — migrated to the shared dispatch table (#5618 Batch 4).
-  'client_joined',
-  'client_left',
-  'conversations_list',
+  // client_joined — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
+  // client_left — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // conversations_list — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // cost_update — migrated to the shared dispatch table (#5618 Batch 5a).
-  'history_replay_end',
-  'key_exchange_ok',
+  // history_replay_end — now has a multi-message SWITCH_FIXTURES entry (#6344).
+  // key_exchange_ok — now has a multi-message SWITCH_FIXTURES entry (#6344).
   // multi_question_intervention — migrated to the shared dispatch table (#5618);
   // now has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
-  'pair_fail',
-  'permission_expired',
-  'permission_mode_changed',
+  // pair_fail — now has a SWITCH_FIXTURES entry (#6325 close-out).
+  // permission_expired — now has a SWITCH_FIXTURES entry (#6325).
+  // permission_mode_changed — now has a SWITCH_FIXTURES entry (#6325, scalar assert).
   // permission_resolved now has a both-clients SWITCH_FIXTURES entry (#6058).
-  'permission_timeout',
-  'plan_ready',
-  'pong',
+  // permission_timeout — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
+  // plan_ready — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
+  // pong — moved to NO_SWITCH_CONTRACT_BY_DESIGN (#6325): pure heartbeat ack.
   // primary_changed — migrated to the shared dispatch table (#5618 Batch 4).
   // provider_list — migrated to the shared dispatch table (#5618 Batch 2);
   // app/dashboard element-handling divergence locked by a divergent fixture.
-  'raw',
-  'raw_background',
-  'search_results',
-  'server_error',
-  'server_mode',
-  'server_shutdown',
-  'server_status',
-  'session_error',
-  'session_list',
+  // raw — moved to NO_SWITCH_CONTRACT_BY_DESIGN (#6325): terminal-mirror only.
+  // raw_background — moved to NO_SWITCH_CONTRACT_BY_DESIGN (#6325): terminal-mirror only.
+  // search_results — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // server_error — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
+  // server_mode — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // server_shutdown — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // server_status — now has a SWITCH_FIXTURES entry (#6325 batch A).
+  // session_error — now has a SWITCH_FIXTURES entry (#6325 batch A).
+  // session_list — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // session_persist_failed / session_restore_failed / session_stopped — migrated
   // to the shared dispatch table (#5618 Batch 3); now have DISPATCH_FIXTURES
   // entries, so they leave the both-clients-switch universe.
   // session_role — migrated to the shared dispatch table (#5618 Batch 4).
-  'session_switched',
-  'session_timeout',
-  'session_warning',
+  // session_switched — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // session_timeout — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // session_warning — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // slash_commands — migrated to the shared dispatch table (#5618 Batch 2); now
   // has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
-  'stream_delta',
-  'terminal_output',
-  'token_rotated',
-  'tool_input_delta',
+  // stream_delta — now has a SWITCH_FIXTURES entry (#6325 batch A).
+  // terminal_output — moved to NO_SWITCH_CONTRACT_BY_DESIGN (#6325): terminal-mirror only.
+  // token_rotated — moved to NO_SWITCH_CONTRACT_BY_DESIGN (#6325): no main-store effect.
+  // tool_input_delta — now has a SWITCH_FIXTURES entry (#6325); the harness
+  // normalize() was extended to assert its toolInputPartial accumulator.
   // tunnel_url_changed — migrated to the shared dispatch table (#5618 Batch 5b).
-  'user_input',
+  // user_input — now has a SWITCH_FIXTURES entry (#6325), so it leaves the
+  // pending backlog (both clients build it via the shared sharedUserInput path).
   // user_question — migrated to the shared dispatch table (#5618); now has a
   // DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // web_task_error — now has a SWITCH_FIXTURES entry (#5619), so it leaves the
   // pending allowlist (both clients append one identical `system` error bubble).
+])
+
+// ---------------------------------------------------------------------------
+// By-design exemption (#6325) — both-clients switch types that will NEVER get a
+// SWITCH_FIXTURES entry because they have NO observable mutation to the MAIN
+// store (the only slice this harness asserts: sessions[id].messages, a session
+// scalar, or a flat ConnectionState field). Unlike PENDING (a backlog awaiting a
+// fixture), these are a terminal, documented state: their entire effect lands on
+// a MOCKED secondary store or is a pure ack/teardown, so there is nothing the
+// main-store contract harness can assert. Each is covered by its own dedicated
+// tests where the effect IS observable (terminal-mirror suites, heartbeat tests).
+//
+// Adding here requires the same rigour as a fixture: prove (by reading the FULL
+// both-client handler bodies) that NO main-store slice is written. A type that
+// later gains a real main-store effect must move OUT of this set into a fixture.
+// ---------------------------------------------------------------------------
+const NO_SWITCH_CONTRACT_BY_DESIGN = new Set<string>([
+  // raw / raw_background / terminal_output — MOVED OUT (#6345): now real
+  // SWITCH_FIXTURES asserting their get().appendTerminalData write via the harness's
+  // captured `_terminalWrites` (expect.terminalWrites). They were exempt only
+  // because the harness stubbed appendTerminalData to a no-op; once captured, the
+  // terminal-mirror write IS an observable both-clients contract.
+  // pong — pure heartbeat ack: both clients only clear the pong-timeout timer
+  // (scheduler.clearTimeout); the RTT/quality path is gated on a running ping loop
+  // (lastPingSentAt > 0) unreachable from a single seeded pong, and the app routes
+  // quality into the mocked connection-lifecycle store. No main-store write.
+  'pong',
+  // token_rotated — the dashboard rewrites the URL token query-param
+  // (window.history.replaceState); the app persists via the mocked SecureStore +
+  // the mocked connection-lifecycle store (setSavedConnection). No main-store set().
+  'token_rotated',
 ])
 
 // ---------------------------------------------------------------------------
@@ -173,20 +241,41 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
     // migrating types OUT to the shared dispatch table (universe shrinks below
     // the floor) lowers it — adjust both bounds in the same PR. Keep the band
     // TIGHT around the real count so the "fail loudly" intent stays sharp. Band
-    // last set for #5618 Batch 5b (available_models / cost_update / auth_bootstrap
-    // / tunnel_url_changed migrated out across Batch 5; universe down to ~48).
-    expect(both.length).toBeGreaterThanOrEqual(42)
-    expect(both.length).toBeLessThanOrEqual(54)
+    // last lowered for #5618 (agent_idle / permission_mode_changed / budget_warning /
+    // plan_ready / rate_limited / server_shutdown / conversations_list /
+    // checkpoint_restored migrated out; universe down to 41).
+    expect(both.length).toBeGreaterThanOrEqual(39)
+    expect(both.length).toBeLessThanOrEqual(50)
   })
 
-  it('every both-clients switch type has a fixture or an explicit PENDING entry', () => {
-    const undeclared = both.filter((t) => !covered.has(t) && !PENDING_CONTRACT_TYPES.has(t))
+  it('every both-clients switch type has a fixture, a PENDING entry, or a by-design exemption', () => {
+    const undeclared = both.filter(
+      (t) => !covered.has(t) && !PENDING_CONTRACT_TYPES.has(t) && !NO_SWITCH_CONTRACT_BY_DESIGN.has(t),
+    )
     expect(
       undeclared,
-      'New both-clients switch type(s) with NO SWITCH_FIXTURES entry and not in ' +
-        'PENDING_CONTRACT_TYPES. Add a behaviour-verified fixture to ' +
-        'contract-fixtures/fixtures.ts (preferred), or — only when retro-fitting a ' +
-        `pre-existing case — add it to the PENDING allowlist with a note:\n  ${undeclared.join('\n  ')}`,
+      'New both-clients switch type(s) with NO SWITCH_FIXTURES entry, not in ' +
+        'PENDING_CONTRACT_TYPES, and not in NO_SWITCH_CONTRACT_BY_DESIGN. Add a ' +
+        'behaviour-verified fixture to contract-fixtures/fixtures.ts (preferred); or — ' +
+        'only when retro-fitting a pre-existing case — add it to the PENDING allowlist ' +
+        'with a note; or, if it provably has no main-store contract, to ' +
+        `NO_SWITCH_CONTRACT_BY_DESIGN with a proof:\n  ${undeclared.join('\n  ')}`,
+    ).toEqual([])
+  })
+
+  it('NO_SWITCH_CONTRACT_BY_DESIGN entries are real both-clients types, uncovered, and disjoint from PENDING', () => {
+    const bothSet = new Set(both)
+    // Stale = no longer a both-clients switch type, OR it gained a fixture (it
+    // should then become a real fixture, not an exemption), OR it is ALSO listed
+    // in PENDING (a type is one or the other, never both).
+    const invalid = [...NO_SWITCH_CONTRACT_BY_DESIGN].filter(
+      (t) => !bothSet.has(t) || covered.has(t) || PENDING_CONTRACT_TYPES.has(t),
+    )
+    expect(
+      invalid,
+      'NO_SWITCH_CONTRACT_BY_DESIGN contains invalid entries — a type here must be a ' +
+        'current both-clients switch type with NO fixture and NOT in PENDING. Remove any ' +
+        `that gained a fixture, stopped being a both-clients switch type, or are also pending:\n  ${invalid.join('\n  ')}`,
     ).toEqual([])
   })
 

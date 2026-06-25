@@ -278,3 +278,48 @@ describe('#6310 — notification-prefs setters do not lie on a closing socket', 
     expect(prefs().bypassCategories).toEqual(['errors']);
   });
 });
+
+describe('#6321 — permission-mode setters do not leave a phantom mode on a closing socket', () => {
+  // These return void (unlike the notification-prefs family) and self-heal on a
+  // server CAPABILITY_NOT_SUPPORTED *rejection* — but a failed send has no
+  // round-trip, so no rejection arrives. The observable contract is that the
+  // optimistic permissionMode flip + pending registration (both gated in the same
+  // `if (!wsSend) return` block) do NOT happen when the send throws.
+  it('setPermissionMode: no optimistic permissionMode flip when the send throws', () => {
+    seedSession({ permissionMode: 'default' } as Partial<SessionState>);
+    const socket = closingSocket();
+    useConnectionStore.setState({ socket } as never);
+    useConnectionStore.getState().setPermissionMode('plan');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(activeState().permissionMode).toBe('default');
+  });
+
+  it('setPermissionMode: applies the optimistic flip on a healthy send', () => {
+    seedSession({ permissionMode: 'default' } as Partial<SessionState>);
+    const socket = liveSocket();
+    useConnectionStore.setState({ socket } as never);
+    useConnectionStore.getState().setPermissionMode('plan');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(activeState().permissionMode).toBe('plan');
+  });
+
+  it('confirmPermissionMode: no optimistic flip but still clears the confirm dialog when the send throws', () => {
+    seedSession({ permissionMode: 'default' } as Partial<SessionState>);
+    const socket = closingSocket();
+    useConnectionStore.setState({ socket, pendingPermissionConfirm: { mode: 'auto' } } as never);
+    useConnectionStore.getState().confirmPermissionMode('auto');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(activeState().permissionMode).toBe('default');
+    // The dialog still closes — the user did confirm; only the optimistic flip is gated.
+    expect(useConnectionStore.getState().pendingPermissionConfirm).toBeNull();
+  });
+
+  it('confirmPermissionMode: applies the flip + clears the dialog on a healthy send', () => {
+    seedSession({ permissionMode: 'default' } as Partial<SessionState>);
+    const socket = liveSocket();
+    useConnectionStore.setState({ socket, pendingPermissionConfirm: { mode: 'auto' } } as never);
+    useConnectionStore.getState().confirmPermissionMode('auto');
+    expect(activeState().permissionMode).toBe('auto');
+    expect(useConnectionStore.getState().pendingPermissionConfirm).toBeNull();
+  });
+});

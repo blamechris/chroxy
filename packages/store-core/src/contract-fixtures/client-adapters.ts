@@ -166,11 +166,16 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // live `flat` ref so the web-task upsert fixtures observe identical results.
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
+    // #5618 — `alert` is a transient UI side-effect OUTSIDE the shared store-state
+    // contract (no fixture asserts it), modelled as a no-op for the contract surface.
+    alert: () => {},
     getSessions: () => sessionList,
     // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
     // Both clients back it with their flat `checkpoints`; modelled as a read of
     // the live `flat` ref so the checkpoint fixtures observe identical results.
     getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
+    // #5618 — search_results staleness gate reads the live flat searchQuery.
+    getSearchQuery: () => ((flat as Record<string, unknown>).searchQuery as string | null | undefined) ?? null,
     // #5618 — `pushSessionNotification` is a UI side-effect OUTSIDE the shared
     // store-state contract (the app additionally mirrors into its mobile push
     // store; the dashboard does not). Modelled as a no-op here, exactly like the
@@ -198,6 +203,13 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     getMyClientId: () => myClientId,
     getFollowMode: () => followMode,
     switchSession: (sessionId) => switchedSessions.push(sessionId),
+    // #5618 — checkpoint_restored auto-switches via switchToRestoredSession. The
+    // contract asserts the flat activeSessionId flip (both real stores' switchSession
+    // re-homes activeSessionId), so model it as writing activeSessionId.
+    switchToRestoredSession: (sessionId) => {
+      ;(flat as Record<string, unknown>).activeSessionId = sessionId
+      switchedSessions.push(sessionId)
+    },
     // #5653 — only the APP opts its imperative-callback registry into the table.
     // Model it as "a callback IS registered for every channel" so the contract
     // can observe the invocation + payload. The DASHBOARD omits `getCallback`

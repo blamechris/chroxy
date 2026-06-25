@@ -503,3 +503,99 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
   message: z.string(),
   actualAuthor: z.string(),
 })
+
+// #6323 (batch 1 of #6314): schemas for the highest-traffic unschemaed
+// server→client session messages, so a field-shape change is drift-checked.
+
+// Per-session busy/idle activity ping (ws-forwarding.js): `isBusy` flips true
+// when a stream starts and false when a result arrives; `lastCost` carries the
+// result cost (null while busy / when no cost is known).
+export const ServerSessionActivitySchema = z.object({
+  type: z.literal('session_activity'),
+  sessionId: z.string(),
+  isBusy: z.boolean(),
+  lastCost: z.number().finite().nullable(),
+})
+
+// Session operation error envelope — the union of fields across its many emit
+// sites (session-start / checkpoint / dev-preview failures, capability gates,
+// token-mismatch via buildSessionTokenMismatchPayload, control-room action
+// errors). `.passthrough()` because the control-room path spreads open-ended
+// `correlate(msg)` correlation fields onto the envelope (mirrors auth_ok's
+// passthrough rationale) — the named fields document the stable contract.
+export const ServerSessionErrorSchema = z.object({
+  type: z.literal('session_error'),
+  message: z.string(),
+  code: z.string().optional(),
+  category: z.string().optional(),
+  sessionId: z.string().optional(),
+  recoverable: z.boolean().optional(),
+  reason: z.string().optional(),
+  requestId: z.string().nullable().optional(),
+  boundSessionId: z.string().nullable().optional(),
+  boundSessionName: z.string().nullable().optional(),
+  primaryClientId: z.string().nullable().optional(),
+}).passthrough()
+
+// A session's metadata changed (today: its display name — auto-label or rename).
+export const ServerSessionUpdatedSchema = z.object({
+  type: z.literal('session_updated'),
+  sessionId: z.string(),
+  name: z.string(),
+})
+
+// #6324 (batch 2a of #6314): checkpoint result family. The wire `checkpoint`
+// projection is built explicitly at the emit site (checkpoint-handlers.js) — 6
+// keys, NOT the manager's full record (gitRef/cwd/resumeSessionId are not sent).
+// createdAt is epoch-ms (number, not ISO). hasGitSnapshot = !!gitRef.
+const CheckpointSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  messageCount: z.number(),
+  createdAt: z.number(),
+  hasGitSnapshot: z.boolean(),
+})
+
+export const ServerCheckpointCreatedSchema = z.object({
+  type: z.literal('checkpoint_created'),
+  sessionId: z.string(),
+  checkpoint: CheckpointSchema,
+})
+
+// `sessionId` is nullable: the no-active-session path emits `{ sessionId: null,
+// checkpoints: [] }`; the populated path emits a string id. Always present.
+export const ServerCheckpointListSchema = z.object({
+  type: z.literal('checkpoint_list'),
+  sessionId: z.string().nullable(),
+  checkpoints: z.array(CheckpointSchema),
+})
+
+// NOTE: checkpoint_restored does NOT carry a `sessionId` — keys are exactly
+// { type, checkpointId, newSessionId, name }. `newSessionId` is the fresh
+// session the restore created; the client re-homes to it via switchSession.
+export const ServerCheckpointRestoredSchema = z.object({
+  type: z.literal('checkpoint_restored'),
+  checkpointId: z.string(),
+  newSessionId: z.string(),
+  name: z.string(),
+})
+
+// #6332 (batch 2b of #6314): idle-timeout lifecycle. `session_warning` is the
+// pre-timeout notice; `session_timeout` fires at close. NOTE the time field
+// differs — `remainingMs` (warning) vs `idleMs` (timeout) — do not conflate.
+export const ServerSessionWarningSchema = z.object({
+  type: z.literal('session_warning'),
+  sessionId: z.string(),
+  name: z.string(),
+  reason: z.literal('idle_timeout'),
+  message: z.string(),
+  remainingMs: z.number(),
+})
+
+export const ServerSessionTimeoutSchema = z.object({
+  type: z.literal('session_timeout'),
+  sessionId: z.string(),
+  name: z.string(),
+  idleMs: z.number(),
+})

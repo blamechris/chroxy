@@ -276,3 +276,42 @@ export const ServerClaudeReadySchema = z.object({
     reason: z.string(),
   }).optional(),
 })
+
+// #6323 (batch 1 of #6314): multi-client presence — broadcast to OTHER
+// authenticated clients when a client connects (`client_joined`, with its
+// device descriptor) or disconnects (`client_left`). Emitted by ws-broadcaster.
+export const ServerClientJoinedSchema = z.object({
+  type: z.literal('client_joined'),
+  client: z.object({
+    clientId: z.string(),
+    deviceName: z.string().nullable(),
+    deviceType: z.enum(['phone', 'tablet', 'desktop', 'unknown']),
+    platform: z.string(),
+  }),
+})
+
+export const ServerClientLeftSchema = z.object({
+  type: z.literal('client_left'),
+  clientId: z.string(),
+})
+
+// #6332 (batch 2b of #6314): E2E key-exchange ack (ws-auth.js). `publicKey` (the
+// server's ephemeral X25519 public key, base64) is always present; `serverKeySig`
+// (#5536 Ed25519 sig over publicKey) is spread only when the daemon has a pinned
+// identity, and `newIdentityKey` + `rotationCert` (#5616 rotation-continuity) are
+// spread as a pair only alongside it — all three absent (not null) otherwise.
+export const ServerKeyExchangeOkSchema = z.object({
+  type: z.literal('key_exchange_ok'),
+  publicKey: z.string(),
+  serverKeySig: z.string().optional(),
+  newIdentityKey: z.string().optional(),
+  rotationCert: z.string().optional(),
+})
+
+// #6332: throttle notice (ws-server.js) — the client should back off for
+// `retryAfterMs` before retrying. Identical field set at both emit sites.
+export const ServerRateLimitedSchema = z.object({
+  type: z.literal('rate_limited'),
+  retryAfterMs: z.number(),
+  message: z.string(),
+})

@@ -65,7 +65,13 @@ import {
   handleAvailablePermissionModes,
   handleSessionUpdated,
   handleAgentBusy,
+  handleAgentIdle,
+  handlePermissionModeChanged,
   handleBudgetResumed,
+  handleBudgetWarning,
+  handlePlanReady,
+  handleRateLimited,
+  handleServerShutdown,
   handleBudgetResumeAck,
   handleConversationId,
   handlePermissionRulesUpdated,
@@ -130,6 +136,9 @@ import {
   applyInterventionBuilder,
   // --- checkpoint cases (#5618 Batch 6) ---
   handleCheckpointCreated,
+  handleCheckpointRestored,
+  handleConversationsList,
+  handleSearchResults,
   handleCheckpointList,
   resolveSessionId,
   type PermissionMode,
@@ -258,6 +267,13 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   updateState(updater: (flat: Flat) => Flat): void
   /** Append a chat message via the client's own add-message path. */
   addMessage(message: ChatMessage): void
+  /**
+   * Surface a transient alert/toast to the user (#5618). Both clients back this
+   * with their own alert primitive (the app's React-Native `Alert.alert`, the
+   * dashboard's `_adapters.alert.alert`). Used by `budget_warning` and other
+   * notice-bearing types whose body is otherwise byte-identical across clients.
+   */
+  alert(title: string, message: string): void
   /** Read the current session list (for `session_updated`). */
   getSessions(): SessionInfo[]
   /**
@@ -313,6 +329,66 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * {@link ClientStoreAdapter.pushSessionNotification}.
    */
   syncSecondaryInventory?(kind: 'slashCommands' | 'customAgents', list: unknown[]): void
+  /**
+   * Apply a no-session FALLBACK patch to the FLAT connection state (#5618). When a
+   * session-targeted message (`agent_idle`, `permission_mode_changed`, …) arrives for
+   * a session that isn't in `sessionStates`, the DASHBOARD writes the patch into its
+   * flat state — its UI reads flat fields directly (`streamingMessageId`/`isIdle` for
+   * the stop button, App.tsx isStreaming; `permissionMode` for the mode pill) and its
+   * pre-bootstrap `sendInput` writes flat `pending`, so without this an abnormal
+   * broadcast leaves that flat UI stale (#5760). The APP has no flat mirror for these
+   * (it derives them from the active session) and OMITS this hook — a faithful
+   * per-client preservation of the prior switch behaviour, like {@link syncSecondaryInventory}.
+   */
+  applyNoSessionFallback?(patch: Flat): void
+  /**
+   * Clear the APP's pending permission-mode optimistic-revert tracker for a session
+   * (#5618). On a `permission_mode_changed` broadcast the app drops any in-flight
+   * optimistic revert for `sessionId` so a late rejection can't undo the confirmed
+   * mode; the DASHBOARD has no equivalent per-session tracker and OMITS this hook.
+   * A null sessionId is a no-op.
+   */
+  clearPendingPermissionModeRequests?(sessionId: string | null): void
+  /**
+   * Surface the APP's `plan_ready` session notification (#5618). On `plan_ready`
+   * the app pushes a 'plan' background-session notification ("Plan ready for
+   * approval"); the DASHBOARD has no equivalent surface and OMITS this hook.
+   */
+  notifyPlanReady?(sessionId: string): void
+  /**
+   * Apply the APP's `server_shutdown` notification side-effect (#5618). After the
+   * shared shutdown patch is written to flat state, the app mirrors it into its
+   * mobile notification store (`setShutdown`); the DASHBOARD omits this hook.
+   */
+  applyShutdownNotification?(payload: { shutdownReason: 'restart' | 'shutdown' | 'crash'; restartEtaMs: number; restartingSince: number }): void
+  /**
+   * Auto-switch to the session a checkpoint restore created (#5618). BOTH clients
+   * switch, so this is required (not optional) — the only divergence is the options:
+   * the APP passes `{ serverNotify: false, haptic: false }` (the server already
+   * re-homed this client, and an auto-switch shouldn't buzz), the DASHBOARD passes
+   * none. Each client backs it with its store's `switchSession`.
+   */
+  switchToRestoredSession(sessionId: string): void
+  /**
+   * Apply the APP's `conversations_list` extras (#5618): clear the app-only
+   * `conversationHistoryError` flag and mirror the list into its secondary
+   * `useConversationStore`. The DASHBOARD has neither and OMITS this hook (the
+   * shared `conversationHistory` / `conversationHistoryLoading` write is enough).
+   */
+  applyConversationsListExtras?(conversations: unknown[]): void
+  /**
+   * Read the current flat `searchQuery` (#5618). `search_results` needs it for the
+   * staleness gate — a late response for an older query is dropped. Both clients
+   * back it with their flat connection state's `searchQuery`.
+   */
+  getSearchQuery(): string | null
+  /**
+   * Apply the APP's `search_results` extras (#5618): clear the app-only `searchError`
+   * flag and mirror the results into its secondary `useConversationStore`. The
+   * DASHBOARD has neither and OMITS this hook (the shared `searchResults` /
+   * `searchLoading` write is enough).
+   */
+  applySearchResultsExtras?(results: unknown[]): void
   /**
    * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
    * The mobile app keeps a separate `useConversationStore` whose checkpoint list
@@ -514,6 +590,48 @@ export interface DispatchMessageMap {
   agent_busy: {
     type: 'agent_busy'
     sessionId?: string
+  }
+  agent_idle: {
+    type: 'agent_idle'
+    sessionId?: string
+  }
+  permission_mode_changed: {
+    type: 'permission_mode_changed'
+    sessionId?: string
+    mode?: string | null
+  }
+  budget_warning: {
+    type: 'budget_warning'
+    sessionId?: string
+    message?: string
+  }
+  plan_ready: {
+    type: 'plan_ready'
+    sessionId?: string
+    allowedPrompts?: unknown[]
+  }
+  rate_limited: {
+    type: 'rate_limited'
+    message?: string
+    retryAfterMs?: number
+  }
+  server_shutdown: {
+    type: 'server_shutdown'
+    reason?: string
+    restartEtaMs?: number
+  }
+  conversations_list: {
+    type: 'conversations_list'
+    conversations?: unknown[]
+  }
+  checkpoint_restored: {
+    type: 'checkpoint_restored'
+    newSessionId?: string
+  }
+  search_results: {
+    type: 'search_results'
+    query?: string
+    results?: unknown[]
   }
   budget_resumed: {
     type: 'budget_resumed'
@@ -867,6 +985,62 @@ function dispatchAgentBusy<S extends DispatchSessionBase>(
   }
 }
 
+/**
+ * `agent_idle` — flip the target session to idle (#5618). Byte-identical to the
+ * prior switch case for a SEEDED session: `updateSession(target, () => handleAgentIdle())`
+ * ({ isIdle, streamingMessageId: null, activeTools: [] }). The no-session FALLBACK
+ * (the dashboard mirrors the patch into flat state; the app no-ops) is preserved
+ * per-client via the optional {@link ClientStoreAdapter.applyNoSessionFallback} hook
+ * — no behaviour change on either client.
+ */
+function dispatchAgentIdle<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['agent_idle'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  const idlePatch = handleAgentIdle()
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(targetId, () => idlePatch as unknown as Partial<S>)
+  } else {
+    adapter.applyNoSessionFallback?.(idlePatch as unknown as Record<string, unknown>)
+  }
+}
+
+/**
+ * `permission_mode_changed` — apply the new permission mode to the target session
+ * (#5618). Reconciliation of the two prior switch cases:
+ *  - **Session resolution = targetId-direct** (Decision A): apply when the target is
+ *    local, else the dashboard's flat fallback via {@link ClientStoreAdapter.applyNoSessionFallback}.
+ *    This drops the APP's prior `effectiveId` retry-to-active-session, which only
+ *    diverged when the target wasn't in `sessionStates` — unreachable in normal use
+ *    (`session_list` seeds a shell for every session) and a latent multi-client bug
+ *    when it did fire (it applied another session's broadcast to the active one).
+ *  - **clearPending** (app-only optimistic-revert tracker) is preserved via
+ *    {@link ClientStoreAdapter.clearPendingPermissionModeRequests} — the app implements
+ *    it, the dashboard omits it. Keyed on `targetId` (the session the broadcast is
+ *    *for*), matching the app's prior multi-client-safe clear.
+ *  - **`pendingPermissionConfirm: null`** (both clients) via `setState`.
+ */
+function dispatchPermissionModeChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['permission_mode_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { mode } = handlePermissionModeChanged(msg as Record<string, unknown>)
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(targetId, () => ({ permissionMode: mode }) as unknown as Partial<S>)
+  } else {
+    adapter.applyNoSessionFallback?.({ permissionMode: mode })
+  }
+  // Guard on targetId (matches the app's prior `if (targetId)`): never clear the
+  // tracker with a null key — clearing the app's pending entries is keyed on the
+  // session the broadcast is *for*.
+  if (targetId) {
+    adapter.clearPendingPermissionModeRequests?.(targetId)
+  }
+  adapter.setState({ pendingPermissionConfirm: null })
+}
+
 /** `budget_resumed` — append the "budget resumed" system message. */
 function dispatchBudgetResumed<S extends DispatchSessionBase>(
   msg: DispatchMessageMap['budget_resumed'],
@@ -885,6 +1059,123 @@ function dispatchBudgetResumed<S extends DispatchSessionBase>(
   } else {
     adapter.addMessage(systemMessage)
   }
+}
+
+/**
+ * `budget_warning` (#5618) — alert the user and append a system message to the
+ * target session (or the flat add-message path when it isn't local). Byte-identical
+ * across clients except the alert primitive, which is the required `adapter.alert`.
+ */
+function dispatchBudgetWarning<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['budget_warning'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { warningMessage, systemMessage } = handleBudgetWarning(msg as Record<string, unknown>)
+  adapter.alert('Budget Warning', warningMessage)
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(targetId, (ss) => ({ messages: [...ss.messages, systemMessage] } as Partial<S>))
+  } else {
+    adapter.addMessage(systemMessage)
+  }
+}
+
+/**
+ * `rate_limited` (#6334, #5618) — surface the server-side throttle as a brief
+ * system notice on the ACTIVE session (or the flat add-message path). Byte-identical
+ * across both clients.
+ */
+function dispatchRateLimited<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['rate_limited'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { chatMessage } = handleRateLimited(msg as Record<string, unknown>)
+  const activeId = adapter.getActiveSessionId()
+  if (activeId && adapter.hasSession(activeId)) {
+    adapter.updateSession(activeId, (ss) => ({ messages: [...ss.messages, chatMessage] } as Partial<S>))
+  } else {
+    adapter.addMessage(chatMessage)
+  }
+}
+
+/**
+ * `plan_ready` (#5618) — flip the target session into plan-pending. The APP also
+ * raises a 'plan' background-session notification via the optional
+ * {@link ClientStoreAdapter.notifyPlanReady} hook (the dashboard omits it).
+ */
+function dispatchPlanReady<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['plan_ready'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const planReady = handlePlanReady(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (planReady.sessionId && adapter.hasSession(planReady.sessionId)) {
+    adapter.updateSession(planReady.sessionId, () => planReady.patch as unknown as Partial<S>)
+  }
+  if (planReady.sessionId) {
+    adapter.notifyPlanReady?.(planReady.sessionId)
+  }
+}
+
+/**
+ * `server_shutdown` (#5618) — write the shared shutdown patch to flat state. The
+ * APP additionally mirrors it into its mobile notification store via the optional
+ * {@link ClientStoreAdapter.applyShutdownNotification} hook (the dashboard omits it).
+ */
+function dispatchServerShutdown<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['server_shutdown'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const payload = handleServerShutdown(msg as Record<string, unknown>)
+  adapter.setState(payload as unknown as Record<string, unknown>)
+  adapter.applyShutdownNotification?.(payload)
+}
+
+/**
+ * `conversations_list` (#5618) — replace the flat conversation-history list. Both
+ * clients write `conversationHistory` + `conversationHistoryLoading: false`
+ * identically; the APP's extra error-clear + secondary-store mirror ride the
+ * optional {@link ClientStoreAdapter.applyConversationsListExtras} hook.
+ */
+function dispatchConversationsList<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['conversations_list'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { conversations } = handleConversationsList(msg as Record<string, unknown>)
+  adapter.setState({ conversationHistory: conversations, conversationHistoryLoading: false })
+  adapter.applyConversationsListExtras?.(conversations)
+}
+
+/**
+ * `checkpoint_restored` (#5618) — the server created a new session at the restored
+ * checkpoint and re-homed this client onto it; auto-switch to it. Both clients
+ * switch via the required {@link ClientStoreAdapter.switchToRestoredSession} hook
+ * (the app passes its no-notify/no-haptic options, the dashboard plain).
+ */
+function dispatchCheckpointRestored<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['checkpoint_restored'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const restored = handleCheckpointRestored(msg as Record<string, unknown>)
+  if (restored) {
+    adapter.switchToRestoredSession(restored.newSessionId)
+  }
+}
+
+/**
+ * `search_results` (#5618) — apply conversation-search results, dropping a stale
+ * response for an older query (the staleness gate reads the live `searchQuery` via
+ * the adapter). Both clients write the flat `searchResults` + `searchLoading: false`
+ * identically; the APP's extra `searchError` clear + secondary-store mirror ride the
+ * optional {@link ClientStoreAdapter.applySearchResultsExtras} hook.
+ */
+function dispatchSearchResults<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['search_results'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { results, shouldApply } = handleSearchResults(msg as Record<string, unknown>, adapter.getSearchQuery())
+  if (!shouldApply) return
+  adapter.setState({ searchResults: results, searchLoading: false })
+  adapter.applySearchResultsExtras?.(results)
 }
 
 /**
@@ -1681,6 +1972,15 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     available_permission_modes: dispatchAvailablePermissionModes,
     session_updated: dispatchSessionUpdated,
     agent_busy: dispatchAgentBusy,
+    agent_idle: dispatchAgentIdle,
+    permission_mode_changed: dispatchPermissionModeChanged,
+    budget_warning: dispatchBudgetWarning,
+    plan_ready: dispatchPlanReady,
+    rate_limited: dispatchRateLimited,
+    server_shutdown: dispatchServerShutdown,
+    conversations_list: dispatchConversationsList,
+    checkpoint_restored: dispatchCheckpointRestored,
+    search_results: dispatchSearchResults,
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
@@ -1768,6 +2068,15 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'available_permission_modes',
   'session_updated',
   'agent_busy',
+  'agent_idle',
+  'permission_mode_changed',
+  'budget_warning',
+  'plan_ready',
+  'rate_limited',
+  'server_shutdown',
+  'conversations_list',
+  'checkpoint_restored',
+  'search_results',
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',

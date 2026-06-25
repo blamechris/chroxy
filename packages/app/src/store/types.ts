@@ -178,6 +178,10 @@ export interface ProviderCapabilities {
   // warning copy from it.
   interruptsTurnOnAutoSwitch?: boolean;
   planMode?: boolean;
+  // #6312: true when the provider streams partial responses. claude-tui reports
+  // false; other providers omit it (treated as capable). Consumed by the
+  // session-creation limitation note so `streaming: false` isn't dropped client-side.
+  streaming?: boolean;
   resume?: boolean;
   terminal?: boolean;
   thinkingLevel?: boolean;

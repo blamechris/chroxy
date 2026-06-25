@@ -17,17 +17,13 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
-  handlePermissionModeChanged as sharedPermissionModeChanged,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
-  handleAgentIdle as sharedAgentIdle,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
-  handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)
-  handlePlanReady as sharedPlanReady,
   // #4653: chroxy-side multi-question deny intervention surfaced to the user
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
@@ -67,8 +63,6 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
-  handleCheckpointRestored as sharedCheckpointRestored,
-  handleConversationsList as sharedConversationsList,
   handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
@@ -94,14 +88,12 @@ import {
   // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
-  handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the dashboard no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
   // web_task_list / web_feature_status migrated to the shared dispatch table
   // (#5556 slice 2)
-  handleSearchResults as sharedSearchResults,
   applyOrphanDeltas,
   isActivityEvent,
   // #5163 (epic #5159): Control Room activity reducer — snapshot replace +
@@ -1051,14 +1043,26 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
+  // #5618 — budget_warning (and future notice types) surface a transient alert
+  // via the dashboard's alert adapter.
+  alert: (title, message) => _adapters.alert.alert(title, message),
   getSessions: () => getStore().getState().sessions,
   // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
   // The dashboard omits syncSecondaryCheckpoints (no secondary checkpoint store).
   getCheckpoints: () => getStore().getState().checkpoints,
+  // #5618 — checkpoint_restored auto-switches (plain, no options — the dashboard has
+  // no serverNotify/haptic concepts; the app passes those via its own impl).
+  switchToRestoredSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  // #5618 — search_results staleness gate reads the live flat searchQuery.
+  getSearchQuery: () => getStore().getState().searchQuery,
   // #5618 — user_question raises a background-session notification via the
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
     pushSessionNotification(sessionId, eventType, message),
+  // #5618 — generic no-session fallback: mirror a session-targeted patch into FLAT
+  // state (the dashboard UI reads flat streamingMessageId/isIdle/permissionMode; the
+  // app omits this hook). Used by agent_idle and permission_mode_changed.
+  applyNoSessionFallback: (patch) => getStore().setState(patch as Partial<ConnectionState>),
   // #5618 Batch 3 — error-sink for session_restore_failed / session_persist_failed.
   // The dashboard's connection-store addServerError builds its own envelope
   // (category 'general', id 'info', ring-capped serverErrors) from the message;
@@ -1384,19 +1388,9 @@ function applyRotatedTunnelUrlDashboard(
   }
 }
 
-function handleCheckpointRestored(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // Server has created a new session from the checkpoint and already moved
-  // this client's server-side activeSessionId onto it (the message is sent
-  // only to the requesting client — see checkpoint-handlers.js). #5454:
-  // adopt the shared parser and auto-switch to the restored session, matching
-  // the app. Previously the dashboard left the operator on the old tab until
-  // they clicked the new "Rewind: …" entry; the session_list broadcast that
-  // follows still populates the tab strip.
-  const restored = sharedCheckpointRestored(msg);
-  if (restored) {
-    get().switchSession(restored.newSessionId);
-  }
-}
+// checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
+// The auto-switch rides the required switchToRestoredSession adapter hook (the
+// dashboard's impl is the plain switchSession, no options).
 
 /**
  * Server emits pairing_refreshed whenever the pairing ID changes: after a
@@ -1411,12 +1405,9 @@ function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set
 // web_feature_status + web_task_list migrated to the shared dispatch table
 // (#5556 slice 2)
 
-function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  // Parser shared via store-core (#5454); the dashboard intentionally has no
-  // `conversationHistoryError` / conversation-store mirror (those are app-only).
-  const { conversations } = sharedConversationsList(msg);
-  set({ conversationHistory: conversations, conversationHistoryLoading: false });
-}
+// conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
+// The dashboard has no conversationHistoryError / conversation-store mirror, so it
+// omits the optional applyConversationsListExtras hook.
 
 // #5618 — model_changed migrated to the shared store-core dispatch table
 // (runDispatch handles it before the HANDLERS map / switch). Removed from here.
@@ -1772,17 +1763,13 @@ function clearPendingTrustGrantByRequestId(requestId: string, get: MsgGet): bool
   return cleared;
 }
 
-function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const { mode } = sharedPermissionModeChanged(msg);
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => ({ permissionMode: mode }));
-  } else {
-    set({ permissionMode: mode });
-  }
-  // Clear pending confirm if mode change arrived (confirmation was accepted)
-  set({ pendingPermissionConfirm: null });
-}
+// permission_mode_changed — migrated to the shared dispatch table (#5618;
+// runDispatch). The seeded-session path + the no-session FLAT fallback
+// (set({ permissionMode })) are the shared dispatchPermissionModeChanged; the flat
+// fallback is carried by the _dispatchAdapter.applyNoSessionFallback hook (the
+// dashboard's UI reads flat permissionMode), and pendingPermissionConfirm is cleared
+// via setState. The dashboard has no pending optimistic-revert tracker, so it omits
+// the clearPendingPermissionModeRequests hook.
 
 // available_permission_modes + session_updated migrated to the shared
 // store-core dispatch table (#5556)
@@ -1855,18 +1842,13 @@ function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   }
 }
 
-function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => sharedAgentIdle());
-  } else {
-    // Legacy/pre-bootstrap path: no session-state yet. The dashboard UI reads
-    // the flat `streamingMessageId` directly (App.tsx isStreaming check), and
-    // sendInput writes flat 'pending' here too. Without this fallback, an
-    // abnormal agent_idle in this state would leave the stop button stuck.
-    set(sharedAgentIdle());
-  }
-}
+// agent_idle — migrated to the shared dispatch table (#5618; runDispatch handles
+// it before this HANDLERS map). The seeded-session path is the shared
+// dispatchAgentIdle; the dashboard's no-session FLAT fallback (its UI reads flat
+// streamingMessageId/isIdle directly — App.tsx isStreaming — and sendInput writes
+// flat 'pending', so without it an abnormal agent_idle leaves the stop button
+// stuck) is preserved per-client via the _dispatchAdapter.applyAgentIdleFallback
+// hook below.
 
 // agent_busy migrated to the shared store-core dispatch table (#5556)
 
@@ -2370,18 +2352,8 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   }
 }
 
-function handleBudgetWarning(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
-  _adapters.alert.alert('Budget Warning', warningMessage);
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, (ss) => ({
-      messages: [...ss.messages, systemMessage],
-    }));
-  } else {
-    get().addMessage(systemMessage);
-  }
-}
+// budget_warning — migrated to the shared dispatch table (#5618; runDispatch).
+// The alert rides the new adapter.alert primitive; routing is byte-identical.
 
 function handleBudgetExceeded(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   const { exceededMessage, systemMessage } = sharedBudgetExceeded(msg);
@@ -2443,9 +2415,8 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   }
 }
 
-function handleServerShutdown(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  set(sharedServerShutdown(msg));
-}
+// server_shutdown — migrated to the shared dispatch table (#5618; runDispatch).
+// The dashboard has no shutdown notification, so it omits applyShutdownNotification.
 
 /**
  * #5163 (epic #5159) — Control Room `activity_snapshot`: REPLACE the target
@@ -3151,10 +3122,10 @@ const HANDLERS: Record<string, Handler> = {
   terminal_size: handleTerminalSize,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
-  checkpoint_restored: handleCheckpointRestored,
+  // checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
   // web_feature_status / web_task_list migrated to the shared dispatch table
   // (#5556 slice 2)
-  conversations_list: handleConversationsList,
+  // conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
   chroxy_context_hint_changed: handleChroxyContextHintChanged,
@@ -3170,12 +3141,12 @@ const HANDLERS: Record<string, Handler> = {
   skill_trust_request: handleSkillTrustRequest,
   skill_trust_granted: handleSkillTrustGranted,
   skill_trust_grant_ok: handleSkillTrustGrantOk,
-  permission_mode_changed: handlePermissionModeChanged,
+  // permission_mode_changed — migrated to the shared dispatch table (#5618; runDispatch).
   // available_permission_modes / session_updated / agent_busy migrated to the
   // shared store-core dispatch table (#5556)
   session_switched: handleSessionSwitched,
   claude_ready: handleClaudeReady,
-  agent_idle: handleAgentIdle,
+  // agent_idle — migrated to the shared dispatch table (#5618; runDispatch).
   stream_start: handleStreamStart,
   stream_delta: handleStreamDelta,
   stream_end: handleStreamEnd,
@@ -3184,11 +3155,11 @@ const HANDLERS: Record<string, Handler> = {
   tool_result: handleToolResult,
   permission_request: handlePermissionRequest,
   permission_resolved: handlePermissionResolved,
-  budget_warning: handleBudgetWarning,
+  // budget_warning — migrated to the shared dispatch table (#5618; runDispatch).
   budget_exceeded: handleBudgetExceeded,
   // budget_resumed migrated to the shared store-core dispatch table (#5556)
   server_error: handleServerError,
-  server_shutdown: handleServerShutdown,
+  // server_shutdown — migrated to the shared dispatch table (#5618; runDispatch).
   // #5163 (epic #5159): Control Room live activity tree.
   activity_snapshot: handleActivitySnapshot,
   activity_delta: handleActivityDelta,
@@ -4356,13 +4327,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_spawned / agent_completed / agent_event / background_work_changed /
     // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'plan_ready': {
-      const planReady = sharedPlanReady(msg, get().activeSessionId);
-      if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
-        updateSession(planReady.sessionId, () => planReady.patch);
-      }
-      break;
-    }
+    // plan_ready — migrated to the shared dispatch table (#5618; runDispatch). The
+    // dashboard has no plan notification, so it omits the notifyPlanReady hook.
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
@@ -4525,6 +4491,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       }
       break;
     }
+
+    // rate_limited (#6334) — migrated to the shared dispatch table (#5618;
+    // runDispatch). Byte-identical active-session notice; no per-client hook.
 
     // --- Multi-client awareness ---
 
@@ -4826,13 +4795,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'search_results': {
-      const currentQuery = (get() as ConnectionState).searchQuery;
-      const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
-      if (!shouldApply) break; // Stale response for an older query — ignore
-      set({ searchResults: results, searchLoading: false });
-      break;
-    }
+    // search_results — migrated to the shared dispatch table (#5618; runDispatch).
+    // The staleness gate reads searchQuery via getSearchQuery; the dashboard has no
+    // searchError / conversation-store mirror, so it omits applySearchResultsExtras.
 
     case 'log_entry': {
       const { entry } = sharedLogEntry(msg);

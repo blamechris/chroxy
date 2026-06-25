@@ -5767,6 +5767,22 @@ button.sidebar-token-view-session-row:hover {
    inline `<option>` hint (which truncated on narrow viewports and
    couldn't render code formatting). Warning-toned so it stands apart
    from the neutral billing-hint above. */
+/* #6312: a subtle informational note explaining a reduced-capability provider's
+   missing affordances (claude-tui: no plan mode / streaming / model switch) at
+   session creation. Info-toned, NOT a warning — the provider works fine; this
+   only sets expectations so the absent controls aren't a silent mystery. */
+.provider-limitation-note {
+  display: block;
+  margin-top: 6px;
+  padding: 6px 10px;
+  border-radius: 6px;
+  background: var(--surface-subtle, #ffffff0a);
+  border-left: 3px solid var(--border, #3a3a3a);
+  color: var(--text-secondary);
+  font-size: var(--text-sm);
+  line-height: 1.45;
+}
+
 .provider-fix-hint {
   display: block;
   margin-top: 6px;

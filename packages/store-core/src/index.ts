@@ -32,6 +32,8 @@ export { isVoiceInputMode } from './types'
 // this single guard, so widening `SelectOptionValue` to a third object
 // shape can't silently misroute it as freeform on either client.
 export { isFreeformAnswer } from './freeform-answer'
+export { buildProviderLimitationNote } from './provider-capabilities'
+export type { DegradableCapabilities } from './provider-capabilities'
 export type { OtherFreeformAnswer } from './freeform-answer'
 
 // #5555.3 / #5555.4 — lastSeq cursor tracking + no-blank-flash replay reconcile.
@@ -580,6 +582,7 @@ export {
   handleServerError,
   handleServerShutdown,
   handleServerStatusLegacy,
+  handleRateLimited,
   handleWebTaskUpsert,
   // #5556 slice 4 — shared filter-and-append upsert for web_task_created/updated.
   applyWebTaskUpsert,

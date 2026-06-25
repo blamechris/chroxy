@@ -3332,10 +3332,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // this, a rejected switch leaves previousPermissionMode pointing at the
     // current mode and the toggle silently becomes a no-op.
     const priorPreviousMode = get().previousPermissionMode ?? null;
-    // Save current mode before switching (for Shift+Tab toggle)
-    if (permissionMode && permissionMode !== mode) {
-      set({ previousPermissionMode: permissionMode });
-    }
     // #5716: remember the mode we're switching FROM, keyed by a requestId the
     // server echoes on a PERMISSION_MODE_NOT_APPLIED rejection, so the error
     // handler can roll the optimistic update below back instead of leaving the
@@ -3345,22 +3341,27 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       ? (get().sessionStates[activeSessionId]!.permissionMode ?? null)
       : (get().permissionMode ?? null);
     const requestId = `set-perm-mode-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    if (mode === 'auto') {
-      // Send with confirmed:true so the server skips its own confirmation
-      // round-trip and broadcasts `permission_mode_changed` directly.
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode, priorPreviousMode });
-        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, confirmed: true, requestId };
-        if (activeSessionId) payload.sessionId = activeSessionId;
-        wsSend(socket, payload);
-      }
-    } else {
-      if (socket && socket.readyState === WebSocket.OPEN) {
-        registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode, priorPreviousMode });
-        const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, requestId };
-        if (activeSessionId) payload.sessionId = activeSessionId;
-        wsSend(socket, payload);
-      }
+    // Send with confirmed:true for `auto` so the server skips its own confirmation
+    // round-trip and broadcasts `permission_mode_changed` directly.
+    const payload: Record<string, unknown> = mode === 'auto'
+      ? { type: 'set_permission_mode', mode, confirmed: true, requestId }
+      : { type: 'set_permission_mode', mode, requestId };
+    if (activeSessionId) payload.sessionId = activeSessionId;
+    // #6321: when the socket is OPEN we attempt the send and gate the pending
+    // registration on its result — if wsSend returns false (the OPEN→CLOSING TOCTOU
+    // #6293/#6308/#6310 harden against) there's no server round-trip, so a
+    // PERMISSION_MODE_NOT_APPLIED rejection never arrives to revert. Bailing keeps a
+    // failed send from leaving a phantom permissionMode (a phantom `auto`/bypass is
+    // the dangerous case) or an orphaned pending request. With NO open socket we
+    // keep the #3693 offline behavior: still flip locally so the controlled
+    // <select> reflects the choice (no round-trip is pending, so nothing to register).
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      if (!wsSend(socket, payload)) return;
+      registerPermissionModeChangeRequest(requestId, { sessionId: activeSessionId, previousMode, priorPreviousMode });
+    }
+    // Save current mode before switching (for Shift+Tab toggle).
+    if (permissionMode && permissionMode !== mode) {
+      set({ previousPermissionMode: permissionMode });
     }
     // Optimistically update local state so the controlled `<select>`
     // doesn't snap back to the prior value before the server's

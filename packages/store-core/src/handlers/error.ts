@@ -276,3 +276,40 @@ export function handleServerStatusLegacy(
   }
   return { chatMessage }
 }
+
+/** Result of {@link handleRateLimited}. */
+export interface RateLimitedPayload {
+  /** A `system`-typed ChatMessage describing the throttle for the active session. */
+  chatMessage: ChatMessage
+}
+
+/**
+ * Build the system-typed ChatMessage for a `rate_limited` throttle notice (#6334).
+ *
+ * The server emits `{ retryAfterMs, message }` when a client trips the
+ * permission/question or general message rate limiter. Both clients surface it as
+ * a brief `system` bubble so the user gets feedback (the throttle itself is
+ * enforced server-side). The `retryAfterMs` is appended as a human "retry in Ns"
+ * hint (ceil to whole seconds, min 1) when positive; a missing/blank `message`
+ * falls back to a generic notice.
+ */
+export function handleRateLimited(
+  msg: Record<string, unknown>,
+): RateLimitedPayload {
+  const baseMessage: string =
+    typeof msg.message === 'string' && (msg.message as string).trim().length > 0
+      ? (msg.message as string)
+      : 'Rate limited. Please slow down.'
+  const retryAfterMs = typeof msg.retryAfterMs === 'number' ? msg.retryAfterMs : 0
+  const content =
+    retryAfterMs > 0
+      ? `${baseMessage} Retry in ${Math.max(1, Math.ceil(retryAfterMs / 1000))}s.`
+      : baseMessage
+  const chatMessage: ChatMessage = {
+    id: nextMessageId('rate-limit'),
+    type: 'system',
+    content,
+    timestamp: Date.now(),
+  }
+  return { chatMessage }
+}

@@ -95,6 +95,10 @@ function normalize(messages: unknown[]): Array<Record<string, unknown>> {
     content: m.content,
     tool: m.tool,
     toolUseId: m.toolUseId,
+    // #6325: the partial-JSON accumulator (tool_input_delta) — included so a
+    // fixture can assert streamed tool input. toMatchObject is partial, so
+    // existing fixtures that don't assert it are unaffected.
+    toolInputPartial: m.toolInputPartial,
   }))
 }
 
@@ -105,7 +109,7 @@ function seedStore(fx: ContractFixture) {
     sessionStates[id] = { ...createEmptySessionState(), ...(seed as Partial<SessionState>) }
   }
   const terminalWrites: string[] = []
-  return createMockStore({
+  const store = createMockStore({
     connectionPhase: 'connected',
     socket: null,
     sessions: [],
@@ -116,6 +120,22 @@ function seedStore(fx: ContractFixture) {
     // permission_resolved's unconditional banner-drain (s.sessionNotifications.map)
     // runs against a realistic store instead of throwing on undefined.
     sessionNotifications: [],
+    // #6325: flat connection-state fields the real store always initialises;
+    // seed them so handlers that read them (client_joined → connectedClients,
+    // activity_delta/_snapshot → activity, server_error → serverErrors) exercise
+    // their real path instead of throwing on undefined. Off the asserted
+    // sessions[id] slice, so existing fixtures are unaffected.
+    connectedClients: [],
+    activity: { bySession: {} },
+    serverErrors: [],
+    // #6268: web_task_error maps over state.webTasks; seed it (default []) so the
+    // .map never throws, and let a fixture seed a task to flip to `failed`.
+    webTasks: fx.init?.webTasks ?? [],
+    // #6325: no-op stubs for the session-lifecycle handler tails
+    // (session_switched calls fetchSlashCommands/fetchCustomAgents; switchSession
+    // is wired below to write the flat activeSessionId for checkpoint_restored).
+    fetchSlashCommands: () => {},
+    fetchCustomAgents: () => {},
     // Store methods the real stream/tool handlers reach for (terminal preview
     // writes, flat addMessage). No-op-ish so the session-state assertions stand
     // alone — the terminal-preview side-channel is covered by its own tests.
@@ -128,6 +148,11 @@ function seedStore(fx: ContractFixture) {
     addServerError: () => {},
     _terminalWrites: terminalWrites,
   } as unknown as ConnectionState)
+  // #6325: checkpoint_restored calls get().switchSession(newId) — stub it to write
+  // the flat activeSessionId (setState spreads prior state, so it survives writes).
+  ;(store.getState() as unknown as { switchSession: unknown }).switchSession = (sessionId: string) =>
+    store.setState({ activeSessionId: sessionId })
+  return store
 }
 
 // ---------------------------------------------------------------------------
@@ -159,6 +184,11 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
       const store = seedStore(fx)
       setStore(store)
 
+      // #6344: dispatch any prelude messages through the real handler first to
+      // establish multi-message context (e.g. a history_replay_start baseline).
+      for (const pre of fx.prelude ?? []) {
+        handleMessage(pre, ctx(mockSocket) as never)
+      }
       handleMessage(fx.message, ctx(mockSocket) as never)
       // Stream cases buffer deltas behind a flush timer; drain it.
       vi.runAllTimers()
@@ -178,6 +208,30 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
             expect(actual[i], `${fx.name}: ${id} messages[${i}]`).toMatchObject(m)
           })
         }
+        // #6325: assert any session-SCALAR fields a fixture specifies beyond
+        // `messages` (isIdle, claudeReady, streamingMessageId, permissionMode, …).
+        // Additive — message-only fixtures have no scalar keys, so they're
+        // unaffected; this unlocks the session-field types in the drain backlog.
+        const { messages: _ignoredMessages, ...scalarFields } = fields as Record<string, unknown>
+        void _ignoredMessages
+        if (Object.keys(scalarFields).length > 0) {
+          expect(ss, `${fx.name}: ${id} scalar fields`).toMatchObject(scalarFields)
+        }
+      }
+      // #6325: assert any flat (top-level connection-state) fields a fixture
+      // specifies — serverMode, serverStatus, connectedClients, conversations,
+      // searchResults, … — via toMatchObject on the whole store. Omitted slice =
+      // "don't care", so existing fixtures are unaffected.
+      if (exp!.flat) {
+        expect(store.getState(), `${fx.name}: flat fields`).toMatchObject(exp!.flat)
+      }
+      // #6345: assert the ordered terminal-mirror writes (appendTerminalData args)
+      // a fixture drives (raw / raw_background / terminal_output).
+      if (exp!.terminalWrites) {
+        expect(
+          (store.getState() as unknown as { _terminalWrites: string[] })._terminalWrites,
+          `${fx.name}: terminal writes`,
+        ).toEqual(exp!.terminalWrites)
       }
     })
   }

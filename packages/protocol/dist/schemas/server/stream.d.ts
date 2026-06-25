@@ -259,3 +259,14 @@ export declare const ServerBackgroundWorkChangedSchema: z.ZodObject<{
         startedAt: z.ZodNumber;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+export declare const ServerTerminalOutputSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_output">;
+    sessionId: z.ZodString;
+    data: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerTerminalSizeSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_size">;
+    sessionId: z.ZodString;
+    cols: z.ZodNumber;
+    rows: z.ZodNumber;
+}, z.core.$strip>;

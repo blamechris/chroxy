@@ -67,7 +67,7 @@ const INTENTIONALLY_UNHANDLED = new Set([
   'session_created',    // ack handled via session_list refresh, no dedicated case needed
   'session_destroyed',  // ack handled via session_list refresh, no dedicated case needed
   'discovered_sessions', // multi-server discovery, handled at connection layer
-  'rate_limited',       // rate limit signals, handled at connection layer
+  // rate_limited — now handled in both clients' switch (#6334): a system throttle notice.
   'extension_message',  // extension framework, routed to extension handlers not main switch
   'stdin_dropped_totals', // #3544 transient counter event — surface is the SessionInfo.stdinForwardingDisabled flag from session_list (#3567/#3593), not the wire event; live counter consumers tracked in #3573
   'pair_request_pending', // #5510 pairing-approval primitive — consumed by the dedicated requester panel (dashboard utils/request-pairing.ts, its own short-lived WS onmessage), NOT the main message-handler dispatch the extractor scans. Mobile requester side is an explicit out-of-scope fast-follow per epic #5509.

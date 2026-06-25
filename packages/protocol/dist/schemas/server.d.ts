@@ -14,4 +14,6 @@ export * from './server/activity.ts';
 export * from './server/control-room.ts';
 export * from './server/session.ts';
 export * from './server/billing.ts';
+export * from './server/file-ops.ts';
+export * from './server/environment.ts';
 export * from './server/messages.ts';

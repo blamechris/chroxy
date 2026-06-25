@@ -374,3 +374,71 @@ export declare const ServerSkillTrustGrantInvalidAuthorSchema: z.ZodObject<{
     message: z.ZodString;
     actualAuthor: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerSessionActivitySchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_activity">;
+    sessionId: z.ZodString;
+    isBusy: z.ZodBoolean;
+    lastCost: z.ZodNullable<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ServerSessionErrorSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_error">;
+    message: z.ZodString;
+    code: z.ZodOptional<z.ZodString>;
+    category: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    recoverable: z.ZodOptional<z.ZodBoolean>;
+    reason: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    boundSessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    boundSessionName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    primaryClientId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$loose>;
+export declare const ServerSessionUpdatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_updated">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerCheckpointCreatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"checkpoint_created">;
+    sessionId: z.ZodString;
+    checkpoint: z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+        description: z.ZodString;
+        messageCount: z.ZodNumber;
+        createdAt: z.ZodNumber;
+        hasGitSnapshot: z.ZodBoolean;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const ServerCheckpointListSchema: z.ZodObject<{
+    type: z.ZodLiteral<"checkpoint_list">;
+    sessionId: z.ZodNullable<z.ZodString>;
+    checkpoints: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+        description: z.ZodString;
+        messageCount: z.ZodNumber;
+        createdAt: z.ZodNumber;
+        hasGitSnapshot: z.ZodBoolean;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const ServerCheckpointRestoredSchema: z.ZodObject<{
+    type: z.ZodLiteral<"checkpoint_restored">;
+    checkpointId: z.ZodString;
+    newSessionId: z.ZodString;
+    name: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerSessionWarningSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_warning">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    reason: z.ZodLiteral<"idle_timeout">;
+    message: z.ZodString;
+    remainingMs: z.ZodNumber;
+}, z.core.$strip>;
+export declare const ServerSessionTimeoutSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_timeout">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    idleMs: z.ZodNumber;
+}, z.core.$strip>;
