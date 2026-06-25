@@ -10,6 +10,7 @@ import { Modal } from './Modal'
 import { usePathAutocomplete } from '../hooks/usePathAutocomplete'
 import { DirectoryBrowser } from './DirectoryBrowser'
 import { useConnectionStore } from '../store/connection'
+import { buildProviderLimitationNote } from '@chroxy/store-core'
 import type { DirectoryListing, DirectoryEntry, ModelInfo } from '../store/types'
 import { PROVIDER_LABELS } from '../lib/provider-labels'
 
@@ -781,6 +782,20 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   data-capability={key}
                 >{label}</span>
               ))}
+            </div>
+          )
+        })()}
+        {/* #6312: a non-blocking limitation note for a reduced-capability
+            provider (notably claude-tui — no plan mode / streaming / model
+            switch). Explains the absent affordances rather than leaving the
+            user to infer the gap from a missing control. */}
+        {availableProviders.length > 0 && (() => {
+          const selected = availableProviders.find(p => p.name === provider)
+          const note = buildProviderLimitationNote(selected?.capabilities)
+          if (!note) return null
+          return (
+            <div className="provider-limitation-note" data-testid="provider-limitation-note">
+              {note}
             </div>
           )
         })()}
