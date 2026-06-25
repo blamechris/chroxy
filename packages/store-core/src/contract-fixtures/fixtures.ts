@@ -1636,4 +1636,93 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  {
+    // #6325 (drain #6314): a pending permission expired/could-not-route. Both
+    // clients call the shared handlePermissionExpired, which appends a fixed
+    // "(Expired — …)" suffix to the matching `prompt` bubble IN PLACE (matched by
+    // requestId + type==='prompt') and clears its options (options is dropped by
+    // the harness normalize, so not asserted). Target = msg.sessionId ||
+    // activeSessionId; no-op if requestId is null or the session/prompt is absent
+    // — so the fixture seeds a prompt carrying the requestId. The dashboard's
+    // #2833 already-resolved early-return is gated on `resolvedPermissions`, which
+    // FixtureInitialState can't seed, so both clients take the same path → single
+    // expect. The banner-drain is a sessionNotifications side effect outside the
+    // asserted messages slice.
+    name: 'permission_expired appends the expired suffix to the matching prompt in place (both clients)',
+    type: 'permission_expired',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'permission_expired',
+      requestId: 'req-1',
+      sessionId: 's1',
+      message: 'permission response could not be routed (expired/handled)',
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x\n(Expired — this permission was already handled or timed out)',
+              tool: 'Bash',
+            },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): streaming partial tool input. Both clients delegate to
+    // the shared handleToolInputDelta, which locates the in-flight tool_use bubble
+    // by toolUseId and appends `partialJson` onto its `toolInputPartial`
+    // accumulator (seeded undefined → ''), leaving a single tool_use entry. The
+    // assertion on `toolInputPartial` requires that field in the harness
+    // `normalize()` whitelist (added in this PR for both clients).
+    name: 'tool_input_delta accumulates the partial JSON onto its in-flight tool_use bubble',
+    type: 'tool_input_delta',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'tool-tu-1',
+              type: 'tool_use',
+              tool: 'Bash',
+              toolUseId: 'tu-1',
+              content: '',
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: {
+      type: 'tool_input_delta',
+      sessionId: 's1',
+      toolUseId: 'tu-1',
+      partialJson: '{"command":"ls',
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'tool_use', toolUseId: 'tu-1', toolInputPartial: '{"command":"ls' }] },
+      },
+    },
+  },
 ]
