@@ -6046,6 +6046,31 @@ button.sidebar-token-view-session-row:hover {
   border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
 }
 
+/* #6313: manual "refresh terminal" (force-repaint) affordance. Positioned via an
+   inline style on the element; this rule is appearance only — subtle until hover
+   so it doesn't distract from the live output. */
+.terminal-resync-button {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 26px;
+  height: 26px;
+  padding: 0;
+  border-radius: var(--radius-sm, 4px);
+  background: rgba(0, 0, 0, 0.55);
+  color: var(--text-muted);
+  font-size: var(--text-md);
+  line-height: 1;
+  border: 1px solid var(--border-subtle, rgba(255, 255, 255, 0.12));
+  cursor: pointer;
+  opacity: 0.6;
+  transition: opacity 0.15s ease, color 0.15s ease;
+}
+.terminal-resync-button:hover {
+  opacity: 1;
+  color: var(--text-primary, #fff);
+}
+
 /* ---- Command Palette ---- */
 .command-palette {
   position: fixed;

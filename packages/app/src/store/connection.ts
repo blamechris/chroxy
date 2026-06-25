@@ -2117,6 +2117,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   subscribeTerminalMirror: (sessionId) => {
     if (!sessionId) return;
     sendIfOpen({ type: 'terminal_subscribe', sessionId });
+    // #6313: a (re)subscribe is exactly when the viewer may have missed frames
+    // (a reconnect mid-stream, or a first subscribe that sees only future bytes).
+    // Ask the server to force a fresh repaint so the grid is current. Ordered
+    // after terminal_subscribe on the same socket.
+    sendIfOpen({ type: 'terminal_resync', sessionId });
+  },
+  // #6313: manual "refresh terminal" — force the server to repaint the live PTY
+  // when the viewer notices a desynced grid (a backpressure-dropped frame the
+  // stateless raw-byte mirror can't otherwise recover). Best-effort.
+  requestTerminalResync: (sessionId) => {
+    if (!sessionId) return;
+    sendIfOpen({ type: 'terminal_resync', sessionId });
   },
   unsubscribeTerminalMirror: (sessionId) => {
     if (!sessionId) return;

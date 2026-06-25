@@ -316,6 +316,34 @@ describe('#6310 — dashboard notification-prefs setters do not lie on a closing
   })
 })
 
+describe('#6313 — dashboard terminal resync sends', () => {
+  it('subscribeTerminalMirror sends terminal_subscribe then terminal_resync', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sent: unknown[] = []
+    useConnectionStore.setState({ socket: liveSocket(sent) } as never)
+    useConnectionStore.getState().subscribeTerminalMirror('s1')
+    expect(sent).toEqual([
+      { type: 'terminal_subscribe', sessionId: 's1' },
+      { type: 'terminal_resync', sessionId: 's1' },
+    ])
+  })
+
+  it('requestTerminalResync sends a standalone terminal_resync (manual refresh)', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sent: unknown[] = []
+    useConnectionStore.setState({ socket: liveSocket(sent) } as never)
+    useConnectionStore.getState().requestTerminalResync('s1')
+    expect(sent).toEqual([{ type: 'terminal_resync', sessionId: 's1' }])
+  })
+
+  it('both are no-ops on a closed socket (best-effort)', async () => {
+    const { useConnectionStore } = await import('./connection')
+    useConnectionStore.setState({ socket: null } as never)
+    expect(() => useConnectionStore.getState().subscribeTerminalMirror('s1')).not.toThrow()
+    expect(() => useConnectionStore.getState().requestTerminalResync('s1')).not.toThrow()
+  })
+})
+
 describe('#6321 — dashboard setPermissionMode does not leave a phantom mode on a closing socket', () => {
   // setPermissionMode self-heals on a server PERMISSION_MODE_NOT_APPLIED rejection,
   // but a failed send has no round-trip → no rejection. The optimistic flip +

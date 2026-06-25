@@ -2066,6 +2066,28 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
+   * #6313: force the live PTY to repaint by toggling the grid width one column and
+   * back. Each resize sends SIGWINCH, so the real TUI redraws its canvas (and a
+   * shell prompt redraws its current line). This is the only recovery for the
+   * stateless raw-byte mirror after a WS-backpressure-dropped frame desyncs the
+   * xterm grid — there is no app-level snapshot to replay. The width is restored,
+   * so the authoritative size is unchanged. No-op (false) when there is no live
+   * PTY. Caveat: a process that ignores SIGWINCH won't repaint.
+   * @returns {boolean} whether a repaint was driven against a live PTY.
+   */
+  forceTerminalRepaint() {
+    if (!this._term || this._ptyExited) return false
+    const { cols, rows } = this.getTerminalSize()
+    // Toggle to a definitely-different width (cols-1, or 2 when at the 1-col
+    // floor) then restore — each resizeTerminal call changes the width so neither
+    // hits its unchanged-size no-op guard, and the original grid is restored.
+    const toggleCols = cols > 1 ? cols - 1 : 2
+    this.resizeTerminal(toggleCols, rows)
+    this.resizeTerminal(cols, rows)
+    return true
+  }
+
+  /**
    * #5835 Phase 3: write raw client keystrokes to the live PTY — true remote
    * control (the read-only mirror becomes interactive). Bytes are written AS-IS:
    * no prompt throttle (interactive keys arrive naturally paced over the wire;
