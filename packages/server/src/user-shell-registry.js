@@ -17,13 +17,27 @@
  * and the boot reaper is a no-op. After an ungraceful death the file retains the
  * last-known shells, which the reaper then reconciles.
  *
- * PID-reuse safety: the reaper only signals a recorded pid that is BOTH still
- * alive AND whose process-command basename still matches the recorded shell
- * (`ps -p <pid> -o comm=`). A still-alive orphan holds its pid (it can't have
- * been reused); a reused pid is very unlikely to also be the same shell binary —
- * so we never SIGTERM an innocent reused pid.
+ * PID-reuse safety (#6276 + #6327): the reaper only signals a recorded pid that
+ * is still alive, whose process-command basename still matches the recorded
+ * shell (`ps -p <pid> -o comm=`), AND whose OS process start-time (`ps -o
+ * lstart=`, captured at record) is unchanged. comm proves "same program"; the
+ * start-time proves "same process incarnation" — a recycled pid (the orphan
+ * exited and the OS reused its pid onto a fresh same-binary shell) has a strictly
+ * later lstart, so the equality check closes that same-binary reuse window
+ * deterministically. A record with no captured start-time (ps unavailable at
+ * spawn, or a legacy record) falls back to the comm-only gate; a record WITH a
+ * start-time that can't be re-read at reap is skipped (we don't signal a pid we
+ * can't positively identify).
  *
- * All I/O is best-effort and the seams (`isAlive`/`commOf`/`kill`) are injectable
+ * Note: `lstart` is wall-clock LOCAL time, so if the host timezone / `LC_TIME`
+ * changes between the daemon incarnation that recorded the shell and the one that
+ * reaps it, the same process can format two different `lstart` strings. That
+ * makes the equality check fail-SAFE: it skips (leaks) a real orphan rather than
+ * ever wrong-killing — the never-signal-an-innocent-pid invariant holds
+ * unconditionally; only reap completeness degrades in that rare case.
+ *
+ * All I/O is best-effort and the seams (`isAlive`/`commOf`/`kill`/`startTimeOf`)
+ * are injectable
  * so the kill path is unit-testable without spawning or signalling a real
  * process, and so tests point the sidecar at a temp path (never the real
  * ~/.chroxy — the test sandbox guard, #4633).
@@ -64,11 +78,19 @@ function writeRegistry(path, records) {
  * same sessionId (idempotent on respawn). Best-effort — a write failure is
  * logged, never thrown (it must not fail the shell spawn).
  */
-export function recordShell(path, { sessionId, pid, shell } = {}) {
+export function recordShell(path, { sessionId, pid, shell } = {}, { startTimeOf = defaultStartTimeOf } = {}) {
   if (typeof sessionId !== 'string' || !Number.isInteger(pid) || pid <= 0) return
   try {
+    // #6327: capture the OS process start-time so the boot reaper can prove
+    // "same process incarnation", not just "same shell binary" — a recycled pid
+    // reports a strictly later lstart, which closes the same-binary reuse window.
+    const startTime = startTimeOf(pid) || null
+    const record = { sessionId, pid, shell: shell ? basename(shell) : null }
+    // Only persist a start-time when we actually captured one — a null key would
+    // be noise, and its absence is the documented "fall back to comm-only" signal.
+    if (startTime) record.startTime = startTime
     const records = readRegistry(path).filter((r) => r.sessionId !== sessionId)
-    records.push({ sessionId, pid, shell: shell ? basename(shell) : null })
+    records.push(record)
     writeRegistry(path, records)
   } catch (err) {
     log.warn(`failed to record user-shell ${sessionId} (non-fatal): ${err?.message || err}`)
@@ -114,6 +136,17 @@ function defaultCommOf(pid) {
   }
 }
 
+// The process start wall-clock (`lstart`) is fixed for a process's lifetime and
+// differs for a recycled pid's new occupant — so a verbatim string match is a
+// sound "same incarnation" check. Available on both macOS and Linux `ps`.
+function defaultStartTimeOf(pid) {
+  try {
+    return execFileSync('ps', ['-p', String(pid), '-o', 'lstart='], { encoding: 'utf8' }).trim() || null
+  } catch {
+    return null
+  }
+}
+
 function defaultKill(pid) {
   try {
     process.kill(pid, 'SIGTERM')
@@ -132,9 +165,9 @@ function defaultKill(pid) {
  * @returns {{ reaped: Array, skipped: Array }} reaped = signalled orphans (the
  *   caller emits a destroy-audit entry per item); skipped carries a `why` so the
  *   reason a record was left alone (dead / comm-mismatch / comm-unknown /
- *   kill-failed) is observable.
+ *   starttime-unknown / starttime-mismatch / kill-failed) is observable.
  */
-export function reapOrphanShells(path, { isAlive = defaultIsAlive, commOf = defaultCommOf, kill = defaultKill } = {}) {
+export function reapOrphanShells(path, { isAlive = defaultIsAlive, commOf = defaultCommOf, startTimeOf = defaultStartTimeOf, kill = defaultKill } = {}) {
   const records = readRegistry(path)
   const reaped = []
   const skipped = []
@@ -154,6 +187,22 @@ export function reapOrphanShells(path, { isAlive = defaultIsAlive, commOf = defa
       }
       if (commBase !== r.shell) {
         skipped.push({ ...r, why: 'comm-mismatch', comm: commBase })
+        continue
+      }
+    }
+    // #6327: start-time identity gate — closes the same-binary pid-reuse window
+    // comm can't (orphan exits → pid recycled onto a fresh same-binary shell).
+    // When we captured an lstart, the live process must still report the SAME
+    // lstart; a recycled pid's occupant started later → different lstart → skip.
+    // A record with no captured start-time falls back to the comm-only gate.
+    if (r.startTime) {
+      const liveStart = startTimeOf(r.pid)
+      if (!liveStart) {
+        skipped.push({ ...r, why: 'starttime-unknown' })
+        continue
+      }
+      if (liveStart !== r.startTime) {
+        skipped.push({ ...r, why: 'starttime-mismatch' })
         continue
       }
     }
