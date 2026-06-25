@@ -239,9 +239,10 @@ describe('shared dispatch table', () => {
   describe('runner mechanics', () => {
     it('returns false (table miss) for an unregistered type so the caller falls through', () => {
       const env = makeAdapter()
-      // permission_mode_changed stays platform-local (divergent dashboard
-      // flat-state fallback), so it is NOT in the shared table — a clean miss.
-      expect(dispatch(env, { type: 'permission_mode_changed', mode: 'plan' })).toBe(false)
+      // terminal_output is a terminal write, never a session-state update, so it is
+      // by-design NOT in the shared table (NO_SWITCH_CONTRACT_BY_DESIGN) — a clean
+      // miss → runDispatch returns false and the caller falls through to its switch.
+      expect(dispatch(env, { type: 'terminal_output', data: 'x' })).toBe(false)
     })
 
     it('returns false for a non-string type', () => {

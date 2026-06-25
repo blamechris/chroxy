@@ -27,7 +27,6 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
-  handlePermissionModeChanged as sharedPermissionModeChanged,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
@@ -1215,6 +1214,11 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // app's own helper (which also mirrors the row into the mobile push store).
   pushSessionNotification: (sessionId, eventType, message) =>
     pushSessionNotification(sessionId, eventType, message),
+  // #5618 — permission_mode_changed clears the app's pending optimistic-revert
+  // tracker for the broadcast's target session (the dashboard has no equivalent
+  // per-session tracker and omits this hook).
+  clearPendingPermissionModeRequests: (sessionId) =>
+    clearPendingPermissionModeRequestsForSession(sessionId),
   // #5653 — file-ops / git wrapper cases route through the shared dispatch
   // table; the app supplies its module-level imperative-callback registry so
   // the parsed payload reaches the UI's registered callback exactly as the
@@ -2774,29 +2778,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // availableModelsProvider extension.
 
 
-    case 'permission_mode_changed': {
-      const { mode } = sharedPermissionModeChanged(msg);
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      {
-        const effectiveId = (targetId && get().sessionStates[targetId]) ? targetId : get().activeSessionId;
-        if (effectiveId && get().sessionStates[effectiveId]) {
-          updateSession(effectiveId, () => ({ permissionMode: mode }));
-        }
-        // Server doesn't echo back the originating requestId on
-        // permission_mode_changed broadcasts (multi-client safe), so clear any
-        // pending tracker entries for the message's resolved target. Use
-        // `targetId` (the session the broadcast is *for*) rather than
-        // `effectiveId`, which can fall back to `activeSessionId` and would
-        // wrongly clear pending entries on a different session if the broadcast
-        // arrived for a session that isn't currently in `sessionStates`.
-        if (targetId) {
-          clearPendingPermissionModeRequestsForSession(targetId);
-        }
-      }
-      // Clear pending confirm if mode change arrived (confirmation was accepted)
-      set({ pendingPermissionConfirm: null });
-      break;
-    }
+    // permission_mode_changed — migrated to the shared dispatch table (#5618;
+    // runDispatch). Now uses targetId-direct resolution (Decision A) instead of the
+    // app's prior effectiveId-retry; the app's clearPendingPermissionModeRequests is
+    // preserved via the _dispatchAdapter hook, and pendingPermissionConfirm is cleared
+    // via setState. Behaviour is unchanged in normal operation (sessionStates always
+    // holds the target session) — see dispatchPermissionModeChanged for the rationale.
 
     // confirm_permission_mode — migrated to the shared dispatch table (#5556)
 
@@ -2851,7 +2838,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_idle — migrated to the shared dispatch table (#5618; handled by
     // runDispatch before this switch). The app has no flat idle fallback (it
     // derives isIdle from the active session), so it omits the
-    // applyAgentIdleFallback adapter hook — behaviour unchanged.
+    // applyNoSessionFallback adapter hook — behaviour unchanged.
 
     // agent_busy — migrated to the shared dispatch table (#5556)
 

@@ -17,11 +17,9 @@ import {
   resolveSessionId,
   handleUserInput as sharedUserInput,
   handleMessage as sharedMessageHandler,
-  handlePermissionModeChanged as sharedPermissionModeChanged,
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
-  handleAgentIdle as sharedAgentIdle,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
@@ -1060,9 +1058,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
     pushSessionNotification(sessionId, eventType, message),
-  // #5618 — agent_idle no-session fallback: mirror the idle patch into FLAT state
-  // (the dashboard UI reads flat streamingMessageId/isIdle; the app omits this).
-  applyAgentIdleFallback: () => getStore().setState(sharedAgentIdle() as Partial<ConnectionState>),
+  // #5618 — generic no-session fallback: mirror a session-targeted patch into FLAT
+  // state (the dashboard UI reads flat streamingMessageId/isIdle/permissionMode; the
+  // app omits this hook). Used by agent_idle and permission_mode_changed.
+  applyNoSessionFallback: (patch) => getStore().setState(patch as Partial<ConnectionState>),
   // #5618 Batch 3 — error-sink for session_restore_failed / session_persist_failed.
   // The dashboard's connection-store addServerError builds its own envelope
   // (category 'general', id 'info', ring-capped serverErrors) from the message;
@@ -1776,17 +1775,13 @@ function clearPendingTrustGrantByRequestId(requestId: string, get: MsgGet): bool
   return cleared;
 }
 
-function handlePermissionModeChanged(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const { mode } = sharedPermissionModeChanged(msg);
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => ({ permissionMode: mode }));
-  } else {
-    set({ permissionMode: mode });
-  }
-  // Clear pending confirm if mode change arrived (confirmation was accepted)
-  set({ pendingPermissionConfirm: null });
-}
+// permission_mode_changed — migrated to the shared dispatch table (#5618;
+// runDispatch). The seeded-session path + the no-session FLAT fallback
+// (set({ permissionMode })) are the shared dispatchPermissionModeChanged; the flat
+// fallback is carried by the _dispatchAdapter.applyNoSessionFallback hook (the
+// dashboard's UI reads flat permissionMode), and pendingPermissionConfirm is cleared
+// via setState. The dashboard has no pending optimistic-revert tracker, so it omits
+// the clearPendingPermissionModeRequests hook.
 
 // available_permission_modes + session_updated migrated to the shared
 // store-core dispatch table (#5556)
@@ -3169,7 +3164,7 @@ const HANDLERS: Record<string, Handler> = {
   skill_trust_request: handleSkillTrustRequest,
   skill_trust_granted: handleSkillTrustGranted,
   skill_trust_grant_ok: handleSkillTrustGrantOk,
-  permission_mode_changed: handlePermissionModeChanged,
+  // permission_mode_changed — migrated to the shared dispatch table (#5618; runDispatch).
   // available_permission_modes / session_updated / agent_busy migrated to the
   // shared store-core dispatch table (#5556)
   session_switched: handleSessionSwitched,
