@@ -64,7 +64,8 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // only legitimate when retro-fitting a pre-existing case, with a note.
 // ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
-  'agent_idle',
+  // agent_idle — now has a SWITCH_FIXTURES entry (#6325); the contract-switch
+  // harness was extended to assert session-scalar fields (isIdle, …).
   // activity_snapshot / activity_delta — both clients now feed them through the
   // store-core ACTIVITY reducer (applyActivitySnapshot/applyActivityDelta) from
   // their own switch (#6246/#6247 added the mobile side; dashboard since #5163).
@@ -85,7 +86,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // batch (both clients still handle it platform-locally — the app via a switch
   // case, the dashboard via its HANDLERS map), so it remains pending.
   'checkpoint_restored',
-  'claude_ready',
+  // claude_ready — now has a SWITCH_FIXTURES entry (#6325, session-scalar assert).
   // client_focus_changed — migrated to the shared dispatch table (#5618 Batch 4).
   'client_joined',
   'client_left',
@@ -97,7 +98,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // now has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   'pair_fail',
   // permission_expired — now has a SWITCH_FIXTURES entry (#6325).
-  'permission_mode_changed',
+  // permission_mode_changed — now has a SWITCH_FIXTURES entry (#6325, scalar assert).
   // permission_resolved now has a both-clients SWITCH_FIXTURES entry (#6058).
   'permission_timeout',
   'plan_ready',

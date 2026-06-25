@@ -1725,4 +1725,48 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  {
+    // #6325 (drain #6314): session ready. Both clients apply the shared
+    // handleClaudeReady patch ({ claudeReady: true, stoppedAt: null,
+    // stoppedCode: null }) onto the session — no message bubble. With no
+    // backgroundTasks on the wire, the app (calls it with no msg arg) and the
+    // dashboard (calls it with msg) produce the identical scalar patch → single
+    // expect. Asserts the session-scalar field via the #6325 harness extension.
+    name: 'claude_ready sets the session claudeReady flag (both clients)',
+    type: 'claude_ready',
+    init: { activeSessionId: 's1', sessions: { s1: { claudeReady: false } } },
+    message: { type: 'claude_ready', sessionId: 's1' },
+    expect: {
+      sessions: { s1: { claudeReady: true } },
+    },
+  },
+  {
+    // #6325 (drain #6314): the agent went idle. Both clients apply the shared
+    // sharedAgentIdle patch ({ isIdle: true, streamingMessageId: null,
+    // activeTools: [] }) to the seeded session (the dashboard's local
+    // handleAgentIdle delegates to sharedAgentIdle on the seeded-session path).
+    // Asserts the scalar fields via the harness extension; activeTools:[] is
+    // omitted from expect because toMatchObject treats an empty expected array as
+    // vacuous (it matches any array).
+    name: 'agent_idle flips the session to idle and clears the streaming id (both clients)',
+    type: 'agent_idle',
+    init: { activeSessionId: 's1', sessions: { s1: { isIdle: false, streamingMessageId: 'live-1' } } },
+    message: { type: 'agent_idle', sessionId: 's1' },
+    expect: {
+      sessions: { s1: { isIdle: true, streamingMessageId: null } },
+    },
+  },
+  {
+    // #6325 (drain #6314): the server confirmed a permission-mode change. Both
+    // clients extract `mode` (shared handlePermissionModeChanged) and set the
+    // session field permissionMode. Target = msg.sessionId || activeSessionId; no
+    // message bubble. Asserts the scalar field via the harness extension.
+    name: 'permission_mode_changed updates the session permissionMode (both clients)',
+    type: 'permission_mode_changed',
+    init: { activeSessionId: 's1', sessions: { s1: { permissionMode: 'default' } } },
+    message: { type: 'permission_mode_changed', sessionId: 's1', mode: 'plan' },
+    expect: {
+      sessions: { s1: { permissionMode: 'plan' } },
+    },
+  },
 ]
