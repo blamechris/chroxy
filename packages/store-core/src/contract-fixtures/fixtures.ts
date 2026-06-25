@@ -1294,6 +1294,21 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     message: { type: 'checkpoint_list' },
     expect: { noop: true },
   },
+  {
+    // #5618 — agent_idle migrated from SWITCH to the shared dispatch table. The
+    // seeded-session path flips the session to idle ({ isIdle: true,
+    // streamingMessageId: null, activeTools: [] }) via the shared dispatchAgentIdle
+    // → updateSession. (The no-session FLAT fallback is preserved per-client by the
+    // optional applyAgentIdleFallback adapter hook — dashboard implements, app
+    // omits — and is exercised by each client's own tests, not the shared contract.)
+    name: 'agent_idle flips the seeded session to idle and clears the streaming id (both clients)',
+    type: 'agent_idle',
+    init: { activeSessionId: 's1', sessions: { s1: { isIdle: false, streamingMessageId: 'live-1' } } },
+    message: { type: 'agent_idle', sessionId: 's1' },
+    expect: {
+      sessions: { s1: { isIdle: true, streamingMessageId: null } },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -1758,22 +1773,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     message: { type: 'claude_ready', sessionId: 's1' },
     expect: {
       sessions: { s1: { claudeReady: true } },
-    },
-  },
-  {
-    // #6325 (drain #6314): the agent went idle. Both clients apply the shared
-    // sharedAgentIdle patch ({ isIdle: true, streamingMessageId: null,
-    // activeTools: [] }) to the seeded session (the dashboard's local
-    // handleAgentIdle delegates to sharedAgentIdle on the seeded-session path).
-    // Asserts the scalar fields via the harness extension; activeTools:[] is
-    // omitted from expect because toMatchObject treats an empty expected array as
-    // vacuous (it matches any array).
-    name: 'agent_idle flips the session to idle and clears the streaming id (both clients)',
-    type: 'agent_idle',
-    init: { activeSessionId: 's1', sessions: { s1: { isIdle: false, streamingMessageId: 'live-1' } } },
-    message: { type: 'agent_idle', sessionId: 's1' },
-    expect: {
-      sessions: { s1: { isIdle: true, streamingMessageId: null } },
     },
   },
   {

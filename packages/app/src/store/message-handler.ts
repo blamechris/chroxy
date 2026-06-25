@@ -31,7 +31,6 @@ import {
   // available_permission_modes / session_updated / confirm_permission_mode /
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
-  handleAgentIdle as sharedAgentIdle,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
   handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
@@ -2849,13 +2848,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'agent_idle': {
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, () => sharedAgentIdle());
-      }
-      break;
-    }
+    // agent_idle — migrated to the shared dispatch table (#5618; handled by
+    // runDispatch before this switch). The app has no flat idle fallback (it
+    // derives isIdle from the active session), so it omits the
+    // applyAgentIdleFallback adapter hook — behaviour unchanged.
 
     // agent_busy — migrated to the shared dispatch table (#5556)
 
