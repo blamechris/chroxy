@@ -95,6 +95,10 @@ function normalize(messages: unknown[]): Array<Record<string, unknown>> {
     content: m.content,
     tool: m.tool,
     toolUseId: m.toolUseId,
+    // #6325: the partial-JSON accumulator (tool_input_delta) — included so a
+    // fixture can assert streamed tool input. toMatchObject is partial, so
+    // existing fixtures that don't assert it are unaffected.
+    toolInputPartial: m.toolInputPartial,
   }))
 }
 

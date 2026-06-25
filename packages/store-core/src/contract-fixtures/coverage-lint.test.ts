@@ -96,7 +96,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // multi_question_intervention — migrated to the shared dispatch table (#5618);
   // now has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   'pair_fail',
-  'permission_expired',
+  // permission_expired — now has a SWITCH_FIXTURES entry (#6325).
   'permission_mode_changed',
   // permission_resolved now has a both-clients SWITCH_FIXTURES entry (#6058).
   'permission_timeout',
@@ -126,7 +126,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'stream_delta',
   'terminal_output',
   'token_rotated',
-  'tool_input_delta',
+  // tool_input_delta — now has a SWITCH_FIXTURES entry (#6325); the harness
+  // normalize() was extended to assert its toolInputPartial accumulator.
   // tunnel_url_changed — migrated to the shared dispatch table (#5618 Batch 5b).
   // user_input — now has a SWITCH_FIXTURES entry (#6325), so it leaves the
   // pending backlog (both clients build it via the shared sharedUserInput path).
