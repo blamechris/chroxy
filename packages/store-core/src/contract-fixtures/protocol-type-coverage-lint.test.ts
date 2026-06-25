@@ -220,11 +220,9 @@ const APP_ONLY = new Set<string>([
 // short-lived socket), so neither client's main switch covers them. Mirrors
 // handler-coverage's INTENTIONALLY_UNHANDLED.
 const UNHANDLED_BY_DESIGN = new Set<string>([
-  // #6332 (batch 2b of #6314): a server throttle notice sent on rate-limit, but
-  // NEITHER client has a handler today — it falls through to the default (no
-  // user-facing "slow down" surface yet). Schemaing it documented the wire
-  // contract; surfacing it in a client is a separate UX follow-up (#6334).
-  'rate_limited',
+  // rate_limited — now handled in both clients' switch (#6334): a system throttle
+  // notice (handleRateLimited), with a both-clients SWITCH_FIXTURES entry. Removed
+  // from this set (it has a real handler + contract fixture now).
   'extension_message',                    // routed to the extension framework, not the main switch
   'pair_request_pending',                 // pairing-approval primitive (#5510) — consumed by the requester's
                                           //   dedicated request-pairing socket, not the main dispatch
