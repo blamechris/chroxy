@@ -29,7 +29,15 @@
  * start-time that can't be re-read at reap is skipped (we don't signal a pid we
  * can't positively identify).
  *
- * All I/O is best-effort and the seams (`isAlive`/`commOf`/`kill`) are injectable
+ * Note: `lstart` is wall-clock LOCAL time, so if the host timezone / `LC_TIME`
+ * changes between the daemon incarnation that recorded the shell and the one that
+ * reaps it, the same process can format two different `lstart` strings. That
+ * makes the equality check fail-SAFE: it skips (leaks) a real orphan rather than
+ * ever wrong-killing — the never-signal-an-innocent-pid invariant holds
+ * unconditionally; only reap completeness degrades in that rare case.
+ *
+ * All I/O is best-effort and the seams (`isAlive`/`commOf`/`kill`/`startTimeOf`)
+ * are injectable
  * so the kill path is unit-testable without spawning or signalling a real
  * process, and so tests point the sidecar at a temp path (never the real
  * ~/.chroxy — the test sandbox guard, #4633).
@@ -157,7 +165,7 @@ function defaultKill(pid) {
  * @returns {{ reaped: Array, skipped: Array }} reaped = signalled orphans (the
  *   caller emits a destroy-audit entry per item); skipped carries a `why` so the
  *   reason a record was left alone (dead / comm-mismatch / comm-unknown /
- *   kill-failed) is observable.
+ *   starttime-unknown / starttime-mismatch / kill-failed) is observable.
  */
 export function reapOrphanShells(path, { isAlive = defaultIsAlive, commOf = defaultCommOf, startTimeOf = defaultStartTimeOf, kill = defaultKill } = {}) {
   const records = readRegistry(path)
