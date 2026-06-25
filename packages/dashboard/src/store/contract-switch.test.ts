@@ -181,6 +181,11 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
       const store = seedStore(fx)
       setStore(store)
 
+      // #6344: dispatch any prelude messages through the real handler first to
+      // establish multi-message context (e.g. a history_replay_start baseline).
+      for (const pre of fx.prelude ?? []) {
+        handleMessage(pre, ctx(mockSocket) as never)
+      }
       handleMessage(fx.message, ctx(mockSocket) as never)
       // Stream cases buffer deltas behind a flush timer; drain it.
       vi.runAllTimers()

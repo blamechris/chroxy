@@ -64,15 +64,13 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // only legitimate when retro-fitting a pre-existing case, with a note.
 // ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
-  // Remaining backlog (#6325 drained the rest into SWITCH_FIXTURES): only the two
-  // below stay pending — they need a MULTI-MESSAGE baseline the single-message
-  // contract-switch harness can't seed yet (it dispatches one wire message per
-  // fixture), so they await a harness that can stage a prior message first:
-  //   - history_replay_end: its in-place prompt resolution + reconcile only has an
-  //     observable effect after a prior history_replay_start(fullHistory) seeds the
-  //     rebuild baseline; dispatched alone it resolves against an empty baseline.
-  //   - key_exchange_ok: its effect depends on a prior key-exchange handshake
-  //     context (encryption state) that a single seeded message can't establish.
+  // EMPTY — the both-clients SWITCH_FIXTURES backlog is fully drained. Every
+  // both-clients switch type now has a behaviour-verified fixture (incl. the last
+  // two via the #6344 multi-message prelude: history_replay_end resolves against a
+  // history_replay_start baseline; key_exchange_ok runs after an encryption auth_ok
+  // stashes the pending key pair) OR is a documented NO_SWITCH_CONTRACT_BY_DESIGN
+  // exemption. Re-add a type here ONLY when retro-fitting a pre-existing case that
+  // genuinely can't be fixtured yet, with a note — prefer a real fixture.
   // agent_idle — now has a SWITCH_FIXTURES entry (#6325); the contract-switch
   // harness was extended to assert session-scalar fields (isIdle, …).
   // activity_snapshot / activity_delta — both clients now feed them through the
@@ -101,8 +99,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // client_left — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // conversations_list — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // cost_update — migrated to the shared dispatch table (#5618 Batch 5a).
-  'history_replay_end',
-  'key_exchange_ok',
+  // history_replay_end — now has a multi-message SWITCH_FIXTURES entry (#6344).
+  // key_exchange_ok — now has a multi-message SWITCH_FIXTURES entry (#6344).
   // multi_question_intervention — migrated to the shared dispatch table (#5618);
   // now has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // pair_fail — now has a SWITCH_FIXTURES entry (#6325 close-out).
