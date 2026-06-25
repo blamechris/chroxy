@@ -1309,6 +1309,20 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { isIdle: true, streamingMessageId: null } },
     },
   },
+  {
+    // #5618 — permission_mode_changed migrated from SWITCH to the shared dispatch
+    // table. The seeded-session path sets the session field permissionMode via the
+    // shared dispatchPermissionModeChanged (targetId-direct resolution, Decision A).
+    // The no-session flat fallback + the app-only clearPending tracker are per-client
+    // adapter hooks, exercised by each client's own tests, not this shared contract.
+    name: 'permission_mode_changed updates the seeded session permissionMode (both clients)',
+    type: 'permission_mode_changed',
+    init: { activeSessionId: 's1', sessions: { s1: { permissionMode: 'default' } } },
+    message: { type: 'permission_mode_changed', sessionId: 's1', mode: 'plan' },
+    expect: {
+      sessions: { s1: { permissionMode: 'plan' } },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -1773,19 +1787,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     message: { type: 'claude_ready', sessionId: 's1' },
     expect: {
       sessions: { s1: { claudeReady: true } },
-    },
-  },
-  {
-    // #6325 (drain #6314): the server confirmed a permission-mode change. Both
-    // clients extract `mode` (shared handlePermissionModeChanged) and set the
-    // session field permissionMode. Target = msg.sessionId || activeSessionId; no
-    // message bubble. Asserts the scalar field via the harness extension.
-    name: 'permission_mode_changed updates the session permissionMode (both clients)',
-    type: 'permission_mode_changed',
-    init: { activeSessionId: 's1', sessions: { s1: { permissionMode: 'default' } } },
-    message: { type: 'permission_mode_changed', sessionId: 's1', mode: 'plan' },
-    expect: {
-      sessions: { s1: { permissionMode: 'plan' } },
     },
   },
   {

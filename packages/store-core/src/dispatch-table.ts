@@ -66,6 +66,7 @@ import {
   handleSessionUpdated,
   handleAgentBusy,
   handleAgentIdle,
+  handlePermissionModeChanged,
   handleBudgetResumed,
   handleBudgetResumeAck,
   handleConversationId,
@@ -315,17 +316,25 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    */
   syncSecondaryInventory?(kind: 'slashCommands' | 'customAgents', list: unknown[]): void
   /**
-   * Apply the `agent_idle` no-session FALLBACK (#5618). When an `agent_idle`
-   * arrives for a session that isn't in `sessionStates`, the DASHBOARD writes the
-   * idle patch (`{ isIdle, streamingMessageId: null, activeTools: [] }`) into its
-   * FLAT connection state — its UI reads flat `streamingMessageId`/`isIdle`
-   * directly (App.tsx isStreaming) and its pre-bootstrap `sendInput` writes flat
-   * `pending`, so without this an abnormal `agent_idle` leaves the stop button
-   * stuck (#5760). The APP has no flat idle mirror (it derives `isIdle` from the
-   * active session) and OMITS this hook — a faithful per-client preservation of
-   * the prior switch behaviour, in the same spirit as {@link syncSecondaryInventory}.
+   * Apply a no-session FALLBACK patch to the FLAT connection state (#5618). When a
+   * session-targeted message (`agent_idle`, `permission_mode_changed`, …) arrives for
+   * a session that isn't in `sessionStates`, the DASHBOARD writes the patch into its
+   * flat state — its UI reads flat fields directly (`streamingMessageId`/`isIdle` for
+   * the stop button, App.tsx isStreaming; `permissionMode` for the mode pill) and its
+   * pre-bootstrap `sendInput` writes flat `pending`, so without this an abnormal
+   * broadcast leaves that flat UI stale (#5760). The APP has no flat mirror for these
+   * (it derives them from the active session) and OMITS this hook — a faithful
+   * per-client preservation of the prior switch behaviour, like {@link syncSecondaryInventory}.
    */
-  applyAgentIdleFallback?(): void
+  applyNoSessionFallback?(patch: Flat): void
+  /**
+   * Clear the APP's pending permission-mode optimistic-revert tracker for a session
+   * (#5618). On a `permission_mode_changed` broadcast the app drops any in-flight
+   * optimistic revert for `sessionId` so a late rejection can't undo the confirmed
+   * mode; the DASHBOARD has no equivalent per-session tracker and OMITS this hook.
+   * A null sessionId is a no-op.
+   */
+  clearPendingPermissionModeRequests?(sessionId: string | null): void
   /**
    * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
    * The mobile app keeps a separate `useConversationStore` whose checkpoint list
@@ -531,6 +540,11 @@ export interface DispatchMessageMap {
   agent_idle: {
     type: 'agent_idle'
     sessionId?: string
+  }
+  permission_mode_changed: {
+    type: 'permission_mode_changed'
+    sessionId?: string
+    mode?: string | null
   }
   budget_resumed: {
     type: 'budget_resumed'
@@ -897,11 +911,42 @@ function dispatchAgentIdle<S extends DispatchSessionBase>(
   adapter: ClientStoreAdapter<S>,
 ): void {
   const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  const idlePatch = handleAgentIdle()
   if (targetId && adapter.hasSession(targetId)) {
-    adapter.updateSession(targetId, () => handleAgentIdle() as unknown as Partial<S>)
+    adapter.updateSession(targetId, () => idlePatch as unknown as Partial<S>)
   } else {
-    adapter.applyAgentIdleFallback?.()
+    adapter.applyNoSessionFallback?.(idlePatch as unknown as Record<string, unknown>)
   }
+}
+
+/**
+ * `permission_mode_changed` — apply the new permission mode to the target session
+ * (#5618). Reconciliation of the two prior switch cases:
+ *  - **Session resolution = targetId-direct** (Decision A): apply when the target is
+ *    local, else the dashboard's flat fallback via {@link ClientStoreAdapter.applyNoSessionFallback}.
+ *    This drops the APP's prior `effectiveId` retry-to-active-session, which only
+ *    diverged when the target wasn't in `sessionStates` — unreachable in normal use
+ *    (`session_list` seeds a shell for every session) and a latent multi-client bug
+ *    when it did fire (it applied another session's broadcast to the active one).
+ *  - **clearPending** (app-only optimistic-revert tracker) is preserved via
+ *    {@link ClientStoreAdapter.clearPendingPermissionModeRequests} — the app implements
+ *    it, the dashboard omits it. Keyed on `targetId` (the session the broadcast is
+ *    *for*), matching the app's prior multi-client-safe clear.
+ *  - **`pendingPermissionConfirm: null`** (both clients) via `setState`.
+ */
+function dispatchPermissionModeChanged<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['permission_mode_changed'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { mode } = handlePermissionModeChanged(msg as Record<string, unknown>)
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(targetId, () => ({ permissionMode: mode }) as unknown as Partial<S>)
+  } else {
+    adapter.applyNoSessionFallback?.({ permissionMode: mode })
+  }
+  adapter.clearPendingPermissionModeRequests?.(targetId)
+  adapter.setState({ pendingPermissionConfirm: null })
 }
 
 /** `budget_resumed` — append the "budget resumed" system message. */
@@ -1719,6 +1764,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     session_updated: dispatchSessionUpdated,
     agent_busy: dispatchAgentBusy,
     agent_idle: dispatchAgentIdle,
+    permission_mode_changed: dispatchPermissionModeChanged,
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
@@ -1807,6 +1853,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'session_updated',
   'agent_busy',
   'agent_idle',
+  'permission_mode_changed',
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',
