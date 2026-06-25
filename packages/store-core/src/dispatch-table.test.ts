@@ -150,6 +150,7 @@ function makeAdapter(init?: {
     getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
     pushSessionNotification: (sessionId, eventType, message) =>
       notifications.push({ sessionId, eventType, message }),
+    switchToRestoredSession: (sessionId: string) => switchedSessions.push(sessionId),
     ...(init?.callbacks
       ? {
           getCallback: ((name: string) =>

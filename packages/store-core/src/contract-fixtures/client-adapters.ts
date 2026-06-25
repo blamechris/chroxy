@@ -201,6 +201,13 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     getMyClientId: () => myClientId,
     getFollowMode: () => followMode,
     switchSession: (sessionId) => switchedSessions.push(sessionId),
+    // #5618 — checkpoint_restored auto-switches via switchToRestoredSession. The
+    // contract asserts the flat activeSessionId flip (both real stores' switchSession
+    // re-homes activeSessionId), so model it as writing activeSessionId.
+    switchToRestoredSession: (sessionId) => {
+      ;(flat as Record<string, unknown>).activeSessionId = sessionId
+      switchedSessions.push(sessionId)
+    },
     // #5653 — only the APP opts its imperative-callback registry into the table.
     // Model it as "a callback IS registered for every channel" so the contract
     // can observe the invocation + payload. The DASHBOARD omits `getCallback`

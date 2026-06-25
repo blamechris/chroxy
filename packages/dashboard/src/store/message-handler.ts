@@ -63,8 +63,6 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
-  handleCheckpointRestored as sharedCheckpointRestored,
-  handleConversationsList as sharedConversationsList,
   handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
@@ -1053,6 +1051,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
   // The dashboard omits syncSecondaryCheckpoints (no secondary checkpoint store).
   getCheckpoints: () => getStore().getState().checkpoints,
+  // #5618 — checkpoint_restored auto-switches (plain, no options — the dashboard has
+  // no serverNotify/haptic concepts; the app passes those via its own impl).
+  switchToRestoredSession: (sessionId) => getStore().getState().switchSession(sessionId),
   // #5618 — user_question raises a background-session notification via the
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
@@ -1386,19 +1387,9 @@ function applyRotatedTunnelUrlDashboard(
   }
 }
 
-function handleCheckpointRestored(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  // Server has created a new session from the checkpoint and already moved
-  // this client's server-side activeSessionId onto it (the message is sent
-  // only to the requesting client — see checkpoint-handlers.js). #5454:
-  // adopt the shared parser and auto-switch to the restored session, matching
-  // the app. Previously the dashboard left the operator on the old tab until
-  // they clicked the new "Rewind: …" entry; the session_list broadcast that
-  // follows still populates the tab strip.
-  const restored = sharedCheckpointRestored(msg);
-  if (restored) {
-    get().switchSession(restored.newSessionId);
-  }
-}
+// checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
+// The auto-switch rides the required switchToRestoredSession adapter hook (the
+// dashboard's impl is the plain switchSession, no options).
 
 /**
  * Server emits pairing_refreshed whenever the pairing ID changes: after a
@@ -1413,12 +1404,9 @@ function handlePairingRefreshed(_msg: Record<string, unknown>, _get: MsgGet, set
 // web_feature_status + web_task_list migrated to the shared dispatch table
 // (#5556 slice 2)
 
-function handleConversationsList(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  // Parser shared via store-core (#5454); the dashboard intentionally has no
-  // `conversationHistoryError` / conversation-store mirror (those are app-only).
-  const { conversations } = sharedConversationsList(msg);
-  set({ conversationHistory: conversations, conversationHistoryLoading: false });
-}
+// conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
+// The dashboard has no conversationHistoryError / conversation-store mirror, so it
+// omits the optional applyConversationsListExtras hook.
 
 // #5618 — model_changed migrated to the shared store-core dispatch table
 // (runDispatch handles it before the HANDLERS map / switch). Removed from here.
@@ -3133,10 +3121,10 @@ const HANDLERS: Record<string, Handler> = {
   terminal_size: handleTerminalSize,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,
-  checkpoint_restored: handleCheckpointRestored,
+  // checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
   // web_feature_status / web_task_list migrated to the shared dispatch table
   // (#5556 slice 2)
-  conversations_list: handleConversationsList,
+  // conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
   thinking_level_changed: handleThinkingLevelChanged,
   prompt_evaluator_changed: handlePromptEvaluatorChanged,
   chroxy_context_hint_changed: handleChroxyContextHintChanged,

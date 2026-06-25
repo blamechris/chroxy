@@ -136,6 +136,8 @@ import {
   applyInterventionBuilder,
   // --- checkpoint cases (#5618 Batch 6) ---
   handleCheckpointCreated,
+  handleCheckpointRestored,
+  handleConversationsList,
   handleCheckpointList,
   resolveSessionId,
   type PermissionMode,
@@ -358,6 +360,21 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * mobile notification store (`setShutdown`); the DASHBOARD omits this hook.
    */
   applyShutdownNotification?(payload: { shutdownReason: 'restart' | 'shutdown' | 'crash'; restartEtaMs: number; restartingSince: number }): void
+  /**
+   * Auto-switch to the session a checkpoint restore created (#5618). BOTH clients
+   * switch, so this is required (not optional) — the only divergence is the options:
+   * the APP passes `{ serverNotify: false, haptic: false }` (the server already
+   * re-homed this client, and an auto-switch shouldn't buzz), the DASHBOARD passes
+   * none. Each client backs it with its store's `switchSession`.
+   */
+  switchToRestoredSession(sessionId: string): void
+  /**
+   * Apply the APP's `conversations_list` extras (#5618): clear the app-only
+   * `conversationHistoryError` flag and mirror the list into its secondary
+   * `useConversationStore`. The DASHBOARD has neither and OMITS this hook (the
+   * shared `conversationHistory` / `conversationHistoryLoading` write is enough).
+   */
+  applyConversationsListExtras?(conversations: unknown[]): void
   /**
    * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
    * The mobile app keeps a separate `useConversationStore` whose checkpoint list
@@ -588,6 +605,14 @@ export interface DispatchMessageMap {
     type: 'server_shutdown'
     reason?: string
     restartEtaMs?: number
+  }
+  conversations_list: {
+    type: 'conversations_list'
+    conversations?: unknown[]
+  }
+  checkpoint_restored: {
+    type: 'checkpoint_restored'
+    newSessionId?: string
   }
   budget_resumed: {
     type: 'budget_resumed'
@@ -1084,6 +1109,37 @@ function dispatchServerShutdown<S extends DispatchSessionBase>(
   const payload = handleServerShutdown(msg as Record<string, unknown>)
   adapter.setState(payload as unknown as Record<string, unknown>)
   adapter.applyShutdownNotification?.(payload)
+}
+
+/**
+ * `conversations_list` (#5618) — replace the flat conversation-history list. Both
+ * clients write `conversationHistory` + `conversationHistoryLoading: false`
+ * identically; the APP's extra error-clear + secondary-store mirror ride the
+ * optional {@link ClientStoreAdapter.applyConversationsListExtras} hook.
+ */
+function dispatchConversationsList<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['conversations_list'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { conversations } = handleConversationsList(msg as Record<string, unknown>)
+  adapter.setState({ conversationHistory: conversations, conversationHistoryLoading: false })
+  adapter.applyConversationsListExtras?.(conversations)
+}
+
+/**
+ * `checkpoint_restored` (#5618) — the server created a new session at the restored
+ * checkpoint and re-homed this client onto it; auto-switch to it. Both clients
+ * switch via the required {@link ClientStoreAdapter.switchToRestoredSession} hook
+ * (the app passes its no-notify/no-haptic options, the dashboard plain).
+ */
+function dispatchCheckpointRestored<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['checkpoint_restored'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const restored = handleCheckpointRestored(msg as Record<string, unknown>)
+  if (restored) {
+    adapter.switchToRestoredSession(restored.newSessionId)
+  }
 }
 
 /**
@@ -1886,6 +1942,8 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     plan_ready: dispatchPlanReady,
     rate_limited: dispatchRateLimited,
     server_shutdown: dispatchServerShutdown,
+    conversations_list: dispatchConversationsList,
+    checkpoint_restored: dispatchCheckpointRestored,
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
@@ -1979,6 +2037,8 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'plan_ready',
   'rate_limited',
   'server_shutdown',
+  'conversations_list',
+  'checkpoint_restored',
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',
