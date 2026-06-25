@@ -31,11 +31,9 @@ import {
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
-  handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)
-  handlePlanReady as sharedPlanReady,
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
   handleToolInputDelta as sharedToolInputDelta,
@@ -97,9 +95,7 @@ import {
   // to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
-  handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
-  handleRateLimited as sharedRateLimited,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the app no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
@@ -1219,6 +1215,19 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // per-session tracker and omits this hook).
   clearPendingPermissionModeRequests: (sessionId) =>
     clearPendingPermissionModeRequestsForSession(sessionId),
+  // #5618 — budget_warning (and future notice types) surface a transient alert
+  // via the app's React-Native Alert.
+  alert: (title, message) => Alert.alert(title, message),
+  // #5618 — plan_ready raises the app's 'plan' background-session notification
+  // (the dashboard has no equivalent surface and omits this hook).
+  notifyPlanReady: (sessionId) =>
+    pushSessionNotification(sessionId, 'plan', 'Plan ready for approval'),
+  // #5618 — server_shutdown mirrors the shutdown patch into the app's mobile
+  // notification store (the dashboard omits this hook).
+  applyShutdownNotification: (payload) =>
+    useNotificationStore
+      .getState()
+      .setShutdown(payload.shutdownReason, payload.restartEtaMs, payload.restartingSince),
   // #5653 — file-ops / git wrapper cases route through the shared dispatch
   // table; the app supplies its module-level imperative-callback registry so
   // the parsed payload reaches the UI's registered callback exactly as the
@@ -2846,19 +2855,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_spawned / agent_completed / agent_event / background_work_changed /
     // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'plan_ready': {
-      const planReady = sharedPlanReady(msg, get().activeSessionId);
-      if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
-        updateSession(planReady.sessionId, () => planReady.patch);
-      }
-      // Platform-specific UX: app surfaces a session notification on
-      // plan-ready (the dashboard has no equivalent surface). Kept at the
-      // call site so the shared handler stays free of platform concerns.
-      if (planReady.sessionId) {
-        pushSessionNotification(planReady.sessionId, 'plan', 'Plan ready for approval');
-      }
-      break;
-    }
+    // plan_ready — migrated to the shared dispatch table (#5618; runDispatch). The
+    // app's plan session-notification rides the optional notifyPlanReady adapter hook.
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
@@ -3120,33 +3118,11 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'rate_limited': {
-      // #6334 — surface the server-side throttle as a brief system notice so the
-      // user gets feedback (the rate limit itself is enforced server-side).
-      const { chatMessage: rateLimitMsg } = sharedRateLimited(msg);
-      const activeRateLimitId = get().activeSessionId;
-      if (activeRateLimitId && get().sessionStates[activeRateLimitId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, rateLimitMsg],
-        }));
-      } else {
-        get().addMessage(rateLimitMsg);
-      }
-      break;
-    }
+    // rate_limited (#6334) — migrated to the shared dispatch table (#5618;
+    // runDispatch). Byte-identical active-session notice; no per-client hook.
 
-    case 'server_shutdown': {
-      const shutdownPatch = sharedServerShutdown(msg);
-      set(shutdownPatch);
-      useNotificationStore
-        .getState()
-        .setShutdown(
-          shutdownPatch.shutdownReason,
-          shutdownPatch.restartEtaMs,
-          shutdownPatch.restartingSince,
-        );
-      break;
-    }
+    // server_shutdown — migrated to the shared dispatch table (#5618; runDispatch).
+    // The app's setShutdown notification rides the optional applyShutdownNotification hook.
 
     // --- Multi-client awareness ---
 
@@ -3256,19 +3232,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // session_usage / session_cost_threshold_crossed — migrated to the shared
     // dispatch table (#5556 slice 2)
 
-    case 'budget_warning': {
-      const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
-      Alert.alert('Budget Warning', warningMessage);
-      const targetId = resolveSessionId(msg, get().activeSessionId);
-      if (targetId && get().sessionStates[targetId]) {
-        updateSession(targetId, (ss) => ({
-          messages: [...ss.messages, systemMessage],
-        }));
-      } else {
-        get().addMessage(systemMessage);
-      }
-      break;
-    }
+    // budget_warning — migrated to the shared dispatch table (#5618; runDispatch).
+    // The alert rides the new adapter.alert primitive; routing is byte-identical.
 
     case 'budget_exceeded': {
       const { exceededMessage, systemMessage } = sharedBudgetExceeded(msg);

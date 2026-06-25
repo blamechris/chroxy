@@ -68,6 +68,10 @@ import {
   handleAgentIdle,
   handlePermissionModeChanged,
   handleBudgetResumed,
+  handleBudgetWarning,
+  handlePlanReady,
+  handleRateLimited,
+  handleServerShutdown,
   handleBudgetResumeAck,
   handleConversationId,
   handlePermissionRulesUpdated,
@@ -260,6 +264,13 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   updateState(updater: (flat: Flat) => Flat): void
   /** Append a chat message via the client's own add-message path. */
   addMessage(message: ChatMessage): void
+  /**
+   * Surface a transient alert/toast to the user (#5618). Both clients back this
+   * with their own alert primitive (the app's React-Native `Alert.alert`, the
+   * dashboard's `_adapters.alert.alert`). Used by `budget_warning` and other
+   * notice-bearing types whose body is otherwise byte-identical across clients.
+   */
+  alert(title: string, message: string): void
   /** Read the current session list (for `session_updated`). */
   getSessions(): SessionInfo[]
   /**
@@ -335,6 +346,18 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    * A null sessionId is a no-op.
    */
   clearPendingPermissionModeRequests?(sessionId: string | null): void
+  /**
+   * Surface the APP's `plan_ready` session notification (#5618). On `plan_ready`
+   * the app pushes a 'plan' background-session notification ("Plan ready for
+   * approval"); the DASHBOARD has no equivalent surface and OMITS this hook.
+   */
+  notifyPlanReady?(sessionId: string): void
+  /**
+   * Apply the APP's `server_shutdown` notification side-effect (#5618). After the
+   * shared shutdown patch is written to flat state, the app mirrors it into its
+   * mobile notification store (`setShutdown`); the DASHBOARD omits this hook.
+   */
+  applyShutdownNotification?(payload: { shutdownReason: 'restart' | 'shutdown' | 'crash'; restartEtaMs: number; restartingSince: number }): void
   /**
    * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
    * The mobile app keeps a separate `useConversationStore` whose checkpoint list
@@ -545,6 +568,26 @@ export interface DispatchMessageMap {
     type: 'permission_mode_changed'
     sessionId?: string
     mode?: string | null
+  }
+  budget_warning: {
+    type: 'budget_warning'
+    sessionId?: string
+    message?: string
+  }
+  plan_ready: {
+    type: 'plan_ready'
+    sessionId?: string
+    allowedPrompts?: unknown[]
+  }
+  rate_limited: {
+    type: 'rate_limited'
+    message?: string
+    retryAfterMs?: number
+  }
+  server_shutdown: {
+    type: 'server_shutdown'
+    reason?: string
+    restartEtaMs?: number
   }
   budget_resumed: {
     type: 'budget_resumed'
@@ -972,6 +1015,75 @@ function dispatchBudgetResumed<S extends DispatchSessionBase>(
   } else {
     adapter.addMessage(systemMessage)
   }
+}
+
+/**
+ * `budget_warning` (#5618) — alert the user and append a system message to the
+ * target session (or the flat add-message path when it isn't local). Byte-identical
+ * across clients except the alert primitive, which is the required `adapter.alert`.
+ */
+function dispatchBudgetWarning<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['budget_warning'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { warningMessage, systemMessage } = handleBudgetWarning(msg as Record<string, unknown>)
+  adapter.alert('Budget Warning', warningMessage)
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(targetId, (ss) => ({ messages: [...ss.messages, systemMessage] } as Partial<S>))
+  } else {
+    adapter.addMessage(systemMessage)
+  }
+}
+
+/**
+ * `rate_limited` (#6334, #5618) — surface the server-side throttle as a brief
+ * system notice on the ACTIVE session (or the flat add-message path). Byte-identical
+ * across both clients.
+ */
+function dispatchRateLimited<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['rate_limited'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { chatMessage } = handleRateLimited(msg as Record<string, unknown>)
+  const activeId = adapter.getActiveSessionId()
+  if (activeId && adapter.hasSession(activeId)) {
+    adapter.updateSession(activeId, (ss) => ({ messages: [...ss.messages, chatMessage] } as Partial<S>))
+  } else {
+    adapter.addMessage(chatMessage)
+  }
+}
+
+/**
+ * `plan_ready` (#5618) — flip the target session into plan-pending. The APP also
+ * raises a 'plan' background-session notification via the optional
+ * {@link ClientStoreAdapter.notifyPlanReady} hook (the dashboard omits it).
+ */
+function dispatchPlanReady<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['plan_ready'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const planReady = handlePlanReady(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (planReady.sessionId && adapter.hasSession(planReady.sessionId)) {
+    adapter.updateSession(planReady.sessionId, () => planReady.patch as unknown as Partial<S>)
+  }
+  if (planReady.sessionId) {
+    adapter.notifyPlanReady?.(planReady.sessionId)
+  }
+}
+
+/**
+ * `server_shutdown` (#5618) — write the shared shutdown patch to flat state. The
+ * APP additionally mirrors it into its mobile notification store via the optional
+ * {@link ClientStoreAdapter.applyShutdownNotification} hook (the dashboard omits it).
+ */
+function dispatchServerShutdown<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['server_shutdown'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const payload = handleServerShutdown(msg as Record<string, unknown>)
+  adapter.setState(payload as unknown as Record<string, unknown>)
+  adapter.applyShutdownNotification?.(payload)
 }
 
 /**
@@ -1770,6 +1882,10 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     agent_busy: dispatchAgentBusy,
     agent_idle: dispatchAgentIdle,
     permission_mode_changed: dispatchPermissionModeChanged,
+    budget_warning: dispatchBudgetWarning,
+    plan_ready: dispatchPlanReady,
+    rate_limited: dispatchRateLimited,
+    server_shutdown: dispatchServerShutdown,
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
@@ -1859,6 +1975,10 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'agent_busy',
   'agent_idle',
   'permission_mode_changed',
+  'budget_warning',
+  'plan_ready',
+  'rate_limited',
+  'server_shutdown',
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',

@@ -21,11 +21,9 @@ import {
   // agent_busy / budget_resumed migrated to the shared dispatch table (#5556)
   handleClaudeReady as sharedClaudeReady,
   handleThinkingLevelChanged as sharedThinkingLevelChanged,
-  handleBudgetWarning as sharedBudgetWarning,
   handleBudgetExceeded as sharedBudgetExceeded,
   // plan_started / inactivity_warning / dev_preview / dev_preview_stopped
   // migrated to the shared dispatch table (#5556 slice 2)
-  handlePlanReady as sharedPlanReady,
   // #4653: chroxy-side multi-question deny intervention surfaced to the user
   handleToolStart as sharedToolStart,
   handleToolResult as sharedToolResult,
@@ -92,9 +90,7 @@ import {
   // mcp_servers / session_usage migrated to the shared dispatch table (#5556 slice 2)
   handleResultUsage as sharedResultUsage,
   handleServerError as sharedServerError,
-  handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
-  handleRateLimited as sharedRateLimited,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the dashboard no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
@@ -1050,6 +1046,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
+  // #5618 — budget_warning (and future notice types) surface a transient alert
+  // via the dashboard's alert adapter.
+  alert: (title, message) => _adapters.alert.alert(title, message),
   getSessions: () => getStore().getState().sessions,
   // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
   // The dashboard omits syncSecondaryCheckpoints (no secondary checkpoint store).
@@ -2364,18 +2363,8 @@ function handlePermissionResolved(msg: Record<string, unknown>, get: MsgGet, set
   }
 }
 
-function handleBudgetWarning(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  const { warningMessage, systemMessage } = sharedBudgetWarning(msg);
-  _adapters.alert.alert('Budget Warning', warningMessage);
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, (ss) => ({
-      messages: [...ss.messages, systemMessage],
-    }));
-  } else {
-    get().addMessage(systemMessage);
-  }
-}
+// budget_warning — migrated to the shared dispatch table (#5618; runDispatch).
+// The alert rides the new adapter.alert primitive; routing is byte-identical.
 
 function handleBudgetExceeded(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
   const { exceededMessage, systemMessage } = sharedBudgetExceeded(msg);
@@ -2437,9 +2426,8 @@ function handleServerError(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   }
 }
 
-function handleServerShutdown(msg: Record<string, unknown>, _get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  set(sharedServerShutdown(msg));
-}
+// server_shutdown — migrated to the shared dispatch table (#5618; runDispatch).
+// The dashboard has no shutdown notification, so it omits applyShutdownNotification.
 
 /**
  * #5163 (epic #5159) — Control Room `activity_snapshot`: REPLACE the target
@@ -3178,11 +3166,11 @@ const HANDLERS: Record<string, Handler> = {
   tool_result: handleToolResult,
   permission_request: handlePermissionRequest,
   permission_resolved: handlePermissionResolved,
-  budget_warning: handleBudgetWarning,
+  // budget_warning — migrated to the shared dispatch table (#5618; runDispatch).
   budget_exceeded: handleBudgetExceeded,
   // budget_resumed migrated to the shared store-core dispatch table (#5556)
   server_error: handleServerError,
-  server_shutdown: handleServerShutdown,
+  // server_shutdown — migrated to the shared dispatch table (#5618; runDispatch).
   // #5163 (epic #5159): Control Room live activity tree.
   activity_snapshot: handleActivitySnapshot,
   activity_delta: handleActivityDelta,
@@ -4350,13 +4338,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_spawned / agent_completed / agent_event / background_work_changed /
     // plan_started — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'plan_ready': {
-      const planReady = sharedPlanReady(msg, get().activeSessionId);
-      if (planReady.sessionId && get().sessionStates[planReady.sessionId]) {
-        updateSession(planReady.sessionId, () => planReady.patch);
-      }
-      break;
-    }
+    // plan_ready — migrated to the shared dispatch table (#5618; runDispatch). The
+    // dashboard has no plan notification, so it omits the notifyPlanReady hook.
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
@@ -4520,20 +4503,8 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'rate_limited': {
-      // #6334 — surface the server-side throttle as a brief system notice so the
-      // user gets feedback (the rate limit itself is enforced server-side).
-      const { chatMessage: rateLimitMsg } = sharedRateLimited(msg);
-      const activeRateLimitId = get().activeSessionId;
-      if (activeRateLimitId && get().sessionStates[activeRateLimitId]) {
-        updateActiveSession((ss) => ({
-          messages: [...ss.messages, rateLimitMsg],
-        }));
-      } else {
-        get().addMessage(rateLimitMsg);
-      }
-      break;
-    }
+    // rate_limited (#6334) — migrated to the shared dispatch table (#5618;
+    // runDispatch). Byte-identical active-session notice; no per-client hook.
 
     // --- Multi-client awareness ---
 
