@@ -225,6 +225,14 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
       if (exp!.flat) {
         expect(store.getState(), `${fx.name}: flat fields`).toMatchObject(exp!.flat)
       }
+      // #6345: assert the ordered terminal-mirror writes (appendTerminalData args)
+      // a fixture drives (raw / raw_background / terminal_output).
+      if (exp!.terminalWrites) {
+        expect(
+          (store.getState() as unknown as { _terminalWrites: string[] })._terminalWrites,
+          `${fx.name}: terminal writes`,
+        ).toEqual(exp!.terminalWrites)
+      }
     })
   }
 })
