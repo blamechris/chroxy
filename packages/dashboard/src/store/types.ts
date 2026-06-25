@@ -139,6 +139,11 @@ export interface ProviderCapabilities {
   // streaming state to word the auto-mode confirm dialog accurately.
   interruptsTurnOnAutoSwitch?: boolean;
   planMode: boolean;
+  // #6312: true when the provider streams partial responses. claude-tui reports
+  // false (it can only deliver complete turns); other providers omit it (treated
+  // as capable). Consumed by the session-creation limitation note so the
+  // `streaming: false` flag isn't silently dropped client-side.
+  streaming?: boolean;
   resume: boolean;
   terminal: boolean;
   thinkingLevel?: boolean;
