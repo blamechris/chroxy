@@ -63,6 +63,12 @@ export interface FixtureInitialState {
   myClientId?: string | null
   /** Follow-mode flag (#5618 Batch 4 — for client_focus_changed auto-switch). */
   followMode?: boolean
+  /**
+   * Flat `webTasks` slice (#6268) — both clients' `web_task_error` handler maps
+   * over `state.webTasks` to flip a matching task to `failed`, so a fixture that
+   * exercises the `taskId` path must seed the task it targets.
+   */
+  webTasks?: Array<Record<string, unknown>>
 }
 
 /**
@@ -2337,6 +2343,48 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
         'lifecycle store and writes only socket: null, so it makes no observable main-store mutation.',
       app: {},
       dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
+  {
+    // #6268: web_task_error carrying a taskId flips the matching flat webTask to
+    // `failed` with the error text — identical in both clients (the shared
+    // state.webTasks.map). Seeds a 'running' task so the transition is non-vacuous;
+    // updatedAt is Date.now() so it is deliberately not asserted. (The common
+    // taskId-less bubble path is pinned by the existing web_task_error fixture.)
+    name: 'web_task_error with a taskId flips the matching webTask to failed (both clients)',
+    type: 'web_task_error',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: {} },
+      webTasks: [{ taskId: 't1', status: 'running', prompt: 'do the thing' }],
+    },
+    message: { type: 'web_task_error', taskId: 't1', message: 'task blew up' },
+    expect: {
+      flat: { webTasks: [{ taskId: 't1', status: 'failed', error: 'task blew up' }] },
+    },
+  },
+  {
+    // #6268: web_task_error with code SESSION_TOKEN_MISMATCH + boundSessionName
+    // legitimately DIVERGES (#2944). The app short-circuits to a native Alert and
+    // appends NO bubble (this device is paired to a different session); the
+    // dashboard has no such guard and always appends the system bubble. No taskId,
+    // so the webTasks slice is untouched. Target = the active session.
+    name: 'web_task_error SESSION_TOKEN_MISMATCH diverges: app shows an Alert with no bubble; the dashboard appends the bubble',
+    type: 'web_task_error',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'web_task_error',
+      code: 'SESSION_TOKEN_MISMATCH',
+      boundSessionName: 'My Session',
+      message: 'This action is bound to another session',
+    },
+    divergent: {
+      reason:
+        'on a SESSION_TOKEN_MISMATCH with a boundSessionName the app short-circuits to showBoundSessionMismatchAlert and appends NO ' +
+        'bubble (#2944), while the dashboard has no such guard and always appends the system error bubble. The Alert is a side effect ' +
+        'outside the asserted messages slice.',
+      app: { sessions: { s1: { messages: [] } } },
+      dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'This action is bound to another session' }] } } },
     },
   },
 ]

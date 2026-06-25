@@ -209,6 +209,9 @@ function seedStore(fx: ContractFixture) {
     activity: { bySession: {} },
     serverErrors: [],
     sessionNotifications: [],
+    // #6268: web_task_error maps over state.webTasks; seed it (default []) so the
+    // .map never throws, and let a fixture seed a task to flip to `failed`.
+    webTasks: fx.init?.webTasks ?? [],
     // #6325: store methods the session-lifecycle handlers call at their tail —
     // no-op stubs so session_switched/checkpoint_restored don't throw on an
     // undefined method. switchSession is wired below (it must write activeSessionId).
