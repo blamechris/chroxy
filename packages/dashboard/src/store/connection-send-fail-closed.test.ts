@@ -347,10 +347,11 @@ describe('#6321 — dashboard setPermissionMode does not leave a phantom mode on
   })
 
   it('applies the optimistic flip on a healthy send', async () => {
-    const sent: unknown[] = []
+    const sent: Array<Record<string, unknown>> = []
     const socket = liveSocket(sent)
     const store = await seed(socket)
     store.getState().setPermissionMode('plan')
+    expect(sent).toEqual([expect.objectContaining({ type: 'set_permission_mode', mode: 'plan' })])
     expect(store.getState().sessionStates['sess-1']!.permissionMode).toBe('plan')
   })
 })
