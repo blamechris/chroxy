@@ -315,3 +315,43 @@ describe('#6310 — dashboard notification-prefs setters do not lie on a closing
     expect(prefs(useConnectionStore).bypassCategories).toEqual([])
   })
 })
+
+describe('#6321 — dashboard setPermissionMode does not leave a phantom mode on a closing socket', () => {
+  // setPermissionMode self-heals on a server PERMISSION_MODE_NOT_APPLIED rejection,
+  // but a failed send has no round-trip → no rejection. The optimistic flip +
+  // pending registration are gated on a real send. ('plan' skips the destructive
+  // 'auto' window.confirm.) confirmPermissionMode has no optimistic flip on the
+  // dashboard, so only setPermissionMode needs covering.
+  async function seed(socket: WebSocket) {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessions: [{ sessionId: 'sess-1', name: 'sess-1', provider: 'claude-sdk' }],
+      sessionStates: {
+        'sess-1': { ...createEmptySessionState(), permissionMode: 'default' } as unknown as SessionState,
+      },
+      permissionMode: 'default',
+      previousPermissionMode: null,
+      socket,
+    } as never)
+    return useConnectionStore
+  }
+
+  it('no optimistic permissionMode flip when the send throws', async () => {
+    const socket = closingSocket()
+    const store = await seed(socket)
+    store.getState().setPermissionMode('plan')
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(store.getState().sessionStates['sess-1']!.permissionMode).toBe('default')
+    expect(store.getState().previousPermissionMode).toBeNull()
+  })
+
+  it('applies the optimistic flip on a healthy send', async () => {
+    const sent: Array<Record<string, unknown>> = []
+    const socket = liveSocket(sent)
+    const store = await seed(socket)
+    store.getState().setPermissionMode('plan')
+    expect(sent).toEqual([expect.objectContaining({ type: 'set_permission_mode', mode: 'plan' })])
+    expect(store.getState().sessionStates['sess-1']!.permissionMode).toBe('plan')
+  })
+})
