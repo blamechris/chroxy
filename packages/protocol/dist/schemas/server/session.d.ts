@@ -428,3 +428,17 @@ export declare const ServerCheckpointRestoredSchema: z.ZodObject<{
     newSessionId: z.ZodString;
     name: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerSessionWarningSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_warning">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    reason: z.ZodLiteral<"idle_timeout">;
+    message: z.ZodString;
+    remainingMs: z.ZodNumber;
+}, z.core.$strip>;
+export declare const ServerSessionTimeoutSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_timeout">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+    idleMs: z.ZodNumber;
+}, z.core.$strip>;

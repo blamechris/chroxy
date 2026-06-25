@@ -545,3 +545,20 @@ export const ServerCheckpointRestoredSchema = z.object({
     newSessionId: z.string(),
     name: z.string(),
 });
+// #6332 (batch 2b of #6314): idle-timeout lifecycle. `session_warning` is the
+// pre-timeout notice; `session_timeout` fires at close. NOTE the time field
+// differs — `remainingMs` (warning) vs `idleMs` (timeout) — do not conflate.
+export const ServerSessionWarningSchema = z.object({
+    type: z.literal('session_warning'),
+    sessionId: z.string(),
+    name: z.string(),
+    reason: z.literal('idle_timeout'),
+    message: z.string(),
+    remainingMs: z.number(),
+});
+export const ServerSessionTimeoutSchema = z.object({
+    type: z.literal('session_timeout'),
+    sessionId: z.string(),
+    name: z.string(),
+    idleMs: z.number(),
+});
