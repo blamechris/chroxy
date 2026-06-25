@@ -15,6 +15,8 @@ import { useConnectionStore } from '../store/connection';
 import { FolderBrowser } from './FolderBrowser';
 import { COLORS } from '../constants/colors';
 import { getProviderLabel } from '../constants/providers';
+import { buildProviderLimitationNote } from '@chroxy/store-core';
+import { DEFAULT_PROVIDER } from '@chroxy/protocol';
 
 const PROVIDERS_TIMEOUT_MS = 5000;
 
@@ -112,6 +114,17 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
   ];
 
   const selectedProviderDetail = providerChips.find((p) => p.id === provider)?.detail ?? '';
+
+  // #6312 / #6352 — mobile parity with the dashboard's session-creation limitation
+  // note. When the selected provider reports a capability as `false` (notably the
+  // default claude-tui: no plan mode / streaming / model switch), surface a concise
+  // non-blocking note rather than leaving the user to infer the gap from an absent
+  // control. The empty `provider` chip means "server default", so resolve it to
+  // DEFAULT_PROVIDER for the capability lookup.
+  const selectedProviderCaps = availableProviders.find(
+    (p) => p.name === (provider || DEFAULT_PROVIDER),
+  )?.capabilities;
+  const providerLimitationNote = buildProviderLimitationNote(selectedProviderCaps);
 
   const handleCreate = () => {
     const sessionName = name.trim() || `Session ${sessions.length + 1}`;
@@ -269,6 +282,15 @@ export function CreateSessionModal({ visible, onClose }: CreateSessionModalProps
                 accessibilityLabel={`Billing: ${selectedProviderDetail}`}
               >
                 {selectedProviderDetail}
+              </Text>
+            ) : null}
+
+            {/* #6312 / #6352 — non-blocking capability-limitation note for a
+                reduced-capability provider (notably claude-tui). Additive copy
+                explaining the absent affordances; behaviour is unchanged. */}
+            {providerLimitationNote ? (
+              <Text style={styles.providerLimitationNote} testID="provider-limitation-note">
+                {providerLimitationNote}
               </Text>
             ) : null}
 
@@ -446,6 +468,13 @@ const styles = StyleSheet.create({
     marginTop: -8,
     marginBottom: 16,
     fontStyle: 'italic',
+  },
+  // #6312 / #6352 — capability-limitation note; subtle, sits under the provider row.
+  providerLimitationNote: {
+    color: COLORS.textMuted,
+    fontSize: 12,
+    marginTop: -8,
+    marginBottom: 16,
   },
   providersEmptyRow: {
     flexDirection: 'row',
