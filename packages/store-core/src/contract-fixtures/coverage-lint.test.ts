@@ -63,6 +63,33 @@ const dashHandlerPath = resolve(here, '../../../dashboard/src/store/message-hand
 // both-clients case — add a real contract fixture instead. New entries are
 // only legitimate when retro-fitting a pre-existing case, with a note.
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// #5618 dispatch-table migration — PHASE COMPLETE (closed 2026-06-25).
+//
+// The cleanly-beneficial migrations are done (~67 types now route through the
+// shared store-core dispatch table). The both-clients-switch types that REMAIN in
+// the universe below are INTENTIONALLY switch-local — do NOT re-attempt migrating
+// them onto the dispatch table without re-deciding (the triage map's "zero-change-
+// via-hooks" rating is misleading for them). Their `handleX` PARSER already lives in
+// store-core and both clients call it; what's left in each switch is genuinely
+// per-client ORCHESTRATION, not incidental duplication — so migrating it would wrap
+// that orchestration behind 2–4 new adapter hooks each, adding ~as much surface as
+// the dedup removes, with real regression risk. Representative cases:
+//   - permission_resolved / permission_timeout / permission_expired — thin shared
+//     prompt-mark updater; thick divergence (all-sessions scan, dashboard flat-message
+//     fallback, app `remove` vs dashboard #5008 `mark-read` notifications, app-only
+//     ServerError banner).
+//   - budget_exceeded — whole behaviour diverges by design (#5619): app manual Resume
+//     button vs dashboard auto-resume + modified message + toast.
+//   - server_status / server_mode / session_warning — thin shared core, thick divergence.
+//   - message / server_error / web_task_error / tool_* / stream_* / session_switched /
+//     session_timeout / client_joined / client_left / pair_fail, plus the hard four
+//     (error / session_list / auth_ok / key_exchange_ok).
+// These keep their SWITCH_FIXTURES (still behaviour-verified through each client's real
+// handler), so they are NOT NO_SWITCH_CONTRACT_BY_DESIGN exemptions. See the #5618
+// close comment for the full rationale.
+// ---------------------------------------------------------------------------
 const PENDING_CONTRACT_TYPES = new Set<string>([
   // EMPTY — the both-clients SWITCH_FIXTURES backlog is fully drained. Every
   // both-clients switch type now has a behaviour-verified fixture (incl. the last
