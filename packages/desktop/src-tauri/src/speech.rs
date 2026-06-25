@@ -148,33 +148,44 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
     *child_lock = Some(child);
     drop(child_lock);
 
-    // Drain stderr on its own thread into a bounded tail buffer. A dedicated
-    // drainer means a chatty/crashing helper never blocks on a full pipe, and
-    // the failure reason is retained for the exit handler below. (#5668)
-    let stderr_handle = thread::spawn(move || {
+    // Drain stderr on its own thread into a SHARED bounded tail buffer (#6281).
+    // A dedicated drainer means a chatty/crashing helper never blocks on a full
+    // pipe, and the failure reason is retained for the exit handler below (#5668).
+    // The reader SNAPSHOTS this buffer instead of join()ing the drain thread, so a
+    // helper that closes stdout while holding stderr open can't park the reader on
+    // an unbounded join — the drain thread exits on its own at stderr EOF.
+    let stderr_tail_buf: Arc<Mutex<VecDeque<String>>> =
+        Arc::new(Mutex::new(VecDeque::with_capacity(STDERR_TAIL_LINES)));
+    let stderr_done = Arc::new(AtomicBool::new(false));
+    let drain_buf = Arc::clone(&stderr_tail_buf);
+    let drain_done = Arc::clone(&stderr_done);
+    thread::spawn(move || {
         let reader = BufReader::new(stderr);
-        let mut tail: VecDeque<String> = VecDeque::with_capacity(STDERR_TAIL_LINES);
         for line in reader.lines() {
             match line {
                 Ok(l) => {
                     if l.is_empty() {
                         continue
                     }
-                    if tail.len() >= STDERR_TAIL_LINES {
-                        tail.pop_front();
+                    if let Ok(mut tail) = drain_buf.lock() {
+                        if tail.len() >= STDERR_TAIL_LINES {
+                            tail.pop_front();
+                        }
+                        tail.push_back(l);
                     }
-                    tail.push_back(l);
                 }
                 Err(_) => break,
             }
         }
-        tail.into_iter().collect::<Vec<_>>().join("\n")
+        drain_done.store(true, Ordering::SeqCst);
     });
 
     // Spawn reader thread — clears child handle when helper exits
     let app_handle = app.clone();
     let child_ref = Arc::clone(&state.child);
     let stopping = Arc::clone(&state.stopping);
+    let reader_tail = Arc::clone(&stderr_tail_buf);
+    let reader_done = Arc::clone(&stderr_done);
     thread::spawn(move || {
         let reader = BufReader::new(stdout);
         let mut emitted_error = false;
@@ -219,8 +230,22 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
             None
         };
 
-        // Collect whatever the helper wrote to stderr before exiting.
-        let stderr_tail = stderr_handle.join().unwrap_or_default();
+        // #6281: snapshot the drained stderr tail WITHOUT an unbounded join. The
+        // child is reaped above, so its stderr write-end is closed and the drain
+        // thread reaches EOF shortly — poll its `done` flag with a short deadline
+        // (so a helper that closes stdout but holds stderr open can't park the
+        // reader forever), then snapshot whatever was drained.
+        let stderr_deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(500);
+        while !reader_done.load(Ordering::SeqCst)
+            && std::time::Instant::now() < stderr_deadline
+        {
+            thread::sleep(std::time::Duration::from_millis(10));
+        }
+        let stderr_tail = reader_tail
+            .lock()
+            .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
+            .unwrap_or_default();
 
         // #5668 — surface an *unexpected* death so it isn't a silent button
         // revert. Only when: the helper exited on its own (not via stop() and
@@ -261,44 +286,49 @@ pub fn stop(state: &SpeechState) {
         // Drop stdin to signal EOF as a fallback
         child.stdin.take();
 
-        // Wait briefly for clean exit, then force kill if needed
-        let pid = child.id();
+        // Wait briefly for clean exit, then nudge with SIGTERM if still hung.
         match child.try_wait() {
             Ok(Some(_)) => {
-                // Already exited
+                // Already exited — reaped here under the lock; clear the handle.
                 *child_lock = None;
             }
             _ => {
-                // Still running — the reader thread will reap it after the
-                // helper responds to the "stop" command. If it hangs,
-                // the reader thread will see EOF when we drop stdin above.
-                // Leave child_lock populated — reader thread clears it.
+                // Still running — the reader thread's child.wait() will reap it
+                // after the helper responds to "stop" (or sees stdin EOF). Leave
+                // child_lock populated; the reader clears it.
                 drop(child_lock);
 
-                // Safety net: kill after 3 seconds if still alive
+                // Safety net (#6282): 3s after a clean stop, if the reader STILL
+                // hasn't reaped the helper, nudge it with SIGTERM — but do NOT
+                // waitpid here. The reader's child.wait() is the SOLE reaper, so
+                // there is no double-reap; and we only signal while holding the
+                // child Mutex with the Child still present, which guarantees the
+                // reader hasn't reaped it (the pid is still ours, never a recycled
+                // one). A hung helper keeps stdout open, so the reader is parked in
+                // reader.lines() with the Mutex FREE → try_lock succeeds and the
+                // SIGTERM fires (#4986: surface the hang loudly rather than hide
+                // behind a silent kill); a reader already mid-wait() holds the lock
+                // → try_lock fails and we correctly leave the in-progress reap alone.
+                let child_ref = Arc::clone(&state.child);
                 thread::spawn(move || {
                     thread::sleep(std::time::Duration::from_secs(3));
-                    // Check if the process is still around before killing.
-                    // waitpid with WNOHANG: 0 = still running
-                    unsafe {
-                        let status = libc::waitpid(pid as i32, std::ptr::null_mut(), libc::WNOHANG);
-                        if status == 0 {
-                            // #4986 — the helper ignored the clean "stop\n"
-                            // signal AND the EOF on stdin. Log loudly so
-                            // future regressions like #4985 (where the
-                            // helper was silently SIGTERM'd every session
-                            // since 0.8.x and voice never actually
-                            // transcribed) surface instead of hiding behind
-                            // a "graceful" kill. The no-op branch (process
-                            // already exited cleanly) stays silent.
+                    if let Ok(guard) = child_ref.try_lock() {
+                        if let Some(child) = guard.as_ref() {
+                            let pid = child.id();
                             eprintln!(
                                 "[speech] WARN: helper (pid {}) did not exit within 3s of clean shutdown; sending SIGTERM. \
 This usually means the helper crashed or hung — voice transcription may have silently failed for this session.",
                                 pid
                             );
-                            libc::kill(pid as i32, libc::SIGTERM);
+                            // Safe: we hold the lock, so the reader cannot reap
+                            // concurrently → the pid is still valid, not recycled.
+                            unsafe {
+                                libc::kill(pid as i32, libc::SIGTERM);
+                            }
                         }
+                        // child is None → reader already reaped → nothing to do.
                     }
+                    // try_lock failed → reader is mid-reap → leave it alone.
                 });
             }
         }
