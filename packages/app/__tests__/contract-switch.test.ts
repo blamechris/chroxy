@@ -190,6 +190,10 @@ function seedStore(fx: ContractFixture) {
   for (const [id, seed] of Object.entries(fx.init?.sessions ?? {})) {
     sessionStates[id] = { ...createEmptySessionState(), ...(seed as Partial<SessionState>) };
   }
+  // #6345: capture appendTerminalData args so a fixture can assert terminal-mirror
+  // writes (raw / raw_background / terminal_output) via expect.terminalWrites,
+  // mirroring the dashboard harness's _terminalWrites.
+  const terminalWrites: string[] = [];
   const store = createMockStore({
     activeSessionId: fx.init?.activeSessionId ?? null,
     sessions: [],
@@ -198,7 +202,10 @@ function seedStore(fx: ContractFixture) {
     messages: [],
     addMessage: jest.fn(),
     // The app's stream/tool handlers reach for the store's appendTerminalData.
-    appendTerminalData: jest.fn(),
+    appendTerminalData: (d: string) => {
+      terminalWrites.push(d);
+    },
+    _terminalWrites: terminalWrites,
     // #6325: flat connection-state fields the real store always initialises;
     // seed them so handlers that read them (client_joined → connectedClients,
     // activity_delta/_snapshot → activity, server_error → serverErrors,
@@ -295,6 +302,13 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
       // "don't care", so existing fixtures are unaffected.
       if (exp!.flat) {
         expect(store.getState()).toMatchObject(exp!.flat);
+      }
+      // #6345: assert the ordered terminal-mirror writes (appendTerminalData args)
+      // a fixture drives (raw / raw_background / terminal_output).
+      if (exp!.terminalWrites) {
+        expect((store.getState() as unknown as { _terminalWrites: string[] })._terminalWrites).toEqual(
+          exp!.terminalWrites,
+        );
       }
     });
   }

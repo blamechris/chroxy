@@ -160,14 +160,11 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
 // later gains a real main-store effect must move OUT of this set into a fixture.
 // ---------------------------------------------------------------------------
 const NO_SWITCH_CONTRACT_BY_DESIGN = new Set<string>([
-  // raw / raw_background / terminal_output — the only effect is
-  // get().appendTerminalData(...) (the PTY/terminal mirror buffer), which the
-  // contract-switch harness stubs to a no-op (app: jest.fn(); dashboard: pushes
-  // to a local _terminalWrites array). No sessions[id], no scalar, no flat write.
-  // The terminal mirror is covered by its own dashboard/app terminal tests.
-  'raw',
-  'raw_background',
-  'terminal_output',
+  // raw / raw_background / terminal_output — MOVED OUT (#6345): now real
+  // SWITCH_FIXTURES asserting their get().appendTerminalData write via the harness's
+  // captured `_terminalWrites` (expect.terminalWrites). They were exempt only
+  // because the harness stubbed appendTerminalData to a no-op; once captured, the
+  // terminal-mirror write IS an observable both-clients contract.
   // pong — pure heartbeat ack: both clients only clear the pong-timeout timer
   // (scheduler.clearTimeout); the RTT/quality path is gated on a running ping loop
   // (lastPingSentAt > 0) unreachable from a single seeded pong, and the app routes

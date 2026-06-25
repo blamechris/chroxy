@@ -116,6 +116,13 @@ export interface FixtureExpectation {
    * to "don't care".
    */
   rotatedTunnelUrls?: Array<{ url: string; previousUrl: string | null }>
+  /**
+   * Expected ordered `appendTerminalData` call args (#6345) — the terminal-mirror
+   * writes a fixture drives (raw / raw_background / terminal_output). Both harnesses
+   * capture the strings passed to the store's `appendTerminalData`; this asserts
+   * them in order. Omit the slice to "don't care".
+   */
+  terminalWrites?: string[]
   /** When true, assert NO mutation happened at all (state is untouched). */
   noop?: boolean
 }
@@ -2386,5 +2393,38 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       app: { sessions: { s1: { messages: [] } } },
       dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'This action is bound to another session' }] } } },
     },
+  },
+  {
+    // #6345: raw PTY output. Both clients pass the shared handleRawOutput data
+    // (msg.data verbatim, '' on non-string) to get().appendTerminalData —
+    // unconditionally (no sessionId/active gate). The app also mirrors into the
+    // mocked useTerminalStore, but only the main-store write is captured, so both
+    // see exactly one identical write → a single terminalWrites expect. (Plain
+    // ASCII data — the contract is "verbatim pass-through"; the byte content is
+    // irrelevant and ANSI escapes only invite source-mangling.)
+    name: 'raw writes the PTY chunk to the terminal mirror, unconditionally (both clients)',
+    type: 'raw',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'raw', sessionId: 's1', data: 'raw-pty-chunk' },
+    expect: { terminalWrites: ['raw-pty-chunk'] },
+  },
+  {
+    // #6345: background-agent PTY output. Same as raw — unconditional verbatim
+    // get().appendTerminalData write in both clients; no gate, no init needed.
+    name: 'raw_background writes the decoded PTY chunk to the terminal mirror (both clients)',
+    type: 'raw_background',
+    message: { type: 'raw_background', data: 'background-agent-output' },
+    expect: { terminalWrites: ['background-agent-output'] },
+  },
+  {
+    // #6345: the opt-in live-PTY mirror channel (#5835). Both clients gate on
+    // typeof msg.data === 'string' AND msg.sessionId === activeSessionId, then write
+    // msg.data verbatim to get().appendTerminalData. Seed activeSessionId === the
+    // message sessionId so the active-id guard passes.
+    name: 'terminal_output writes the PTY chunk to the mirror for the active session (both clients)',
+    type: 'terminal_output',
+    init: { activeSessionId: 's1' },
+    message: { type: 'terminal_output', sessionId: 's1', data: 'term-line file.txt' },
+    expect: { terminalWrites: ['term-line file.txt'] },
   },
 ]
