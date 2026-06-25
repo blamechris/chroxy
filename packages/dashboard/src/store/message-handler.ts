@@ -96,6 +96,7 @@ import {
   handleServerError as sharedServerError,
   handleServerShutdown as sharedServerShutdown,
   handleServerStatusLegacy as sharedServerStatusLegacy,
+  handleRateLimited as sharedRateLimited,
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the dashboard no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
@@ -4522,6 +4523,21 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         }));
       } else {
         get().addMessage(statusMsg);
+      }
+      break;
+    }
+
+    case 'rate_limited': {
+      // #6334 — surface the server-side throttle as a brief system notice so the
+      // user gets feedback (the rate limit itself is enforced server-side).
+      const { chatMessage: rateLimitMsg } = sharedRateLimited(msg);
+      const activeRateLimitId = get().activeSessionId;
+      if (activeRateLimitId && get().sessionStates[activeRateLimitId]) {
+        updateActiveSession((ss) => ({
+          messages: [...ss.messages, rateLimitMsg],
+        }));
+      } else {
+        get().addMessage(rateLimitMsg);
       }
       break;
     }

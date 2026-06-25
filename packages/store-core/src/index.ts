@@ -580,6 +580,7 @@ export {
   handleServerError,
   handleServerShutdown,
   handleServerStatusLegacy,
+  handleRateLimited,
   handleWebTaskUpsert,
   // #5556 slice 4 — shared filter-and-append upsert for web_task_created/updated.
   applyWebTaskUpsert,

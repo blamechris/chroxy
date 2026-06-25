@@ -2427,4 +2427,18 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     message: { type: 'terminal_output', sessionId: 's1', data: 'term-line file.txt' },
     expect: { terminalWrites: ['term-line file.txt'] },
   },
+  {
+    // #6334: a server-side throttle. Both clients run the shared handleRateLimited,
+    // which builds a `system` bubble from `message` + a "Retry in Ns" hint
+    // (ceil(retryAfterMs/1000)), and append it to the active session.
+    name: 'rate_limited appends a system throttle notice with a retry hint (both clients)',
+    type: 'rate_limited',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'rate_limited', retryAfterMs: 2000, message: 'Too many messages. Please slow down.' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Too many messages. Please slow down. Retry in 2s.' }] },
+      },
+    },
+  },
 ]
