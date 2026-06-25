@@ -2025,6 +2025,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const previousMode = targetSessionId
         ? sessionStates[targetSessionId]?.permissionMode ?? null
         : null;
+      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, requestId };
+      if (activeSessionId) payload.sessionId = activeSessionId;
+      // Send first and gate on the result (#6321). On the OPEN→CLOSING TOCTOU
+      // window wsSend catches InvalidStateError and returns false — there's no
+      // server round-trip, so a CAPABILITY_NOT_SUPPORTED rejection never arrives
+      // to revert. Bailing before the optimistic flip + pending registration keeps
+      // a failed send from leaving a phantom permissionMode or an orphaned pending
+      // request (mirrors the #6309/#6310 send-fail-closed family).
+      if (!wsSend(socket, payload)) return;
       // Drop any superseded pending entries for this session — only the
       // latest tap should be allowed to revert state on rejection. This
       // prevents stale rejections from overwriting a newer optimistic mode
@@ -2041,9 +2050,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (targetSessionId && sessionStates[targetSessionId]) {
         updateSession(targetSessionId, () => ({ permissionMode: mode }));
       }
-      const payload: Record<string, unknown> = { type: 'set_permission_mode', mode, requestId };
-      if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
     }
   },
 
@@ -2062,17 +2068,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       const previousMode = targetSessionId
         ? sessionStates[targetSessionId]?.permissionMode ?? null
         : null;
-      // Drop any superseded pending entries (see setPermissionMode for
-      // rationale).
-      clearPendingPermissionModeRequestsForSession(targetSessionId);
-      registerPendingPermissionModeRequest(requestId, {
-        sessionId: targetSessionId,
-        previousMode,
-        requestedMode: mode,
-      });
-      if (targetSessionId && sessionStates[targetSessionId]) {
-        updateSession(targetSessionId, () => ({ permissionMode: mode }));
-      }
       const payload: Record<string, unknown> = {
         type: 'set_permission_mode',
         mode,
@@ -2080,7 +2075,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         requestId,
       };
       if (activeSessionId) payload.sessionId = activeSessionId;
-      wsSend(socket, payload);
+      // Send first and gate the optimistic flip + pending registration on it
+      // (#6321) — see setPermissionMode. On a failed (closing-socket) send there's
+      // no round-trip to reject, so don't leave a phantom permissionMode or an
+      // orphaned pending request. The pendingPermissionConfirm dialog is still
+      // cleared below regardless (the user did confirm).
+      if (wsSend(socket, payload)) {
+        // Drop any superseded pending entries (see setPermissionMode for
+        // rationale).
+        clearPendingPermissionModeRequestsForSession(targetSessionId);
+        registerPendingPermissionModeRequest(requestId, {
+          sessionId: targetSessionId,
+          previousMode,
+          requestedMode: mode,
+        });
+        if (targetSessionId && sessionStates[targetSessionId]) {
+          updateSession(targetSessionId, () => ({ permissionMode: mode }));
+        }
+      }
     }
     set({ pendingPermissionConfirm: null });
   },
