@@ -65,6 +65,7 @@ import {
   handleAvailablePermissionModes,
   handleSessionUpdated,
   handleAgentBusy,
+  handleAgentIdle,
   handleBudgetResumed,
   handleBudgetResumeAck,
   handleConversationId,
@@ -314,6 +315,18 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    */
   syncSecondaryInventory?(kind: 'slashCommands' | 'customAgents', list: unknown[]): void
   /**
+   * Apply the `agent_idle` no-session FALLBACK (#5618). When an `agent_idle`
+   * arrives for a session that isn't in `sessionStates`, the DASHBOARD writes the
+   * idle patch (`{ isIdle, streamingMessageId: null, activeTools: [] }`) into its
+   * FLAT connection state — its UI reads flat `streamingMessageId`/`isIdle`
+   * directly (App.tsx isStreaming) and its pre-bootstrap `sendInput` writes flat
+   * `pending`, so without this an abnormal `agent_idle` leaves the stop button
+   * stuck (#5760). The APP has no flat idle mirror (it derives `isIdle` from the
+   * active session) and OMITS this hook — a faithful per-client preservation of
+   * the prior switch behaviour, in the same spirit as {@link syncSecondaryInventory}.
+   */
+  applyAgentIdleFallback?(): void
+  /**
    * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
    * The mobile app keeps a separate `useConversationStore` whose checkpoint list
    * powers its timeline UI; after the `checkpoint_created` / `checkpoint_list`
@@ -513,6 +526,10 @@ export interface DispatchMessageMap {
   }
   agent_busy: {
     type: 'agent_busy'
+    sessionId?: string
+  }
+  agent_idle: {
+    type: 'agent_idle'
     sessionId?: string
   }
   budget_resumed: {
@@ -864,6 +881,26 @@ function dispatchAgentBusy<S extends DispatchSessionBase>(
   const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
   if (targetId && adapter.hasSession(targetId)) {
     adapter.updateSession(targetId, () => handleAgentBusy() as Partial<S>)
+  }
+}
+
+/**
+ * `agent_idle` — flip the target session to idle (#5618). Byte-identical to the
+ * prior switch case for a SEEDED session: `updateSession(target, () => handleAgentIdle())`
+ * ({ isIdle, streamingMessageId: null, activeTools: [] }). The no-session FALLBACK
+ * (the dashboard mirrors the patch into flat state; the app no-ops) is preserved
+ * per-client via the optional {@link ClientStoreAdapter.applyAgentIdleFallback} hook
+ * — no behaviour change on either client.
+ */
+function dispatchAgentIdle<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['agent_idle'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const targetId = resolveSessionId(msg as Record<string, unknown>, adapter.getActiveSessionId())
+  if (targetId && adapter.hasSession(targetId)) {
+    adapter.updateSession(targetId, () => handleAgentIdle() as unknown as Partial<S>)
+  } else {
+    adapter.applyAgentIdleFallback?.()
   }
 }
 
@@ -1681,6 +1718,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     available_permission_modes: dispatchAvailablePermissionModes,
     session_updated: dispatchSessionUpdated,
     agent_busy: dispatchAgentBusy,
+    agent_idle: dispatchAgentIdle,
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
@@ -1768,6 +1806,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'available_permission_modes',
   'session_updated',
   'agent_busy',
+  'agent_idle',
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',

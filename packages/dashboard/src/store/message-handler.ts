@@ -1060,6 +1060,9 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
     pushSessionNotification(sessionId, eventType, message),
+  // #5618 — agent_idle no-session fallback: mirror the idle patch into FLAT state
+  // (the dashboard UI reads flat streamingMessageId/isIdle; the app omits this).
+  applyAgentIdleFallback: () => getStore().setState(sharedAgentIdle() as Partial<ConnectionState>),
   // #5618 Batch 3 — error-sink for session_restore_failed / session_persist_failed.
   // The dashboard's connection-store addServerError builds its own envelope
   // (category 'general', id 'info', ring-capped serverErrors) from the message;
@@ -1856,18 +1859,13 @@ function handleClaudeReady(msg: Record<string, unknown>, get: MsgGet, set: MsgSe
   }
 }
 
-function handleAgentIdle(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
-  const targetId = resolveSessionId(msg, get().activeSessionId);
-  if (targetId && get().sessionStates[targetId]) {
-    updateSession(targetId, () => sharedAgentIdle());
-  } else {
-    // Legacy/pre-bootstrap path: no session-state yet. The dashboard UI reads
-    // the flat `streamingMessageId` directly (App.tsx isStreaming check), and
-    // sendInput writes flat 'pending' here too. Without this fallback, an
-    // abnormal agent_idle in this state would leave the stop button stuck.
-    set(sharedAgentIdle());
-  }
-}
+// agent_idle — migrated to the shared dispatch table (#5618; runDispatch handles
+// it before this HANDLERS map). The seeded-session path is the shared
+// dispatchAgentIdle; the dashboard's no-session FLAT fallback (its UI reads flat
+// streamingMessageId/isIdle directly — App.tsx isStreaming — and sendInput writes
+// flat 'pending', so without it an abnormal agent_idle leaves the stop button
+// stuck) is preserved per-client via the _dispatchAdapter.applyAgentIdleFallback
+// hook below.
 
 // agent_busy migrated to the shared store-core dispatch table (#5556)
 
@@ -3176,7 +3174,7 @@ const HANDLERS: Record<string, Handler> = {
   // shared store-core dispatch table (#5556)
   session_switched: handleSessionSwitched,
   claude_ready: handleClaudeReady,
-  agent_idle: handleAgentIdle,
+  // agent_idle — migrated to the shared dispatch table (#5618; runDispatch).
   stream_start: handleStreamStart,
   stream_delta: handleStreamDelta,
   stream_end: handleStreamEnd,
