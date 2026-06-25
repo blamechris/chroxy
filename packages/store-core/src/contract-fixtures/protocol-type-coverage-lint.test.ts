@@ -227,14 +227,17 @@ describe('protocol server→client type coverage lint (#6033)', () => {
   const { inApp, inDash } = clientCoverage()
 
   it('derives a non-trivial server→client schema-type union (extraction sanity)', () => {
-    // Pin to a band around the real count (~92) so a parser regression (e.g. the
-    // schema being reformatted in a way the literal regex stops matching) fails
-    // LOUDLY rather than silently shrinking the universe to nothing and passing
-    // vacuously. A real new server→client schema type that pushes past the
-    // ceiling is a DELIBERATE bump — raise both bounds in the same PR that adds
-    // the type (and its both-client coverage or allowlist entry).
-    expect(types.length).toBeGreaterThanOrEqual(80)
-    expect(types.length).toBeLessThanOrEqual(120)
+    // Floor-only guard (#6274). The only regression this protects against is a
+    // PARSER fault that silently empties the universe — e.g. the schema being
+    // reformatted, or barrel-split (#6272), so the `z.literal` regex stops
+    // matching — which would make every coverage assertion below pass vacuously.
+    // A generous floor well below the real count (~108) trips LOUDLY on that
+    // collapse. The prior [80,120] band added a ceiling that policed legitimate
+    // GROWTH (only ~12 headroom — a new server→client type or another tab-split
+    // would have failed the lint spuriously) for no protective value: a parser
+    // regression empties the universe, it does not inflate it. So: floor, no
+    // ceiling — add new types freely; only a collapse-to-near-zero fails here.
+    expect(types.length).toBeGreaterThanOrEqual(70)
   })
 
   it('every server→client schema type is handled by BOTH clients or explicitly declared asymmetric', () => {
