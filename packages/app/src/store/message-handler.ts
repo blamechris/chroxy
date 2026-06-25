@@ -2838,7 +2838,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // agent_idle — migrated to the shared dispatch table (#5618; handled by
     // runDispatch before this switch). The app has no flat idle fallback (it
     // derives isIdle from the active session), so it omits the
-    // applyAgentIdleFallback adapter hook — behaviour unchanged.
+    // applyNoSessionFallback adapter hook — behaviour unchanged.
 
     // agent_busy — migrated to the shared dispatch table (#5556)
 

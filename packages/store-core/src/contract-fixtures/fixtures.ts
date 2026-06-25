@@ -1299,7 +1299,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
     // seeded-session path flips the session to idle ({ isIdle: true,
     // streamingMessageId: null, activeTools: [] }) via the shared dispatchAgentIdle
     // → updateSession. (The no-session FLAT fallback is preserved per-client by the
-    // optional applyAgentIdleFallback adapter hook — dashboard implements, app
+    // optional applyNoSessionFallback adapter hook — dashboard implements, app
     // omits — and is exercised by each client's own tests, not the shared contract.)
     name: 'agent_idle flips the seeded session to idle and clears the streaming id (both clients)',
     type: 'agent_idle',

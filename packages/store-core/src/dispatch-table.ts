@@ -903,7 +903,7 @@ function dispatchAgentBusy<S extends DispatchSessionBase>(
  * prior switch case for a SEEDED session: `updateSession(target, () => handleAgentIdle())`
  * ({ isIdle, streamingMessageId: null, activeTools: [] }). The no-session FALLBACK
  * (the dashboard mirrors the patch into flat state; the app no-ops) is preserved
- * per-client via the optional {@link ClientStoreAdapter.applyAgentIdleFallback} hook
+ * per-client via the optional {@link ClientStoreAdapter.applyNoSessionFallback} hook
  * — no behaviour change on either client.
  */
 function dispatchAgentIdle<S extends DispatchSessionBase>(
@@ -945,7 +945,12 @@ function dispatchPermissionModeChanged<S extends DispatchSessionBase>(
   } else {
     adapter.applyNoSessionFallback?.({ permissionMode: mode })
   }
-  adapter.clearPendingPermissionModeRequests?.(targetId)
+  // Guard on targetId (matches the app's prior `if (targetId)`): never clear the
+  // tracker with a null key — clearing the app's pending entries is keyed on the
+  // session the broadcast is *for*.
+  if (targetId) {
+    adapter.clearPendingPermissionModeRequests?.(targetId)
+  }
   adapter.setState({ pendingPermissionConfirm: null })
 }
 
