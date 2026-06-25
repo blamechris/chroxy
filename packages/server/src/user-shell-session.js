@@ -18,6 +18,7 @@ import { realpathSync, existsSync } from 'fs'
 import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
+import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 
 const log = createLogger('user-shell-session')
 
@@ -111,6 +112,24 @@ export class UserShellSession extends BaseSession {
   }
 
   /**
+   * Build the env for the spawned interactive shell PTY. Inherits the operator's
+   * full process env (it IS their shell) with TERM forced, then strips the
+   * chroxy-owned daemon secrets (#6311) — defence in depth so a command, script,
+   * or tool the user runs in the shell can't read the daemon's full-authority
+   * primary bearer token from the environment. Extracted so the strip is
+   * unit-testable without a real PTY spawn.
+   *
+   * @returns {Record<string, string>}
+   */
+  _buildShellEnv() {
+    const env = { ...process.env, TERM: 'xterm-256color' }
+    for (const key of CHROXY_SECRET_DENYLIST) {
+      delete env[key]
+    }
+    return env
+  }
+
+  /**
    * Spawn the shell under node-pty and wire its I/O. Async + rejects on failure
    * so SessionManager's _handleAsyncStartFailure tears down the phantom session
    * (same contract claude-tui relies on).
@@ -134,7 +153,7 @@ export class UserShellSession extends BaseSession {
       // truly unusable. Never default to '/' silently (Tauri/launchd cwd trap).
       cwdReal = this.cwd
     }
-    const env = { ...process.env, TERM: 'xterm-256color' }
+    const env = this._buildShellEnv()
 
     try {
       this._term = ptyMod.spawn(shell, [], {

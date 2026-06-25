@@ -23,6 +23,7 @@ import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
+import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 
 // #4453: exponential restart backoff. The first restart still fires at ~1s
 // after the death (no regression on the existing acceptance test); the
@@ -164,12 +165,29 @@ export class MCPClient extends EventEmitter {
     }
   }
 
+  /**
+   * Build the env for the spawned MCP server child. Inherits the operator's
+   * full process env plus any user-configured `_config.env`, then strips the
+   * chroxy-owned daemon secrets (#6311) — the full-authority API_TOKEN must
+   * never reach an MCP server subprocess, which could read it and seize the
+   * daemon. Extracted so the strip is unit-testable without a real spawn.
+   *
+   * @returns {Record<string, string>}
+   */
+  _buildChildEnv() {
+    const env = { ...process.env, ...this._config.env }
+    for (const key of CHROXY_SECRET_DENYLIST) {
+      delete env[key]
+    }
+    return env
+  }
+
   _spawnAndHandshake() {
     this._setState(MCP_STATES.STARTING)
     let child
     try {
       child = spawn(this._config.command, this._config.args, {
-        env: { ...process.env, ...this._config.env },
+        env: this._buildChildEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
       })
     } catch (err) {
