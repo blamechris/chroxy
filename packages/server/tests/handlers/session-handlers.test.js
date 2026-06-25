@@ -445,6 +445,25 @@ describe('session-handlers', () => {
       assert.equal(forceTerminalRepaint.callCount, 1)
     })
 
+    it('rejects a client bound to a different session', () => {
+      const ctx = makeCtx()
+      const forceTerminalRepaint = createSpy()
+      ctx._sessions.set('s-1', ptyEntry({ forceTerminalRepaint }))
+      const client = makeClient({ boundSessionId: 'other', activeSessionId: 's-1' })
+      sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 's-1' }, ctx)
+      assert.equal(forceTerminalRepaint.callCount, 0)
+    })
+
+    it('rejects when another client holds primary (only the driver repaints)', () => {
+      const ctx = makeCtx()
+      const forceTerminalRepaint = createSpy()
+      ctx._sessions.set('s-1', ptyEntry({ forceTerminalRepaint }))
+      ctx.transport.getPrimary = () => 'another-client'
+      const client = makeClient({ activeSessionId: 's-1' })
+      sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 's-1' }, ctx)
+      assert.equal(forceTerminalRepaint.callCount, 0)
+    })
+
     it('is a no-op (no throw) for a session without forceTerminalRepaint or an unknown session', () => {
       const ctx = makeCtx()
       ctx._sessions.set('s-1', ptyEntry())

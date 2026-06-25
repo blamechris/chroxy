@@ -156,7 +156,7 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
           />
         </div>
       ))}
-      {activeSessionId && activeBuffer && (
+      {activeSessionId && activeBuffer && !activeIsObserver && (
         <button
           type="button"
           className="terminal-resync-button"
