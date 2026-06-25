@@ -634,6 +634,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setNotificationPrefsCategory: (category: string, enabled: boolean): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      // #6310: send first and gate the optimistic mutation on wsSend. On the
+      // OPEN→CLOSING TOCTOU window wsSend catches the InvalidStateError and
+      // returns false; mutating then returning true would leave a phantom
+      // "sent" toggle the server never received (fails closed, no local drift).
+      if (!wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { categories: { [category]: enabled } },
+      })) return false;
       if (notificationPrefs) {
         set({
           notificationPrefs: {
@@ -642,10 +650,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           },
         });
       }
-      wsSend(socket, {
-        type: 'notification_prefs_set',
-        prefs: { categories: { [category]: enabled } },
-      });
       return true;
     }
     return false;
@@ -668,6 +672,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!deviceKey) return false;
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      // #6310: gate the optimistic mutation on the send (closing-socket TOCTOU).
+      if (!wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: {
+          devices: {
+            [deviceKey]: { categories: { [category]: enabled } },
+          },
+        },
+      })) return false;
       if (notificationPrefs) {
         const existingDevice = notificationPrefs.devices[deviceKey] ?? {};
         const existingCats = existingDevice.categories ?? {};
@@ -684,14 +697,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           },
         });
       }
-      wsSend(socket, {
-        type: 'notification_prefs_set',
-        prefs: {
-          devices: {
-            [deviceKey]: { categories: { [category]: enabled } },
-          },
-        },
-      });
       return true;
     }
     return false;
@@ -714,6 +719,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!deviceKey) return false;
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      // #6310: gate the optimistic delete on the send (closing-socket TOCTOU) —
+      // an optimistic row removal on a failed send would never reconcile.
+      if (!wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { devices: { [deviceKey]: null } },
+      })) return false;
       if (notificationPrefs) {
         const { [deviceKey]: _removed, ...rest } = notificationPrefs.devices;
         void _removed;
@@ -724,10 +735,6 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
           },
         });
       }
-      wsSend(socket, {
-        type: 'notification_prefs_set',
-        prefs: { devices: { [deviceKey]: null } },
-      });
       return true;
     }
     return false;
@@ -743,15 +750,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setNotificationPrefsQuietHours: (window: { start: string; end: string; timezone: string } | null): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      // #6310: gate the optimistic mutation on the send (closing-socket TOCTOU).
+      if (!wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { quietHours: window },
+      })) return false;
       if (notificationPrefs) {
         set({
           notificationPrefs: { ...notificationPrefs, quietHours: window },
         });
       }
-      wsSend(socket, {
-        type: 'notification_prefs_set',
-        prefs: { quietHours: window },
-      });
       return true;
     }
     return false;
@@ -766,15 +774,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   setNotificationPrefsBypassCategories: (categories: string[]): boolean => {
     const { socket, notificationPrefs } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
+      // #6310: gate the optimistic mutation on the send (closing-socket TOCTOU).
+      if (!wsSend(socket, {
+        type: 'notification_prefs_set',
+        prefs: { bypassCategories: categories },
+      })) return false;
       if (notificationPrefs) {
         set({
           notificationPrefs: { ...notificationPrefs, bypassCategories: categories },
         });
       }
-      wsSend(socket, {
-        type: 'notification_prefs_set',
-        prefs: { bypassCategories: categories },
-      });
       return true;
     }
     return false;

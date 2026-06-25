@@ -288,11 +288,14 @@ describe('connection.ts — quiet-hours actions (#4544)', () => {
 // Switch revert was the only signal and looked like a misfire. Both the
 // store action and the SettingsScreen banner are covered here.
 describe('connection.ts — notification-prefs WS-closed return values (#4559)', () => {
-  it('setNotificationPrefsCategory returns true after sending and false on the no-op path', () => {
-    // The action body must return `true` once `wsSend(...)` has shipped
-    // the patch and `false` from the fall-through (closed socket).
+  it('setNotificationPrefsCategory gates the optimistic mutation on wsSend and fails closed (#6310)', () => {
+    // #6310: the action must send FIRST and gate on wsSend — `if (!wsSend(...)) return false`
+    // on the closing-socket TOCTOU — THEN apply the optimistic patch and `return true`, with
+    // the outer `return false` for the closed-socket no-op. Pre-#6310 the optimistic `set`
+    // ran before an unchecked `wsSend`, so the toggle reported success on a frame the server
+    // never received (phantom "sent"); this regex now pins the send-gated ordering.
     expect(connectionSource).toMatch(
-      /setNotificationPrefsCategory[\s\S]{0,1400}wsSend\(socket,[\s\S]{0,200}notification_prefs_set[\s\S]{0,300}return true[\s\S]{0,80}return false/,
+      /setNotificationPrefsCategory[\s\S]{0,800}if \(!wsSend\(socket,[\s\S]{0,300}notification_prefs_set[\s\S]{0,300}return false[\s\S]{0,500}return true[\s\S]{0,150}return false/,
     );
   });
 
