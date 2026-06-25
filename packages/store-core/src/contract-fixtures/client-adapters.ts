@@ -174,6 +174,8 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // Both clients back it with their flat `checkpoints`; modelled as a read of
     // the live `flat` ref so the checkpoint fixtures observe identical results.
     getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
+    // #5618 — search_results staleness gate reads the live flat searchQuery.
+    getSearchQuery: () => ((flat as Record<string, unknown>).searchQuery as string | null | undefined) ?? null,
     // #5618 — `pushSessionNotification` is a UI side-effect OUTSIDE the shared
     // store-state contract (the app additionally mirrors into its mobile push
     // store; the dashboard does not). Modelled as a no-op here, exactly like the

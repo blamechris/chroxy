@@ -148,6 +148,7 @@ function makeAdapter(init?: {
     alert: () => {},
     getSessions: () => sessionList,
     getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
+    getSearchQuery: () => (flat.searchQuery as string | null | undefined) ?? null,
     pushSessionNotification: (sessionId, eventType, message) =>
       notifications.push({ sessionId, eventType, message }),
     switchToRestoredSession: (sessionId: string) => switchedSessions.push(sessionId),

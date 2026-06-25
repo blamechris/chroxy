@@ -138,6 +138,7 @@ import {
   handleCheckpointCreated,
   handleCheckpointRestored,
   handleConversationsList,
+  handleSearchResults,
   handleCheckpointList,
   resolveSessionId,
   type PermissionMode,
@@ -376,6 +377,19 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
    */
   applyConversationsListExtras?(conversations: unknown[]): void
   /**
+   * Read the current flat `searchQuery` (#5618). `search_results` needs it for the
+   * staleness gate — a late response for an older query is dropped. Both clients
+   * back it with their flat connection state's `searchQuery`.
+   */
+  getSearchQuery(): string | null
+  /**
+   * Apply the APP's `search_results` extras (#5618): clear the app-only `searchError`
+   * flag and mirror the results into its secondary `useConversationStore`. The
+   * DASHBOARD has neither and OMITS this hook (the shared `searchResults` /
+   * `searchLoading` write is enough).
+   */
+  applySearchResultsExtras?(results: unknown[]): void
+  /**
    * Mirror checkpoint changes into a SECONDARY client store (#5618 Batch 6).
    * The mobile app keeps a separate `useConversationStore` whose checkpoint list
    * powers its timeline UI; after the `checkpoint_created` / `checkpoint_list`
@@ -613,6 +627,11 @@ export interface DispatchMessageMap {
   checkpoint_restored: {
     type: 'checkpoint_restored'
     newSessionId?: string
+  }
+  search_results: {
+    type: 'search_results'
+    query?: string
+    results?: unknown[]
   }
   budget_resumed: {
     type: 'budget_resumed'
@@ -1140,6 +1159,23 @@ function dispatchCheckpointRestored<S extends DispatchSessionBase>(
   if (restored) {
     adapter.switchToRestoredSession(restored.newSessionId)
   }
+}
+
+/**
+ * `search_results` (#5618) — apply conversation-search results, dropping a stale
+ * response for an older query (the staleness gate reads the live `searchQuery` via
+ * the adapter). Both clients write the flat `searchResults` + `searchLoading: false`
+ * identically; the APP's extra `searchError` clear + secondary-store mirror ride the
+ * optional {@link ClientStoreAdapter.applySearchResultsExtras} hook.
+ */
+function dispatchSearchResults<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['search_results'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const { results, shouldApply } = handleSearchResults(msg as Record<string, unknown>, adapter.getSearchQuery())
+  if (!shouldApply) return
+  adapter.setState({ searchResults: results, searchLoading: false })
+  adapter.applySearchResultsExtras?.(results)
 }
 
 /**
@@ -1944,6 +1980,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     server_shutdown: dispatchServerShutdown,
     conversations_list: dispatchConversationsList,
     checkpoint_restored: dispatchCheckpointRestored,
+    search_results: dispatchSearchResults,
     budget_resumed: dispatchBudgetResumed,
     budget_resume_ack: dispatchBudgetResumeAck,
     conversation_id: dispatchConversationId,
@@ -2039,6 +2076,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   'server_shutdown',
   'conversations_list',
   'checkpoint_restored',
+  'search_results',
   'budget_resumed',
   'budget_resume_ack',
   'conversation_id',
