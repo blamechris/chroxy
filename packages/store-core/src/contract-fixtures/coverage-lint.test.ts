@@ -214,10 +214,11 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
     // migrating types OUT to the shared dispatch table (universe shrinks below
     // the floor) lowers it — adjust both bounds in the same PR. Keep the band
     // TIGHT around the real count so the "fail loudly" intent stays sharp. Band
-    // last set for #5618 Batch 5b (available_models / cost_update / auth_bootstrap
-    // / tunnel_url_changed migrated out across Batch 5; universe down to ~48).
-    expect(both.length).toBeGreaterThanOrEqual(42)
-    expect(both.length).toBeLessThanOrEqual(54)
+    // last lowered for #5618 (agent_idle / permission_mode_changed / budget_warning /
+    // plan_ready / rate_limited / server_shutdown / conversations_list /
+    // checkpoint_restored migrated out; universe down to 41).
+    expect(both.length).toBeGreaterThanOrEqual(39)
+    expect(both.length).toBeLessThanOrEqual(50)
   })
 
   it('every both-clients switch type has a fixture, a PENDING entry, or a by-design exemption', () => {

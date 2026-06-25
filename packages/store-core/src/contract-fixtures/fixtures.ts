@@ -1381,6 +1381,57 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  {
+    // #5618 — checkpoint_restored migrated SWITCH→DISPATCH. Both clients auto-switch
+    // to the new checkpoint session via the required switchToRestoredSession hook;
+    // the converged flat effect is activeSessionId = newSessionId (the DISPATCH test
+    // adapter models the switch as writing activeSessionId, like the real stores).
+    name: 'checkpoint_restored re-homes the active session to the new checkpoint session (both clients)',
+    type: 'checkpoint_restored',
+    init: { activeSessionId: 'old-sid', sessions: { 'old-sid': {} } },
+    message: { type: 'checkpoint_restored', checkpointId: 'cp-1', newSessionId: 'cp-new-sid', name: 'Rewind: cp-1' },
+    expect: { flat: { activeSessionId: 'cp-new-sid' } },
+  },
+  {
+    // #5618 — conversations_list migrated SWITCH→DISPATCH. Both clients write the flat
+    // conversationHistory from the parsed array (the app's error-clear + secondary-store
+    // mirror ride the optional applyConversationsListExtras hook, not asserted here).
+    name: 'conversations_list replaces the flat conversationHistory list (both clients)',
+    type: 'conversations_list',
+    message: {
+      type: 'conversations_list',
+      conversations: [
+        {
+          conversationId: 'conv-1',
+          project: '/proj',
+          projectName: 'proj',
+          modifiedAt: '2026-06-24T00:00:00Z',
+          modifiedAtMs: 1750000000000,
+          sizeBytes: 1024,
+          preview: 'first turn',
+          cwd: '/proj',
+        },
+        {
+          conversationId: 'conv-2',
+          project: null,
+          projectName: 'other',
+          modifiedAt: '2026-06-23T00:00:00Z',
+          modifiedAtMs: 1749900000000,
+          sizeBytes: 2048,
+          preview: null,
+          cwd: null,
+        },
+      ],
+    },
+    expect: {
+      flat: {
+        conversationHistory: [
+          { conversationId: 'conv-1', projectName: 'proj', preview: 'first turn' },
+          { conversationId: 'conv-2', projectName: 'other', preview: null },
+        ],
+      },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -2085,19 +2136,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
-    // #6325 (bucket-B): server re-homed this client onto a NEW session at the
-    // checkpoint. Both clients parse via shared handleCheckpointRestored then call
-    // get().switchSession(newSessionId); the converged both-clients flat effect is
-    // activeSessionId = newSessionId (the harness stubs switchSession to write it).
-    // Seeds activeSessionId 'old-sid' (≠ new) so the flip is non-vacuous and
-    // switchSession doesn't early-return.
-    name: 'checkpoint_restored re-homes the active session to the new checkpoint session (both clients)',
-    type: 'checkpoint_restored',
-    init: { activeSessionId: 'old-sid', sessions: { 'old-sid': {} } },
-    message: { type: 'checkpoint_restored', checkpointId: 'cp-1', newSessionId: 'cp-new-sid', name: 'Rewind: cp-1' },
-    expect: { flat: { activeSessionId: 'cp-new-sid' } },
-  },
-  {
     // #6325 (bucket-B): another client disconnected. With ONE seeded (active)
     // session the app's active-only append and the dashboard's all-sessions append
     // converge → a plain expect (mirrors client_joined). The bubble label is
@@ -2119,47 +2157,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
             { type: 'system', content: 'A device disconnected' },
           ],
         },
-      },
-    },
-  },
-  {
-    // #6325 (bucket-B): both clients write the flat `conversationHistory` from the
-    // parsed `conversations` array (shared handleConversationsList). The app also
-    // mirrors to the mocked useConversationStore; the shared, non-mocked flat field
-    // both set identically is conversationHistory. Unseeded default → non-vacuous.
-    name: 'conversations_list replaces the flat conversationHistory list (both clients)',
-    type: 'conversations_list',
-    message: {
-      type: 'conversations_list',
-      conversations: [
-        {
-          conversationId: 'conv-1',
-          project: '/proj',
-          projectName: 'proj',
-          modifiedAt: '2026-06-24T00:00:00Z',
-          modifiedAtMs: 1750000000000,
-          sizeBytes: 1024,
-          preview: 'first turn',
-          cwd: '/proj',
-        },
-        {
-          conversationId: 'conv-2',
-          project: null,
-          projectName: 'other',
-          modifiedAt: '2026-06-23T00:00:00Z',
-          modifiedAtMs: 1749900000000,
-          sizeBytes: 2048,
-          preview: null,
-          cwd: null,
-        },
-      ],
-    },
-    expect: {
-      flat: {
-        conversationHistory: [
-          { conversationId: 'conv-1', projectName: 'proj', preview: 'first turn' },
-          { conversationId: 'conv-2', projectName: 'other', preview: null },
-        ],
       },
     },
   },

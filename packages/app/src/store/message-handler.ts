@@ -49,13 +49,11 @@ import {
   // (#5618 Batch 6); checkpoint_restored is not migrated in this batch — it
   // stays platform-local (here as a switch case; the dashboard via its
   // HANDLERS map), so this shared import remains.
-  handleCheckpointRestored as sharedCheckpointRestored,
   handleError as sharedError,
   handleSessionError as sharedSessionError,
   handleClientJoined as sharedClientJoined,
   handleClientLeft as sharedClientLeft,
   // conversation_id migrated to the shared dispatch table (#5556)
-  handleConversationsList as sharedConversationsList,
   handleHistoryReplayStart as sharedHistoryReplayStart,
   handleHistoryReplayEnd as sharedHistoryReplayEnd,
   // #5555.3 / #5555.4 — lastSeq cursor + no-blank-flash reconcile.
@@ -1228,6 +1226,16 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
     useNotificationStore
       .getState()
       .setShutdown(payload.shutdownReason, payload.restartEtaMs, payload.restartingSince),
+  // #5618 — checkpoint_restored auto-switches with the app's no-notify/no-haptic
+  // options (the server already re-homed this client; an auto-switch shouldn't buzz).
+  switchToRestoredSession: (sessionId) =>
+    getStore().getState().switchSession(sessionId, { serverNotify: false, haptic: false }),
+  // #5618 — conversations_list clears the app-only conversationHistoryError flag and
+  // mirrors the list into the secondary conversation store (the dashboard omits this).
+  applyConversationsListExtras: (conversations) => {
+    getStore().setState({ conversationHistoryError: null });
+    useConversationStore.getState().setConversationHistory(conversations as ConversationSummary[]);
+  },
   // #5653 — file-ops / git wrapper cases route through the shared dispatch
   // table; the app supplies its module-level imperative-callback registry so
   // the parsed payload reaches the UI's registered callback exactly as the
@@ -3212,15 +3220,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // now rides on the `syncSecondaryCheckpoints` adapter hook below; the
     // dashboard omits that hook (no secondary checkpoint store).
 
-    case 'checkpoint_restored': {
-      // Server created a new session at the checkpoint state.
-      // Auto-switch to it; session_list update follows from server.
-      const restored = sharedCheckpointRestored(msg);
-      if (restored) {
-        get().switchSession(restored.newSessionId, { serverNotify: false, haptic: false });
-      }
-      break;
-    }
+    // checkpoint_restored — migrated to the shared dispatch table (#5618; runDispatch).
+    // The auto-switch (with the app's no-notify/no-haptic opts) rides the required
+    // switchToRestoredSession adapter hook.
 
     // mcp_servers — migrated to the shared dispatch table (#5556 slice 2)
 
@@ -3327,14 +3329,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // web_task_list — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'conversations_list': {
-      // Parser shared via store-core; app-only state mirroring (loading/error
-      // flags + useConversationStore) stays here.
-      const { conversations } = sharedConversationsList(msg);
-      set({ conversationHistory: conversations, conversationHistoryLoading: false, conversationHistoryError: null });
-      useConversationStore.getState().setConversationHistory(conversations);
-      break;
-    }
+    // conversations_list — migrated to the shared dispatch table (#5618; runDispatch).
+    // The app's error-clear + useConversationStore mirror ride the optional
+    // applyConversationsListExtras adapter hook.
 
     case 'search_results': {
       const currentQuery = (get() as ConnectionState).searchQuery;
