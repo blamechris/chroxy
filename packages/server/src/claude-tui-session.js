@@ -16,6 +16,7 @@ import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 import { stderrIndicatesUnknownResume } from './cli-session.js'
 import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
+import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
 import { formatIdleDuration } from './session-timeout-manager.js'
 import { isOperatorTimeoutInRange } from './duration.js'
@@ -1587,28 +1588,35 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   /**
-   * Spawn the persistent PTY under node-pty + wait for the TUI to render.
-   * Sets `this._term`, wires onData/onExit handlers, then sleeps for
-   * WARMUP_MS so the TUI's input prompt is ready before the first
-   * sendMessage() writes. Tests stub this method on the prototype to
-   * skip the real spawn.
+   * Build the env object for the spawned claude TUI PTY.
+   *
+   * Unlike the claude-cli path (which goes through buildSpawnEnv('claude')),
+   * the TUI inherits the operator's full shell env (denylist semantics) so
+   * Claude Code tools see the user's environment — but two classes of secret
+   * are stripped:
+   *   - ANTHROPIC_API_KEY: would pin auth to API billing and defeat the whole
+   *     point of this subscription/OAuth provider.
+   *   - CHROXY_SECRET_DENYLIST (API_TOKEN): the full-authority primary bearer
+   *     token must never reach a tool/MCP/subagent the TUI runs (#6311). The
+   *     scoped per-session CHROXY_HOOK_SECRET below is the only chroxy secret
+   *     the child legitimately needs.
+   *
+   * Extracted from _spawnPty so the secret-stripping invariant is unit-testable
+   * without spawning a real PTY.
    *
    * @param {boolean} permissionsEnabled
+   * @returns {Record<string, string>}
    */
-  async _spawnPty(permissionsEnabled) {
-    let ptyMod
-    try {
-      ptyMod = await import('node-pty')
-    } catch (err) {
-      this.emit('error', { message: `node-pty unavailable: ${err.message}` })
-      return
-    }
-
-    const cwdReal = realpathSync(this.cwd)
+  _buildPtyEnv(permissionsEnabled) {
     const env = { ...process.env }
     // The TUI path must route via OAuth subscription. ANTHROPIC_API_KEY would
     // pin auth to API and defeat the whole point of this provider.
     delete env.ANTHROPIC_API_KEY
+    // #6311: strip chroxy-owned daemon secrets (the primary API_TOKEN) so a
+    // tool/MCP/subagent/shell the TUI runs can't read them from process.env.
+    for (const key of CHROXY_SECRET_DENYLIST) {
+      delete env[key]
+    }
     env.TERM = 'xterm-256color'
 
     // permission-hook.sh reads these to phone home to /permission on the
@@ -1633,6 +1641,29 @@ export class ClaudeTuiSession extends BaseSession {
       // none of CHROXY_* env vars are read.
       env.CHROXY_SINK_DIR = this._sinkDir
     }
+    return env
+  }
+
+  /**
+   * Spawn the persistent PTY under node-pty + wait for the TUI to render.
+   * Sets `this._term`, wires onData/onExit handlers, then sleeps for
+   * WARMUP_MS so the TUI's input prompt is ready before the first
+   * sendMessage() writes. Tests stub this method on the prototype to
+   * skip the real spawn.
+   *
+   * @param {boolean} permissionsEnabled
+   */
+  async _spawnPty(permissionsEnabled) {
+    let ptyMod
+    try {
+      ptyMod = await import('node-pty')
+    } catch (err) {
+      this.emit('error', { message: `node-pty unavailable: ${err.message}` })
+      return
+    }
+
+    const cwdReal = realpathSync(this.cwd)
+    const env = this._buildPtyEnv(permissionsEnabled)
 
     // #5307 (WP-0.1) — on a fresh session, set the conversation uuid with
     // `--session-id <id>` (claude requires a brand-new uuid here). On restore,

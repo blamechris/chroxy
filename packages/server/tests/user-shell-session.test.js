@@ -159,4 +159,23 @@ describe('UserShellSession — lifecycle (#5983)', () => {
     s.destroy()
     assert.equal(term._calls.kill.length, 0, 'no SIGTERM — PTY already exited')
   })
+
+  describe('_buildShellEnv secret stripping (#6311)', () => {
+    it('strips the primary API_TOKEN from the shell PTY env', () => {
+      const prev = process.env.API_TOKEN
+      process.env.API_TOKEN = 'primary-bearer-token'
+      try {
+        const s = new UserShellSession({ cwd: '/tmp' })
+        const env = s._buildShellEnv()
+        assert.equal(env.API_TOKEN, undefined,
+          'the full-authority API_TOKEN must never reach the interactive shell env')
+        assert.equal(env.TERM, 'xterm-256color', 'TERM is forced for the PTY')
+        assert.equal(env.PATH, process.env.PATH,
+          'the operator process env still passes through (it is their shell), minus secrets')
+      } finally {
+        if (prev === undefined) delete process.env.API_TOKEN
+        else process.env.API_TOKEN = prev
+      }
+    })
+  })
 })

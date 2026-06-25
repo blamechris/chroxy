@@ -516,4 +516,38 @@ describe('MCPClient', () => {
       assert.ok(elapsed >= 900 && elapsed <= 2000, `destroy took ${elapsed}ms, expected ~1000ms (SIGTERM grace before SIGKILL)`)
     })
   })
+
+  describe('_buildChildEnv secret stripping (#6311)', () => {
+    it('strips the primary API_TOKEN from the MCP server child env', () => {
+      const prev = process.env.API_TOKEN
+      process.env.API_TOKEN = 'primary-bearer-token'
+      try {
+        const client = new MCPClient(stubConfig({ env: { MY_MCP_OPT: 'keep-me' } }), { log: silentLog() })
+        const env = client._buildChildEnv()
+        assert.equal(env.API_TOKEN, undefined,
+          'the full-authority API_TOKEN must never reach an MCP server subprocess')
+        assert.equal(env.MY_MCP_OPT, 'keep-me',
+          'user-configured _config.env entries are still forwarded')
+        assert.equal(env.PATH, process.env.PATH,
+          'the operator process env still passes through (minus secrets)')
+      } finally {
+        if (prev === undefined) delete process.env.API_TOKEN
+        else process.env.API_TOKEN = prev
+      }
+    })
+
+    it('strips API_TOKEN even when _config.env tries to set it', () => {
+      const prev = process.env.API_TOKEN
+      delete process.env.API_TOKEN
+      try {
+        const client = new MCPClient(stubConfig({ env: { API_TOKEN: 'sneaky' } }), { log: silentLog() })
+        const env = client._buildChildEnv()
+        assert.equal(env.API_TOKEN, undefined,
+          'a reserved chroxy secret name in _config.env is stripped, not honoured')
+      } finally {
+        if (prev === undefined) delete process.env.API_TOKEN
+        else process.env.API_TOKEN = prev
+      }
+    })
+  })
 })
