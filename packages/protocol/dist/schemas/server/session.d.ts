@@ -398,3 +398,33 @@ export declare const ServerSessionUpdatedSchema: z.ZodObject<{
     sessionId: z.ZodString;
     name: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerCheckpointCreatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"checkpoint_created">;
+    sessionId: z.ZodString;
+    checkpoint: z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+        description: z.ZodString;
+        messageCount: z.ZodNumber;
+        createdAt: z.ZodNumber;
+        hasGitSnapshot: z.ZodBoolean;
+    }, z.core.$strip>;
+}, z.core.$strip>;
+export declare const ServerCheckpointListSchema: z.ZodObject<{
+    type: z.ZodLiteral<"checkpoint_list">;
+    sessionId: z.ZodNullable<z.ZodString>;
+    checkpoints: z.ZodArray<z.ZodObject<{
+        id: z.ZodString;
+        name: z.ZodString;
+        description: z.ZodString;
+        messageCount: z.ZodNumber;
+        createdAt: z.ZodNumber;
+        hasGitSnapshot: z.ZodBoolean;
+    }, z.core.$strip>>;
+}, z.core.$strip>;
+export declare const ServerCheckpointRestoredSchema: z.ZodObject<{
+    type: z.ZodLiteral<"checkpoint_restored">;
+    checkpointId: z.ZodString;
+    newSessionId: z.ZodString;
+    name: z.ZodString;
+}, z.core.$strip>;

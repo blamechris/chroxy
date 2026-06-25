@@ -543,3 +543,40 @@ export const ServerSessionUpdatedSchema = z.object({
   sessionId: z.string(),
   name: z.string(),
 })
+
+// #6324 (batch 2a of #6314): checkpoint result family. The wire `checkpoint`
+// projection is built explicitly at the emit site (checkpoint-handlers.js) — 6
+// keys, NOT the manager's full record (gitRef/cwd/resumeSessionId are not sent).
+// createdAt is epoch-ms (number, not ISO). hasGitSnapshot = !!gitRef.
+const CheckpointSchema = z.object({
+  id: z.string(),
+  name: z.string(),
+  description: z.string(),
+  messageCount: z.number(),
+  createdAt: z.number(),
+  hasGitSnapshot: z.boolean(),
+})
+
+export const ServerCheckpointCreatedSchema = z.object({
+  type: z.literal('checkpoint_created'),
+  sessionId: z.string(),
+  checkpoint: CheckpointSchema,
+})
+
+// `sessionId` is nullable: the no-active-session path emits `{ sessionId: null,
+// checkpoints: [] }`; the populated path emits a string id. Always present.
+export const ServerCheckpointListSchema = z.object({
+  type: z.literal('checkpoint_list'),
+  sessionId: z.string().nullable(),
+  checkpoints: z.array(CheckpointSchema),
+})
+
+// NOTE: checkpoint_restored does NOT carry a `sessionId` — keys are exactly
+// { type, checkpointId, newSessionId, name }. `newSessionId` is the fresh
+// session the restore created; the client re-homes to it via switchSession.
+export const ServerCheckpointRestoredSchema = z.object({
+  type: z.literal('checkpoint_restored'),
+  checkpointId: z.string(),
+  newSessionId: z.string(),
+  name: z.string(),
+})

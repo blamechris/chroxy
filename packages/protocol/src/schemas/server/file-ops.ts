@@ -1,0 +1,102 @@
+/**
+ * Server → Client schemas for the git + file-operation result families
+ * (#6324 batch 2a of #6314).
+ *
+ * Domain slice of the server→client schema surface; re-exported verbatim by
+ * ../server.ts (barrel). Shapes verified against the emit sites in
+ * packages/server/src/ws-file-ops/* (reader/browser/git). Element shapes are
+ * INLINED rather than imported from @chroxy/store-core — the protocol package is
+ * the source of truth and must not depend on store-core (which depends on it).
+ */
+import { z } from 'zod'
+
+// One staged/unstaged entry in a git_status_result. `untracked` is a flat array
+// of path strings (NOT objects). The status enum is the server STATUS_MAP set.
+const GitStatusEntrySchema = z.object({
+  path: z.string(),
+  status: z.enum(['modified', 'added', 'deleted', 'renamed', 'copied', 'unknown']),
+})
+
+// `git_status` response. `branch` is null in detached-HEAD / not-a-repo; the
+// four data fields are always present (defaulted to [] / null on every error
+// path). Handled by both clients (dashboard case + shared store-core dispatch).
+export const ServerGitStatusResultSchema = z.object({
+  type: z.literal('git_status_result'),
+  branch: z.string().nullable(),
+  staged: z.array(GitStatusEntrySchema),
+  unstaged: z.array(GitStatusEntrySchema),
+  untracked: z.array(z.string()),
+  error: z.string().nullable(),
+})
+
+// `git_branches` response. NOTE the wire field is `currentBranch` (the
+// ws-server.js doc comment's `current` is stale). App-only today (the dashboard
+// has no git_branches_result handler).
+export const ServerGitBranchesResultSchema = z.object({
+  type: z.literal('git_branches_result'),
+  branches: z.array(z.object({
+    name: z.string(),
+    isCurrent: z.boolean(),
+    isRemote: z.boolean(),
+  })),
+  currentBranch: z.string().nullable(),
+  error: z.string().nullable(),
+})
+
+// `get_diff` response — 3-level nesting (files → hunks → lines). The DiffFile
+// status enum carries `untracked` (and no `copied`/`unknown`), distinct from the
+// git_status entry enum. line.type is exactly context/addition/deletion.
+export const ServerDiffResultSchema = z.object({
+  type: z.literal('diff_result'),
+  files: z.array(z.object({
+    path: z.string(),
+    status: z.enum(['modified', 'added', 'deleted', 'renamed', 'untracked']),
+    additions: z.number(),
+    deletions: z.number(),
+    hunks: z.array(z.object({
+      header: z.string(),
+      lines: z.array(z.object({
+        type: z.enum(['context', 'addition', 'deletion']),
+        content: z.string(),
+      })),
+    })),
+  })),
+  error: z.string().nullable(),
+})
+
+// `read_file` response. All 7 keys are always present (present-and-nullable, not
+// optional). For images, `content` is a base64 data URL and `language` is the
+// literal 'image'; `content` is sliced to 100KB with `truncated` true past that.
+export const ServerFileContentSchema = z.object({
+  type: z.literal('file_content'),
+  path: z.string().nullable(),
+  content: z.string().nullable(),
+  language: z.string().nullable(),
+  size: z.number().nullable(),
+  truncated: z.boolean(),
+  error: z.string().nullable(),
+})
+
+// `browse_files` response (HOME-dir restricted). `entries` are directories only
+// ({ name, isDirectory: true }); `parentPath` is legitimately null at the root
+// (not just on error). Distinct from the `file_listing` family (CWD-restricted,
+// entries carry size).
+export const ServerDirectoryListingSchema = z.object({
+  type: z.literal('directory_listing'),
+  path: z.string().nullable(),
+  parentPath: z.string().nullable(),
+  entries: z.array(z.object({
+    name: z.string(),
+    isDirectory: z.boolean(),
+  })),
+  error: z.string().nullable(),
+})
+
+// `write_file` response — the wire type is `write_file_result` (NOT
+// file_write_result). Only path + error beyond type. App-only today (the
+// dashboard has no write_file handling).
+export const ServerWriteFileResultSchema = z.object({
+  type: z.literal('write_file_result'),
+  path: z.string().nullable(),
+  error: z.string().nullable(),
+})
