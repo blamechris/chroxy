@@ -182,6 +182,15 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
             expect(actual[i], `${fx.name}: ${id} messages[${i}]`).toMatchObject(m)
           })
         }
+        // #6325: assert any session-SCALAR fields a fixture specifies beyond
+        // `messages` (isIdle, claudeReady, streamingMessageId, permissionMode, …).
+        // Additive — message-only fixtures have no scalar keys, so they're
+        // unaffected; this unlocks the session-field types in the drain backlog.
+        const { messages: _ignoredMessages, ...scalarFields } = fields as Record<string, unknown>
+        void _ignoredMessages
+        if (Object.keys(scalarFields).length > 0) {
+          expect(ss, `${fx.name}: ${id} scalar fields`).toMatchObject(scalarFields)
+        }
       }
     })
   }
