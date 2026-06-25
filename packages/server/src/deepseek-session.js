@@ -23,13 +23,27 @@
 import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
 import { resolveDeepSeekApiKey } from './deepseek-credentials.js'
-import { getDeepSeekPricing } from './models.js'
 import { BILLING_CLASSES } from './billing-class.js'
 
 // Override point for self-hosted or pinned-version endpoints. Defaults
 // to DeepSeek's Anthropic-compatible endpoint, which they explicitly
 // publish so Claude Code clients can point at it without translation.
 const DEFAULT_DEEPSEEK_BASE_URL = 'https://api.deepseek.com/anthropic'
+
+// DeepSeek pricing in USD per million tokens (#6201 OCP — owned by this provider
+// class rather than bolted into models.js's central tables; relocated verbatim from
+// models.js getDeepSeekPricing). DeepSeek reports usage in the Anthropic shape and
+// maps its cache-hit metric onto `cache_read_input_tokens`; it never reports cache
+// writes, so the zero `cacheWrite` rate is correct, not a placeholder. Verbatim-only
+// lookup — DeepSeek doesn't ship date-suffixed model ids the way Anthropic does, so
+// the strip-and-retry dance from models.js's resolvePricingKey isn't warranted here
+// (if they ever do, extend along the same shape).
+const DEEPSEEK_PRICING_USD_PER_MTOK = Object.freeze({
+  // V3 chat — general-purpose model.
+  'deepseek-chat':     Object.freeze({ input: 0.27, output: 1.10, cacheRead: 0.07, cacheWrite: 0 }),
+  // R1 reasoning — emits a reasoning trace before the final answer.
+  'deepseek-reasoner': Object.freeze({ input: 0.55, output: 2.19, cacheRead: 0.14, cacheWrite: 0 }),
+})
 
 // DeepSeek's published context window for both `deepseek-chat` (V3) and
 // `deepseek-reasoner` (R1). If they ever ship a larger-context variant,
@@ -166,6 +180,7 @@ export class DeepSeekSession extends ClaudeByokSession {
   }
 
   _getPricing(model) {
-    return getDeepSeekPricing(model)
+    if (typeof model !== 'string' || model.length === 0) return null
+    return DEEPSEEK_PRICING_USD_PER_MTOK[model] || null
   }
 }
