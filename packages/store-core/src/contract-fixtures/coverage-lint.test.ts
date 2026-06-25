@@ -72,7 +72,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // They are NOT on the shared dispatch table (the reducer write is platform-local
   // — each client owns its `activity` store field), so they stay PENDING rather
   // than carrying a DISPATCH_FIXTURES entry.
-  'activity_snapshot',
+  // activity_snapshot — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // activity_delta — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
   // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
@@ -85,12 +85,12 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // both-clients-switch universe. checkpoint_restored is NOT migrated in this
   // batch (both clients still handle it platform-locally — the app via a switch
   // case, the dashboard via its HANDLERS map), so it remains pending.
-  'checkpoint_restored',
+  // checkpoint_restored — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // claude_ready — now has a SWITCH_FIXTURES entry (#6325, session-scalar assert).
   // client_focus_changed — migrated to the shared dispatch table (#5618 Batch 4).
   // client_joined — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
-  'client_left',
-  'conversations_list',
+  // client_left — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // conversations_list — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // cost_update — migrated to the shared dispatch table (#5618 Batch 5a).
   'history_replay_end',
   'key_exchange_ok',
@@ -108,10 +108,10 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // app/dashboard element-handling divergence locked by a divergent fixture.
   'raw',
   'raw_background',
-  'search_results',
+  // search_results — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // server_error — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
-  'server_mode',
-  'server_shutdown',
+  // server_mode — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // server_shutdown — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // server_status — now has a SWITCH_FIXTURES entry (#6325 batch A).
   // session_error — now has a SWITCH_FIXTURES entry (#6325 batch A).
   // session_list — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
@@ -119,8 +119,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // to the shared dispatch table (#5618 Batch 3); now have DISPATCH_FIXTURES
   // entries, so they leave the both-clients-switch universe.
   // session_role — migrated to the shared dispatch table (#5618 Batch 4).
-  'session_switched',
-  'session_timeout',
+  // session_switched — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
+  // session_timeout — now has a SWITCH_FIXTURES entry (#6325 bucket-B flat-assert).
   // session_warning — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // slash_commands — migrated to the shared dispatch table (#5618 Batch 2); now
   // has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
