@@ -47,7 +47,7 @@ jest.mock('../src/store/imperative-callbacks', () => ({
 
 jest.mock('../src/store/multi-client', () => ({
   // #6325: client_joined calls addClient on the roster store.
-  useMultiClientStore: { getState: jest.fn(() => ({ setClients: jest.fn(), addClient: jest.fn(), removeClient: jest.fn() })), setState: jest.fn() },
+  useMultiClientStore: { getState: jest.fn(() => ({ setClients: jest.fn(), addClient: jest.fn(), removeClient: jest.fn(), setMyClientId: jest.fn(), setConnectedClients: jest.fn() })), setState: jest.fn() },
 }));
 
 jest.mock('../src/store/web', () => ({
@@ -90,8 +90,21 @@ jest.mock('../src/store/conversations', () => ({
 }));
 
 jest.mock('../src/store/connection-lifecycle', () => ({
-  // #6325: server_mode routes serverInfo into the connection-lifecycle store.
-  useConnectionLifecycleStore: { getState: jest.fn(() => ({ setServerInfo: jest.fn() })), setState: jest.fn() },
+  // #6325: server_mode/auth_ok/auth_fail/pair_fail route connection state into
+  // the lifecycle store — provide the full setter surface they reach for.
+  useConnectionLifecycleStore: {
+    getState: jest.fn(() => ({
+      setServerInfo: jest.fn(),
+      setConnectionPhase: jest.fn(),
+      setConnectionDetails: jest.fn(),
+      setActivePath: jest.fn(),
+      setConnectionError: jest.fn(),
+      setUserDisconnected: jest.fn(),
+      setSavedConnection: jest.fn(),
+      savedConnection: null,
+    })),
+    setState: jest.fn(),
+  },
 }));
 
 jest.mock('expo-secure-store', () => ({
@@ -146,7 +159,8 @@ function createMockStore(initial: Partial<ConnectionState>) {
 const mockCtx = {
   url: 'wss://test.example.com',
   token: 'test-token',
-  socket: {} as WebSocket,
+  // #6325: auth_fail/pair_fail call ctx.socket.close() before tearing down.
+  socket: { close: jest.fn() } as unknown as WebSocket,
   isReconnect: false,
   silent: false,
 };
