@@ -1610,4 +1610,30 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  {
+    // #6325 (drain #6314): the server broadcasts `user_input` to all OTHER
+    // clients when one client sends a message — a multi-client live echo. Both
+    // clients route it through the shared `sharedUserInput`/parseUserInputMessage
+    // path: it builds a `user_input`-typed bubble (content from `text`, id from
+    // the server's stable `messageId`) and appends it. The gate skips a message
+    // from THIS client (clientId === myClientId), so the fixture uses a different
+    // sender. The dashboard additionally writes the prompt to its terminal buffer
+    // (a mocked side effect outside the asserted `messages` slice).
+    name: 'user_input echoes another client’s message as a user_input bubble',
+    type: 'user_input',
+    init: { activeSessionId: 's1', myClientId: 'me', sessions: { s1: {} } },
+    message: {
+      type: 'user_input',
+      sessionId: 's1',
+      clientId: 'other-device',
+      messageId: 'ui-1',
+      text: 'hello from another device',
+      timestamp: 1000,
+    },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'ui-1', type: 'user_input', content: 'hello from another device' }] },
+      },
+    },
+  },
 ]
