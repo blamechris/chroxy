@@ -26,6 +26,7 @@ import { createLogger } from './logger.js'
 import { ExternalSessionRegistry } from './external-session-registry.js'
 import { metrics } from './metrics.js'
 import { auditShellDestroy } from './shell-audit.js'
+import { recordShell, forgetShell, reapOrphanShells } from './user-shell-registry.js'
 import { getErrorMessage } from './utils/error-message.js'
 import {
   forwardPerSessionSettingsToProviderOpts,
@@ -235,6 +236,11 @@ export class SessionManager extends EventEmitter {
     // spawn path — WS create, restoreState, and any internal caller — per the
     // #5985 swarm-audit C3 finding.
     userShellEnabled = false,
+    // #6276 test seam: inject {isAlive, commOf, kill} for the boot-time
+    // orphan-shell reaper so the reap+audit path is exercisable without
+    // signalling a real process. Undefined in production → the reaper uses its
+    // own defaults (process.kill / ps).
+    userShellReapSeams = undefined,
     // Shadowed in production (server-cli.js always passes providerType
     // explicitly), but kept on the single source of truth so the fallback
     // can't silently diverge from the server's default (#5819).
@@ -350,6 +356,7 @@ export class SessionManager extends EventEmitter {
     // a truthy non-boolean (`'true'`, `1`) must NOT open the shell gate. Matches
     // isUserShellEnabled()'s strictness; production passes that helper's boolean.
     this._userShellEnabled = userShellEnabled === true
+    this._userShellReapSeams = userShellReapSeams
     this._sweepOrphanWorktrees = !!sweepOrphanWorktrees
     this._providerType = providerType
 
@@ -462,6 +469,9 @@ export class SessionManager extends EventEmitter {
     })
     // Backward-compatible accessors for tests that reference internal state
     this._stateFilePath = this._persistence._stateFilePath
+    // #6276: orphan-shell reaper sidecar, colocated with the state file so a
+    // test's temp stateFilePath keeps it out of the real ~/.chroxy.
+    this._userShellSidecarPath = join(dirname(this._stateFilePath), 'user-shells.json')
     this._stateTtlMs = this._persistence._stateTtlMs
     this._persistDebounceMs = this._persistence._persistDebounceMs
 
@@ -1841,6 +1851,9 @@ export class SessionManager extends EventEmitter {
         exitCode: entry.session._exitCode ?? null,
         reason: entry.session._exitReason ?? 'destroyed',
       })
+      // #6276: a clean teardown SIGTERMs the shell, so drop its orphan-reaper
+      // record — otherwise the next boot would try to reap an already-dead pid.
+      forgetShell(this._userShellSidecarPath, sessionId)
     }
     this.emit('session_destroyed', { sessionId })
     // Flush synchronously so the deletion survives an abrupt shutdown. The
@@ -2115,6 +2128,27 @@ export class SessionManager extends EventEmitter {
    * @returns {string|null} The first restored session ID, or null
    */
   restoreState() {
+    // #6276: reap orphaned user-shell PTYs FIRST — before the no-prior-state
+    // early return below — so it runs on EVERY boot. A SIGKILL/crash skips
+    // destroySession's SIGTERM, leaving a `$SHELL` reparented to init with no
+    // destroy-audit entry; the daemon may have no session state to restore yet
+    // still have a live orphaned shell recorded in the sidecar, so this cannot
+    // hang off state restoration. Runs unconditionally (independent of the
+    // userShell.enabled gate, so a shell from when the feature was enabled is
+    // cleaned up after it's turned off). No-op when the sidecar is absent (the
+    // clean-shutdown case). Best-effort — a reaper hiccup never affects boot.
+    try {
+      const { reaped, skipped } = reapOrphanShells(this._userShellSidecarPath, this._userShellReapSeams)
+      for (const r of reaped) {
+        auditShellDestroy({ sessionId: r.sessionId, exitCode: null, reason: 'orphan_reaper' })
+      }
+      if (reaped.length || skipped.length) {
+        log.warn(`user-shell orphan reaper: reaped=${reaped.length} skipped=${skipped.length}`)
+      }
+    } catch (err) {
+      log.warn(`user-shell orphan reaper failed (non-fatal): ${err?.message || err}`)
+    }
+
     const state = this._persistence.restoreState()
     if (!state) return null
 
@@ -2605,6 +2639,13 @@ export class SessionManager extends EventEmitter {
     // it can't keep the process alive, and re-checks the session still exists
     // (and isn't already tearing down) before destroying.
     if (session.constructor?.isUserShell === true) {
+      // #6276: record the live PTY pid to the orphan-reaper sidecar so a shell
+      // left running by an ungraceful daemon death (SIGKILL/crash, which skips
+      // destroySession's SIGTERM) can be reaped + audited on the next boot. The
+      // matching record is dropped by destroySession on a clean teardown.
+      session.on('shell_spawned', ({ pid } = {}) => {
+        recordShell(this._userShellSidecarPath, { sessionId, pid, shell: session._shellPath })
+      })
       session.on('shell_exited', () => {
         const timer = setTimeout(() => {
           const entry = this._sessions.get(sessionId)

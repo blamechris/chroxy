@@ -177,6 +177,11 @@ export class UserShellSession extends BaseSession {
 
     this._shellAlive = true
     log.info(`user-shell spawned (${shell} pid=${this._term.pid} ${this._ptyCols}x${this._ptyRows} cwd=${cwdReal})`)
+    // #6276: announce the live PTY pid so SessionManager can record it to the
+    // orphan-reaper sidecar. Emitted synchronously here (the listener is wired in
+    // _wireSessionEvents before start()) so the pid is durably tracked the moment
+    // the shell exists — the only window where a SIGKILL could orphan it.
+    this.emit('shell_spawned', { pid: this._term.pid })
 
     this._term.onData((data) => this._feedTerminalMirror(data))
     this._term.onExit((info) => this._onShellExit(info, 'exit'))
