@@ -817,6 +817,19 @@ jobs:
           mkdir -p "$HOME/.chroxy"
           printf '{ "apiToken": "ci-smoke-token", "externalUrl": "http://localhost:8765", "tunnel": "quick" }\n' > "$HOME/.chroxy/config.json"
 
+      - name: Stub the `claude` binary
+        # The daemon auto-creates a default claude-tui session on boot, whose
+        # preflight requires a `claude` binary on PATH — which a hosted CI runner
+        # doesn't have. The smoke never drives a real turn, so a no-op stub that
+        # just stays alive in the PTY satisfies the existence check (preflight.js
+        # isExecutableFile) and lets the daemon start. ~/.local/bin is both a
+        # checked candidate path AND added to PATH for subsequent steps.
+        run: |
+          mkdir -p "$HOME/.local/bin"
+          printf '#!/usr/bin/env bash\nexec cat >/dev/null\n' > "$HOME/.local/bin/claude"
+          chmod +x "$HOME/.local/bin/claude"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
       - name: Start chroxy server (background, no tunnel)
         working-directory: packages/server
         # CHROXY_ALLOW_UNPINNED_BOOT=1 lets the daemon boot without an identity
