@@ -468,3 +468,33 @@ describe('TerminalView originWhitelist passes RN whitelist for both inline-load 
     expect(passesWhitelist(compiled, '')).toBe(false);
   });
 });
+
+/**
+ * #6329 — manual "refresh terminal" resync button. The button is presentation-only;
+ * SessionScreen passes `onRefresh` (= requestTerminalResync(activeSessionId)) only
+ * when the active session is a resync-eligible PTY mirror and not an observer. These
+ * pin the wiring: the button renders + fires onRefresh when the prop is supplied, and
+ * is absent (the gated-off case) when it isn't.
+ */
+describe('TerminalView — #6329 manual resync button', () => {
+  it('renders the ⟳ button and calls onRefresh on press when onRefresh is provided', () => {
+    const onRefresh = jest.fn();
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<TerminalView onRefresh={onRefresh} />);
+    });
+    const button = renderer.root.findByProps({ testID: 'terminal-resync-button' });
+    act(() => {
+      button.props.onPress();
+    });
+    expect(onRefresh).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not render the resync button when onRefresh is omitted (gated-off case)', () => {
+    let renderer!: ReactTestRenderer;
+    act(() => {
+      renderer = create(<TerminalView />);
+    });
+    expect(renderer.root.findAllByProps({ testID: 'terminal-resync-button' })).toHaveLength(0);
+  });
+});

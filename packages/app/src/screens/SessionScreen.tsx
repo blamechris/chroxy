@@ -535,6 +535,15 @@ export function SessionScreen() {
   // Reuses the reactive `activeSessionProvider` selector declared above.
   const isUserShell = activeSessionProvider === USER_SHELL_PROVIDER;
   const isPtyMirror = isUserShell;
+  // #6329 — manual terminal resync affordance. The store action + the auto-resync
+  // on (re)subscribe ship in #6313; this wires the explicit "looks out of sync"
+  // button. Only meaningful for the live PTY mirror (user-shell) on an active,
+  // non-observer session — the server still enforces resync authority.
+  const requestTerminalResync = useConnectionStore((s) => s.requestTerminalResync);
+  const canResyncTerminal = isPtyMirror && !!activeSessionId && sessionRole !== 'observer';
+  const handleTerminalRefresh = useCallback(() => {
+    if (activeSessionId) requestTerminalResync(activeSessionId);
+  }, [activeSessionId, requestTerminalResync]);
   // #6003 — a user-shell terminal is interactive (drivable) only when this client
   // may drive it: the server's userShell capability is gated on the primary token
   // (+ userShell.enabled), matching the terminal_input authority gate. claude-tui
@@ -1590,7 +1599,7 @@ export function SessionScreen() {
             <View style={styles.splitDivider} />
             <View style={styles.splitPane}>
               <ErrorBoundary fallbackTitle="Terminal error">
-                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} />
+                <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} onRefresh={canResyncTerminal ? handleTerminalRefresh : undefined} />
               </ErrorBoundary>
             </View>
           </View>
@@ -1651,7 +1660,7 @@ export function SessionScreen() {
           // read-only mirror for claude-tui (terminal_output renders via the
           // write-callback path, onData stays disabled so no input is forwarded).
           <ErrorBoundary fallbackTitle="Terminal error">
-            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} />
+            <TerminalView ref={terminalRef} onReady={handleTerminalReady} onResize={handleTerminalResize} interactive={terminalInteractive} onInput={handleTerminalInput} onRefresh={canResyncTerminal ? handleTerminalRefresh : undefined} />
           </ErrorBoundary>
         )
       )}

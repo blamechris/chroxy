@@ -1,5 +1,5 @@
 import React, { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState, useEffect } from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { WebView, WebViewMessageEvent } from 'react-native-webview';
 import type { ShouldStartLoadRequest } from 'react-native-webview/lib/WebViewTypes';
 import { buildXtermHtml } from './xterm-html';
@@ -65,11 +65,17 @@ export interface TerminalViewProps {
   // claude-tui mirror) so existing behavior is unchanged.
   interactive?: boolean;
   onInput?: (data: string) => void;
+  // #6329 — when provided, render a manual "refresh terminal" control that forces a
+  // resync repaint (the auto-resync on (re)subscribe is already wired in
+  // SessionScreen). Omitted (no button) when there's no resync-eligible session —
+  // e.g. a claude-tui mirror or an observer — so the affordance only appears where it
+  // works. The server still enforces resync authority, so this is a UX gate.
+  onRefresh?: () => void;
 }
 
 // -- Component --
 
-export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function TerminalView({ onResize, onReady, interactive, onInput }, ref) {
+export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(function TerminalView({ onResize, onReady, interactive, onInput, onRefresh }, ref) {
   const webViewRef = useRef<WebView>(null);
   const readyRef = useRef(false);
   const pendingWritesRef = useRef<string[]>([]);
@@ -195,6 +201,20 @@ export const TerminalView = forwardRef<TerminalHandle, TerminalViewProps>(functi
           <Text style={styles.recoveryText}>Terminal recovering...</Text>
         </View>
       )}
+      {/* #6329 — manual resync: force a fresh repaint if the live mirror looks
+          out of sync (the auto-resync on resubscribe is the primary recovery). */}
+      {onRefresh && (
+        <TouchableOpacity
+          style={styles.refreshButton}
+          onPress={onRefresh}
+          testID="terminal-resync-button"
+          accessibilityRole="button"
+          accessibilityLabel="Refresh terminal"
+          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+        >
+          <Text style={styles.refreshGlyph}>⟳</Text>
+        </TouchableOpacity>
+      )}
       <WebView
         ref={webViewRef}
         source={{ html }}
@@ -256,6 +276,25 @@ const styles = StyleSheet.create({
   recoveryText: {
     color: COLORS.accentOrange,
     fontSize: 13,
+    fontWeight: '600',
+  },
+  // #6329 — small top-right corner control, mirrors the dashboard's ⟳ resync button.
+  refreshButton: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    zIndex: 2,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(26, 26, 46, 0.85)',
+  },
+  refreshGlyph: {
+    color: COLORS.textDim,
+    fontSize: 16,
+    lineHeight: 18,
     fontWeight: '600',
   },
 });
