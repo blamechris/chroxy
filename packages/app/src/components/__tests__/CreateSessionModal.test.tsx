@@ -275,3 +275,34 @@ describe('CreateSessionModal provider loading state', () => {
     expect(defaultChip).toBeTruthy();
   });
 });
+
+describe('CreateSessionModal — #6312/#6352 provider capability-limitation note', () => {
+  it('surfaces a limitation note for the default reduced-capability provider (claude-tui)', () => {
+    // The empty Default chip resolves to DEFAULT_PROVIDER (claude-tui); seed it with
+    // the degraded caps the server reports for claude-tui.
+    setupStore([
+      { name: 'claude-tui', capabilities: { planMode: false, streaming: false, modelSwitch: false }, auth: { ready: true } },
+    ]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    const note = component!.root.findByProps({ testID: 'provider-limitation-note' });
+    expect(JSON.stringify(note.props.children)).toContain("doesn't support");
+  });
+
+  it('shows no limitation note for a fully-capable provider', () => {
+    setupStore([
+      { name: 'claude-tui', capabilities: { planMode: true, streaming: true, modelSwitch: true }, auth: { ready: true } },
+    ]);
+
+    let component: renderer.ReactTestRenderer;
+    act(() => {
+      component = renderer.create(<CreateSessionModal visible onClose={jest.fn()} />);
+    });
+
+    expect(component!.root.findAllByProps({ testID: 'provider-limitation-note' })).toHaveLength(0);
+  });
+});
