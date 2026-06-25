@@ -37,6 +37,8 @@ jest.mock('../src/utils/haptics', () => ({
 
 jest.mock('../src/store/persistence', () => ({
   clearPersistedSession: jest.fn(),
+  // #6325: session_list persists the active conversation id as a side effect.
+  persistLastConversationId: jest.fn(),
 }));
 
 jest.mock('../src/store/imperative-callbacks', () => ({
@@ -44,7 +46,8 @@ jest.mock('../src/store/imperative-callbacks', () => ({
 }));
 
 jest.mock('../src/store/multi-client', () => ({
-  useMultiClientStore: { getState: jest.fn(() => ({ setClients: jest.fn() })), setState: jest.fn() },
+  // #6325: client_joined calls addClient on the roster store.
+  useMultiClientStore: { getState: jest.fn(() => ({ setClients: jest.fn(), addClient: jest.fn(), removeClient: jest.fn() })), setState: jest.fn() },
 }));
 
 jest.mock('../src/store/web', () => ({
@@ -60,7 +63,21 @@ jest.mock('../src/store/terminal', () => ({
 }));
 
 jest.mock('../src/store/notifications', () => ({
-  useNotificationStore: { getState: jest.fn(() => ({ addNotification: jest.fn(), dismissNotification: jest.fn() })), setState: jest.fn() },
+  // #6325: permission_timeout/server_error/session_warning reach for more of the
+  // notification store than addNotification — seed the full surface so they
+  // exercise their real switch path instead of throwing on an undefined method.
+  useNotificationStore: {
+    getState: jest.fn(() => ({
+      addNotification: jest.fn(),
+      dismissNotification: jest.fn(),
+      sessionNotifications: [],
+      addSessionNotification: jest.fn(),
+      dismissSessionNotification: jest.fn(),
+      setTimeoutWarning: jest.fn(),
+      addServerError: jest.fn(),
+    })),
+    setState: jest.fn(),
+  },
 }));
 
 jest.mock('../src/store/conversations', () => ({
@@ -92,6 +109,7 @@ import {
   setConnectionContext,
   clearDeltaBuffers,
   updateSession,
+  resetReplayFlags,
 } from '../src/store/message-handler';
 import { createEmptySessionState } from '../src/store/utils';
 import type { ConnectionState, SessionState } from '../src/store/types';
@@ -157,6 +175,16 @@ function seedStore(fx: ContractFixture) {
     addMessage: jest.fn(),
     // The app's stream/tool handlers reach for the store's appendTerminalData.
     appendTerminalData: jest.fn(),
+    // #6325: flat connection-state fields the real store always initialises;
+    // seed them so handlers that read them (client_joined → connectedClients,
+    // activity_delta/_snapshot → activity, server_error → serverErrors,
+    // plan_ready/permission_timeout → sessionNotifications) exercise their real
+    // path instead of throwing on undefined. Off the asserted sessions[id] slice,
+    // so existing fixtures are unaffected.
+    connectedClients: [],
+    activity: { bySession: {} },
+    serverErrors: [],
+    sessionNotifications: [],
   } as unknown as ConnectionState);
 }
 
@@ -168,6 +196,11 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
   beforeEach(() => {
     jest.useFakeTimers();
     clearDeltaBuffers();
+    // #6325: reset the per-context replay flags between fixtures (the dashboard
+    // twin already does). Without this a prior history-replay fixture leaves a
+    // session in `_ctx.replayingSessions`, which gates off activity_delta's
+    // inactivity-warning clear (test-order contamination).
+    resetReplayFlags();
   });
 
   afterEach(() => {

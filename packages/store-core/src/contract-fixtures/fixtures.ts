@@ -1824,4 +1824,187 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'Hello, world' }] } },
     },
   },
+  {
+    // #6325 (drain #6314): a live-activity delta. Its PRIMARY effect (the flat
+    // `activity` tree) isn't switch-harness-assertable, but it has a deterministic
+    // both-clients session-scalar side effect: clearing the target session's
+    // inactivityWarning to null (live activity = the user is back). lastClientActivityAt
+    // is also written but is Date.now() (non-deterministic) → deliberately not asserted.
+    name: 'activity_delta clears any inactivityWarning on its target session (live-activity bump)',
+    type: 'activity_delta',
+    init: { sessions: { s1: { inactivityWarning: { idleMs: 60000, prefab: 'Still there?', receivedAt: 1000 } } } },
+    message: {
+      type: 'activity_delta',
+      sessionId: 's1',
+      schemaVersion: 1,
+      op: 'started',
+      entry: { id: 'a1', kind: 'shell', label: 'npm test', status: 'running', startedAt: 1000 },
+    },
+    expect: { sessions: { s1: { inactivityWarning: null } } },
+  },
+  {
+    // #6325 (drain #6314): another client connected. With ONE seeded (active)
+    // session the app's active-only append and the dashboard's all-sessions append
+    // converge → a plain expect (the divergence is only observable with 2+ seeded
+    // sessions). Seeds a prior bubble so the 2-entry expect is non-vacuous.
+    name: 'client_joined appends a connected-device system bubble to the active session',
+    type: 'client_joined',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'seed-1', type: 'response', content: 'prior' } as unknown as ChatMessage] } },
+    },
+    message: {
+      type: 'client_joined',
+      client: { clientId: 'c2', deviceName: 'iPhone 16 Pro', deviceType: 'phone', platform: 'ios' },
+    },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'seed-1', type: 'response', content: 'prior' },
+            { type: 'system', content: 'iPhone 16 Pro connected' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a pending permission auto-denied after the server
+    // timeout. Both clients (shared handlePermissionTimeout) scan sessionStates for
+    // the matching `prompt` (requestId + type==='prompt') and append a fixed
+    // '(Auto-denied — permission timed out)' suffix in place (options cleared, not
+    // asserted). Targeting is by requestId alone, so the fixture seeds the prompt.
+    name: 'permission_timeout appends the auto-denied suffix to the matching prompt in place (both clients)',
+    type: 'permission_timeout',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [
+            {
+              id: 'prompt-req-1',
+              type: 'prompt',
+              content: 'Bash: rm -rf /tmp/x',
+              tool: 'Bash',
+              requestId: 'req-1',
+              options: [{ label: 'Allow', value: 'allow' }, { label: 'Deny', value: 'deny' }],
+            } as unknown as ChatMessage,
+          ],
+        },
+      },
+    },
+    message: { type: 'permission_timeout', requestId: 'req-1', tool: 'Bash' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'prompt-req-1', type: 'prompt', content: 'Bash: rm -rf /tmp/x\n(Auto-denied — permission timed out)', tool: 'Bash' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): the plan is ready. Both clients flip the session to
+    // plan-pending and store the allowed prompts (session-scalar fields).
+    name: 'plan_ready flips plan state to ready and stores the allowed prompts (both clients)',
+    type: 'plan_ready',
+    init: { sessions: { s1: { isPlanPending: false, planAllowedPrompts: [] } } },
+    message: {
+      type: 'plan_ready',
+      sessionId: 's1',
+      allowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
+    },
+    expect: {
+      sessions: {
+        s1: {
+          isPlanPending: true,
+          planAllowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a server-side error tagged to a session. Both clients
+    // (shared handleServerError) append an `error` bubble to the tagged session and
+    // clear streamingMessageId + pendingClientMessageId. The serverErrors ring +
+    // notification toast are off the sessions[id] slice.
+    name: 'server_error appends an error bubble to the tagged session and clears the live stream (both clients)',
+    type: 'server_error',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'working' } as unknown as ChatMessage],
+          streamingMessageId: 'live-1',
+          pendingClientMessageId: 'uin-1',
+        },
+      },
+    },
+    message: { type: 'server_error', sessionId: 's1', category: 'session', message: 'Disk write failed', recoverable: true },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'resp-1', type: 'response', content: 'working' },
+            { type: 'error', content: 'Disk write failed' },
+          ],
+          streamingMessageId: null,
+          pendingClientMessageId: null,
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a session_list refresh patches conversationId onto a
+    // pre-existing session (the patch loop skips ids not already in sessionStates).
+    // Seeds a different starting conversationId so the patch is non-vacuous.
+    name: 'session_list patches conversationId onto a pre-existing session (both clients)',
+    type: 'session_list',
+    init: { activeSessionId: 's1', sessions: { s1: { conversationId: 'conv-OLD' } } },
+    message: {
+      type: 'session_list',
+      sessions: [
+        {
+          sessionId: 's1',
+          name: 'Session 1',
+          cwd: '/tmp',
+          type: 'cli',
+          hasTerminal: false,
+          model: null,
+          permissionMode: null,
+          isBusy: false,
+          createdAt: 0,
+          conversationId: 'conv-NEW',
+        },
+      ],
+    },
+    expect: { sessions: { s1: { conversationId: 'conv-NEW' } } },
+  },
+  {
+    // #6325 (drain #6314): a session_warning legitimately DIVERGES. The dashboard
+    // pushes a `system` warning bubble into the target session's messages; the app
+    // instead writes the warning to its flat `timeoutWarning` banner slot and leaves
+    // messages untouched. Target = the active session so the dashboard's
+    // non-active-session Alert side effect doesn't fire.
+    name: 'session_warning diverges: dashboard appends a warning bubble; the app keeps messages untouched',
+    type: 'session_warning',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: {
+      type: 'session_warning',
+      sessionId: 's1',
+      name: 'My Session',
+      reason: 'idle_timeout',
+      message: 'Session will time out in 2 minutes',
+      remainingMs: 120000,
+    },
+    divergent: {
+      reason:
+        'the dashboard pushes the shared system ChatMessage into the target session’s messages; the app writes the parsed ' +
+        'warning into the flat timeoutWarning slot (banner UI) + useNotificationStore and leaves sessions[id].messages untouched. ' +
+        'Target = the active session so the dashboard’s non-active-session Alert side effect does not fire.',
+      app: { sessions: { s1: { messages: [] } } },
+      dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'Session will time out in 2 minutes' }] } } },
+    },
+  },
 ]

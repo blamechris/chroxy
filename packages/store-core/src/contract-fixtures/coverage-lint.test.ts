@@ -73,7 +73,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // — each client owns its `activity` store field), so they stay PENDING rather
   // than carrying a DISPATCH_FIXTURES entry.
   'activity_snapshot',
-  'activity_delta',
+  // activity_delta — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
   // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // auth_bootstrap — migrated to the shared dispatch table (#5618 Batch 5b).
@@ -88,7 +88,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'checkpoint_restored',
   // claude_ready — now has a SWITCH_FIXTURES entry (#6325, session-scalar assert).
   // client_focus_changed — migrated to the shared dispatch table (#5618 Batch 4).
-  'client_joined',
+  // client_joined — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   'client_left',
   'conversations_list',
   // cost_update — migrated to the shared dispatch table (#5618 Batch 5a).
@@ -100,8 +100,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // permission_expired — now has a SWITCH_FIXTURES entry (#6325).
   // permission_mode_changed — now has a SWITCH_FIXTURES entry (#6325, scalar assert).
   // permission_resolved now has a both-clients SWITCH_FIXTURES entry (#6058).
-  'permission_timeout',
-  'plan_ready',
+  // permission_timeout — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
+  // plan_ready — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   'pong',
   // primary_changed — migrated to the shared dispatch table (#5618 Batch 4).
   // provider_list — migrated to the shared dispatch table (#5618 Batch 2);
@@ -109,19 +109,19 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'raw',
   'raw_background',
   'search_results',
-  'server_error',
+  // server_error — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   'server_mode',
   'server_shutdown',
   // server_status — now has a SWITCH_FIXTURES entry (#6325 batch A).
   // session_error — now has a SWITCH_FIXTURES entry (#6325 batch A).
-  'session_list',
+  // session_list — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // session_persist_failed / session_restore_failed / session_stopped — migrated
   // to the shared dispatch table (#5618 Batch 3); now have DISPATCH_FIXTURES
   // entries, so they leave the both-clients-switch universe.
   // session_role — migrated to the shared dispatch table (#5618 Batch 4).
   'session_switched',
   'session_timeout',
-  'session_warning',
+  // session_warning — now has a SWITCH_FIXTURES entry (#6325; harness flat-seed/mock harden).
   // slash_commands — migrated to the shared dispatch table (#5618 Batch 2); now
   // has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // stream_delta — now has a SWITCH_FIXTURES entry (#6325 batch A).

@@ -120,6 +120,14 @@ function seedStore(fx: ContractFixture) {
     // permission_resolved's unconditional banner-drain (s.sessionNotifications.map)
     // runs against a realistic store instead of throwing on undefined.
     sessionNotifications: [],
+    // #6325: flat connection-state fields the real store always initialises;
+    // seed them so handlers that read them (client_joined → connectedClients,
+    // activity_delta/_snapshot → activity, server_error → serverErrors) exercise
+    // their real path instead of throwing on undefined. Off the asserted
+    // sessions[id] slice, so existing fixtures are unaffected.
+    connectedClients: [],
+    activity: { bySession: {} },
+    serverErrors: [],
     // Store methods the real stream/tool handlers reach for (terminal preview
     // writes, flat addMessage). No-op-ish so the session-state assertions stand
     // alone — the terminal-preview side-channel is covered by its own tests.
