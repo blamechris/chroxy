@@ -1769,4 +1769,59 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { permissionMode: 'plan' } },
     },
   },
+  {
+    // #6325 (drain #6314): a session crashed. Both clients (shared handleSessionError,
+    // category 'crash') flip the target session's `health` to 'crashed'. crashedId
+    // resolves to the active session, so the pushSessionNotification side effect
+    // early-returns (sessionId === activeSessionId) and never hits the mocked store.
+    // Non-vacuous: seeds health:'ok' so the handler must flip it.
+    name: 'session_error (crash) flips the target session health to crashed (both clients)',
+    type: 'session_error',
+    init: { activeSessionId: 's1', sessions: { s1: { health: 'ok' } } },
+    message: { type: 'session_error', category: 'crash', sessionId: 's1' },
+    expect: { sessions: { s1: { health: 'crashed' } } },
+  },
+  {
+    // #6325 (drain #6314): a legacy server_status (no phase) — both clients append
+    // the ANSI-stripped status message as a `system` bubble to the active session.
+    name: 'server_status (legacy, no phase) appends the status message to the active session (both clients)',
+    type: 'server_status',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'seed-1', type: 'user', content: 'hello', timestamp: 1 } as unknown as ChatMessage] } },
+    },
+    message: { type: 'server_status', message: 'Tunnel reconnected' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { type: 'user', content: 'hello' },
+            { type: 'system', content: 'Tunnel reconnected' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (drain #6314): a stream_delta buffers behind the coalescing flush timer,
+    // then applyDeltaBatch appends the text onto the in-flight response bubble's
+    // content on flush. The contract harness drains the timer before asserting, so
+    // the concatenated content is observable. Seeds non-empty content so the append
+    // is non-vacuous.
+    name: 'stream_delta appends the delta text onto its in-flight response bubble (both clients)',
+    type: 'stream_delta',
+    init: {
+      activeSessionId: 's1',
+      sessions: {
+        s1: {
+          messages: [{ id: 'resp-1', type: 'response', content: 'Hello' } as unknown as ChatMessage],
+          streamingMessageId: 'resp-1',
+        },
+      },
+    },
+    message: { type: 'stream_delta', sessionId: 's1', messageId: 'resp-1', delta: ', world' },
+    expect: {
+      sessions: { s1: { messages: [{ id: 'resp-1', type: 'response', content: 'Hello, world' }] } },
+    },
+  },
 ]

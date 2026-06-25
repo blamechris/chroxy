@@ -112,8 +112,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'server_error',
   'server_mode',
   'server_shutdown',
-  'server_status',
-  'session_error',
+  // server_status — now has a SWITCH_FIXTURES entry (#6325 batch A).
+  // session_error — now has a SWITCH_FIXTURES entry (#6325 batch A).
   'session_list',
   // session_persist_failed / session_restore_failed / session_stopped — migrated
   // to the shared dispatch table (#5618 Batch 3); now have DISPATCH_FIXTURES
@@ -124,7 +124,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'session_warning',
   // slash_commands — migrated to the shared dispatch table (#5618 Batch 2); now
   // has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
-  'stream_delta',
+  // stream_delta — now has a SWITCH_FIXTURES entry (#6325 batch A).
   'terminal_output',
   'token_rotated',
   // tool_input_delta — now has a SWITCH_FIXTURES entry (#6325); the harness
