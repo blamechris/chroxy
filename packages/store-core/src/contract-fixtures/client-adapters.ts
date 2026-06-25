@@ -166,6 +166,9 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // live `flat` ref so the web-task upsert fixtures observe identical results.
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
+    // #5618 — `alert` is a transient UI side-effect OUTSIDE the shared store-state
+    // contract (no fixture asserts it), modelled as a no-op for the contract surface.
+    alert: () => {},
     getSessions: () => sessionList,
     // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
     // Both clients back it with their flat `checkpoints`; modelled as a read of

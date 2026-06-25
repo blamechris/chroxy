@@ -1323,6 +1323,64 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       sessions: { s1: { permissionMode: 'plan' } },
     },
   },
+  {
+    // #5618 — budget_warning migrated SWITCH→DISPATCH. Both clients append the SAME
+    // system note to the target session (the alert rides the shared adapter.alert,
+    // not asserted here).
+    name: 'budget_warning appends the warning system bubble to the target session (both clients)',
+    type: 'budget_warning',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'budget_warning', sessionId: 's1', message: 'Approaching cost budget limit' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Approaching cost budget limit' }] },
+      },
+    },
+  },
+  {
+    // #5618 — plan_ready migrated SWITCH→DISPATCH. Both clients flip the session to
+    // plan-pending and store the allowed prompts (the app's plan notification rides
+    // the optional notifyPlanReady hook, not asserted here).
+    name: 'plan_ready flips plan state to ready and stores the allowed prompts (both clients)',
+    type: 'plan_ready',
+    init: { sessions: { s1: { isPlanPending: false, planAllowedPrompts: [] } } },
+    message: {
+      type: 'plan_ready',
+      sessionId: 's1',
+      allowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
+    },
+    expect: {
+      sessions: {
+        s1: {
+          isPlanPending: true,
+          planAllowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
+        },
+      },
+    },
+  },
+  {
+    // #5618 — server_shutdown migrated SWITCH→DISPATCH. Both clients write the shared
+    // patch to flat state (the app's setShutdown notification rides applyShutdownNotification).
+    name: 'server_shutdown writes shutdownReason + restartEtaMs to the flat store (both clients)',
+    type: 'server_shutdown',
+    message: { type: 'server_shutdown', reason: 'restart', restartEtaMs: 30000 },
+    expect: {
+      flat: { shutdownReason: 'restart', restartEtaMs: 30000 },
+    },
+  },
+  {
+    // #5618 — rate_limited (#6334) migrated SWITCH→DISPATCH. Both clients append a
+    // system throttle notice (with a retry hint) to the active session.
+    name: 'rate_limited appends a system throttle notice with a retry hint (both clients)',
+    type: 'rate_limited',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'rate_limited', retryAfterMs: 2000, message: 'Too many messages. Please slow down.' },
+    expect: {
+      sessions: {
+        s1: { messages: [{ type: 'system', content: 'Too many messages. Please slow down. Retry in 2s.' }] },
+      },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -1433,20 +1491,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       // Both clients attach the result onto the same bubble; assert the bubble
       // is still a single tool_use entry carrying the result text.
       sessions: { s1: { messages: [{ type: 'tool_use', toolUseId: 'tu-1' }] } },
-    },
-  },
-  {
-    // budget_warning is a both-clients switch case (#5619): both clients append
-    // the SAME system note to the target session's messages when it exists.
-    // `msg.message` is echoed verbatim into the bubble content.
-    name: 'budget_warning appends the warning system bubble to the target session',
-    type: 'budget_warning',
-    init: { activeSessionId: 's1', sessions: { s1: {} } },
-    message: { type: 'budget_warning', sessionId: 's1', message: 'Approaching cost budget limit' },
-    expect: {
-      sessions: {
-        s1: { messages: [{ type: 'system', content: 'Approaching cost budget limit' }] },
-      },
     },
   },
   {
@@ -1925,26 +1969,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
-    // #6325 (drain #6314): the plan is ready. Both clients flip the session to
-    // plan-pending and store the allowed prompts (session-scalar fields).
-    name: 'plan_ready flips plan state to ready and stores the allowed prompts (both clients)',
-    type: 'plan_ready',
-    init: { sessions: { s1: { isPlanPending: false, planAllowedPrompts: [] } } },
-    message: {
-      type: 'plan_ready',
-      sessionId: 's1',
-      allowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
-    },
-    expect: {
-      sessions: {
-        s1: {
-          isPlanPending: true,
-          planAllowedPrompts: [{ tool: 'ExitPlanMode', prompt: 'Proceed with the plan' }],
-        },
-      },
-    },
-  },
-  {
     // #6325 (drain #6314): a server-side error tagged to a session. Both clients
     // (shared handleServerError) append an `error` bubble to the tagged session and
     // clear streamingMessageId + pendingClientMessageId. The serverErrors ring +
@@ -2195,18 +2219,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     },
   },
   {
-    // #6325 (bucket-B): the server announced a restart. Both clients run the shared
-    // handleServerShutdown and set its patch onto the flat store: shutdownReason +
-    // restartEtaMs (restartingSince is Date.now() → not asserted). Both flat fields
-    // unseeded → non-vacuous. The app's setShutdown notification is off-slice.
-    name: 'server_shutdown writes shutdownReason + restartEtaMs to the flat store (both clients)',
-    type: 'server_shutdown',
-    message: { type: 'server_shutdown', reason: 'restart', restartEtaMs: 30000 },
-    expect: {
-      flat: { shutdownReason: 'restart', restartEtaMs: 30000 },
-    },
-  },
-  {
     // #6325 (bucket-B): the active session switched. Both clients (shared
     // handleSessionSwitched) set the flat activeSessionId to the new id and lazily
     // init sessionStates[newId], stamping conversationId. Seeds a different starting
@@ -2426,19 +2438,5 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
     init: { activeSessionId: 's1' },
     message: { type: 'terminal_output', sessionId: 's1', data: 'term-line file.txt' },
     expect: { terminalWrites: ['term-line file.txt'] },
-  },
-  {
-    // #6334: a server-side throttle. Both clients run the shared handleRateLimited,
-    // which builds a `system` bubble from `message` + a "Retry in Ns" hint
-    // (ceil(retryAfterMs/1000)), and append it to the active session.
-    name: 'rate_limited appends a system throttle notice with a retry hint (both clients)',
-    type: 'rate_limited',
-    init: { activeSessionId: 's1', sessions: { s1: {} } },
-    message: { type: 'rate_limited', retryAfterMs: 2000, message: 'Too many messages. Please slow down.' },
-    expect: {
-      sessions: {
-        s1: { messages: [{ type: 'system', content: 'Too many messages. Please slow down. Retry in 2s.' }] },
-      },
-    },
   },
 ]

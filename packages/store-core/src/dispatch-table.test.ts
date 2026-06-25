@@ -145,6 +145,7 @@ function makeAdapter(init?: {
     setState: (patch) => Object.assign(flat, patch),
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => addedMessages.push(m),
+    alert: () => {},
     getSessions: () => sessionList,
     getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
     pushSessionNotification: (sessionId, eventType, message) =>
