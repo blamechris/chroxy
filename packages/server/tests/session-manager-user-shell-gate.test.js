@@ -187,6 +187,22 @@ describe('SessionManager user-shell orphan reaper (#6276)', () => {
     }
   })
 
+  it('boot reaper does NOT signal a same-binary pid whose start-time differs from the record (#6327)', () => {
+    const killed = []
+    const mgr = makeMgr({
+      userShellReapSeams: { isAlive: () => true, commOf: () => 'zsh', startTimeOf: () => 'recycled-later', kill: (pid) => { killed.push(pid); return true } },
+    })
+    try {
+      writeFileSync(sidecarOf(mgr), JSON.stringify([{ sessionId: 'recycled-2', pid: 4242, shell: 'zsh', startTime: 'original' }]))
+      const audit = captureAudit(() => mgr.restoreState())
+      assert.deepEqual(killed, [], 'a recycled pid (later start-time) running the same shell binary must NOT be signalled')
+      assert.ok(!audit.some((m) => m.includes('orphan_reaper')), 'no orphan_reaper audit for a start-time-mismatched record')
+      assert.equal(existsSync(sidecarOf(mgr)), false)
+    } finally {
+      cleanup(mgr)
+    }
+  })
+
   it('boot reaper is a no-op when there is no sidecar (clean-shutdown case)', () => {
     const mgr = makeMgr()
     try {
