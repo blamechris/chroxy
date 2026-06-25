@@ -94,7 +94,6 @@ import {
   handleWebTaskError as sharedWebTaskError,
   // web_task_list / web_feature_status migrated to the shared dispatch table
   // (#5556 slice 2)
-  handleSearchResults as sharedSearchResults,
   applyOrphanDeltas,
   isActivityEvent,
   // #5163 (epic #5159): Control Room activity reducer — snapshot replace +
@@ -1054,6 +1053,8 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   // #5618 — checkpoint_restored auto-switches (plain, no options — the dashboard has
   // no serverNotify/haptic concepts; the app passes those via its own impl).
   switchToRestoredSession: (sessionId) => getStore().getState().switchSession(sessionId),
+  // #5618 — search_results staleness gate reads the live flat searchQuery.
+  getSearchQuery: () => getStore().getState().searchQuery,
   // #5618 — user_question raises a background-session notification via the
   // dashboard's own helper (dedup by (sessionId, eventType); no push store).
   pushSessionNotification: (sessionId, eventType, message) =>
@@ -4794,13 +4795,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
-    case 'search_results': {
-      const currentQuery = (get() as ConnectionState).searchQuery;
-      const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
-      if (!shouldApply) break; // Stale response for an older query — ignore
-      set({ searchResults: results, searchLoading: false });
-      break;
-    }
+    // search_results — migrated to the shared dispatch table (#5618; runDispatch).
+    // The staleness gate reads searchQuery via getSearchQuery; the dashboard has no
+    // searchError / conversation-store mirror, so it omits applySearchResultsExtras.
 
     case 'log_entry': {
       const { entry } = sharedLogEntry(msg);

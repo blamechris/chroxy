@@ -97,7 +97,6 @@ import {
   // web_task_created / web_task_updated — migrated to the shared dispatch table
   // (#5556 slice 4); the app no longer imports the upsert helper directly.
   handleWebTaskError as sharedWebTaskError,
-  handleSearchResults as sharedSearchResults,
   applyOrphanDeltas,
   isActivityEvent,
   // #5163 (epic #5159) — Control Room cross-session activity reducer:
@@ -160,6 +159,7 @@ import type {
   SlashCommand,
   ProviderInfo,
   ConversationSummary,
+  SearchResult,
   PermissionRule,
 } from './types';
 import { createEmptySessionState } from './utils';
@@ -1235,6 +1235,16 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
   applyConversationsListExtras: (conversations) => {
     getStore().setState({ conversationHistoryError: null });
     useConversationStore.getState().setConversationHistory(conversations as ConversationSummary[]);
+  },
+  // #5618 — search_results staleness gate reads the live flat searchQuery.
+  getSearchQuery: () => getStore().getState().searchQuery,
+  // #5618 — search_results clears the app-only searchError flag and mirrors the
+  // results (with the live query) into the secondary conversation store (dashboard omits).
+  applySearchResultsExtras: (results) => {
+    getStore().setState({ searchError: null });
+    useConversationStore
+      .getState()
+      .setSearchResults(results as SearchResult[], getStore().getState().searchQuery);
   },
   // #5653 — file-ops / git wrapper cases route through the shared dispatch
   // table; the app supplies its module-level imperative-callback registry so
@@ -3333,15 +3343,9 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // The app's error-clear + useConversationStore mirror ride the optional
     // applyConversationsListExtras adapter hook.
 
-    case 'search_results': {
-      const currentQuery = (get() as ConnectionState).searchQuery;
-      const { results, shouldApply } = sharedSearchResults(msg, currentQuery);
-      if (!shouldApply) break; // Stale response for an older query — ignore
-      // results is already typed as SearchResult[] from store-core (#3146).
-      set({ searchResults: results, searchLoading: false, searchError: null });
-      useConversationStore.getState().setSearchResults(results, currentQuery);
-      break;
-    }
+    // search_results — migrated to the shared dispatch table (#5618; runDispatch).
+    // The staleness gate reads searchQuery via getSearchQuery; the app's searchError
+    // clear + useConversationStore mirror ride the optional applySearchResultsExtras hook.
 
     // notification_prefs — migrated to the shared dispatch table (#5556 slice
     // 2). The app previously hand-maintained a byte-identical inline Zod parse

@@ -1432,6 +1432,42 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
       },
     },
   },
+  {
+    // #5618 — search_results migrated SWITCH→DISPATCH. Both clients write the flat
+    // searchResults + searchLoading:false (the staleness gate reads searchQuery via
+    // getSearchQuery — unseeded here → apply). The app's searchError clear + secondary
+    // store mirror ride the optional applySearchResultsExtras hook (not asserted).
+    name: 'search_results replaces the flat searchResults list (both clients)',
+    type: 'search_results',
+    message: {
+      type: 'search_results',
+      query: 'auth',
+      results: [
+        {
+          conversationId: 'conv-1',
+          projectName: 'chroxy',
+          project: 'chroxy',
+          cwd: '/Users/me/chroxy',
+          preview: 'auth handler',
+          snippet: 'ws-auth.js validates the bearer token',
+          matchCount: 3,
+        },
+      ],
+    },
+    expect: {
+      flat: {
+        searchResults: [
+          {
+            conversationId: 'conv-1',
+            projectName: 'chroxy',
+            preview: 'auth handler',
+            matchCount: 3,
+          },
+        ],
+        searchLoading: false,
+      },
+    },
+  },
 ]
 
 // ---------------------------------------------------------------------------
@@ -2157,42 +2193,6 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
             { type: 'system', content: 'A device disconnected' },
           ],
         },
-      },
-    },
-  },
-  {
-    // #6325 (bucket-B): both clients call sharedSearchResults then set({
-    // searchResults, searchLoading:false }). searchQuery is left unseeded so the
-    // staleness gate short-circuits → apply. Unseeded searchResults/searchLoading
-    // → non-vacuous. searchError is app-only (not asserted).
-    name: 'search_results replaces the flat searchResults list (both clients)',
-    type: 'search_results',
-    message: {
-      type: 'search_results',
-      query: 'auth',
-      results: [
-        {
-          conversationId: 'conv-1',
-          projectName: 'chroxy',
-          project: 'chroxy',
-          cwd: '/Users/me/chroxy',
-          preview: 'auth handler',
-          snippet: 'ws-auth.js validates the bearer token',
-          matchCount: 3,
-        },
-      ],
-    },
-    expect: {
-      flat: {
-        searchResults: [
-          {
-            conversationId: 'conv-1',
-            projectName: 'chroxy',
-            preview: 'auth handler',
-            matchCount: 3,
-          },
-        ],
-        searchLoading: false,
       },
     },
   },
