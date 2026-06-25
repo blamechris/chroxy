@@ -2007,4 +2007,212 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       dashboard: { sessions: { s1: { messages: [{ type: 'system', content: 'Session will time out in 2 minutes' }] } } },
     },
   },
+  {
+    // #6325 (bucket-B flat-assert): an activity_snapshot REPLACES the target
+    // session's flat `activity` tree ({byId, order} per session) — both clients run
+    // the same applyActivitySnapshot + set({ activity }). A snapshot is a full-state
+    // resync, so (unlike activity_delta) it does NOT touch any session scalar. The
+    // harness seeds activity:{bySession:{}}, so populate-from-empty is non-vacuous.
+    name: "activity_snapshot replaces the target session's flat activity tree",
+    type: 'activity_snapshot',
+    message: {
+      type: 'activity_snapshot',
+      sessionId: 's1',
+      schemaVersion: 1,
+      entries: [
+        { id: 'a1', kind: 'shell', label: 'npm test', status: 'running', startedAt: 1000 },
+        { id: 'a2', kind: 'agent', label: 'review', status: 'done', startedAt: 1000, endedAt: 2000 },
+      ],
+    },
+    expect: {
+      flat: {
+        activity: {
+          bySession: {
+            s1: {
+              byId: {
+                a1: { id: 'a1', kind: 'shell', label: 'npm test', status: 'running', startedAt: 1000 },
+                a2: { id: 'a2', kind: 'agent', label: 'review', status: 'done', startedAt: 1000, endedAt: 2000 },
+              },
+              order: ['a1', 'a2'],
+            },
+          },
+        },
+      },
+    },
+  },
+  {
+    // #6325 (bucket-B): server re-homed this client onto a NEW session at the
+    // checkpoint. Both clients parse via shared handleCheckpointRestored then call
+    // get().switchSession(newSessionId); the converged both-clients flat effect is
+    // activeSessionId = newSessionId (the harness stubs switchSession to write it).
+    // Seeds activeSessionId 'old-sid' (≠ new) so the flip is non-vacuous and
+    // switchSession doesn't early-return.
+    name: 'checkpoint_restored re-homes the active session to the new checkpoint session (both clients)',
+    type: 'checkpoint_restored',
+    init: { activeSessionId: 'old-sid', sessions: { 'old-sid': {} } },
+    message: { type: 'checkpoint_restored', checkpointId: 'cp-1', newSessionId: 'cp-new-sid', name: 'Rewind: cp-1' },
+    expect: { flat: { activeSessionId: 'cp-new-sid' } },
+  },
+  {
+    // #6325 (bucket-B): another client disconnected. With ONE seeded (active)
+    // session the app's active-only append and the dashboard's all-sessions append
+    // converge → a plain expect (mirrors client_joined). The bubble label is
+    // 'A device' (not the wire id): handleClientLeft looks the departing client up
+    // in connectedClients, which the harness seeds to [] → fallback 'A device'. The
+    // roster flat effect ([]→[]) is vacuous, so we assert the bubble, not the roster.
+    name: 'client_left appends a disconnected-device system bubble to the active session',
+    type: 'client_left',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'seed-1', type: 'response', content: 'prior' } as unknown as ChatMessage] } },
+    },
+    message: { type: 'client_left', clientId: 'c2' },
+    expect: {
+      sessions: {
+        s1: {
+          messages: [
+            { id: 'seed-1', type: 'response', content: 'prior' },
+            { type: 'system', content: 'A device disconnected' },
+          ],
+        },
+      },
+    },
+  },
+  {
+    // #6325 (bucket-B): both clients write the flat `conversationHistory` from the
+    // parsed `conversations` array (shared handleConversationsList). The app also
+    // mirrors to the mocked useConversationStore; the shared, non-mocked flat field
+    // both set identically is conversationHistory. Unseeded default → non-vacuous.
+    name: 'conversations_list replaces the flat conversationHistory list (both clients)',
+    type: 'conversations_list',
+    message: {
+      type: 'conversations_list',
+      conversations: [
+        {
+          conversationId: 'conv-1',
+          project: '/proj',
+          projectName: 'proj',
+          modifiedAt: '2026-06-24T00:00:00Z',
+          modifiedAtMs: 1750000000000,
+          sizeBytes: 1024,
+          preview: 'first turn',
+          cwd: '/proj',
+        },
+        {
+          conversationId: 'conv-2',
+          project: null,
+          projectName: 'other',
+          modifiedAt: '2026-06-23T00:00:00Z',
+          modifiedAtMs: 1749900000000,
+          sizeBytes: 2048,
+          preview: null,
+          cwd: null,
+        },
+      ],
+    },
+    expect: {
+      flat: {
+        conversationHistory: [
+          { conversationId: 'conv-1', projectName: 'proj', preview: 'first turn' },
+          { conversationId: 'conv-2', projectName: 'other', preview: null },
+        ],
+      },
+    },
+  },
+  {
+    // #6325 (bucket-B): both clients call sharedSearchResults then set({
+    // searchResults, searchLoading:false }). searchQuery is left unseeded so the
+    // staleness gate short-circuits → apply. Unseeded searchResults/searchLoading
+    // → non-vacuous. searchError is app-only (not asserted).
+    name: 'search_results replaces the flat searchResults list (both clients)',
+    type: 'search_results',
+    message: {
+      type: 'search_results',
+      query: 'auth',
+      results: [
+        {
+          conversationId: 'conv-1',
+          projectName: 'chroxy',
+          project: 'chroxy',
+          cwd: '/Users/me/chroxy',
+          preview: 'auth handler',
+          snippet: 'ws-auth.js validates the bearer token',
+          matchCount: 3,
+        },
+      ],
+    },
+    expect: {
+      flat: {
+        searchResults: [
+          {
+            conversationId: 'conv-1',
+            projectName: 'chroxy',
+            preview: 'auth handler',
+            matchCount: 3,
+          },
+        ],
+        searchLoading: false,
+      },
+    },
+  },
+  {
+    // #6325 (bucket-B): server_mode legitimately DIVERGES. The dashboard sets the
+    // flat main-store `serverMode`; the app routes it into the mocked
+    // useConnectionLifecycleStore (setServerInfo) and only conditionally sets
+    // viewMode (guarded on viewMode==='terminal', never seeded) — so the app makes
+    // no observable main-store mutation. Dashboard asserts flat serverMode; app no-op.
+    name: 'server_mode sets the flat serverMode on the dashboard; the app routes it to the mocked lifecycle store (divergent)',
+    type: 'server_mode',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'server_mode', mode: 'cli' },
+    divergent: {
+      reason:
+        "the dashboard writes the flat main-store field serverMode (set({serverMode:'cli'})); the app routes serverMode into the " +
+        'secondary useConnectionLifecycleStore (mocked here) and only conditionally sets viewMode (guarded on a terminal viewMode the ' +
+        'harness never seeds), so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { serverMode: 'cli' } },
+    },
+  },
+  {
+    // #6325 (bucket-B): the server announced a restart. Both clients run the shared
+    // handleServerShutdown and set its patch onto the flat store: shutdownReason +
+    // restartEtaMs (restartingSince is Date.now() → not asserted). Both flat fields
+    // unseeded → non-vacuous. The app's setShutdown notification is off-slice.
+    name: 'server_shutdown writes shutdownReason + restartEtaMs to the flat store (both clients)',
+    type: 'server_shutdown',
+    message: { type: 'server_shutdown', reason: 'restart', restartEtaMs: 30000 },
+    expect: {
+      flat: { shutdownReason: 'restart', restartEtaMs: 30000 },
+    },
+  },
+  {
+    // #6325 (bucket-B): the active session switched. Both clients (shared
+    // handleSessionSwitched) set the flat activeSessionId to the new id and lazily
+    // init sessionStates[newId], stamping conversationId. Seeds a different starting
+    // activeSessionId so the flip is non-vacuous; the switched-to session is created
+    // by the handler. fetchSlashCommands/fetchCustomAgents at the tail are stubbed.
+    name: 'session_switched flips activeSessionId and initialises the switched-to session with its conversationId (both clients)',
+    type: 'session_switched',
+    init: { activeSessionId: 's-old', sessions: { 's-old': {} } },
+    message: { type: 'session_switched', sessionId: 's-new', conversationId: 'conv-7' },
+    expect: {
+      flat: { activeSessionId: 's-new' },
+      sessions: { 's-new': { conversationId: 'conv-7' } },
+    },
+  },
+  {
+    // #6325 (bucket-B): session_timeout deletes the timed-out session and, when it
+    // was active, reassigns the flat activeSessionId to the first remaining session.
+    // s1 (active) times out, s2 survives → both set activeSessionId 's2'. The deleted
+    // session is NOT listed under expect.sessions (the harness does toBeDefined()
+    // per id); only the flat activeSessionId effect is asserted (both agree).
+    name: 'session_timeout removes the active session and switches activeSessionId to the next remaining session',
+    type: 'session_timeout',
+    init: { activeSessionId: 's1', sessions: { s1: {}, s2: {} } },
+    message: { type: 'session_timeout', sessionId: 's1', name: 'Old Session' },
+    expect: {
+      flat: { activeSessionId: 's2' },
+    },
+  },
 ]

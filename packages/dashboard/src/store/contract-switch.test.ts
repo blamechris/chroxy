@@ -109,7 +109,7 @@ function seedStore(fx: ContractFixture) {
     sessionStates[id] = { ...createEmptySessionState(), ...(seed as Partial<SessionState>) }
   }
   const terminalWrites: string[] = []
-  return createMockStore({
+  const store = createMockStore({
     connectionPhase: 'connected',
     socket: null,
     sessions: [],
@@ -128,6 +128,11 @@ function seedStore(fx: ContractFixture) {
     connectedClients: [],
     activity: { bySession: {} },
     serverErrors: [],
+    // #6325: no-op stubs for the session-lifecycle handler tails
+    // (session_switched calls fetchSlashCommands/fetchCustomAgents; switchSession
+    // is wired below to write the flat activeSessionId for checkpoint_restored).
+    fetchSlashCommands: () => {},
+    fetchCustomAgents: () => {},
     // Store methods the real stream/tool handlers reach for (terminal preview
     // writes, flat addMessage). No-op-ish so the session-state assertions stand
     // alone — the terminal-preview side-channel is covered by its own tests.
@@ -140,6 +145,11 @@ function seedStore(fx: ContractFixture) {
     addServerError: () => {},
     _terminalWrites: terminalWrites,
   } as unknown as ConnectionState)
+  // #6325: checkpoint_restored calls get().switchSession(newId) — stub it to write
+  // the flat activeSessionId (setState spreads prior state, so it survives writes).
+  ;(store.getState() as unknown as { switchSession: unknown }).switchSession = (sessionId: string) =>
+    store.setState({ activeSessionId: sessionId })
+  return store
 }
 
 // ---------------------------------------------------------------------------
@@ -199,6 +209,13 @@ describe('contract switch fixtures — dashboard real handleMessage (#5556.5)', 
         if (Object.keys(scalarFields).length > 0) {
           expect(ss, `${fx.name}: ${id} scalar fields`).toMatchObject(scalarFields)
         }
+      }
+      // #6325: assert any flat (top-level connection-state) fields a fixture
+      // specifies — serverMode, serverStatus, connectedClients, conversations,
+      // searchResults, … — via toMatchObject on the whole store. Omitted slice =
+      // "don't care", so existing fixtures are unaffected.
+      if (exp!.flat) {
+        expect(store.getState(), `${fx.name}: flat fields`).toMatchObject(exp!.flat)
       }
     })
   }

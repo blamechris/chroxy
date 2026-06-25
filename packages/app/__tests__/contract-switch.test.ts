@@ -75,17 +75,23 @@ jest.mock('../src/store/notifications', () => ({
       dismissSessionNotification: jest.fn(),
       setTimeoutWarning: jest.fn(),
       addServerError: jest.fn(),
+      setShutdown: jest.fn(),
     })),
     setState: jest.fn(),
   },
 }));
 
 jest.mock('../src/store/conversations', () => ({
-  useConversationStore: { getState: jest.fn(() => ({})), setState: jest.fn() },
+  // #6325: conversations_list/search_results mirror into the conversation store.
+  useConversationStore: {
+    getState: jest.fn(() => ({ setConversationHistory: jest.fn(), setSearchResults: jest.fn() })),
+    setState: jest.fn(),
+  },
 }));
 
 jest.mock('../src/store/connection-lifecycle', () => ({
-  useConnectionLifecycleStore: { getState: jest.fn(() => ({})), setState: jest.fn() },
+  // #6325: server_mode routes serverInfo into the connection-lifecycle store.
+  useConnectionLifecycleStore: { getState: jest.fn(() => ({ setServerInfo: jest.fn() })), setState: jest.fn() },
 }));
 
 jest.mock('expo-secure-store', () => ({
@@ -166,7 +172,7 @@ function seedStore(fx: ContractFixture) {
   for (const [id, seed] of Object.entries(fx.init?.sessions ?? {})) {
     sessionStates[id] = { ...createEmptySessionState(), ...(seed as Partial<SessionState>) };
   }
-  return createMockStore({
+  const store = createMockStore({
     activeSessionId: fx.init?.activeSessionId ?? null,
     sessions: [],
     availableProviders: [],
@@ -185,7 +191,19 @@ function seedStore(fx: ContractFixture) {
     activity: { bySession: {} },
     serverErrors: [],
     sessionNotifications: [],
+    // #6325: store methods the session-lifecycle handlers call at their tail —
+    // no-op stubs so session_switched/checkpoint_restored don't throw on an
+    // undefined method. switchSession is wired below (it must write activeSessionId).
+    fetchSlashCommands: jest.fn(),
+    fetchCustomAgents: jest.fn(),
   } as unknown as ConnectionState);
+  // #6325: checkpoint_restored calls get().switchSession(newId) — stub it to
+  // write the flat activeSessionId (the both-clients converged effect the fixture
+  // asserts). setState spreads prior state, so the method survives later writes.
+  (store.getState() as unknown as { switchSession: unknown }).switchSession = jest.fn((sessionId: string) =>
+    store.setState({ activeSessionId: sessionId }),
+  );
+  return store;
 }
 
 // ---------------------------------------------------------------------------
@@ -244,6 +262,13 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
         if (Object.keys(scalarFields).length > 0) {
           expect(ss).toMatchObject(scalarFields);
         }
+      }
+      // #6325: assert any flat (top-level connection-state) fields a fixture
+      // specifies — server_mode, serverStatus, connectedClients, conversations,
+      // searchResults, … — via toMatchObject on the whole store. Omitted slice =
+      // "don't care", so existing fixtures are unaffected.
+      if (exp!.flat) {
+        expect(store.getState()).toMatchObject(exp!.flat);
       }
     });
   }
