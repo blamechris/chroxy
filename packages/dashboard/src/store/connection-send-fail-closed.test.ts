@@ -240,3 +240,78 @@ describe('#6308 — dashboard sendInterrupt / sendUserQuestionResponse', () => {
     expect(ss.activeTools.find((t) => t.toolUseId === 'tool-1')).toBeUndefined()
   })
 })
+
+describe('#6310 — dashboard notification-prefs setters do not lie on a closing socket', () => {
+  const seedPrefs = (store: { setState: (s: never) => void }, socket: WebSocket): void => {
+    store.setState({
+      socket,
+      notificationPrefs: {
+        categories: {},
+        devices: { 'dev-1': { categories: {} } },
+        quietHours: null,
+        bypassCategories: [],
+      },
+    } as never)
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const prefs = (store: { getState: () => { notificationPrefs: unknown } }): any => store.getState().notificationPrefs
+
+  it('setNotificationPrefsCategory: returns false + no optimistic flip when the send throws', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const socket = closingSocket()
+    seedPrefs(useConnectionStore, socket)
+    const result = useConnectionStore.getState().setNotificationPrefsCategory('push', false)
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(result).toBe(false)
+    expect(prefs(useConnectionStore).categories.push).toBeUndefined()
+  })
+
+  it('setNotificationPrefsCategory: applies the optimistic flip on a healthy send', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    seedPrefs(useConnectionStore, socket)
+    expect(useConnectionStore.getState().setNotificationPrefsCategory('push', false)).toBe(true)
+    expect(prefs(useConnectionStore).categories.push).toBe(false)
+  })
+
+  it('setNotificationPrefsDevice: returns false + no optimistic patch when the send throws', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const socket = closingSocket()
+    seedPrefs(useConnectionStore, socket)
+    const result = useConnectionStore.getState().setNotificationPrefsDevice('dev-1', 'push', false)
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(result).toBe(false)
+    expect(prefs(useConnectionStore).devices['dev-1'].categories.push).toBeUndefined()
+  })
+
+  it('deleteNotificationPrefsDevice: returns false + keeps the row when the send throws', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const socket = closingSocket()
+    seedPrefs(useConnectionStore, socket)
+    const result = useConnectionStore.getState().deleteNotificationPrefsDevice('dev-1')
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(result).toBe(false)
+    expect(prefs(useConnectionStore).devices['dev-1']).toBeDefined()
+  })
+
+  it('setNotificationPrefsQuietHours: returns false + no optimistic set when the send throws', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const socket = closingSocket()
+    seedPrefs(useConnectionStore, socket)
+    const result = useConnectionStore.getState().setNotificationPrefsQuietHours({ start: '22:00', end: '07:00', timezone: 'UTC' })
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(result).toBe(false)
+    expect(prefs(useConnectionStore).quietHours).toBeNull()
+  })
+
+  it('setNotificationPrefsBypassCategories: returns false + no optimistic set when the send throws', async () => {
+    const { useConnectionStore } = await import('./connection')
+    const socket = closingSocket()
+    seedPrefs(useConnectionStore, socket)
+    const result = useConnectionStore.getState().setNotificationPrefsBypassCategories(['errors'])
+    expect(sendCalls(socket)).toHaveLength(1)
+    expect(result).toBe(false)
+    expect(prefs(useConnectionStore).bypassCategories).toEqual([])
+  })
+})

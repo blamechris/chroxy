@@ -192,3 +192,89 @@ describe('#6308 — sendUserQuestionResponse does not lie on a closing socket', 
     expect(socket.send).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('#6310 — notification-prefs setters do not lie on a closing socket', () => {
+  let warn: jest.SpyInstance;
+  beforeEach(() => { warn = jest.spyOn(console, 'warn').mockImplementation(() => {}); });
+  afterEach(() => { warn.mockRestore(); });
+
+  function seedPrefs(socket: FakeSocket): void {
+    useConnectionStore.setState({
+      socket,
+      notificationPrefs: {
+        categories: {},
+        devices: { 'dev-1': { categories: {} } },
+        quietHours: null,
+        bypassCategories: [],
+      },
+    } as never);
+  }
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const prefs = (): any => useConnectionStore.getState().notificationPrefs;
+
+  it('setNotificationPrefsCategory: returns false + no optimistic flip when the send throws', () => {
+    const socket = closingSocket();
+    seedPrefs(socket);
+    const result = useConnectionStore.getState().setNotificationPrefsCategory('push', false);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    expect(prefs().categories.push).toBeUndefined();
+  });
+
+  it('setNotificationPrefsCategory: applies the optimistic flip on a healthy send', () => {
+    const socket = liveSocket();
+    seedPrefs(socket);
+    expect(useConnectionStore.getState().setNotificationPrefsCategory('push', false)).toBe(true);
+    expect(prefs().categories.push).toBe(false);
+  });
+
+  it('setNotificationPrefsDevice: returns false + no optimistic patch when the send throws', () => {
+    const socket = closingSocket();
+    seedPrefs(socket);
+    const result = useConnectionStore.getState().setNotificationPrefsDevice('dev-1', 'push', false);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    expect(prefs().devices['dev-1'].categories.push).toBeUndefined();
+  });
+
+  it('deleteNotificationPrefsDevice: returns false + keeps the row when the send throws', () => {
+    const socket = closingSocket();
+    seedPrefs(socket);
+    const result = useConnectionStore.getState().deleteNotificationPrefsDevice('dev-1');
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    expect(prefs().devices['dev-1']).toBeDefined();
+  });
+
+  it('deleteNotificationPrefsDevice: drops the row on a healthy send', () => {
+    const socket = liveSocket();
+    seedPrefs(socket);
+    expect(useConnectionStore.getState().deleteNotificationPrefsDevice('dev-1')).toBe(true);
+    expect(prefs().devices['dev-1']).toBeUndefined();
+  });
+
+  it('setNotificationPrefsQuietHours: returns false + no optimistic set when the send throws', () => {
+    const socket = closingSocket();
+    seedPrefs(socket);
+    const result = useConnectionStore.getState().setNotificationPrefsQuietHours({ start: '22:00', end: '07:00', timezone: 'UTC' });
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    expect(prefs().quietHours).toBeNull();
+  });
+
+  it('setNotificationPrefsBypassCategories: returns false + no optimistic set when the send throws', () => {
+    const socket = closingSocket();
+    seedPrefs(socket);
+    const result = useConnectionStore.getState().setNotificationPrefsBypassCategories(['errors']);
+    expect(socket.send).toHaveBeenCalledTimes(1);
+    expect(result).toBe(false);
+    expect(prefs().bypassCategories).toEqual([]);
+  });
+
+  it('setNotificationPrefsBypassCategories: applies the list on a healthy send', () => {
+    const socket = liveSocket();
+    seedPrefs(socket);
+    expect(useConnectionStore.getState().setNotificationPrefsBypassCategories(['errors'])).toBe(true);
+    expect(prefs().bypassCategories).toEqual(['errors']);
+  });
+});
