@@ -261,3 +261,19 @@ export const ServerClaudeReadySchema = z.object({
         reason: z.string(),
     }).optional(),
 });
+// #6323 (batch 1 of #6314): multi-client presence — broadcast to OTHER
+// authenticated clients when a client connects (`client_joined`, with its
+// device descriptor) or disconnects (`client_left`). Emitted by ws-broadcaster.
+export const ServerClientJoinedSchema = z.object({
+    type: z.literal('client_joined'),
+    client: z.object({
+        clientId: z.string(),
+        deviceName: z.string().nullable(),
+        deviceType: z.enum(['phone', 'tablet', 'desktop', 'unknown']),
+        platform: z.string(),
+    }),
+});
+export const ServerClientLeftSchema = z.object({
+    type: z.literal('client_left'),
+    clientId: z.string(),
+});

@@ -151,6 +151,11 @@ const DASHBOARD_ONLY = new Set<string>([
   // activity_snapshot / activity_delta removed — the mobile app now feeds them
   // too (#6246/#6247, the Phase-2 mobile-parity fast-follow per epic #5159), so
   // they are no longer dashboard-only.
+  // #6323 (batch 1 of #6314): schemaing these surfaced an existing asymmetry —
+  // both are handled by the dashboard only today (the app has no `case`). Not
+  // introduced here; the schema just made the lint see them.
+  'session_activity',           // per-session busy/idle + cost ping — dashboard activity tree only
+  'terminal_size',              // authoritative PTY grid for letterboxing — app terminal parity is still partial (#5987)
   'billing_canary',             // live billing-canary banner (#5821) — dashboard sidebar
   'byok_credentials_status',    // BYOK paste-API-key form (#4052) — dashboard-only for v1
   'cancel_activity_ack',        // Control Room cancel-click correlation ack (#5277)
