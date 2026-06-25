@@ -30,10 +30,16 @@ beforeEach(() => {
 });
 
 describe('subscribeTerminalMirror', () => {
-  it('sends terminal_subscribe for a non-empty sessionId on an open socket', () => {
+  it('sends terminal_subscribe then a terminal_resync (#6313) on an open socket', () => {
     const sent = mockOpenSocket();
     useConnectionStore.getState().subscribeTerminalMirror('sess-1');
-    expect(sent).toEqual([{ type: 'terminal_subscribe', sessionId: 'sess-1' }]);
+    // #6313: a (re)subscribe auto-requests a repaint so a reconnect mid-stream —
+    // or a first subscribe that otherwise sees only future bytes — recovers a
+    // current grid. Ordered after terminal_subscribe on the same socket.
+    expect(sent).toEqual([
+      { type: 'terminal_subscribe', sessionId: 'sess-1' },
+      { type: 'terminal_resync', sessionId: 'sess-1' },
+    ]);
   });
 
   it('does nothing for an empty sessionId', () => {
@@ -45,6 +51,25 @@ describe('subscribeTerminalMirror', () => {
   it('no-ops (does not throw) when the socket is not open', () => {
     useConnectionStore.setState({ socket: null });
     expect(() => useConnectionStore.getState().subscribeTerminalMirror('sess-1')).not.toThrow();
+  });
+});
+
+describe('requestTerminalResync (#6313)', () => {
+  it('sends a standalone terminal_resync for the manual refresh affordance', () => {
+    const sent = mockOpenSocket();
+    useConnectionStore.getState().requestTerminalResync('sess-1');
+    expect(sent).toEqual([{ type: 'terminal_resync', sessionId: 'sess-1' }]);
+  });
+
+  it('does nothing for an empty sessionId', () => {
+    const sent = mockOpenSocket();
+    useConnectionStore.getState().requestTerminalResync('');
+    expect(sent).toHaveLength(0);
+  });
+
+  it('no-ops (does not throw) when the socket is not open', () => {
+    useConnectionStore.setState({ socket: null });
+    expect(() => useConnectionStore.getState().requestTerminalResync('sess-1')).not.toThrow();
   });
 });
 

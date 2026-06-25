@@ -473,6 +473,26 @@ function handleTerminalResize(ws, client, msg, ctx) {
   entry.session.resizeTerminal(msg.cols, msg.rows)
 }
 
+// #6313: request a fresh repaint of a session's live PTY mirror — recovery for a
+// WS-backpressure-dropped terminal_output frame that silently desynced the xterm
+// grid (and, since the mirror is interactive, left keystrokes landing at the
+// wrong cursor). The repaint mutates the shared PTY (a SIGWINCH grid size-toggle
+// that makes the shell/TUI redraw), so authority mirrors terminal_resize exactly:
+// a session viewer, primary-owner gated, and user-shell primary-token gated.
+// Silent reject — an observer simply can't drive a repaint.
+function handleTerminalResync(ws, client, msg, ctx) {
+  const sid = msg.sessionId
+  if (client.boundSessionId && client.boundSessionId !== sid) return
+  const entry = ctx?.sessions?.sessionManager?.getSession?.(sid)
+  if (!entry) return
+  if (isUserShellSession(entry) && client.isPrimaryToken !== true) return
+  if (!isSessionViewer(client, sid)) return
+  const primary = ctx.transport.getPrimary?.(sid)
+  if (primary && primary !== client.id) return
+  if (typeof entry.session?.forceTerminalRepaint !== 'function') return
+  entry.session.forceTerminalRepaint()
+}
+
 // #5835 Phase 1: opt the client OUT of a session's live PTY mirror (e.g. the
 // dashboard leaving the Output tab). Idempotent.
 function handleTerminalUnsubscribe(ws, client, msg, ctx) {
@@ -567,6 +587,7 @@ export const sessionHandlers = {
   terminal_subscribe: handleTerminalSubscribe,
   terminal_unsubscribe: handleTerminalUnsubscribe,
   terminal_resize: handleTerminalResize,
+  terminal_resync: handleTerminalResync,
   client_visible: handleClientVisible,
   claim_primary: handleClaimPrimary,
 }

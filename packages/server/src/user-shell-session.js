@@ -300,6 +300,24 @@ export class UserShellSession extends BaseSession {
   }
 
   /**
+   * #6313: force the live shell to repaint by toggling the grid width one column
+   * and back — each resize sends SIGWINCH, so the shell prompt (and any TUI the
+   * user is running) redraws. Recovery for the stateless raw-byte mirror after a
+   * WS-backpressure-dropped frame desyncs the xterm grid. Width is restored, so
+   * the authoritative size is unchanged. No-op (false) without a live PTY. Caveat:
+   * a plain shell redraws its current prompt line, not desynced scrollback.
+   * @returns {boolean} whether a repaint was driven against a live PTY.
+   */
+  forceTerminalRepaint() {
+    if (!this._term || this._ptyExited) return false
+    const { cols, rows } = this.getTerminalSize()
+    const toggleCols = cols > 1 ? cols - 1 : 2
+    this.resizeTerminal(toggleCols, rows)
+    this.resizeTerminal(cols, rows)
+    return true
+  }
+
+  /**
    * Write raw client keystrokes to the live PTY. The WS handler enforces
    * authority (PRIMARY token + viewer); this just writes. No-op (false) when
    * there is no live PTY.

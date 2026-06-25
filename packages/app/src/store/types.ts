@@ -689,6 +689,8 @@ export interface UIViewActions {
   subscribeTerminalMirror: (sessionId: string) => void;
   unsubscribeTerminalMirror: (sessionId: string) => void;
   sendTerminalResize: (sessionId: string, cols: number, rows: number) => void;
+  /** #6313 — force a fresh PTY repaint (sent on (re)subscribe + via a manual "refresh terminal" affordance) so a backpressure-dropped frame that desynced the xterm grid is recovered. */
+  requestTerminalResync: (sessionId: string) => void;
   /** #6003 — forward keystrokes from an interactive (user-shell) terminal to the PTY (chunked under the 100k cap). */
   sendTerminalInput: (sessionId: string, data: string) => void;
 }

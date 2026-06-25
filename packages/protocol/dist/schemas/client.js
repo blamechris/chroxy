@@ -745,6 +745,18 @@ export const TerminalInputSchema = z.object({
     sessionId: z.string().max(256),
     data: z.string().max(100000),
 });
+// #6313: request a fresh repaint of a session's live PTY mirror. The mirror
+// streams raw coalesced ANSI bytes with no replay, so a WS-backpressure-dropped
+// `terminal_output` frame silently desyncs the xterm grid — and since the mirror
+// is interactive (#5835 Phase 3) keystrokes then land at the wrong cursor. A
+// client asks for a resync on (re)subscribe and via a manual "refresh" affordance;
+// the server forces the PTY to redraw (a SIGWINCH grid size-toggle). Authority
+// mirrors terminal_resize: a session viewer, primary-owner gated, and (for a
+// user-shell) primary-token gated.
+export const TerminalResyncSchema = z.object({
+    type: z.literal('terminal_resync'),
+    sessionId: z.string().max(256),
+});
 // #3404: client signals foreground/background state. Mobile app sends
 // {visible:false} on AppState background/inactive so the server stops
 // treating its still-alive WS connection as an active viewer and lets
@@ -1233,6 +1245,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     TerminalUnsubscribeSchema,
     TerminalResizeSchema,
     TerminalInputSchema,
+    TerminalResyncSchema,
     ClientVisibleSchema,
     ClaimPrimarySchema,
     ListProvidersSchema,

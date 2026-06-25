@@ -557,6 +557,10 @@ export declare const TerminalInputSchema: z.ZodObject<{
     sessionId: z.ZodString;
     data: z.ZodString;
 }, z.core.$strip>;
+export declare const TerminalResyncSchema: z.ZodObject<{
+    type: z.ZodLiteral<"terminal_resync">;
+    sessionId: z.ZodString;
+}, z.core.$strip>;
 export declare const ClientVisibleSchema: z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;
@@ -1066,6 +1070,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"terminal_input">;
     sessionId: z.ZodString;
     data: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"terminal_resync">;
+    sessionId: z.ZodString;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"client_visible">;
     visible: z.ZodBoolean;

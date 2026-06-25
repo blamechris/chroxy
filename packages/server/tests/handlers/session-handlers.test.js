@@ -405,6 +405,54 @@ describe('session-handlers', () => {
       assert.equal(resizeTerminal.callCount, 1)
     })
 
+    // #6313: terminal_resync forces a PTY repaint — same authority as resize
+    // (it mutates the shared grid via a SIGWINCH toggle).
+    const ptyEntry = (extra = {}) => ({ session: { constructor: { isUserShell: false }, ...extra } })
+
+    it('forces a repaint for a viewer of a (non-shell) live PTY', () => {
+      const ctx = makeCtx()
+      const forceTerminalRepaint = createSpy()
+      ctx._sessions.set('s-1', ptyEntry({ forceTerminalRepaint }))
+      const client = makeClient({ activeSessionId: 's-1' })
+      sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 's-1' }, ctx)
+      assert.equal(forceTerminalRepaint.callCount, 1)
+    })
+
+    it('rejects a non-viewer (only a viewer may drive the shared PTY)', () => {
+      const ctx = makeCtx()
+      const forceTerminalRepaint = createSpy()
+      ctx._sessions.set('s-1', ptyEntry({ forceTerminalRepaint }))
+      const client = makeClient({ activeSessionId: 'other' })
+      sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 's-1' }, ctx)
+      assert.equal(forceTerminalRepaint.callCount, 0)
+    })
+
+    it('blocks a non-primary client from resyncing a user-shell PTY', () => {
+      const ctx = makeCtx()
+      const forceTerminalRepaint = createSpy()
+      ctx._sessions.set('sh-1', shellEntry({ forceTerminalRepaint }))
+      const client = makeClient({ isPrimaryToken: false, activeSessionId: 'sh-1' })
+      sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 'sh-1' }, ctx)
+      assert.equal(forceTerminalRepaint.callCount, 0)
+    })
+
+    it('allows a primary client to resync a user-shell PTY', () => {
+      const ctx = makeCtx()
+      const forceTerminalRepaint = createSpy()
+      ctx._sessions.set('sh-1', shellEntry({ forceTerminalRepaint }))
+      const client = makeClient({ isPrimaryToken: true, activeSessionId: 'sh-1' })
+      sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 'sh-1' }, ctx)
+      assert.equal(forceTerminalRepaint.callCount, 1)
+    })
+
+    it('is a no-op (no throw) for a session without forceTerminalRepaint or an unknown session', () => {
+      const ctx = makeCtx()
+      ctx._sessions.set('s-1', ptyEntry())
+      const client = makeClient({ activeSessionId: 's-1' })
+      assert.doesNotThrow(() => sessionHandlers.terminal_resync(makeWs(), client, { sessionId: 's-1' }, ctx))
+      assert.doesNotThrow(() => sessionHandlers.terminal_resync(makeWs(), makeClient({ activeSessionId: 'nope' }), { sessionId: 'nope' }, ctx))
+    })
+
     // Mailbox (#5914 follow-up): the WS handler hands an optional AGENT_COMM_ID
     // off to SessionManager.createSession, which auto-registers it so the
     // live-interrupt route resolves agent -> session without a separate

@@ -34,6 +34,10 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
   const handlesRef = useRef(new Map<string, TerminalHandle>())
   const setTerminalWriteCallback = useConnectionStore(s => s.setTerminalWriteCallback)
   const requestTerminalResize = useConnectionStore(s => s.requestTerminalResize)
+  // #6313: manual "refresh terminal" — forces the server to repaint the live PTY
+  // if the viewer notices a desynced grid (a backpressure-dropped frame the
+  // stateless mirror can't otherwise recover).
+  const requestTerminalResync = useConnectionStore(s => s.requestTerminalResync)
   const sendTerminalInput = useConnectionStore(s => s.sendTerminalInput)
   // #5835 Phase 2: per-session authoritative sizes (server terminal_size). Reads
   // the whole map so a size change re-renders and the new fixedSize flows to the
@@ -152,6 +156,19 @@ export function MultiTerminalView({ sessions, activeSessionId, className }: Mult
           />
         </div>
       ))}
+      {activeSessionId && activeBuffer && (
+        <button
+          type="button"
+          className="terminal-resync-button"
+          data-testid="terminal-resync-button"
+          title="Refresh terminal — force a fresh repaint if the view looks out of sync"
+          aria-label="Refresh terminal"
+          onClick={() => requestTerminalResync(activeSessionId)}
+          style={{ position: 'absolute', top: 8, right: 8, zIndex: 2 }}
+        >
+          ⟳
+        </button>
+      )}
       {activeIsObserver && (
         <div className="terminal-readonly-badge" data-testid="terminal-readonly-badge">
           Read-only — another device is driving this session

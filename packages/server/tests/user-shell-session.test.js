@@ -178,4 +178,29 @@ describe('UserShellSession — lifecycle (#5983)', () => {
       }
     })
   })
+
+  describe('forceTerminalRepaint (#6313)', () => {
+    it('toggles the PTY width and restores it (two SIGWINCH resizes), returning true', () => {
+      const s = makeLiveShell()
+      s._ptyCols = 80
+      s._ptyRows = 24
+      const ok = s.forceTerminalRepaint()
+      assert.equal(ok, true)
+      assert.deepEqual(s._term._calls.resize, [[79, 24], [80, 24]], 'shrink one column then restore')
+      assert.equal(s._ptyCols, 80, 'the authoritative width is unchanged after the toggle')
+    })
+
+    it('toggles UP from the 1-column floor (never a no-op resize)', () => {
+      const s = makeLiveShell()
+      s._ptyCols = 1
+      s._ptyRows = 24
+      assert.equal(s.forceTerminalRepaint(), true)
+      assert.deepEqual(s._term._calls.resize, [[2, 24], [1, 24]], 'grow to 2 then restore to 1')
+    })
+
+    it('returns false and does not resize when there is no live PTY', () => {
+      const s = new UserShellSession({ cwd: '/tmp' })
+      assert.equal(s.forceTerminalRepaint(), false)
+    })
+  })
 })

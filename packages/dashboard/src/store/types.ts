@@ -1249,6 +1249,10 @@ export interface ConnectionState {
   // live PTY (terminal_resize) when the viewer pane can fit a different grid.
   setTerminalSize: (sessionId: string, cols: number, rows: number) => void;
   requestTerminalResize: (sessionId: string, cols: number, rows: number) => void;
+  // #6313: force a fresh repaint of a session's live PTY mirror (sent on
+  // (re)subscribe and via a manual "refresh terminal" affordance) so a
+  // backpressure-dropped frame that desynced the xterm grid is recovered.
+  requestTerminalResync: (sessionId: string) => void;
   // #5835 Phase 3: forward raw keystrokes to a session's live PTY (true remote
   // control). Best-effort; the server enforces the single-driver authority.
   sendTerminalInput: (sessionId: string, data: string) => void;
