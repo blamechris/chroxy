@@ -503,3 +503,43 @@ export const ServerSkillTrustGrantInvalidAuthorSchema = z.object({
   message: z.string(),
   actualAuthor: z.string(),
 })
+
+// #6323 (batch 1 of #6314): schemas for the highest-traffic unschemaed
+// server→client session messages, so a field-shape change is drift-checked.
+
+// Per-session busy/idle activity ping (ws-forwarding.js): `isBusy` flips true
+// when a stream starts and false when a result arrives; `lastCost` carries the
+// result cost (null while busy / when no cost is known).
+export const ServerSessionActivitySchema = z.object({
+  type: z.literal('session_activity'),
+  sessionId: z.string(),
+  isBusy: z.boolean(),
+  lastCost: z.number().finite().nullable(),
+})
+
+// Session operation error envelope — the union of fields across its many emit
+// sites (session-start / checkpoint / dev-preview failures, capability gates,
+// token-mismatch via buildSessionTokenMismatchPayload, control-room action
+// errors). `.passthrough()` because the control-room path spreads open-ended
+// `correlate(msg)` correlation fields onto the envelope (mirrors auth_ok's
+// passthrough rationale) — the named fields document the stable contract.
+export const ServerSessionErrorSchema = z.object({
+  type: z.literal('session_error'),
+  message: z.string(),
+  code: z.string().optional(),
+  category: z.string().optional(),
+  sessionId: z.string().optional(),
+  recoverable: z.boolean().optional(),
+  reason: z.string().optional(),
+  requestId: z.string().nullable().optional(),
+  boundSessionId: z.string().nullable().optional(),
+  boundSessionName: z.string().nullable().optional(),
+  primaryClientId: z.string().nullable().optional(),
+}).passthrough()
+
+// A session's metadata changed (today: its display name — auto-label or rename).
+export const ServerSessionUpdatedSchema = z.object({
+  type: z.literal('session_updated'),
+  sessionId: z.string(),
+  name: z.string(),
+})

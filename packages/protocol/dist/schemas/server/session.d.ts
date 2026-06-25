@@ -374,3 +374,27 @@ export declare const ServerSkillTrustGrantInvalidAuthorSchema: z.ZodObject<{
     message: z.ZodString;
     actualAuthor: z.ZodString;
 }, z.core.$strip>;
+export declare const ServerSessionActivitySchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_activity">;
+    sessionId: z.ZodString;
+    isBusy: z.ZodBoolean;
+    lastCost: z.ZodNullable<z.ZodNumber>;
+}, z.core.$strip>;
+export declare const ServerSessionErrorSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_error">;
+    message: z.ZodString;
+    code: z.ZodOptional<z.ZodString>;
+    category: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
+    recoverable: z.ZodOptional<z.ZodBoolean>;
+    reason: z.ZodOptional<z.ZodString>;
+    requestId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    boundSessionId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    boundSessionName: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+    primaryClientId: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+}, z.core.$loose>;
+export declare const ServerSessionUpdatedSchema: z.ZodObject<{
+    type: z.ZodLiteral<"session_updated">;
+    sessionId: z.ZodString;
+    name: z.ZodString;
+}, z.core.$strip>;
