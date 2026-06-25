@@ -17,7 +17,10 @@
 // ---------------------------------------------------------------------------
 
 jest.mock('../src/utils/crypto', () => ({
-  createKeyPair: jest.fn(),
+  // #6344: key_exchange_ok's prelude (encryption auth_ok) stashes _pendingKeyPair =
+  // createKeyPair() and reads .publicKey — return a stub so it's non-falsy (mirrors
+  // the dashboard crypto mock).
+  createKeyPair: jest.fn(() => ({ publicKey: 'mock-pub', secretKey: 'mock-sec' })),
   deriveSharedKey: jest.fn(),
   encrypt: jest.fn(),
   decrypt: jest.fn(),
@@ -159,8 +162,9 @@ function createMockStore(initial: Partial<ConnectionState>) {
 const mockCtx = {
   url: 'wss://test.example.com',
   token: 'test-token',
-  // #6325: auth_fail/pair_fail call ctx.socket.close() before tearing down.
-  socket: { close: jest.fn() } as unknown as WebSocket,
+  // #6325/#6344: auth_fail/pair_fail call ctx.socket.close(); the key_exchange_ok
+  // prelude (encryption auth_ok) sends a discrete key_exchange via ctx.socket.send.
+  socket: { close: jest.fn(), send: jest.fn() } as unknown as WebSocket,
   isReconnect: false,
   silent: false,
 };
@@ -248,6 +252,11 @@ describe('contract switch fixtures — app real handleMessage (#5556.5)', () => 
       setStore(store);
       setConnectionContext(mockCtx as never);
 
+      // #6344: dispatch any prelude messages through the real handler first to
+      // establish multi-message context (e.g. a history_replay_start baseline).
+      for (const pre of fx.prelude ?? []) {
+        handleMessage(pre);
+      }
       handleMessage(fx.message);
       // Stream cases buffer deltas behind a flush timer; drain it.
       jest.runAllTimers();

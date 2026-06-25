@@ -125,6 +125,13 @@ export interface ContractFixture {
   type: string
   /** Starting store snapshot. */
   init?: FixtureInitialState
+  /**
+   * Optional ordered wire messages dispatched through the SAME real handleMessage
+   * BEFORE `message`, to establish context a single message can't (#6344) — e.g. a
+   * `history_replay_start` that seeds the rebuild baseline `history_replay_end`
+   * resolves against. The harness asserts only the post-`message` state.
+   */
+  prelude?: Array<Record<string, unknown>>
   /** The raw wire message handed to the dispatch path. */
   message: Record<string, unknown>
   /**
@@ -2276,6 +2283,58 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
         "the dashboard writes the flat main-store field connectionPhase via set({ connectionPhase: 'disconnected', socket: null }) " +
         '(seeded connected → non-vacuous); the app routes the phase into the secondary useConnectionLifecycleStore (mocked here) and ' +
         'only does the vacuous set({ socket: null }), so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
+  {
+    // #6344 (multi-message): history_replay_end's observable effect is the deferred
+    // atomic swap that slices off the pre-baseline prefix. That's only non-vacuous
+    // when (a) a full-rebuild baseline exists AND (b) entries were appended after it,
+    // so this fixture uses a prelude: history_replay_start(fullHistory) records the
+    // baseline at the seeded prefix length (1, no wipe — the #5555.4 contract), then
+    // a replayed `message` envelope appends after it. history_replay_end then swaps
+    // to the post-baseline tail → the seeded 'stale' prefix is removed, leaving only
+    // the replayed turn (1 in → 1 DIFFERENT out; a no-op would leave both = 2).
+    name: 'history_replay_end swaps to the replayed tail, dropping the pre-baseline prefix (multi-message)',
+    type: 'history_replay_end',
+    init: {
+      activeSessionId: 's1',
+      sessions: { s1: { messages: [{ id: 'old-1', type: 'response', content: 'stale' } as unknown as ChatMessage] } },
+    },
+    prelude: [
+      { type: 'history_replay_start', sessionId: 's1', fullHistory: true },
+      { type: 'message', sessionId: 's1', messageType: 'response', messageId: 'replayed-1', content: 'authoritative replayed turn', timestamp: 2000 },
+    ],
+    message: { type: 'history_replay_end', sessionId: 's1', latestSeq: 1 },
+    expect: {
+      sessions: {
+        s1: { messages: [{ id: 'replayed-1', type: 'response', content: 'authoritative replayed turn' }] },
+      },
+    },
+  },
+  {
+    // #6344 (multi-message): key_exchange_ok's only store-writing branch is the
+    // invalid-publicKey error path, gated behind `if (_pendingKeyPair)` — so alone
+    // it's a total no-op. The prelude auth_ok (encryption:'required', no
+    // serverPublicKey, unpinned→TOFU) takes the discrete-handshake fallback and
+    // stashes _pendingKeyPair; the asserted key_exchange_ok (publicKey omitted →
+    // null) then enters the guard and runs the error teardown. The divergence is the
+    // same shape as auth_fail/pair_fail: the dashboard flips the flat main-store
+    // connectionPhase; the app routes phase to the mocked lifecycle store (no
+    // observable main-store change).
+    name: 'key_exchange_ok (invalid server key) flips the dashboard flat connectionPhase; the app routes it to the mocked lifecycle store (divergent, multi-message)',
+    type: 'key_exchange_ok',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    prelude: [{ type: 'auth_ok', encryption: 'required' }],
+    message: { type: 'key_exchange_ok' },
+    divergent: {
+      reason:
+        "key_exchange_ok's only store-writing branch is the invalid-publicKey error path, gated behind if (_pendingKeyPair) — so " +
+        'without the prelude the handler is a pure no-op. The prelude auth_ok (encryption required, no serverPublicKey, unpinned→TOFU) ' +
+        'stashes _pendingKeyPair via the discrete-handshake fallback; the asserted key_exchange_ok (publicKey null) then runs the error ' +
+        'teardown. The dashboard writes the flat connectionPhase (seeded connected → non-vacuous); the app keeps phase in the mocked ' +
+        'lifecycle store and writes only socket: null, so it makes no observable main-store mutation.',
       app: {},
       dashboard: { flat: { connectionPhase: 'disconnected' } },
     },
