@@ -2215,4 +2215,69 @@ export const SWITCH_FIXTURES: ContractFixture[] = [
       flat: { activeSessionId: 's2' },
     },
   },
+  {
+    // #6325 (auth_ok close-out): the handshake-complete frame. Both clients run the
+    // shared handleAuthOk parser, then write a SHARED slice onto the flat main store
+    // via set(connectedState): the boolean-coerced webFeatures map AND the
+    // shutdown-state clear (shutdownReason/restartEtaMs/restartingSince → null, "clear
+    // shutdown on a successful connect"). The dashboard ALSO writes serverMode/version/
+    // etc. flat; the app routes those into the mocked lifecycle/multi-client stores —
+    // so those DIVERGE and are not asserted. webFeatures (unseeded; the wire carries
+    // mixed-truthy values the parser coerces to strict booleans) + the shutdown trio
+    // (unseeded → the null clear) are the non-vacuous both-clients flat slice.
+    name: 'auth_ok writes the shared webFeatures map and clears shutdown state on the flat main store (both clients)',
+    type: 'auth_ok',
+    message: {
+      type: 'auth_ok',
+      webFeatures: { available: 1, remote: true, teleport: 0 },
+    },
+    expect: {
+      flat: {
+        webFeatures: { available: true, remote: true, teleport: false },
+        shutdownReason: null,
+        restartEtaMs: null,
+        restartingSince: null,
+      },
+    },
+  },
+  {
+    // #6325 (auth_fail close-out): the server rejected the bearer token. Both clients
+    // close the socket and tear down, but record the phase in DIFFERENT stores: the
+    // dashboard writes the flat main-store connectionPhase (set({ connectionPhase:
+    // 'disconnected', socket: null }), seeded 'connected' → non-vacuous); the app keeps
+    // connectionPhase in the secondary useConnectionLifecycleStore (mocked) and only
+    // writes socket: null (a WebSocket ref, not a meaningful assert) — so no observable
+    // main-store mutation. Same divergence shape as server_mode.
+    name: 'auth_fail flips the dashboard flat connectionPhase to disconnected; the app routes the phase to the mocked lifecycle store (divergent)',
+    type: 'auth_fail',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'auth_fail', reason: 'expired token' },
+    divergent: {
+      reason:
+        "the dashboard writes the flat main-store field connectionPhase via set({ connectionPhase: 'disconnected', socket: null }) " +
+        '(seeded connected → non-vacuous); the app keeps connectionPhase in the secondary useConnectionLifecycleStore (mocked here) and ' +
+        'writes only socket: null to the main store, so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
+  {
+    // #6325 (pair_fail close-out): pairing rejected — same divergence as auth_fail.
+    // The dashboard flips the flat connectionPhase to disconnected; the app routes the
+    // phase into the mocked lifecycle store and only does the vacuous set({socket:null}).
+    // Default reason 'unknown' (no reason field) skips the dashboard's requires_approval
+    // branch; activeServerId is unseeded so removeServer is never called.
+    name: 'pair_fail flips the dashboard flat connectionPhase to disconnected; the app routes the phase to the mocked lifecycle store (divergent)',
+    type: 'pair_fail',
+    init: { activeSessionId: 's1', sessions: { s1: {} } },
+    message: { type: 'pair_fail' },
+    divergent: {
+      reason:
+        "the dashboard writes the flat main-store field connectionPhase via set({ connectionPhase: 'disconnected', socket: null }) " +
+        '(seeded connected → non-vacuous); the app routes the phase into the secondary useConnectionLifecycleStore (mocked here) and ' +
+        'only does the vacuous set({ socket: null }), so the app makes no observable main-store mutation.',
+      app: {},
+      dashboard: { flat: { connectionPhase: 'disconnected' } },
+    },
+  },
 ]

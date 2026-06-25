@@ -77,8 +77,8 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   // agent_list — migrated to the shared dispatch table (#5618 Batch 2); now has
   // a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
   // auth_bootstrap — migrated to the shared dispatch table (#5618 Batch 5b).
-  'auth_fail',
-  'auth_ok',
+  // auth_fail — now has a SWITCH_FIXTURES entry (#6325 close-out).
+  // auth_ok — now has a SWITCH_FIXTURES entry (#6325 close-out).
   // available_models — migrated to the shared dispatch table (#5618 Batch 5a).
   // checkpoint_created / checkpoint_list — migrated to the shared dispatch table
   // (#5618 Batch 6); both now have DISPATCH_FIXTURES entries, so they leave the
@@ -96,7 +96,7 @@ const PENDING_CONTRACT_TYPES = new Set<string>([
   'key_exchange_ok',
   // multi_question_intervention — migrated to the shared dispatch table (#5618);
   // now has a DISPATCH_FIXTURES entry, so it leaves the both-clients-switch universe.
-  'pair_fail',
+  // pair_fail — now has a SWITCH_FIXTURES entry (#6325 close-out).
   // permission_expired — now has a SWITCH_FIXTURES entry (#6325).
   // permission_mode_changed — now has a SWITCH_FIXTURES entry (#6325, scalar assert).
   // permission_resolved now has a both-clients SWITCH_FIXTURES entry (#6058).
