@@ -947,7 +947,7 @@ const styles = StyleSheet.create({
     flex: 1,
     color: COLORS.textChatMessage,
     fontSize: 14,
-    lineHeight: 20,
+    lineHeight: 22, // #6391: relaxed leading reaches the prompt-answer summary (22/14 ≈ 1.57)
   },
   errorBubble: {
     backgroundColor: COLORS.accentRedLight,
@@ -979,6 +979,7 @@ const styles = StyleSheet.create({
   systemMessageText: {
     color: COLORS.textSystem,
     fontSize: 13,
+    lineHeight: 20, // #6391: was RN-default (cramped); relax secondary system notices too
   },
   selectedBubble: {
     borderColor: COLORS.accentBlue,
@@ -987,7 +988,11 @@ const styles = StyleSheet.create({
   messageText: {
     color: COLORS.textChatMessage,
     fontSize: 15,
-    lineHeight: 22,
+    // Chat redesign #6391 (mobile relaxed scale): 24/15 = 1.60 leading — the
+    // dashboard's document ratio. Body stays 15px (the correct phone size); the
+    // calmer reading rhythm comes from leading, not glyph size. Propagates to
+    // all assistant prose (FormattedResponse inherits this as messageTextStyle).
+    lineHeight: 24,
   },
   userMessageText: {
     color: COLORS.textPrimary,

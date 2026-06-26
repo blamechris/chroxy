@@ -626,23 +626,26 @@ export const md = StyleSheet.create({
     paddingHorizontal: 3,
     borderRadius: 3,
   },
+  // Chat redesign #6391 (mobile relaxed scale): nudge heading leading up in step
+  // with the roomier 24px body so a heading never looks tighter than the prose
+  // beneath it. Headings stay slightly below 1.6 (they read fine denser).
   h1: {
     fontSize: 17,
     fontWeight: '700',
     color: COLORS.headerText1,
-    lineHeight: 24,
+    lineHeight: 26,
   },
   h2: {
     fontSize: 16,
     fontWeight: '700',
     color: COLORS.headerText2,
-    lineHeight: 22,
+    lineHeight: 24,
   },
   h3: {
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.headerText3,
-    lineHeight: 22,
+    lineHeight: 24,
   },
   codeBlock: {
     backgroundColor: COLORS.backgroundCodeBlock,
