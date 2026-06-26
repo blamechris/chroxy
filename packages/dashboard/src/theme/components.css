@@ -2604,9 +2604,17 @@ button.sidebar-token-view-session-row:hover {
 }
 
 .msg.assistant {
-  background: var(--bg-secondary);
+  /* Chat redesign #6391 (no-bubble three-tier hierarchy): the assistant
+     response sits on the BARE chat canvas — no card, no tail — so a long agent
+     turn reads like a document, not a wall of grey bubbles. The user keeps its
+     card (.msg.user) and tool calls keep theirs (.msg.tool); only the
+     assistant prose loses its bubble. Markdown chrome (code blocks,
+     blockquotes, inline code) keeps its own surfaces since those rules hang off
+     `.msg` descendants, not the bubble background. */
+  background: transparent;
   align-self: flex-start;
-  border-bottom-left-radius: 4px;
+  padding: 2px 0;
+  border-radius: 0;
 }
 
 .msg.user {
