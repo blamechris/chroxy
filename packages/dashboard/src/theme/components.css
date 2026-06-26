@@ -4441,13 +4441,26 @@ button.sidebar-token-view-session-row:hover {
   background: var(--bg-header);
   border-top: 1px solid var(--border-primary);
   flex-shrink: 0;
-  transition: border-color 0.15s, background-color 0.15s;
+  transition: border-color 0.15s, background-color 0.15s, box-shadow var(--dur-base) var(--ease-standard);
 }
 
 .input-bar.dragging {
   border-color: var(--accent-blue);
   background: color-mix(in srgb, var(--accent-blue) 8%, var(--bg-header));
 }
+
+/* Chat redesign #6391 (slice 4): live hairline. The composer's top edge glows
+   the canonical chat-activity colour — driven by the `data-activity-state`
+   attribute set from store-core's deriveChatActivity (slice 3) — so you can
+   feel the remote machine working while you type the next instruction. An inset
+   box-shadow keeps it layout-shift-free (idle has none) and the colours reuse
+   the existing navy accents, so no raw literals land (ratchet-clean). The
+   send/stop morph + the labelled "streaming · +N queued" lozenge build on this
+   same attribute next. */
+.input-bar[data-activity-state="thinking"] { box-shadow: inset 0 2px 0 0 var(--accent-blue); }
+.input-bar[data-activity-state="busy"] { box-shadow: inset 0 2px 0 0 var(--accent-purple); }
+.input-bar[data-activity-state="waiting"] { box-shadow: inset 0 2px 0 0 var(--accent-orange); }
+.input-bar[data-activity-state="error"] { box-shadow: inset 0 2px 0 0 var(--text-error); }
 
 /* ---- File Picker ---- */
 .file-picker {
