@@ -32,6 +32,20 @@ describe('ToolBubble', () => {
     expect(toggle).toBeInTheDocument()
   })
 
+  it('collapses a long tool result behind a Show-more pill (chat redesign #6391)', () => {
+    const longResult = Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join('\n')
+    render(<ToolBubble {...baseProps} result={longResult} isTail />)
+    const resultEl = () => document.getElementById('tool-result-tool-1')!
+    const expandBtn = screen.getByTestId('tool-result-expand-tool-1')
+    expect(expandBtn).toHaveTextContent('Show 8 more lines')
+    // collapsed: head (line1..line12) shown, tail (line13..line20) hidden
+    expect(resultEl().textContent).toContain('line12')
+    expect(resultEl().textContent).not.toContain('line13')
+    fireEvent.click(expandBtn)
+    expect(resultEl().textContent).toContain('line20')
+    expect(screen.getByTestId('tool-result-collapse-tool-1')).toBeInTheDocument()
+  })
+
   it('has aria-expanded reflecting collapsed state', () => {
     render(<ToolBubble {...baseProps} />)
     const toggle = screen.getByRole('button')
