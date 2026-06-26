@@ -17,7 +17,7 @@
  * survives a row scrolling out of and back into the window.
  */
 import { memo, useRef, useState, useCallback, useEffect, useLayoutEffect, useMemo, type ReactNode, type CSSProperties } from 'react'
-import { bumpRenderCount } from '@chroxy/store-core'
+import { bumpRenderCount, type ChatActivityState } from '@chroxy/store-core'
 import { WorkingIndicator } from './WorkingIndicator'
 import { renderMarkdown } from '../lib/markdown'
 import { MessageRowShell } from './MeasuredRow'
@@ -118,6 +118,14 @@ export interface ChatViewProps {
   isStreaming: boolean
   /** Show thinking indicator during pre-streaming busy state */
   isBusy?: boolean
+  /**
+   * Chat redesign #6392 (presence rail): the canonical chat-activity state
+   * ('idle'|'thinking'|'busy'|'waiting'|'error') from store-core's
+   * `deriveChatActivity`. Drives the colour + motion of the left-edge presence
+   * rail via a `data-activity-state` attribute — the same wiring the Phase 1
+   * composer hairline uses. Undefined → the rail stays idle (neutral).
+   */
+  chatActivityState?: ChatActivityState
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
   /**
@@ -340,7 +348,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
@@ -686,6 +694,17 @@ function ChatViewImpl({ messages, isStreaming, isBusy, renderMessage, scrollToBo
 
   return (
     <div className="chat-view" data-testid="chat-view">
+      {/*
+        Chat redesign #6392 (presence rail): ONE left-edge spine per pane,
+        absolutely positioned against this non-scrolling .chat-view parent — NOT
+        inside the virtualized .chat-messages scroller — so it's continuous and
+        independent of the windowed row slice and the WKWebView scroll-anchor
+        math. Colour + motion come from data-activity-state (the same pattern as
+        the Phase 1 composer hairline). aria-hidden: ambient decoration, not
+        content. Motion choreography is intentionally restrained pending design
+        tuning (see the .presence-rail CSS).
+      */}
+      <div className="presence-rail" data-activity-state={chatActivityState ?? 'idle'} data-testid="presence-rail" aria-hidden="true" />
       <ChatExpandContext.Provider value={expandRegistry}>
         <div
           ref={containerRef}

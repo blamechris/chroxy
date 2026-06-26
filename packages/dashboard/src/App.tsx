@@ -2241,6 +2241,7 @@ export function App() {
                         messages={chatMessages}
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
+                        chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         scrollToBottomSignal={scrollToBottomSignal}
                         queuedIds={queuedIds}
@@ -2285,6 +2286,7 @@ export function App() {
                         messages={chatMessages}
                         isStreaming={streamingMessageId !== null}
                         isBusy={!isIdle}
+                        chatActivityState={chatActivity.state}
                         renderMessage={renderMessage}
                         hidden={viewMode !== 'chat'}
                         scrollToBottomSignal={scrollToBottomSignal}
