@@ -7,6 +7,41 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.9.47] - 2026-06-25
+
+A **model-serving freshness** release with **operator-security hardening**. The headline: you no longer need to release a new build to **call, add, or re-price a model** the provider's API already exposes — across the whole provider matrix. Alongside that: a **host-local user-shell approval** control, completion of the **#6201 Open/Closed catalog** refactor, an **OpenAI-compatible provider**, a **mobile mission-control** read-only slice, a deep **store-core/protocol contract-typing** wave, and broad reliability/UX polish.
+
+### Added
+
+- **Serve a new model without a release (model-serving freshness epic).**
+  - `providers.allowAnyModel` — a per-provider config opt-in (default OFF) that lets the static-allowlist providers (Gemini, Codex, DeepSeek) serve any API-valid model id verbatim, letting the upstream API be the validator — mirroring how Ollama already works (#6378).
+  - The hot-reloadable `~/.chroxy/models.json` **model overlay** now reaches **every provider's registry** via an optional per-entry `provider` field — add or relabel or re-window a Gemini/Codex/DeepSeek/Ollama model at runtime, not just Claude (#6377).
+  - **Per-provider overlay pricing** — a `provider`-tagged overlay entry can re-price a non-Claude model (e.g. DeepSeek) with no release (#6381).
+  - A user guide for the model overlay, previously undocumented (#6376).
+- **Host-local per-spawn user-shell approval (#6277).** Opt-in `userShell.requireApproval` holds a user-shell spawn pending the host operator's explicit OK, served over a **separate `127.0.0.1`-only listener** the Cloudflare tunnel never forwards (closing a tunnel-loopback bypass); driven by a new `chroxy shell approve|deny|list` CLI. Plus a boot-time orphan reaper for user-shell PTYs with a start-time identity gate (#6276).
+- **OpenAI-compatible provider** via the Anthropic shim — config-driven `/v1/chat/completions` endpoints (OpenAI, OpenRouter, LM Studio, vLLM, …) as first-class BYOK providers (#5420).
+- **Mobile mission-control** (read-only slice) — cross-session activity view on the app, with a live activity feeder and `lastClientActivityAt` tracking (#5968, #6246, #6248); desktop dock-badges the cross-session blocked+failed count (#6184).
+- **Dashboard model-picker** reworked to a button + modal picker with keyboard nav (#6220, #6238); the Control Room tab strip gains drag-to-scroll + edge chevrons (#6230, #6218).
+- **`doctor`** surfaces keychain health + the active storage backend (#6236).
+- **CI:** a Playwright dashboard smoke test (#6315) and a nightly Maestro app-E2E workflow (#6355) wired in.
+
+### Changed
+
+- **#6201 Open/Closed epic completed.** The Claude model catalog (roster, pricing, context-window heuristic) moved onto its own provider-owned module, inverting the dependency so the generic registry no longer reaches back into Claude specifics (#6366); DeepSeek pricing moved onto its provider class (#6365). `set_model` no longer falls through to the Claude allowlist for a non-Claude provider that declares none (#6367).
+- **Default model is now Opus 4.8**; Fable removed from and disallowed in the model registry (#6219, #6233).
+- **store-core dispatch-table migration (#5618)** — the remaining server→client handlers (`agent_idle`, `permission_mode_changed`, `budget_warning`/`plan_ready`/`rate_limited`/`server_shutdown`, `conversations_list`/`checkpoint_restored`, `search_results`) moved onto the shared dispatch table.
+- **Protocol contract-typing wave** — Zod-schemed the high-traffic, `environment_*`, and git/file/checkpoint-result server→client families (#6314, #6324), and drained the `PENDING_CONTRACT_TYPES` backlog with behavioural contract fixtures (#6325 close-out).
+- The release CI test gate broadened to match full CI coverage so a release re-tests the same suites (#6316).
+
+### Fixed
+
+- Declared the `provider` field on the `available_models` protocol schema to match the senders that emit it (#6370); boot-cache warm + legacy `available_models` are now scoped to the active provider when `DEFAULT_PROVIDER` is non-Claude (#6368).
+- **Connection resilience (mobile/dashboard):** the `ConnectionPhase` FSM rejects illegal transitions instead of failing open and restricts forced exits to whitelisted terminal phases; File/Git op failures on a closed socket surface instead of wedging; optimistic `set_model`/permission-mode/notification-pref/permission-answer flips now honor a false `wsSend` return (#6308, #6321, #6222, #6285, #6289).
+- **Desktop voice/speech helper:** single-owner reaping + decoupled stderr drain, with stderr surfaced on unexpected exit and a voice error when the restart budget is exhausted (#6281, #6282); deterministic concurrency regression tests added (#6362).
+- No macOS keychain modal on a broken login keychain — the daemon detects an unusable keychain without prompting (#6234).
+- `terminal_resync` recovers a desynced live PTY mirror, with a manual "refresh terminal" button on app + dashboard (#6329, #6330).
+- A `rate_limited` throttle notice is surfaced on app + dashboard (#6334); never-sent queued bubbles are dropped on Stop/Cancel and stranded in-flight flags reset on disconnect.
+
 ## [0.9.46] - 2026-06-20
 
 A large release on three fronts. **A security and identity-rotation wave** lands token revocation with scheduled rotation, revoke-kills-live-shells, identity-key rotation handoff, exchange-key domain separation, pairing-bound-token write gates, broadcast-path secret redaction, and a single-source answer-authorization predicate. **Two operator epics** open up: the **user-shell terminal** (#5982) puts a real `$SHELL` PTY behind a primary-token gate across server, dashboard, and mobile, and the **Control Room env/runtime control** epic (#5530) turns the dashboard into a live ops surface for containers, repo runtime config, the BYOK pool, host prune, device runtimes (iOS/Android/WSL2), and cross-session mission control. On top of that: **queue-while-processing** (server-authoritative send queue with per-item cancel and a live "Claude is working" indicator), an **OpenAI-compatible provider** translation core, an **agent-to-agent mailbox** with live interrupt, and a deep reliability/refactor wave — the store-core handler split, the swarm-hardening audit, claude-tui hardening, and CI moved onto self-hosted macOS + Linux runners with the last `--test-force-exit` retired. The original control-surface slice (Control Room Integrations/Settings tabs, pairing epic #5509, latency epic #5514, OpenRouter) ships in the same release.
