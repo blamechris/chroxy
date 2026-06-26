@@ -16,6 +16,15 @@ describe('InputBar', () => {
     expect(screen.getByTestId('send-button')).toBeInTheDocument()
   })
 
+  it('exposes the chat-activity state as a data attribute (chat redesign #6391)', () => {
+    const { rerender } = render(
+      <InputBar onSend={vi.fn()} onInterrupt={vi.fn()} chatActivityState="streaming" />,
+    )
+    expect(screen.getByTestId('input-bar')).toHaveAttribute('data-activity-state', 'streaming')
+    rerender(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} chatActivityState="waiting" />)
+    expect(screen.getByTestId('input-bar')).toHaveAttribute('data-activity-state', 'waiting')
+  })
+
   it('calls onSend with input text on send button click', () => {
     const onSend = vi.fn()
     render(<InputBar onSend={onSend} onInterrupt={vi.fn()} />)
