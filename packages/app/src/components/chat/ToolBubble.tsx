@@ -7,7 +7,7 @@ import {
   Platform,
   LayoutAnimation,
 } from 'react-native';
-import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput } from '@chroxy/store-core';
+import { getPartialSummary, tryParseCompleteJson, shouldSuppressRawToolInput, TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD, TOOL_OUTPUT_COLLAPSE_HEAD_LINES } from '@chroxy/store-core';
 import type { ChatMessage, ToolResultImage } from '../../store/connection';
 import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
@@ -52,6 +52,9 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   onExpandedChange?: (id: string, expanded: boolean) => void;
 }) {
   const [expanded, setExpandedRaw] = useState(() => getInitialExpanded?.(message.id) ?? false);
+  // #6391 (mobile auto-collapse): inner collapse of a long expanded result,
+  // mirroring the dashboard ToolBubble. Independent of the bubble's own expand.
+  const [resultExpanded, setResultExpanded] = useState(false);
   const setExpanded = (next: boolean) => {
     setExpandedRaw(next);
     onExpandedChange?.(message.id, next);
@@ -185,6 +188,10 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
   const todoParsed = expanded && message.tool === 'TodoWrite' && message.toolResult
     ? parseTodoList(message.toolResult)
     : null;
+  // #6391 (mobile auto-collapse): collapse a long expanded result to its head
+  // behind a "Show N more lines" pill (shared store-core threshold).
+  const contentLineCount = content ? content.split('\n').length : 0;
+  const isLongContent = !todoParsed && contentLineCount > TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD;
 
   return (
     <TouchableOpacity
@@ -218,8 +225,22 @@ export function ToolBubble({ message, isSelected, isSelecting, onToggleSelection
         <>
           {todoParsed ? (
             <TodoList parsed={todoParsed} />
+          ) : isLongContent && !resultExpanded ? (
+            <>
+              <Text selectable style={styles.toolContentExpanded}>{content.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</Text>
+              <TouchableOpacity onPress={() => setResultExpanded(true)} testID={`tool-result-expand-${message.id}`}>
+                <Text style={styles.toolResultExpand}>Show {contentLineCount - TOOL_OUTPUT_COLLAPSE_HEAD_LINES} more lines</Text>
+              </TouchableOpacity>
+            </>
           ) : (
-            <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+            <>
+              <Text selectable style={styles.toolContentExpanded}>{content}</Text>
+              {isLongContent && (
+                <TouchableOpacity onPress={() => setResultExpanded(false)} testID={`tool-result-collapse-${message.id}`}>
+                  <Text style={styles.toolResultExpand}>Show less</Text>
+                </TouchableOpacity>
+              )}
+            </>
           )}
           {/* #5060 — Task subagent nested progress. The child's
               intermediate tool_start/tool_result/tool_input_delta/
@@ -291,6 +312,12 @@ const styles = StyleSheet.create({
     fontFamily: Platform.OS === 'ios' ? 'Menlo' : 'monospace',
     marginTop: 6,
     lineHeight: 18,
+  },
+  // #6391 (mobile auto-collapse): the "Show N more lines" / "Show less" pill.
+  toolResultExpand: {
+    color: COLORS.accentBlue,
+    fontSize: 12,
+    marginTop: 6,
   },
   selectedBubble: {
     borderColor: COLORS.accentBlue,
