@@ -4911,6 +4911,18 @@ button.sidebar-token-view-session-row:hover {
   flex-shrink: 0;
 }
 
+/* Chat redesign #6391 (slice 5): always-visible Enter-mode keyhint. Muted and
+   small, sits inline before the action buttons — no extra row, so the composer
+   height never churns. Tokens only (ratchet-clean). */
+.input-bar-keyhint {
+  font-size: var(--text-xs);
+  color: var(--text-dim);
+  opacity: 0.7;
+  white-space: nowrap;
+  user-select: none;
+  margin-right: 2px;
+}
+
 .btn-mic {
   display: flex;
   align-items: center;

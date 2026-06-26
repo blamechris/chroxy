@@ -25,6 +25,17 @@ describe('InputBar', () => {
     expect(screen.getByTestId('input-bar')).toHaveAttribute('data-activity-state', 'waiting')
   })
 
+  it('shows an always-visible Enter-mode keyhint (chat redesign #6391)', () => {
+    const { rerender } = render(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} sendOnEnter />)
+    const hint = screen.getByTestId('input-bar-keyhint')
+    expect(hint).toBeInTheDocument()
+    expect(hint.textContent).toContain('send')
+    expect(hint.textContent).toContain('newline')
+    rerender(<InputBar onSend={vi.fn()} onInterrupt={vi.fn()} sendOnEnter={false} />)
+    expect(screen.getByTestId('input-bar-keyhint').textContent).toContain('send')
+    expect(screen.getByTestId('input-bar-keyhint').textContent).not.toContain('newline')
+  })
+
   it('calls onSend with input text on send button click', () => {
     const onSend = vi.fn()
     render(<InputBar onSend={onSend} onInterrupt={vi.fn()} />)
