@@ -40,7 +40,7 @@ import { registerAnthropicCompatibleProviders } from './anthropic-compatible-ses
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
 import { getSharedPool, isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
-import { loadModelsCache, getModels, watchModelsOverlay } from './models.js'
+import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // Imported from a dedicated constants module rather than environment-manager.js
 // so we don't eagerly pull in DockerBackend when environments are disabled —
 // environment-manager.js itself remains behind the dynamic import below
@@ -514,12 +514,6 @@ export async function startCliServer(config) {
     process.exit(1)
   }
 
-  // Warm the models registry from disk cache so the picker is populated
-  // before any SDK session fires supportedModels(). Silent miss on first boot.
-  if (loadModelsCache()) {
-    log.info(`Warmed models from cache: ${getModels().map(m => m.id).join(', ')}`)
-  }
-
   // Register optional providers (e.g. docker) based on config
   await registerDockerProvider(config)
 
@@ -538,6 +532,19 @@ export async function startCliServer(config) {
   registerOpenAiCompatibleProviders(config)
 
   const providerType = config.provider || DEFAULT_PROVIDER
+
+  // Warm the models registry from disk cache so the picker is populated before
+  // any SDK session fires supportedModels(). Routed through the ACTIVE provider's
+  // registry (#6368) so a non-Claude DEFAULT_PROVIDER warms its OWN cache
+  // (~/.chroxy/models-cache.<provider>.json) instead of the Claude default. For
+  // Claude providers getRegistryForProvider returns the shared default registry,
+  // so behaviour is byte-identical to the prior module-level loadModelsCache().
+  // Placed after the provider-registration block above so getRegistryForProvider
+  // can resolve docker/config-driven/non-Claude providers. Silent miss on first boot.
+  const bootRegistry = getRegistryForProvider(providerType)
+  if (bootRegistry.loadCache()) {
+    log.info(`Warmed models from cache: ${bootRegistry.getModels().map(m => m.id).join(', ')}`)
+  }
 
   // #4209 / #4246: resolve the effective skip-permissions setting from the
   // merged config (CLI flag > canonical `dangerouslySkipPermissions` >

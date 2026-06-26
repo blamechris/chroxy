@@ -184,6 +184,69 @@ describe('_reserveEagerDerivationSlot — per-iteration budget (#5622)', () => {
   })
 })
 
+// #6368: in legacy single-session mode the `available_models` snapshot must
+// reflect the ACTIVE provider's registry (the cliSession is the default-provider
+// session), not the Claude-only module-level getModels(). Pre-fix, a non-Claude
+// DEFAULT_PROVIDER broadcast Claude's roster to the picker. The provider is read
+// from billingCanary.defaultProvider (= resolved `config.provider || DEFAULT_PROVIDER`).
+describe('sendPostAuthInfo — legacy available_models provider scoping (#6368)', () => {
+  // Distinctive non-Claude provider so a Claude-vs-provider mix-up is obvious.
+  class Stub6368Session {
+    static claudeFamily = false
+    static getFallbackModels() {
+      return [{ id: 'stub-7b', label: 'Stub 7B', fullId: 'stub-7b', contextWindow: 8000 }]
+    }
+    static getModelMetadata(id) {
+      return { id, label: id, fullId: id, contextWindow: 8000 }
+    }
+    sendMessage() {}
+    interrupt() {}
+    setModel() {}
+    setPermissionMode() {}
+    start() {}
+    destroy() {}
+  }
+
+  function legacyCtx(overrides = {}) {
+    return makeCtx({
+      sessionManager: null,
+      cliSession: { isReady: false, model: null, bootedModel: null, permissionMode: 'approve', cwd: '/tmp' },
+      ...overrides,
+    })
+  }
+
+  it('scopes the legacy model list to a non-Claude default provider', () => {
+    registerProvider('stub-6368', Stub6368Session)
+    const ctx = legacyCtx({ billingCanary: { defaultProvider: 'stub-6368' } })
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const avail = ctx._sends.find((m) => m.type === 'available_models')
+    assert.ok(avail, 'legacy mode must push an available_models snapshot')
+    const ids = avail.models.map((m) => m.id)
+    assert.ok(ids.includes('stub-7b'), `expected the provider's models, got ${JSON.stringify(ids)}`)
+    assert.ok(!ids.some((id) => ['sonnet', 'opus', 'haiku'].includes(id)), `must NOT broadcast Claude models, got ${JSON.stringify(ids)}`)
+    assert.equal(avail.provider, 'stub-6368')
+  })
+
+  it('falls back to the Claude default registry when no billing canary (old ctx / Claude default)', () => {
+    const ctx = legacyCtx() // no billingCanary
+    const ws = makeFakeWs()
+    registerClient(ctx, ws)
+
+    sendPostAuthInfo(ctx, ws)
+
+    const avail = ctx._sends.find((m) => m.type === 'available_models')
+    assert.ok(avail, 'legacy mode must push an available_models snapshot')
+    const ids = avail.models.map((m) => m.id)
+    // Default Claude registry roster (FALLBACK_MODELS) — unchanged behaviour.
+    assert.ok(ids.includes('sonnet') && ids.includes('opus') && ids.includes('haiku'), `expected the Claude default roster, got ${JSON.stringify(ids)}`)
+    assert.equal(avail.provider, null)
+  })
+})
+
 // #5622: under a reconnect storm, the eager X25519 fold is capped per event-loop
 // iteration so the synchronous scalar-mults don't starve the keepalive sweep.
 // Connects beyond the cap fall back to the (already-tested) discrete handshake.

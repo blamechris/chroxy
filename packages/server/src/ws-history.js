@@ -4,7 +4,7 @@
  * Extracted from ws-server.js to separate the post-authentication
  * handshake and history replay concerns from core server orchestration.
  */
-import { toShortModelId, getModels, getDefaultModelId, getRegistryForProvider } from './models.js'
+import { toShortModelId, getRegistryForProvider } from './models.js'
 import { PERMISSION_MODES } from './handler-utils.js'
 import { listProviders, getProvider } from './providers.js'
 import { createLogger } from './logger.js'
@@ -671,7 +671,15 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
         ? toShortModelId(cliSession.model || cliSession.bootedModel)
         : null,
     })
-    send(ws, { type: 'available_models', models: getModels(), defaultModel: getDefaultModelId() })
+    // #6368: scope the legacy single-session model list to the ACTIVE provider's
+    // registry (the cliSession is the default-provider session) instead of the
+    // Claude-only module-level getModels(). billingCanary.defaultProvider is the
+    // resolved `config.provider || DEFAULT_PROVIDER`; for Claude (or a null/absent
+    // canary on old ctx) getRegistryForProvider falls back to the default Claude
+    // registry, so behaviour is unchanged today.
+    const legacyProvider = billingCanary?.defaultProvider || null
+    const legacyRegistry = getRegistryForProvider(legacyProvider)
+    send(ws, { type: 'available_models', models: legacyRegistry.getModels(), defaultModel: legacyRegistry.getDefaultModelId(), provider: legacyProvider })
     send(ws, {
       type: 'permission_mode_changed',
       mode: cliSession.permissionMode || 'approve',
