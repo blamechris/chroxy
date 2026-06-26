@@ -389,6 +389,14 @@ export {
 } from './tool-presentation'
 export type { ToolKind, ToolPresentation } from './tool-presentation'
 
+// Chat redesign #6391 (Phase 1): shared tool-output auto-collapse thresholds —
+// the dashboard + mobile ToolBubble collapse a long result past the same line
+// boundary.
+export {
+  TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD,
+  TOOL_OUTPUT_COLLAPSE_HEAD_LINES,
+} from './tool-output'
+
 export {
   PASTE_COLLAPSE_CHAR_THRESHOLD,
   PASTE_COLLAPSE_LINE_THRESHOLD,

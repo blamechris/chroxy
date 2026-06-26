@@ -2936,6 +2936,29 @@ button.sidebar-token-view-session-row:hover {
   color: var(--text-secondary);
 }
 
+/* Chat redesign #6391 (slice 7): a long tool result manages its own length via
+   the "Show N more lines" collapse pill, so drop the fixed 200px scroll cap
+   when collapsible (the cap stays for short results, and the toggle button must
+   not be trapped inside a scroll box). The toggle re-measures the row via the
+   per-row ResizeObserver, so the virtualized list stays correct. */
+.tool-result--unbounded {
+  max-height: none;
+  overflow-y: visible;
+}
+.tool-result-expand {
+  display: block;
+  margin-top: 6px;
+  padding: 2px 0;
+  background: none;
+  border: none;
+  color: var(--accent-blue);
+  font-size: var(--text-xs);
+  cursor: pointer;
+}
+.tool-result-expand:hover {
+  text-decoration: underline;
+}
+
 .tool-bubble.expanded .tool-result {
   display: block;
 }

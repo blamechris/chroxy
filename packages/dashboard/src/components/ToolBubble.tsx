@@ -29,6 +29,8 @@ import {
   getPartialSummary,
   tryParseCompleteJson,
   shouldSuppressRawToolInput,
+  TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD,
+  TOOL_OUTPUT_COLLAPSE_HEAD_LINES,
 } from '@chroxy/store-core'
 import type { ChildAgentEvent, ToolResultImage } from '@chroxy/store-core'
 import { TodoList, parseTodoList } from './TodoList'
@@ -177,6 +179,13 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
   const todoParsed = expanded && result && toolName === 'TodoWrite'
     ? parseTodoList(result)
     : null
+  // #6391 (slice 7): collapse a long tool result to its head behind a "Show N
+  // more lines" pill. Independent of the bubble's own expand/collapse; the
+  // per-row ResizeObserver (MeasuredRow, #5561) re-measures the row when this
+  // toggles, so the virtualized list stays correct with no extra plumbing.
+  const [resultExpanded, setResultExpanded] = useState(false)
+  const resultLineCount = useMemo(() => (result ? result.split('\n').length : 0), [result])
+  const isLongResult = !todoParsed && resultLineCount > TOOL_OUTPUT_COLLAPSE_LINE_THRESHOLD
   // #4081: streaming preview — render the accumulator as a code block
   // while the result hasn't arrived. Best-effort pretty-print: try
   // JSON.parse first (the final delta often completes the JSON), fall
@@ -262,14 +271,38 @@ export function ToolBubble({ toolName, toolUseId, input, inputPartial, result, s
         // outer onClick that collapses the bubble — otherwise selecting
         // text or interacting with the checklist accidentally re-toggles.
         <div
-          className="tool-result"
+          className={`tool-result${isLongResult ? ' tool-result--unbounded' : ''}`}
           id={resultId}
           onClick={(e) => e.stopPropagation()}
         >
           {todoParsed ? (
             <TodoList parsed={todoParsed} />
+          ) : isLongResult && !resultExpanded ? (
+            <>
+              <pre>{result!.split('\n').slice(0, TOOL_OUTPUT_COLLAPSE_HEAD_LINES).join('\n')}</pre>
+              <button
+                type="button"
+                className="tool-result-expand"
+                data-testid={`tool-result-expand-${toolUseId}`}
+                onClick={() => setResultExpanded(true)}
+              >
+                Show {resultLineCount - TOOL_OUTPUT_COLLAPSE_HEAD_LINES} more lines
+              </button>
+            </>
           ) : (
-            <pre>{result}</pre>
+            <>
+              <pre>{result}</pre>
+              {isLongResult && (
+                <button
+                  type="button"
+                  className="tool-result-expand"
+                  data-testid={`tool-result-collapse-${toolUseId}`}
+                  onClick={() => setResultExpanded(false)}
+                >
+                  Show less
+                </button>
+              )}
+            </>
           )}
         </div>
       )}
