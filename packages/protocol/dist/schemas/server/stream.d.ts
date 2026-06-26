@@ -259,6 +259,11 @@ export declare const ServerBackgroundWorkChangedSchema: z.ZodObject<{
         startedAt: z.ZodNumber;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+export declare const ServerShellPendingApprovalSchema: z.ZodObject<{
+    type: z.ZodLiteral<"shell_pending_approval">;
+    approvalId: z.ZodString;
+    hint: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const ServerTerminalOutputSchema: z.ZodObject<{
     type: z.ZodLiteral<"terminal_output">;
     sessionId: z.ZodString;

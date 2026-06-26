@@ -604,7 +604,7 @@ function validateBillingBlock(billing, warnings) {
   warnUnknownKeys(billing, BILLING_SUPPORTED_KEYS, 'billing', warnings)
 }
 
-const USER_SHELL_SUPPORTED_KEYS = new Set(['enabled'])
+const USER_SHELL_SUPPORTED_KEYS = new Set(['enabled', 'requireApproval'])
 
 // #5985 (epic #5982): validate the `userShell` block. Only `enabled` (boolean)
 // today; the security primitives (primary-token gate, audit, isolation) land in
@@ -626,6 +626,13 @@ function validateUserShellBlock(userShell, warnings) {
       warnings.push(`Invalid value for 'userShell.enabled': expected a boolean, got ${JSON.stringify(userShell.enabled)}`)
     }
   }
+  // #6277 — host-local per-spawn shell approval. Warn-only (never fatal) like
+  // `enabled`; isUserShellApprovalRequired stays fail-closed for a bad value.
+  if (Object.prototype.hasOwnProperty.call(userShell, 'requireApproval')) {
+    if (typeof userShell.requireApproval !== 'boolean') {
+      warnings.push(`Invalid value for 'userShell.requireApproval': expected a boolean, got ${JSON.stringify(userShell.requireApproval)}`)
+    }
+  }
   warnUnknownKeys(userShell, USER_SHELL_SUPPORTED_KEYS, 'userShell', warnings)
 }
 
@@ -634,6 +641,15 @@ function validateUserShellBlock(userShell, warnings) {
 // disabled. Used by SessionManager.createSession (the authoritative gate).
 export function isUserShellEnabled(config) {
   return config?.userShell?.enabled === true
+}
+
+// #6277: single source of truth for "does a user-shell spawn need host-local
+// approval first?". Fail-closed — only an explicit `userShell.requireApproval
+// === true` enables the gate. Independent of `enabled`: the gate only bites when
+// shells are enabled (a disabled shell is already rejected upstream), so an
+// operator opts into BOTH `enabled: true` and `requireApproval: true`.
+export function isUserShellApprovalRequired(config) {
+  return config?.userShell?.requireApproval === true
 }
 
 function validateDiscordNotificationsBlock(discord, warnings) {

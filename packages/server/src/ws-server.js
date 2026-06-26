@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { PagesStore } from './pages-store.js'
+import { ShellApprovalStore } from './shell-approval-store.js'
+import { finalizeShellCreate } from './handlers/session-handlers.js'
 import { decrypt, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { safeTokenCompare } from './token-compare.js'
 import { createClientSender } from './ws-client-sender.js'
@@ -25,7 +27,9 @@ import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
 import { WebTaskManager } from './web-task-manager.js'
-import { RateLimiter, getClientIp, getRateLimitKey } from './rate-limiter.js'
+import { RateLimiter, getClientIp, getRateLimitKey, LOOPBACK_ADDRESSES } from './rate-limiter.js'
+import { isUserShellApprovalRequired } from './config.js'
+import { writeShellApprovalInfo, removeShellApprovalInfo } from './shell-approval-info.js'
 import { createLogger, addLogListener, removeLogListener } from './logger.js'
 import { PermissionAuditLog } from './permission-audit.js'
 import { WsBroadcaster } from './ws-broadcaster.js'
@@ -424,6 +428,7 @@ function _isSecureRequest(req) {
  *   { type: 'agent_completed', sessionId, agentId, parentToolId }       — background agent completed
  *   { type: 'agent_event', sessionId, parentToolUseId, eventType, payload } — Task subagent intermediate wire event re-emit (#5016, transient; eventType is one of `tool_start` / `tool_input_delta` / `tool_result` / `stream_delta`)
  *   { type: 'background_work_changed', sessionId, pending } — pending background shells snapshot changed (#4307, transient; `pending: [{ shellId, command, startedAt }, …]`)
+ *   { type: 'shell_pending_approval', approvalId, hint? } — #6277 host-local user-shell approval: a requested user-shell spawn is HELD pending the host operator's out-of-band approval (`chroxy shell approve <id>`). Informational; dashboard-only banner for v1. The normal `session_switched` confirms on approval, a `session_error` (SHELL_APPROVAL_DENIED) on deny.
  *   { type: 'activity_snapshot', sessionId, schemaVersion, entries } — Control Room full activity tree for a session, on subscribe/resync (#5161 schema; emitter #5160; `entries: [{ id, kind, label, status, startedAt, endedAt?, parentId?, outputRef? }, …]`)
  *   { type: 'activity_delta', sessionId, schemaVersion, op, entry } — Control Room incremental activity-entry change (#5161 schema; emitter #5160; `op` is one of `started` / `updated` / `ended`; `entry` is the full node)
  *   { type: 'message_queued', sessionId, clientMessageId?, text, queueLength } — a send-while-busy follow-up entered the server's outgoing-message queue (#5936/#5937, transient; mirrors `_outgoingQueue`)
@@ -589,6 +594,10 @@ export class WsServer {
     this.pagesStore = pagesStore || new PagesStore({
       pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
     })
+    // #6277: host-local user-shell approval store. The create gate holds a spawn
+    // here when userShell.requireApproval is on; the host operator approves it
+    // out-of-band via the loopback /api/shell routes (or `chroxy shell approve`).
+    this._shellApprovalStore = new ShellApprovalStore()
     this._clientSend = createClientSender(log)
     // audit P1-2: when a client's active session changes, re-sync the live
     // terminal mirror gate for BOTH the session it left and the one it joined.
@@ -849,6 +858,9 @@ export class WsServer {
         get skillsUsageRecorder() { return self.sessionManager?.skillsUsageRecorder ?? null },
         resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),
         broadcastPairResolved: (requestId, reason) => self._broadcastPairResolved(requestId, reason),
+        // #6277: the create gate reads this to HOLD a user-shell spawn pending
+        // host approval. Late-bound so it tracks the server instance.
+        get shellApprovalStore() { return self._shellApprovalStore },
       },
       runtime: {
         get draining() { return self._draining },
@@ -1357,6 +1369,126 @@ export class WsServer {
   }
 
   /**
+   * #6277 — complete a host-approved user-shell spawn. Resolves the requesting
+   * socket from the client map (it may be GONE if the requester disconnected
+   * during the approval window — that's tolerated: the session is still created
+   * + audited + broadcast to other clients, only the requester notify is
+   * skipped) and replays finalizeShellCreate with the audit identity captured at
+   * request time. Returns the created sessionId; throws on a create failure
+   * (the caller maps it to an HTTP 500).
+   *
+   * @param {object} entry - the resolved pending-approval entry from the store
+   * @returns {string} sessionId
+   */
+  completeShellApproval(entry) {
+    let ws = null
+    let client = null
+    for (const [sock, c] of this.clients) {
+      if (c?.id === entry.clientId) { ws = sock; client = c; break }
+    }
+    return finalizeShellCreate(ws, client, entry.createSessionOptions, this._handlerCtx, {
+      isUserShell: true,
+      tokenClass: entry.tokenClass || 'primary',
+      deviceName: entry.deviceName,
+      clientId: entry.clientId,
+    })
+  }
+
+  /**
+   * #6277 — tell the requester their shell was declined by the host operator.
+   * No-op if the requesting socket is already gone.
+   * @param {object} entry - the resolved pending-approval entry
+   */
+  notifyShellDenied(entry) {
+    for (const [sock, c] of this.clients) {
+      if (c?.id === entry.clientId) {
+        this._handlerCtx.transport.send(sock, {
+          type: 'session_error',
+          code: 'SHELL_APPROVAL_DENIED',
+          message: 'The host operator declined this shell.',
+        })
+        break
+      }
+    }
+  }
+
+  /**
+   * #6277 — start the host-local user-shell approval listener.
+   *
+   * A SEPARATE HTTP server bound to 127.0.0.1 ONLY, on an ephemeral port the
+   * Cloudflare tunnel never forwards (cloudflared only proxies the main port).
+   * This separation is the load-bearing security property: a loopback check on
+   * the MAIN port would be defeated because cloudflared makes tunnel traffic
+   * arrive as 127.0.0.1, so a leaked-token attacker over the tunnel could
+   * approve their own held shell. Only the host can reach this listener; the
+   * primary-token check then narrows it to the operator. The port is published
+   * to a 0600 file for the `chroxy shell approve` CLI.
+   */
+  _startApprovalListener() {
+    this._approvalServer = createServer((req, res) => this._handleApprovalRequest(req, res))
+    this._approvalServer.on('error', (err) => {
+      log.error(`[shell-approval] listener error: ${err.message}`)
+    })
+    this._approvalServer.listen(0, '127.0.0.1', () => {
+      const port = this._approvalServer.address()?.port
+      this._shellApprovalPort = port
+      try {
+        writeShellApprovalInfo({ port, pid: process.pid })
+        log.info(`[shell-approval] host-local approval listener on 127.0.0.1:${port} — user-shell spawns require \`chroxy shell approve\``)
+      } catch (err) {
+        log.error(`[shell-approval] failed to publish approval port: ${err.message}`)
+      }
+    })
+  }
+
+  /**
+   * #6277 — request handler for the host-local approval listener. Serves only
+   * POST /api/shell/approve, POST /api/shell/deny, GET /api/shell/pending. The
+   * listener is already 127.0.0.1-bound, but the kernel socket-IP is re-checked
+   * (defense-in-depth against a future bind mistake) and every route requires
+   * the primary token.
+   */
+  _handleApprovalRequest(req, res) {
+    const json = (code, body) => {
+      res.writeHead(code, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(body))
+    }
+    // Defense-in-depth: bound to 127.0.0.1, but re-verify the kernel-supplied
+    // socket IP so a future 0.0.0.0 bind mistake can't quietly expose this.
+    const socketIp = req.socket?.remoteAddress || ''
+    if (!LOOPBACK_ADDRESSES.has(socketIp)) return json(403, { error: 'loopback_only' })
+    // Host-OPERATOR authority: rejects pairing-bound tokens (writes its own 403).
+    // Under --no-auth (no token configured) this passes through, consistent with
+    // chroxy's local-trust model — the listener is still loopback-only (not
+    // tunnel-reachable) and the create-side gate is equally token-free there.
+    if (!this._validatePrimaryBearerAuth(req, res)) return
+    const path = (req.url || '').split('?')[0]
+    const store = this._shellApprovalStore
+    if (req.method === 'GET' && path === '/api/shell/pending') {
+      return json(200, { pending: store.list() })
+    }
+    if (req.method === 'POST' && (path === '/api/shell/approve' || path === '/api/shell/deny')) {
+      let id = null
+      try { id = new URL(req.url, 'http://localhost').searchParams.get('id') } catch { /* malformed url */ }
+      if (!id) return json(400, { error: 'missing_id' })
+      const isApprove = path === '/api/shell/approve'
+      const result = isApprove ? store.approve(id) : store.deny(id)
+      if (!result.ok) return json(result.reason === 'not_found' ? 404 : 403, { error: result.reason })
+      if (isApprove) {
+        try {
+          return json(200, { ok: true, sessionId: this.completeShellApproval(result.entry) })
+        } catch (err) {
+          log.warn(`[shell-approval] approve ${id}: create failed: ${err.message}`)
+          return json(500, { error: 'create_failed', message: err.message })
+        }
+      }
+      try { this.notifyShellDenied(result.entry) } catch { /* requester socket gone */ }
+      return json(200, { ok: true })
+    }
+    return json(404, { error: 'not_found' })
+  }
+
+  /**
    * Post an approval-gated pairing link to the configured Discord webhook
    * (#5513). Thin seam around discord-pair-delivery.postPairLinkToDiscord so
    * http-routes can call it and tests can stub it. Never logs / returns the
@@ -1809,6 +1941,14 @@ export class WsServer {
     })
 
     this.httpServer.listen(this.port, host)
+
+    // #6277 — host-local user-shell approval listener. Started only when approval
+    // is enabled at boot (off by default → the WsServer test harness is
+    // untouched). See _startApprovalListener for why it's a separate
+    // 127.0.0.1-only server rather than a main-port route.
+    if (isUserShellApprovalRequired(this.config)) {
+      this._startApprovalListener()
+    }
 
     // Detect Claude Code Web features (non-blocking)
     this._webTaskManager.detectFeatures().then(({ remote, teleport }) => {
@@ -2641,5 +2781,11 @@ export class WsServer {
     }
     if (this.wss) this.wss.close()
     if (this.httpServer) this.httpServer.close()
+    // #6277 — tear down the host-local approval listener + its port file.
+    if (this._approvalServer) {
+      try { this._approvalServer.close() } catch { /* already closing */ }
+      this._approvalServer = null
+      removeShellApprovalInfo()
+    }
   }
 }

@@ -114,6 +114,7 @@ const PLATFORM_SPECIFIC = {
   'pairing_refreshed': 'dashboard',  // QR display and auto-refresh is dashboard-only (#2916)
   'pair_pending': 'dashboard',       // #5510 pairing-approval primitive — host-level approval banner fan-out is dashboard-only for v1 (the mobile app has no approve surface yet); mobile/desktop-tray approve is an explicit out-of-scope fast-follow per epic #5509
   'pair_resolved': 'dashboard',      // #5510 pairing-approval primitive — banner retraction pairs with pair_pending; dashboard-only for v1, mobile parity deferred per epic #5509
+  'shell_pending_approval': 'dashboard', // #6277 host-local user-shell approval — "waiting for host approval" banner; dashboard-only for v1, mobile parity deferred
   'monthly_budget': 'dashboard',     // #5665 monthly programmatic-credit meter renders in the dashboard sidebar; mobile parity tracked as a follow-up
   'log_entry': 'dashboard',          // console page is dashboard-only
   'file_list': 'dashboard',          // file explorer sidebar is dashboard-only

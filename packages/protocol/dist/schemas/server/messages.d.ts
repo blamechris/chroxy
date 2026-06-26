@@ -6,7 +6,7 @@
  */
 import { z } from 'zod';
 import { BillingCanarySnapshotSchema, BillingCanaryWarningSchema, ServerAuthOkSchema, ServerPairPendingSchema, ServerPairRequestPendingSchema, ServerPairResolvedSchema, ServerPairResultSchema } from './connection.ts';
-import { ServerPermissionRequestSchema, ServerStreamDeltaSchema } from './stream.ts';
+import { ServerPermissionRequestSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts';
 import { ActivityEntrySchema, ActivityKindSchema, ActivityOutputRefSchema, ActivityStatusSchema, ServerActivityDeltaSchema, ServerActivitySnapshotSchema, ServerCancelActivityAckSchema, ServerMessageDequeuedSchema, ServerMessageQueuedSchema } from './activity.ts';
 import { ExternalSessionEntrySchema, HostStatusSummarySchema, IntegrationActionCountsSchema, IntegrationCliStatusSchema, IntegrationRepoSchema, IntegrationStatusSummarySchema, MailboxDeliveryEventSchema, MailboxRegistrationSchema, RepoMemoryCacheSchema, RepoMemoryReportSchema, RepoMemoryStatusSchema, RepoRelayRunSchema, RepoRelayStatusSchema, RepoRelayVerdictSchema, RepoRunnersSchema, RepoRuntimeConfigEntrySchema, RepoStatusSchema, RepoTreeSchema, RepoVerdictSchema, RunnerInfoSchema, RunnerServiceStateSchema, RunnerStatusSummarySchema, RunnerVerdictSchema, ServerByokPoolActionAckSchema, ServerByokPoolStatusSnapshotSchema, ServerContainersActionAckSchema, ServerContainersStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerHostPruneActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerSessionPresetDisclosureSchema, ServerSessionPresetFullSchema, ServerSessionPresetSnapshotSchema, ServerSimulatorActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerSummarizeSessionResultSchema, ServerWslActionAckSchema, ServerWslStatusSnapshotSchema, SkillInventoryEntrySchema, SkillInventoryRepoSchema } from './control-room.ts';
 import { CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerTunnelUrlChangedSchema } from './session.ts';
@@ -20,6 +20,7 @@ export type ServerPairPendingMessage = z.infer<typeof ServerPairPendingSchema>;
 export type ServerPairResultMessage = z.infer<typeof ServerPairResultSchema>;
 export type ServerPairResolvedMessage = z.infer<typeof ServerPairResolvedSchema>;
 export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>;
+export type ServerShellPendingApprovalMessage = z.infer<typeof ServerShellPendingApprovalSchema>;
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>;
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>;
 export type ServerErrorEnvelopeMessage = z.infer<typeof ServerErrorEnvelopeSchema>;

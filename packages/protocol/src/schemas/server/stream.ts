@@ -390,6 +390,19 @@ export const ServerBackgroundWorkChangedSchema = z.object({
   pending: z.array(ServerPendingBackgroundShellSchema),
 })
 
+// #6277 — host-local user-shell approval. Sent to the REQUESTING client when a
+// user-shell spawn is HELD pending the host operator's out-of-band approval
+// (loopback `chroxy shell approve <id>`). Informational: the client shows a
+// "waiting for host approval" banner; on approval the normal `session_switched`
+// confirms the create, on deny/expiry a `session_error` arrives. Dashboard-only
+// for v1 — mobile parity is deferred. `approvalId` is the one-time id the host
+// operator reads from the daemon log to approve.
+export const ServerShellPendingApprovalSchema = z.object({
+  type: z.literal('shell_pending_approval'),
+  approvalId: z.string(),
+  hint: z.string().optional(),
+})
+
 // #6323 (batch 1 of #6314): the live PTY mirror channel (#5835). `terminal_output`
 // is raw coalesced ANSI bytes (transient — no history/replay); `terminal_size` is
 // the authoritative grid the server broadcasts so observers letterbox to it.

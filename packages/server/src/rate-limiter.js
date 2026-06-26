@@ -6,7 +6,7 @@
 import { createLogger } from './logger.js'
 
 // Loopback addresses used by cloudflared and local dev connections
-const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
+export const LOOPBACK_ADDRESSES = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
 
 /**
  * Normalize a Node.js HTTP header value to a string.

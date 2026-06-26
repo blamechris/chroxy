@@ -136,6 +136,9 @@ export const CTX_NAMESPACES = {
     'skillsUsageRecorder',
     'resolvePairRequester',
     'broadcastPairResolved',
+    // #6277: host-local user-shell approval store; the create gate holds a
+    // spawn here when userShell.requireApproval is on. Null in test ctx mocks.
+    'shellApprovalStore',
   ],
   runtime: [
     'draining',
