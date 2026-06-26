@@ -31,6 +31,9 @@ permissions:
 jobs:
   maestro:
     name: Maestro App E2E
+    # No fork-PR guard (unlike ci.yml's self-hosted jobs) is needed: this workflow
+    # is schedule + workflow_dispatch only, neither of which is reachable from a
+    # fork PR — so untrusted code can never land on the self-hosted runner here.
     runs-on: [self-hosted, macOS, ARM64, chroxy-mac]
     timeout-minutes: 90
     steps:
@@ -95,7 +98,7 @@ jobs:
 
       - name: Upload screenshots on failure
         if: failure()
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: maestro-screenshots
           path: packages/app/*.png
