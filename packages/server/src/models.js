@@ -80,7 +80,7 @@ export function getModelPricing(modelId) {
  * yields null — never 0.
  *
  * @param {string} modelId
- * @param {Map} [overlay] - fullId → overlay entry map (see loadModelsOverlay)
+ * @param {Map} [overlay] - fullId → overlay entry map (see loadModelsOverlayResult)
  * @returns {object|null}
  */
 function resolveModelPricing(modelId, overlay) {
@@ -209,11 +209,11 @@ function getDefaultOverlayPath() {
  *   - non-object JSON root → `{ ok: false, overlay: <empty> }`
  *   - valid object        → `{ ok: true,  overlay: <normalised> }`
  *
- * NEVER throws. The boot-time {@link loadModelsOverlay} wraps this and returns
- * just the overlay (treating malformed as empty, exactly as before).
+ * NEVER throws. Boot + reload call this directly to get both the default
+ * (Claude) overlay and the per-provider slices (#6377).
  *
  * @param {string} [path]
- * @returns {{ ok: boolean, overlay: Map<string, object> }}
+ * @returns {{ ok: boolean, overlay: Map<string, object>, byProvider: Map<string, Map<string, object>> }}
  */
 function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
   // `overlay` is the DEFAULT (Claude) registry overlay — entries with no
@@ -222,6 +222,7 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
   // non-Claude provider's own registry: Map<providerName, Map<fullId, entry>>.
   const overlay = new Map()
   const byProvider = new Map()
+  const pricingIgnoredForTagged = []
   let raw
   try {
     raw = readFileSync(path, 'utf-8')
@@ -271,15 +272,18 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
       let providerMap = byProvider.get(provider)
       if (!providerMap) { providerMap = new Map(); byProvider.set(provider, providerMap) }
       providerMap.set(fullId, entry)
+      // #6385: a tagged (non-Claude) entry's `pricing` is collected but inert —
+      // non-Claude cost flows through ProviderClass._getPricing, not the
+      // registry. Surface it once so the inertness is observable, not doc-tribal.
+      if (entry.pricing) pricingIgnoredForTagged.push(fullId)
     } else {
       overlay.set(fullId, entry)
     }
   }
+  if (pricingIgnoredForTagged.length > 0) {
+    log.debug(`loadModelsOverlay: ignoring 'pricing' on ${pricingIgnoredForTagged.length} provider-tagged overlay entr${pricingIgnoredForTagged.length === 1 ? 'y' : 'ies'} (${pricingIgnoredForTagged.join(', ')}) — non-Claude pricing is owned by the provider class, not the overlay (#6385)`)
+  }
   return { ok: true, overlay, byProvider }
-}
-
-function loadModelsOverlay(path = getDefaultOverlayPath()) {
-  return loadModelsOverlayResult(path).overlay
 }
 
 // Module-level overlay, loaded at boot and HOT-RELOADABLE (#5932). The default
@@ -455,7 +459,7 @@ function humanizeModelId(id) {
  *   provider-scoped path (e.g. `~/.chroxy/models-cache.codex.json`) so the
  *   default Claude cache stays untouched by per-provider learn-loops (#4413).
  * @param {Map} [hooks.overlay] - User-extensible overlay (fullId → entry; see
- *   loadModelsOverlay). Overlay entries SEED the registry like a
+ *   loadModelsOverlayResult). Overlay entries SEED the registry like a
  *   FALLBACK_MODELS row, so a brand-new model id appears with no code change
  *   and survives loadCache()'s family prune. The default Claude registry gets
  *   the module-level `defaultOverlay`; pass `new Map()` to opt out.
