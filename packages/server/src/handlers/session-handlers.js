@@ -8,6 +8,7 @@ import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
+import { isUserShellApprovalRequired } from '../config.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
@@ -203,46 +204,48 @@ function handleCreateSession(ws, client, msg, ctx) {
     }
   }
 
-  try {
-    const sessionId = ctx.sessions.sessionManager.createSession({ name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, agentCommId, ...envOpts })
-    // #5563: index-maintaining helpers.
-    ctx.transport.setActiveSession(client, sessionId)
-    ctx.transport.subscribeClient(client, sessionId)
-    const entry = ctx.sessions.sessionManager.getSession(sessionId)
-    // #5985 audit — a user-shell spawn is host code execution; record who
-    // opened it (token class + client id/device), where, and which shell, so
-    // shell usage is traceable. Only the create path here knows the token
-    // class; the matching destroy entry is emitted by SessionManager.
-    if (provider === USER_SHELL_PROVIDER) {
-      auditShellCreate({
-        sessionId,
-        clientId: client.id,
-        // Always 'primary' today — the gate above rejects every non-primary
-        // class before we reach here. The ternary is future-proofing for if the
-        // authz ever widens; 'pairing' (the only non-primary class) is currently
-        // unreachable.
-        tokenClass: client.isPrimaryToken === true ? 'primary' : 'pairing',
-        cwd: entry?.cwd,
-        shell: entry?.session?._shellPath,
-        deviceName: client.deviceInfo?.deviceName,
-      })
+  // #6277 — build the create options + audit identity ONCE; both the synchronous
+  // path and the host-approval deferred path replay the identical create.
+  const createOptions = { name, cwd, provider, model, permissionMode, worktree, sandbox, skipPermissions, agentCommId, ...envOpts }
+  const isUserShell = provider === USER_SHELL_PROVIDER
+  // Capture the audit identity at REQUEST time: the deferred (approved) path may
+  // run after the requesting socket is gone, so it can't read a live `client`.
+  // tokenClass is always 'primary' today — the gate above rejects every
+  // non-primary class — but the ternary future-proofs a widened authz.
+  const audit = {
+    isUserShell,
+    tokenClass: client.isPrimaryToken === true ? 'primary' : 'pairing',
+    deviceName: client.deviceInfo?.deviceName,
+    clientId: client.id,
+  }
+
+  // #6277 — host-local per-spawn approval gate. When `userShell.requireApproval`
+  // is on, HOLD the spawn instead of creating it: log a one-time id for the host
+  // operator and tell the requester it's pending. The create happens ONLY when
+  // the host approves out-of-band (loopback `/api/shell/approve` or
+  // `chroxy shell approve <id>`), which replays finalizeShellCreate directly — so
+  // this handler is the sole gate and the deferred path never re-enters it.
+  if (isUserShell && isUserShellApprovalRequired(ctx.services?.config)) {
+    const store = ctx.services?.shellApprovalStore
+    if (!store) {
+      // Fail-closed: approval is required but the service isn't wired.
+      sendSessionError(ws, ctx, 'User-shell approval is required but the approval service is unavailable')
+      return
     }
-    // #5553: disclose the resolved per-repo session preset on the create
-    // confirmation so the client can (a) show the "repo preset applied" badge
-    // and (b) stage the seed EDITABLE into the new session's composer (never
-    // auto-sent). The preamble TEXT is never sent — it's already folded into
-    // the prompt server-side; only its length + the seed + trust metadata
-    // cross the wire. Omitted entirely when the session has no preset.
-    const sessionSwitched = { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null }
-    const preset = typeof ctx.sessions.sessionManager.getSessionPreset === 'function'
-      ? ctx.sessions.sessionManager.getSessionPreset(sessionId)
-      : null
-    if (preset) sessionSwitched.sessionPreset = preset
-    ctx.transport.send(ws, sessionSwitched)
-    ctx.transport.sendSessionInfo(ws, sessionId)
-    ctx.transport.broadcastSessionList()
-    autoSubscribeOtherClients(sessionId, ws, ctx)
-    broadcastFocusChanged(client, sessionId, ctx)
+    const { approvalId } = store.createPendingApproval({
+      clientId: client.id,
+      createSessionOptions: createOptions,
+      tokenClass: audit.tokenClass,
+      deviceName: audit.deviceName,
+      hint: cwd || name || null,
+    })
+    log.warn(`[shell-approval] user-shell spawn HELD pending host approval — id=${approvalId} client=${client.id} cwd=${cwd || '(default)'} device=${audit.deviceName || '(unknown)'}. Approve on the host with: chroxy shell approve ${approvalId}`)
+    ctx.transport.send(ws, { type: 'shell_pending_approval', approvalId, hint: cwd || name || undefined })
+    return
+  }
+
+  try {
+    finalizeShellCreate(ws, client, createOptions, ctx, audit)
   } catch (err) {
     // Surface error code (e.g. PROVIDER_BINARY_NOT_FOUND,
     // PROVIDER_CREDENTIAL_MISSING) so the client can render an actionable
@@ -251,6 +254,66 @@ function handleCreateSession(ws, client, msg, ctx) {
     if (err.code) payload.code = err.code
     ctx.transport.send(ws, payload)
   }
+}
+
+/**
+ * #6277 — the post-create sequence, shared by the synchronous create path AND
+ * the host-approval deferred path. Creates the session exactly once, audits a
+ * user-shell spawn, sends the create confirmation to the requester, and
+ * broadcasts the new session to everyone else.
+ *
+ * `ws`/`client` MAY be null: the deferred path runs at approval time, by which
+ * point the requesting socket may have disconnected — the create + audit +
+ * broadcasts to OTHER clients still complete; only the "notify the requester"
+ * steps are skipped. The audit identity is passed in (captured at request time)
+ * rather than read off a possibly-gone `client`. Throws on a createSession
+ * failure (the caller maps it to a session_error / HTTP 500).
+ *
+ * @param {WebSocket|null} ws
+ * @param {object|null} client
+ * @param {object} createOptions - SessionManager.createSession options
+ * @param {object} ctx
+ * @param {{isUserShell:boolean, tokenClass:string, deviceName?:string, clientId:string}} audit
+ * @returns {string} the created sessionId
+ */
+export function finalizeShellCreate(ws, client, createOptions, ctx, audit) {
+  const sessionId = ctx.sessions.sessionManager.createSession(createOptions)
+  // #5563: index-maintaining helpers (skipped if the requester socket is gone).
+  if (client) {
+    ctx.transport.setActiveSession(client, sessionId)
+    ctx.transport.subscribeClient(client, sessionId)
+  }
+  const entry = ctx.sessions.sessionManager.getSession(sessionId)
+  // #5985 audit — a user-shell spawn is host code execution; record who opened
+  // it (token class + client id/device), where, and which shell, so shell usage
+  // is traceable. The matching destroy entry is emitted by SessionManager.
+  if (audit.isUserShell) {
+    auditShellCreate({
+      sessionId,
+      clientId: audit.clientId,
+      tokenClass: audit.tokenClass,
+      cwd: entry?.cwd,
+      shell: entry?.session?._shellPath,
+      deviceName: audit.deviceName,
+    })
+  }
+  // #5553: disclose the resolved per-repo session preset on the create
+  // confirmation so the client can show the "repo preset applied" badge and
+  // stage the seed EDITABLE into the composer (never auto-sent). The preamble
+  // TEXT never crosses the wire — only its length + seed + trust metadata.
+  const sessionSwitched = { type: 'session_switched', sessionId, name: entry.name, cwd: entry.cwd, conversationId: entry.session.resumeSessionId || null }
+  const preset = typeof ctx.sessions.sessionManager.getSessionPreset === 'function'
+    ? ctx.sessions.sessionManager.getSessionPreset(sessionId)
+    : null
+  if (preset) sessionSwitched.sessionPreset = preset
+  if (ws) {
+    ctx.transport.send(ws, sessionSwitched)
+    ctx.transport.sendSessionInfo(ws, sessionId)
+  }
+  ctx.transport.broadcastSessionList()
+  autoSubscribeOtherClients(sessionId, ws, ctx)
+  if (client) broadcastFocusChanged(client, sessionId, ctx)
+  return sessionId
 }
 
 async function handleDestroySession(ws, client, msg, ctx) {
