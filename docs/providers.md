@@ -633,7 +633,7 @@ Notes:
 
 - **Default OFF.** Omitting the key keeps the strict, misconfiguration-catching behaviour. Opt in only for providers whose API you track.
 - **A restart is required** — the opt-in is read at startup (it seeds `SessionManager`).
-- **Pricing/context** for an unlisted model is `null` until you add it to the model table or the [`~/.chroxy/models.json` overlay](#) — serving still works; cost just reads `0`.
+- **Pricing/context** for an unlisted model is `null` until you add it to the model table or the `~/.chroxy/models.json` overlay (documentation tracked in [#6376](https://github.com/blamechris/chroxy/issues/6376)) — serving still works; cost just reads `0`.
 - This is the runtime escape hatch for the three release-bound providers; per-provider live discovery (so the list maintains itself) is tracked separately.
 
 ## Selecting a provider
