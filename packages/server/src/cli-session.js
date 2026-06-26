@@ -7,7 +7,8 @@ import { createPermissionHookManager } from './permission-hook.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { ALLOWED_MODEL_IDS } from './models.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { forceKill } from './platform.js'
 import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
@@ -319,8 +320,9 @@ export class CliSession extends BaseSession {
   }
 
   /**
-   * Per-provider fallback model list (#2956). Shared with SdkSession via
-   * the module-level `FALLBACK_MODELS`. The default Claude registry is
+   * Per-provider fallback model list (#2956). Shared with every Claude
+   * provider via `CLAUDE_FALLBACK_MODELS` in claude-model-catalog.js
+   * (#6201 OCP). The default Claude registry is
    * what this provider uses at runtime — this static exists so
    * `getRegistryForProvider('claude-cli')` and the per-provider tests
    * can discover the Claude defaults through the same hook shape used
@@ -329,7 +331,7 @@ export class CliSession extends BaseSession {
    * @returns {ReadonlyArray<{id:string,label:string,fullId:string,contextWindow:number}>}
    */
   static getFallbackModels() {
-    return FALLBACK_MODELS
+    return CLAUDE_FALLBACK_MODELS
   }
 
   static getAllowedModels() {
@@ -337,23 +339,14 @@ export class CliSession extends BaseSession {
   }
 
   /**
-   * Claude-style metadata: strip the `claude-` prefix for the short id,
-   * reuse the shared context-window heuristic. Mirrors SdkSession (#2956).
+   * Claude-style metadata via the shared claudeModelMetadata() helper
+   * (#6201 OCP). Mirrors SdkSession (#2956).
    *
    * @param {string} modelId
    * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
    */
   static getModelMetadata(modelId) {
-    if (typeof modelId !== 'string' || modelId.length === 0) return null
-    const fullId = modelId
-    const id = claudeDeriveId(fullId)
-    return {
-      id,
-      label: id,
-      fullId,
-      contextWindow: resolveClaudeContextWindow(fullId),
-      description: '',
-    }
+    return claudeModelMetadata(modelId)
   }
 
   constructor(opts = {}) {
