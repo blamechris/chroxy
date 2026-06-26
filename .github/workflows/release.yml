@@ -31,6 +31,11 @@ jobs:
   test:
     name: Test Suite
     needs: validate
+    # #6316: deliberately GitHub-hosted ubuntu-24.04 (x86_64), NOT the self-hosted
+    # ARM64 pool CI uses for same-repo merges — so a release never blocks on
+    # self-hosted-runner availability. CI already validated the merged commit on
+    # ARM64; this re-test is a defense-in-depth consistency gate, and the arch
+    # difference is an accepted tradeoff (release availability > arch parity).
     runs-on: ubuntu-24.04
     permissions:
       contents: read
@@ -64,6 +69,31 @@ jobs:
       - name: Test dashboard
         run: npm test
         working-directory: packages/dashboard
+
+      # #6316: broaden the release gate to match CI's unit-test coverage so a
+      # regression in an otherwise-release-untested package (store-core,
+      # claude-hooks, app units) can't ship. Mirrors ci.yml's store-core-tests /
+      # claude-hooks-tests / app-tests jobs, including the @chroxy/protocol build
+      # (claude-hooks + app depend on it) and the app's xterm bundle.
+      - name: Test store-core
+        run: npm test
+        working-directory: packages/store-core
+
+      - name: Build @chroxy/protocol
+        run: npm run build
+        working-directory: packages/protocol
+
+      - name: Test claude-hooks
+        run: npm test
+        working-directory: packages/claude-hooks
+
+      - name: Generate xterm bundle
+        run: npm run bundle-xterm
+        working-directory: packages/app
+
+      - name: Test app
+        run: npm test
+        working-directory: packages/app
 
   docker:
     name: Docker Image
