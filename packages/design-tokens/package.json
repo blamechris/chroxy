@@ -1,0 +1,22 @@
+{
+  "name": "@chroxy/design-tokens",
+  "version": "0.9.47",
+  "description": "Canonical Chroxy design tokens — single source for the dashboard theme (and, later, mobile). The dashboard theme.css + tokens.ts are generated from here.",
+  "type": "module",
+  "main": "src/index.js",
+  "types": "index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./index.d.ts",
+      "default": "./src/index.js"
+    }
+  },
+  "files": [
+    "src",
+    "index.d.ts"
+  ],
+  "scripts": {
+    "test": "node --test"
+  },
+  "license": "MIT"
+}

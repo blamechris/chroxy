@@ -1,13 +1,10 @@
 /**
- * DO NOT EDIT — generated from theme.css by scripts/generate-theme-tokens.mjs
+ * DO NOT EDIT — generated from @chroxy/design-tokens by
+ * scripts/generate-theme-tokens.mjs.
  *
- * Design tokens for the Chroxy desktop dashboard.
- * Run: npm run dashboard:generate-tokens
+ * Edit tokens in packages/design-tokens/src/tokens-data.js, then run
+ * `npm run generate-tokens` in packages/dashboard.
  */
-
-// ---------------------------------------------------------------------------
-// Colors
-// ---------------------------------------------------------------------------
 
 export const colors = {
   bg: {
@@ -114,10 +111,6 @@ export const colors = {
   },
 } as const
 
-// ---------------------------------------------------------------------------
-// Spacing — 4px base grid
-// ---------------------------------------------------------------------------
-
 export const spacing = {
   1: 4,
   2: 8,
@@ -127,23 +120,49 @@ export const spacing = {
   8: 32,
 } as const
 
-// ---------------------------------------------------------------------------
-// Typography — font sizes in px
-// ---------------------------------------------------------------------------
-
 export const typography = {
   xs: 10,
   sm: 12,
   base: 13,
   md: 14,
   lg: 16,
+  chat: 15,
 } as const
-
-// ---------------------------------------------------------------------------
-// Font stacks
-// ---------------------------------------------------------------------------
 
 export const fonts = {
   mono: "'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace",
   ui: "system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif",
+} as const
+
+export const leading = {
+  tight: 1.35,
+  normal: 1.5,
+  chat: 1.6,
+  code: 1.5,
+} as const
+
+export const radii = {
+  xs: 4,
+  sm: 6,
+  md: 10,
+  lg: 14,
+  pill: 999,
+} as const
+
+export const motion = {
+  durations: {
+    fast: 150,
+    base: 200,
+    slow: 280,
+  },
+  easings: {
+    out: 'cubic-bezier(0.2, 0.8, 0.2, 1)',
+    standard: 'cubic-bezier(0.4, 0, 0.2, 1)',
+  },
+  loops: {
+    railHeartbeat: 1200,
+    railBreathe: 2400,
+    caretBlink: 1100,
+    waitingPulse: 1600,
+  },
 } as const

@@ -1,12 +1,10 @@
-/**
- * Chroxy Desktop Dashboard — CSS Custom Properties
- *
- * Dark-only theme. Values sourced from mobile colors.ts + legacy dashboard.css.
- * TypeScript tokens in tokens.ts mirror these values.
- */
+/* DO NOT EDIT — generated from @chroxy/design-tokens by
+ * scripts/generate-theme-tokens.mjs. Edit tokens in
+ * packages/design-tokens/src/tokens-data.js, then run
+ * `npm run generate-tokens` in packages/dashboard. */
 
 :root {
-  /* ---- Backgrounds ---- */
+  /* Backgrounds */
   --bg-primary: #0f0f1a;
   --bg-secondary: #1a1a2e;
   --bg-tertiary: #16162a;
@@ -22,7 +20,7 @@
   --bg-plan-banner: #2a1a40;
   --bg-modal: #1a1a2e;
 
-  /* ---- Text ---- */
+  /* Text */
   --text-primary: #ffffff;
   --text-secondary: #cccccc;
   --text-muted: #888888;
@@ -35,7 +33,7 @@
   --text-heading: #f0f0f0;
   --text-blockquote: #999999;
 
-  /* ---- Accents ---- */
+  /* Accents */
   --accent-blue: #4a9eff;
   --accent-green: #22c55e;
   --accent-purple: #a78bfa;
@@ -47,37 +45,28 @@
   --accent-blue-subtle: #4a9eff33;
   --accent-blue-border: #4a9eff44;
   --accent-blue-border-strong: #4a9eff66;
-
   --accent-green-light: #22c55e22;
   --accent-green-border: #22c55e33;
   --accent-green-border-strong: #22c55e66;
-
   --accent-purple-light: #a78bfa22;
   --accent-purple-subtle: #a78bfa33;
   --accent-purple-border-strong: #a78bfa66;
   --accent-purple-code: #c4a5ff;
-
   --accent-orange-light: #f59e0b11;
   --accent-orange-subtle: #f59e0b22;
   --accent-orange-medium: #f59e0b33;
   --accent-orange-border: #f59e0b44;
   --accent-orange-border-strong: #f59e0b66;
-
   --accent-red-light: #ff4a4a11;
   --accent-red-subtle: #ff4a4a22;
   --accent-red-border: #ff4a4a44;
 
-  /* Tailwind-scale tokens (#3789). Distinct base hexes from the
-   * Tailwind palette; mirror the accentOrange500 / accentYellow500 /
-   * accentRed500 tokens in packages/app/src/constants/colors.ts. The legacy
-   * --accent-orange / --accent-red above are brand hexes with opacity
-   * variants; the *-500 tokens are different base hexes, not opacity
-   * variants of them. Used by the activity-indicator escalation. */
+  /* Tailwind-scale (distinct base hexes, not opacity variants of the brand hex) */
   --accent-orange-500: #f97316;
   --accent-yellow-500: #eab308;
   --accent-red-500: #ef4444;
 
-  /* ---- Borders ---- */
+  /* Borders */
   --border-primary: #2a2a4e;
   --border-secondary: #3a3a5e;
   --border-subtle: #4a4a6e;
@@ -85,27 +74,20 @@
   --border-permission: #4a3a7a;
   --border-question: #2a5a7a;
 
-  /* ---- Banner borders (subtle dividers for status/warning banners) ---- */
+  /* Banner borders */
   --banner-border-subtle: #252540;
 
-  /* ---- Warning (amber-yellow, distinct from --accent-orange) ----
-   *
-   * Canonical warning tokens. Use these for any warning-tinted UI
-   * (text, icons, status dots, banner backgrounds). Previously this
-   * codebase had three fragmented references — `--warning`,
-   * `--status-warning`, `--warning-fg` — with divergent fallbacks.
-   * They have all been migrated to `--warning-fg` / `--warning-bg-subtle`.
-   */
+  /* Warning (amber-yellow, distinct from --accent-orange) */
   --warning-fg: #fbbf24;
   --warning-bg-subtle: #fbbf2422;
 
-  /* ---- Status indicators ---- */
+  /* Status indicators */
   --status-connected: #22c55e;
   --status-disconnected: #ef4444;
   --status-connecting: #eab308;
   --status-restarting: #f59e0b;
 
-  /* ---- Syntax highlighting ---- */
+  /* Syntax highlighting */
   --syntax-keyword: #c4a5ff;
   --syntax-string: #4eca6a;
   --syntax-comment: #7a7a7a;
@@ -117,33 +99,64 @@
   --syntax-type: #4a9eff;
   --syntax-property: #4eca6a;
 
-  /* ---- Diff ---- */
+  /* Diff */
   --diff-add-bg: #1a2e1a;
   --diff-remove-bg: #2e1a1a;
   --diff-add-text: #4eca6a;
   --diff-remove-text: #ff5b5b;
 
-  /* ---- Scrollbar ---- */
+  /* Scrollbar */
   --scrollbar-track: transparent;
   --scrollbar-thumb: #333355;
   --scrollbar-thumb-hover: #444466;
 
-  /* ---- Fonts ---- */
+  /* Fonts */
   --font-mono: 'SF Mono', 'Fira Code', 'Cascadia Code', Menlo, Monaco, Consolas, monospace;
   --font-ui: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
 
-  /* ---- Typography scale ---- */
+  /* Typography scale */
   --text-xs: 10px;
   --text-sm: 12px;
   --text-base: 13px;
   --text-md: 14px;
   --text-lg: 16px;
 
-  /* ---- Spacing (4px base grid) ---- */
+  /* Spacing (4px base grid) */
   --space-1: 4px;
   --space-2: 8px;
   --space-3: 12px;
   --space-4: 16px;
   --space-6: 24px;
   --space-8: 32px;
+
+  /* Typography — chat reading size (chat redesign #6390) */
+  --text-chat: 15px;
+
+  /* Line heights (chat redesign #6390) */
+  --leading-tight: 1.35;
+  --leading-normal: 1.5;
+  --leading-chat: 1.6;
+  --leading-code: 1.5;
+
+  /* Radii (chat redesign #6390) */
+  --radius-xs: 4px;
+  --radius-sm: 6px;
+  --radius-md: 10px;
+  --radius-lg: 14px;
+  --radius-pill: 999px;
+
+  /* Motion — durations (chat redesign #6390) */
+  --dur-fast: 150ms;
+  --dur-base: 200ms;
+  --dur-slow: 280ms;
+
+  /* Motion — easings (chat redesign #6390) */
+  --ease-out: cubic-bezier(0.2, 0.8, 0.2, 1);
+  --ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+
+  /* Motion — loop timings (chat redesign #6390) */
+  --rail-heartbeat: 1200ms;
+  --rail-breathe: 2400ms;
+  --caret-blink: 1100ms;
+  --waiting-pulse: 1600ms;
 }
