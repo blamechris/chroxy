@@ -83,19 +83,27 @@ export function getModelPricing(modelId) {
  * @param {Map} [overlay] - fullId → overlay entry map (see loadModelsOverlayResult)
  * @returns {object|null}
  */
-function resolveModelPricing(modelId, overlay) {
-  if (overlay && overlay.size > 0 && typeof modelId === 'string' && modelId.length > 0) {
-    // Try the id verbatim, then the registry-resolved full id, against the
-    // overlay's fullId-keyed map. Short ids ('opus') resolve via the default
-    // registry so an operator can key the overlay on either form.
-    const candidates = new Set([modelId])
-    const resolvedFull = defaultRegistry.resolveModelId(modelId)
-    if (typeof resolvedFull === 'string' && resolvedFull.length > 0) candidates.add(resolvedFull)
-    for (const candidate of candidates) {
-      const entry = overlay.get(candidate)
-      if (entry && entry.pricing) return entry.pricing
-    }
+// #6381 — pure overlay-pricing lookup against a fullId-keyed overlay map. Tries
+// the id verbatim, then the `resolveId`-resolved full id (so an operator can key
+// the overlay on a short alias OR a full id). Returns the matched entry's pricing
+// or null. Reused by resolveModelPricing (Claude path, with the static fallback)
+// and the per-provider registry's getOverlayPricing (overlay only) so non-Claude
+// providers can be re-priced via the overlay with no release.
+function lookupOverlayPricing(modelId, overlay, resolveId) {
+  if (!(overlay instanceof Map) || overlay.size === 0 || typeof modelId !== 'string' || modelId.length === 0) return null
+  const candidates = new Set([modelId])
+  const resolved = typeof resolveId === 'function' ? resolveId(modelId) : null
+  if (typeof resolved === 'string' && resolved.length > 0) candidates.add(resolved)
+  for (const candidate of candidates) {
+    const entry = overlay.get(candidate)
+    if (entry && entry.pricing) return entry.pricing
   }
+  return null
+}
+
+function resolveModelPricing(modelId, overlay) {
+  const fromOverlay = lookupOverlayPricing(modelId, overlay, (id) => defaultRegistry.resolveModelId(id))
+  if (fromOverlay) return fromOverlay
   const key = resolvePricingKey(modelId)
   // Coalesce a resolved-but-absent key (e.g. a short alias that resolves to a
   // full id with no pricing row because we don't ship unverified pricing) to null, not
@@ -222,7 +230,6 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
   // non-Claude provider's own registry: Map<providerName, Map<fullId, entry>>.
   const overlay = new Map()
   const byProvider = new Map()
-  const pricingIgnoredForTagged = []
   let raw
   try {
     raw = readFileSync(path, 'utf-8')
@@ -272,16 +279,9 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
       let providerMap = byProvider.get(provider)
       if (!providerMap) { providerMap = new Map(); byProvider.set(provider, providerMap) }
       providerMap.set(fullId, entry)
-      // #6385: a tagged (non-Claude) entry's `pricing` is collected but inert —
-      // non-Claude cost flows through ProviderClass._getPricing, not the
-      // registry. Surface it once so the inertness is observable, not doc-tribal.
-      if (entry.pricing) pricingIgnoredForTagged.push(fullId)
     } else {
       overlay.set(fullId, entry)
     }
-  }
-  if (pricingIgnoredForTagged.length > 0) {
-    log.debug(`loadModelsOverlay: ignoring 'pricing' on ${pricingIgnoredForTagged.length} provider-tagged overlay entr${pricingIgnoredForTagged.length === 1 ? 'y' : 'ies'} (${pricingIgnoredForTagged.join(', ')}) — non-Claude pricing is owned by the provider class, not the overlay (#6385)`)
   }
   return { ok: true, overlay, byProvider }
 }
@@ -473,6 +473,10 @@ export function createModelsRegistry(hooks = {}) {
   const cachePathFn = typeof hooks.cachePath === 'function' ? hooks.cachePath : getDefaultCachePath
   const getModelMetadataFn = typeof hooks.getModelMetadata === 'function' ? hooks.getModelMetadata : null
   const overlay = hooks.overlay instanceof Map ? hooks.overlay : new Map()
+  // #6381: the CURRENT overlay (swapped by applyOverlay on hot-reload), retained
+  // so getOverlayPricing() reflects live edits. The fallback rows don't carry
+  // pricing, so pricing is read from this map directly.
+  let currentOverlay = overlay
 
   // Fold overlay entries into the fallback set. An overlay entry for a fullId
   // NOT already in the base fallbacks seeds the registry exactly like a
@@ -672,6 +676,7 @@ export function createModelsRegistry(hooks = {}) {
      */
     applyOverlay(newOverlay) {
       const map = newOverlay instanceof Map ? newOverlay : new Map()
+      currentOverlay = map // #6381: keep getOverlayPricing in sync with reloads
       fallbackModels = computeFallbackModels(map)
       if (lastSdkModels) {
         registry.updateModels(lastSdkModels)
@@ -914,6 +919,14 @@ export function createModelsRegistry(hooks = {}) {
 
     resolveModelId(model) {
       return toFullIdMap.get(model) || model
+    },
+
+    // #6381: this registry's overlay pricing for a model id (or null). Lets a
+    // non-Claude provider honor `pricing` from a `provider`-tagged ~/.chroxy/
+    // models.json entry — re-pricing a model with no release. Overlay only; the
+    // provider's own static table is the caller's fallback.
+    getOverlayPricing(model) {
+      return lookupOverlayPricing(model, currentOverlay, (id) => toFullIdMap.get(id) || id)
     },
 
     toShortModelId(model) {
