@@ -1,7 +1,8 @@
 import { homedir } from 'os'
 import { join } from 'path'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { ALLOWED_MODEL_IDS } from './models.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BILLING_CLASSES } from './billing-class.js'
 
 // Minimum `claude` CLI version that ships the `--channels` MCP transport.
@@ -129,7 +130,7 @@ export class ClaudeChannelSession extends BaseSession {
   }
 
   static getFallbackModels() {
-    return FALLBACK_MODELS
+    return CLAUDE_FALLBACK_MODELS
   }
 
   static getAllowedModels() {
@@ -137,10 +138,7 @@ export class ClaudeChannelSession extends BaseSession {
   }
 
   static getModelMetadata(modelId) {
-    if (typeof modelId !== 'string' || modelId.length === 0) return null
-    const fullId = modelId
-    const id = claudeDeriveId(fullId)
-    return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
+    return claudeModelMetadata(modelId)
   }
 
   constructor(opts = {}) {

@@ -22,13 +22,11 @@ import { PermissionManager, wirePermissionManager } from './permission-manager.j
 import { createLogger } from './logger.js'
 import { isOperatorTimeoutInRange } from './duration.js'
 import {
-  FALLBACK_MODELS,
   ALLOWED_MODEL_IDS,
-  claudeDeriveId,
-  resolveClaudeContextWindow,
   getModelPricing,
   computePromptCostUsd,
 } from './models.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { resolveAnthropicApiKey, maskApiKey } from './byok-credentials.js'
 import { BILLING_CLASSES } from './billing-class.js'
 import { translateSdkEvent } from './byok-event-translator.js'
@@ -201,7 +199,7 @@ export class ClaudeByokSession extends BaseSession {
   }
 
   static getFallbackModels() {
-    return FALLBACK_MODELS
+    return CLAUDE_FALLBACK_MODELS
   }
 
   static getAllowedModels() {
@@ -211,18 +209,10 @@ export class ClaudeByokSession extends BaseSession {
   /**
    * Model registry hook. BYOK accepts any Anthropic model id the API
    * accepts; reuse claude-* metadata since the ids are the same shape.
+   * Delegates to the shared claudeModelMetadata() helper (#6201 OCP).
    */
   static getModelMetadata(modelId) {
-    if (typeof modelId !== 'string' || modelId.length === 0) return null
-    const fullId = modelId
-    const id = claudeDeriveId(fullId)
-    return {
-      id,
-      label: id,
-      fullId,
-      contextWindow: resolveClaudeContextWindow(fullId),
-      description: '',
-    }
+    return claudeModelMetadata(modelId)
   }
 
   /**

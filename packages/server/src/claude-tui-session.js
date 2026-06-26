@@ -14,7 +14,8 @@ import { CLAUDE_TUI_PTY_SIZE } from '@chroxy/protocol'
 // (RESUME_UNKNOWN_STDERR_PATTERNS, #4929/#4950) via this matcher: the PTY
 // merges stdout+stderr, so claude's resume rejection lands in _outputTail.
 import { stderrIndicatesUnknownResume } from './cli-session.js'
-import { FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { ALLOWED_MODEL_IDS } from './models.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
 import { createLogger, loggerForSession, redactSensitive, redactSensitivePreservingEscapes } from './logger.js'
@@ -250,7 +251,7 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   static getFallbackModels() {
-    return FALLBACK_MODELS
+    return CLAUDE_FALLBACK_MODELS
   }
 
   static getAllowedModels() {
@@ -258,10 +259,7 @@ export class ClaudeTuiSession extends BaseSession {
   }
 
   static getModelMetadata(modelId) {
-    if (typeof modelId !== 'string' || modelId.length === 0) return null
-    const fullId = modelId
-    const id = claudeDeriveId(fullId)
-    return { id, label: id, fullId, contextWindow: resolveClaudeContextWindow(fullId), description: '' }
+    return claudeModelMetadata(modelId)
   }
 
   /**

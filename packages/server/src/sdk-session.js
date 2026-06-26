@@ -1,7 +1,8 @@
 import { query } from '@anthropic-ai/claude-agent-sdk'
 import { join } from 'path'
 import { homedir } from 'os'
-import { updateModels, saveModelsCache, updateContextWindow, getModels, FALLBACK_MODELS, ALLOWED_MODEL_IDS, claudeDeriveId, resolveClaudeContextWindow } from './models.js'
+import { updateModels, saveModelsCache, updateContextWindow, getModels, ALLOWED_MODEL_IDS } from './models.js'
+import { CLAUDE_FALLBACK_MODELS, claudeModelMetadata } from './claude-model-catalog.js'
 import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { buildContentBlocks } from './content-blocks.js'
 import { MessageTransformPipeline } from './message-transform.js'
@@ -283,7 +284,7 @@ export class SdkSession extends BaseSession {
    * before the first SDK response arrives.
    */
   static getFallbackModels() {
-    return FALLBACK_MODELS
+    return CLAUDE_FALLBACK_MODELS
   }
 
   static getAllowedModels() {
@@ -293,26 +294,14 @@ export class SdkSession extends BaseSession {
   /**
    * Claude-style metadata: strip the `claude-` prefix for the short id,
    * reuse the shared context-window heuristic. Used by the per-provider
-   * registry for both lookup and validation (#2956).
-   *
-   * The registry calls this with the full model id as returned by the SDK
-   * (e.g. 'claude-sonnet-4-6'). Short alias resolution is intentionally
-   * left to the caller — the registry always has the fullId available.
+   * registry for both lookup and validation (#2956). Delegates to the shared
+   * claudeModelMetadata() so all Claude providers stay in lockstep (#6201 OCP).
    *
    * @param {string} modelId - Full model id (e.g. 'claude-sonnet-4-6').
    * @returns {{id:string,label:string,fullId:string,contextWindow:number,description?:string}|null}
    */
   static getModelMetadata(modelId) {
-    if (typeof modelId !== 'string' || modelId.length === 0) return null
-    const fullId = modelId
-    const id = claudeDeriveId(fullId)
-    return {
-      id,
-      label: id,
-      fullId,
-      contextWindow: resolveClaudeContextWindow(fullId),
-      description: '',
-    }
+    return claudeModelMetadata(modelId)
   }
 
   /** Token budgets for thinking levels. null = adaptive (SDK default). */
