@@ -9,8 +9,9 @@
  *
  * The pipeline is INVERTED from the old "parse theme.css → emit tokens.ts"
  * direction (chat redesign #6389, Phase 0 #6390): edit tokens in the package,
- * then run this. CI (`check-tokens-fresh.mjs`) fails the build if the committed
- * outputs drift from what this would generate.
+ * then run this. CI (the "Check generated theme tokens are up-to-date" step in
+ * .github/workflows/ci.yml) fails the build if the committed outputs drift from
+ * what this would generate.
  *
  * Usage: npm run generate-tokens   (from packages/dashboard)
  */

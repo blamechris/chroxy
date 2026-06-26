@@ -68,13 +68,13 @@ Line-heights (new): `--leading-tight 1.35` · `--leading-normal 1.5` · `--leadi
 | streaming | `--accent-blue` | downward heartbeat 1.2s |
 | tool-running | active tool-kind color | — |
 | waiting-on-you | `--accent-blue` solid | node ring pulse 1.6s |
-| error | `--text-error #ff5b5b` solid | static (stillness distinguishes it from waiting) |
+| error | `--accent-red #ff4a4a` solid | static (stillness distinguishes it from waiting) |
 
 **Diff / syntax** — use the existing `--diff-*` and `--syntax-*` tokens as-is.
 
 ### 3.3 The token package
 
-Stand up `@chroxy/design-tokens` as the canonical TS token map and **invert the pipeline**: tokens flow *from* the package → `generate-theme-tokens.mjs` emits `theme.css` + `tokens.ts` and feeds mobile `COLORS` (stable key names). The existing navy palette + 9 built-in themes are preserved; the package just becomes their single source. CI hex-lint gate forbids raw color literals in styling files (scoped to component/theme/StyleSheet files; excludes generated xterm bundles, error-code/status strings, tests).
+Stand up `@chroxy/design-tokens` as the canonical TS token map and **invert the pipeline**: tokens flow *from* the package → `generate-theme-tokens.mjs` emits `theme.css` + `tokens.ts` and feeds mobile `COLORS` (stable key names). The existing navy palette + 8 built-in themes are preserved; the package just becomes their single source. CI hex-lint gate forbids raw color literals in styling files (scoped to component/theme/StyleSheet files; excludes generated xterm bundles, error-code/status strings, tests).
 
 ## 4. Pillar change lists
 
@@ -134,7 +134,7 @@ Surface = `dashboard` / `mobile` / `both` / `shared`. Effort = S/M/L. File paths
 - **Mobile inline diffs:** acceptable to ship Phases 1–2 with mobile diffs still in the modal `DiffViewer` and land inline mobile diffs in Phase 3 after a spike, or is inline-everywhere a hard v1 requirement?
 - **Mobile light mode:** the rejected paper/ember direction would have given mobile a light theme for free. Staying navy, mobile remains dark-only — confirm that's fine to defer.
 - **Footer-stat thinking:** confirm replacing the standing thinking block entirely (calibrated against the real app), with an expand affordance to reveal reasoning when present.
-- **The 9 built-in themes:** kept as-is (no repalette). Confirm none should be pruned while the token package re-sources them.
+- **The 8 built-in themes:** kept as-is (no repalette). Confirm none should be pruned while the token package re-sources them.
 
 ## 8. Risks
 
