@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'fs'
 import { tmpdir } from 'os'
 import { join } from 'path'
 import { settingsHandlers } from '../../src/handlers/settings-handlers.js'
+import { registerProvider } from '../../src/providers.js'
 import { addLogListener, removeLogListener } from '../../src/logger.js'
 import { createSpy, createMockSession, nsCtx } from '../test-helpers.js'
 
@@ -223,6 +224,63 @@ describe('settings-handlers', () => {
         settingsHandlers.set_model(ws, client, { model: 'haiku' }, ctx)
 
         assert.equal(session.setModel.callCount, 1)
+      })
+    })
+
+    // #6201 (OCP) — the legacy global ALLOWED_MODEL_IDS fallthrough is the
+    // Claude-only, SDK-fed allowlist. A KNOWN non-Claude provider only reaches
+    // it when it declares no static getAllowedModels(); letting it through would
+    // silently validate its model ids against Claude's list. No shipped provider
+    // is in that bucket (each non-Claude one has getAllowedModels(); user-shell
+    // is modelSwitch:false), so this guards a FUTURE provider added without an
+    // allowlist.
+    describe('non-Claude fallthrough guard (#6201 OCP)', () => {
+      // Stand-in for a future provider: registered, non-Claude, model-switchable,
+      // and declaring NO static getAllowedModels().
+      class NoAllowlistNonClaudeSession {
+        static claudeFamily = false
+        sendMessage() {}
+        interrupt() {}
+        setModel() {}
+        setPermissionMode() {}
+        start() {}
+        destroy() {}
+      }
+
+      it('rejects a Claude model on a known non-Claude provider that declares no allowlist', () => {
+        registerProvider('test-no-allowlist-nonclaude', NoAllowlistNonClaudeSession)
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Stub', cwd: '/tmp', provider: 'test-no-allowlist-nonclaude' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        // 'sonnet' is a valid Claude id (in ALLOWED_MODEL_IDS); before this guard
+        // it would have been silently accepted on this non-Claude session.
+        settingsHandlers.set_model(ws, client, { model: 'sonnet', requestId: 'r-ocp' }, ctx)
+
+        assert.equal(session.setModel.callCount, 0, 'must not apply a Claude model to a non-Claude provider lacking an allowlist')
+        assert.equal(ws._messages.length, 1)
+        const err = ws._messages[0]
+        assert.equal(err.type, 'error')
+        assert.equal(err.code, 'MODEL_NOT_SUPPORTED_BY_PROVIDER')
+        assert.match(err.message, /test-no-allowlist-nonclaude/)
+        assert.match(err.message, /allowlist/i)
+      })
+
+      it('fails open for an UNKNOWN provider — still accepts a valid Claude id (unchanged forward-compat)', () => {
+        const sessions = new Map()
+        const session = createMockSession()
+        sessions.set('s1', { session, name: 'Future', cwd: '/tmp', provider: 'totally-unknown-provider-xyz' })
+        const ctx = makeCtx(sessions)
+        const client = makeClient({ activeSessionId: 's1' })
+        const ws = makeWs()
+
+        settingsHandlers.set_model(ws, client, { model: 'haiku' }, ctx)
+
+        assert.equal(session.setModel.callCount, 1, 'unknown provider falls through to the global allowlist (fail-open preserved)')
+        assert.equal(session.setModel.lastCall[0], 'haiku')
       })
     })
   })
