@@ -185,6 +185,13 @@ export const ServerAvailableModelsSchema = z.object({
     type: z.literal('available_models'),
     models: z.array(z.unknown()).optional(),
     defaultModel: z.string().optional(),
+    // #6370: four senders tag the roster with the provider it came from
+    // (ws-history multi + legacy single, server-cli overlay re-broadcast,
+    // ws-forwarding) and the wire contract documents it — declare it so the
+    // schema matches. Nullable: some senders pass an explicit `provider: null`
+    // for the default/unscoped roster. Non-breaking — the handler reads models/
+    // defaultModel off the envelope and ignored the undeclared key before.
+    provider: z.string().nullable().optional(),
 });
 export const ServerPermissionModeChangedSchema = z.object({
     type: z.literal('permission_mode_changed'),
