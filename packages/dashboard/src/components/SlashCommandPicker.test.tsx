@@ -30,6 +30,24 @@ describe('SlashCommandPicker', () => {
     expect(screen.getByText('/fix-ci')).toBeInTheDocument()
   })
 
+  it('renders source group headers (chat redesign #6391)', () => {
+    render(
+      <SlashCommandPicker
+        commands={[
+          { name: 'clear', description: 'Clear', source: 'builtin' as const },
+          { name: 'commit', description: 'Commit', source: 'project' as const },
+          { name: 'learn', description: 'Learn', source: 'user' as const },
+        ]}
+        filter=""
+        onSelect={vi.fn()}
+        onClose={vi.fn()}
+      />
+    )
+    expect(screen.getByText('Built-in')).toBeInTheDocument()
+    expect(screen.getByText('Project')).toBeInTheDocument()
+    expect(screen.getByText('User')).toBeInTheDocument()
+  })
+
   it('shows command descriptions', () => {
     render(
       <SlashCommandPicker

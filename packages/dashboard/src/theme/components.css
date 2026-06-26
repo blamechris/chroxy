@@ -4385,6 +4385,17 @@ button.sidebar-token-view-session-row:hover {
   transition: background 0.1s;
 }
 
+/* Chat redesign #6391 (slice 8): source group header in the slash picker
+   (Built-in / Project / User). Quiet, uppercase, token-only. */
+.slash-picker-group {
+  font-size: var(--text-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+  padding: 6px 12px 2px;
+  user-select: none;
+}
+
 .slash-picker-item:hover,
 .slash-picker-item.selected {
   background: var(--bg-card);

@@ -457,6 +457,17 @@ export function App() {
 
   const slashCommands = useConnectionStore(s => s.slashCommands)
 
+  // Chat redesign #6391 (slice 8): order slash commands by source so the picker
+  // renders clean Built-in / Project / User groups (and the "builtins pinned
+  // above" intent in the SlashCommand docstring is actually enforced). Stable
+  // within each group; the parent's keyboard nav (InputBar `filteredCommands`)
+  // reads this same ordering, so selection stays coherent across the grouped
+  // display.
+  const orderedSlashCommands = useMemo(() => {
+    const rank = (s: string) => (s === 'builtin' ? 0 : s === 'project' ? 1 : 2)
+    return [...slashCommands].sort((a, b) => rank(a.source) - rank(b.source))
+  }, [slashCommands])
+
   // Store actions (stable refs)
   const connect = useConnectionStore(s => s.connect)
   const retryConnection = useConnectionStore(s => s.retryConnection)
@@ -2404,7 +2415,7 @@ export function App() {
               onFileTrigger={fetchFileList}
               attachments={fileAttachments}
               onRemoveAttachment={handleRemoveAttachment}
-              slashCommands={slashCommands}
+              slashCommands={orderedSlashCommands}
               onSlashTrigger={fetchSlashCommands}
               onImagePaste={handleImagePaste}
               onImageDrop={handleImageDrop}
