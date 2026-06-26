@@ -17,8 +17,9 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { TextInput } from 'react-native';
+import { TextInput, StyleSheet } from 'react-native';
 import { InputBar, type InputBarHandle } from '../InputBar';
+import { COLORS } from '../../constants/colors';
 
 const noop = () => {};
 
@@ -264,5 +265,45 @@ describe('InputBar send-while-streaming un-gate (#5938)', () => {
     });
     expect(hasLabel(tree, 'Attach file')).toBe(false);
     expect(hasLabel(tree, 'Take photo')).toBe(false);
+  });
+});
+
+describe('InputBar activity hairline (chat redesign #6391)', () => {
+  // The root composer View's style is [styles.inputContainer, { paddingBottom,
+  // borderTopColor }]. The base style ALSO sets borderTopColor, so target the
+  // inline override — uniquely identified by carrying BOTH paddingBottom and
+  // borderTopColor — to read the EFFECTIVE (later-wins) edge color.
+  function hairlineColor(tree: renderer.ReactTestRenderer): unknown {
+    const view = tree.root.findAll(
+      (node) =>
+        String(node.type) === 'View' &&
+        Array.isArray(node.props.style) &&
+        node.props.style.some(
+          (s: any) => s && typeof s === 'object' && 'paddingBottom' in s && 'borderTopColor' in s,
+        ),
+    )[0];
+    // Flatten to the EFFECTIVE (later-wins) edge color RN actually paints —
+    // robust even if a future style element re-overrides borderTopColor.
+    return StyleSheet.flatten(view.props.style).borderTopColor;
+  }
+
+  it('keeps the neutral edge at idle (default — no visible change at rest)', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => { tree = renderer.create(<InputBar {...baseProps} onChangeText={noop} />); });
+    expect(hairlineColor(tree)).toBe(COLORS.backgroundCard);
+  });
+
+  it('tints the composer edge by chat-activity state (no layout shift — color only)', () => {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(<InputBar {...baseProps} onChangeText={noop} activityState="thinking" />);
+    });
+    expect(hairlineColor(tree)).toBe(COLORS.accentBlue);
+
+    act(() => { tree.update(<InputBar {...baseProps} onChangeText={noop} activityState="waiting" />); });
+    expect(hairlineColor(tree)).toBe(COLORS.accentOrange);
+
+    act(() => { tree.update(<InputBar {...baseProps} onChangeText={noop} activityState="error" />); });
+    expect(hairlineColor(tree)).toBe(COLORS.textError);
   });
 });
