@@ -7,6 +7,8 @@ import { fileURLToPath } from 'url'
 import { dirname, join } from 'path'
 import { homedir } from 'os'
 import { PagesStore } from './pages-store.js'
+import { ShellApprovalStore } from './shell-approval-store.js'
+import { finalizeShellCreate } from './handlers/session-handlers.js'
 import { decrypt, DIRECTION_CLIENT } from '@chroxy/store-core/crypto'
 import { safeTokenCompare } from './token-compare.js'
 import { createClientSender } from './ws-client-sender.js'
@@ -589,6 +591,10 @@ export class WsServer {
     this.pagesStore = pagesStore || new PagesStore({
       pagesDir: join(process.env.CHROXY_CONFIG_DIR || join(homedir(), '.chroxy'), 'pages'),
     })
+    // #6277: host-local user-shell approval store. The create gate holds a spawn
+    // here when userShell.requireApproval is on; the host operator approves it
+    // out-of-band via the loopback /api/shell routes (or `chroxy shell approve`).
+    this._shellApprovalStore = new ShellApprovalStore()
     this._clientSend = createClientSender(log)
     // audit P1-2: when a client's active session changes, re-sync the live
     // terminal mirror gate for BOTH the session it left and the one it joined.
@@ -849,6 +855,9 @@ export class WsServer {
         get skillsUsageRecorder() { return self.sessionManager?.skillsUsageRecorder ?? null },
         resolvePairRequester: (requestId, result) => self._resolvePairRequester(requestId, result),
         broadcastPairResolved: (requestId, reason) => self._broadcastPairResolved(requestId, reason),
+        // #6277: the create gate reads this to HOLD a user-shell spawn pending
+        // host approval. Late-bound so it tracks the server instance.
+        get shellApprovalStore() { return self._shellApprovalStore },
       },
       runtime: {
         get draining() { return self._draining },
@@ -1354,6 +1363,50 @@ export class WsServer {
       return false
     }
     return true
+  }
+
+  /**
+   * #6277 — complete a host-approved user-shell spawn. Resolves the requesting
+   * socket from the client map (it may be GONE if the requester disconnected
+   * during the approval window — that's tolerated: the session is still created
+   * + audited + broadcast to other clients, only the requester notify is
+   * skipped) and replays finalizeShellCreate with the audit identity captured at
+   * request time. Returns the created sessionId; throws on a create failure
+   * (the caller maps it to an HTTP 500).
+   *
+   * @param {object} entry - the resolved pending-approval entry from the store
+   * @returns {string} sessionId
+   */
+  completeShellApproval(entry) {
+    let ws = null
+    let client = null
+    for (const [sock, c] of this.clients) {
+      if (c?.id === entry.clientId) { ws = sock; client = c; break }
+    }
+    return finalizeShellCreate(ws, client, entry.createSessionOptions, this._handlerCtx, {
+      isUserShell: true,
+      tokenClass: entry.tokenClass || 'primary',
+      deviceName: entry.deviceName,
+      clientId: entry.clientId,
+    })
+  }
+
+  /**
+   * #6277 — tell the requester their shell was declined by the host operator.
+   * No-op if the requesting socket is already gone.
+   * @param {object} entry - the resolved pending-approval entry
+   */
+  notifyShellDenied(entry) {
+    for (const [sock, c] of this.clients) {
+      if (c?.id === entry.clientId) {
+        this._handlerCtx.transport.send(sock, {
+          type: 'session_error',
+          code: 'SHELL_APPROVAL_DENIED',
+          message: 'The host operator declined this shell.',
+        })
+        break
+      }
+    }
   }
 
   /**
