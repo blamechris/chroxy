@@ -315,6 +315,14 @@ export {
   selectCrossSessionActivity,
 } from './activity-reducer'
 
+// Chat redesign #6389 (Phase 0 #6390): canonical per-session chat activity
+// state machine (idle/thinking/busy/waiting/error) — the input the presence
+// rail + composer lozenge read. Distinct from `deriveSessionStatus` above
+// (the Control Room cross-session rollup). Mobile re-exports this under its
+// original names; the dashboard adopts it in Phase 1.
+export { deriveChatActivity } from './chat-activity'
+export type { ChatActivityState, SessionChatActivity, ChatActivityInput } from './chat-activity'
+
 // #4242: cheap structural gate for `JSON.parse` on streaming
 // `tool_input_delta` accumulators. Amortises N-1 throws on long
 // streams (every Bash invocation, every Edit).
