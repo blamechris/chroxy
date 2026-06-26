@@ -4807,6 +4807,22 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
       break;
     }
 
+    case 'shell_pending_approval': {
+      // #6277 — a user-shell spawn this client requested is HELD pending the
+      // host operator's out-of-band approval (`chroxy shell approve <id>`).
+      // Surface a one-time info toast so the requester knows it isn't stuck; the
+      // normal session_switched confirms on approval, a session_error
+      // (SHELL_APPROVAL_DENIED) arrives on deny, and it simply times out on
+      // expiry. Dashboard-only for v1; mobile parity is deferred.
+      const approvalId = typeof msg.approvalId === 'string' ? msg.approvalId : '';
+      getStore()
+        .getState()
+        .addInfoNotification(
+          `Shell pending host approval — run \`chroxy shell approve ${approvalId}\` on the host machine`,
+        );
+      break;
+    }
+
     case 'session_warning': {
       const { sessionId: warnSessionId, message, systemMessage: warningMsg } =
         sharedSessionWarning(msg);
