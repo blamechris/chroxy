@@ -1169,6 +1169,12 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, c
         />
       </div>
       <div className="input-bar-actions">
+        {/* Chat redesign #6391 (slice 5): always-visible Enter-mode keyhint so
+            the send key is never a guess. aria-hidden — the sr-only
+            #shortcutsId span above carries the full hint for screen readers. */}
+        <span className="input-bar-keyhint" aria-hidden="true" data-testid="input-bar-keyhint">
+          {sendOnEnter ? '⏎ send · ⇧⏎ newline' : '⌘⏎ send'}
+        </span>
         {voiceInput?.isAvailable && (
           <button
             data-testid="mic-button"
