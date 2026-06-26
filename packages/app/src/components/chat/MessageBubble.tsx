@@ -170,6 +170,9 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
     if (message.answered == null) submittedRef.current = false;
   }, [message.answered]);
   const isUser = message.type === 'user_input';
+  // Chat redesign #6391 (mobile no-bubble): the assistant 'response' prose
+  // loses its card and sits on the bare canvas (parity with the dashboard).
+  const isAssistant = message.type === 'response';
   const isTool = message.type === 'tool_use';
   const isThinking = message.type === 'thinking';
   const isPrompt = message.type === 'prompt';
@@ -396,7 +399,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
       // Applied to every bubble (cheap, deterministic, and lets the test
       // assert on a stable per-message anchor instead of brittle text matching).
       testID={`approval-card-${message.id}`}
-      style={[styles.messageBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSystem && styles.systemBubble, isSelected && styles.selectedBubble]}
+      style={[styles.messageBubble, isAssistant && styles.assistantBubble, isUser && styles.userBubble, isPrompt && styles.promptBubble, isError && styles.errorBubble, isSystem && styles.systemBubble, isSelected && styles.selectedBubble]}
     >
       <View style={isPrompt && message.expiresAt && !message.answered ? styles.promptHeaderRow : undefined}>
         <Text
@@ -740,6 +743,16 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     marginBottom: 12,
     maxWidth: '85%',
+  },
+  // Chat redesign #6391 (mobile no-bubble): bare assistant response — no card,
+  // flush, so a long turn reads like a document. User/prompt/tool keep cards.
+  assistantBubble: {
+    backgroundColor: 'transparent',
+    paddingHorizontal: 0,
+    paddingVertical: 2,
+    borderRadius: 0,
+    marginBottom: 8,
+    maxWidth: '100%',
   },
   userBubble: {
     backgroundColor: COLORS.accentBlueLight,
