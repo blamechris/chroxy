@@ -117,8 +117,14 @@ function parseRootTokensFromCss(): string[] {
     if (m[1]) names.push(m[1])
   }
 
-  // Exclude non-themeable structural tokens
-  const excludePrefixes = ['font-', 'text-xs', 'text-sm', 'text-base', 'text-md', 'text-lg', 'space-']
+  // Exclude non-themeable structural tokens (constant across every theme — no
+  // theme override sets them, so they're deliberately absent from ALL_CSS_VARS).
+  // chat redesign #6390 added the chat reading size, line heights, radii, and
+  // motion tokens to this same structural-only tier.
+  const excludePrefixes = [
+    'font-', 'text-xs', 'text-sm', 'text-base', 'text-md', 'text-lg', 'space-',
+    'text-chat', 'leading-', 'radius-', 'dur-', 'ease-', 'rail-', 'caret-', 'waiting-',
+  ]
   return names.filter((n) => !excludePrefixes.some((p) => n === p || n.startsWith(p)))
 }
 

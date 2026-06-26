@@ -11,6 +11,7 @@
     "generate-tokens": "node scripts/generate-theme-tokens.mjs"
   },
   "dependencies": {
+    "@chroxy/design-tokens": "*",
     "@chroxy/protocol": "*",
     "@chroxy/store-core": "*",
     "dompurify": "^3.3.1",

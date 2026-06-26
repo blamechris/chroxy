@@ -400,11 +400,11 @@ jobs:
         run: npm run build
         working-directory: packages/protocol
 
-      - name: Check generated tokens are up-to-date
+      - name: Check generated theme tokens are up-to-date
         run: |
-          node scripts/generate-theme-tokens.mjs
-          git diff --exit-code src/theme/tokens.ts || {
-            echo "::error::tokens.ts is stale. Run 'npm run generate-tokens' from packages/dashboard and commit the result."
+          npm run generate-tokens
+          git diff --exit-code src/theme/theme.css src/theme/tokens.ts || {
+            echo "::error::theme.css / tokens.ts are stale. Edit packages/design-tokens/src/tokens-data.js, run 'npm run generate-tokens' from packages/dashboard, and commit the result."
             exit 1
           }
 
