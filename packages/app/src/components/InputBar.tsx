@@ -115,6 +115,16 @@ const HAIRLINE_COLOR: Record<ActivityState, string> = {
   error: COLORS.textError,
 };
 
+// Chat redesign #6391 (slice 8 parity, mobile): slash commands group by source
+// into Built-in / Project / User sections (mirrors the dashboard
+// SlashCommandPicker). Unknown/future sources sort last and fall under "Other".
+const SLASH_GROUP_LABEL: Record<string, string> = {
+  builtin: 'Built-in',
+  project: 'Project',
+  user: 'User',
+};
+const SLASH_SOURCE_RANK: Record<string, number> = { builtin: 0, project: 1, user: 2 };
+
 // -- Component --
 
 export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(function InputBar({
@@ -220,9 +230,16 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   const filteredCommands = useMemo(() => {
     if (viewMode !== 'chat' || !value.startsWith('/') || slashCommands.length === 0) return [];
     const query = value.slice(1).toLowerCase();
-    // Show all commands if user just typed `/`
-    if (!query) return slashCommands;
-    return slashCommands.filter((cmd) => cmd.name.toLowerCase().includes(query));
+    const matched = query
+      ? slashCommands.filter((cmd) => cmd.name.toLowerCase().includes(query))
+      : slashCommands;
+    // #6391: stable-sort by source so the dropdown renders clean Built-in /
+    // Project / User sections (Array.sort is stable → order within a source is
+    // preserved; unknown sources rank last → "Other"). Copy first so we never
+    // mutate the store's slashCommands array.
+    return [...matched].sort(
+      (a, b) => (SLASH_SOURCE_RANK[a.source] ?? 99) - (SLASH_SOURCE_RANK[b.source] ?? 99),
+    );
   }, [value, slashCommands, viewMode]);
 
   const showDropdown = filteredCommands.length > 0;
@@ -235,25 +252,40 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
           keyboardShouldPersistTaps="handled"
           bounces={false}
         >
-          {filteredCommands.map((cmd) => (
-            <TouchableOpacity
-              key={cmd.name}
-              style={styles.dropdownItem}
-              onPress={() => handleChangeText(`/${cmd.name} `)}
-              accessibilityRole="button"
-              accessibilityLabel={`Slash command ${cmd.name}`}
-            >
-              <View style={styles.dropdownItemHeader}>
-                <Text style={styles.dropdownItemName}>/{cmd.name}</Text>
-                {cmd.source === 'project' && (
-                  <Text style={styles.dropdownItemBadge}>project</Text>
+          {filteredCommands.map((cmd, i) => {
+            // #6391: section header whenever the (sorted) source changes → clean
+            // Built-in / Project / User groups. project rows stay badgeless (the
+            // implicit default, per #3856); builtin/user get a chip.
+            const showHeader = i === 0 || filteredCommands[i - 1].source !== cmd.source;
+            return (
+              <React.Fragment key={cmd.name}>
+                {showHeader && (
+                  <Text style={styles.dropdownGroupHeader} accessibilityRole="header">
+                    {SLASH_GROUP_LABEL[cmd.source] ?? 'Other'}
+                  </Text>
                 )}
-              </View>
-              {cmd.description ? (
-                <Text style={styles.dropdownItemDesc} numberOfLines={1}>{cmd.description}</Text>
-              ) : null}
-            </TouchableOpacity>
-          ))}
+                <TouchableOpacity
+                  style={styles.dropdownItem}
+                  onPress={() => handleChangeText(`/${cmd.name} `)}
+                  accessibilityRole="button"
+                  accessibilityLabel={`Slash command ${cmd.name}`}
+                >
+                  <View style={styles.dropdownItemHeader}>
+                    <Text style={styles.dropdownItemName}>/{cmd.name}</Text>
+                    {cmd.source === 'builtin' && (
+                      <Text style={[styles.dropdownItemBadge, styles.dropdownItemBadgeBuiltin]}>built-in</Text>
+                    )}
+                    {cmd.source === 'user' && (
+                      <Text style={styles.dropdownItemBadge}>user</Text>
+                    )}
+                  </View>
+                  {cmd.description ? (
+                    <Text style={styles.dropdownItemDesc} numberOfLines={1}>{cmd.description}</Text>
+                  ) : null}
+                </TouchableOpacity>
+              </React.Fragment>
+            );
+          })}
         </ScrollView>
       )}
       {viewMode === 'terminal' && hasTerminal && (
@@ -479,6 +511,16 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.borderPrimary,
   },
+  dropdownGroupHeader: {
+    color: COLORS.textMuted,
+    fontSize: 11,
+    fontWeight: '600',
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 4,
+  },
   dropdownItem: {
     paddingHorizontal: 16,
     paddingVertical: 10,
@@ -505,6 +547,16 @@ const styles = StyleSheet.create({
     paddingVertical: 1,
     borderRadius: 4,
     overflow: 'hidden',
+  },
+  // #3856 parity: built-in commands get a distinct OUTLINED accent chip
+  // (transparent bg + accent border/text) so the eye reads "locked provider
+  // built-in, not your editable file" — mirrors the dashboard's
+  // .slash-picker-badge-builtin. User/project use the flat chip above.
+  dropdownItemBadgeBuiltin: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: COLORS.accentBlue,
+    color: COLORS.accentBlue,
   },
   dropdownItemDesc: {
     color: COLORS.textMuted,
