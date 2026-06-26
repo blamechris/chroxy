@@ -1,0 +1,105 @@
+# Maestro app E2E — nightly (#6355, the deferred half of #6315).
+#
+# The Playwright dashboard smoke is a per-PR CI gate; the Maestro APP E2E suite
+# was deferred from per-PR because it needs a booted iOS simulator + a built dev
+# client + Metro, which only the self-hosted macOS runner can host and is too
+# costly to run on every PR. This runs it once a night instead.
+#
+# NOTE (#6355): the build + Metro orchestration below could not be validated
+# from a dev machine — verify it via the `workflow_dispatch` trigger on the
+# self-hosted runner before relying on the nightly. The runner must have the iOS
+# toolchain (Xcode + an "iPhone 16 Pro" simulator) available; the suite is
+# documented as tested only on that device (see CLAUDE.md). `run-all-sequential.sh`
+# runs each flow in its own maestro process and retries a failure once — the
+# resilient runner required over `run-all.yaml` on a single simulator (#6091).
+name: Maestro App E2E (nightly)
+
+on:
+  schedule:
+    # ~01:00 America/Los_Angeles (09:00 UTC). Adjust to a runner-idle window.
+    - cron: '0 9 * * *'
+  workflow_dispatch: {}
+
+# Never overlap with a still-running prior night.
+concurrency:
+  group: maestro-nightly
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  maestro:
+    name: Maestro App E2E
+    # No fork-PR guard (unlike ci.yml's self-hosted jobs) is needed: this workflow
+    # is schedule + workflow_dispatch only, neither of which is reachable from a
+    # fork PR — so untrusted code can never land on the self-hosted runner here.
+    runs-on: [self-hosted, macOS, ARM64, chroxy-mac]
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Maestro
+        run: |
+          curl -Ls "https://get.maestro.mobile.dev" | bash
+          echo "$HOME/.maestro/bin" >> "$GITHUB_PATH"
+
+      - name: Boot the iPhone 16 Pro simulator
+        run: |
+          DEVICE=$(xcrun simctl list devices available \
+            | grep -m1 'iPhone 16 Pro (' | grep -oE '[0-9A-F-]{36}')
+          if [ -z "$DEVICE" ]; then
+            echo "::error::no available 'iPhone 16 Pro' simulator on this runner"
+            exit 1
+          fi
+          echo "DEVICE=$DEVICE" >> "$GITHUB_ENV"
+          xcrun simctl boot "$DEVICE" || true
+          xcrun simctl bootstatus "$DEVICE" -b || true
+
+      # Builds + installs the chroxy dev client (com.blamechris.chroxy) into the
+      # simulator WITHOUT starting Metro (started separately below so it can run
+      # in the background while Maestro drives the app). ~10-15 min cold.
+      - name: Build + install the dev client
+        working-directory: packages/app
+        run: npx expo run:ios --device "$DEVICE" --no-bundler
+
+      - name: Start Metro (background)
+        working-directory: packages/app
+        run: |
+          npx expo start > "$RUNNER_TEMP/metro.log" 2>&1 &
+          echo "METRO_PID=$!" >> "$GITHUB_ENV"
+          # Wait for the bundler to answer before running flows.
+          for i in $(seq 1 60); do
+            if curl -sf http://localhost:8081/status >/dev/null 2>&1; then
+              echo "Metro up after ${i}s"; exit 0
+            fi
+            sleep 1
+          done
+          echo "::warning::Metro did not answer on :8081 within 60s — running flows anyway"
+
+      # run-all-sequential.sh parses the flow inventory from run-all.yaml, starts/
+      # reuses the mock server on :9876 itself, runs each flow in its own maestro
+      # process, retries a failing flow once, and exits non-zero on a real failure.
+      - name: Run Maestro suite
+        run: bash packages/app/.maestro/scripts/run-all-sequential.sh --device "$DEVICE"
+
+      - name: Stop Metro
+        if: always()
+        run: kill "${METRO_PID}" 2>/dev/null || true
+
+      - name: Upload screenshots on failure
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: maestro-screenshots
+          path: packages/app/*.png
+          retention-days: 7
