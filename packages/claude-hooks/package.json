@@ -1,6 +1,6 @@
 {
   "name": "@chroxy/claude-hooks",
-  "version": "0.9.46",
+  "version": "0.9.47",
   "description": "Stateless Claude Code hook emitters for chroxy's POST /api/events ingest",
   "type": "module",
   "bin": {
