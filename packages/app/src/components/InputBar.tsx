@@ -6,6 +6,7 @@ import { COLORS } from '../constants/colors';
 import type { SlashCommand } from '../store/connection';
 import type { Attachment } from '../utils/attachments';
 import { formatFileSize } from '../utils/attachments';
+import type { ActivityState } from '../store/session-activity';
 
 
 // -- Props --
@@ -75,6 +76,13 @@ export interface InputBarProps {
   disabled?: boolean;
   disabledPlaceholder?: string;
   slashCommands?: SlashCommand[];
+  /**
+   * Chat redesign #6391 (mobile): current chat-activity state, used to tint the
+   * composer's top hairline (idle = neutral; thinking/busy/waiting/error light
+   * it up). Already derived + persisted in the store; SessionScreen passes the
+   * primitive `.state` down. Mirrors the dashboard InputBar's data-activity-state.
+   */
+  activityState?: ActivityState;
   isRecognizing?: boolean;
   onMicPress?: () => void;
   speechUnavailable?: boolean;
@@ -89,6 +97,23 @@ export interface InputBarProps {
   /** #3797 — tap × on a chip to remove the chip and its inline marker. */
   onRemovePastedText?: (id: number) => void;
 }
+
+// Chat redesign #6391 (mobile): composer activity hairline — the top edge tints
+// by chat-activity state, mirroring the dashboard InputBar's data-activity-state
+// inset edge. idle keeps today's neutral border (no visible change at rest);
+// only active states light up. Width stays 1px in every state → zero layout
+// shift on transition. (RN has no inset box-shadow; recoloring the existing 1px
+// top border is the faithful 1:1 port.)
+const HAIRLINE_COLOR: Record<ActivityState, string> = {
+  idle: COLORS.backgroundCard,
+  thinking: COLORS.accentBlue,
+  busy: COLORS.accentPurple,
+  waiting: COLORS.accentOrange,
+  // Dashboard parity: error uses the muted --text-error token, NOT a louder
+  // alarm red, so the two clients don't drift (COLORS.textError '#e8a0a0' ===
+  // the dashboard's --text-error).
+  error: COLORS.textError,
+};
 
 // -- Component --
 
@@ -110,6 +135,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   disabled,
   disabledPlaceholder,
   slashCommands = [],
+  activityState = 'idle',
   isRecognizing,
   onMicPress,
   speechUnavailable,
@@ -202,7 +228,7 @@ export const InputBar = React.memo(forwardRef<InputBarHandle, InputBarProps>(fun
   const showDropdown = filteredCommands.length > 0;
 
   return (
-    <View style={[styles.inputContainer, { paddingBottom: bottomPadding }]}>
+    <View style={[styles.inputContainer, { paddingBottom: bottomPadding, borderTopColor: HAIRLINE_COLOR[activityState] }]}>
       {showDropdown && (
         <ScrollView
           style={styles.dropdown}

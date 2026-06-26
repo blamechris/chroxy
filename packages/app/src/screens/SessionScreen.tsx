@@ -308,6 +308,16 @@ export function SessionScreen() {
     const id = s.activeSessionId;
     return id && s.sessionStates[id] ? s.sessionStates[id].health : 'healthy';
   });
+  // Chat redesign #6391 (mobile): chat-activity state (already derived +
+  // persisted by message-handler) drives the composer's activity hairline.
+  // A primitive-string selector → Zustand default equality re-renders the
+  // composer only on a real state transition, not every store write.
+  const activityState = useConnectionStore((s) => {
+    const id = s.activeSessionId;
+    return id && s.sessionStates[id]?.activityState
+      ? s.sessionStates[id].activityState.state
+      : 'idle';
+  });
   // #4879: quiet user-initiated Stop marker. Set by the `session_stopped`
   // handler (sharedSessionStopped); cleared on next claude_ready. Drives
   // the subtle "Session stopped." status strip below — distinct from the
@@ -1697,6 +1707,7 @@ export function SessionScreen() {
         disabled={connectionPhase !== 'connected'}
         disabledPlaceholder={viewingCachedSession ? 'Offline — viewing cached history' : connectionPhase === 'server_restarting' ? 'Server restarting...' : 'Reconnecting...'}
         slashCommands={slashCommands}
+        activityState={activityState}
         isRecognizing={isRecognizing}
         onMicPress={speechAvailable ? handleMicPress : undefined}
         speechUnavailable={!speechAvailable}
