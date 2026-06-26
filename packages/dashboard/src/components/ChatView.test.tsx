@@ -44,6 +44,19 @@ describe('ChatView', () => {
     expect(screen.getByTestId('chat-view')).toBeInTheDocument()
   })
 
+  it('renders the presence rail reflecting the chat-activity state (chat redesign #6392)', () => {
+    render(<ChatView messages={makeMessages(2)} isStreaming={false} chatActivityState="thinking" />)
+    const rail = screen.getByTestId('presence-rail')
+    expect(rail).toHaveAttribute('data-activity-state', 'thinking')
+    // ambient decoration — hidden from assistive tech
+    expect(rail).toHaveAttribute('aria-hidden', 'true')
+  })
+
+  it('defaults the presence rail to idle when no activity state is given (chat redesign #6392)', () => {
+    render(<ChatView messages={makeMessages(1)} isStreaming={false} />)
+    expect(screen.getByTestId('presence-rail')).toHaveAttribute('data-activity-state', 'idle')
+  })
+
   it('shows thinking dots when streaming', () => {
     render(<ChatView messages={makeMessages(1)} isStreaming />)
     expect(screen.getByTestId('thinking-dots')).toBeInTheDocument()

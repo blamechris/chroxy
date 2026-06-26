@@ -2557,6 +2557,60 @@ button.sidebar-token-view-session-row:hover {
   overscroll-behavior: contain;
 }
 
+/*
+ * Chat redesign #6392 — presence rail. A continuous left-edge spine painted on
+ * the non-scrolling .chat-view parent (NOT inside the virtualized .chat-messages
+ * scroller), so it stays continuous and independent of the windowed row slice
+ * and the WKWebView scroll-anchor math. Colour reflects the canonical
+ * chat-activity state at a glance ("what is my machine doing"); idle is
+ * invisible at rest. Colour mapping mirrors the Phase 1 composer hairline.
+ *
+ * MOTION IS INTENTIONALLY RESTRAINED — a single gentle "breathe" opacity loop
+ * for the active states, NOT the differentiated breathe/heartbeat/ring-pulse the
+ * spec sketches (§3.1). That choreography is a deliberate design-tuning
+ * follow-up to do with eyes on the real motion; the timings already reference
+ * the --rail-* tokens so retuning is a one-line change. Reduced-motion → static.
+ */
+.presence-rail {
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px; /* must stay <= .chat-messages left padding (16px) so it never overpaints content */
+  background: transparent;
+  pointer-events: none;
+  z-index: 2;
+  transition: background var(--dur-base) var(--ease-standard);
+}
+.presence-rail[data-activity-state="thinking"] {
+  background: var(--accent-blue);
+  animation: presence-rail-breathe var(--rail-breathe) var(--ease-standard) infinite;
+}
+.presence-rail[data-activity-state="busy"] {
+  background: var(--accent-purple);
+  animation: presence-rail-breathe var(--rail-heartbeat) var(--ease-standard) infinite;
+}
+.presence-rail[data-activity-state="waiting"] {
+  background: var(--accent-orange);
+  animation: presence-rail-breathe var(--rail-breathe) var(--ease-standard) infinite;
+}
+.presence-rail[data-activity-state="error"] {
+  background: var(--text-error);
+}
+/* idle: transparent (declared on the base rule) — the rail is invisible at rest. */
+
+@keyframes presence-rail-breathe {
+  0%, 100% { opacity: 0.45; }
+  50% { opacity: 1; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  /* Match the active-state selectors' specificity (0,2,0) so this actually WINS
+     the cascade — a bare .presence-rail (0,1,0) loses to them and the breathe
+     would keep running for users who opted out of motion. */
+  .presence-rail[data-activity-state] { animation: none; }
+}
+
 /* ---- Message rows with sender icons ---- */
 .msg-row {
   display: flex;
