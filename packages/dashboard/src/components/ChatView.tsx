@@ -242,6 +242,35 @@ function rowClassFor(type: string, hasIcon: boolean): string {
   return hasIcon ? 'msg-row' : ''
 }
 
+/**
+ * Chat redesign #6391 (slice 6): thinking renders as a quiet, collapsed
+ * disclosure instead of a standing wall of reasoning text — "▸ Thinking…" while
+ * it streams, "▸ Thought" once done; click reveals the full reasoning. (The
+ * "thought for Ns" duration/token stat is deferred — it needs a thinking
+ * start/end the client doesn't carry yet.) The row's MeasuredRow ResizeObserver
+ * re-measures on toggle, so the virtualized list stays correct.
+ */
+function ThinkingBody({ content, streaming }: { content: string; streaming: boolean }) {
+  const [expanded, setExpanded] = useState(false)
+  return (
+    <div className="thinking-body">
+      <button
+        type="button"
+        className="thinking-toggle"
+        data-testid="thinking-toggle"
+        aria-expanded={expanded}
+        onClick={(e) => {
+          e.stopPropagation()
+          setExpanded(v => !v)
+        }}
+      >
+        {expanded ? '▾' : '▸'} {streaming ? 'Thinking…' : 'Thought'}
+      </button>
+      {expanded && <div className="thinking-full">{content}</div>}
+    </div>
+  )
+}
+
 const DefaultMessageRow = memo(function DefaultMessageRow({
   id,
   type,
@@ -278,7 +307,9 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   const body =
     type === 'response' || type === 'tool_use'
       ? <div dangerouslySetInnerHTML={{ __html: renderMarkdown(content) }} />
-      : content
+      : type === 'thinking'
+        ? <ThinkingBody content={content} streaming={!!isStreaming} />
+        : content
 
   return (
     <>
