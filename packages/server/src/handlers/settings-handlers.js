@@ -4,7 +4,7 @@
  * Handles: set_model, set_permission_mode, permission_response,
  *          query_permission_audit, list_providers, set_permission_rules
  */
-import { ALLOWED_MODEL_IDS, toShortModelId } from '../models.js'
+import { ALLOWED_MODEL_IDS, toShortModelId, isClaudeProvider } from '../models.js'
 import {
   ALLOWED_PERMISSION_MODE_IDS,
   resolveSession,
@@ -191,6 +191,39 @@ function handleSetModel(ws, client, msg, ctx) {
     }
     // Fall through to the legacy global allowlist when the provider hasn't
     // opted in (e.g. claude-sdk, claude-cli, docker-* inherit from it).
+  }
+
+  // #6201 (OCP) — the global ALLOWED_MODEL_IDS below is the Claude-only,
+  // SDK-fed allowlist. A KNOWN non-Claude provider reaches this fallthrough
+  // only when it declares no static getAllowedModels() (getProviderAllowedModels
+  // returned null above); letting it through would silently validate its model
+  // ids against Claude's allowlist — an open-for-extension gap a newly-added
+  // provider could trip purely by existing. Reject such a provider with a clear
+  // error instead. Claude-family providers (claudeFamily === true) and legacy
+  // single-session (entry === null) fall through unchanged; an UNKNOWN provider
+  // fails open, mirroring the modelSwitch capability guard above. No current
+  // provider hits this branch — every shipped non-Claude provider has
+  // getAllowedModels() (so it's handled above) and user-shell is modelSwitch:false
+  // (rejected earlier) — so this is a pure forward-compat guard.
+  if (entry && entry.provider) {
+    let ResolvedProviderClass = null
+    try {
+      ResolvedProviderClass = getProvider(entry.provider)
+    } catch {
+      // Unknown provider — can't classify; fail open to the legacy behaviour.
+    }
+    if (ResolvedProviderClass && !isClaudeProvider(entry.provider, ResolvedProviderClass)) {
+      ;sessionLogger(modelSessionId).warn(`Rejected set_model '${msg.model}' on ${entry.provider} session ${modelSessionId} from ${client.id}: provider declares no model allowlist and is not Claude-family`)
+      sendError(
+        ws,
+        msg?.requestId,
+        'MODEL_NOT_SUPPORTED_BY_PROVIDER',
+        `The active provider '${entry.provider}' does not declare a model allowlist; cannot validate model '${msg.model}'.`,
+        undefined,
+        ctx,
+      )
+      return
+    }
   }
 
   if (ALLOWED_MODEL_IDS.has(msg.model)) {
