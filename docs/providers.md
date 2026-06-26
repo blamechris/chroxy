@@ -609,6 +609,33 @@ npx chroxy start --provider lm-studio-oai
 - Tool-use quality depends entirely on the model behind the endpoint (same caveat as Ollama and the Anthropic-compatible block).
 - Capabilities are identical to `claude-byok` by construction — see the [capability matrix](#capability-matrix) note.
 
+## Serving a new model without a release (`providers.allowAnyModel`)
+
+Most of Chroxy's stack already lets a new model flow through with **no Chroxy release** the moment the provider's API exposes it:
+
+- **Claude** (`claude-sdk`/`-cli`/`-tui`/docker) — the Agent SDK's live `supportedModels()` push refreshes the registry at runtime; a new `claude-*` id is servable immediately (a release is only needed for accurate *pricing*, which otherwise degrades to `cost=null`).
+- **`anthropicCompatible` / `openaiCompatible`** endpoints — add a model via the config `models` array or live [model discovery](#model-discovery).
+- **`ollama`** — any `ollama pull`ed id passes through; the local daemon validates.
+
+The exception is the **static-allowlist subprocess providers — `gemini`, `codex`, `deepseek`** — whose accepted models are a fixed list compiled into the provider class. By default an unlisted id is hard-rejected (so a Claude id sent to a Gemini session can't silently respawn the CLI with a bad `-m` arg). To call a model the provider's API supports but Chroxy's list doesn't carry yet, opt the provider into **unrestricted** validation:
+
+```json
+{
+  "providers": {
+    "allowAnyModel": ["gemini", "codex", "deepseek"]
+  }
+}
+```
+
+Listed providers then behave like `ollama`: an unlisted-but-API-valid model id passes through **verbatim** at both session creation and live `set_model`, and the **upstream API becomes the validator** (an id it doesn't recognize surfaces as the provider's own error on the next turn). The list is **per-provider** — opting in `gemini` does not loosen `codex`.
+
+Notes:
+
+- **Default OFF.** Omitting the key keeps the strict, misconfiguration-catching behaviour. Opt in only for providers whose API you track.
+- **A restart is required** — the opt-in is read at startup (it seeds `SessionManager`).
+- **Pricing/context** for an unlisted model is `null` until you add it to the model table or the [`~/.chroxy/models.json` overlay](#) — serving still works; cost just reads `0`.
+- This is the runtime escape hatch for the three release-bound providers; per-provider live discovery (so the list maintains itself) is tracked separately.
+
 ## Selecting a provider
 
 Precedence (highest first): CLI flag > environment variable > config file > default (`claude-tui`; see #5819).

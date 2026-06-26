@@ -46,7 +46,7 @@ import { getRegistryForProvider, watchModelsOverlay } from './models.js'
 // environment-manager.js itself remains behind the dynamic import below
 // (`if (config?.environments?.enabled)`).
 import { UNREACHABLE_STATUSES } from './environment-statuses.js'
-import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled } from './config.js'
+import { resolveSkipPermissions, buildEnvironmentBackend, isUserShellEnabled, getAllowAnyModelProviders } from './config.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = dirname(__filename)
@@ -652,6 +652,10 @@ export async function startCliServer(config) {
     // operator set userShell.enabled:true in the config file. Enforced in
     // SessionManager.createSession so it covers every spawn path.
     userShellEnabled: isUserShellEnabled(config),
+    // #6378: providers opted into unrestricted model validation (serve any
+    // API-valid model id without a release). Empty Set unless the operator set
+    // config.providers.allowAnyModel.
+    allowAnyModelProviders: getAllowAnyModelProviders(config),
     providerType,
     maxToolInput: config.maxToolInput || null,
     transforms: config.transforms || [],

@@ -500,10 +500,27 @@ function validateCompatibleProviders(configKey, value, opts = {}) {
  * @param {string[]} warnings - Accumulator the caller logs/returns
  */
 export function validateProvidersConfigBlock(providers, warnings) {
-  const KNOWN_PROVIDER_BLOCK_KEYS = new Set(['anthropicCompatible', 'openaiCompatible'])
+  const KNOWN_PROVIDER_BLOCK_KEYS = new Set(['anthropicCompatible', 'openaiCompatible', 'allowAnyModel'])
   for (const key of Object.keys(providers)) {
     if (!KNOWN_PROVIDER_BLOCK_KEYS.has(key)) {
       warnings.push(`Unknown key 'providers.${key}' (will be ignored)`)
+    }
+  }
+  // #6378: `providers.allowAnyModel` — an array of provider-name strings that
+  // opt out of static model-allowlist validation (serve any API-valid id with
+  // no release). Validate shape here so a malformed value warns rather than
+  // silently disabling the opt-in; bad entries are dropped by
+  // getAllowAnyModelProviders (config.js).
+  if (Object.prototype.hasOwnProperty.call(providers, 'allowAnyModel')) {
+    const value = providers.allowAnyModel
+    if (!Array.isArray(value)) {
+      warnings.push(`Invalid value for 'providers.allowAnyModel': expected an array of provider-name strings, got ${value === null ? 'null' : typeof value}`)
+    } else {
+      for (const name of value) {
+        if (typeof name !== 'string' || name.length === 0) {
+          warnings.push(`Invalid value in 'providers.allowAnyModel': expected non-empty provider-name strings, got ${JSON.stringify(name)}`)
+        }
+      }
     }
   }
   if (Object.prototype.hasOwnProperty.call(providers, 'anthropicCompatible')) {
