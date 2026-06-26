@@ -17,7 +17,7 @@
  */
 import React from 'react';
 import renderer, { act, ReactTestInstance } from 'react-test-renderer';
-import { TextInput, StyleSheet } from 'react-native';
+import { TextInput, StyleSheet, Text } from 'react-native';
 import { InputBar, type InputBarHandle } from '../InputBar';
 import { COLORS } from '../../constants/colors';
 
@@ -305,5 +305,67 @@ describe('InputBar activity hairline (chat redesign #6391)', () => {
 
     act(() => { tree.update(<InputBar {...baseProps} onChangeText={noop} activityState="error" />); });
     expect(hairlineColor(tree)).toBe(COLORS.textError);
+  });
+});
+
+describe('InputBar slash-command grouping (chat redesign #6391)', () => {
+  // Intentionally out of source order to prove the picker sorts/groups them.
+  const slashCommands = [
+    { name: 'zeta-user', description: 'u', source: 'user' as const },
+    { name: 'alpha-builtin', description: 'b', source: 'builtin' as const },
+    { name: 'mid-project', description: 'p', source: 'project' as const },
+  ];
+
+  // All visible Text content in tree (render) order — headers, names, badges.
+  function textsInOrder(tree: renderer.ReactTestRenderer): string[] {
+    return tree.root
+      .findAllByType(Text)
+      .map((t) => (Array.isArray(t.props.children) ? t.props.children.join('') : t.props.children))
+      .filter((c): c is string => typeof c === 'string');
+  }
+
+  // `inputText="/"` seeds the internal draft to '/', which opens the picker
+  // with the full (sorted) command list.
+  function openPicker(): renderer.ReactTestRenderer {
+    let tree!: renderer.ReactTestRenderer;
+    act(() => {
+      tree = renderer.create(
+        <InputBar {...baseProps} onChangeText={noop} inputText="/" slashCommands={slashCommands} />,
+      );
+    });
+    return tree;
+  }
+
+  it('renders source section headers in Built-in → Project → User order', () => {
+    const texts = textsInOrder(openPicker());
+    const iBuiltin = texts.indexOf('Built-in');
+    const iProject = texts.indexOf('Project');
+    const iUser = texts.indexOf('User');
+    expect(iBuiltin).toBeGreaterThanOrEqual(0);
+    expect(iProject).toBeGreaterThan(iBuiltin);
+    expect(iUser).toBeGreaterThan(iProject);
+    // The builtin command sorts under its header, ahead of the user command.
+    expect(texts.indexOf('/alpha-builtin')).toBeGreaterThan(iBuiltin);
+    expect(texts.indexOf('/alpha-builtin')).toBeLessThan(texts.indexOf('/zeta-user'));
+  });
+
+  it('badges builtin and user but leaves project badgeless (dashboard parity)', () => {
+    const tree = openPicker();
+    const texts = textsInOrder(tree);
+    expect(texts).toContain('built-in');
+    expect(texts).toContain('user');
+    // No lowercase 'project' badge — the "Project" header conveys the group.
+    expect(texts).not.toContain('project');
+    // #3856 parity: built-in is the distinct OUTLINED accent chip (transparent
+    // bg); user is the flat chip. Pin the visual distinction against regression.
+    const badgeStyle = (label: string) => {
+      const t = tree.root.findAllByType(Text).find((n) => {
+        const c = Array.isArray(n.props.children) ? n.props.children.join('') : n.props.children;
+        return c === label;
+      })!;
+      return StyleSheet.flatten(t.props.style);
+    };
+    expect(badgeStyle('built-in').backgroundColor).toBe('transparent');
+    expect(badgeStyle('user').backgroundColor).not.toBe('transparent');
   });
 });
