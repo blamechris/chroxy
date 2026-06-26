@@ -2698,6 +2698,26 @@ button.sidebar-token-view-session-row:hover {
   font-style: italic;
 }
 
+/* Chat redesign #6391 (slice 6): collapsed thinking disclosure — quiet by
+   default, expands to the full reasoning. Token-only (ratchet-clean). */
+.thinking-toggle {
+  background: none;
+  border: none;
+  color: var(--text-muted);
+  font: inherit;
+  font-style: italic;
+  cursor: pointer;
+  padding: 0;
+}
+.thinking-toggle:hover {
+  color: var(--text-secondary);
+}
+.thinking-full {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  color: var(--text-muted);
+}
+
 .msg.tool {
   background: var(--bg-tool-bubble);
   align-self: flex-start;

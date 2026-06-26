@@ -26,6 +26,19 @@ describe('ChatView', () => {
     expect(screen.getByText('Message 2')).toBeInTheDocument()
   })
 
+  it('renders thinking as a collapsed disclosure (chat redesign #6391)', () => {
+    const messages: ChatViewMessage[] = [
+      { id: 't1', type: 'thinking', content: 'deep-secret-reasoning', timestamp: Date.now() },
+    ]
+    render(<ChatView messages={messages} isStreaming={false} />)
+    const toggle = screen.getByTestId('thinking-toggle')
+    expect(toggle).toHaveTextContent('Thought')
+    // collapsed by default — the full reasoning is hidden
+    expect(screen.queryByText('deep-secret-reasoning')).not.toBeInTheDocument()
+    fireEvent.click(toggle)
+    expect(screen.getByText('deep-secret-reasoning')).toBeInTheDocument()
+  })
+
   it('renders empty state when no messages', () => {
     render(<ChatView messages={[]} isStreaming={false} />)
     expect(screen.getByTestId('chat-view')).toBeInTheDocument()
