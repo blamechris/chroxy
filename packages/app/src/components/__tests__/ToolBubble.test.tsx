@@ -86,6 +86,26 @@ describe('ToolBubble — TodoWrite integration (#4180)', () => {
     expect(findByTestId(root, 'todo-list-item-t3')[0]).toBeTruthy();
   });
 
+  it('collapses a long tool result behind a Show-more pill (chat redesign #6391)', () => {
+    const longContent = Array.from({ length: 20 }, (_, i) => `line${i + 1}`).join('\n');
+    const root = renderBubble(makeToolMessage({ id: 'tool-long', tool: 'Bash', content: longContent, toolResult: undefined }));
+    tapToExpand(root);
+    const allText = () =>
+      root.root.findAllByType(Text)
+        .flatMap((t) => (Array.isArray(t.props.children) ? t.props.children : [t.props.children]))
+        .filter((c): c is string => typeof c === 'string')
+        .join(' ');
+    // Collapsed: the Show-more pill is present; head (line12) shown, tail (line13) hidden.
+    expect(findByTestId(root, 'tool-result-expand-tool-long')[0]).toBeTruthy();
+    expect(allText()).toContain('line12');
+    expect(allText()).not.toContain('line13');
+    // Expand → full result visible.
+    act(() => {
+      findByTestId(root, 'tool-result-expand-tool-long')[0]!.props.onPress();
+    });
+    expect(allText()).toContain('line20');
+  });
+
   it('parses message.toolResult — not message.content (pins #4194 regression)', () => {
     // `content` is plainly NOT a TodoWrite header here; if the parser were
     // pointed at it, the structured renderer would not appear and we'd see
