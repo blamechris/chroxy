@@ -236,6 +236,13 @@ export class SessionManager extends EventEmitter {
     // spawn path — WS create, restoreState, and any internal caller — per the
     // #5985 swarm-audit C3 finding.
     userShellEnabled = false,
+    // #6378: provider names that opt OUT of static model-allowlist validation
+    // at create time (config.providers.allowAnyModel) — an unlisted-but-API-
+    // valid model id passes through verbatim instead of throwing
+    // ProviderModelNotSupportedError, so a new model needs no release. A Set of
+    // strings; wired from `getAllowAnyModelProviders(config)` in server-cli.
+    // Default empty → OFF (strict validation, the secure default).
+    allowAnyModelProviders = new Set(),
     // #6276 test seam: inject {isAlive, commOf, kill} for the boot-time
     // orphan-shell reaper so the reap+audit path is exercisable without
     // signalling a real process. Undefined in production → the reaper uses its
@@ -356,6 +363,11 @@ export class SessionManager extends EventEmitter {
     // a truthy non-boolean (`'true'`, `1`) must NOT open the shell gate. Matches
     // isUserShellEnabled()'s strictness; production passes that helper's boolean.
     this._userShellEnabled = userShellEnabled === true
+    // #6378: normalize to a Set so `.has()` is always safe even if a caller
+    // passes undefined/null/array. Default = empty Set (strict validation).
+    this._allowAnyModelProviders = allowAnyModelProviders instanceof Set
+      ? allowAnyModelProviders
+      : new Set(Array.isArray(allowAnyModelProviders) ? allowAnyModelProviders : [])
     this._userShellReapSeams = userShellReapSeams
     this._sweepOrphanWorktrees = !!sweepOrphanWorktrees
     this._providerType = providerType
@@ -854,7 +866,12 @@ export class SessionManager extends EventEmitter {
     if (!this._skipPreflight) {
       runProviderPreflight(PreflightProviderClass)
     }
-    if (resolvedModel && typeof PreflightProviderClass.getAllowedModels === 'function') {
+    // #6378: a provider opted into `config.providers.allowAnyModel` skips static
+    // allowlist validation entirely — the model id passes through verbatim and
+    // the upstream API validates it (mirrors ollama's null-allowlist behaviour),
+    // so a new model the provider's API already exposes needs no release.
+    const modelUnrestricted = this._allowAnyModelProviders.has(resolvedProviderType)
+    if (resolvedModel && !modelUnrestricted && typeof PreflightProviderClass.getAllowedModels === 'function') {
       let providerAllowedModels = null
       try {
         const list = PreflightProviderClass.getAllowedModels()

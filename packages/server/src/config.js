@@ -652,6 +652,29 @@ export function isUserShellApprovalRequired(config) {
   return config?.userShell?.requireApproval === true
 }
 
+// #6378: which providers may serve a model id that is NOT in their static
+// allowlist. The static-allowlist subprocess providers (gemini/codex/deepseek)
+// otherwise hard-reject an unlisted-but-API-valid model, forcing a code release
+// just to add one the upstream API already exposes. Opting a provider in here
+// makes it behave like ollama (#5418 PROVIDER_MODELS_UNRESTRICTED): the id
+// passes through verbatim and the upstream API becomes the validator. Returns a
+// Set of provider-name strings; a missing/non-array value → empty Set (the
+// default — OFF, so the misconfig-catching strictness is preserved unless an
+// operator explicitly opts in). Only well-formed string entries are kept.
+export function getAllowAnyModelProviders(config) {
+  const raw = config?.providers?.allowAnyModel
+  if (!Array.isArray(raw)) return new Set()
+  return new Set(raw.filter((name) => typeof name === 'string' && name.length > 0))
+}
+
+// #6378: does `providerName` opt out of static model-allowlist validation?
+// Fail-closed: anything other than an explicit entry in
+// `config.providers.allowAnyModel` returns false.
+export function isProviderModelUnrestricted(config, providerName) {
+  if (!providerName) return false
+  return getAllowAnyModelProviders(config).has(providerName)
+}
+
 function validateDiscordNotificationsBlock(discord, warnings) {
   if (typeof discord !== 'object' || discord === null || Array.isArray(discord)) {
     warnings.push(`Invalid value for 'notifications.discord': expected object, got ${Array.isArray(discord) ? 'array' : typeof discord}`)

@@ -16,6 +16,7 @@ import {
   isSessionViewer,
 } from '../handler-utils.js'
 import { listProviders, getProvider } from '../providers.js'
+import { isProviderModelUnrestricted } from '../config.js'
 import { createLogger, loggerForSession, sessionLogger } from '../logger.js'
 // Credential + skills handlers were split into sibling modules (audit P2-4);
 // their maps are composed into settingsHandlers below.
@@ -67,8 +68,14 @@ const PROVIDER_MODELS_UNRESTRICTED = Symbol('provider-models-unrestricted')
  * @param {string|undefined} providerName - Session's registered provider name
  * @returns {string[]|typeof PROVIDER_MODELS_UNRESTRICTED|null}
  */
-function getProviderAllowedModels(providerName) {
+function getProviderAllowedModels(providerName, config) {
   if (!providerName) return null
+  // #6378: an operator can opt a static-allowlist provider into unrestricted
+  // model validation via `config.providers.allowAnyModel` — treat it exactly
+  // like ollama (#5418) so an unlisted-but-API-valid id passes through and the
+  // upstream API validates, with no release. Checked before the class lookup so
+  // it applies regardless of what getAllowedModels() returns.
+  if (isProviderModelUnrestricted(config, providerName)) return PROVIDER_MODELS_UNRESTRICTED
   let ProviderClass
   try {
     ProviderClass = getProvider(providerName)
@@ -128,7 +135,7 @@ function handleSetModel(ws, client, msg, ctx) {
   // it to setModel() would respawn the CLI with an unknown `-m` arg and
   // crash opaquely (see issue #2946). Consult the session's provider first.
   if (entry) {
-    const providerAllowed = getProviderAllowedModels(entry.provider)
+    const providerAllowed = getProviderAllowedModels(entry.provider, ctx.services?.config)
     if (providerAllowed === PROVIDER_MODELS_UNRESTRICTED) {
       // #5418: the provider validates nothing statically (ollama — any
       // locally pulled model id is valid; an unknown id surfaces as the
