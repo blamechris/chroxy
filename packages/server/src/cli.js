@@ -25,6 +25,7 @@ import { registerWorktreeCommand } from './cli/worktree-gc-cmd.js'
 import { registerCredentialsCommand } from './cli/credentials-cmd.js'
 import { registerProvidersCommand } from './cli/providers-cmd.js'
 import { registerPagesCommands } from './cli/pages-cmd.js'
+import { registerShellApprovalCommand } from './cli/shell-cmd.js'
 import { registerIdentityCommand } from './cli/identity-cmd.js'
 
 const require = createRequire(import.meta.url)
@@ -53,6 +54,7 @@ registerWorktreeCommand(program)
 registerCredentialsCommand(program)
 registerProvidersCommand(program)
 registerPagesCommands(program)
+registerShellApprovalCommand(program)
 registerIdentityCommand(program)
 
 program.parse()
