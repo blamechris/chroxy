@@ -2,7 +2,7 @@
 
 Add, relabel, or re-price a model **at runtime, with no Chroxy release** — by dropping a small JSON file next to your config. The overlay is Chroxy's lightest "serve a model the build doesn't know about yet" lever: edit the file and the change is picked up live (hot-reload), no restart.
 
-> **Scope today:** the overlay applies to the **default Claude registry** only (`claude-sdk` / `claude-cli` / `claude-tui` / docker-wrapped Claude). Extending it to the other providers' registries (Gemini, Codex, DeepSeek, Ollama, config-driven endpoints) is tracked in [#6377](https://github.com/blamechris/chroxy/issues/6377). For those providers today, see [`providers.allowAnyModel`](../providers.md#serving-a-new-model-without-a-release-providersallowanymodel) (serve any API-valid id) and the config-driven [`models` / `modelDiscovery`](../providers.md#anthropic-compatible-endpoints-config-driven) blocks.
+> **Scope:** by default an entry applies to the **Claude registry** (`claude-sdk` / `claude-cli` / `claude-tui` / docker-wrapped Claude). Since [#6377](https://github.com/blamechris/chroxy/issues/6377) an entry can carry a **`provider` field** to target any other provider's registry instead (Gemini, Codex, DeepSeek, Ollama, config-driven endpoints) — see [Targeting a specific provider](#targeting-a-specific-provider-non-claude). One caveat: **`pricing` in a `provider`-tagged entry is not yet applied** — non-Claude cost flows through the provider class, not the registry, so overlay pricing currently only takes effect for Claude models (labels / context windows / new-model seeding work for every provider).
 
 ## Location
 
@@ -38,7 +38,8 @@ A JSON **object keyed by the model's full id**. Every field except the key is op
 | `shortId` | Optional alias (e.g. `opus-5`) the picker and `set_model` accept. Defaults to a derived short id. |
 | `label` | Optional display name in the picker. Defaults to a humanized id. |
 | `contextWindow` | Optional token window (positive number) for the context meter. |
-| `pricing` | Optional USD-per-MTok rates: `{ input, output, cacheRead, cacheWrite }`. Absent → cost reads `null` (not `$0`). |
+| `pricing` | Optional USD-per-MTok rates: `{ input, output, cacheRead, cacheWrite }`. Absent → cost reads `null` (not `$0`). (Claude registry only — see the scope note.) |
+| `provider` | Optional provider name (e.g. `"gemini"`, `"codex"`, `"deepseek"`) to target that provider's registry instead of Claude's. Omit for Claude models. |
 
 ### What an entry does
 
@@ -46,6 +47,30 @@ A JSON **object keyed by the model's full id**. Every field except the key is op
 - **An existing id** has its `label` / `contextWindow` / `shortId` overridden (overlay wins over the static heuristic).
 - **Pricing precedence:** overlay `pricing` (matched on the resolved full id) > the built-in pricing table > `null`. A missing `pricing` block does *not* shadow the built-in table.
 - **Live SDK values still win** for the context window: when the Agent SDK reports a model, its values are consulted ahead of the overlay row, so the overlay never pins a stale window over fresh SDK data.
+
+### Targeting a specific provider (non-Claude)
+
+Add a `provider` field to route an entry to that provider's own registry instead of Claude's ([#6377](https://github.com/blamechris/chroxy/issues/6377)):
+
+```json
+{
+  "gemini-3.0-pro": {
+    "provider": "gemini",
+    "label": "Gemini 3.0 Pro",
+    "contextWindow": 2000000
+  },
+  "deepseek-v4": {
+    "provider": "deepseek",
+    "label": "DeepSeek V4"
+  }
+}
+```
+
+- A tagged entry seeds/overrides **that** provider's picker + allowlist and is **isolated** — a `gemini` entry never bleeds into Codex or Claude.
+- Routing is by the field's **presence**, not by validating the name; a Claude provider name (or omitting the field) lands on the Claude registry, so just omit `provider` for Claude models.
+- Tagged entries hot-reload like Claude ones — already-running provider sessions pick up the change on the next models fetch.
+- **`pricing` is not yet applied for tagged entries** (non-Claude cost is owned by the provider class, not the registry). Labels, context windows, and new-model seeding work for every provider; per-provider overlay *pricing* is a follow-up.
+- To *serve* (not just list) a new model on a static-allowlist provider, you still want [`providers.allowAnyModel`](../providers.md#serving-a-new-model-without-a-release-providersallowanymodel) — the overlay makes it appear in the picker; `allowAnyModel` lets an unlisted id through validation.
 
 ## Hot-reload
 
@@ -59,7 +84,7 @@ The overlay is watched and re-folded into the registry on change ([#5932](https:
 
 - **Secrets never belong here** (same posture as `config.json`) — the overlay only carries model metadata.
 - `claude-fable-5` is disallowed and **cannot be reintroduced** via the overlay ([#6219](https://github.com/blamechris/chroxy/issues/6219)).
-- Claude-registry-scoped (see the scope note above).
+- Untagged entries are Claude-registry-scoped; use a `provider` field for other providers (see [Targeting a specific provider](#targeting-a-specific-provider-non-claude)). `pricing` overrides apply to Claude models only for now.
 - This complements, not replaces, the SDK's live `supportedModels()` push — a brand-new Claude model the SDK already knows about appears with no overlay at all; the overlay is for getting *ahead* of the build (or fixing a label/price) before the SDK or a release catches up.
 
 ## When to reach for which lever
