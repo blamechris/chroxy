@@ -1458,6 +1458,9 @@ export class WsServer {
     const socketIp = req.socket?.remoteAddress || ''
     if (!LOOPBACK_ADDRESSES.has(socketIp)) return json(403, { error: 'loopback_only' })
     // Host-OPERATOR authority: rejects pairing-bound tokens (writes its own 403).
+    // Under --no-auth (no token configured) this passes through, consistent with
+    // chroxy's local-trust model — the listener is still loopback-only (not
+    // tunnel-reachable) and the create-side gate is equally token-free there.
     if (!this._validatePrimaryBearerAuth(req, res)) return
     const path = (req.url || '').split('?')[0]
     const store = this._shellApprovalStore

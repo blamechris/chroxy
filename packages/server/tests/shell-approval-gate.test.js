@@ -17,7 +17,7 @@ function primaryClient() {
   return { id: 'client-x', authenticated: true, isPrimaryToken: true, deviceInfo: { deviceName: 'Mac' }, subscribedSessionIds: new Set(), boundSessionId: null, authToken: 'tok' }
 }
 
-function gateCtx({ requireApproval, store, createSession }) {
+function gateCtx({ requireApproval, store, createSession, enabled = true }) {
   const flat = {
     ...makeSessionIndexCtx(),
     // Mirror the real transport: forward to ws.send so ws._messages observes
@@ -25,7 +25,7 @@ function gateCtx({ requireApproval, store, createSession }) {
     send: createSpy((w, m) => { if (w && typeof w.send === 'function' && w.readyState === 1) w.send(JSON.stringify(m)) }),
     broadcastSessionList: createSpy(),
     sendSessionInfo: createSpy(),
-    config: { userShell: { enabled: true, requireApproval } },
+    config: { userShell: { enabled, requireApproval } },
     sessionManager: {
       listSessions: () => [],
       getSession: () => ({ name: 'shell', cwd: '/tmp', session: { resumeSessionId: null } }),
@@ -64,6 +64,13 @@ describe('user-shell approval gate (#6277)', () => {
     sessionHandlers.create_session(ws, primaryClient(), { provider: 'user-shell' }, gateCtx({ requireApproval: true, store: undefined, createSession }))
     assert.equal(createSession.callCount, 0)
     assert.ok(ws._messages.some((m) => m.type === 'session_error'), 'sends a session_error, never silently allows')
+  })
+
+  it('does NOT hold when user-shell is disabled (no doomed approval; create rejects upstream)', () => {
+    const store = new ShellApprovalStore()
+    const createSession = createSpy(() => 'sess-1')
+    sessionHandlers.create_session(makeWs(), primaryClient(), { provider: 'user-shell' }, gateCtx({ enabled: false, requireApproval: true, store, createSession }))
+    assert.equal(store.size, 0, 'a disabled shell is never held — it is rejected upstream by createSession')
   })
 
   it('does NOT gate a non-user-shell provider', () => {

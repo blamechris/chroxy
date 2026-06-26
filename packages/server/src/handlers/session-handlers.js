@@ -8,7 +8,7 @@ import { USER_SHELL_PROVIDER } from '@chroxy/protocol'
 import { auditShellCreate } from '../shell-audit.js'
 import { validateCwdAllowed, broadcastFocusChanged, autoSubscribeOtherClients, buildSessionTokenMismatchPayload, sendSessionError, isSessionViewer, isUserShellSession, ALLOWED_PERMISSION_MODE_IDS } from '../handler-utils.js'
 import { getRegistryForProvider } from '../models.js'
-import { isUserShellApprovalRequired } from '../config.js'
+import { isUserShellEnabled, isUserShellApprovalRequired } from '../config.js'
 import { createLogger, loggerForSession } from '../logger.js'
 
 const log = createLogger('ws')
@@ -225,7 +225,11 @@ function handleCreateSession(ws, client, msg, ctx) {
   // the host approves out-of-band (loopback `/api/shell/approve` or
   // `chroxy shell approve <id>`), which replays finalizeShellCreate directly — so
   // this handler is the sole gate and the deferred path never re-enters it.
-  if (isUserShell && isUserShellApprovalRequired(ctx.services?.config)) {
+  // Only HOLD a spawn that would actually be allowed: when userShell.enabled is
+  // false the create is rejected upstream by SessionManager anyway, so gating it
+  // here would log + hold a doomed approval that 500s on approve (a non-sensical
+  // enabled:false + requireApproval:true combo).
+  if (isUserShell && isUserShellEnabled(ctx.services?.config) && isUserShellApprovalRequired(ctx.services?.config)) {
     const store = ctx.services?.shellApprovalStore
     if (!store) {
       // Fail-closed: approval is required but the service isn't wired.
