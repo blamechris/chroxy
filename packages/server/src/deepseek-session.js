@@ -22,6 +22,7 @@
 
 import Anthropic from '@anthropic-ai/sdk'
 import { ClaudeByokSession } from './byok-session.js'
+import { getRegistryForProvider } from './models.js'
 import { resolveDeepSeekApiKey } from './deepseek-credentials.js'
 import { BILLING_CLASSES } from './billing-class.js'
 
@@ -181,6 +182,11 @@ export class DeepSeekSession extends ClaudeByokSession {
 
   _getPricing(model) {
     if (typeof model !== 'string' || model.length === 0) return null
+    // #6381: a `provider: "deepseek"` entry in ~/.chroxy/models.json can re-price
+    // a model with no release (e.g. when DeepSeek changes published rates). The
+    // operator overlay wins over the shipped static table; absent → static.
+    const fromOverlay = getRegistryForProvider(this._provider).getOverlayPricing(model)
+    if (fromOverlay) return fromOverlay
     return DEEPSEEK_PRICING_USD_PER_MTOK[model] || null
   }
 }
