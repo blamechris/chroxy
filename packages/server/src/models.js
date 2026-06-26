@@ -80,7 +80,7 @@ export function getModelPricing(modelId) {
  * yields null — never 0.
  *
  * @param {string} modelId
- * @param {Map} [overlay] - fullId → overlay entry map (see loadModelsOverlay)
+ * @param {Map} [overlay] - fullId → overlay entry map (see loadModelsOverlayResult)
  * @returns {object|null}
  */
 function resolveModelPricing(modelId, overlay) {
@@ -209,14 +209,20 @@ function getDefaultOverlayPath() {
  *   - non-object JSON root → `{ ok: false, overlay: <empty> }`
  *   - valid object        → `{ ok: true,  overlay: <normalised> }`
  *
- * NEVER throws. The boot-time {@link loadModelsOverlay} wraps this and returns
- * just the overlay (treating malformed as empty, exactly as before).
+ * NEVER throws. Boot + reload call this directly to get both the default
+ * (Claude) overlay and the per-provider slices (#6377).
  *
  * @param {string} [path]
- * @returns {{ ok: boolean, overlay: Map<string, object> }}
+ * @returns {{ ok: boolean, overlay: Map<string, object>, byProvider: Map<string, Map<string, object>> }}
  */
 function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
+  // `overlay` is the DEFAULT (Claude) registry overlay — entries with no
+  // `provider` field (or a Claude provider name), for backward compatibility.
+  // `byProvider` (#6377) routes entries that carry `provider: "<name>"` to that
+  // non-Claude provider's own registry: Map<providerName, Map<fullId, entry>>.
   const overlay = new Map()
+  const byProvider = new Map()
+  const pricingIgnoredForTagged = []
   let raw
   try {
     raw = readFileSync(path, 'utf-8')
@@ -227,20 +233,20 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
     // (EACCES, EBUSY, EISDIR, transient IO) is NOT an intentional clear — return
     // `ok: false` + warn so a hot-reload keeps the LAST-GOOD set instead of
     // silently wiping the operator's overlay on a transient fault (Copilot #5945).
-    if (err?.code === 'ENOENT') return { ok: true, overlay }
+    if (err?.code === 'ENOENT') return { ok: true, overlay, byProvider }
     log.warn(`loadModelsOverlay: cannot read ${path}: ${err?.code || ''} ${err?.message || err} — keeping last-good overlay`.replace(/\s+/g, ' ').trim())
-    return { ok: false, overlay }
+    return { ok: false, overlay, byProvider }
   }
   let parsed
   try {
     parsed = JSON.parse(raw)
   } catch (err) {
     log.warn(`loadModelsOverlay: malformed JSON in ${path}: ${err?.message || err} — ignoring overlay`)
-    return { ok: false, overlay }
+    return { ok: false, overlay, byProvider }
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
     log.warn(`loadModelsOverlay: ${path} is not a JSON object keyed by model id — ignoring overlay`)
-    return { ok: false, overlay }
+    return { ok: false, overlay, byProvider }
   }
   for (const [key, value] of Object.entries(parsed)) {
     if (typeof key !== 'string' || key.length === 0) continue
@@ -253,13 +259,31 @@ function loadModelsOverlayResult(path = getDefaultOverlayPath()) {
     if (value.pricing && typeof value.pricing === 'object' && !Array.isArray(value.pricing)) {
       entry.pricing = value.pricing
     }
-    overlay.set(fullId, entry)
+    // #6377: route by an optional `provider` field. Routing is by PRESENCE, not
+    // by classifying the name — this runs at module-init (before providers may
+    // have registered), so a registry lookup here would be unreliable. Absent
+    // `provider` → the default Claude registry overlay (backward-compatible, the
+    // common case). A `provider` name → that provider's own registry overlay,
+    // applied by getRegistryForProvider (which returns the default registry for
+    // Claude names, so tagging a Claude model is a documented no-op — omit it).
+    // The routing field is NOT copied into the entry.
+    const provider = typeof value.provider === 'string' && value.provider.length > 0 ? value.provider : null
+    if (provider) {
+      let providerMap = byProvider.get(provider)
+      if (!providerMap) { providerMap = new Map(); byProvider.set(provider, providerMap) }
+      providerMap.set(fullId, entry)
+      // #6385: a tagged (non-Claude) entry's `pricing` is collected but inert —
+      // non-Claude cost flows through ProviderClass._getPricing, not the
+      // registry. Surface it once so the inertness is observable, not doc-tribal.
+      if (entry.pricing) pricingIgnoredForTagged.push(fullId)
+    } else {
+      overlay.set(fullId, entry)
+    }
   }
-  return { ok: true, overlay }
-}
-
-function loadModelsOverlay(path = getDefaultOverlayPath()) {
-  return loadModelsOverlayResult(path).overlay
+  if (pricingIgnoredForTagged.length > 0) {
+    log.debug(`loadModelsOverlay: ignoring 'pricing' on ${pricingIgnoredForTagged.length} provider-tagged overlay entr${pricingIgnoredForTagged.length === 1 ? 'y' : 'ies'} (${pricingIgnoredForTagged.join(', ')}) — non-Claude pricing is owned by the provider class, not the overlay (#6385)`)
+  }
+  return { ok: true, overlay, byProvider }
 }
 
 // Module-level overlay, loaded at boot and HOT-RELOADABLE (#5932). The default
@@ -268,7 +292,12 @@ function loadModelsOverlay(path = getDefaultOverlayPath()) {
 // applyOverlay), so reassigning it in reloadModelsOverlay() takes effect without
 // a restart. Per-provider registries take their own overlay via the
 // createModelsRegistry hook.
-let defaultOverlay = loadModelsOverlay()
+const _bootOverlayResult = loadModelsOverlayResult()
+let defaultOverlay = _bootOverlayResult.overlay
+// #6377: per-provider overlays — entries tagged `provider: "<name>"` keyed by
+// provider name. Threaded into each non-Claude registry by
+// getRegistryForProvider and re-folded across cached registries on hot-reload.
+let providerOverlays = _bootOverlayResult.byProvider
 
 /**
  * Per-provider cache path resolver (#4413). Non-Claude providers
@@ -430,7 +459,7 @@ function humanizeModelId(id) {
  *   provider-scoped path (e.g. `~/.chroxy/models-cache.codex.json`) so the
  *   default Claude cache stays untouched by per-provider learn-loops (#4413).
  * @param {Map} [hooks.overlay] - User-extensible overlay (fullId → entry; see
- *   loadModelsOverlay). Overlay entries SEED the registry like a
+ *   loadModelsOverlayResult). Overlay entries SEED the registry like a
  *   FALLBACK_MODELS row, so a brand-new model id appears with no code change
  *   and survives loadCache()'s family prune. The default Claude registry gets
  *   the module-level `defaultOverlay`; pass `new Map()` to opt out.
@@ -1069,6 +1098,15 @@ export function reloadModelsOverlay(path = getDefaultOverlayPath()) {
   }
   defaultOverlay = result.overlay
   defaultRegistry.applyOverlay(result.overlay)
+  // #6377: re-fold the per-provider slices into every ALREADY-BUILT non-Claude
+  // registry. A provider whose registry hasn't been built yet picks up its slice
+  // lazily on first getRegistryForProvider() (which reads providerOverlays), so
+  // only the cached ones need an explicit re-fold here. A provider that lost all
+  // its overlay entries gets an empty Map → its overlay-only rows drop.
+  providerOverlays = result.byProvider
+  for (const [name, registry] of providerRegistryCache) {
+    registry.applyOverlay(providerOverlays.get(name) ?? new Map())
+  }
   return {
     reloaded: true,
     models: defaultRegistry.getModels(),
@@ -1145,9 +1183,15 @@ export function watchModelsOverlay({ path = getDefaultOverlayPath(), onReload, d
  * mutations into sibling tests. Pass a Map to seed a specific overlay, or omit
  * for an empty one.
  */
-export function _resetModelsOverlayForTests(overlay = new Map()) {
+export function _resetModelsOverlayForTests(overlay = new Map(), byProvider = new Map()) {
   defaultOverlay = overlay instanceof Map ? overlay : new Map()
   defaultRegistry.applyOverlay(defaultOverlay)
+  // #6377: reset the per-provider overlays + re-fold any cached provider
+  // registries so a test can't leak provider-overlay state into siblings.
+  providerOverlays = byProvider instanceof Map ? byProvider : new Map()
+  for (const [name, registry] of providerRegistryCache) {
+    registry.applyOverlay(providerOverlays.get(name) ?? new Map())
+  }
 }
 
 /**
@@ -1300,6 +1344,11 @@ export function getRegistryForProvider(providerName) {
     // #4413: provider-scoped cache path. Lazy resolver so tests that mutate
     // `CHROXY_CONFIG_DIR` after registry creation still hit the temp dir.
     cachePath: () => getProviderCachePath(providerName),
+    // #6377: this provider's slice of the user overlay (entries tagged
+    // `provider: "<name>"`) — seeds new models + overrides labels/windows just
+    // like the Claude registry's overlay. Empty Map when the operator supplied
+    // none. Re-folded on hot-reload (reloadModelsOverlay).
+    overlay: providerOverlays.get(providerName) ?? new Map(),
   })
   // #4413: hydrate the registry from its own cache file before serving the
   // first getModels() call. A miss (no file, malformed, all-stale) is a
