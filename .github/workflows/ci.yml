@@ -439,6 +439,21 @@ jobs:
       - name: Type check dashboard
         run: npm run typecheck
 
+  style-lint:
+    name: Style Lint
+    # Ratchet guard (chat redesign #6390): NEW component/screen styling files
+    # must use design tokens, not raw color literals. Pure bash/grep — no deps,
+    # so no setup-node / npm ci. The ~120 existing literal-heavy files are
+    # grandfathered via scripts/no-raw-color-literals-baseline.txt.
+    needs: runner-target
+    runs-on: ${{ fromJSON(needs.runner-target.outputs.runner) }}  # SELF_HOSTED_OR_HOSTED (see header)
+    timeout-minutes: 2
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: No raw color literals in new styling files
+        run: bash scripts/lint-no-raw-color-literals.sh
+
   store-core-tests:
     name: Store Core Tests
     # Self-hosted (#6046): the prior install OOM (exit 137) was the 7.7GB Docker
