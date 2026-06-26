@@ -3049,4 +3049,37 @@ describe('@chroxy/protocol schemas', () => {
       })
     })
   })
+
+  describe('ServerAvailableModelsSchema provider tag (#6370)', () => {
+    it('accepts a roster tagged with a provider string', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerAvailableModelsSchema.safeParse({
+        type: 'available_models',
+        models: [{ id: 'sonnet' }],
+        defaultModel: 'sonnet',
+        provider: 'claude-sdk',
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.provider, 'claude-sdk', 'provider is preserved on parse, not stripped')
+    })
+
+    it('accepts an explicit provider: null (the default/unscoped roster — ws-history.js:859)', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerAvailableModelsSchema.safeParse({ type: 'available_models', models: [], provider: null })
+      assert.ok(r.success)
+      assert.equal(r.data.provider, null)
+    })
+
+    it('accepts an omitted provider (backward compatible)', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      const r = ServerAvailableModelsSchema.safeParse({ type: 'available_models', models: [], defaultModel: 'opus' })
+      assert.ok(r.success)
+      assert.equal(r.data.provider, undefined)
+    })
+
+    it('rejects a non-string provider', async () => {
+      const { ServerAvailableModelsSchema } = await import('../src/schemas/server/stream.ts')
+      assert.ok(!ServerAvailableModelsSchema.safeParse({ type: 'available_models', provider: 42 }).success)
+    })
+  })
 })
