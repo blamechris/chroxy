@@ -118,6 +118,46 @@ fn should_surface_failure(emitted_error: bool, user_requested_stop: bool, exit_f
     !emitted_error && !user_requested_stop && exit_failed
 }
 
+/// Bounded wait for the stderr drain thread to finish (#6281): poll `reader_done`
+/// until it flips or `deadline` passes. The deadline is the load-bearing
+/// invariant — a helper that closes stdout while holding stderr open never flips
+/// `reader_done`, so without the deadline the reader would park forever.
+/// Extracted from the reader thread so the timeout can be regression-tested
+/// deterministically (#6362).
+fn wait_for_drain(reader_done: &AtomicBool, deadline: std::time::Instant) {
+    while !reader_done.load(Ordering::SeqCst) && std::time::Instant::now() < deadline {
+        thread::sleep(std::time::Duration::from_millis(10));
+    }
+}
+
+/// The 3s safety-net decision (#6282): nudge a hung helper with SIGTERM, but ONLY
+/// when we can take the child lock (`try_lock` succeeds → the reader is not
+/// mid-reap) AND the `Child` is still present (the reader hasn't reaped it yet).
+///
+/// The supplied `kill` closure runs **while the lock is still held** — that is the
+/// load-bearing invariant: holding the lock guarantees the reader can't reap
+/// concurrently, so the pid handed to `kill` is still ours and can never be a
+/// recycled pid. Returns the pid that was signalled, or `None` when the safety net
+/// correctly did nothing (`Err(_)` from `try_lock` → reader mid-reap; `None` child
+/// → already reaped). Extracted so the gate can be regression-tested without
+/// spawning the real helper (#6362).
+fn run_safety_net<F: FnOnce(u32)>(child: &Mutex<Option<Child>>, kill: F) -> Option<u32> {
+    match child.try_lock() {
+        Ok(guard) => match guard.as_ref() {
+            Some(c) => {
+                let pid = c.id();
+                // Fired under the held lock — pid cannot have been recycled.
+                kill(pid);
+                Some(pid)
+            }
+            // try_lock succeeded but the reader already reaped → nothing to do.
+            None => None,
+        },
+        // try_lock failed → the reader holds the lock mid-reap → leave it alone.
+        Err(_) => None,
+    }
+}
+
 /// Start recording and recognizing speech. Streams results as Tauri events.
 pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> {
     let mut child_lock = state.child.lock().unwrap();
@@ -237,11 +277,7 @@ pub fn start(state: &SpeechState, app: &tauri::AppHandle) -> Result<(), String> 
         // reader forever), then snapshot whatever was drained.
         let stderr_deadline =
             std::time::Instant::now() + std::time::Duration::from_millis(500);
-        while !reader_done.load(Ordering::SeqCst)
-            && std::time::Instant::now() < stderr_deadline
-        {
-            thread::sleep(std::time::Duration::from_millis(10));
-        }
+        wait_for_drain(&reader_done, stderr_deadline);
         let stderr_tail = reader_tail
             .lock()
             .map(|t| t.iter().cloned().collect::<Vec<_>>().join("\n"))
@@ -312,23 +348,19 @@ pub fn stop(state: &SpeechState) {
                 let child_ref = Arc::clone(&state.child);
                 thread::spawn(move || {
                     thread::sleep(std::time::Duration::from_secs(3));
-                    if let Ok(guard) = child_ref.try_lock() {
-                        if let Some(child) = guard.as_ref() {
-                            let pid = child.id();
-                            eprintln!(
-                                "[speech] WARN: helper (pid {}) did not exit within 3s of clean shutdown; sending SIGTERM. \
+                    // run_safety_net fires the closure only while it holds the
+                    // child lock with the Child present, so the SIGTERM below
+                    // targets a pid that cannot have been recycled (#6282).
+                    run_safety_net(&child_ref, |pid| {
+                        eprintln!(
+                            "[speech] WARN: helper (pid {}) did not exit within 3s of clean shutdown; sending SIGTERM. \
 This usually means the helper crashed or hung — voice transcription may have silently failed for this session.",
-                                pid
-                            );
-                            // Safe: we hold the lock, so the reader cannot reap
-                            // concurrently → the pid is still valid, not recycled.
-                            unsafe {
-                                libc::kill(pid as i32, libc::SIGTERM);
-                            }
+                            pid
+                        );
+                        unsafe {
+                            libc::kill(pid as i32, libc::SIGTERM);
                         }
-                        // child is None → reader already reaped → nothing to do.
-                    }
-                    // try_lock failed → reader is mid-reap → leave it alone.
+                    });
                 });
             }
         }
@@ -337,7 +369,11 @@ This usually means the helper crashed or hung — voice transcription may have s
 
 #[cfg(test)]
 mod tests {
-    use super::should_surface_failure;
+    use super::{run_safety_net, should_surface_failure, wait_for_drain};
+    use std::process::{Child, Command};
+    use std::sync::atomic::AtomicBool;
+    use std::sync::Mutex;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn surfaces_unexpected_failure() {
@@ -362,5 +398,85 @@ mod tests {
     fn silent_on_clean_exit() {
         // Exited successfully on its own — nothing to surface.
         assert!(!should_surface_failure(false, false, false));
+    }
+
+    // #6362 — stderr-drain deadline (#6281). The reader must never park forever
+    // waiting on the drain thread; the deadline bounds the wait.
+
+    #[test]
+    fn drain_wait_returns_at_deadline_when_reader_never_finishes() {
+        // reader_done never flips (stdout-closed/stderr-open case) → the loop must
+        // exit when the deadline passes, not hang.
+        let never = AtomicBool::new(false);
+        let start = Instant::now();
+        wait_for_drain(&never, start + Duration::from_millis(150));
+        let elapsed = start.elapsed();
+        assert!(elapsed >= Duration::from_millis(150), "returned before the deadline: {:?}", elapsed);
+        assert!(elapsed < Duration::from_millis(600), "overran the deadline: {:?}", elapsed);
+    }
+
+    #[test]
+    fn drain_wait_returns_promptly_when_reader_done() {
+        // Already drained → return immediately, far short of a 30s deadline.
+        let done = AtomicBool::new(true);
+        let start = Instant::now();
+        wait_for_drain(&done, start + Duration::from_secs(30));
+        assert!(start.elapsed() < Duration::from_millis(100), "should return immediately when already done");
+    }
+
+    // #6362 — single-owner reaping safety net (#6282). The 3s SIGTERM fires ONLY
+    // when the lock is takeable AND the Child is present, and always under the
+    // held lock (so the pid can't be recycled).
+
+    #[test]
+    fn safety_net_skips_while_reader_holds_lock() {
+        // Reader mid-reap = lock held → try_lock fails → leave the in-progress
+        // reap alone, never signal.
+        let child: Mutex<Option<Child>> = Mutex::new(None);
+        let _held = child.lock().unwrap(); // simulate the reader holding the lock
+        let mut killed = false;
+        let pid = run_safety_net(&child, |_p| killed = true);
+        assert_eq!(pid, None);
+        assert!(!killed, "must NOT signal while the reader holds the lock (recycled-pid race)");
+    }
+
+    #[test]
+    fn safety_net_skips_when_child_already_reaped() {
+        // try_lock succeeds but the Child is None (reader already reaped) → no-op.
+        let child: Mutex<Option<Child>> = Mutex::new(None);
+        let mut killed = false;
+        let pid = run_safety_net(&child, |_p| killed = true);
+        assert_eq!(pid, None);
+        assert!(!killed, "must NOT signal when the child was already reaped");
+    }
+
+    #[test]
+    fn safety_net_signals_live_child_pid_under_lock() {
+        // try_lock succeeds AND the Child is present → the closure fires exactly
+        // once with the live child's pid. A real benign long-lived process gives a
+        // real pid; the injected closure records it instead of signalling, and we
+        // reap the helper ourselves afterwards.
+        let sleeper = Command::new("sleep").arg("30").spawn().expect("spawn sleep helper");
+        let expected_pid = sleeper.id();
+        let child: Mutex<Option<Child>> = Mutex::new(Some(sleeper));
+
+        let mut calls = 0;
+        let mut seen_pid = None;
+        let pid = run_safety_net(&child, |p| {
+            calls += 1;
+            seen_pid = Some(p);
+        });
+
+        assert_eq!(pid, Some(expected_pid));
+        assert_eq!(calls, 1, "safety net must fire exactly once");
+        assert_eq!(seen_pid, Some(expected_pid), "kill must receive the live child's pid");
+
+        // Clean up the real process we spawned. Bind the take() into its own
+        // statement so the temporary MutexGuard drops before `child` does.
+        let leftover = child.lock().unwrap().take();
+        if let Some(mut c) = leftover {
+            let _ = c.kill();
+            let _ = c.wait();
+        }
     }
 }
