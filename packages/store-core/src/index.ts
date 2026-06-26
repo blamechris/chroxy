@@ -371,6 +371,16 @@ export {
   shouldSuppressRawToolInput,
 } from './tool-summary'
 
+// Chat redesign #6389 (Phase 0 #6390): canonical tool-presentation registry
+// — verb (label) → kind → icon glyph → color token, defined once so the
+// dashboard and mobile op-card renderers can't drift.
+export {
+  TOOL_KIND_META,
+  getToolKind,
+  getToolPresentation,
+} from './tool-presentation'
+export type { ToolKind, ToolPresentation } from './tool-presentation'
+
 export {
   PASTE_COLLAPSE_CHAR_THRESHOLD,
   PASTE_COLLAPSE_LINE_THRESHOLD,
