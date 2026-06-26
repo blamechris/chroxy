@@ -14,6 +14,7 @@ import {
   resolveContextWindow,
   providerSupportsMultiQuestion,
   formatToolName,
+  deriveChatActivity,
   type SessionInfo,
 } from '@chroxy/store-core'
 import { useConnectionStore } from './store/connection'
@@ -1213,6 +1214,22 @@ export function App() {
   // for the header indicator so we don't scan every session's messages twice;
   // the badge adds crashed-session count on top (failed slice, inside the hook).
   useTrayBadgeSync(pendingPermissionTotal)
+
+  // Chat redesign #6391 (slice 3): the dashboard's canonical per-session chat
+  // activity (idle/thinking/busy/waiting/error), replacing the ad-hoc binary
+  // isBusy. Feeds the store's raw signals into store-core's deriveChatActivity
+  // — the SAME machine the mobile app uses (#6396) — so the composer's live
+  // hairline + state-lozenge (slices 4-5) read one source instead of N
+  // independent isBusy/isStreaming derivations. Exposed to the composer as a
+  // data attribute; startedAt continuity is wired when slice 6 (footer-stat
+  // thinking) consumes it.
+  const chatActivity = deriveChatActivity({
+    isIdle: isIdle ?? true,
+    streamingMessageId: streamingMessageId ?? null,
+    isPlanPending: isPlanPending ?? false,
+    pendingPermission: (pendingPermissionCounts[activeSessionId ?? ''] ?? 0) > 0,
+  })
+
   const handleJumpToPending = useCallback(() => {
     const orderedIds = sessionTabs.map(t => t.sessionId)
     const next = selectNextPendingSession(orderedIds, pendingPermissionCounts, activeSessionId)
@@ -2379,6 +2396,7 @@ export function App() {
               disabled={!isConnected}
               isBusy={!isIdle}
               isStreaming={streamingMessageId !== null}
+              chatActivityState={chatActivity.state}
               placeholder={isConnected ? `Type a message... (${inputSettings.chatEnterToSend ? 'Enter' : formatShortcutKeys('Cmd+Enter')} to send)` : 'Connecting...'}
               controlledValue={inputDraftValue}
               onValueChange={handleDraftChange}

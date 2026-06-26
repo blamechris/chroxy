@@ -64,6 +64,11 @@ export interface InputBarProps {
   disabled?: boolean
   isBusy?: boolean
   isStreaming?: boolean
+  /** Chat redesign #6391: the canonical chat-activity state
+   *  (idle/thinking/busy/waiting/error) from store-core's deriveChatActivity.
+   *  Surfaced as a `data-activity-state` attribute so the live hairline +
+   *  state-lozenge (slices 4-5) are pure CSS keyed off it. */
+  chatActivityState?: string
   placeholder?: string
   filePickerFiles?: FilePickerItem[] | null
   onFileTrigger?: () => void
@@ -182,7 +187,7 @@ const PTT_TYPING_GUARD_MS = 250
 //   - 'recording' : the timer fired while still held → voice capture is live
 type PttState = 'idle' | 'arming' | 'recording'
 
-export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
+export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, chatActivityState, placeholder, filePickerFiles, onFileTrigger, attachments, onRemoveAttachment, slashCommands, onSlashTrigger, onImagePaste, onImageDrop, imageAttachments, onRemoveImage, onFileAttach, controlledValue, onValueChange, sendOnEnter, voiceInput, onEvaluate, onLargePaste, pastedTextBlocks, onInspectPastedText, onRemovePastedText, userMessageHistory, highlightThinkingKeywords }: InputBarProps) {
   const [internalValue, setInternalValue] = useState('')
   const value = controlledValue !== undefined ? controlledValue : internalValue
   const setValue = onValueChange || setInternalValue
@@ -1017,6 +1022,7 @@ export function InputBar({ onSend, onInterrupt, disabled, isBusy, isStreaming, p
     <div
       className={`input-bar${dragging ? ' dragging' : ''}`}
       data-testid="input-bar"
+      data-activity-state={chatActivityState}
       onDragOver={handleDragOver}
       onDragEnter={handleDragEnter}
       onDragLeave={handleDragLeave}
