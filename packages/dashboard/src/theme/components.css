@@ -2593,9 +2593,12 @@ button.sidebar-token-view-session-row:hover {
      wall — without min-width: 0 the bubble blew past it. */
   min-width: 0;
   padding: 10px 14px;
-  border-radius: 12px;
-  font-size: var(--text-md);
-  line-height: 1.55;
+  /* Chat redesign #6391: relaxed reading scale + soft-card radius, re-pointed
+     at the Phase 0 design tokens (theme.css). Body goes 14px/1.55 -> the
+     dedicated chat size 15px/1.6; radius 12px -> the canonical --radius-md. */
+  border-radius: var(--radius-md);
+  font-size: var(--text-chat);
+  line-height: var(--leading-chat);
   word-wrap: break-word;
   overflow-wrap: break-word;
 }
@@ -2700,7 +2703,7 @@ button.sidebar-token-view-session-row:hover {
 .msg-timestamp {
   display: block;
   text-align: right;
-  font-size: 0.7rem;
+  font-size: var(--text-xs);
   color: var(--text-muted);
   opacity: 0.6;
   margin-top: 4px;
