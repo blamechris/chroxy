@@ -986,11 +986,15 @@ export function Sidebar({
 
           {/* Footer */}
           <div className="sidebar-footer" data-testid="sidebar-footer">
-            <span className={`sidebar-status-dot ${serverStatus}`} data-activity={serverStatus === 'connected' ? chatActivityState : undefined} title={
-              serverStatus === 'connected' ? 'Server connected'
-                : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
-                : 'Server disconnected'
-            } />
+            <span
+              className={`sidebar-status-dot ${serverStatus}`}
+              data-activity={serverStatus === 'connected' ? chatActivityState : undefined}
+              title={
+                serverStatus === 'connected' ? 'Server connected'
+                  : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
+                  : 'Server disconnected'
+              }
+            />
             <span className="sidebar-status-label">{statusLabel}</span>
             {tunnelUrl && (
               <span className="sidebar-tunnel" title={tunnelUrl}>

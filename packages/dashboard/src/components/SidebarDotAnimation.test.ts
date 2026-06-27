@@ -40,4 +40,15 @@ describe('Sidebar dot animations (#1675)', () => {
   test('working dot animation respects prefers-reduced-motion', () => {
     expect(componentsCss).toMatch(/prefers-reduced-motion[\s\S]*?sidebar-session-dot/)
   })
+
+  // #6418 — the sidebar CONNECTION dots (Projects header + footer) breathe while
+  // the active session is active. Pin both the pulse and its reduced-motion
+  // override so a future refactor can't silently drop them (review suggestion, #6421).
+  test('sidebar connection dot breathes via busyPulse when active', () => {
+    expect(componentsCss).toMatch(/sidebar-status-dot\.connected\[data-activity="thinking"\][\s\S]*?animation:\s*busyPulse/)
+  })
+
+  test('sidebar connection dot pulse respects prefers-reduced-motion', () => {
+    expect(componentsCss).toMatch(/prefers-reduced-motion[\s\S]*?sidebar-status-dot\.connected\[data-activity\][\s\S]*?animation:\s*none/)
+  })
 })
