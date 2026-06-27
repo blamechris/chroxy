@@ -36,6 +36,7 @@
  * affordance — the chip visual language is shared.
  */
 import { Platform, StyleSheet, Text, View } from 'react-native';
+import { getErrorPresentation } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
 
 export interface ResumeUnknownChipProps {
@@ -65,9 +66,6 @@ export interface ResumeUnknownChipProps {
   variant?: 'recoverable' | 'exhausted';
 }
 
-const RECOVERABLE_HEADLINE = 'Previous conversation could not be resumed — starting fresh';
-const EXHAUSTED_HEADLINE = 'Auto-recovery exhausted — start a new session manually to continue';
-
 export function ResumeUnknownChip({
   errorText,
   attemptedResumeId,
@@ -78,11 +76,14 @@ export function ResumeUnknownChip({
   // a broken-looking "Attempted id: " slot with no value.
   const hasId = typeof attemptedResumeId === 'string' && attemptedResumeId.trim().length > 0;
 
-  // #5006: switch headline copy on the variant. accessibilityRole stays
-  // `'alert'` for both variants — the mobile RN convention is to use the
-  // assertive role on recoverable amber chips too (parity with
-  // StreamStallChip). The label difference carries the urgency signal.
-  const headline = variant === 'exhausted' ? EXHAUSTED_HEADLINE : RECOVERABLE_HEADLINE;
+  // #5006 / #6392: the variant maps to a resume error code; the shared
+  // error-presentation registry (store-core) supplies the headline so the copy
+  // is single-sourced cross-surface. accessibilityRole stays `'alert'` for both
+  // variants — the mobile RN convention is the assertive role on recoverable
+  // amber chips too (parity with StreamStallChip); the label carries the urgency.
+  const { headline } = getErrorPresentation(
+    variant === 'exhausted' ? 'resume_unknown_exhausted' : 'resume_unknown',
+  );
 
   return (
     <View
