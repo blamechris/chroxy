@@ -81,6 +81,33 @@ describe('ChatView', () => {
     expect(componentsCss).not.toMatch(/presence-rail\[data-activity-state="error"\]\s*\{[^}]*--rail-color/)
   })
 
+  it('numbers queued follow-ups by send order when more than one is queued (chat redesign #6392)', () => {
+    render(
+      <ChatView
+        messages={makeMessages(3)}
+        isStreaming={false}
+        queuedIds={new Set(['msg-1', 'msg-2'])}
+        onCancelQueued={() => {}}
+      />,
+    )
+    expect(screen.getByTestId('msg-queued-position-msg-1')).toHaveTextContent('#1')
+    expect(screen.getByTestId('msg-queued-position-msg-2')).toHaveTextContent('#2')
+  })
+
+  it('omits the position for a single queued follow-up (chat redesign #6392)', () => {
+    render(
+      <ChatView
+        messages={makeMessages(2)}
+        isStreaming={false}
+        queuedIds={new Set(['msg-1'])}
+        onCancelQueued={() => {}}
+      />,
+    )
+    // Still flagged as queued, just no redundant "#1".
+    expect(screen.getByTestId('msg-queued-msg-1')).toBeInTheDocument()
+    expect(screen.queryByTestId('msg-queued-position-msg-1')).not.toBeInTheDocument()
+  })
+
   it('shows thinking dots when streaming', () => {
     render(<ChatView messages={makeMessages(1)} isStreaming />)
     expect(screen.getByTestId('thinking-dots')).toBeInTheDocument()

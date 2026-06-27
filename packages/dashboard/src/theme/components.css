@@ -2855,6 +2855,13 @@ button.sidebar-token-view-session-row:hover {
   text-transform: uppercase;
 }
 
+/* #6392 — subtle 1-based send position shown next to the Queued pill when more
+   than one follow-up is queued (the flex gap on .msg-queued spaces it). */
+.msg-queued-position {
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+}
+
 .msg-queued-cancel {
   display: inline-flex;
   align-items: center;
