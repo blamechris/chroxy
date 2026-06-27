@@ -217,6 +217,10 @@ export {
   MAX_SESSION_INTERVENTIONS,
 } from './utils'
 
+// #6453 — shared one-line summary for an answered question prompt (was a
+// duplicated copy in the app + dashboard).
+export { formatQuestionAnswerSummary } from './question-answer-summary'
+
 // #4123: shared cost formatters used by both dashboard sidebar badge
 // (#4073) and mobile session-header badge (#4074). Keeping a single
 // implementation avoids drift between the two surfaces.
