@@ -389,6 +389,12 @@ export {
 } from './tool-presentation'
 export type { ToolKind, ToolPresentation } from './tool-presentation'
 
+// Chat redesign #6389 (Phase 2 #6392): canonical error-presentation registry
+// — error code → kind → ARIA role → default headline, defined once so the
+// dashboard + mobile ChatErrorFrame can't drift on error copy / a11y.
+export { getErrorPresentation } from './error-presentation'
+export type { ErrorKind, ErrorPresentation } from './error-presentation'
+
 // Chat redesign #6391 (Phase 1): shared tool-output auto-collapse thresholds —
 // the dashboard + mobile ToolBubble collapse a long result past the same line
 // boundary.
