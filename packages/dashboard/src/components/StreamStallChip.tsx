@@ -17,7 +17,8 @@
  * wires it to `setViewMode('system')`).
  */
 import { useCallback } from 'react'
-import { formatDurationVerbose, getProviderInfo } from '@chroxy/store-core'
+import { formatDurationVerbose, getProviderInfo, getErrorPresentation } from '@chroxy/store-core'
+import { ChatErrorFrame } from './ChatErrorFrame'
 
 export interface StreamStallChipProps {
   /** The raw error text from the server (e.g. "Stream stalled — no response for 5 minutes"). */
@@ -97,10 +98,14 @@ export function StreamStallChip({
   // #4497: humanise only when the server actually advertised a usable
   // window. Guard against 0 (explicitly disabled, per protocol) and
   // non-finite values so a malformed auth_ok can't degrade the UI.
+  // #6392 — role + the static default headline come from the shared
+  // error-presentation registry; the timeout/provider headline below is the
+  // dynamic override the registry intentionally doesn't encode.
+  const presentation = getErrorPresentation('stream_stall')
   const body =
     typeof timeoutMs === 'number' && Number.isFinite(timeoutMs) && timeoutMs > 0
       ? `No response for ${formatDurationVerbose(timeoutMs)} — retry?`
-      : 'Stream stalled — retry?'
+      : presentation.headline
 
   // #4603: prefix the body with the provider short label (e.g. "SDK · ")
   // only when the prop is a non-empty, non-whitespace string. An empty
@@ -113,13 +118,12 @@ export function StreamStallChip({
   const headline = providerShort ? `${providerShort} · ${body}` : body
 
   return (
-    <div
-      className="stream-stall-chip"
-      data-testid="stream-stall-chip"
-      role="status"
+    <ChatErrorFrame
+      testId="stream-stall-chip"
+      role={presentation.role}
       title={errorText}
+      headline={headline}
     >
-      <span className="stream-stall-chip-text">{headline}</span>
       {onRetry && (
         <button
           type="button"
@@ -140,6 +144,6 @@ export function StreamStallChip({
           View logs
         </button>
       )}
-    </div>
+    </ChatErrorFrame>
   )
 }

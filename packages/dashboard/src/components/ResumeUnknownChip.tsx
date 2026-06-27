@@ -33,6 +33,8 @@
  * `data-testid` makes the chip targetable from integration / E2E tests.
  */
 import type { CSSProperties } from 'react'
+import { getErrorPresentation } from '@chroxy/store-core'
+import { ChatErrorFrame } from './ChatErrorFrame'
 
 export interface ResumeUnknownChipProps {
   /**
@@ -91,35 +93,30 @@ export function ResumeUnknownChip({
   // "Attempted id: " slot.
   const hasId = typeof attemptedResumeId === 'string' && attemptedResumeId.trim().length > 0
 
-  // #5006: switch headline + a11y role on the variant. The recoverable
-  // variant uses `role="status"` (polite live region — chroxy already
-  // recovered) whereas the exhausted variant uses `role="alert"` (assertive
-  // — the user must take action). Keep the same `stream-stall-chip` palette
-  // so the visual language stays shared; the AT role + copy carry the
-  // urgency difference.
+  // #5006 / #6392: the variant maps to a resume error code, and the shared
+  // error-presentation registry supplies the headline + a11y role for it —
+  // recoverable → polite `status` (chroxy already recovered), exhausted →
+  // assertive `alert` (the user must act). Same `stream-stall-chip` palette via
+  // ChatErrorFrame; the AT role + copy carry the urgency difference.
   const isExhausted = variant === 'exhausted'
-  const headline = isExhausted
-    ? 'Auto-recovery exhausted — start a new session manually to continue'
-    : 'Previous conversation could not be resumed — starting fresh'
-  const role = isExhausted ? 'alert' : 'status'
+  const presentation = getErrorPresentation(
+    isExhausted ? 'resume_unknown_exhausted' : 'resume_unknown',
+  )
 
   return (
-    <div
-      className="stream-stall-chip"
-      data-testid="resume-unknown-chip"
-      data-variant={variant}
-      role={role}
+    <ChatErrorFrame
+      testId="resume-unknown-chip"
+      variant={variant}
+      role={presentation.role}
       title={errorText}
-    >
-      <span className="stream-stall-chip-text">{headline}</span>
-      {hasId && (
-        <span
-          data-testid="resume-unknown-chip-id"
-          style={ID_SUBTEXT_STYLE}
-        >
-          Attempted id: {attemptedResumeId}
-        </span>
-      )}
-    </div>
+      headline={presentation.headline}
+      subtext={
+        hasId && (
+          <span data-testid="resume-unknown-chip-id" style={ID_SUBTEXT_STYLE}>
+            Attempted id: {attemptedResumeId}
+          </span>
+        )
+      }
+    />
   )
 }
