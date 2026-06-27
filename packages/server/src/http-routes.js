@@ -9,6 +9,7 @@ import { buildDiagnosticsSnapshot } from './diagnostics.js'
 import { getRateLimitKey } from './rate-limiter.js'
 import { listSnapshots, deleteSnapshot } from './snapshots-store.js'
 import { handleEventIngest } from './event-ingest.js'
+import { handleGithubWebhook } from './github-webhook.js'
 import { handleMailboxPing, handleMailboxRegister } from './mailbox-route.js'
 import { isPoolEnabled } from './docker-byok-pool.js'
 import { getSharedPoolStats } from './docker-byok-pool-stats.js'
@@ -437,6 +438,15 @@ export function createHttpHandler(server) {
     // callbacks and guards them per the #5313 pattern.
     if (req.method === 'POST' && snapPath === '/api/events') {
       handleEventIngest(server, req, res)
+      return
+    }
+
+    // Control Room repo-events feed (#5966): GitHub webhook deliveries. Auth is
+    // the X-Hub-Signature-256 HMAC (NOT the ingest secret) — the handler verifies
+    // it over the RAW body before parsing, and stays inert (503) until a secret
+    // is configured. See github-webhook.js.
+    if (req.method === 'POST' && snapPath === '/api/github/webhook') {
+      handleGithubWebhook(server, req, res)
       return
     }
 
