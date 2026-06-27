@@ -18,7 +18,7 @@
  * multi-select values JSON-stringified arrays).
  */
 import { describe, it, expect } from 'vitest'
-import { formatQuestionAnswerSummary } from './questionAnswerSummary'
+import { formatQuestionAnswerSummary } from './question-answer-summary'
 
 describe('formatQuestionAnswerSummary', () => {
   describe('legacy single-question / free-text path', () => {
