@@ -9,6 +9,10 @@
  * Platform-specific types (SessionState, ConnectionState) are defined here.
  */
 
+// #6453 — canonical WIRE attachment type for the sendInput signature (was an
+// inline `{ type; mediaType; data; name }[]`; the app only sends binary).
+import type { BinaryAttachment } from '@chroxy/protocol';
+
 // Re-export shared protocol types from store-core
 export type {
   MessageAttachment,
@@ -483,7 +487,7 @@ export interface MessageInputActions {
   // and seed an optimistic `queuedMessages` entry (rendered with a "Queued"
   // badge) instead of starting a fresh turn.
   addUserMessage: (text: string, attachments?: MessageAttachment[], opts?: { clientMessageId?: string; queued?: boolean }) => void;
-  sendInput: (input: string, wireAttachments?: { type: string; mediaType: string; data: string; name: string }[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
+  sendInput: (input: string, wireAttachments?: BinaryAttachment[], options?: { isVoice?: boolean; clientMessageId?: string }) => 'sent' | 'queued' | false;
   sendInterrupt: () => 'sent' | 'queued' | false;
   // #5938 (#5943) — cancel one queued follow-up by its clientMessageId before
   // it flushes. Returns false (refused) while disconnected; never offline-queued.

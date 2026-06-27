@@ -2,6 +2,10 @@ import * as ImagePicker from 'expo-image-picker';
 import * as DocumentPicker from 'expo-document-picker';
 import { readAsStringAsync } from 'expo-file-system';
 import { Alert } from 'react-native';
+// #6453 — the WIRE shape `toWireAttachments` produces is the protocol's canonical
+// `BinaryAttachment` (the local `Attachment` below is the device-side picker type:
+// id, uri, size — those stay client-side and never cross the socket).
+import type { BinaryAttachment } from '@chroxy/protocol';
 
 // -- Types --
 
@@ -166,7 +170,7 @@ export function formatFileSize(bytes: number): string {
 }
 
 /** Build the wire-format attachments array for the WebSocket message */
-export function toWireAttachments(attachments: Attachment[]): { type: string; mediaType: string; data: string; name: string }[] {
+export function toWireAttachments(attachments: Attachment[]): BinaryAttachment[] {
   return attachments
     .filter((a) => a.data != null)
     .map((a) => ({

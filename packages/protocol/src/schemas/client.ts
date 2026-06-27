@@ -31,6 +31,14 @@ const FileRefAttachmentSchema = z.object({
 
 const AttachmentSchema = z.union([BinaryAttachmentSchema, FileRefAttachmentSchema])
 
+// #6453 — canonical WIRE attachment types, single-sourced from the schemas above
+// (was a loose `WireAttachment` in the dashboard + an inline type in the app).
+// Client-local picker types (device uri / id / size) stay client-side; this is
+// only the wire shape that crosses the socket.
+export type BinaryAttachment = z.infer<typeof BinaryAttachmentSchema>
+export type FileRefAttachment = z.infer<typeof FileRefAttachmentSchema>
+export type Attachment = z.infer<typeof AttachmentSchema>
+
 // -- Device info (optional in auth) --
 const DeviceInfoSchema = z.object({
   deviceId: z.string().max(256).optional(),

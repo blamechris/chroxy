@@ -14,6 +14,36 @@
  * are). This keeps server and client schemas on a single sanity ceiling.
  */
 import { z } from 'zod';
+declare const BinaryAttachmentSchema: z.ZodObject<{
+    type: z.ZodEnum<{
+        image: "image";
+        document: "document";
+    }>;
+    mediaType: z.ZodString;
+    data: z.ZodString;
+    name: z.ZodString;
+}, z.core.$strip>;
+declare const FileRefAttachmentSchema: z.ZodObject<{
+    type: z.ZodLiteral<"file_ref">;
+    path: z.ZodString;
+    name: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
+declare const AttachmentSchema: z.ZodUnion<readonly [z.ZodObject<{
+    type: z.ZodEnum<{
+        image: "image";
+        document: "document";
+    }>;
+    mediaType: z.ZodString;
+    data: z.ZodString;
+    name: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"file_ref">;
+    path: z.ZodString;
+    name: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>]>;
+export type BinaryAttachment = z.infer<typeof BinaryAttachmentSchema>;
+export type FileRefAttachment = z.infer<typeof FileRefAttachmentSchema>;
+export type Attachment = z.infer<typeof AttachmentSchema>;
 export declare const AuthSchema: z.ZodObject<{
     type: z.ZodLiteral<"auth">;
     token: z.ZodString;
@@ -1333,3 +1363,4 @@ export type SessionPresetRevokeMessage = z.infer<typeof SessionPresetRevokeSchem
 export type ClaimPrimaryMessage = z.infer<typeof ClaimPrimarySchema>;
 export type ClientMessage = z.infer<typeof ClientMessageSchema>;
 export type EncryptedEnvelope = z.infer<typeof EncryptedEnvelopeSchema>;
+export {};
