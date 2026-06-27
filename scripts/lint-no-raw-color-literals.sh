@@ -31,17 +31,40 @@ BASELINE="scripts/no-raw-color-literals-baseline.txt"
 # 3/4/6/8-digit hex color literals (#fff, #ffff, #4a9eff, #4a9eff22).
 PAT='#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})'
 
+# The recheck pass below strips comments with perl. Fail LOUD if perl is missing
+# rather than letting `set -e` + the `|| true` swallow turn a perl-less runner
+# into a silently-disabled guard (every candidate would be dropped → all files
+# pass). perl is present on both CI runner pools; this just keeps it honest.
+command -v perl >/dev/null 2>&1 || {
+  echo "::error::lint-no-raw-color-literals.sh requires perl (used to strip comments before the hex re-check)"
+  exit 1
+}
+
 # Styling files (components + screens) that contain at least one hex literal,
 # excluding tests, generated bundles, and the xterm color assets. The color
 # *sources* (dashboard src/theme, mobile src/constants/colors.ts) are out of
 # scope by construction — they live outside components/screens.
 collect() {
+  # First pass: candidate files matching the raw pattern (a superset — includes
+  # files whose only "match" is a #NNNN issue reference in a comment). Second
+  # pass: re-check each candidate with COMMENTS STRIPPED, and keep only those
+  # that still contain a hex literal. Real color literals live in code / CSS
+  # values; #NNNN issue refs (3-4 hex digits → they trip the {3,4} branch) live
+  # exclusively in // and /* */ comments — so stripping comments removes the
+  # false positives without weakening the guard on actual colors (#6423).
   grep -rlE "$PAT" \
     packages/dashboard/src/components \
     packages/app/src/components \
     packages/app/src/screens \
     --include='*.ts' --include='*.tsx' --include='*.css' 2>/dev/null \
     | grep -vE '\.test\.|/__tests__/|\.generated\.|xterm|\.stories\.' \
+    | while IFS= read -r f; do
+        # Strip // line comments and /* */ block comments (the latter across
+        # newlines, via the /s flag), then test for a remaining hex literal.
+        if perl -0777 -pe 's{//[^\n]*}{}g; s{/\*.*?\*/}{}gs' "$f" 2>/dev/null | grep -Eq "$PAT"; then
+          printf '%s\n' "$f"
+        fi
+      done \
     | LC_ALL=C sort
 }
 
