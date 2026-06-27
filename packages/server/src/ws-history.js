@@ -500,7 +500,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
         try {
           ws.send(JSON.stringify({ type: 'server_error', message: 'Encryption required but key exchange timed out. Please reconnect.', recoverable: false }))
         } catch (_) {}
-        ws.close(1008, 'Key exchange timeout')
+        // Guard close() too: if the socket is already CLOSING/CLOSED when this
+        // timer fires (a race with a concurrent client disconnect), a bare
+        // ws.close() can throw — and the uncaught error would escape this setTimeout
+        // callback. Mirrors the guarded close() at the other timeout/error sites.
+        try {
+          ws.close(1008, 'Key exchange timeout')
+        } catch (_) {}
       }
     }, keyExchangeTimeoutMs)
   }
