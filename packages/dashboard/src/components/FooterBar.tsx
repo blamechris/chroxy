@@ -8,7 +8,7 @@
  */
 
 import { useEffect, useState } from 'react'
-import type { SessionIntervention } from '@chroxy/store-core'
+import type { SessionIntervention, ChatActivityState } from '@chroxy/store-core'
 import {
   costTooltip,
   contextTooltip,
@@ -21,7 +21,7 @@ declare const __APP_VERSION__: string
 export interface FooterBarProps {
   connectionPhase: string
   /** Chat redesign #6392: chat-activity state → breathe the dot when connected + active. */
-  chatActivityState?: string
+  chatActivityState?: ChatActivityState
   tunnelReady?: boolean
   serverPhase?: 'tunnel_warming' | 'tunnel_verifying' | 'ready' | null
   tunnelProgress?: { attempt: number; maxAttempts: number } | null
