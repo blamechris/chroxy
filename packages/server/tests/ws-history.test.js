@@ -800,6 +800,25 @@ describe('sendPostAuthInfo — encryption', () => {
     if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
   })
 
+  // Swarm-audit (W2): the key-exchange timeout handler must survive a throwing
+  // ws.close() (socket already CLOSING from a concurrent disconnect) — otherwise
+  // the uncaught error escapes the setTimeout callback.
+  it('does not crash when ws.close() throws as the key-exchange timeout fires', async () => {
+    const ws = makeFakeWs()
+    ws.close = () => { throw new Error('socket already closing') }
+    const ctx = makeCtx({ encryptionEnabled: true, keyExchangeTimeoutMs: 1 })
+    const client = registerClient(ctx, ws, { socketIp: '203.0.113.1' })
+
+    sendPostAuthInfo(ctx, ws)
+    assert.equal(client.encryptionPending, true)
+
+    // Let the (1ms) timeout fire. If the close() throw escaped the timer callback
+    // the process would crash before the assertion below; the guard swallows it.
+    await new Promise((r) => setTimeout(r, 25))
+    assert.equal(client.encryptionPending, false, 'timeout handler completed despite the throwing close()')
+    if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+  })
+
   it('bypasses encryption requirement for 127.0.0.1 when localhostBypass enabled', () => {
     const ws = makeFakeWs()
     const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true })
