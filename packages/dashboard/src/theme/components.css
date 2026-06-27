@@ -2612,12 +2612,16 @@ button.sidebar-token-view-session-row:hover {
   z-index: 2;
   transition: background var(--dur-base) var(--ease-standard);
 }
+/* #6392 — when a tool is mid-flight the rail takes the tool's colour (--rail-color,
+   set inline from the tool-presentation registry); otherwise it falls back to the
+   activity-state colour. Only the two states a tool can run in (thinking / busy)
+   read --rail-color — waiting / error keep their fixed signal colour. */
 .presence-rail[data-activity-state="thinking"] {
-  background: var(--accent-blue);
+  background: var(--rail-color, var(--accent-blue));
   animation: presence-rail-breathe var(--rail-breathe) var(--ease-standard) infinite;
 }
 .presence-rail[data-activity-state="busy"] {
-  background: var(--accent-purple);
+  background: var(--rail-color, var(--accent-purple));
   animation: presence-rail-breathe var(--rail-heartbeat) var(--ease-standard) infinite;
 }
 .presence-rail[data-activity-state="waiting"] {
