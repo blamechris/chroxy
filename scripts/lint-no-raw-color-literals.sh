@@ -31,6 +31,15 @@ BASELINE="scripts/no-raw-color-literals-baseline.txt"
 # 3/4/6/8-digit hex color literals (#fff, #ffff, #4a9eff, #4a9eff22).
 PAT='#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})'
 
+# The recheck pass below strips comments with perl. Fail LOUD if perl is missing
+# rather than letting `set -e` + the `|| true` swallow turn a perl-less runner
+# into a silently-disabled guard (every candidate would be dropped → all files
+# pass). perl is present on both CI runner pools; this just keeps it honest.
+command -v perl >/dev/null 2>&1 || {
+  echo "::error::lint-no-raw-color-literals.sh requires perl (used to strip comments before the hex re-check)"
+  exit 1
+}
+
 # Styling files (components + screens) that contain at least one hex literal,
 # excluding tests, generated bundles, and the xterm color assets. The color
 # *sources* (dashboard src/theme, mobile src/constants/colors.ts) are out of
