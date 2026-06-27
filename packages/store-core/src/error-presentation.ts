@@ -25,13 +25,16 @@ import { isRetryableAskUserQuestionError } from './ask-user-question-errors'
 export type ErrorKind = 'stall' | 'question' | 'resume' | 'generic'
 
 export interface ErrorPresentation {
-  kind: ErrorKind
+  // Fields are `readonly`: getErrorPresentation returns shared module-level
+  // singletons, so a consumer that mutated one would corrupt the registry for
+  // every later caller. readonly blocks that at compile time for all (TS) consumers.
+  readonly kind: ErrorKind
   /** ARIA live politeness: `status` (polite) for recoverable / auto-handled
    *  errors, `alert` (assertive) for terminal ones the user must act on. */
-  role: 'status' | 'alert'
+  readonly role: 'status' | 'alert'
   /** Default human-facing headline. Consumers may override for the dynamic
    *  cases (e.g. the stall chip's "No response for 30s — retry?"). */
-  headline: string
+  readonly headline: string
 }
 
 /** Per-code presentation. The AskUserQuestion teardown family (six codes, #5793)
