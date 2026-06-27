@@ -29,6 +29,12 @@ describe('conversation-search', () => {
     await rm(tmpDir, { recursive: true, force: true })
   })
 
+  // #6448 — bound the query length (every candidate file is substring-scanned).
+  it('returns [] for a query longer than the max length (DoS guard)', async () => {
+    const res = await searchConversations('x'.repeat(501))
+    assert.deepEqual(res, [])
+  })
+
   describe('extractSearchableText', () => {
     it('extracts text from user message with array content', () => {
       const entry = { type: 'user', message: { content: [{ type: 'text', text: 'hello world' }] } }
