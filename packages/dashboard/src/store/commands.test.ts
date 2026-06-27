@@ -42,6 +42,17 @@ describe('useCommands', () => {
     expect(names).toContain('Switch to Terminal')
   })
 
+  it('hides the terminal commands for providers without a PTY', () => {
+    const { result } = renderHook(() => useCommands(false))
+    const names = result.current.map(c => c.name)
+    // No terminal view exists for non-PTY providers → these would be no-ops.
+    expect(names).not.toContain('Switch to Terminal')
+    expect(names).not.toContain('Toggle View')
+    // Non-terminal commands stay.
+    expect(names).toContain('Switch to Chat')
+    expect(names).toContain('New Session')
+  })
+
   it('includes session commands', () => {
     const { result } = renderHook(() => useCommands())
     const names = result.current.map(c => c.name)

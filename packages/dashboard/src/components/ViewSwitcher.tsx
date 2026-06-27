@@ -108,7 +108,7 @@ export function ViewSwitcher({
           <button className={`view-tab${viewMode === 'chat' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('chat'); setSplitMode(null); persistSplitMode(null) }} type="button">Chat</button>
         )}
         {showTerminalTab && (
-          <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Output</button>
+          <button className={`view-tab${viewMode === 'terminal' && !splitMode ? ' active' : ''}`} onClick={() => { setViewMode('terminal'); setSplitMode(null); persistSplitMode(null) }} type="button">Terminal</button>
         )}
         {/* #5200/#5204: the Control Room is launched from the bottom sidebar
             panel slot (its header "Control Room" button) and opens as its own
