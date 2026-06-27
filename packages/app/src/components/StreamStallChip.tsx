@@ -53,6 +53,12 @@ export function StreamStallChip({
 }: StreamStallChipProps) {
   const [detailVisible, setDetailVisible] = useState(false);
 
+  // #6429: politeness is derived from the registry role for parity with the
+  // other error chips. stream_stall is role 'status', so this chip always
+  // resolves to 'polite'; the derivation just guards against a future role
+  // change. accessibilityRole stays 'alert' (the RN convention for amber chips).
+  const liveRegion = getErrorPresentation('stream_stall').role === 'alert' ? 'assertive' : 'polite';
+
   const handleRetry = useCallback(() => {
     onRetry?.();
   }, [onRetry]);
@@ -65,7 +71,7 @@ export function StreamStallChip({
     <Pressable
       testID="stream-stall-chip"
       accessibilityRole="alert"
-      accessibilityLiveRegion="polite"
+      accessibilityLiveRegion={liveRegion}
       accessibilityLabel={headline}
       accessibilityHint={errorText}
       // Long-press reveals the underlying server diagnostic text without

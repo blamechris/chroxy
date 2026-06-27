@@ -170,6 +170,20 @@ describe('ResumeUnknownChip (#4971)', () => {
       expect(chip.props.accessibilityLabel).not.toContain('starting fresh');
     });
 
+    // #6429: live-region politeness is derived from the registry role —
+    // exhausted (terminal/alert) announces assertively, recoverable (status)
+    // politely. accessibilityRole stays 'alert' for both (label carries copy).
+    it('derives accessibilityLiveRegion from the role: exhausted→assertive, recoverable→polite (#6429)', () => {
+      const exhausted = render(<ResumeUnknownChip variant="exhausted" errorText="x" />)
+        .root.findByProps({ testID: 'resume-unknown-chip' });
+      const recoverable = render(<ResumeUnknownChip variant="recoverable" errorText="x" />)
+        .root.findByProps({ testID: 'resume-unknown-chip' });
+      expect(exhausted.props.accessibilityLiveRegion).toBe('assertive');
+      expect(recoverable.props.accessibilityLiveRegion).toBe('polite');
+      expect(exhausted.props.accessibilityRole).toBe('alert');
+      expect(recoverable.props.accessibilityRole).toBe('alert');
+    });
+
     it('defaults to the recoverable headline when variant is omitted (back-compat)', () => {
       // Existing call sites pass no variant — they must continue to render
       // the recoverable copy unchanged.
