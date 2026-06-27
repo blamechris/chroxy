@@ -58,6 +58,20 @@ describe('@chroxy/protocol schemas', () => {
     assert.deepEqual(ok.data.historyCursors, { s1: 5, s2: 10 }, 'a normal small cursor map passes through')
   })
 
+  // Pin the exact cap boundaries (review #6436) — these lines regress if someone
+  // tweaks the cap without updating the test.
+  it('bounds are exact: 64/256 at-cap pass, 65/257 one-over coerce', async () => {
+    const { AuthSchema } = await import('../src/schemas/client.ts')
+    const parse = (extra) => AuthSchema.safeParse({ type: 'auth', token: 't', ...extra }).data
+    assert.equal(parse({ capabilities: Array(64).fill('c') }).capabilities.length, 64, '64 capabilities pass')
+    assert.deepEqual(parse({ capabilities: Array(65).fill('c') }).capabilities, [], '65 coerce to []')
+    assert.equal(parse({ capabilities: ['x'.repeat(256)] }).capabilities.length, 1, '256-char capability passes')
+    assert.deepEqual(parse({ capabilities: ['x'.repeat(257)] }).capabilities, [], '257-char capability coerces to []')
+    const mk = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`s${i}`, i]))
+    assert.equal(Object.keys(parse({ historyCursors: mk(256) }).historyCursors).length, 256, '256 cursors pass')
+    assert.equal(parse({ historyCursors: mk(257) }).historyCursors, undefined, '257 cursors coerce to undefined')
+  })
+
   // #5270 (Control Room Phase 2a): cancel_activity client→server message.
   it('validates cancel_activity with an activityId (sessionId optional)', async () => {
     const { CancelActivitySchema } = await import('../src/schemas/client.ts')
