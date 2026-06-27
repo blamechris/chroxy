@@ -2345,6 +2345,15 @@ export class SessionManager extends EventEmitter {
     // Restore cost tracking data (v1+), remapping old IDs to new IDs.
     this._costBudget.restore(state, oldToNew.size > 0 ? oldToNew : null)
 
+    // Swarm-audit: drop failed-restore entries whose session has been inactive
+    // past the TTL. A chronically-failing session (e.g. a missing env var the
+    // user never fixes) otherwise re-fails + re-persists on EVERY boot, growing
+    // _failedRestores + session-state.json without bound (clearFailedRestore is
+    // only called on a user retry/dismiss, which may never come). Runs BEFORE the
+    // flush (so the prune lands on disk) and BEFORE the worktree sweep (so a
+    // pruned session's worktree is reclaimed too).
+    this._pruneStaleFailedRestores()
+
     // Now that history and budget are reseeded, flush once so the on-disk
     // state reflects the restored state (and so any subsequent abrupt
     // shutdown preserves it). Flush if we restored any session OR had any
@@ -2397,6 +2406,35 @@ export class SessionManager extends EventEmitter {
     const sessionId = saved.id || randomBytes(16).toString('hex')
     this._failedRestores.set(sessionId, { saved, error: err })
     return sessionId
+  }
+
+  /**
+   * Drop failed-restore entries whose session has been inactive longer than the
+   * TTL, so a chronically-failing session can't grow _failedRestores +
+   * session-state.json without bound across boots. Conservative by design: a
+   * recently-active failure is KEPT (it still surfaces in the "needs attention"
+   * UI for retry), and an entry with no usable timestamp is kept rather than
+   * guessed-stale. Failed-restore entries are display + retry only, so pruning a
+   * long-dead one has no operational effect beyond removing the stale UI entry.
+   * @param {number} [now]
+   * @returns {number} count pruned
+   */
+  _pruneStaleFailedRestores(now = Date.now()) {
+    const TTL_MS = 30 * 24 * 60 * 60 * 1000 // 30 days
+    let pruned = 0
+    for (const [sessionId, entry] of this._failedRestores) {
+      const saved = entry?.saved
+      const last = (typeof saved?.lastActivityAt === 'number' && saved.lastActivityAt > 0)
+        ? saved.lastActivityAt
+        : (typeof saved?.createdAt === 'number' && saved.createdAt > 0 ? saved.createdAt : null)
+      if (last !== null && Number.isFinite(last) && now - last > TTL_MS) {
+        this._failedRestores.delete(sessionId)
+        pruned++
+        log.info(`Pruned stale failed-restore "${saved?.name || sessionId}" (inactive since ${new Date(last).toISOString()})`)
+      }
+    }
+    if (pruned > 0) log.info(`Pruned ${pruned} stale failed-restore session(s) (inactive > 30d)`)
+    return pruned
   }
 
   /**
