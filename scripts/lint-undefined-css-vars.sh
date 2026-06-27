@@ -28,13 +28,13 @@ command -v perl >/dev/null 2>&1 || {
   exit 1
 }
 
-# Grandfathered: short semantic vars referenced (fallback-less) in components.css
-# that the theme does not define (it defines suffixed forms like --accent-blue).
-# These pre-date the lint and need a theme-author decision to resolve — tracked
-# in https://github.com/blamechris/chroxy/issues/6444. The list only FREEZES the
-# known backlog; any NEW undefined reference is still caught. Shrink it as #6444
-# is worked.
-ALLOW="--accent --accent-yellow --bg-active --bg-hover --border --border-muted --error --text-bright --text-tertiary"
+# Grandfathered backlog: EMPTY (#6444 resolved). The 9 short semantic vars that
+# previously lacked a definition (--accent, --accent-yellow, --bg-active,
+# --bg-hover, --border, --border-muted, --error, --text-bright, --text-tertiary)
+# are now defined in packages/dashboard/src/theme/theme.css, so the lint actively
+# guards them. Re-add a name here ONLY to freeze a NEW pre-existing-undefined
+# backlog item, with an issue link; prefer defining it.
+ALLOW=""
 
 # Comment-stripped content of every styling file, as one stream. CSS files get
 # ONLY the /* */ strip — CSS has no // line comments, so stripping // there could
@@ -72,4 +72,4 @@ if [ -n "$undefined" ]; then
   exit 1
 fi
 
-echo "OK — every fallback-less var(--…) resolves to a defined custom property ($(printf '%s\n' $ALLOW | grep -c .) grandfathered, tracked in #6444)."
+echo "OK — every fallback-less var(--…) resolves to a defined custom property ($(printf '%s\n' $ALLOW | grep -c .) grandfathered; #6444 resolved, all now defined)."
