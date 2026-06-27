@@ -31,6 +31,48 @@ describe('SessionMessageHistory', () => {
     })
   })
 
+  // #6431 — an over-size stream delta is dropped from history but still reached
+  // the client, so recordHistory signals the drop (once per stream) and the
+  // SessionManager turns that into a client-visible error instead of a silent
+  // desync. maxPendingStreamSize is injectable so the test needs no 100MB alloc.
+  describe('stream truncation signalling (#6431)', () => {
+    it('returns truncated:true once, then false, when deltas exceed the size cap', () => {
+      const h = new SessionMessageHistory({ maxPendingStreamSize: 50 })
+      h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+      const r1 = h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(100) })
+      assert.equal(r1.persistNeeded, false)
+      assert.equal(r1.truncated, true, 'first over-size delta signals truncation')
+      const r2 = h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(100) })
+      assert.equal(r2.truncated, false, 'subsequent over-size deltas dedupe (no re-signal)')
+    })
+
+    it('does not signal truncation for a normal-size stream', () => {
+      const h = new SessionMessageHistory({ maxPendingStreamSize: 50 })
+      h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+      const r = h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'small' })
+      assert.ok(!r.truncated)
+    })
+
+    it('releases the once-per-stream guard on stream_end (a fresh stream re-signals)', () => {
+      const h = new SessionMessageHistory({ maxPendingStreamSize: 50 })
+      h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+      h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(100) })
+      h.recordHistory('s1', 'stream_end', { messageId: 'm1' })
+      h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+      const r = h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(100) })
+      assert.equal(r.truncated, true, 'guard released on stream_end → re-signals')
+    })
+
+    it('cleanupSession releases lingering truncation guards (no leak)', () => {
+      const h = new SessionMessageHistory({ maxPendingStreamSize: 50 })
+      h.recordHistory('s1', 'stream_start', { messageId: 'm1' })
+      h.recordHistory('s1', 'stream_delta', { messageId: 'm1', delta: 'x'.repeat(100) })
+      assert.equal(h._truncatedStreams.size, 1)
+      h.cleanupSession('s1')
+      assert.equal(h._truncatedStreams.size, 0, 'cleanupSession releases the guard')
+    })
+  })
+
   describe('getHistory / getHistoryCount', () => {
     it('returns empty array for unknown session', () => {
       assert.deepStrictEqual(history.getHistory('unknown'), [])

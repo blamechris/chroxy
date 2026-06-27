@@ -2599,9 +2599,26 @@ export class SessionManager extends EventEmitter {
    * Delegates to SessionMessageHistory and triggers persist when needed.
    */
   _recordHistory(sessionId, event, data) {
-    const { persistNeeded } = this._history.recordHistory(sessionId, event, data)
+    const { persistNeeded, truncated } = this._history.recordHistory(sessionId, event, data)
     if (persistNeeded) {
       this._schedulePersist()
+    }
+    if (truncated) {
+      // #6431 — an over-size stream delta was dropped from history. The client
+      // still received it (forwarded independently via the stream_delta proxy),
+      // so its local copy now diverges from the persisted message. Surface a
+      // client-visible error so the truncation is observable instead of a silent
+      // desync. Emitted once per stream (the history layer dedupes).
+      this.emit('session_event', {
+        sessionId,
+        event: 'error',
+        data: {
+          code: 'stream_truncated',
+          message: 'A response exceeded the server buffer limit and was truncated server-side; the saved message may be incomplete.',
+          recoverable: true,
+          messageId: data?.messageId,
+        },
+      })
     }
   }
 
