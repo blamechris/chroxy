@@ -27,8 +27,10 @@ describe('SessionManager — stream truncation client signal (#6431)', () => {
     assert.equal(errors.length, 1, 'truncation surfaces exactly one client-visible error (deduped)')
     assert.equal(errors[0].sessionId, 's1')
     assert.equal(errors[0].data.code, 'stream_truncated')
-    assert.equal(errors[0].data.messageId, 'm1')
-    assert.equal(errors[0].data.recoverable, true)
+    assert.ok(errors[0].data.message, 'carries a human-readable message')
+    // messageId/recoverable are intentionally absent — the normalizer's generic
+    // error builder forwards only code + message, so we don't emit dead fields.
+    assert.equal(errors[0].data.messageId, undefined)
 
     sm.destroy?.()
     try { rmSync(tmpState, { force: true }) } catch { /* never written (no persistNeeded) */ }
