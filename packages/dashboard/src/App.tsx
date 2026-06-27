@@ -588,7 +588,7 @@ export function App() {
   const clearSearchResults = useConnectionStore(s => s.clearSearchResults)
 
   // Command palette
-  const commands = useCommands()
+  const commands = useCommands(isPtyProvider)
   const [paletteOpen, setPaletteOpen] = useState(false)
 
   // Local state

@@ -33,23 +33,23 @@ function renderSwitcher(overrides: Partial<Parameters<typeof ViewSwitcher>[0]> =
 }
 
 describe('ViewSwitcher tab gates', () => {
-  it('shows both Chat and Output by default (chat provider path unaffected)', () => {
+  it('shows both Chat and Terminal by default (chat provider path unaffected)', () => {
     renderSwitcher({ showTerminalTab: true })
     expect(screen.getByRole('button', { name: 'Chat' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Output' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Terminal' })).toBeInTheDocument()
   })
 
-  it('hides the Output tab for providers without a PTY (showTerminalTab=false)', () => {
+  it('hides the Terminal tab for providers without a PTY (showTerminalTab=false)', () => {
     renderSwitcher({ showTerminalTab: false })
     expect(screen.getByRole('button', { name: 'Chat' })).toBeInTheDocument()
-    expect(screen.queryByRole('button', { name: 'Output' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Terminal' })).not.toBeInTheDocument()
   })
 
   it('hides the Chat tab for terminal-only providers (#5986 user-shell)', () => {
     renderSwitcher({ showChatTab: false, showTerminalTab: true })
     expect(screen.queryByRole('button', { name: 'Chat' })).not.toBeInTheDocument()
     // The Output terminal stays — that's the only surface a user-shell has.
-    expect(screen.getByRole('button', { name: 'Output' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Terminal' })).toBeInTheDocument()
   })
 
   // #5998 — dedicated Split + showChatTab=false case: a terminal-only provider
@@ -60,7 +60,7 @@ describe('ViewSwitcher tab gates', () => {
     renderSwitcher({ showChatTab: false, showTerminalTab: true })
     expect(screen.queryByRole('button', { name: 'Split' })).not.toBeInTheDocument()
     // The Output terminal stays — the only surface a user-shell has.
-    expect(screen.getByRole('button', { name: 'Output' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Terminal' })).toBeInTheDocument()
   })
 
   it('shows Split only when BOTH chat and terminal surfaces exist (#5997)', () => {
