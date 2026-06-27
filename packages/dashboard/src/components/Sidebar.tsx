@@ -5,7 +5,7 @@
  * Collapsible with Cmd+B toggle.
  */
 import { useState, useCallback, useRef, useMemo } from 'react'
-import type { CumulativeUsage, SessionInfo, SessionVisualStatus, SessionRole } from '@chroxy/store-core'
+import type { CumulativeUsage, SessionInfo, SessionVisualStatus, SessionRole, ChatActivityState } from '@chroxy/store-core'
 import { formatCostBadge, formatCostBreakdown } from '@chroxy/store-core'
 import { DEFAULT_PROVIDER } from '@chroxy/protocol'
 import { ConversationSearch } from './ConversationSearch'
@@ -69,6 +69,10 @@ export interface SidebarProps {
   width: number
   filter: string
   serverStatus: 'connected' | 'disconnected' | 'reconnecting'
+  /** #6418 — active session's chat-activity state. The connection dots breathe
+      (busyPulse) while it's thinking/busy/waiting, mirroring the header+footer
+      dots (#6415). Connection colour stays serverStatus-driven. */
+  chatActivityState?: ChatActivityState
   tunnelUrl: string | null
   /** #5281 ①.3 — all clients attached to the daemon, for the shared-session
       presence indicator in the footer. */
@@ -130,6 +134,7 @@ export function Sidebar({
   width,
   filter,
   serverStatus,
+  chatActivityState,
   tunnelUrl,
   connectedClients,
   activePrimaryClientId,
@@ -689,6 +694,7 @@ export function Sidebar({
             <span className="sidebar-projects-title">Projects</span>
             <span
               className={`sidebar-status-dot ${serverStatus}`}
+              data-activity={serverStatus === 'connected' ? chatActivityState : undefined}
               data-testid="sidebar-projects-status-dot"
               // Decorative — the adjacent status label already announces the
               // state, so hide the dot from screen readers to avoid a
@@ -980,11 +986,15 @@ export function Sidebar({
 
           {/* Footer */}
           <div className="sidebar-footer" data-testid="sidebar-footer">
-            <span className={`sidebar-status-dot ${serverStatus}`} title={
-              serverStatus === 'connected' ? 'Server connected'
-                : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
-                : 'Server disconnected'
-            } />
+            <span
+              className={`sidebar-status-dot ${serverStatus}`}
+              data-activity={serverStatus === 'connected' ? chatActivityState : undefined}
+              title={
+                serverStatus === 'connected' ? 'Server connected'
+                  : serverStatus === 'reconnecting' ? 'Reconnecting to server...'
+                  : 'Server disconnected'
+              }
+            />
             <span className="sidebar-status-label">{statusLabel}</span>
             {tunnelUrl && (
               <span className="sidebar-tunnel" title={tunnelUrl}>

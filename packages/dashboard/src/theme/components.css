@@ -947,7 +947,11 @@
 
 .sidebar-session-dot.status-working {
   background: var(--accent-green);
-  animation: dotPulse 1.5s ease-in-out infinite;
+  /* #6419 — dotBreathe (opacity + gentle scale), NOT dotPulse: dotPulse animates
+     scale(0)->scale(1), so the working dot vanished for 80% of each cycle instead
+     of breathing. dotPulse stays for the .thinking-dot loader, where the staggered
+     bounce is intended. */
+  animation: dotBreathe 1.5s ease-in-out infinite;
 }
 
 .sidebar-session-dot.status-stale {
@@ -1727,6 +1731,16 @@ button.sidebar-token-view-session-row:hover {
 
 .sidebar-status-dot.reconnecting {
   background: var(--status-restarting);
+}
+
+/* #6418 — the sidebar connection dots breathe while the active session is
+   thinking/busy/waiting, mirroring the header+footer dots (#6415). Gated on
+   .connected so a disconnected/reconnecting dot never animates; colour stays
+   serverStatus-driven. idle + error stay still. Reuses busyPulse. */
+.sidebar-status-dot.connected[data-activity="thinking"],
+.sidebar-status-dot.connected[data-activity="busy"],
+.sidebar-status-dot.connected[data-activity="waiting"] {
+  animation: busyPulse 1.2s ease-in-out infinite;
 }
 
 .sidebar-tunnel {
@@ -7612,7 +7626,8 @@ button.sidebar-token-view-session-row:hover {
   /* #6392: match the connection-dot pulse specificity (0,3,0) so this WINS the
      cascade — a bare .status-dot (0,1,0) would lose to .status-dot.connected[…]. */
   .status-dot.connected[data-activity],
-  .footer-status-dot.connected[data-activity] {
+  .footer-status-dot.connected[data-activity],
+  .sidebar-status-dot.connected[data-activity] {
     animation: none;
   }
 
