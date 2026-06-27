@@ -44,6 +44,7 @@
 import { readFileSync, statSync, writeFileSync, chmodSync, renameSync, mkdirSync, unlinkSync, existsSync } from 'fs'
 import { join, dirname } from 'path'
 import { homedir } from 'os'
+import { randomBytes } from 'crypto'
 import { maskApiKey } from './byok-credentials.js'
 import * as realKeychain from './keychain.js'
 import { createLogger } from './logger.js'
@@ -374,7 +375,10 @@ function writeStoreAtomically(target, nextObj) {
   const key = getOrCreateMasterKey(activeKeychain())
   const payload = key ? encryptJson(nextObj, key) : nextObj
 
-  const tmp = `${target}.tmp.${process.pid}.${Math.random().toString(36).slice(2, 10)}`
+  // randomBytes (not Math.random) for the atomic-write temp suffix — a predictable
+  // temp name is a (minor) symlink/pre-creation foothold; cryptographic randomness
+  // costs nothing here and matches the pattern in path-hash-trust-ledger.js.
+  const tmp = `${target}.tmp.${process.pid}.${randomBytes(4).toString('hex')}`
   let renamed = false
   try {
     writeFileSync(tmp, JSON.stringify(payload, null, 2), { mode: 0o600 })
