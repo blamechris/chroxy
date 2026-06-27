@@ -88,6 +88,13 @@ export interface AdapterResult {
    * asserts they apply the SAME (url, previousUrl).
    */
   rotatedTunnelUrls: Array<{ url: string; previousUrl: string | null }>
+  /**
+   * Raw terminal-mirror writes via `appendTerminalData` (#6449 slice 1), in
+   * order — from the raw / raw_background / terminal_output cases. BOTH clients
+   * call it once per accepted frame (the app's extra useTerminalStore mirror is a
+   * platform side-effect below the hook), so the contract asserts identical writes.
+   */
+  terminalWrites: string[]
 }
 
 /** Which client an adapter models — drives the `updateSession` divergence. */
@@ -132,6 +139,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   const infoNotifications: string[] = []
   const switchedSessions: string[] = []
   const rotatedTunnelUrls: AdapterResult['rotatedTunnelUrls'] = []
+  const terminalWrites: string[] = []
 
   // Reproduce each client's real `updateSession`. Both share the
   // "no-op on missing session / empty patch" guard; they diverge only in the
@@ -166,6 +174,12 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // live `flat` ref so the web-task upsert fixtures observe identical results.
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
+    // #6449 slice 1 — terminal-mirror cases record one write per accepted frame.
+    // Both clients call this once; the app's extra useTerminalStore mirror is a
+    // platform side-effect below the hook, modelled as out-of-contract here.
+    appendTerminalData: (data) => {
+      terminalWrites.push(data)
+    },
     // #5618 — `alert` is a transient UI side-effect OUTSIDE the shared store-state
     // contract (no fixture asserts it), modelled as a no-op for the contract surface.
     alert: () => {},
@@ -285,7 +299,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
   return {
     adapter,
     get result(): AdapterResult {
-      return { sessions, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions, rotatedTunnelUrls }
+      return { sessions, flat, added, callbacks, serverErrors, infoNotifications, switchedSessions, rotatedTunnelUrls, terminalWrites }
     },
     setActive: (id: string | null) => {
       activeSessionId = id
