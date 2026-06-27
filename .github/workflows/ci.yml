@@ -454,6 +454,9 @@ jobs:
       - name: No raw color literals in new styling files
         run: bash scripts/lint-no-raw-color-literals.sh
 
+      - name: No fallback-less var(--…) to an undefined CSS custom property
+        run: bash scripts/lint-undefined-css-vars.sh
+
   store-core-tests:
     name: Store Core Tests
     # Self-hosted (#6046): the prior install OOM (exit 137) was the 7.7GB Docker
