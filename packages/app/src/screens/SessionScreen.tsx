@@ -821,22 +821,13 @@ export function SessionScreen() {
         content: 'Message queued — waiting for reconnection...',
         timestamp: Date.now(),
       });
-    } else if (result === false) {
-      // #6451 — the send AND the offline-enqueue both failed (offline queue
-      // full), so the message never left. If we optimistically showed a 'Queued'
-      // badge (busy / send-while-streaming), no server message_queued/dequeued
-      // will ever reconcile it — roll it back so it doesn't linger forever, and
-      // tell the user the send failed.
-      const store = useConnectionStore.getState();
-      if (busy && (viewMode === 'chat' || viewMode === 'files')) {
-        store.clearOptimisticQueuedMessage(clientMessageId);
-      }
-      store.addMessage({
-        id: `send-failed-${Date.now()}`,
-        type: 'system',
-        content: "Couldn't send — the message queue is full. Reconnect and try again.",
-        timestamp: Date.now(),
-      });
+    } else if (result === false && busy && (viewMode === 'chat' || viewMode === 'files')) {
+      // #6451 — the send AND the offline-enqueue both failed (queue full), so no
+      // server message_queued/dequeued will reconcile the optimistic 'Queued'
+      // badge we added when busy — roll it back so it doesn't linger forever.
+      // (enqueueMessage already surfaced a 'couldn't queue' system message via
+      // notifyQueueFailure, so we don't add a duplicate notice here.)
+      useConnectionStore.getState().clearOptimisticQueuedMessage(clientMessageId);
     }
   };
   // Refresh the live implementation each render, then expose a stable wrapper.
