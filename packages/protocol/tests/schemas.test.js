@@ -48,19 +48,25 @@ describe('@chroxy/protocol schemas', () => {
     assert.deepEqual(ok.data.capabilities, ['voice', 'terminal'], 'a normal small list passes through')
   })
 
-  it('degrades an oversized historyCursors map to undefined (full replay, no reject)', async () => {
+  it('rejects an oversized historyCursors map (>256) and an invalid cursor value (#5555.3)', async () => {
     const { AuthSchema } = await import('../src/schemas/client.ts')
+    // Unlike capabilities (graceful .catch([])), historyCursors has NO .catch:
+    // its established contract is to REJECT malformed input (#5555.3), and the
+    // size cap rejects an abusive map rather than silently degrading it.
     const huge = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`s${i}`, i]))
-    const res = AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: huge })
-    assert.ok(res.success, 'oversized historyCursors must not reject the auth')
-    assert.equal(res.data.historyCursors, undefined, 'oversized cursor map degrades to undefined (full replay)')
+    assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: huge }).success, false,
+      'an oversized cursor map (>256) rejects the auth')
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 'x']) {
+      assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: { s1: bad } }).success, false,
+        `an invalid cursor value (${String(bad)}) rejects the auth (#5555.3 preserved)`)
+    }
     const ok = AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: { s1: 5, s2: 10 } })
     assert.deepEqual(ok.data.historyCursors, { s1: 5, s2: 10 }, 'a normal small cursor map passes through')
   })
 
   // Pin the exact cap boundaries (review #6436) — these lines regress if someone
   // tweaks the cap without updating the test.
-  it('bounds are exact: 64/256 at-cap pass, 65/257 one-over coerce', async () => {
+  it('bounds are exact: at-cap pass; capabilities coerce, historyCursors reject one-over', async () => {
     const { AuthSchema } = await import('../src/schemas/client.ts')
     const parse = (extra) => AuthSchema.safeParse({ type: 'auth', token: 't', ...extra }).data
     assert.equal(parse({ capabilities: Array(64).fill('c') }).capabilities.length, 64, '64 capabilities pass')
@@ -68,8 +74,9 @@ describe('@chroxy/protocol schemas', () => {
     assert.equal(parse({ capabilities: ['x'.repeat(256)] }).capabilities.length, 1, '256-char capability passes')
     assert.deepEqual(parse({ capabilities: ['x'.repeat(257)] }).capabilities, [], '257-char capability coerces to []')
     const mk = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`s${i}`, i]))
-    assert.equal(Object.keys(parse({ historyCursors: mk(256) }).historyCursors).length, 256, '256 cursors pass')
-    assert.equal(parse({ historyCursors: mk(257) }).historyCursors, undefined, '257 cursors coerce to undefined')
+    // capabilities coerces (graceful .catch); historyCursors rejects (strict) — different by design.
+    assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: mk(256) }).success, true, '256 cursors pass')
+    assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: mk(257) }).success, false, '257 cursors reject')
   })
 
   // #5270 (Control Room Phase 2a): cancel_activity client→server message.

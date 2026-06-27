@@ -32,7 +32,7 @@ export declare const AuthSchema: z.ZodObject<{
     capabilities: z.ZodDefault<z.ZodCatch<z.ZodOptional<z.ZodArray<z.ZodString>>>>;
     eagerPublicKey: z.ZodOptional<z.ZodString>;
     eagerSalt: z.ZodOptional<z.ZodString>;
-    historyCursors: z.ZodCatch<z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodNumber>>>;
+    historyCursors: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodNumber>>;
 }, z.core.$loose>;
 export declare const PairSchema: z.ZodObject<{
     type: z.ZodLiteral<"pair">;

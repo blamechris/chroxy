@@ -66,12 +66,14 @@ export const AuthSchema = z.object({
     // ignores the field). The server falls back to a full replay (flagged with
     // `fullHistory: true` on `history_replay_start`) whenever it cannot honour a
     // cursor — history trimmed past it, unknown session, or a server restart
-    // reset the seqs. `seq` is a non-negative finite int; the server caps the
-    // number of honoured keys defensively so a fat map can't bloat the auth path.
-    // .catch(undefined): an oversized/malformed cursor map degrades to a full
-    // history replay (the documented fallback) rather than REJECTING the auth — so
-    // the cap can never lock a legitimate client out, only drop an abusive map.
-    historyCursors: z.record(z.string().max(256), z.number().int().nonnegative()).refine((m) => Object.keys(m).length <= 256, { message: 'too many history cursors (max 256)' }).optional().catch(undefined),
+    // reset the seqs. `seq` is a non-negative finite int; an INVALID value
+    // rejects the auth (#5555.3 — this contract predates the size cap and must
+    // hold). The `.refine` also rejects an absurdly large map (>256 keys): a
+    // legit client sends at most MAX_CLIENT_HISTORY_CURSORS (64), and the server
+    // independently caps the honoured keys, so a fat map can't bloat the replay
+    // path. No `.catch` here — unlike `capabilities` (graceful by design), this
+    // field rejects malformed input rather than silently degrading it.
+    historyCursors: z.record(z.string().max(256), z.number().int().nonnegative()).refine((m) => Object.keys(m).length <= 256, { message: 'too many history cursors (max 256)' }).optional(),
 }).passthrough();
 export const PairSchema = z.object({
     type: z.literal('pair'),
