@@ -52,4 +52,20 @@ describe('PermissionManager resource-limit caps (#6448)', () => {
     pm.destroy()
     await p
   })
+
+  it('a secret straddling the 8KB pre-cap boundary is never shown (review #6455 — pins the boundary)', async () => {
+    const pm = new PermissionManager({ timeoutMs: 60_000 })
+    let emitted = null
+    pm.on('permission_request', (p) => { emitted = p })
+    const secret = 'sk-ant-api03-' + 'A1b2C3d4e5'.repeat(5)
+    // Place the secret straddling the 8192-char pre-cap boundary. It is far past
+    // the 200-char shown window, so it is sliced away regardless of the cap — the
+    // pre-cap can only ever remove content that was already destined to be cut.
+    const huge = 'x'.repeat(8185) + secret + 'y'.repeat(1000)
+    const p = pm.handlePermission('Bash', { description: huge }, null, 'approve')
+    assert.ok(emitted.description.length <= 200, 'shown window stays bounded')
+    assert.ok(!emitted.description.includes('sk-ant-api03'), 'a secret past the shown window never appears')
+    pm.destroy()
+    await p
+  })
 })
