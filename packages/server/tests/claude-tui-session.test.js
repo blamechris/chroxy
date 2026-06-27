@@ -73,7 +73,7 @@ describe('ClaudeTuiSession', () => {
         const idArgs = this._resumedFromPersisted
           ? ['--resume', this._sessionId]
           : ['--session-id', this._sessionId]
-        capturedArgs = [...idArgs, '--settings', this._settingsPath]
+        capturedArgs = [...idArgs, '--settings', this._settingsPath, '--no-chrome']
         this._term = { write: () => {}, kill: () => {}, onData: () => {}, onExit: () => {} }
       }
     })
@@ -122,6 +122,9 @@ describe('ClaudeTuiSession', () => {
       const i = capturedArgs.indexOf('--session-id')
       assert.ok(i >= 0 && capturedArgs[i + 1] === session._sessionId, 'fresh spawn uses --session-id <uuid>')
       assert.equal(capturedArgs.includes('--resume'), false, 'fresh spawn must NOT use --resume')
+      // Claude Code 2.1.186's "Claude in Chrome extension detected" prompt
+      // interactively wedges the PTY; the TUI spawn must pass --no-chrome.
+      assert.equal(capturedArgs.includes('--no-chrome'), true, 'TUI spawn passes --no-chrome')
     })
 
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
