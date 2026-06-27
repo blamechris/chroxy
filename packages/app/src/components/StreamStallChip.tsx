@@ -53,9 +53,10 @@ export function StreamStallChip({
 }: StreamStallChipProps) {
   const [detailVisible, setDetailVisible] = useState(false);
 
-  // #6429: derive live-region politeness from the registry role — terminal
-  // (alert) variants announce assertively, recoverable (status) ones politely.
-  // accessibilityRole stays 'alert' (the RN convention for amber error chips).
+  // #6429: politeness is derived from the registry role for parity with the
+  // other error chips. stream_stall is role 'status', so this chip always
+  // resolves to 'polite'; the derivation just guards against a future role
+  // change. accessibilityRole stays 'alert' (the RN convention for amber chips).
   const liveRegion = getErrorPresentation('stream_stall').role === 'alert' ? 'assertive' : 'polite';
 
   const handleRetry = useCallback(() => {
