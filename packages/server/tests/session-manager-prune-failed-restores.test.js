@@ -42,6 +42,24 @@ describe('SessionManager._pruneStaleFailedRestores (swarm-audit leak fix)', () =
     assert.equal(sm._failedRestores.has('noTime'), true, 'timestamp-less entry kept (not guessed stale)')
   })
 
+  it('NEVER prunes a worktree-backed failed-restore, even when stale (#2954 protection)', () => {
+    dir = mkdtempSync(join(tmpdir(), 'chroxy-sm-'))
+    sm = new SessionManager({ stateFilePath: join(dir, 'state.json') })
+    const now = Date.now()
+    const DAY = 24 * 60 * 60 * 1000
+    // Both 90d stale; only the worktree-less one may be pruned. Pruning the
+    // worktree-backed one would expose its worktree to the orphan sweep, which
+    // can't see committed-but-unreachable --detach commits and would reclaim them.
+    sm._failedRestores.set('wt', { saved: { id: 'wt', name: 'WT', lastActivityAt: now - 90 * DAY, worktreePath: '/some/wt/dir' }, error: new Error('x') })
+    sm._failedRestores.set('plain', { saved: { id: 'plain', name: 'Plain', lastActivityAt: now - 90 * DAY }, error: new Error('x') })
+
+    const pruned = sm._pruneStaleFailedRestores(now)
+
+    assert.equal(pruned, 1)
+    assert.equal(sm._failedRestores.has('wt'), true, 'worktree-backed entry kept regardless of age')
+    assert.equal(sm._failedRestores.has('plain'), false, 'plain stale entry still pruned')
+  })
+
   it('is a no-op on an empty failed-restore set', () => {
     dir = mkdtempSync(join(tmpdir(), 'chroxy-sm-'))
     sm = new SessionManager({ stateFilePath: join(dir, 'state.json') })

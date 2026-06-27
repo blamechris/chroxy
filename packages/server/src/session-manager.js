@@ -2416,6 +2416,8 @@ export class SessionManager extends EventEmitter {
    * UI for retry), and an entry with no usable timestamp is kept rather than
    * guessed-stale. Failed-restore entries are display + retry only, so pruning a
    * long-dead one has no operational effect beyond removing the stale UI entry.
+   * Worktree-backed failed-restores are NEVER pruned (guard below) so the #2954
+   * worktree-preservation contract is never widened by this cleanup.
    * @param {number} [now]
    * @returns {number} count pruned
    */
@@ -2424,6 +2426,13 @@ export class SessionManager extends EventEmitter {
     let pruned = 0
     for (const [sessionId, entry] of this._failedRestores) {
       const saved = entry?.saved
+      // NEVER prune a worktree-backed failed-restore. Removing its id from the
+      // live set exposes its worktree to the orphan sweep, whose clean-tree guard
+      // can't see committed-but-UNREACHABLE commits on a --detach worktree (#2954)
+      // and would reclaim (then GC) that work. Bounding only the worktree-less
+      // entries still closes the common unbounded-growth case (config-error
+      // restores) without widening the #2954 worktree-preservation contract.
+      if (saved?.worktreePath) continue
       const last = (typeof saved?.lastActivityAt === 'number' && saved.lastActivityAt > 0)
         ? saved.lastActivityAt
         : (typeof saved?.createdAt === 'number' && saved.createdAt > 0 ? saved.createdAt : null)
