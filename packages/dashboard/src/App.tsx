@@ -1962,6 +1962,7 @@ export function App() {
       <AppHeader
         serverVersion={serverVersion}
         connectionPhase={connectionPhase}
+        chatActivityState={chatActivity.state}
         serverPhase={serverPhase}
         isConnected={isConnected}
         tunnelReady={tunnelReady}
@@ -2447,6 +2448,7 @@ export function App() {
       {/* Footer bar */}
       <FooterBar
         connectionPhase={connectionPhase}
+        chatActivityState={chatActivity.state}
         tunnelReady={tunnelReady}
         serverPhase={serverPhase}
         tunnelProgress={tunnelProgress}

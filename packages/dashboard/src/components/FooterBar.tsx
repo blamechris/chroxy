@@ -20,6 +20,8 @@ declare const __APP_VERSION__: string
 
 export interface FooterBarProps {
   connectionPhase: string
+  /** Chat redesign #6392: chat-activity state → breathe the dot when connected + active. */
+  chatActivityState?: string
   tunnelReady?: boolean
   serverPhase?: 'tunnel_warming' | 'tunnel_verifying' | 'ready' | null
   tunnelProgress?: { attempt: number; maxAttempts: number } | null
@@ -95,6 +97,7 @@ export const FOOTER_OVER_BUDGET_THRESHOLD = 100
 
 export function FooterBar({
   connectionPhase,
+  chatActivityState,
   tunnelReady = true,
   serverPhase,
   tunnelProgress,
@@ -185,6 +188,7 @@ export function FooterBar({
             announcements. */}
         <span
           className={`footer-status-dot ${dotClass}`}
+          data-activity={dotClass === 'connected' ? chatActivityState : undefined}
           title={statusFullLabel}
           aria-label={statusFullLabel}
         />

@@ -21,6 +21,12 @@ declare const __APP_VERSION__: string
 export interface AppHeaderProps {
   serverVersion: string | null
   connectionPhase: string
+  /**
+   * Chat redesign #6392: the canonical chat-activity state. When the dot is
+   * genuinely connected, an active state (thinking/busy/waiting) makes it
+   * breathe — the chrome shows life without overriding the connection colour.
+   */
+  chatActivityState?: string
   serverPhase: string | null
   isConnected: boolean
   tunnelReady: boolean
@@ -132,6 +138,7 @@ export function AppHeader(props: AppHeaderProps) {
           return (
             <span
               className={`status-dot ${phase}`}
+              data-activity={phase === 'connected' ? props.chatActivityState : undefined}
               title={label}
               aria-label={label}
             />
