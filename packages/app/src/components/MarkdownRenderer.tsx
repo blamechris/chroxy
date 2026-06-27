@@ -1,5 +1,5 @@
 import React, { useMemo } from 'react';
-import { View, Text, StyleSheet, Platform, Linking, StyleProp, TextStyle, ScrollView } from 'react-native';
+import { View, Text, StyleSheet, Platform, Linking, Alert, StyleProp, TextStyle, ScrollView } from 'react-native';
 import { ICON_BULLET, ICON_CHECKBOX_CHECKED, ICON_CHECKBOX_UNCHECKED } from '../constants/icons';
 import { COLORS } from '../constants/colors';
 import { tokenize, SYNTAX_COLORS } from '../utils/syntax';
@@ -69,8 +69,15 @@ export function splitContentBlocks(rawContent: string): ContentBlock[] {
   return blocks;
 }
 
-/** Safe URL opener with scheme validation and error handling */
-function openURL(url: string) {
+/**
+ * Safe URL opener with scheme validation + a confirmation prompt.
+ *
+ * #6447 — links in rendered markdown come from the server (Claude responses and
+ * tool output), which a malicious server or MITM could inject. Confirm before
+ * opening and show the FULL destination URL so the user can spot a phishing link,
+ * rather than silently navigating away. Exported for unit testing.
+ */
+export function openURL(url: string) {
   // Strip trailing punctuation that shouldn't be part of the URL
   const cleanUrl = url.replace(/[.,;!?)\]]+$/, '');
 
@@ -80,9 +87,22 @@ function openURL(url: string) {
     return;
   }
 
-  void Linking.openURL(cleanUrl).catch((err) => {
-    console.error('Failed to open URL:', cleanUrl, err);
-  });
+  Alert.alert(
+    'Open link?',
+    cleanUrl,
+    [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Open',
+        onPress: () => {
+          void Linking.openURL(cleanUrl).catch((err) => {
+            console.error('Failed to open URL:', cleanUrl, err);
+          });
+        },
+      },
+    ],
+    { cancelable: true },
+  );
 }
 
 /** Generate indentation whitespace based on nesting level.
