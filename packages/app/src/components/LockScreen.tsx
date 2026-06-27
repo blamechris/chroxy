@@ -22,7 +22,15 @@ export function LockScreen({ onUnlock }: LockScreenProps) {
         <Text style={styles.icon}>{'🔒'}</Text>
         <Text style={styles.title}>Chroxy is Locked</Text>
         <Text style={styles.subtitle}>Authenticate to continue</Text>
-        <TouchableOpacity style={styles.button} onPress={onUnlock}>
+        <TouchableOpacity
+          style={styles.button}
+          onPress={onUnlock}
+          // #6450 — the lock gate blocks all app interaction, so the unlock
+          // control must be identifiable + actionable by screen-reader users.
+          accessibilityRole="button"
+          accessibilityLabel="Unlock Chroxy"
+          accessibilityHint="Authenticate with biometrics to continue"
+        >
           <Text style={styles.buttonText}>Unlock</Text>
         </TouchableOpacity>
       </View>
