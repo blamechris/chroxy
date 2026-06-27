@@ -2020,6 +2020,7 @@ export function App() {
           width={sidebarWidth}
           filter={sidebarFilter}
           serverStatus={isConnected ? 'connected' : isReconnecting ? 'reconnecting' : 'disconnected'}
+          chatActivityState={chatActivity.state}
           tunnelUrl={null}
           connectedClients={connectedClients}
           activePrimaryClientId={resolveActivePrimaryClientId(activeSessionId, sessionStates, globalPrimaryClientId)}

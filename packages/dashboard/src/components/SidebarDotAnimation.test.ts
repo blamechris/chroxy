@@ -21,8 +21,11 @@ describe('Sidebar dot animations (#1675)', () => {
     expect(componentsCss).not.toMatch(/sidebar-session-dot\.status-idle\s*\{[^}]*animation:/)
   })
 
-  test('working dot has dotPulse animation', () => {
-    expect(componentsCss).toMatch(/sidebar-session-dot\.status-working\s*\{[^}]*animation:\s*dotPulse/)
+  test('working dot breathes (dotBreathe, not the shrink keyframe dotPulse)', () => {
+    // #6419 — dotPulse animates scale(0)->scale(1) so the dot vanished ~80% of the
+    // cycle; dotBreathe (opacity + gentle scale) actually breathes.
+    expect(componentsCss).toMatch(/sidebar-session-dot\.status-working\s*\{[^}]*animation:\s*dotBreathe/)
+    expect(componentsCss).not.toMatch(/sidebar-session-dot\.status-working\s*\{[^}]*animation:\s*dotPulse/)
   })
 
   test('stale dot is static warning color', () => {
@@ -30,8 +33,8 @@ describe('Sidebar dot animations (#1675)', () => {
     expect(componentsCss).not.toMatch(/sidebar-session-dot\.status-stale\s*\{[^}]*animation:/)
   })
 
-  test('dotPulse keyframes exist in global.css', () => {
-    expect(globalCss).toMatch(/@keyframes dotPulse/)
+  test('dotBreathe keyframes exist in global.css', () => {
+    expect(globalCss).toMatch(/@keyframes dotBreathe/)
   })
 
   test('working dot animation respects prefers-reduced-motion', () => {
