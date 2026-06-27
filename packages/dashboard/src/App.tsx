@@ -14,6 +14,7 @@ import {
   resolveContextWindow,
   providerSupportsMultiQuestion,
   formatToolName,
+  getToolPresentation,
   deriveChatActivity,
   type SessionInfo,
 } from '@chroxy/store-core'
@@ -300,6 +301,18 @@ export function App() {
   const workingLabel = useMemo(() => {
     const inFlight = findInFlightToolUse(storeMessages)
     return inFlight ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)}…` : undefined
+  }, [storeMessages])
+
+  // #6392 — color the presence rail by the in-flight tool's kind (Read=blue,
+  // Bash=purple, Edit=orange…) via the shared tool-presentation registry, rather
+  // than the generic 'busy' purple. A `var(--token)` string when a tool is
+  // mid-flight, undefined otherwise → the rail falls back to its activity-state
+  // colour. Same findInFlightToolUse walk as workingLabel, so it's stable across
+  // response tokens (only changes when the tool changes).
+  const inFlightToolColor = useMemo(() => {
+    const inFlight = findInFlightToolUse(storeMessages)
+    if (!inFlight) return undefined
+    return `var(--${getToolPresentation(inFlight.tool, inFlight.serverName).colorToken})`
   }, [storeMessages])
 
   // #4735 / #4731: the multi-question AskUserQuestion form is gated per
@@ -2249,6 +2262,7 @@ export function App() {
                         queuedIds={queuedIds}
                         onCancelQueued={onCancelQueued}
                         workingLabel={workingLabel}
+                        inFlightToolColor={inFlightToolColor}
                       />
                     }
                     second={
@@ -2295,6 +2309,7 @@ export function App() {
                         queuedIds={queuedIds}
                         onCancelQueued={onCancelQueued}
                         workingLabel={workingLabel}
+                        inFlightToolColor={inFlightToolColor}
                       />
                     </div>
                     <div

@@ -126,6 +126,10 @@ export interface ChatViewProps {
    * composer hairline uses. Undefined → the rail stays idle (neutral).
    */
   chatActivityState?: ChatActivityState
+  /** #6392 — a `var(--token)` colour (from the shared tool-presentation registry)
+   *  for the presence rail when a tool is mid-flight, so the rail reflects WHICH
+   *  tool is running. undefined → the rail keeps its activity-state colour. */
+  inFlightToolColor?: string
   /** Optional custom renderer. Return a node to override default rendering, or null to fall back. */
   renderMessage?: (msg: ChatViewMessage) => ReactNode | null
   /**
@@ -348,7 +352,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   )
 })
 
-function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
+function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
@@ -704,7 +708,13 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, render
         content. Motion choreography is intentionally restrained pending design
         tuning (see the .presence-rail CSS).
       */}
-      <div className="presence-rail" data-activity-state={chatActivityState ?? 'idle'} data-testid="presence-rail" aria-hidden="true" />
+      <div
+        className="presence-rail"
+        data-activity-state={chatActivityState ?? 'idle'}
+        style={inFlightToolColor ? ({ '--rail-color': inFlightToolColor } as CSSProperties) : undefined}
+        data-testid="presence-rail"
+        aria-hidden="true"
+      />
       <ChatExpandContext.Provider value={expandRegistry}>
         <div
           ref={containerRef}

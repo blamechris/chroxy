@@ -5,6 +5,10 @@ import { describe, it, expect, afterEach, vi } from 'vitest'
 import { render, screen, fireEvent, cleanup, act } from '@testing-library/react'
 import { ChatView, type ChatViewMessage } from './ChatView'
 import { ThinkingDots } from './ThinkingDots'
+import * as fs from 'fs'
+import * as path from 'path'
+
+const componentsCss = fs.readFileSync(path.resolve(__dirname, '../theme/components.css'), 'utf-8')
 
 afterEach(cleanup)
 
@@ -55,6 +59,26 @@ describe('ChatView', () => {
   it('defaults the presence rail to idle when no activity state is given (chat redesign #6392)', () => {
     render(<ChatView messages={makeMessages(1)} isStreaming={false} />)
     expect(screen.getByTestId('presence-rail')).toHaveAttribute('data-activity-state', 'idle')
+  })
+
+  it('paints the presence rail with the in-flight tool colour via --rail-color (chat redesign #6392)', () => {
+    const { rerender } = render(
+      <ChatView messages={makeMessages(2)} isStreaming={false} chatActivityState="busy" inFlightToolColor="var(--accent-blue)" />,
+    )
+    const rail = screen.getByTestId('presence-rail')
+    // Inline --rail-color wins the cascade so the busy rule paints the tool colour.
+    expect(rail.style.getPropertyValue('--rail-color')).toBe('var(--accent-blue)')
+    // No tool in flight → no override; the rail keeps its activity-state colour.
+    rerender(<ChatView messages={makeMessages(2)} isStreaming={false} chatActivityState="busy" />)
+    expect(screen.getByTestId('presence-rail').style.getPropertyValue('--rail-color')).toBe('')
+  })
+
+  it('the busy + thinking rail rules consume --rail-color (tool colour overrides); waiting/error stay fixed (chat redesign #6392)', () => {
+    expect(componentsCss).toMatch(/presence-rail\[data-activity-state="busy"\]\s*\{[^}]*background:\s*var\(--rail-color,\s*var\(--accent-purple\)\)/)
+    expect(componentsCss).toMatch(/presence-rail\[data-activity-state="thinking"\]\s*\{[^}]*background:\s*var\(--rail-color,\s*var\(--accent-blue\)\)/)
+    // waiting + error keep their fixed signal colours — they must NOT read --rail-color.
+    expect(componentsCss).not.toMatch(/presence-rail\[data-activity-state="waiting"\]\s*\{[^}]*--rail-color/)
+    expect(componentsCss).not.toMatch(/presence-rail\[data-activity-state="error"\]\s*\{[^}]*--rail-color/)
   })
 
   it('shows thinking dots when streaming', () => {
