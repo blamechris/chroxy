@@ -76,6 +76,8 @@ describe('ChatView', () => {
   it('the busy + thinking rail rules consume --rail-color (tool colour overrides); waiting/error stay fixed (chat redesign #6392)', () => {
     expect(componentsCss).toMatch(/presence-rail\[data-activity-state="busy"\]\s*\{[^}]*background:\s*var\(--rail-color,\s*var\(--accent-purple\)\)/)
     expect(componentsCss).toMatch(/presence-rail\[data-activity-state="thinking"\]\s*\{[^}]*background:\s*var\(--rail-color,\s*var\(--accent-blue\)\)/)
+    // waiting + error keep their fixed signal colours — they must NOT read --rail-color.
+    expect(componentsCss).not.toMatch(/presence-rail\[data-activity-state="waiting"\]\s*\{[^}]*--rail-color/)
     expect(componentsCss).not.toMatch(/presence-rail\[data-activity-state="error"\]\s*\{[^}]*--rail-color/)
   })
 
