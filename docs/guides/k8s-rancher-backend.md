@@ -13,6 +13,13 @@ backends are available for remote / team deployments:
 This guide covers when to pick each one and how to configure the Rancher
 adapter.
 
+> ⚠️ **Experimental until live-validated (#6275).** These backends are
+> feature-complete + unit-tested but have not been exercised against a live
+> cluster. Before relying on them, walk the
+> [K8s backend validation runbook](./k8s-backend-validation.md) — a mostly-automated
+> path (a dry-run preflight + a one-command kind integration test) ending in a
+> short manual check against your own cluster.
+
 ## When to pick K8s vs Rancher
 
 | Aspect | `K8sBackend` (plain K8s) | `RancherBackend` (optional adapter) |
