@@ -15,6 +15,7 @@
  */
 import { createHmac, timingSafeEqual } from 'node:crypto'
 import { RateLimiter, getRateLimitKey } from './rate-limiter.js'
+import { sendOversizeResponse } from './http-oversize.js'
 import { createLogger } from './logger.js'
 
 const log = createLogger('github-webhook')
@@ -186,43 +187,66 @@ export function handleGithubWebhook(server, req, res) {
   let bytes = 0
   let oversized = false
   req.on('data', (chunk) => {
+    if (oversized) return
     const buf = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk)
     bytes += buf.length
     if (bytes > MAX_WEBHOOK_BYTES) {
       oversized = true
+      // #5433: respond + STOP consuming from inside the 'data' handler. The
+      // helper removes the data listener, pauses the stream (TCP backpressure),
+      // and sends the 413 with Connection: close — never drain an unbounded body.
+      // Cap checked BEFORE push: the violating chunk is never buffered.
+      sendOversizeResponse(req, res, { error: 'payload too large' })
       return
     }
     chunks.push(buf)
   })
-  req.on('error', () => sendJson(res, 400, { error: 'read error' }))
-  req.on('end', () => {
-    if (oversized) {
-      sendJson(res, 413, { error: 'payload too large' })
-      return
-    }
-    const raw = Buffer.concat(chunks)
-    const sig = req.headers['x-hub-signature-256']
-    if (!verifyGithubSignature(raw, sig, secret)) {
-      log.warn('Rejected GitHub webhook: invalid or missing X-Hub-Signature-256')
-      sendJson(res, 401, { error: 'invalid signature' })
-      return
-    }
-    let payload
+  req.on('error', () => {
+    // Body-stream error (e.g. client reset mid-send). Guard the response — the
+    // socket may already be gone.
     try {
-      payload = JSON.parse(raw.toString('utf8'))
+      sendJson(res, 400, { error: 'read error' })
     } catch {
-      sendJson(res, 400, { error: 'invalid JSON' })
-      return
+      /* socket already torn down */
     }
-    const eventType = String(req.headers['x-github-event'] || '')
-    const event = normalizeGithubEvent(eventType, payload)
-    if (!event) {
-      // Authentic delivery, but an event type the Control Room doesn't surface.
-      sendJson(res, 202, { accepted: true, surfaced: false })
-      return
+  })
+  req.on('end', () => {
+    // #5313 pattern: this callback runs on a later tick, OUTSIDE the HTTP
+    // dispatch try/catch — wrap everything so a throw here (e.g. writeHead on a
+    // torn-down socket) can't escape to uncaughtException and crash the daemon.
+    try {
+      if (oversized) return // 413 already sent from the 'data' handler
+      const raw = Buffer.concat(chunks)
+      const sig = req.headers['x-hub-signature-256']
+      if (!verifyGithubSignature(raw, sig, secret)) {
+        log.warn('Rejected GitHub webhook: invalid or missing X-Hub-Signature-256')
+        sendJson(res, 401, { error: 'invalid signature' })
+        return
+      }
+      let payload
+      try {
+        payload = JSON.parse(raw.toString('utf8'))
+      } catch {
+        sendJson(res, 400, { error: 'invalid JSON' })
+        return
+      }
+      const eventType = String(req.headers['x-github-event'] || '')
+      const event = normalizeGithubEvent(eventType, payload)
+      if (!event) {
+        // Authentic delivery, but an event type the Control Room doesn't surface.
+        sendJson(res, 202, { accepted: true, surfaced: false })
+        return
+      }
+      if (!server._repoEventStore) server._repoEventStore = new RepoEventStore()
+      server._repoEventStore.push(event)
+      sendJson(res, 202, { accepted: true, surfaced: true, kind: event.kind })
+    } catch (err) {
+      log.error(`github webhook handler error: ${err?.stack || err}`)
+      try {
+        sendJson(res, 500, { error: 'internal error' })
+      } catch {
+        /* socket already torn down */
+      }
     }
-    if (!server._repoEventStore) server._repoEventStore = new RepoEventStore()
-    server._repoEventStore.push(event)
-    sendJson(res, 202, { accepted: true, surfaced: true, kind: event.kind })
   })
 }

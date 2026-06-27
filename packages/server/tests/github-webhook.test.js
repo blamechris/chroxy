@@ -99,6 +99,21 @@ describe('normalizeGithubEvent()', () => {
     assert.equal(normalizeGithubEvent('star', { repository: {} }), null)
     assert.equal(normalizeGithubEvent('push', null), null)
     assert.equal(normalizeGithubEvent('push', 'nope'), null)
+    assert.equal(normalizeGithubEvent('push', undefined), null)
+  })
+
+  it('tolerates adversarial field shapes without throwing', () => {
+    // A hostile / garbage authentic payload must produce a value (or null), never throw.
+    assert.doesNotThrow(() => normalizeGithubEvent('push', {
+      ref: 12345, // not a string
+      commits: 'not-an-array',
+      head_commit: { message: 42 }, // not a string
+      repository: ['array', 'not', 'object'],
+      sender: null,
+    }))
+    const ev = normalizeGithubEvent('pull_request', { action: null, pull_request: { number: 'NaN' } })
+    assert.equal(ev.kind, 'pull_request')
+    assert.equal(ev.number, null) // a non-number "number" is coerced to null
   })
 })
 
@@ -131,18 +146,35 @@ describe('handleGithubWebhook()', () => {
     else process.env.GITHUB_WEBHOOK_SECRET = savedEnv
   })
 
-  // Drive one delivery synchronously and return the captured response.
-  function deliver(server, { headers = {}, body = '' } = {}) {
+  // Mock req/res supporting the helpers the handler uses: sendOversizeResponse
+  // pauses the stream + waits for res 'finish'.
+  function makeReq(headers) {
     const req = new EventEmitter()
     req.headers = headers
     req.socket = { remoteAddress: '127.0.0.1' }
-    const res = { statusCode: null, headers: null, body: null }
+    req.pause = () => {}
+    req.resume = () => {}
+    return req
+  }
+  function makeRes() {
+    const res = new EventEmitter()
+    res.statusCode = null
+    res.headers = null
+    res.body = null
+    res.socket = null
     res.writeHead = (status, h) => { res.statusCode = status; res.headers = h }
-    res.end = (b) => { res.body = b }
+    res.end = (b) => { res.body = b; res.emit('finish') }
+    return res
+  }
+
+  // Drive one delivery synchronously and return the captured response.
+  function deliver(server, { headers = {}, body = '' } = {}) {
+    const req = makeReq(headers)
+    const res = makeRes()
     handleGithubWebhook(server, req, res)
     if (res.statusCode == null) {
-      // listeners were registered (passed rate-limit + secret) — feed the body
-      req.emit('data', Buffer.from(body))
+      // listeners were registered (passed rate-limit + secret) — feed the body.
+      req.emit('data', Buffer.isBuffer(body) ? body : Buffer.from(body))
       req.emit('end')
     }
     return res
@@ -197,17 +229,28 @@ describe('handleGithubWebhook()', () => {
     assert.equal(res.statusCode, 400)
   })
 
-  it('413 on an oversized body (before signature/parse)', () => {
-    const req = new EventEmitter()
-    req.headers = { 'x-github-event': 'push' }
-    req.socket = { remoteAddress: '127.0.0.1' }
-    const res = { statusCode: null }
-    res.writeHead = (s) => { res.statusCode = s }
-    res.end = () => {}
+  it('413 on an oversized body — and STOPS consuming (no unbounded drain)', () => {
+    const req = makeReq({ 'x-github-event': 'push' })
+    const res = makeRes()
     handleGithubWebhook({ _githubWebhookSecret: SECRET }, req, res)
     req.emit('data', Buffer.alloc(MAX_WEBHOOK_BYTES + 1))
+    assert.equal(res.statusCode, 413)
+    // sendOversizeResponse removed the data listener + paused the stream — the
+    // handler is no longer reading the (potentially unbounded) body off the wire.
+    assert.equal(req.listenerCount('data'), 0, 'data listener removed after 413')
+    // A late 'end' must not re-process or change the response.
     req.emit('end')
     assert.equal(res.statusCode, 413)
+  })
+
+  it('handles a body-stream error without throwing (guarded 400)', () => {
+    const req = makeReq({ 'x-github-event': 'push' })
+    const res = makeRes()
+    handleGithubWebhook({ _githubWebhookSecret: SECRET }, req, res)
+    // The error callback fires on a later tick, outside the dispatch try/catch —
+    // it must not escape to uncaughtException.
+    assert.doesNotThrow(() => req.emit('error', new Error('client reset')))
+    assert.equal(res.statusCode, 400)
   })
 
   it('reads the secret from $GITHUB_WEBHOOK_SECRET when not set on the server', () => {
