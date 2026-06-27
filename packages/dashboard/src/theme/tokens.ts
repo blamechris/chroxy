@@ -42,6 +42,7 @@ export const colors = {
     purple: '#a78bfa',
     orange: '#f59e0b',
     red: '#ff4a4a',
+    cyan: '#22d3ee',
     blueLight: '#4a9eff22',
     blueSubtle: '#4a9eff33',
     blueBorder: '#4a9eff44',

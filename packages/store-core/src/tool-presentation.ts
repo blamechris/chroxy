@@ -52,12 +52,16 @@ export interface ToolPresentation {
 /** Per-kind icon + color. Color tokens are the existing dashboard accent
  *  tokens (see theme.css); the icon keys are semantic and platform-neutral. */
 export const TOOL_KIND_META: Readonly<Record<ToolKind, { icon: string; colorToken: string }>> = {
-  read: { icon: 'file-text', colorToken: 'accent-blue' },
+  // #6426: read/search/web use accent-CYAN, not accent-blue — the latter is the
+  // presence rail's "thinking" colour, so the rail looked identical whether
+  // Claude was thinking or running a Read (the most common tool). Cyan keeps the
+  // cool/retrieval feel while reading as distinct from thinking-blue.
+  read: { icon: 'file-text', colorToken: 'accent-cyan' },
   edit: { icon: 'pencil', colorToken: 'accent-orange' },
   write: { icon: 'file-plus', colorToken: 'accent-green' },
   exec: { icon: 'terminal', colorToken: 'accent-purple' },
-  search: { icon: 'search', colorToken: 'accent-blue' },
-  web: { icon: 'world', colorToken: 'accent-blue' },
+  search: { icon: 'search', colorToken: 'accent-cyan' },
+  web: { icon: 'world', colorToken: 'accent-cyan' },
   task: { icon: 'subtask', colorToken: 'accent-purple' },
   todo: { icon: 'checklist', colorToken: 'accent-green' },
   question: { icon: 'help', colorToken: 'accent-orange' },

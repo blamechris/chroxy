@@ -58,6 +58,7 @@ export const TOKEN_GROUPS = [
       ["accent-purple", "#a78bfa"],
       ["accent-orange", "#f59e0b"],
       ["accent-red", "#ff4a4a"],
+      ["accent-cyan", "#22d3ee"], // #6426: distinct hue for the read/search/web retrieval family (vs thinking-blue)
     ],
   },
   {
