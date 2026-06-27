@@ -642,6 +642,11 @@ export function setPendingKeyPair(kp: KeyPair | null): void {
   _ctx.pendingKeyPair = kp;
 }
 
+/** #6446 — read the in-flight handshake salt, so a reset can be asserted directly. */
+export function getPendingSalt(): string | null {
+  return _ctx.pendingSalt;
+}
+
 /**
  * #5555 (eager key exchange) — generate this connection's ephemeral X25519
  * keypair + per-connection salt and stash them on the handler context so they
@@ -659,6 +664,23 @@ export function prepareEagerKeyExchange(): { publicKey: string; salt: string } {
   _ctx.pendingKeyPair = createKeyPair();
   _ctx.pendingSalt = generateConnectionSalt();
   return { publicKey: _ctx.pendingKeyPair.publicKey, salt: _ctx.pendingSalt };
+}
+
+/**
+ * Reset the E2E encryption context (post-handshake `encryptionState` AND the
+ * in-flight handshake material `pendingKeyPair` + `pendingSalt`) to its initial
+ * state, as a UNIT — for forward secrecy on every new connection.
+ *
+ * #6446: callers previously reset `encryptionState` + `pendingKeyPair`
+ * field-by-field and MISSED `pendingSalt`. Resetting through the grouped
+ * `INITIAL_ENCRYPTION_CONTEXT` (the same object `createDefaultContext` spreads)
+ * clears every field — and any field a future handshake adds to
+ * `EncryptionContext` — so nothing can silently survive a reconnect or a server
+ * switch. This is deliberately narrow: it does NOT tear down timers / heartbeat
+ * / connection-attempt counters (that is the heavier `resetAllHandlerState`).
+ */
+export function resetEncryptionContext(): void {
+  Object.assign(_ctx, INITIAL_ENCRYPTION_CONTEXT);
 }
 
 // ---------------------------------------------------------------------------

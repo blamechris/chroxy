@@ -96,7 +96,7 @@ import {
   handleMessage,
   setConnectionContext,
   setEncryptionState,
-  setPendingKeyPair,
+  resetEncryptionContext,
   prepareEagerKeyExchange,
   getEncryptionState,
   getPendingKeyPair,
@@ -1154,9 +1154,11 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
 
     function _connectWebSocket() {
-    // Reset encryption state for each new connection (forward secrecy)
-    setEncryptionState(null);
-    setPendingKeyPair(null);
+    // Reset the encryption context as a unit for each new connection (forward
+    // secrecy). #6446: doing this through resetEncryptionContext (not
+    // field-by-field) also clears pendingSalt + any future field, so nothing
+    // leaks across a reconnect or a server switch.
+    resetEncryptionContext();
     // #5962 (#5721 parity) — clear any leftover handshake timer from a prior
     // attempt before opening a new socket, so a stale timer can't fire against
     // this fresh attempt.
@@ -1500,9 +1502,9 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     clearPermissionSplits();
     // Clear terminal write batching
     clearTerminalWriteBatching();
-    // Clear encryption state (new connection = new keys = forward secrecy)
-    setEncryptionState(null);
-    setPendingKeyPair(null);
+    // Clear the encryption context as a unit (new connection = new keys =
+    // forward secrecy). #6446: also clears pendingSalt + any future field.
+    resetEncryptionContext();
     // Clear message queue on explicit disconnect
     clearMessageQueue();
     useMultiClientStore.getState().resetPresence();
