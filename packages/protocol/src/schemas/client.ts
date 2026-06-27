@@ -46,7 +46,11 @@ export const AuthSchema = z.object({
   token: z.string().max(512),
   protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
-  capabilities: z.array(z.string()).optional().catch([]).default([]),
+  // Bounded to stop an adversarial auth/pair from sending a giant capabilities
+  // array (the server does `new Set(authData.capabilities)` with no count guard,
+  // so a huge array is a CPU/memory DoS at Set construction). Feature-flag list —
+  // 64 entries × 256 chars is far above any real client.
+  capabilities: z.array(z.string().max(256)).max(64).optional().catch([]).default([]),
   // #5555 (eager key exchange) — optional ephemeral X25519 public key + salt
   // sent WITH the auth message so the server can derive the shared key and
   // return its public key in auth_ok, collapsing the discrete `key_exchange`
@@ -70,7 +74,10 @@ export const AuthSchema = z.object({
   // cursor — history trimmed past it, unknown session, or a server restart
   // reset the seqs. `seq` is a non-negative finite int; the server caps the
   // number of honoured keys defensively so a fat map can't bloat the auth path.
-  historyCursors: z.record(z.string().max(256), z.number().int().nonnegative()).optional(),
+  // .catch(undefined): an oversized/malformed cursor map degrades to a full
+  // history replay (the documented fallback) rather than REJECTING the auth — so
+  // the cap can never lock a legitimate client out, only drop an abusive map.
+  historyCursors: z.record(z.string().max(256), z.number().int().nonnegative()).refine((m) => Object.keys(m).length <= 256, { message: 'too many history cursors (max 256)' }).optional().catch(undefined),
 }).passthrough()
 
 export const PairSchema = z.object({
@@ -78,7 +85,11 @@ export const PairSchema = z.object({
   pairingId: z.string().min(1).max(256),
   protocolVersion: z.number().int().min(0).optional(),
   deviceInfo: DeviceInfoSchema.optional(),
-  capabilities: z.array(z.string()).optional().catch([]).default([]),
+  // Bounded to stop an adversarial auth/pair from sending a giant capabilities
+  // array (the server does `new Set(authData.capabilities)` with no count guard,
+  // so a huge array is a CPU/memory DoS at Set construction). Feature-flag list —
+  // 64 entries × 256 chars is far above any real client.
+  capabilities: z.array(z.string().max(256)).max(64).optional().catch([]).default([]),
 }).passthrough()
 
 // -- Pairing-approval primitive (#5510, epic #5509) --

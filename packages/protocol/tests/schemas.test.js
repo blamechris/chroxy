@@ -35,6 +35,29 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject data over 100k chars')
   })
 
+  // Swarm-audit (W2): bound the client auth collections so an adversarial auth
+  // can't DoS the server (capabilities is `new Set()`-iterated server-side).
+  it('degrades an oversized / over-long capabilities array to [] (no DoS, no reject)', async () => {
+    const { AuthSchema } = await import('../src/schemas/client.ts')
+    const big = AuthSchema.safeParse({ type: 'auth', token: 't', capabilities: Array(5000).fill('x') })
+    assert.ok(big.success, 'oversized capabilities must not reject the auth')
+    assert.deepEqual(big.data.capabilities, [], 'oversized array degrades to [] via .catch')
+    const longStr = AuthSchema.safeParse({ type: 'auth', token: 't', capabilities: ['x'.repeat(5000)] })
+    assert.deepEqual(longStr.data.capabilities, [], 'over-long capability string degrades to []')
+    const ok = AuthSchema.safeParse({ type: 'auth', token: 't', capabilities: ['voice', 'terminal'] })
+    assert.deepEqual(ok.data.capabilities, ['voice', 'terminal'], 'a normal small list passes through')
+  })
+
+  it('degrades an oversized historyCursors map to undefined (full replay, no reject)', async () => {
+    const { AuthSchema } = await import('../src/schemas/client.ts')
+    const huge = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`s${i}`, i]))
+    const res = AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: huge })
+    assert.ok(res.success, 'oversized historyCursors must not reject the auth')
+    assert.equal(res.data.historyCursors, undefined, 'oversized cursor map degrades to undefined (full replay)')
+    const ok = AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: { s1: 5, s2: 10 } })
+    assert.deepEqual(ok.data.historyCursors, { s1: 5, s2: 10 }, 'a normal small cursor map passes through')
+  })
+
   // #5270 (Control Room Phase 2a): cancel_activity client→server message.
   it('validates cancel_activity with an activityId (sessionId optional)', async () => {
     const { CancelActivitySchema } = await import('../src/schemas/client.ts')
