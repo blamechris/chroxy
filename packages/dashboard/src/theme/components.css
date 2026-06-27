@@ -6247,7 +6247,7 @@ button.sidebar-token-view-session-row:hover {
   /* Navy scrim tinted from --bg-primary (#0f0f1a) + a frosted blur, so the chat
      behind reads as "pushed back" — the Spotlight "floats above a blurred page"
      look. Previously rgba(0,0,0,.5) over a TRANSPARENT dialog, so content bled
-     straight through the palete (the dialog's bg token was undefined). */
+     straight through the palette (the dialog's bg token was undefined). */
   background: rgba(15, 15, 26, 0.72);
   backdrop-filter: blur(8px);
   -webkit-backdrop-filter: blur(8px); /* Safari + the Tauri WKWebView the app wraps */
