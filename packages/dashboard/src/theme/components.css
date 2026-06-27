@@ -544,6 +544,22 @@
 .status-dot.server_restarting { background: var(--status-restarting); }
 .status-dot.server_down { background: var(--accent-red); } /* #5698 — terminal */
 
+/*
+ * Chat redesign #6392 — the connection dots (header + footer) also breathe while
+ * the agent is active, so the chrome shows life instead of a static green.
+ * COLOUR stays connection-driven (green=connected, orange/red=trouble); only the
+ * PULSE reflects activity, and only when genuinely connected — so a connected dot
+ * never reads as a connection problem. idle + error stay still. Reuses busyPulse.
+ */
+.status-dot.connected[data-activity="thinking"],
+.status-dot.connected[data-activity="busy"],
+.status-dot.connected[data-activity="waiting"],
+.footer-status-dot.connected[data-activity="thinking"],
+.footer-status-dot.connected[data-activity="busy"],
+.footer-status-dot.connected[data-activity="waiting"] {
+  animation: busyPulse 1.2s ease-in-out infinite;
+}
+
 /* ---- Sidebar ---- */
 .sidebar {
   display: flex;
@@ -7584,6 +7600,13 @@ button.sidebar-token-view-session-row:hover {
   .thinking-dot,
   .loading-spinner,
   .qr-spinner {
+    animation: none;
+  }
+
+  /* #6392: match the connection-dot pulse specificity (0,3,0) so this WINS the
+     cascade — a bare .status-dot (0,1,0) would lose to .status-dot.connected[…]. */
+  .status-dot.connected[data-activity],
+  .footer-status-dot.connected[data-activity] {
     animation: none;
   }
 

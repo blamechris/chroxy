@@ -38,6 +38,18 @@ describe('FooterBar', () => {
     expect(screen.queryByText('server_down')).not.toBeInTheDocument()
   })
 
+  // Chat redesign #6392: the connection dot carries data-activity ONLY when
+  // genuinely connected, so CSS breathes it on activity without overriding the
+  // connection colour. Disconnected → no data-activity (connection signal wins).
+  it('sets data-activity on the connection dot only when connected', () => {
+    const { container, rerender } = render(<FooterBar {...baseProps} chatActivityState="busy" />)
+    expect(container.querySelector('.footer-status-dot')).toHaveAttribute('data-activity', 'busy')
+    rerender(<FooterBar {...baseProps} chatActivityState="idle" />)
+    expect(container.querySelector('.footer-status-dot')).toHaveAttribute('data-activity', 'idle')
+    rerender(<FooterBar connectionPhase="disconnected" chatActivityState="busy" />)
+    expect(container.querySelector('.footer-status-dot')).not.toHaveAttribute('data-activity')
+  })
+
   it('shows abbreviated cwd', () => {
     render(<FooterBar {...baseProps} cwd="/Users/me/Projects/chroxy" />)
     expect(screen.getByText('Projects/chroxy')).toBeInTheDocument()
