@@ -63,7 +63,6 @@ import {
   handlePermissionRequest as sharedPermissionRequest,
   handlePermissionResolved as sharedPermissionResolved,
   handlePermissionTimeout as sharedPermissionTimeout,
-  handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
   // session_cost_threshold_crossed / notification_prefs migrated to the shared
@@ -1043,6 +1042,10 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
+  // #6449 slice 5 — terminal-mirror cases (raw/raw_background/terminal_output)
+  // migrated to the shared dispatch table. The dashboard writes only the
+  // connection store (no secondary terminal store, unlike the app).
+  appendTerminalData: (data) => getStore().getState().appendTerminalData(data),
   // #5618 — budget_warning (and future notice types) surface a transient alert
   // via the dashboard's alert adapter.
   alert: (title, message) => _adapters.alert.alert(title, message),
@@ -1289,29 +1292,11 @@ function handlePong(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _c
   _onPong(typeof msg.serverTs === 'number' ? msg.serverTs : undefined);
 }
 
-function handleRaw(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  get().appendTerminalData(sharedRawOutput(msg).data);
-}
-
-function handleRawBackground(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  get().appendTerminalData(sharedRawOutput(msg).data);
-}
-
-// #5835 (PR2): live claude-tui PTY mirror. The server delivers terminal_output
-// only to clients that opted in (terminal_subscribe) for a session they're
-// viewing — i.e. the active session whose Output tab is showing — so route the
-// raw bytes through appendTerminalData (active-session). Guard on the active id
-// anyway so a stale frame arriving just after a session switch can't paint the
-// new session's terminal.
-function handleTerminalOutput(msg: Record<string, unknown>, get: MsgGet, _set: MsgSet, _ctx: ConnectionContext): void {
-  if (typeof msg.data !== 'string') return;
-  // Require an explicit string sessionId that matches the active session. The
-  // server always stamps one (ws-forwarding.js); dropping a frame without one
-  // (malformed/legacy/empty) keeps it from bleeding into whatever terminal is
-  // currently active, matching the typeof guard the rest of this file uses.
-  if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) return;
-  get().appendTerminalData(msg.data);
-}
+// raw / raw_background / terminal_output — migrated to the shared dispatch table
+// (#6449 slice 5; runDispatch handles them before the HANDLERS map, via the
+// appendTerminalData adapter hook). terminal_output's active-session guard (drop
+// a stale frame whose sessionId isn't the active session) now lives in
+// dispatchTerminalOutput, byte-identical to the handler removed here.
 
 // #5835 Phase 2: the server's authoritative live-PTY grid size for a session
 // (sent on terminal_subscribe and on every primary-driven resize). Record it so
@@ -3116,9 +3101,8 @@ function handleBillingCanary(msg: Record<string, unknown>, get: MsgGet, set: Msg
 const HANDLERS: Record<string, Handler> = {
   billing_canary: handleBillingCanary,
   pong: handlePong,
-  raw: handleRaw,
-  raw_background: handleRawBackground,
-  terminal_output: handleTerminalOutput,
+  // raw / raw_background / terminal_output — migrated to the shared dispatch
+  // table (#6449 slice 5; runDispatch handles them before this HANDLERS map).
   terminal_size: handleTerminalSize,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,

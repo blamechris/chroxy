@@ -155,6 +155,9 @@ import {
   type GitStageResultPayload,
   type GitCommitResultPayload,
 } from './handlers'
+// #6449 slice 5 — shared raw-output parse for the terminal-mirror cases. The
+// './handlers' barrel doesn't re-export stream.ts, so import it directly.
+import { handleRawOutput } from './handlers/stream'
 
 // ---------------------------------------------------------------------------
 // Client adapter
@@ -267,6 +270,15 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   updateState(updater: (flat: Flat) => Flat): void
   /** Append a chat message via the client's own add-message path. */
   addMessage(message: ChatMessage): void
+  /**
+   * Append raw bytes to the client's terminal view (#6449 slice 5). Backs the
+   * terminal-mirror cases (`raw` / `raw_background` / `terminal_output`). Both
+   * clients expose an `appendTerminalData(data)` store action; the APP impl ALSO
+   * mirrors into its secondary `useTerminalStore` — a platform side-effect folded
+   * into the adapter, in the same spirit as the push-store mirror in
+   * {@link ClientStoreAdapter.pushSessionNotification}.
+   */
+  appendTerminalData(data: string): void
   /**
    * Surface a transient alert/toast to the user (#5618). Both clients back this
    * with their own alert primitive (the app's React-Native `Alert.alert`, the
@@ -908,6 +920,22 @@ export interface DispatchMessageMap {
     type: 'checkpoint_list'
     sessionId?: string
     checkpoints?: unknown[]
+  }
+  // #6449 slice 5 — terminal-mirror pass-through cases (wire-shape optionality:
+  // raw_background carries no sessionId; the handlers guard defensively anyway).
+  raw: {
+    type: 'raw'
+    sessionId?: string
+    data?: string
+  }
+  raw_background: {
+    type: 'raw_background'
+    data?: string
+  }
+  terminal_output: {
+    type: 'terminal_output'
+    sessionId?: string
+    data?: string
   }
 }
 
@@ -1967,6 +1995,46 @@ function dispatchMultiQuestionIntervention<S extends DispatchSessionBase>(
  * `updateSession` updater typed against its own session shape; the underlying
  * handlers are shared and identical.
  */
+// ---------------------------------------------------------------------------
+// slice 5 (#6449) — terminal-mirror pass-through (raw / raw_background /
+// terminal_output). All three are verbatim writes to the client's terminal view
+// via the single `appendTerminalData` adapter primitive; their both-clients
+// equivalence is gated by the #6345 SWITCH_FIXTURES the contract harness drives.
+// ---------------------------------------------------------------------------
+
+/** `raw` — claude-tui headless output → terminal view (verbatim pass-through). */
+function dispatchRaw<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['raw'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  adapter.appendTerminalData(handleRawOutput(msg as Record<string, unknown>).data)
+}
+
+/** `raw_background` — background-agent output → terminal view (verbatim pass-through). */
+function dispatchRawBackground<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['raw_background'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  adapter.appendTerminalData(handleRawOutput(msg as Record<string, unknown>).data)
+}
+
+/**
+ * `terminal_output` — live PTY mirror for the ACTIVE session. Replicates both
+ * clients' guard exactly: drop a frame whose `data` isn't a string, or whose
+ * `sessionId` is missing / not the active session (a stale frame arriving across
+ * a session switch must not bleed into the new session's terminal). OWNS the
+ * message either way — the prior switch `break`/`return`ed without falling through.
+ */
+function dispatchTerminalOutput<S extends DispatchSessionBase>(
+  msg: DispatchMessageMap['terminal_output'],
+  adapter: ClientStoreAdapter<S>,
+): void {
+  const m = msg as Record<string, unknown>
+  if (typeof m.data !== 'string') return
+  if (typeof m.sessionId !== 'string' || m.sessionId !== adapter.getActiveSessionId()) return
+  adapter.appendTerminalData(m.data)
+}
+
 export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTable<S> {
   return {
     available_permission_modes: dispatchAvailablePermissionModes,
@@ -2060,6 +2128,10 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- checkpoint cases (#5618 Batch 6) ---
     checkpoint_created: dispatchCheckpointCreated,
     checkpoint_list: dispatchCheckpointList,
+    // --- slice 5 (#6449) — terminal-mirror pass-through ---
+    raw: dispatchRaw,
+    raw_background: dispatchRawBackground,
+    terminal_output: dispatchTerminalOutput,
   }
 }
 
@@ -2142,6 +2214,10 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- checkpoint cases (#5618 Batch 6) ---
   'checkpoint_created',
   'checkpoint_list',
+  // --- slice 5 (#6449) — terminal-mirror pass-through ---
+  'raw',
+  'raw_background',
+  'terminal_output',
 ]
 
 /**

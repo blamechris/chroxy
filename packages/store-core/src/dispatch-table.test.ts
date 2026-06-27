@@ -145,6 +145,9 @@ function makeAdapter(init?: {
     setState: (patch) => Object.assign(flat, patch),
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => addedMessages.push(m),
+    // #6449 slice 5 — required by ClientStoreAdapter; this unit test doesn't
+    // exercise the terminal-mirror cases, so a no-op satisfies the contract.
+    appendTerminalData: () => {},
     alert: () => {},
     getSessions: () => sessionList,
     getCheckpoints: () => (flat.checkpoints as Checkpoint[] | undefined) ?? [],
@@ -242,10 +245,12 @@ describe('shared dispatch table', () => {
   describe('runner mechanics', () => {
     it('returns false (table miss) for an unregistered type so the caller falls through', () => {
       const env = makeAdapter()
-      // terminal_output is a terminal write, never a session-state update, so it is
-      // by-design NOT in the shared table (NO_SWITCH_CONTRACT_BY_DESIGN) — a clean
-      // miss → runDispatch returns false and the caller falls through to its switch.
-      expect(dispatch(env, { type: 'terminal_output', data: 'x' })).toBe(false)
+      // pong is handled by the heartbeat path (_onPong), never a store-state
+      // update, so it is by-design NOT in the shared table: a clean miss, so
+      // runDispatch returns false and the caller falls through to its switch.
+      // (terminal_output used to be the example here; it migrated INTO the table
+      // in #6449 slice 5, so this now uses a still-unregistered type.)
+      expect(dispatch(env, { type: 'pong', serverTs: 1 })).toBe(false)
     })
 
     it('returns false for a non-string type', () => {

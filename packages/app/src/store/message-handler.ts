@@ -68,7 +68,6 @@ import {
   handlePermissionTimeout as sharedPermissionTimeout,
   // permission_rules_updated migrated to the shared dispatch table (#5556)
   // #5454 — remaining both-sides duplicates extracted into store-core
-  handleRawOutput as sharedRawOutput,
   handleTokenRotated as sharedTokenRotated,
   handlePairFail as sharedPairFail,
   // session_cost_threshold_crossed + notification_prefs migrated to the shared
@@ -1223,6 +1222,14 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
+  // #6449 slice 5 — terminal-mirror cases (raw/raw_background/terminal_output)
+  // migrated to the shared dispatch table. The app writes to BOTH the connection
+  // store and its secondary useTerminalStore (the dashboard omits the latter) —
+  // folding the prior switch cases' two writes into this one adapter primitive.
+  appendTerminalData: (data) => {
+    getStore().getState().appendTerminalData(data);
+    useTerminalStore.getState().appendTerminalData(data);
+  },
   getSessions: () => getStore().getState().sessions,
   // #5618 Batch 6 — checkpoint_created reads the prior flat list to append.
   getCheckpoints: () => getStore().getState().checkpoints,
@@ -2840,32 +2847,12 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // available_permission_modes — migrated to the shared dispatch table (#5556)
 
 
-    case 'raw': {
-      const { data: rawData } = sharedRawOutput(msg);
-      get().appendTerminalData(rawData);
-      useTerminalStore.getState().appendTerminalData(rawData);
-      break;
-    }
+    // raw — migrated to the shared dispatch table (#6449 slice 5; runDispatch
+    // handles it before this switch, via the appendTerminalData adapter hook).
 
-    // #5835 / #5987 — live PTY mirror channel. Unlike legacy 'raw' (claude-tui's
-    // headless output), terminal_output is the opt-in mirror stream for a
-    // user-shell ($SHELL) session subscribed via terminal_subscribe. Render it
-    // through the exact same write-callback → xterm path as 'raw' so user-shell
-    // output appears in TerminalView with no TerminalView changes. Read-only in
-    // PR1; interactive stdin (terminal_input) is deferred — see #6003.
-    case 'terminal_output': {
-      const data = msg.data;
-      if (typeof data !== 'string') break;
-      // Guard on the active session id (mirrors the dashboard handler): between
-      // an unsubscribe(old) and subscribe(new) during a session switch, a stale
-      // frame for the old session can still arrive — without this guard it would
-      // bleed into the new session's terminal (mobile renders one global
-      // terminalRawBuffer, so a mis-targeted frame paints the wrong shell).
-      if (typeof msg.sessionId !== 'string' || msg.sessionId !== get().activeSessionId) break;
-      get().appendTerminalData(data);
-      useTerminalStore.getState().appendTerminalData(data);
-      break;
-    }
+    // terminal_output — migrated to the shared dispatch table (#6449 slice 5).
+    // The live-PTY active-session guard (drop a stale frame whose sessionId isn't
+    // the active session) now lives in dispatchTerminalOutput, byte-identical.
 
     case 'claude_ready': {
       const patch = sharedClaudeReady();
@@ -2900,12 +2887,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
-    case 'raw_background': {
-      const { data: rawBgData } = sharedRawOutput(msg);
-      get().appendTerminalData(rawBgData);
-      useTerminalStore.getState().appendTerminalData(rawBgData);
-      break;
-    }
+    // raw_background — migrated to the shared dispatch table (#6449 slice 5).
 
     case 'permission_request': {
       const permPayload = sharedPermissionRequest(msg);
