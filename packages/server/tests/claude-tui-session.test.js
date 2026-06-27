@@ -137,8 +137,9 @@ describe('ClaudeTuiSession', () => {
       ClaudeTuiSession.prototype._spawnPty = origSpawnPty // run the genuine method
       let realArgs = null
       let realCmd = null
+      let errored = false
       session = new ClaudeTuiSession({ cwd: '/tmp', port: 12346, skillsDir: emptySkillsDir, repoSkillsDir: null })
-      session.on('error', () => {}) // _spawnPty emits 'error' when our spawn throws; swallow it
+      session.on('error', () => { errored = true }) // _spawnPty emits 'error' when our spawn throws
       session._sessionId = 'drift-guard-uuid'
       session._settingsPath = join(fakeHome, 'settings.json')
       session._ptyModOverride = {
@@ -150,6 +151,10 @@ describe('ClaudeTuiSession', () => {
       assert.equal(realArgs.includes('--no-chrome'), true,
         'the REAL _spawnPty argv carries --no-chrome — drift on the real method is now caught')
       assert.equal(realArgs.includes('--settings'), true, 'the real argv also carries --settings')
+      // Clean-bail contract: the thrown spawn surfaces as an 'error' event and
+      // leaves no live PTY behind (the catch returns before _term is assigned).
+      assert.ok(errored, 'the spawn throw surfaces as an error event')
+      assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
     })
 
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
