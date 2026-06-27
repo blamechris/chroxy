@@ -117,7 +117,15 @@ export function useTauriEvents() {
     )
 
     return () => {
-      unlisteners.forEach(p => p.then(fn => fn()).catch(() => {}))
+      // #6452 — surface (don't swallow) a failure here: a rejected listen()
+      // promise (the event was never registered) or an unlisten throw. Each is
+      // caught independently so cleanup never throws, but it's now observable
+      // instead of silently disappearing.
+      unlisteners.forEach(p =>
+        p.then(fn => fn()).catch((err) => {
+          console.warn('[useTauriEvents] listener registration/cleanup failed:', err)
+        }),
+      )
     }
   }, [])
 }
