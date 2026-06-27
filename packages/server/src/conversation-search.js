@@ -9,6 +9,10 @@ const MIN_FILE_SIZE = 100
 const CONCURRENCY = 10
 const MAX_FILE_READ = 512 * 1024 // read up to 512KB per file for search
 const DEFAULT_MAX_RESULTS = 50
+// #6448 — bound the query length: every candidate file is substring-scanned for
+// the query, so an absurdly long query is a CPU DoS. 500 chars is far beyond any
+// real search.
+const MAX_QUERY_LENGTH = 500
 
 /**
  * Extract searchable text from a JSONL entry.
@@ -152,6 +156,8 @@ async function searchFile(filePath, queryLower, conversationId, projectName, dec
 export async function searchConversations(query, opts = {}) {
   const trimmed = (query || '').trim()
   if (!trimmed) return []
+  // #6448 — reject an over-long query rather than substring-scan every file with it.
+  if (trimmed.length > MAX_QUERY_LENGTH) return []
 
   const queryLower = trimmed.toLowerCase()
   const projectsDir = opts.projectsDir || PROJECTS_DIR

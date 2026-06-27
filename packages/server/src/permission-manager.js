@@ -20,6 +20,13 @@ export const NEVER_AUTO_ALLOW = new Set(['Bash', 'Task', 'WebFetch', 'WebSearch'
 // Default permission timeout (5 minutes)
 const DEFAULT_TIMEOUT_MS = 300_000
 
+// #6448 — resource-limit caps (DoS hardening). A normal session sits far below
+// all of these; they only bite under a flood of requests or a malicious tool
+// input, where the alternative is unbounded memory/CPU growth.
+const MAX_PENDING_PERMISSIONS = 1000  // concurrent pending requests (each holds map entries + a timer)
+const MAX_SESSION_RULES = 100         // session-scoped auto-allow rules
+const MAX_RAW_DESCRIPTION_LEN = 8192  // raw tool field length fed to redactValue (far above the 200-char shown window)
+
 /**
  * Manages in-process permission requests for SDK-style sessions.
  *
@@ -36,10 +43,13 @@ const DEFAULT_TIMEOUT_MS = 300_000
  *   user_question       { toolUseId, questions }
  */
 export class PermissionManager extends EventEmitter {
-  constructor({ timeoutMs, log } = {}) {
+  constructor({ timeoutMs, log, maxPendingPermissions } = {}) {
     super()
     this._timeoutMs = timeoutMs || DEFAULT_TIMEOUT_MS
     this._log = log || console
+    // #6448 — bound on concurrent pending permissions; injectable so the cap is
+    // testable without minting 1000 real requests.
+    this._maxPendingPermissions = maxPendingPermissions || MAX_PENDING_PERMISSIONS
 
     this._pendingPermissions = new Map() // requestId -> { resolve, input }
     this._permissionTimers = new Map()   // requestId -> timer
@@ -77,6 +87,10 @@ export class PermissionManager extends EventEmitter {
   setRules(rules) {
     if (!Array.isArray(rules)) {
       throw new Error('rules must be an array')
+    }
+    // #6448 — bound the session rules array (it is matched on every tool call).
+    if (rules.length > MAX_SESSION_RULES) {
+      throw new Error(`too many rules (max ${MAX_SESSION_RULES})`)
     }
     for (const rule of rules) {
       if (!rule || typeof rule.tool !== 'string') {
@@ -178,6 +192,17 @@ export class PermissionManager extends EventEmitter {
 
     return new Promise((resolve) => {
       const requestId = `perm-${this._idNonce}-${++this._permissionCounter}-${Date.now()}`
+      // #6448 — bound concurrent pending permissions (each holds entries in
+      // _pendingPermissions / _permissionTimers / _lastPermissionData plus a
+      // live timer). A normal session has 1-2 pending; this only trips under a
+      // flood, where the incoming request is auto-denied rather than letting
+      // those grow unbounded. The per-request timeout (below) sweeps stuck old
+      // entries, so the cap + timeout together bound memory.
+      if (this._pendingPermissions.size >= this._maxPendingPermissions) {
+        this._logInfo(`Pending-permission cap (${this._maxPendingPermissions}) reached — auto-denying ${requestId}`)
+        resolve({ behavior: 'deny', message: 'Too many pending permission requests' })
+        return
+      }
       this._pendingPermissions.set(requestId, {
         resolve,
         input: input || {},
@@ -199,7 +224,12 @@ export class PermissionManager extends EventEmitter {
       // leave a secret straddling the cap as a sub-floor partial prefix that the
       // pattern scan misses. String() coerces a non-string field so a malformed
       // tool input can't crash the emit path (.replace on a non-string throws).
-      const description = redactValue(String(rawDescription)).slice(0, 200)
+      // #6448 — cap the raw string BEFORE redaction so a malicious multi-MB tool
+      // field can't make redactValue scan the whole thing (CPU DoS). The 8KB cap
+      // is far above the 200-char shown window below, so it can never split a
+      // SHOWN secret — the #6038 redact-then-truncate guarantee holds for
+      // everything the client sees (anything past 8KB is sliced away regardless).
+      const description = redactValue(String(rawDescription).slice(0, MAX_RAW_DESCRIPTION_LEN)).slice(0, 200)
 
       this._logInfo(`Permission request ${requestId}: ${toolName}`)
 
