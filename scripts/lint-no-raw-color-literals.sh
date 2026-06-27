@@ -26,10 +26,20 @@ set -euo pipefail
 
 cd "$(dirname "$0")/.."
 
-BASELINE="scripts/no-raw-color-literals-baseline.txt"
+BASELINE="${LINT_COLOR_BASELINE:-scripts/no-raw-color-literals-baseline.txt}"
 
 # 3/4/6/8-digit hex color literals (#fff, #ffff, #4a9eff, #4a9eff22).
 PAT='#([0-9a-fA-F]{8}|[0-9a-fA-F]{6}|[0-9a-fA-F]{3,4})'
+
+# Scan roots — overridable via $LINT_COLOR_SCAN_DIRS (space-separated) so the
+# golden test (scripts/__tests__/lint-no-raw-color-literals.test.sh, #6441) can
+# point the lint at a temp tree instead of the real source dirs. Defaults to the
+# real dashboard component + mobile component/screen dirs (the production scope).
+if [ -n "${LINT_COLOR_SCAN_DIRS:-}" ]; then
+  read -ra SCAN_DIRS <<< "$LINT_COLOR_SCAN_DIRS"
+else
+  SCAN_DIRS=(packages/dashboard/src/components packages/app/src/components packages/app/src/screens)
+fi
 
 # The recheck pass below strips comments with perl. Fail LOUD if perl is missing
 # rather than letting `set -e` + the `|| true` swallow turn a perl-less runner
@@ -52,10 +62,7 @@ collect() {
   # values; #NNNN issue refs (3-4 hex digits → they trip the {3,4} branch) live
   # exclusively in // and /* */ comments — so stripping comments removes the
   # false positives without weakening the guard on actual colors (#6423).
-  grep -rlE "$PAT" \
-    packages/dashboard/src/components \
-    packages/app/src/components \
-    packages/app/src/screens \
+  grep -rlE "$PAT" "${SCAN_DIRS[@]}" \
     --include='*.ts' --include='*.tsx' --include='*.css' 2>/dev/null \
     | grep -vE '\.test\.|/__tests__/|\.generated\.|xterm|\.stories\.' \
     | while IFS= read -r f; do

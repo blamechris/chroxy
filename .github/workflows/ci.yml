@@ -793,6 +793,9 @@ jobs:
       - name: Run compile-skill-targets.mjs tests
         run: node scripts/__tests__/compile-skill-targets.test.mjs
 
+      - name: Run lint-no-raw-color-literals golden test
+        run: bash scripts/__tests__/lint-no-raw-color-literals.test.sh
+
   dashboard-smoke:
     name: Dashboard Smoke (Playwright)
     # #6315: a UI-regression gate. Runs the Playwright dashboard smoke
