@@ -35,6 +35,50 @@ describe('@chroxy/protocol schemas', () => {
     assert.ok(!result.success, 'Should reject data over 100k chars')
   })
 
+  // Swarm-audit (W2): bound the client auth collections so an adversarial auth
+  // can't DoS the server (capabilities is `new Set()`-iterated server-side).
+  it('degrades an oversized / over-long capabilities array to [] (no DoS, no reject)', async () => {
+    const { AuthSchema } = await import('../src/schemas/client.ts')
+    const big = AuthSchema.safeParse({ type: 'auth', token: 't', capabilities: Array(5000).fill('x') })
+    assert.ok(big.success, 'oversized capabilities must not reject the auth')
+    assert.deepEqual(big.data.capabilities, [], 'oversized array degrades to [] via .catch')
+    const longStr = AuthSchema.safeParse({ type: 'auth', token: 't', capabilities: ['x'.repeat(5000)] })
+    assert.deepEqual(longStr.data.capabilities, [], 'over-long capability string degrades to []')
+    const ok = AuthSchema.safeParse({ type: 'auth', token: 't', capabilities: ['voice', 'terminal'] })
+    assert.deepEqual(ok.data.capabilities, ['voice', 'terminal'], 'a normal small list passes through')
+  })
+
+  it('rejects an oversized historyCursors map (>256) and an invalid cursor value (#5555.3)', async () => {
+    const { AuthSchema } = await import('../src/schemas/client.ts')
+    // Unlike capabilities (graceful .catch([])), historyCursors has NO .catch:
+    // its established contract is to REJECT malformed input (#5555.3), and the
+    // size cap rejects an abusive map rather than silently degrading it.
+    const huge = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`s${i}`, i]))
+    assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: huge }).success, false,
+      'an oversized cursor map (>256) rejects the auth')
+    for (const bad of [-1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, 'x']) {
+      assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: { s1: bad } }).success, false,
+        `an invalid cursor value (${String(bad)}) rejects the auth (#5555.3 preserved)`)
+    }
+    const ok = AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: { s1: 5, s2: 10 } })
+    assert.deepEqual(ok.data.historyCursors, { s1: 5, s2: 10 }, 'a normal small cursor map passes through')
+  })
+
+  // Pin the exact cap boundaries (review #6436) — these lines regress if someone
+  // tweaks the cap without updating the test.
+  it('bounds are exact: at-cap pass; capabilities coerce, historyCursors reject one-over', async () => {
+    const { AuthSchema } = await import('../src/schemas/client.ts')
+    const parse = (extra) => AuthSchema.safeParse({ type: 'auth', token: 't', ...extra }).data
+    assert.equal(parse({ capabilities: Array(64).fill('c') }).capabilities.length, 64, '64 capabilities pass')
+    assert.deepEqual(parse({ capabilities: Array(65).fill('c') }).capabilities, [], '65 coerce to []')
+    assert.equal(parse({ capabilities: ['x'.repeat(256)] }).capabilities.length, 1, '256-char capability passes')
+    assert.deepEqual(parse({ capabilities: ['x'.repeat(257)] }).capabilities, [], '257-char capability coerces to []')
+    const mk = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`s${i}`, i]))
+    // capabilities coerces (graceful .catch); historyCursors rejects (strict) — different by design.
+    assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: mk(256) }).success, true, '256 cursors pass')
+    assert.equal(AuthSchema.safeParse({ type: 'auth', token: 't', historyCursors: mk(257) }).success, false, '257 cursors reject')
+  })
+
   // #5270 (Control Room Phase 2a): cancel_activity client→server message.
   it('validates cancel_activity with an activityId (sessionId optional)', async () => {
     const { CancelActivitySchema } = await import('../src/schemas/client.ts')
