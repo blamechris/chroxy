@@ -233,4 +233,20 @@ describe('useTauriEvents', () => {
     await new Promise(r => setTimeout(r, 10))
     expect(unlisten).toHaveBeenCalled()
   })
+
+  it('surfaces (warns) a rejected listen() registration on cleanup, not silently (#6452)', async () => {
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    // Every listen() rejects (registration failed) instead of resolving an unlisten fn.
+    Object.defineProperty(window, '__TAURI__', {
+      value: { event: { listen: vi.fn(() => Promise.reject(new Error('registration failed'))) } },
+      writable: true,
+      configurable: true,
+    })
+    const { unmount } = renderHook(() => useTauriEvents())
+    unmount()
+    await new Promise(r => setTimeout(r, 10))
+    expect(warnSpy).toHaveBeenCalled()
+    expect(warnSpy.mock.calls.some(c => String(c[0]).includes('useTauriEvents'))).toBe(true)
+    warnSpy.mockRestore()
+  })
 })
