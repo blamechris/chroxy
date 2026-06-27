@@ -1653,11 +1653,19 @@ export class ClaudeTuiSession extends BaseSession {
    */
   async _spawnPty(permissionsEnabled) {
     let ptyMod
-    try {
-      ptyMod = await import('node-pty')
-    } catch (err) {
-      this.emit('error', { message: `node-pty unavailable: ${err.message}` })
-      return
+    // Test seam (#6417): a test may inject a capturing node-pty stand-in so the
+    // REAL arg-builder below runs against it — catching drift on the actual spawn
+    // argv (e.g. a dropped --no-chrome), which a wholesale _spawnPty mock cannot.
+    // Undefined in production → the genuine dynamic import runs unchanged.
+    if (this._ptyModOverride) {
+      ptyMod = this._ptyModOverride
+    } else {
+      try {
+        ptyMod = await import('node-pty')
+      } catch (err) {
+        this.emit('error', { message: `node-pty unavailable: ${err.message}` })
+        return
+      }
     }
 
     const cwdReal = realpathSync(this.cwd)

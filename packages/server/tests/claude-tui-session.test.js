@@ -127,6 +127,36 @@ describe('ClaudeTuiSession', () => {
       assert.equal(capturedArgs.includes('--no-chrome'), true, 'TUI spawn passes --no-chrome')
     })
 
+    // #6417 — the assertions above pin the *wholesale _spawnPty mock* (it
+    // reconstructs the arg list), so dropping --no-chrome from the REAL method
+    // would not fail them. This test runs the real _spawnPty against a capturing
+    // node-pty stand-in (the _ptyModOverride seam), so drift on the real argv is
+    // caught directly. The stub throws after capturing, which _spawnPty's own
+    // spawn try-catch turns into an early return (no warmup, no live PTY).
+    it('drift guard: the REAL _spawnPty argv carries --no-chrome (stubs only node-pty spawn)', async () => {
+      ClaudeTuiSession.prototype._spawnPty = origSpawnPty // run the genuine method
+      let realArgs = null
+      let realCmd = null
+      let errored = false
+      session = new ClaudeTuiSession({ cwd: '/tmp', port: 12346, skillsDir: emptySkillsDir, repoSkillsDir: null })
+      session.on('error', () => { errored = true }) // _spawnPty emits 'error' when our spawn throws
+      session._sessionId = 'drift-guard-uuid'
+      session._settingsPath = join(fakeHome, 'settings.json')
+      session._ptyModOverride = {
+        spawn: (cmd, args) => { realCmd = cmd; realArgs = args; throw new Error('captured-and-bail') },
+      }
+      await session._spawnPty(true)
+      assert.ok(realArgs, 'the real _spawnPty invoked node-pty spawn (not a wholesale mock)')
+      assert.ok(realCmd, 'spawn received a claude binary path')
+      assert.equal(realArgs.includes('--no-chrome'), true,
+        'the REAL _spawnPty argv carries --no-chrome — drift on the real method is now caught')
+      assert.equal(realArgs.includes('--settings'), true, 'the real argv also carries --settings')
+      // Clean-bail contract: the thrown spawn surfaces as an 'error' event and
+      // leaves no live PTY behind (the catch returns before _term is assigned).
+      assert.ok(errored, 'the spawn throw surfaces as an error event')
+      assert.ok(!session._term, 'clean bail: no live PTY left behind after the throw')
+    })
+
     it('restored session: seeds _sessionId from resumeSessionId, keeps it through start, spawns with --resume', async () => {
       const persisted = '11111111-2222-3333-4444-555555555555'
       session = new ClaudeTuiSession({
