@@ -19,7 +19,7 @@ export function recordMruCommand(id: string): void {
   useMruStore.getState().recordCommand(id)
 }
 
-export function useCommands(): Command[] {
+export function useCommands(isPtyProvider = true): Command[] {
   const setViewMode = useConnectionStore(s => s.setViewMode)
   const sendInterrupt = useConnectionStore(s => s.sendInterrupt)
   const createSession = useConnectionStore(s => s.createSession)
@@ -81,6 +81,13 @@ export function useCommands(): Command[] {
         action: () => setViewMode('files'),
       },
     ]
+    // Sessions without a terminal (non claude-tui / non user-shell providers)
+    // have no PTY view — App.tsx's guard bounces viewMode='terminal' straight
+    // back to Chat, so "Switch to Terminal" / "Toggle View" would be a confusing
+    // do-nothing entry in the palette. Hide the terminal commands for those.
+    if (!isPtyProvider) {
+      return commands.filter(c => c.id !== 'switch-terminal' && c.id !== 'toggle-view')
+    }
     return commands
-  }, [setViewMode, sendInterrupt, createSession])
+  }, [setViewMode, sendInterrupt, createSession, isPtyProvider])
 }

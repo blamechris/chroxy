@@ -6244,7 +6244,13 @@ button.sidebar-token-view-session-row:hover {
 .command-palette-backdrop {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.5);
+  /* Navy scrim tinted from --bg-primary (#0f0f1a) + a frosted blur, so the chat
+     behind reads as "pushed back" — the Spotlight "floats above a blurred page"
+     look. Previously rgba(0,0,0,.5) over a TRANSPARENT dialog, so content bled
+     straight through the palette (the dialog's bg token was undefined). */
+  background: rgba(15, 15, 26, 0.72);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px); /* Safari + the Tauri WKWebView the app wraps */
 }
 
 .command-palette-dialog {
@@ -6252,8 +6258,8 @@ button.sidebar-token-view-session-row:hover {
   width: 480px;
   max-width: 90vw;
   max-height: 400px;
-  background: var(--color-surface);
-  border: 1px solid var(--color-border);
+  background: var(--bg-modal);
+  border: 1px solid var(--scrollbar-thumb);
   border-radius: 12px;
   box-shadow: 0 16px 48px rgba(0, 0, 0, 0.3);
   display: flex;
@@ -6264,16 +6270,16 @@ button.sidebar-token-view-session-row:hover {
 .command-palette-search {
   padding: 12px 16px;
   border: none;
-  border-bottom: 1px solid var(--color-border);
+  border-bottom: 1px solid var(--scrollbar-thumb);
   background: transparent;
-  color: var(--color-text);
+  color: var(--text-primary);
   font-size: var(--text-base);
   font-family: inherit;
   outline: none;
 }
 
 .command-palette-search::placeholder {
-  color: var(--color-text-dim);
+  color: var(--text-dim);
 }
 
 .command-palette-list {
@@ -6284,7 +6290,7 @@ button.sidebar-token-view-session-row:hover {
 .command-palette-empty {
   padding: 16px;
   text-align: center;
-  color: var(--color-text-dim);
+  color: var(--text-dim);
   font-size: var(--text-sm);
 }
 
@@ -6298,7 +6304,7 @@ button.sidebar-token-view-session-row:hover {
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.05em;
-  color: var(--color-text-dim);
+  color: var(--text-dim);
 }
 
 .command-palette-item {
@@ -6307,20 +6313,20 @@ button.sidebar-token-view-session-row:hover {
   justify-content: space-between;
   padding: 8px 16px;
   cursor: pointer;
-  color: var(--color-text);
+  color: var(--text-primary);
   font-size: var(--text-sm);
 }
 
 .command-palette-item:hover,
 .command-palette-item.selected {
-  background: var(--color-surface-hover);
+  background: var(--bg-card);
 }
 
 .command-palette-item-shortcut {
   font-size: 11px;
-  color: var(--color-text-dim);
+  color: var(--text-dim);
   padding: 2px 6px;
-  background: var(--color-surface-hover);
+  background: var(--bg-card);
   border-radius: 4px;
   font-family: var(--font-mono);
 }
