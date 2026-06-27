@@ -80,4 +80,5 @@ export type { RunnerStatusRequestMessage } from './schemas/client.ts';
 export type { IntegrationStatusRequestMessage } from './schemas/client.ts';
 export type { IntegrationActionMessage } from './schemas/client.ts';
 export type { SkillsInventoryRequestMessage } from './schemas/client.ts';
+export type { Attachment, BinaryAttachment, FileRefAttachment } from './schemas/client.ts';
 export * from './error-categories.ts';

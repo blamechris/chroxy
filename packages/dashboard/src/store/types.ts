@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -1262,7 +1262,9 @@ export interface ConnectionState {
   // control). Best-effort; the server enforces the single-driver authority.
   sendTerminalInput: (sessionId: string, data: string) => void;
   updateInputSettings: (settings: Partial<InputSettings>) => void;
-  sendInput: (input: string, wireAttachments?: { type: string; name: string; [key: string]: string }[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
+  // #6453 — canonical WIRE attachment type (was an inline loose shape with a
+  // `[key: string]: string` index); the dashboard sends both file_ref + image.
+  sendInput: (input: string, wireAttachments?: Attachment[], options?: { isVoice?: boolean }) => 'sent' | 'queued' | false;
   /**
    * Interrupt the current turn. Defaults to the active session; pass an explicit
    * `sessionId` to interrupt a specific session (e.g. the Control Room

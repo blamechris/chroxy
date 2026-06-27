@@ -169,6 +169,9 @@ export type { IntegrationStatusRequestMessage } from './schemas/client.ts'
 export type { IntegrationActionMessage } from './schemas/client.ts'
 // #5554: skills inventory survey request alias.
 export type { SkillsInventoryRequestMessage } from './schemas/client.ts'
+// #6453: canonical WIRE attachment types pinned at the entry point so the app +
+// dashboard import one shape (was a loose `WireAttachment` / inline ad-hoc type).
+export type { Attachment, BinaryAttachment, FileRefAttachment } from './schemas/client.ts'
 
 // Re-export client-side error-category detection (#3151)
 export * from './error-categories.ts'
