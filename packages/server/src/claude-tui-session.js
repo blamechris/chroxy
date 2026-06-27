@@ -1681,6 +1681,13 @@ export class ClaudeTuiSession extends BaseSession {
     const args = [
       ...idArgs,
       '--settings', this._settingsPath,
+      // Claude Code 2.1.186 added a "Claude in Chrome extension detected"
+      // first-run prompt that interactively blocks the TUI (1/2/Enter/Esc) when
+      // the browser extension is installed. chroxy's PTY driver can't dismiss
+      // that prompt, so the session wedges and the claude PTY exits mid-turn
+      // (code=1). A headless chroxy TUI session never drives the browser
+      // integration, so disable it at spawn — no prompt, no wedge.
+      '--no-chrome',
     ]
     if (this.skipPermissions) {
       // #4044: bypass chroxy's hook + claude's per-tool prompt entirely.
