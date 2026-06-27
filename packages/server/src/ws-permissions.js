@@ -342,6 +342,29 @@ export function createPermissionHandler({ sendFn, broadcastFn, validateBearerAut
       ? pairingManager.getSessionIdForToken(presentedToken)
       : null
 
+    // SECURITY (swarm-audit): reject an UNBOUND PAIRING token — a pairing-ISSUED
+    // token with no bound session, e.g. one a device obtained from the auto-
+    // refreshing linking-mode QR, which is handed out PRE host-approval. Such a
+    // token resolves to callerBoundSessionId=null, which the resolver treats as
+    // unrestricted, so without this guard it could answer ANY session's permission
+    // over this HTTP fallback. This PRESERVES the #5373 "invariant G": the PRIMARY
+    // API token is NOT a pairing token (isSessionTokenValid=false) so it keeps full
+    // HTTP authority, and bound pairing tokens are binding-checked by the resolver
+    // below — only unbound *pairing* tokens are rejected. The typeof guard keeps
+    // single-token / partial-pairingManager modes working (no isSessionTokenValid →
+    // treated as the primary token, i.e. not rejected).
+    const tokenIsPairingToken = !!(
+      pairingManager &&
+      typeof pairingManager.isSessionTokenValid === 'function' &&
+      presentedToken &&
+      pairingManager.isSessionTokenValid(presentedToken)
+    )
+    if (tokenIsPairingToken && callerBoundSessionId === null) {
+      log.warn('Rejected HTTP /permission-response: an unbound pairing token cannot answer permission requests')
+      sendJson(res, 403, { error: 'unbound token cannot answer cross-session permissions' })
+      return
+    }
+
     const MAX_BODY = 4096
     // utf8 decoding + byte-accurate cap, checked BEFORE append — see
     // handlePermissionRequest above; the three capped readers stay in lockstep.
