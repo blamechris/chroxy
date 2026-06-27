@@ -36,21 +36,27 @@ command -v perl >/dev/null 2>&1 || {
 # is worked.
 ALLOW="--accent --accent-yellow --bg-active --bg-hover --border --border-muted --error --text-bright --text-tertiary"
 
-# Comment-stripped content of every styling file, as one stream (// line + /* */
-# block comments, the latter across newlines via /s). Over-stripping a // inside
-# a string only drops a candidate (false-negative) — safe for this guard.
-stripped="$(find "$ROOT" \( -name '*.css' -o -name '*.ts' -o -name '*.tsx' \) -type f -print0 \
-  | xargs -0 perl -0777 -pe 's{//[^\n]*}{}g; s{/\*.*?\*/}{}gs' 2>/dev/null)"
+# Comment-stripped content of every styling file, as one stream. CSS files get
+# ONLY the /* */ strip — CSS has no // line comments, so stripping // there could
+# eat a real `--foo:` definition (e.g. inside a url()) and cause a FALSE positive;
+# .ts/.tsx get both // and /* */. Over-stripping only ever drops a candidate
+# (false-negative). `|| true`: an empty styling dir mustn't abort under set -e.
+css_stripped="$(find "$ROOT" -name '*.css' -type f -print0 \
+  | xargs -0 perl -0777 -pe 's{/\*.*?\*/}{}gs' 2>/dev/null || true)"
+ts_stripped="$(find "$ROOT" \( -name '*.ts' -o -name '*.tsx' \) -type f -print0 \
+  | xargs -0 perl -0777 -pe 's{//[^\n]*}{}g; s{/\*.*?\*/}{}gs' 2>/dev/null || true)"
+stripped="$css_stripped
+$ts_stripped"
 
 # Defined props: `--foo:` (CSS / inline object), setProperty('--foo'), '--foo':
 defined="$(printf '%s' "$stripped" \
   | grep -oE -- "--[a-zA-Z0-9-]+[[:space:]]*:|setProperty\(['\"]--[a-zA-Z0-9-]+|['\"]--[a-zA-Z0-9-]+['\"][[:space:]]*:" \
-  | grep -oE -- "--[a-zA-Z0-9-]+" | sort -u)"
+  | grep -oE -- "--[a-zA-Z0-9-]+" | sort -u || true)"
 
 # Fallback-less references: var(--foo) but NOT var(--foo, …).
 refs="$(printf '%s' "$stripped" \
   | grep -oE "var\(--[a-zA-Z0-9-]+[[:space:]]*\)" \
-  | grep -oE -- "--[a-zA-Z0-9-]+" | sort -u)"
+  | grep -oE -- "--[a-zA-Z0-9-]+" | sort -u || true)"
 
 # Known = defined ∪ grandfathered. Undefined = fallback-less refs minus known.
 known="$(printf '%s\n' "$defined"; printf '%s\n' $ALLOW)"
