@@ -241,7 +241,7 @@ describe('both-clients SWITCH_FIXTURES coverage lint (#5619)', () => {
     // migrating types OUT to the shared dispatch table (universe shrinks below
     // the floor) lowers it — adjust both bounds in the same PR. Keep the band
     // TIGHT around the real count so the "fail loudly" intent stays sharp. Band
-    // last lowered for #6449 slice 5 (raw / raw_background / terminal_output
+    // last lowered for #6449 slice 1 (raw / raw_background / terminal_output
     // migrated out to the shared dispatch table; universe down to 37).
     expect(both.length).toBeGreaterThanOrEqual(35)
     expect(both.length).toBeLessThanOrEqual(45)

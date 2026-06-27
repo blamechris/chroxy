@@ -1042,7 +1042,7 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
-  // #6449 slice 5 — terminal-mirror cases (raw/raw_background/terminal_output)
+  // #6449 slice 1 — terminal-mirror cases (raw/raw_background/terminal_output)
   // migrated to the shared dispatch table. The dashboard writes only the
   // connection store (no secondary terminal store, unlike the app).
   appendTerminalData: (data) => getStore().getState().appendTerminalData(data),
@@ -1293,7 +1293,7 @@ function handlePong(msg: Record<string, unknown>, _get: MsgGet, _set: MsgSet, _c
 }
 
 // raw / raw_background / terminal_output — migrated to the shared dispatch table
-// (#6449 slice 5; runDispatch handles them before the HANDLERS map, via the
+// (#6449 slice 1; runDispatch handles them before the HANDLERS map, via the
 // appendTerminalData adapter hook). terminal_output's active-session guard (drop
 // a stale frame whose sessionId isn't the active session) now lives in
 // dispatchTerminalOutput, byte-identical to the handler removed here.
@@ -3102,7 +3102,7 @@ const HANDLERS: Record<string, Handler> = {
   billing_canary: handleBillingCanary,
   pong: handlePong,
   // raw / raw_background / terminal_output — migrated to the shared dispatch
-  // table (#6449 slice 5; runDispatch handles them before this HANDLERS map).
+  // table (#6449 slice 1; runDispatch handles them before this HANDLERS map).
   terminal_size: handleTerminalSize,
   token_rotated: handleTokenRotated,
   pairing_refreshed: handlePairingRefreshed,

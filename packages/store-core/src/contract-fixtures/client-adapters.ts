@@ -89,7 +89,7 @@ export interface AdapterResult {
    */
   rotatedTunnelUrls: Array<{ url: string; previousUrl: string | null }>
   /**
-   * Raw terminal-mirror writes via `appendTerminalData` (#6449 slice 5), in
+   * Raw terminal-mirror writes via `appendTerminalData` (#6449 slice 1), in
    * order — from the raw / raw_background / terminal_output cases. BOTH clients
    * call it once per accepted frame (the app's extra useTerminalStore mirror is a
    * platform side-effect below the hook), so the contract asserts identical writes.
@@ -174,7 +174,7 @@ export function makeClientEnv(kind: ClientKind, init?: FixtureInitialState) {
     // live `flat` ref so the web-task upsert fixtures observe identical results.
     updateState: (updater) => Object.assign(flat, updater(flat)),
     addMessage: (m) => added.push(m),
-    // #6449 slice 5 — terminal-mirror cases record one write per accepted frame.
+    // #6449 slice 1 — terminal-mirror cases record one write per accepted frame.
     // Both clients call this once; the app's extra useTerminalStore mirror is a
     // platform side-effect below the hook, modelled as out-of-contract here.
     appendTerminalData: (data) => {

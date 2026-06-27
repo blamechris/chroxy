@@ -1222,7 +1222,7 @@ const _dispatchAdapter: ClientStoreAdapter<SessionState> = {
       updater(state as unknown as Record<string, unknown>) as Partial<ConnectionState>,
     ),
   addMessage: (m) => getStore().getState().addMessage(m),
-  // #6449 slice 5 — terminal-mirror cases (raw/raw_background/terminal_output)
+  // #6449 slice 1 — terminal-mirror cases (raw/raw_background/terminal_output)
   // migrated to the shared dispatch table. The app writes to BOTH the connection
   // store and its secondary useTerminalStore (the dashboard omits the latter) —
   // folding the prior switch cases' two writes into this one adapter primitive.
@@ -2847,10 +2847,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // available_permission_modes — migrated to the shared dispatch table (#5556)
 
 
-    // raw — migrated to the shared dispatch table (#6449 slice 5; runDispatch
+    // raw — migrated to the shared dispatch table (#6449 slice 1; runDispatch
     // handles it before this switch, via the appendTerminalData adapter hook).
 
-    // terminal_output — migrated to the shared dispatch table (#6449 slice 5).
+    // terminal_output — migrated to the shared dispatch table (#6449 slice 1).
     // The live-PTY active-session guard (drop a stale frame whose sessionId isn't
     // the active session) now lives in dispatchTerminalOutput, byte-identical.
 
@@ -2887,7 +2887,7 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
 
     // inactivity_warning — migrated to the shared dispatch table (#5556 slice 2)
 
-    // raw_background — migrated to the shared dispatch table (#6449 slice 5).
+    // raw_background — migrated to the shared dispatch table (#6449 slice 1).
 
     case 'permission_request': {
       const permPayload = sharedPermissionRequest(msg);

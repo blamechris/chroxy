@@ -182,7 +182,7 @@ function sysMsg(content: string): Partial<ChatMessage> {
 // ---------------------------------------------------------------------------
 
 export const DISPATCH_FIXTURES: ContractFixture[] = [
-  // --- slice 5 (#6449) — terminal-mirror pass-through. Moved here from
+  // --- slice 1 (#6449) — terminal-mirror pass-through. Moved here from
   // SWITCH_FIXTURES: raw / raw_background / terminal_output now live in the
   // shared dispatch table, so contract.test.ts drives them through runDispatch
   // (the contract adapter records one appendTerminalData write per accepted frame).

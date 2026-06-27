@@ -155,7 +155,7 @@ import {
   type GitStageResultPayload,
   type GitCommitResultPayload,
 } from './handlers'
-// #6449 slice 5 — shared raw-output parse for the terminal-mirror cases. The
+// #6449 slice 1 — shared raw-output parse for the terminal-mirror cases. The
 // './handlers' barrel doesn't re-export stream.ts, so import it directly.
 import { handleRawOutput } from './handlers/stream'
 
@@ -271,7 +271,7 @@ export interface ClientStoreAdapter<S extends DispatchSessionBase, Flat = Record
   /** Append a chat message via the client's own add-message path. */
   addMessage(message: ChatMessage): void
   /**
-   * Append raw bytes to the client's terminal view (#6449 slice 5). Backs the
+   * Append raw bytes to the client's terminal view (#6449 slice 1). Backs the
    * terminal-mirror cases (`raw` / `raw_background` / `terminal_output`). Both
    * clients expose an `appendTerminalData(data)` store action; the APP impl ALSO
    * mirrors into its secondary `useTerminalStore` — a platform side-effect folded
@@ -921,7 +921,7 @@ export interface DispatchMessageMap {
     sessionId?: string
     checkpoints?: unknown[]
   }
-  // #6449 slice 5 — terminal-mirror pass-through cases (wire-shape optionality:
+  // #6449 slice 1 — terminal-mirror pass-through cases (wire-shape optionality:
   // raw_background carries no sessionId; the handlers guard defensively anyway).
   raw: {
     type: 'raw'
@@ -1996,7 +1996,7 @@ function dispatchMultiQuestionIntervention<S extends DispatchSessionBase>(
  * handlers are shared and identical.
  */
 // ---------------------------------------------------------------------------
-// slice 5 (#6449) — terminal-mirror pass-through (raw / raw_background /
+// slice 1 (#6449) — terminal-mirror pass-through (raw / raw_background /
 // terminal_output). All three are verbatim writes to the client's terminal view
 // via the single `appendTerminalData` adapter primitive; their both-clients
 // equivalence is gated by the #6345 SWITCH_FIXTURES the contract harness drives.
@@ -2128,7 +2128,7 @@ export function createDispatchTable<S extends DispatchSessionBase>(): DispatchTa
     // --- checkpoint cases (#5618 Batch 6) ---
     checkpoint_created: dispatchCheckpointCreated,
     checkpoint_list: dispatchCheckpointList,
-    // --- slice 5 (#6449) — terminal-mirror pass-through ---
+    // --- slice 1 (#6449) — terminal-mirror pass-through ---
     raw: dispatchRaw,
     raw_background: dispatchRawBackground,
     terminal_output: dispatchTerminalOutput,
@@ -2214,7 +2214,7 @@ export const DISPATCH_TABLE_TYPES: readonly DispatchMessageType[] = [
   // --- checkpoint cases (#5618 Batch 6) ---
   'checkpoint_created',
   'checkpoint_list',
-  // --- slice 5 (#6449) — terminal-mirror pass-through ---
+  // --- slice 1 (#6449) — terminal-mirror pass-through ---
   'raw',
   'raw_background',
   'terminal_output',
