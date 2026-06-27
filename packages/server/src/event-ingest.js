@@ -26,7 +26,7 @@
  */
 
 import { randomBytes } from 'node:crypto'
-import { existsSync, mkdirSync, readFileSync } from 'node:fs'
+import { existsSync, mkdirSync, readFileSync, openSync, writeSync, closeSync } from 'node:fs'
 import { dirname, join } from 'node:path'
 import { homedir } from 'node:os'
 import { safeTokenCompare } from './token-compare.js'
@@ -176,7 +176,30 @@ export function loadOrCreateIngestSecret(secretPath = defaultIngestSecretPath())
   }
   const secret = randomBytes(32).toString('base64url')
   mkdirSync(dirname(secretPath), { recursive: true })
-  writeFileRestricted(secretPath, secret + '\n')
+  // Atomic exclusive-create ('ax' fails with EEXIST if the file already exists) so
+  // two concurrent first-starts can't each write a DIFFERENT secret: the old
+  // existsSync+write check-then-act let the LAST writer win, silently invalidating
+  // the first process's secret (and the emitters that already authenticated with
+  // it). With 'ax' the FIRST writer wins; a loser re-reads the winner's secret.
+  let fd
+  try {
+    fd = openSync(secretPath, 'ax', 0o600)
+  } catch (err) {
+    if (err && err.code === 'EEXIST') {
+      const existing = readFileSync(secretPath, 'utf-8').trim()
+      if (existing.length > 0) return existing
+      // Exists but EMPTY — a corrupt / crashed-mid-write file, NOT the concurrent
+      // race. Fall back to the legacy temp+rename overwrite to recover.
+      writeFileRestricted(secretPath, secret + '\n')
+      return secret
+    }
+    throw err
+  }
+  try {
+    writeSync(fd, secret + '\n')
+  } finally {
+    closeSync(fd)
+  }
   return secret
 }
 
