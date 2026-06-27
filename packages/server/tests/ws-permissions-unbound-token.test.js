@@ -103,4 +103,30 @@ describe('HTTP /permission-response rejects unbound pairing tokens (swarm-audit 
     const res = await respond('bound-token')
     assert.doesNotMatch(String(res.body ?? ''), /unbound token/)
   })
+
+  it('does NOT 403 when the pairingManager lacks isSessionTokenValid (single-token / partial mode)', async () => {
+    // The typeof guard must treat the token as the primary (not a pairing token):
+    // it neither throws nor rejects when isSessionTokenValid is absent.
+    const partial = createPermissionHandler({
+      sendFn: mock.fn(),
+      broadcastFn: mock.fn(),
+      validateBearerAuth: mock.fn(() => true),
+      pendingPermissions: new Map(),
+      permissionSessionMap: new Map(),
+      getSessionManager: () => ({ getSession: () => null }),
+      pairingManager: { getSessionIdForToken: () => null }, // NO isSessionTokenValid
+    })
+    try {
+      const req = makeReq(
+        JSON.stringify({ requestId: 'perm-1', decision: 'allow' }),
+        { authorization: 'Bearer any-token' },
+      )
+      const res = makeRes()
+      partial.handlePermissionResponseHttp(req, res)
+      await new Promise((r) => setImmediate(r))
+      assert.doesNotMatch(String(res.body ?? ''), /unbound token/)
+    } finally {
+      partial.destroy()
+    }
+  })
 })
