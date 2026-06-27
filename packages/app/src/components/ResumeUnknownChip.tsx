@@ -81,15 +81,19 @@ export function ResumeUnknownChip({
   // is single-sourced cross-surface. accessibilityRole stays `'alert'` for both
   // variants — the mobile RN convention is the assertive role on recoverable
   // amber chips too (parity with StreamStallChip); the label carries the urgency.
-  const { headline } = getErrorPresentation(
+  const { headline, role } = getErrorPresentation(
     variant === 'exhausted' ? 'resume_unknown_exhausted' : 'resume_unknown',
   );
+  // #6429: derive live-region politeness from the registry role — the exhausted
+  // (alert) variant announces assertively, the recoverable (status) one politely.
+  // accessibilityRole stays 'alert' for both (the label still carries the urgency).
+  const liveRegion = role === 'alert' ? 'assertive' : 'polite';
 
   return (
     <View
       testID="resume-unknown-chip"
       accessibilityRole="alert"
-      accessibilityLiveRegion="polite"
+      accessibilityLiveRegion={liveRegion}
       accessibilityLabel={headline}
       accessibilityHint={errorText}
       style={styles.container}
