@@ -163,6 +163,18 @@ export function defaultIngestSecretPath() {
   return join(configDir, 'ingest-secret')
 }
 
+// Synchronous millisecond sleep (Atomics.wait on a throwaway SharedArrayBuffer) —
+// used only in the rare ingest-secret create race, to yield the CPU so a concurrent
+// winner's writeSync can land before we re-read its (briefly 0-byte) file.
+function sleepSync(ms) {
+  try {
+    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms)
+  } catch {
+    // SharedArrayBuffer/Atomics unavailable — skip the backoff; the retry loop's
+    // own syscall overhead still spaces the reads.
+  }
+}
+
 /**
  * Read the ingest secret from disk, generating + persisting it (0600,
  * temp+rename via writeFileRestricted) when missing. Throws on I/O failure
@@ -186,10 +198,19 @@ export function loadOrCreateIngestSecret(secretPath = defaultIngestSecretPath())
     fd = openSync(secretPath, 'ax', 0o600)
   } catch (err) {
     if (err && err.code === 'EEXIST') {
-      const existing = readFileSync(secretPath, 'utf-8').trim()
-      if (existing.length > 0) return existing
-      // Exists but EMPTY — a corrupt / crashed-mid-write file, NOT the concurrent
-      // race. Fall back to the legacy temp+rename overwrite to recover.
+      // The file already exists — re-read the winner's secret. An EMPTY read means
+      // EITHER a corrupt / crashed-mid-write file OR a concurrent winner that just
+      // created the 0-byte file via its own 'ax' but hasn't flushed its writeSync
+      // yet. Retry briefly (yielding the CPU so the winner can be scheduled) so its
+      // write lands and BOTH processes converge on the winner's secret — overwriting
+      // here would clobber the winner's inode and re-open the very split-secret race.
+      for (let attempt = 0; attempt < 10; attempt++) {
+        const existing = readFileSync(secretPath, 'utf-8').trim()
+        if (existing.length > 0) return existing
+        if (attempt < 9) sleepSync(5)
+      }
+      // Still empty after the retry window — genuinely corrupt (not a live winner);
+      // recover via the legacy temp+rename overwrite.
       writeFileRestricted(secretPath, secret + '\n')
       return secret
     }
