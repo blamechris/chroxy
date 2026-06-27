@@ -821,6 +821,13 @@ export function SessionScreen() {
         content: 'Message queued — waiting for reconnection...',
         timestamp: Date.now(),
       });
+    } else if (result === false && busy && (viewMode === 'chat' || viewMode === 'files')) {
+      // #6451 — the send AND the offline-enqueue both failed (queue full), so no
+      // server message_queued/dequeued will reconcile the optimistic 'Queued'
+      // badge we added when busy — roll it back so it doesn't linger forever.
+      // (enqueueMessage already surfaced a 'couldn't queue' system message via
+      // notifyQueueFailure, so we don't add a duplicate notice here.)
+      useConnectionStore.getState().clearOptimisticQueuedMessage(clientMessageId);
     }
   };
   // Refresh the live implementation each render, then expose a stable wrapper.

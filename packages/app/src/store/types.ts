@@ -488,6 +488,9 @@ export interface MessageInputActions {
   // #5938 (#5943) — cancel one queued follow-up by its clientMessageId before
   // it flushes. Returns false (refused) while disconnected; never offline-queued.
   sendCancelQueued: (clientMessageId: string, sessionId?: string) => 'sent' | false;
+  // #6451 — locally drop an optimistic 'Queued' badge whose send failed outright
+  // (no server confirm/dequeue will arrive), so it can't linger forever.
+  clearOptimisticQueuedMessage: (clientMessageId: string, sessionId?: string) => void;
   sendPermissionResponse: (requestId: string, decision: string) => 'sent' | 'queued' | false;
   /**
    * Send a `user_question_response` answer to the server.

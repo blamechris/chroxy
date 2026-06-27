@@ -1846,6 +1846,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     return 'sent';
   },
 
+  // #6451 — locally drop an optimistic 'Queued' badge whose send failed outright
+  // (wsSend false AND the offline queue full), so the server will never send a
+  // message_queued/dequeued to reconcile it. Unlike sendCancelQueued this sends
+  // NOTHING (the message never reached the server) — it only clears the stale
+  // local badge so it can't linger forever. The user's message bubble is kept so
+  // their text stays visible; the caller surfaces a "couldn't send" notice.
+  clearOptimisticQueuedMessage: (clientMessageId: string, sessionId?: string) => {
+    const sid = sessionId ?? get().activeSessionId;
+    if (sid && get().sessionStates[sid]) {
+      updateSession(sid, (ss) => ({
+        queuedMessages: removeQueuedMessage(ss.queuedMessages ?? [], clientMessageId),
+      }));
+    }
+  },
+
   sendPermissionResponse: (requestId: string, decision: string) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected, rather
