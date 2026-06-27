@@ -21,6 +21,8 @@
  * duplicate the theme tokens for no UX benefit).
  */
 import { useCallback } from 'react'
+import { getErrorPresentation } from '@chroxy/store-core'
+import { ChatErrorFrame } from './ChatErrorFrame'
 
 export interface AskUserQuestionStallChipProps {
   /** The raw error text from the server (action-oriented copy, currently
@@ -42,14 +44,17 @@ export function AskUserQuestionStallChip({ errorText, onRetry }: AskUserQuestion
     onRetry?.()
   }, [onRetry])
 
+  // #6392 — the six retryable AskUserQuestion codes all share one presentation;
+  // ASK_USER_QUESTION_STALL is the canonical (first, #4614) family code.
+  const presentation = getErrorPresentation('ASK_USER_QUESTION_STALL')
+
   return (
-    <div
-      className="stream-stall-chip"
-      data-testid="ask-user-question-stall-chip"
-      role="status"
+    <ChatErrorFrame
+      testId="ask-user-question-stall-chip"
+      role={presentation.role}
       title={errorText}
+      headline={presentation.headline}
     >
-      <span className="stream-stall-chip-text">Question delivery failed — retry?</span>
       {onRetry && (
         <button
           type="button"
@@ -60,6 +65,6 @@ export function AskUserQuestionStallChip({ errorText, onRetry }: AskUserQuestion
           Retry
         </button>
       )}
-    </div>
+    </ChatErrorFrame>
   )
 }
