@@ -19,13 +19,20 @@ export class SessionMessageHistory extends EventEmitter {
    * @param {number} [opts.maxMessages=1000] - Max messages per session (FIFO eviction when exceeded)
    * @param {number} [opts.maxHistory]       - Alias for maxMessages (legacy option name)
    * @param {number} [opts.maxToolInput]     - Max characters for tool input (unused here, reserved)
+   * @param {number} [opts.maxPendingStreamSize] - Max accumulated chars for one pending stream before further deltas are dropped (default 100MB). Injectable for tests.
    */
-  constructor({ maxMessages, maxHistory, maxToolInput } = {}) {
+  constructor({ maxMessages, maxHistory, maxToolInput, maxPendingStreamSize } = {}) {
     super()
     this._maxHistory = maxMessages ?? maxHistory ?? 1000
     this._maxToolInput = maxToolInput || null
+    this._maxPendingStreamSize = maxPendingStreamSize || MAX_PENDING_STREAM_SIZE
     this._messageHistory = new Map()    // sessionId -> Array<{ type, _seq, ...data }>
     this._pendingStreams = new Map()     // sessionId:messageId -> accumulated delta text
+    // #6431 — messageIds whose pending stream has already been truncated, so the
+    // truncation is signalled to the client ONCE per stream (every subsequent
+    // over-size delta for the same message also exceeds the cap and would
+    // otherwise re-fire the error). Cleared on stream_end / session clear.
+    this._truncatedStreams = new Set()   // sessionId:messageId
     this._historyTruncated = new Map()  // sessionId -> boolean
     // #5555.3 (lastSeq delta replay) — per-session monotonic history sequence.
     // Every entry pushed into the ring buffer is stamped with a strictly
@@ -116,6 +123,7 @@ export class SessionMessageHistory extends EventEmitter {
         const messageId = key.slice(prefix.length)
         closedMessageIds.push(messageId)
         this._pendingStreams.delete(key)
+        this._truncatedStreams.delete(key) // #6431 — release the truncation guard
       }
     }
     return closedMessageIds
@@ -294,9 +302,18 @@ export class SessionMessageHistory extends EventEmitter {
         const key = `${sessionId}:${data.messageId}`
         const existing = this._pendingStreams.get(key)
         if (existing !== undefined) {
-          if (existing.length + data.delta.length > MAX_PENDING_STREAM_SIZE) {
-            log.warn(`Stream delta exceeded size limit for ${key}`)
-            return { persistNeeded: false }
+          if (existing.length + data.delta.length > this._maxPendingStreamSize) {
+            // #6431 — drop the over-size delta from history. The client still
+            // received it (forwarded independently), so its local copy now
+            // diverges from the persisted message. Signal truncation ONCE per
+            // stream so the caller can emit a client-visible error instead of a
+            // silent desync.
+            const firstDrop = !this._truncatedStreams.has(key)
+            if (firstDrop) {
+              this._truncatedStreams.add(key)
+              log.warn(`Stream delta exceeded size limit for ${key} — truncating; client will be notified`)
+            }
+            return { persistNeeded: false, truncated: firstDrop }
           }
           this._pendingStreams.set(key, existing + data.delta)
         }
@@ -307,6 +324,7 @@ export class SessionMessageHistory extends EventEmitter {
         const key = `${sessionId}:${data.messageId}`
         const content = this._pendingStreams.get(key) || ''
         this._pendingStreams.delete(key)
+        this._truncatedStreams.delete(key) // #6431 — release the once-per-stream guard
         if (content) {
           this._pushHistory(history, {
             type: 'message',
@@ -474,6 +492,10 @@ export class SessionMessageHistory extends EventEmitter {
       if (key.startsWith(prefix)) {
         this._pendingStreams.delete(key)
       }
+    }
+    // #6431 — and any lingering truncation guards for this session
+    for (const key of this._truncatedStreams) {
+      if (key.startsWith(prefix)) this._truncatedStreams.delete(key)
     }
   }
 
