@@ -8,7 +8,7 @@ import {
   Image,
   LayoutAnimation,
 } from 'react-native';
-import { OTHER_OPTION_VALUE, bumpRenderCount, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
+import { OTHER_OPTION_VALUE, bumpRenderCount, getErrorPresentation, isRetryableAskUserQuestionError, isSingleMultiSelectForm } from '@chroxy/store-core';
 // #4875: `OtherFreeformAnswer` moved to @chroxy/store-core/freeform-answer
 // so the mobile store, the mobile screen, and (eventually) the dashboard
 // can converge on a single declaration paired with the shared
@@ -336,12 +336,13 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
       <StreamStallChip
         errorText={message.content?.trim() || ''}
         onRetry={onRetryStreamStall}
-        // #5793: the AskUserQuestion teardown codes are a question-delivery
-        // failure, not a stream stall — use copy that matches the dashboard's
-        // AskUserQuestionStallChip ("Question delivery failed — retry?").
+        // #5793 / #6392: the AskUserQuestion teardown codes are a question-
+        // delivery failure, not a stream stall — source the copy from the shared
+        // error-presentation registry (single source cross-surface). stream_stall
+        // falls through to the chip's registry-sourced default.
         headline={
           isRetryableAskUserQuestionError(message.code)
-            ? 'Question delivery failed — retry?'
+            ? getErrorPresentation(message.code).headline
             : undefined
         }
       />

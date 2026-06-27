@@ -19,6 +19,7 @@
  */
 import React, { useCallback, useState } from 'react';
 import { Pressable, StyleSheet, Text, View } from 'react-native';
+import { getErrorPresentation } from '@chroxy/store-core';
 import { COLORS } from '../constants/colors';
 
 export interface StreamStallChipProps {
@@ -43,7 +44,13 @@ export interface StreamStallChipProps {
   headline?: string;
 }
 
-export function StreamStallChip({ errorText, onRetry, headline = 'Stream stalled — retry?' }: StreamStallChipProps) {
+export function StreamStallChip({
+  errorText,
+  onRetry,
+  // #6392: the default stream-stall copy is single-sourced from the shared
+  // error-presentation registry (callers override for the AskUserQuestion family).
+  headline = getErrorPresentation('stream_stall').headline,
+}: StreamStallChipProps) {
   const [detailVisible, setDetailVisible] = useState(false);
 
   const handleRetry = useCallback(() => {
