@@ -642,6 +642,11 @@ export function setPendingKeyPair(kp: KeyPair | null): void {
   _ctx.pendingKeyPair = kp;
 }
 
+/** #6446 — read the in-flight handshake salt, so a reset can be asserted directly. */
+export function getPendingSalt(): string | null {
+  return _ctx.pendingSalt;
+}
+
 /**
  * #5555 (eager key exchange) — generate this connection's ephemeral X25519
  * keypair + per-connection salt and stash them on the handler context so they

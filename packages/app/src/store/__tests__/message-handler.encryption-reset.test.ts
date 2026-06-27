@@ -2,6 +2,7 @@ import {
   resetEncryptionContext,
   getEncryptionState,
   getPendingKeyPair,
+  getPendingSalt,
   setEncryptionState,
   prepareEagerKeyExchange,
 } from '../message-handler';
@@ -20,12 +21,12 @@ describe('resetEncryptionContext (#6446)', () => {
     prepareEagerKeyExchange(); // sets pendingKeyPair + pendingSalt
     expect(getEncryptionState()).not.toBeNull();
     expect(getPendingKeyPair()).not.toBeNull();
+    expect(getPendingSalt()).not.toBeNull();
 
     resetEncryptionContext();
 
     expect(getEncryptionState()).toBeNull();
     expect(getPendingKeyPair()).toBeNull();
-    // pendingSalt is cleared by the same INITIAL_ENCRYPTION_CONTEXT unit-reset
-    // (no getter to assert directly; covered by construction — that was the gap).
+    expect(getPendingSalt()).toBeNull(); // the field the old field-by-field reset missed (#6446)
   });
 });
