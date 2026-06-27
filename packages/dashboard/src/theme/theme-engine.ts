@@ -19,7 +19,7 @@ const ALL_CSS_VARS = [
   'bg-tool-bubble', 'bg-permission', 'bg-question', 'bg-plan-banner', 'bg-modal',
   'text-primary', 'text-secondary', 'text-muted', 'text-dim', 'text-disabled',
   'text-error', 'text-system', 'text-link', 'text-emphasis', 'text-heading', 'text-blockquote',
-  'accent-blue', 'accent-green', 'accent-purple', 'accent-orange', 'accent-red',
+  'accent-blue', 'accent-green', 'accent-purple', 'accent-orange', 'accent-red', 'accent-cyan',
   'accent-blue-light', 'accent-blue-subtle', 'accent-blue-border', 'accent-blue-border-strong',
   'accent-green-light', 'accent-green-border', 'accent-green-border-strong',
   'accent-purple-light', 'accent-purple-subtle', 'accent-purple-border-strong', 'accent-purple-code',

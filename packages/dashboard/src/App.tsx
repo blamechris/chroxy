@@ -303,7 +303,7 @@ export function App() {
     return inFlight ? `Running ${formatToolName(inFlight.tool, inFlight.serverName)}…` : undefined
   }, [storeMessages])
 
-  // #6392 — color the presence rail by the in-flight tool's kind (Read=blue,
+  // #6392 — color the presence rail by the in-flight tool's kind (Read=cyan,
   // Bash=purple, Edit=orange…) via the shared tool-presentation registry, rather
   // than the generic 'busy' purple. A `var(--token)` string when a tool is
   // mid-flight, undefined otherwise → the rail falls back to its activity-state
