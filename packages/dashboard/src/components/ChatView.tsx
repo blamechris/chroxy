@@ -291,6 +291,7 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   isStreaming,
   queued,
   onCancelQueued,
+  queuePosition,
 }: {
   id: string
   type: ChatViewMessage['type']
@@ -301,6 +302,9 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
   queued?: boolean
   /** #5939: cancel this queued follow-up (stable callback from ChatView). */
   onCancelQueued?: (id: string) => void
+  /** #6392: 1-based send position among queued follow-ups, shown only when more
+   *  than one is queued (so a lone queued message stays a plain "Queued"). */
+  queuePosition?: number
 }) {
   // Dev-only render tally — proves (in the memoization test + ad-hoc
   // profiling) non-tail rows don't re-render on a delta flush. Never read on
@@ -331,6 +335,9 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
         {queued && (
           <span className="msg-queued" data-testid={`msg-queued-${id}`}>
             <span className="msg-queued-label">Queued</span>
+            {queuePosition != null && (
+              <span className="msg-queued-position" data-testid={`msg-queued-position-${id}`}>#{queuePosition}</span>
+            )}
             {onCancelQueued && (
               <button
                 type="button"
@@ -354,6 +361,20 @@ const DefaultMessageRow = memo(function DefaultMessageRow({
 
 function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlightToolColor, renderMessage, scrollToBottomSignal, queuedIds, onCancelQueued, workingLabel }: ChatViewProps) {
   const containerRef = useRef<HTMLDivElement>(null)
+
+  // #6392 — 1-based send position for each queued follow-up, derived from the
+  // ordered `messages` (queuedIds is an unordered Set). Only built when 2+ are
+  // queued, so a single queued message stays a plain "Queued" (no "#1").
+  const queuePositions = useMemo(() => {
+    if (!queuedIds || queuedIds.size < 2) return null
+    const positions = new Map<string, number>()
+    let n = 0
+    for (const m of messages) {
+      if (queuedIds.has(m.id)) positions.set(m.id, ++n)
+    }
+    return positions
+  }, [messages, queuedIds])
+
   const [userScrolledUp, setUserScrolledUp] = useState(false)
   const programmaticScrollRef = useRef(false)
   // #5954 — a ref mirror of `userScrolledUp` so the ResizeObserver callback can
@@ -766,6 +787,7 @@ function ChatViewImpl({ messages, isStreaming, isBusy, chatActivityState, inFlig
                   timestamp={msg.timestamp}
                   isStreaming={msg.isStreaming}
                   queued={queuedIds?.has(msg.id) ?? false}
+                  queuePosition={queuePositions?.get(msg.id)}
                   onCancelQueued={onCancelQueued}
                 />
               </MessageRowShell>
