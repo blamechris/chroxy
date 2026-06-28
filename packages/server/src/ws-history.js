@@ -181,6 +181,11 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // surfaced as the `userShell` capability so the dashboard gates its "New
     // shell" affordance. Optional — absent → false (fail-closed) for old servers.
     userShellEnabled,
+    // #6481 (epic #6469): whether the opt-in IDE feature surface is enabled
+    // (config.features.ide / CHROXY_ENABLE_IDE). Surfaced as the `ide` capability
+    // so clients reveal IDE navigation/editing UI. Optional — absent → false
+    // (fail-closed) for old servers / callers.
+    ideEnabled,
     // #6006: whether the server has a rotating TokenManager (i.e. auth is on),
     // so the operator panic button (`revoke_token`) can fire. Surfaced as the
     // `tokenRevoke` capability, gated to primary-token clients below. Optional —
@@ -343,6 +348,13 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     // (older server) fall back to requesting the three lists as before. The
     // request handlers stay live either way for post-connect refreshes.
     authBootstrap: true,
+    // #6481 (epic #6469): the opt-in IDE feature surface (file navigator, symbol
+    // navigation, go-to-definition, find-references, edit-in-place) is enabled on
+    // THIS server (config.features.ide / CHROXY_ENABLE_IDE). Clients gate ALL IDE
+    // UI on this flag; absent/false (default, or older servers) → no IDE chrome
+    // (fail-closed). A server-wide feature gate, not token-scoped — available to
+    // every client when the operator opts in.
+    ide: ideEnabled === true,
     // #5986 (epic #5982) — the embedded user-shell terminal is available to THIS
     // client: the server has it enabled (userShell.enabled) AND this connection
     // holds the primary token. Both conditions of the create gate are reflected

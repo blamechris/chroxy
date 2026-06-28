@@ -96,6 +96,10 @@ const CONFIG_SCHEMA = {
   //   billing.monthlyCreditBudgetUsd raw USD cap (wins over the tier preset)
   //   billing.budgetWarningPercent   warn threshold 1-100 (default 80)
   billing: 'object',
+  // #6481 (epic #6469): opt-in IDE feature surface. `features.ide: true` (or the
+  // CHROXY_ENABLE_IDE=1 env override) reveals the IDE navigation/editing features;
+  // off by default so it never risks the core offering. See isIdeFeatureEnabled().
+  features: 'object',
   externalUrl: 'string',
   repos: 'array',
   // #5172 (Control Room v2): filesystem root the Host Status survey scans
@@ -641,6 +645,19 @@ function validateUserShellBlock(userShell, warnings) {
 // disabled. Used by SessionManager.createSession (the authoritative gate).
 export function isUserShellEnabled(config) {
   return config?.userShell?.enabled === true
+}
+
+// #6481 (epic #6469): single source of truth for the OPT-IN IDE feature surface
+// (file navigator, symbol navigation, go-to-definition, find-references,
+// edit-in-place). Off by default so it never risks the core remote-cockpit
+// offering. Enabled by an explicit `features.ide === true` in config OR the
+// `CHROXY_ENABLE_IDE=1` env override (quick opt-in / dev). When on, the server
+// registers the IDE WS handlers and advertises the `ide` capability so clients
+// reveal the IDE UI; off ⇒ no IDE handlers, no IDE UI, core byte-identical.
+// Fail-closed: anything but an explicit boolean true / the env "1" is off.
+export function isIdeFeatureEnabled(config) {
+  if (process.env.CHROXY_ENABLE_IDE === '1') return true
+  return config?.features?.ide === true
 }
 
 // #6277: single source of truth for "does a user-shell spawn need host-local
