@@ -13,8 +13,11 @@
 //
 // node-pty does NOT share this problem (it routes through conpty / cmd.exe
 // internally and runs a `.cmd` fine — verified), so ClaudeTuiSession's PTY spawn
-// needs no wrapping. This helper exists only for the plain-subprocess providers
-// (cli-session.js and its DockerSession subclass).
+// needs no wrapping. This helper is used by the plain-subprocess path in
+// cli-session.js. (DockerSession overrides _spawnPersistentProcess to run
+// `docker` directly, so it does not go through here. The other subprocess
+// providers — codex/gemini/deepseek/ollama via jsonl-subprocess-session.js —
+// resolve binaries the same way and have the same need; tracked in #6484.)
 //
 // The `.cmd`/`.bat` escaping is the battle-tested cmd.exe algorithm popularised
 // by `cross-spawn` (https://qntm.org/cmd), which npm itself relies on. Each token
