@@ -71,8 +71,11 @@ describe('runProviderPreflight — binary checks', () => {
     // under a fake name. resolveBinary returns the absolute path of
     // whichever candidate exists first, so this validates the fallback path.
     const { resolveBinary } = await import('../src/utils/resolve-binary.js')
+    const { isAbsolute } = await import('node:path')
     const nodePath = resolveBinary('node', [])
-    assert.ok(nodePath.startsWith('/'), 'precondition: node must be on PATH')
+    // Cross-platform: an absolute path on POSIX (/usr/bin/node) or Windows
+    // (C:\...\node.exe) — resolveBinary uses `which`/`where` respectively.
+    assert.ok(isAbsolute(nodePath), `precondition: node must be on PATH (got: ${nodePath})`)
 
     const Provider = makeProvider({
       preflight: {
