@@ -22,7 +22,7 @@ import { handleAuthMessage, handlePairMessage, handlePairRequestMessage, handleK
 import { postPairLinkToDiscord } from './discord-pair-delivery.js'
 import { sendPostAuthInfo, replayHistory, flushPostAuthQueue, sendSessionInfo } from './ws-history.js'
 import { createDevicePreferences } from './device-preferences.js'
-import { isUserShellEnabled } from './config.js'
+import { isUserShellEnabled, isIdeFeatureEnabled } from './config.js'
 import { createHttpHandler } from './http-routes.js'
 import { CheckpointManager } from './checkpoint-manager.js'
 import { DevPreviewManager } from './dev-preview.js'
@@ -930,6 +930,11 @@ export class WsServer {
       // user-shell provider is hidden from listProviders, so the picker can't
       // advertise it). Late-bound getter so a test mutating self.config is seen.
       get userShellEnabled() { return isUserShellEnabled(self.config) },
+      // #6481 (epic #6469): whether the opt-in IDE feature surface is enabled on
+      // this server (config.features.ide / CHROXY_ENABLE_IDE). Surfaced as the
+      // `ide` capability so clients gate IDE UI. Late-bound getter so a test
+      // mutating self.config is seen.
+      get ideEnabled() { return isIdeFeatureEnabled(self.config) },
       // #6006: whether the operator panic button (revoke_token) can fire — true
       // iff a usable rotating TokenManager exists (i.e. auth is on). Mirrors the
       // token-handlers availability check (`typeof revoke === 'function'`) so the

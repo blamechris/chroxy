@@ -324,6 +324,33 @@ describe('sendPostAuthInfo — userShell capability (#5986)', () => {
   })
 })
 
+// #6481 (epic #6469): the `ide` capability advertises that the opt-in IDE feature
+// surface is enabled on this server (config.features.ide / CHROXY_ENABLE_IDE).
+// Unlike userShell/tokenRevoke it is a server-WIDE gate, not token-scoped —
+// available to every client when the operator opts in. Clients gate ALL IDE UI on
+// it; absent/false (default, or older servers) → no IDE chrome (fail-closed).
+describe('sendPostAuthInfo — ide capability (#6481)', () => {
+  it('advertises ide:true when the IDE feature is enabled, for ANY client class', () => {
+    for (const primary of [true, false, undefined]) {
+      const ctx = makeCtx({ ideEnabled: true })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, primary === undefined ? {} : { isPrimaryToken: primary })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.ide, true)
+    }
+  })
+
+  it('advertises ide:false when disabled or absent (fail-closed)', () => {
+    for (const v of [false, undefined]) {
+      const ctx = makeCtx(v === undefined ? {} : { ideEnabled: v })
+      const ws = makeFakeWs()
+      registerClient(ctx, ws, { isPrimaryToken: true })
+      sendPostAuthInfo(ctx, ws)
+      assert.equal(ctx._sends[0].capabilities.ide, false)
+    }
+  })
+})
+
 // #6006: the tokenRevoke capability gates the dashboard's "Revoke token" panic
 // button. It requires BOTH a rotating TokenManager (tokenRevocable — i.e. auth
 // is on) AND the primary-token class, mirroring the server-side handler gate, so
