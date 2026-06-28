@@ -1,0 +1,35 @@
+/**
+ * Server → Client schemas for the IDE navigation surface (epic #6469).
+ *
+ * Domain slice of the server→client schema surface; re-exported verbatim by
+ * ../server.ts (barrel). The whole surface is gated behind the opt-in
+ * `features.ide` flag (#6481) — the server advertises the `ide` capability and
+ * emits these messages only when the operator opts in.
+ *
+ * v1 is DASHBOARD_ONLY (the mobile app has no symbol surface yet); the asymmetry
+ * is declared in the protocol type-coverage lint (DASHBOARD_ONLY) and the
+ * handler-coverage guard (PLATFORM_SPECIFIC: 'dashboard').
+ */
+import { z } from 'zod';
+export declare const SymbolEntrySchema: z.ZodObject<{
+    name: z.ZodString;
+    kind: z.ZodString;
+    file: z.ZodString;
+    line: z.ZodNumber;
+    exported: z.ZodBoolean;
+}, z.core.$strip>;
+export declare const ServerSymbolsSnapshotSchema: z.ZodObject<{
+    type: z.ZodLiteral<"symbols_snapshot">;
+    path: z.ZodNullable<z.ZodString>;
+    symbols: z.ZodArray<z.ZodObject<{
+        name: z.ZodString;
+        kind: z.ZodString;
+        file: z.ZodString;
+        line: z.ZodNumber;
+        exported: z.ZodBoolean;
+    }, z.core.$strip>>;
+    truncated: z.ZodBoolean;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export type SymbolEntry = z.infer<typeof SymbolEntrySchema>;
+export type ServerSymbolsSnapshotMessage = z.infer<typeof ServerSymbolsSnapshotSchema>;

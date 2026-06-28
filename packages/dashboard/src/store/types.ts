@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerSymbolsSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -755,6 +755,20 @@ export interface ConnectionState {
    * disabled state. Cleared when a snapshot lands.
    */
   hostStatusLoading: boolean;
+
+  /**
+   * #6471 (epic #6469) — opt-in IDE workspace symbol table from the last
+   * `symbols_snapshot`. Null until the first `list_symbols` reply lands; the
+   * symbol panel (#6472) renders `symbols.symbols`. Only populated when the
+   * server advertises the `ide` capability (features.ide).
+   */
+  symbols: ServerSymbolsSnapshotMessage | null;
+  /**
+   * #6471 — true between dispatching a `list_symbols` request and the matching
+   * `symbols_snapshot` arriving, so the symbol panel can show a loading state.
+   * Cleared when a snapshot lands.
+   */
+  symbolsLoading: boolean;
 
   // Mailbox (#5914 follow-up) — Control Room "Mailbox" tab snapshot (live
   // agentCommId→session registrations + recent live-interrupt deliveries). Null
