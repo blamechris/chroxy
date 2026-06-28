@@ -47,7 +47,7 @@
     <span class="chip"><span class="dot ok"></span>167 features shipped (18 categories)</span>
     <span class="chip"><span class="dot ac"></span>Moat: multi-provider + self-hosted + native-mobile</span>
     <span class="chip"><span class="dot bad"></span>Biggest gap: the editing surface</span>
-    <span class="chip"><span class="dot ok"></span>IDE epic #6469 + 10 issues filed</span>
+    <span class="chip"><span class="dot ok"></span>IDE: epic #6469 + 11 issues, all opt-in (features.ide)</span>
     <span class="chip"><span class="dot warn"></span>New rival: Claude Code Remote Control (Feb 2026)</span>
   </div>
 </header>
@@ -110,8 +110,10 @@
 <section>
   <h2>IDE roadmap — filed today</h2>
   <p class="mut">Epic <a href="https://github.com/blamechris/chroxy/issues/6469">#6469</a>. Strategy: bootstrap symbol intelligence from the <b>repo-memory AST index</b> (~1,500 files, language-agnostic, cached, zero new binaries) — <b>not</b> LSP-first. Phases 1–2 are pure additive nav (parallelize freely); Phase 3 is the editing-surface identity decision; Phase 4 (LSP) only if regex precision fails.</p>
+  <div class="callout"><b>⚑ Opt-in feature flag (#6481):</b> the entire IDE surface ships behind a server <code>features.ide</code> flag — <b>off by default</b>. Operators opt in (<code>config.features.ide</code> or <code>CHROXY_ENABLE_IDE=1</code>); the server then registers the IDE handlers + advertises <code>capabilities.ide</code>, and clients reveal the UI. Flag off ⇒ the core remote-cockpit offering is byte-identical. Build #6481 first — everything gates on it.</div>
   <table>
     <tr><th>Phase</th><th>Issue</th><th>What</th></tr>
+    <tr><td><b>0</b> · foundation</td><td><span class="ref">#6481</span></td><td>⚑ <code>features.ide</code> opt-in flag <span class="bad">(build first — gates the whole surface)</span></td></tr>
     <tr><td><b>1</b> · read-only nav</td><td><span class="ref">#6470</span></td><td>File-tree navigator (collapsible explorer + breadcrumbs)</td></tr>
     <tr><td></td><td><span class="ref">#6471</span></td><td><code>list_symbols</code> WS handler + protocol schema (the backbone)</td></tr>
     <tr><td></td><td><span class="ref">#6472</span></td><td>Read-only symbol side-panel</td></tr>
