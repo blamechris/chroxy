@@ -198,6 +198,18 @@ describe('server identity (#5536)', () => {
       })
     })
 
+    it('(d2) unavailable but not broken keychain + NO fallback file → mints file identity', () => {
+      withTempDir((filePath) => {
+        // Linux with no secret-tool/libsecret is not a broken keychain; it is
+        // the documented headless/no-keychain fallback path.
+        const unavailable = fakeKeychain({ available: false, broken: false })
+        const id = getOrCreateServerIdentity({ keychain: unavailable, filePath })
+        assert.equal(id.created, true)
+        assert.equal(id.backend, 'file')
+        assert.equal(existsSync(filePath), true, 'must write the fallback file identity')
+      })
+    })
+
     it('(e) broken keychain + NO fallback file → throws IdentityUnavailableError (refuses to mint)', () => {
       withTempDir((filePath) => {
         const broken = fakeKeychain({ available: false, broken: true })

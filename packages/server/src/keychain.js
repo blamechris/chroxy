@@ -122,16 +122,25 @@ export function isKeychainAvailable() {
 
 /**
  * True when the keychain is present-but-UNUSABLE (broken/missing login keychain),
- * as DISTINCT from explicitly disabled (`CHROXY_DISABLE_KEYCHAIN=1`).
+ * as DISTINCT from explicitly disabled (`CHROXY_DISABLE_KEYCHAIN=1`) or simply
+ * absent.
  *
  * The server-identity loader (#5615) needs this distinction: a broken keychain
  * must not silently rotate the identity. It uses `isKeychainBroken()` to fail
  * safe — refuse to mint a replacement when it can't confirm there's no pinned
  * identity in the (now unreadable) keychain AND no fallback file exists. The
  * probe is non-prompting, so this never triggers the macOS modal.
+ *
+ * Linux is deliberately NOT classified as broken when `secret-tool` is missing:
+ * that is the documented headless/no-keychain fallback case, so identity storage
+ * should mint/reload the 0600 file just like other unsupported hosts. When a
+ * Linux keychain is actually available but a lookup fails, `getTokenStatus()`
+ * still reports `error` and the identity loader fails safe without rotating.
  */
 export function isKeychainBroken() {
-  return !keychainDisabled() && !keychainUsable()
+  if (keychainDisabled()) return false
+  if (!isMac) return false
+  return !keychainUsable()
 }
 
 /**
