@@ -131,7 +131,9 @@ export function isKeychainAvailable() {
  * probe is non-prompting, so this never triggers the macOS modal.
  */
 export function isKeychainBroken() {
-  return !keychainDisabled() && !keychainUsable()
+  if (keychainDisabled()) return false
+  if (!isMac && !isLinux) return false
+  return !keychainUsable()
 }
 
 /**

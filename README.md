@@ -149,6 +149,20 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy init
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 ```
 
+On Windows PowerShell:
+
+```powershell
+git clone https://github.com/blamechris/chroxy.git
+cd chroxy
+npm install
+
+# Install and configure
+npx chroxy init
+
+# Start the server
+npx chroxy start
+```
+
 The server prints a QR code. Scan it with the Chroxy mobile app, or open the dashboard URL in your browser.
 
 #### Verify it worked
@@ -186,15 +200,28 @@ If your phone and dev machine are on the same WiFi, connect directly without the
 PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start --tunnel none
 ```
 
+On Windows PowerShell:
+
+```powershell
+npx chroxy start --tunnel none
+```
+
 Then:
 
 1. Find your machine's local IP:
    ```bash
+   # macOS
    ipconfig getifaddr en0
+
+   # Windows PowerShell
+   Get-NetIPAddress -AddressFamily IPv4 |
+     Where-Object { $_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -ne 'WellKnown' } |
+     Select-Object IPAddress,InterfaceAlias
    ```
 2. In the Chroxy app, tap **"Enter manually"** and enter:
    - URL: `ws://YOUR_IP:8765`
    - Token: the API token printed during `chroxy init` (stored in OS keychain, or `~/.chroxy/config.json` as fallback)
+3. For the web dashboard, open `http://YOUR_IP:8765/dashboard?token=YOUR_TOKEN` the first time. The token query sets the dashboard auth cookie and lets the browser app open its WebSocket connection. After that, plain `/dashboard` can load the page, but reconnecting may still need the full token URL if browser storage was cleared.
 
 ### Tunnel Modes
 

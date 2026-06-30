@@ -1,12 +1,13 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
+import { isAbsolute } from 'node:path'
 import { resolveBinary } from '../src/utils/resolve-binary.js'
 
 describe('resolveBinary', () => {
   it('returns an absolute path for a binary that is on PATH', () => {
     // `node` is always on PATH when running these tests
     const result = resolveBinary('node', [])
-    assert.ok(result.startsWith('/'), `expected absolute path, got: ${result}`)
+    assert.ok(isAbsolute(result), `expected absolute path, got: ${result}`)
   })
 
   it('returns the binary name as-is when not found anywhere', () => {
@@ -20,7 +21,7 @@ describe('resolveBinary', () => {
     // We resolve `node` via which first to get its real path, then pass
     // a mangled name with the real path as a candidate.
     const nodePath = resolveBinary('node', [])
-    assert.ok(nodePath.startsWith('/'), 'precondition: node must be findable')
+    assert.ok(isAbsolute(nodePath), 'precondition: node must be findable')
 
     // Now ask for the same binary via a fake name but its known path
     const result = resolveBinary('__fake_name_for_test__', [nodePath])
@@ -46,6 +47,13 @@ describe('resolveBinary', () => {
     ])
     // No candidates matched, so bare name is returned
     assert.equal(result, '__fake_name_for_test__')
+  })
+
+  it('checks PATHEXT suffixes for extensionless Windows candidates', { skip: process.platform !== 'win32' }, () => {
+    const nodePath = resolveBinary('node', [])
+    const extensionless = nodePath.replace(/\.[^.\\/]+$/, '')
+    const result = resolveBinary('__fake_name_for_test__', [extensionless])
+    assert.equal(result.toLowerCase(), nodePath.toLowerCase())
   })
 
   it('returns a string in all cases', () => {

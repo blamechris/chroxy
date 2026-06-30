@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, statSync } from 'fs'
-import { join, resolve, dirname } from 'path'
+import { join, resolve, dirname, relative, sep } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
@@ -1075,7 +1075,8 @@ export function createHttpHandler(server) {
       // Serve static assets WITHOUT auth — hashed filenames from Vite build
       if (relPath.startsWith('assets/')) {
         const filePath = resolve(distDir, relPath)
-        if (!filePath.startsWith(distDir + '/')) {
+        const assetRel = relative(distDir, filePath)
+        if (assetRel.startsWith('..') || assetRel === '' || assetRel.includes(`..${sep}`)) {
           res.writeHead(403)
           res.end('Forbidden')
           return
