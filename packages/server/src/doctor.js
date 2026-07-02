@@ -6,6 +6,7 @@ import { homedir, platform } from 'os'
 import { createServer } from 'net'
 import { validateConfig } from './config.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { prepareSpawn } from './utils/win-spawn.js'
 import { getProvider, DEFAULT_PROVIDER } from './providers.js'
 import { registerAnthropicCompatibleProviders } from './anthropic-compatible-session.js'
 import { registerOpenAiCompatibleProviders } from './openai-compatible-session.js'
@@ -155,7 +156,14 @@ function claudeTuiBinaryCandidates() {
  */
 export function checkClaudeTuiCliVersion(deps = {}) {
   const {
-    exec = (bin, args) => execFileSync(bin, args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'] }),
+    // #6484 — route through prepareSpawn so a `.cmd` shim (npm-only Windows host)
+    // is run via cmd.exe instead of hitting Node 24's `.cmd` EINVAL. No-op for
+    // `.exe`/POSIX. Most tests inject their own `exec`, bypassing this; the
+    // win32-routing test exercises this default path directly.
+    exec = (bin, args) => {
+      const s = prepareSpawn(bin, args)
+      return execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...s.options })
+    },
     tested = TESTED_CLAUDE_TUI_CLI_VERSION,
     // #5871: resolve against the SAME candidate paths the claude-tui provider
     // preflight uses, so this drift backstop isn't silently skipped in a
@@ -597,8 +605,12 @@ function checkProvider(providerName) {
 export function checkBinary(name, args, { parseVersion, required, installHint, candidates = [], minVersion = null }) {
   const resolved = resolveBinary(name, candidates)
   try {
-    const output = execFileSync(resolved, args, {
-      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'],
+    // #6484 — a resolved `.cmd` shim (npm-only Windows host) can't be spawned
+    // directly on Node 24; route it through cmd.exe via prepareSpawn. No-op for
+    // a `.exe` and on POSIX, so non-Windows binary checks are unchanged.
+    const spawnSpec = prepareSpawn(resolved, args)
+    const output = execFileSync(spawnSpec.command, spawnSpec.args, {
+      encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...spawnSpec.options,
     })
     const message = parseVersion(output)
     // #3953: when the provider declares a minimum version, parse the

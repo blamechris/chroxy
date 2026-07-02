@@ -4,6 +4,7 @@ import { BaseSession, buildBaseSessionOpts } from './base-session.js'
 import { createLogger } from './logger.js'
 import { guardChildStreams } from './child-stream-guard.js'
 import { getErrorMessage } from './utils/error-message.js'
+import { prepareSpawn } from './utils/win-spawn.js'
 
 const log = createLogger('jsonl-subprocess-session')
 
@@ -277,13 +278,19 @@ export class JsonlSubprocessSession extends BaseSession {
     const args = this._buildArgs(effectiveText)
     let proc
     try {
-      proc = spawn(Klass.resolvedBinary, args, {
+      // #6484 — the resolver can hand us a `.cmd` shim on Windows (npm-only host,
+      // no native `.exe`); spawning a `.cmd` via child_process throws EINVAL on
+      // Node 24, so route it through cmd.exe with proper escaping — the same
+      // prepareSpawn cli-session.js uses. No-op for a `.exe` and on POSIX.
+      const spawnSpec = prepareSpawn(Klass.resolvedBinary, args)
+      proc = spawn(spawnSpec.command, spawnSpec.args, {
         cwd: this.cwd,
         // We pass the prompt as argv, not stdin. Some CLIs, notably
         // `codex exec`, treat an open stdin pipe as extra prompt input and
         // wait for EOF forever, leaving the session stuck busy.
         stdio: ['ignore', 'pipe', 'pipe'],
         env: this._buildChildEnv(),
+        ...spawnSpec.options,
       })
     } catch (err) {
       // spawn() can throw synchronously (ENOENT for missing binary, EACCES,
