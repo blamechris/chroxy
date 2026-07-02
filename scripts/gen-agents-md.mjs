@@ -14,7 +14,7 @@
 
 import { readFileSync, writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { dirname, join } from 'node:path'
+import { dirname, join, resolve } from 'node:path'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const CLAUDE_PATH = join(ROOT, 'CLAUDE.md')
@@ -53,13 +53,18 @@ export function readClaudeMd() {
 export function readAgentsMd() {
   try {
     return readFileSync(AGENTS_PATH, 'utf8')
-  } catch {
-    return null
+  } catch (err) {
+    // Only a genuinely-absent file means "not generated yet"; surface real IO
+    // errors (EACCES, EISDIR, …) instead of masking them as a missing mirror.
+    if (err.code === 'ENOENT') return null
+    throw err
   }
 }
 
 // Only run the CLI side-effects when invoked directly (not when imported by tests).
-if (process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1]) {
+// Normalize both sides: process.argv[1] may be relative depending on how node was
+// invoked, while fileURLToPath(import.meta.url) is absolute.
+if (process.argv[1] && resolve(fileURLToPath(import.meta.url)) === resolve(process.argv[1])) {
   const expected = renderAgentsMd(readClaudeMd())
   if (process.argv.includes('--check')) {
     if (readAgentsMd() !== expected) {
