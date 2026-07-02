@@ -216,6 +216,8 @@ export function FileBrowserPanel() {
   const fileBrowserPendingOpen = useConnectionStore(s => s.fileBrowserPendingOpen)
   // #6475 — go-to-definition: cmd/ctrl+click a token → resolve → jump.
   const requestResolveSymbol = useConnectionStore(s => s.requestResolveSymbol)
+  // #6477 — find-all-references: alt/option+click a token → references palette.
+  const requestFindReferences = useConnectionStore(s => s.requestFindReferences)
   const symbolLocation = useConnectionStore(s => s.symbolLocation)
   const openFileInBrowser = useConnectionStore(s => s.openFileInBrowser)
   const [currentPath, setCurrentPath] = useState<string | null>(null)
@@ -380,12 +382,15 @@ export function FileBrowserPanel() {
     requestFileContent(path)
   }, [requestFileContent])
 
-  // #6475 — cmd/ctrl+click a token in the viewer to jump to its definition.
-  // Event-delegated on the <pre>: read the clicked token's text; if it's an
-  // identifier-ish token (not a keyword/string/comment/punctuation), resolve it,
-  // passing the open file as a ranking tie-break hint. Opt-in: gated on ideEnabled.
+  // #6475 / #6477 — modifier+click a token in the viewer: cmd/ctrl+click jumps to
+  // its definition (go-to-definition); alt/option+click finds all references.
+  // Event-delegated on the <pre>: read the clicked token's text; only act on an
+  // identifier-ish token (not a keyword/string/comment/punctuation). Opt-in.
   const handleCodeClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
-    if (!ideEnabled || !(e.metaKey || e.ctrlKey)) return
+    if (!ideEnabled) return
+    const goToDef = e.metaKey || e.ctrlKey
+    const findRefs = e.altKey
+    if (!goToDef && !findRefs) return
     const target = e.target as HTMLElement
     const cls = typeof target.className === 'string' ? target.className : ''
     const m = cls.match(/(?:^|\s)syn-(\w+)/)
@@ -396,8 +401,10 @@ export function FileBrowserPanel() {
     const fromFile = selectedFile && rootPath.current
       ? relativePath(selectedFile, rootPath.current)
       : undefined
-    requestResolveSymbol(text, fromFile)
-  }, [ideEnabled, selectedFile, requestResolveSymbol])
+    // cmd/ctrl wins if both modifiers are held (definition is the primary gesture).
+    if (goToDef) requestResolveSymbol(text, fromFile)
+    else requestFindReferences(text, fromFile)
+  }, [ideEnabled, selectedFile, requestResolveSymbol, requestFindReferences])
 
   // #6473 — open a file requested externally (Cmd+P quick-open); reuse the click
   // path so it persists the selection, loads content, and triggers the symbols

@@ -12,6 +12,7 @@ const mockRequestGitStatus = vi.fn()
 const mockRequestSymbols = vi.fn()
 // #6475 go-to-definition
 const mockRequestResolveSymbol = vi.fn()
+const mockRequestFindReferences = vi.fn()
 const mockOpenFileInBrowser = vi.fn()
 let mockSymbolLocation: any = null
 let fileBrowserCallback: ((listing: any) => void) | null = null
@@ -42,6 +43,7 @@ vi.mock('../store/connection', () => {
     serverCapabilities: { ide: mockIdeCapability },
     fileBrowserPendingOpen: mockFileBrowserPendingOpen,
     requestResolveSymbol: mockRequestResolveSymbol,
+    requestFindReferences: mockRequestFindReferences,
     openFileInBrowser: mockOpenFileInBrowser,
     symbolLocation: mockSymbolLocation,
   })
@@ -453,6 +455,21 @@ describe('FileBrowserPanel — go-to-definition (#6475)', () => {
     await openIdentifierFile(true)
     fireEvent.click(screen.getByText('widget'))
     expect(mockRequestResolveSymbol).not.toHaveBeenCalled()
+    expect(mockRequestFindReferences).not.toHaveBeenCalled()
+  })
+
+  it('alt/option+click on a token finds references (#6477), passing the open file', async () => {
+    await openIdentifierFile(true)
+    fireEvent.click(screen.getByText('widget'), { altKey: true })
+    expect(mockRequestFindReferences).toHaveBeenCalledWith('widget', 'foo.ts')
+    expect(mockRequestResolveSymbol).not.toHaveBeenCalled()
+  })
+
+  it('cmd wins over alt when both are held (definition is primary)', async () => {
+    await openIdentifierFile(true)
+    fireEvent.click(screen.getByText('widget'), { metaKey: true, altKey: true })
+    expect(mockRequestResolveSymbol).toHaveBeenCalledWith('widget', 'foo.ts')
+    expect(mockRequestFindReferences).not.toHaveBeenCalled()
   })
 
   it('does nothing on cmd+click when the ide capability is off', async () => {

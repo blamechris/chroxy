@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ideHandlers } from '../src/handlers/ide-handlers.js'
-import { ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema } from '@chroxy/protocol'
+import { ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema } from '@chroxy/protocol'
 import { nsCtx } from './test-helpers.js'
 
 /**
@@ -16,6 +16,7 @@ import { nsCtx } from './test-helpers.js'
 const handleListSymbols = ideHandlers.list_symbols
 const handleResolveSymbol = ideHandlers.resolve_symbol
 const handleSearchContent = ideHandlers.search_content
+const handleFindReferences = ideHandlers.find_references
 
 /** Build a handler ctx with a send-capturing transport, a config (for the flag
  *  gate), and a sessionManager resolving the given cwd. */
@@ -214,6 +215,58 @@ describe('search_content handler — emission', () => {
     const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: null })
     await handleSearchContent({}, client, { type: 'search_content', query: 'findMe' }, ctx)
     assert.equal(sent[0].type, 'code_search_results')
+    assert.deepEqual(sent[0].results, [])
+    assert.match(sent[0].error, /No workspace/)
+  })
+})
+
+describe('find_references handler — feature gate', () => {
+  it('is a no-op (no send) when features.ide is off', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: false, cwd: '/tmp' })
+    await handleFindReferences({}, client, { type: 'find_references', symbol: 'x' }, ctx)
+    assert.equal(sent.length, 0)
+  })
+})
+
+describe('find_references handler — emission', () => {
+  let root
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-h-'))
+    writeFileSync(join(root, 'mod.ts'), 'const findMe = 1\nconst x = findMe + findMeToo\n')
+  })
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('emits a schema-valid references_result with whole-word hits', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleFindReferences({}, client, { type: 'find_references', symbol: 'findMe' }, ctx)
+    assert.equal(sent.length, 1)
+    const msg = sent[0]
+    assert.ok(ServerReferencesResultSchema.safeParse(msg).success, 'emitted message must satisfy ServerReferencesResultSchema')
+    assert.equal(msg.symbol, 'findMe')
+    assert.equal(msg.error, null)
+    // line 1 (decl) + line 2 (usage) — NOT `findMeToo` (word boundary).
+    assert.deepEqual(msg.results.map((r) => r.line).sort(), [1, 2])
+  })
+
+  it('emits an empty result set for a symbol with no references', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleFindReferences({}, client, { type: 'find_references', symbol: 'nope' }, ctx)
+    assert.ok(ServerReferencesResultSchema.safeParse(sent[0]).success)
+    assert.deepEqual(sent[0].results, [])
+    assert.equal(sent[0].error, null)
+  })
+
+  it('emits an empty result set for an empty symbol (no crash)', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleFindReferences({}, client, { type: 'find_references', symbol: '   ' }, ctx)
+    assert.equal(sent[0].type, 'references_result')
+    assert.deepEqual(sent[0].results, [])
+  })
+
+  it('emits an error result when the session has no cwd', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: null })
+    await handleFindReferences({}, client, { type: 'find_references', symbol: 'findMe' }, ctx)
+    assert.equal(sent[0].type, 'references_result')
     assert.deepEqual(sent[0].results, [])
     assert.match(sent[0].error, /No workspace/)
   })

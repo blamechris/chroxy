@@ -660,6 +660,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   symbolLocation: null,
   codeSearchResults: null,
   codeSearchLoading: false,
+  referencesResult: null,
+  referencesSymbol: '',
+  referencesOpen: false,
+  referencesLoading: false,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2493,6 +2497,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   symbolLocation: null,
   codeSearchResults: null,
   codeSearchLoading: false,
+  referencesResult: null,
+  referencesSymbol: '',
+  referencesOpen: false,
+  referencesLoading: false,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3685,6 +3693,22 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ codeSearchLoading: true });
       const msg: Record<string, unknown> = { type: 'search_content', query: trimmed };
+      if (activeSessionId) msg.sessionId = activeSessionId;
+      wsSend(socket, msg);
+    }
+  },
+
+  // #6477 — find-all-references for a clicked symbol. Opens the references palette
+  // and clears any stale result; the reply (`references_result`) lands in
+  // `referencesResult`.
+  requestFindReferences: (symbol: string, file?: string) => {
+    const trimmed = typeof symbol === 'string' ? symbol.trim() : '';
+    if (!trimmed) return;
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ referencesSymbol: trimmed, referencesOpen: true, referencesLoading: true, referencesResult: null });
+      const msg: Record<string, unknown> = { type: 'find_references', symbol: trimmed };
+      if (file) msg.file = file;
       if (activeSessionId) msg.sessionId = activeSessionId;
       wsSend(socket, msg);
     }

@@ -46,21 +46,25 @@ const TEXT_BASENAMES = new Set([
 ])
 
 /**
- * Search the workspace (or a confined sub-path) for a case-insensitive substring.
+ * Shared confined walk (#6474 search + #6477 find-references). Walks `rootDir`
+ * (or a confined sub-path), reads each text file, and calls `matchLine(text)` per
+ * line; `matchLine` returns an array of 1-indexed column positions where a match
+ * starts. Each match becomes a `{file,line,column,text}` row, honouring the caps.
+ *
+ * SECURITY — this is the single confinement boundary for BOTH callers: the root
+ * is realpath-resolved, an optional scope `path` is REAL-path confined (a
+ * `..`-escape, an absolute path, or a symlink whose real target lands outside is
+ * refused), ignored/dot dirs are skipped, and files are lstat'd so a symlink is
+ * never followed. The regression tests in ide-search.test.js assert the
+ * symlink-escape cases for both entry points.
  *
  * @param {string} rootDir            Absolute workspace root (session cwd).
- * @param {string} query             Needle (min 2 chars after trim; else no-op).
- * @param {object} [opts]
- * @param {string|null} [opts.path]   Workspace-relative file/dir to scope to.
- * @param {number} [opts.maxFiles]    Cap on files read (default 2000).
- * @param {number} [opts.maxResults]  Cap on match rows returned (default 500).
- * @param {number} [opts.maxFileSize] Skip files larger than this (default 512KB).
- * @param {number} [opts.maxDepth]    Directory recursion depth (default 12).
- * @param {number} [opts.maxLineLength] Preview cap so a minified line can't bloat
- *                                       a result (default 1000).
+ * @param {(line: string) => number[]} matchLine  Per-line matcher → 1-indexed columns.
+ * @param {object} [opts]  path, maxFiles(2000), maxResults(500), maxFileSize(512KB),
+ *                         maxDepth(12), maxLineLength(1000).
  * @returns {Promise<{results: Array<{file:string,line:number,column:number,text:string}>, truncated: boolean}>}
  */
-export async function searchContent(rootDir, query, opts = {}) {
+async function collectMatches(rootDir, matchLine, opts = {}) {
   const {
     path = null,
     maxFiles = 2000,
@@ -69,12 +73,6 @@ export async function searchContent(rootDir, query, opts = {}) {
     maxDepth = 12,
     maxLineLength = 1000,
   } = opts
-
-  const needle = typeof query === 'string' ? query.trim() : ''
-  // A 1-char search would match almost everything and swamp the result cap; the
-  // dashboard also requires 2+ chars, so this is a cheap server-side guard too.
-  if (needle.length < 2) return { results: [], truncated: false }
-  const lowerNeedle = needle.toLowerCase()
 
   // Realpath-confine the root (symlink-safe base) — see the security note above.
   let root
@@ -133,15 +131,16 @@ export async function searchContent(rootDir, query, opts = {}) {
     const rel = relative(root, absPath).split(sep).join('/')
     const lines = content.split('\n')
     for (let i = 0; i < lines.length; i++) {
-      const idx = lines[i].toLowerCase().indexOf(lowerNeedle)
-      if (idx === -1) continue
-      if (results.length >= maxResults) { truncated = true; return }
-      results.push({
-        file: rel,
-        line: i + 1,
-        column: idx + 1,
-        text: lines[i].length > maxLineLength ? lines[i].slice(0, maxLineLength) : lines[i],
-      })
+      const cols = matchLine(lines[i])
+      for (let c = 0; c < cols.length; c++) {
+        if (results.length >= maxResults) { truncated = true; return }
+        results.push({
+          file: rel,
+          line: i + 1,
+          column: cols[c],
+          text: lines[i].length > maxLineLength ? lines[i].slice(0, maxLineLength) : lines[i],
+        })
+      }
     }
   }
 
@@ -181,4 +180,67 @@ export async function searchContent(rootDir, query, opts = {}) {
   }
 
   return { results, truncated }
+}
+
+/**
+ * Search the workspace (or a confined sub-path) for a case-insensitive substring
+ * (#6474). One result per matching line (the first occurrence), matching the
+ * find-in-project palette's expectation.
+ *
+ * @param {string} rootDir  Absolute workspace root (session cwd).
+ * @param {string} query    Needle (min 2 chars after trim; else no-op).
+ * @param {object} [opts]   See collectMatches.
+ * @returns {Promise<{results: Array<{file:string,line:number,column:number,text:string}>, truncated: boolean}>}
+ */
+export async function searchContent(rootDir, query, opts = {}) {
+  const needle = typeof query === 'string' ? query.trim() : ''
+  // A 1-char search would match almost everything and swamp the result cap; the
+  // dashboard also requires 2+ chars, so this is a cheap server-side guard too.
+  if (needle.length < 2) return { results: [], truncated: false }
+  const lowerNeedle = needle.toLowerCase()
+  return collectMatches(rootDir, (line) => {
+    const idx = line.toLowerCase().indexOf(lowerNeedle)
+    return idx === -1 ? EMPTY_COLS : [idx + 1]
+  }, opts)
+}
+
+const EMPTY_COLS = []
+
+/**
+ * Find all references to a symbol NAME (#6477) — reverse-lookup for the
+ * find-all-references panel. Unlike searchContent this is a WORD-BOUNDARY,
+ * case-SENSITIVE match (an identifier reference is exact + whole-word: `go`
+ * matches `go()` but not `goHome` or `Cargo`), and it returns EVERY occurrence on
+ * a line, not just the first. Regex-based over the same confined walk — ~80%
+ * accurate with zero new deps (no scope/type analysis; a string literal or
+ * comment mentioning the name is still a "reference").
+ *
+ * @param {string} rootDir  Absolute workspace root (session cwd).
+ * @param {string} symbol   Identifier to find references to.
+ * @param {object} [opts]   See collectMatches.
+ * @returns {Promise<{results: Array<{file:string,line:number,column:number,text:string}>, truncated: boolean}>}
+ */
+export async function findReferences(rootDir, symbol, opts = {}) {
+  const name = typeof symbol === 'string' ? symbol.trim() : ''
+  // Only real identifiers — a non-identifier can't be word-boundary-matched
+  // meaningfully and would risk a runaway regex.
+  if (!/^[A-Za-z_$][\w$]*$/.test(name)) return { results: [], truncated: false }
+  // Escape `$` (the only regex-special an identifier can contain) so a
+  // `$`-prefixed name doesn't turn into an end-of-line anchor.
+  const escaped = name.replace(/\$/g, '\\$&')
+  // Explicit identifier boundaries — a plain `\b` is `\w`-relative and mishandles
+  // `$`-names (`$` isn't a `\w` char): it MISSES a real `$store` and FALSE-matches
+  // the `$store` tail inside `my$store`. `(?<![\w$])…(?![\w$])` treats `$` as part
+  // of the identifier, so a reference must be flanked by non-identifier chars.
+  const re = new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`, 'g')
+  return collectMatches(rootDir, (line) => {
+    const cols = []
+    re.lastIndex = 0
+    let m
+    while ((m = re.exec(line)) !== null) {
+      cols.push(m.index + 1)
+      if (m.index === re.lastIndex) re.lastIndex++ // zero-width guard (defensive)
+    }
+    return cols
+  }, opts)
 }

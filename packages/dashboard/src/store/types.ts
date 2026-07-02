@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -1211,6 +1211,14 @@ export interface ConnectionState {
   codeSearchResults: ServerSearchResultsMessage | null;
   // #6474 — true between dispatching a `search_content` request and its reply.
   codeSearchLoading: boolean;
+  // #6477 — find-all-references (alt/option+click a token). `referencesResult` is
+  // the latest `references_result` reply; `referencesSymbol` is the requested name
+  // (for the modal title while the reply is in flight); `referencesOpen` controls
+  // the references palette; `referencesLoading` is true between request and reply.
+  referencesResult: ServerReferencesResultMessage | null;
+  referencesSymbol: string;
+  referencesOpen: boolean;
+  referencesLoading: boolean;
 
   // Custom agents from server
   customAgents: CustomAgent[];
@@ -1424,6 +1432,9 @@ export interface ConnectionState {
   // #6474 — find-in-project: grep the workspace for `query` (2+ chars). Sets
   // codeSearchLoading; the reply lands in `codeSearchResults` (Cmd+Shift+F palette).
   requestSearchContent: (query: string) => void;
+  // #6477 — find-all-references for a clicked symbol. Opens the references palette
+  // (referencesOpen) + sets referencesLoading; the reply lands in referencesResult.
+  requestFindReferences: (symbol: string, file?: string) => void;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;

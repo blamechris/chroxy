@@ -4709,6 +4709,22 @@ button.sidebar-token-view-session-row:hover {
 }
 .file-open-palette-input::placeholder { color: var(--text-muted); }
 
+/* #6477 — references palette header (no input; the symbol is fixed by the click). */
+.file-open-palette-header {
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--text-secondary);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  padding: 12px 14px;
+}
+.file-open-palette-header code {
+  color: var(--text-primary);
+  background: var(--bg-tertiary);
+  padding: 1px 5px;
+  border-radius: 4px;
+}
+.references-count { color: var(--text-muted); }
+
 .file-open-palette-list {
   overflow-y: auto;
   padding: 4px 0;
