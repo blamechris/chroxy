@@ -212,7 +212,8 @@ Then:
    ```bash
    # macOS
    ipconfig getifaddr en0
-
+   ```
+   ```powershell
    # Windows PowerShell
    Get-NetIPAddress -AddressFamily IPv4 |
      Where-Object { $_.IPAddress -notlike '127.*' -and $_.PrefixOrigin -ne 'WellKnown' } |

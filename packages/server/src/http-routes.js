@@ -1,5 +1,5 @@
 import { readFileSync, existsSync, statSync } from 'fs'
-import { join, resolve, dirname, relative, sep } from 'path'
+import { join, resolve, dirname, relative, sep, isAbsolute } from 'path'
 import { fileURLToPath } from 'url'
 import QRCode from 'qrcode'
 import { readConnectionInfo } from './connection-info.js'
@@ -1076,7 +1076,9 @@ export function createHttpHandler(server) {
       if (relPath.startsWith('assets/')) {
         const filePath = resolve(distDir, relPath)
         const assetRel = relative(distDir, filePath)
-        if (assetRel.startsWith('..') || assetRel === '' || assetRel.includes(`..${sep}`)) {
+        // isAbsolute catches the Windows different-drive escape: path.relative across
+        // drives (C:\dist -> D:\evil) returns an absolute path that has no leading '..'.
+        if (isAbsolute(assetRel) || assetRel.startsWith('..') || assetRel === '' || assetRel.includes(`..${sep}`)) {
           res.writeHead(403)
           res.end('Forbidden')
           return
