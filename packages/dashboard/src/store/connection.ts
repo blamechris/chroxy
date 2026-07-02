@@ -3604,6 +3604,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
+  // #6472 (epic #6469) — request the opt-in IDE symbol table. The server is
+  // fail-closed when features.ide is off, so the UI gates the affordance on
+  // serverCapabilities.ide (never spin symbolsLoading waiting on a reply that
+  // won't come). `path` scopes the scan to one file/dir; omitted ⇒ whole workspace.
+  requestSymbols: (path?: string) => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ symbolsLoading: true });
+      const msg: Record<string, unknown> = { type: 'list_symbols' };
+      if (path) msg.path = path;
+      if (activeSessionId) msg.sessionId = activeSessionId;
+      wsSend(socket, msg);
+    }
+  },
+
   // Git status
 
   setGitStatusCallback: (cb) => {

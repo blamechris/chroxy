@@ -1389,6 +1389,9 @@ export interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
+  // #6472 (epic #6469) — request the opt-in IDE symbol table, optionally scoped
+  // to one file/dir. Sets symbolsLoading; the reply lands in `symbols`.
+  requestSymbols: (path?: string) => void;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;
