@@ -2,7 +2,7 @@ import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync } from 'fs'
 import { join, dirname } from 'path'
-import { fileURLToPath } from 'url'
+import { fileURLToPath, pathToFileURL } from 'url'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const srcDir = join(__dirname, '../src')
@@ -20,7 +20,7 @@ if (process.env.CHROXY_TEST_REAL_KEYCHAIN === '1') {
 }
 
 // Top-level await import to avoid timing issues with before() hooks
-const keychain = await import(join(srcDir, 'keychain.js'))
+const keychain = await import(pathToFileURL(join(srcDir, 'keychain.js')).href)
 
 // Helper: run a keychain integration test, skipping when keychain is
 // unavailable (CI without secret-tool, or transient ENOENT under load)
@@ -73,6 +73,16 @@ describe('Keychain token storage (#1838)', () => {
   it('isKeychainAvailable returns a boolean', () => {
     const result = keychain.isKeychainAvailable()
     assert.equal(typeof result, 'boolean')
+  })
+
+  it('does not classify missing Linux keychain backend as broken in source', () => {
+    const source = readFileSync(join(srcDir, 'keychain.js'), 'utf-8')
+    const brokenBlock = source.match(/export function isKeychainBroken[\s\S]*?^}/m)
+    assert.ok(brokenBlock, 'isKeychainBroken should exist')
+    assert.ok(
+      brokenBlock[0].includes('if (!isMac) return false'),
+      'only macOS missing login-keychain should be classified as broken; Linux absence uses file fallback',
+    )
   })
 
   it('getToken returns null when no token is stored', () => {
