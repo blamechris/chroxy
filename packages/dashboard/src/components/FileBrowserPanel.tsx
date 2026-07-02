@@ -9,6 +9,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { tokenize } from '@chroxy/store-core'
 import type { FileEntry, FileListing, FileContent, GitStatusResult } from '../store/types'
+import type { SymbolEntry } from '@chroxy/protocol'
 
 /** File icon by extension */
 function fileIcon(name: string, isDirectory: boolean): string {
@@ -121,6 +122,61 @@ function FileTreeItem({ entry, currentPath, rootPath, gitStatusMap, onNavigate, 
   )
 }
 
+/** Single-glyph badge per symbol kind (open string — falls back to a dot). */
+const SYMBOL_KIND_ICON: Record<string, string> = {
+  function: 'ƒ', method: 'ƒ', class: 'C', interface: 'I',
+  type: 'T', enum: 'E', const: 'k', variable: 'v',
+}
+
+interface SymbolsListProps {
+  groups: [string, SymbolEntry[]][]
+  loading: boolean
+  onPick: (line: number) => void
+}
+
+/**
+ * #6472 — read-only symbol list for the open file, grouped by kind. Clicking a
+ * symbol scrolls the viewer to its (1-indexed) line via `onPick`. No per-symbol
+ * backend call — renders the cached `symbols_snapshot` from the store.
+ */
+function SymbolsList({ groups, loading, onPick }: SymbolsListProps) {
+  if (loading && groups.length === 0) {
+    return <div className="symbol-panel-status" data-testid="symbol-panel-loading">Loading symbols…</div>
+  }
+  if (groups.length === 0) {
+    return <div className="symbol-panel-status" data-testid="symbol-panel-empty">No symbols</div>
+  }
+  return (
+    <div className="symbol-panel" data-testid="symbol-panel">
+      {groups.map(([kind, syms]) => (
+        <div key={kind} className="symbol-group">
+          <div className="symbol-group-kind" data-testid={`symbol-group-${kind}`}>
+            {kind}<span className="symbol-group-count">{syms.length}</span>
+          </div>
+          <ul className="symbol-list" role="list">
+            {syms.map((s, i) => (
+              <li key={`${s.name}-${s.line}-${i}`}>
+                <button
+                  type="button"
+                  className="symbol-item"
+                  data-testid={`symbol-item-${s.name}`}
+                  onClick={() => onPick(s.line)}
+                  title={`${s.kind} · line ${s.line}`}
+                >
+                  <span className="symbol-item-icon" aria-hidden="true">{SYMBOL_KIND_ICON[s.kind] ?? '•'}</span>
+                  <span className="symbol-item-name">{s.name}</span>
+                  {s.exported && <span className="symbol-item-exported" title="exported">↗</span>}
+                  <span className="symbol-item-line">{s.line}</span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
+    </div>
+  )
+}
+
 export function FileBrowserPanel() {
   const requestFileListing = useConnectionStore(s => s.requestFileListing)
   const requestFileContent = useConnectionStore(s => s.requestFileContent)
@@ -128,6 +184,11 @@ export function FileBrowserPanel() {
   const setFileBrowserCallback = useConnectionStore(s => s.setFileBrowserCallback)
   const setFileContentCallback = useConnectionStore(s => s.setFileContentCallback)
   const setGitStatusCallback = useConnectionStore(s => s.setGitStatusCallback)
+  // #6472 — opt-in IDE symbol panel (gated on the server's `ide` capability).
+  const requestSymbols = useConnectionStore(s => s.requestSymbols)
+  const symbolsSnapshot = useConnectionStore(s => s.symbols)
+  const symbolsLoading = useConnectionStore(s => s.symbolsLoading)
+  const ideEnabled = useConnectionStore(s => s.serverCapabilities.ide === true)
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [parentPath, setParentPath] = useState<string | null>(null)
@@ -163,6 +224,10 @@ export function FileBrowserPanel() {
 
   const [gitStatus, setGitStatus] = useState<GitStatusResult | null>(null)
   const rootPath = useRef<string | null>(null)
+  const viewerRef = useRef<HTMLDivElement>(null)
+  // The workspace-relative path we last asked symbols for; matched against the
+  // snapshot's echoed `path` so we only render symbols for the open file.
+  const [symbolScope, setSymbolScope] = useState<string | null>(null)
 
   // Register callbacks
   useEffect(() => {
@@ -214,6 +279,7 @@ export function FileBrowserPanel() {
     setFileTruncated(false)
     setFileError(null)
     setGitStatus(null)
+    setSymbolScope(null)
     rootPath.current = null
 
     // Restore selected file from session state
@@ -251,7 +317,13 @@ export function FileBrowserPanel() {
     setFileError(null)
     setFileContent(null)
     requestFileContent(path)
-  }, [requestFileContent])
+    // #6472 — also pull the file's symbols (opt-in; the server fail-closes if off).
+    if (ideEnabled && rootPath.current) {
+      const rel = relativePath(path, rootPath.current)
+      setSymbolScope(rel)
+      requestSymbols(rel)
+    }
+  }, [requestFileContent, ideEnabled, requestSymbols])
 
   const handleBack = useCallback(() => {
     if (parentPath) {
@@ -264,6 +336,29 @@ export function FileBrowserPanel() {
     setSelectedFile(null)
     setFileContent(null)
     setFileError(null)
+    setSymbolScope(null)
+  }, [])
+
+  // #6472 — group the open file's symbols by kind for the read-only panel. Only
+  // render when the snapshot's echoed `path` matches the file we asked about.
+  const groupedSymbols = useMemo<[string, SymbolEntry[]][]>(() => {
+    if (!symbolsSnapshot || !symbolScope || symbolsSnapshot.path !== symbolScope) return []
+    const byKind = new Map<string, SymbolEntry[]>()
+    for (const sym of symbolsSnapshot.symbols) {
+      const arr = byKind.get(sym.kind)
+      if (arr) arr.push(sym)
+      else byKind.set(sym.kind, [sym])
+    }
+    return [...byKind.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1))
+  }, [symbolsSnapshot, symbolScope])
+
+  // Scroll the viewer to a 1-indexed line and briefly highlight it.
+  const scrollToLine = useCallback((line: number) => {
+    const el = viewerRef.current?.querySelector<HTMLElement>(`[data-line="${line}"]`)
+    if (!el) return
+    el.scrollIntoView({ block: 'center', behavior: 'smooth' })
+    el.classList.add('file-viewer-line--active')
+    window.setTimeout(() => el.classList.remove('file-viewer-line--active'), 1400)
   }, [])
 
   // Breadcrumbs from currentPath relative to root
@@ -378,7 +473,10 @@ export function FileBrowserPanel() {
               &times;
             </button>
           </div>
-          <div className="file-viewer-content">
+          {ideEnabled && fileContent !== null && fileLanguage !== 'image' && (
+            <SymbolsList groups={groupedSymbols} loading={symbolsLoading} onPick={scrollToLine} />
+          )}
+          <div className="file-viewer-content" ref={viewerRef}>
             {fileLoading && <div className="file-viewer-loading">Loading file...</div>}
             {!fileLoading && fileError && <div className="file-viewer-error">{fileError}</div>}
             {!fileLoading && !fileError && fileContent !== null && fileLanguage === 'image' && (
@@ -395,7 +493,7 @@ export function FileBrowserPanel() {
                 <code>
                   {highlightedLines
                     ? highlightedLines.map((tokens, lineIdx) => (
-                        <span key={lineIdx} className="file-viewer-line">
+                        <span key={lineIdx} className="file-viewer-line" data-line={lineIdx + 1}>
                           <span className="file-viewer-line-num">{lineIdx + 1}</span>
                           {tokens.map((tok, tokIdx) => (
                             <span key={tokIdx} className={`syn-${tok.type}`}>{tok.text}</span>
