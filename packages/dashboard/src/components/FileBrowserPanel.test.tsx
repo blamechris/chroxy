@@ -9,23 +9,32 @@ import { FileBrowserPanel } from './FileBrowserPanel'
 const mockRequestFileListing = vi.fn()
 const mockRequestFileContent = vi.fn()
 const mockRequestGitStatus = vi.fn()
+const mockRequestSymbols = vi.fn()
 let fileBrowserCallback: ((listing: any) => void) | null = null
 let fileContentCallback: ((content: any) => void) | null = null
 let gitStatusCallback: ((result: any) => void) | null = null
 
 let mockSessionStates: Record<string, any> = {}
 let mockActiveSessionId: string | null = 's1'
+// #6472 symbol-panel store state
+let mockSymbols: any = null
+let mockSymbolsLoading = false
+let mockIdeCapability = false
 
 vi.mock('../store/connection', () => {
   const storeState = () => ({
     requestFileListing: mockRequestFileListing,
     requestFileContent: mockRequestFileContent,
     requestGitStatus: mockRequestGitStatus,
+    requestSymbols: mockRequestSymbols,
     setFileBrowserCallback: (cb: any) => { fileBrowserCallback = cb },
     setFileContentCallback: (cb: any) => { fileContentCallback = cb },
     setGitStatusCallback: (cb: any) => { gitStatusCallback = cb },
     activeSessionId: mockActiveSessionId,
     sessionStates: mockSessionStates,
+    symbols: mockSymbols,
+    symbolsLoading: mockSymbolsLoading,
+    serverCapabilities: { ide: mockIdeCapability },
   })
 
   const useConnectionStore = Object.assign(
@@ -59,6 +68,9 @@ beforeEach(() => {
   gitStatusCallback = null
   mockSessionStates = {}
   mockActiveSessionId = 's1'
+  mockSymbols = null
+  mockSymbolsLoading = false
+  mockIdeCapability = false
 })
 
 describe('FileBrowserPanel', () => {
@@ -285,5 +297,84 @@ describe('FileBrowserPanel', () => {
 
     // Should request file content for the saved path on mount
     expect(mockRequestFileContent).toHaveBeenCalledWith('/home/user/project/index.ts')
+  })
+})
+
+describe('FileBrowserPanel — symbol panel (#6472)', () => {
+  const SNAPSHOT = {
+    path: 'foo.ts',
+    truncated: false,
+    error: null,
+    symbols: [
+      { name: 'doThing', kind: 'function', file: 'foo.ts', line: 5, exported: true },
+      { name: 'helper', kind: 'function', file: 'foo.ts', line: 9, exported: false },
+      { name: 'Widget', kind: 'class', file: 'foo.ts', line: 14, exported: true },
+    ],
+  }
+
+  // Render the panel, load a root listing with one file, click it, and land its
+  // content — so the file viewer (and, when ide is on, the symbol panel) shows.
+  async function openFile(opts: { ide: boolean; symbols?: any }) {
+    mockIdeCapability = opts.ide
+    mockSymbols = opts.symbols ?? null
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root',
+        parentPath: null,
+        entries: [{ name: 'foo.ts', isDirectory: false, size: 200 }],
+        error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('foo.ts'))
+    fireEvent.click(screen.getByText('foo.ts'))
+    act(() => {
+      fileContentCallback!({
+        content: Array.from({ length: 20 }, (_, i) => `const v${i} = ${i}`).join('\n'),
+        language: 'typescript',
+        size: 200,
+        truncated: false,
+        error: null,
+      })
+    })
+  }
+
+  it('requests symbols scoped to the file when the ide capability is on', async () => {
+    await openFile({ ide: true, symbols: SNAPSHOT })
+    expect(mockRequestSymbols).toHaveBeenCalledWith('foo.ts')
+  })
+
+  it('renders the open file symbols grouped by kind', async () => {
+    await openFile({ ide: true, symbols: SNAPSHOT })
+    await waitFor(() => {
+      expect(screen.getByTestId('symbol-panel')).toBeTruthy()
+      expect(screen.getByTestId('symbol-group-function')).toBeTruthy()
+      expect(screen.getByTestId('symbol-group-class')).toBeTruthy()
+      expect(screen.getByTestId('symbol-item-doThing')).toBeTruthy()
+      expect(screen.getByTestId('symbol-item-Widget')).toBeTruthy()
+    })
+  })
+
+  it('scrolls the viewer to a symbol line on click', async () => {
+    const scrollSpy = vi.fn()
+    const prevScrollIntoView = (Element.prototype as any).scrollIntoView
+    ;(Element.prototype as any).scrollIntoView = scrollSpy // jsdom lacks it
+    try {
+      await openFile({ ide: true, symbols: SNAPSHOT })
+      const item = await screen.findByTestId('symbol-item-doThing')
+      fireEvent.click(item)
+      expect(scrollSpy).toHaveBeenCalled()
+      const line = document.querySelector('[data-line="5"]')
+      expect(line?.classList.contains('file-viewer-line--active')).toBe(true)
+    } finally {
+      ;(Element.prototype as any).scrollIntoView = prevScrollIntoView
+    }
+  })
+
+  it('shows no symbol panel and sends no request when the ide capability is off', async () => {
+    await openFile({ ide: false, symbols: SNAPSHOT })
+    await waitFor(() => screen.getByLabelText('Close file')) // file is open
+    expect(screen.queryByTestId('symbol-panel')).toBeNull()
+    expect(mockRequestSymbols).not.toHaveBeenCalled()
   })
 })

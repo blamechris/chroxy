@@ -8094,6 +8094,67 @@ button.sidebar-token-view-session-row:hover {
   opacity: 0.5;
 }
 
+/* #6472 — read-only symbol panel (opt-in IDE surface) + scroll-target highlight */
+.file-viewer-line--active {
+  background: var(--accent-subtle, rgba(124, 156, 255, 0.18));
+  transition: background 0.3s ease;
+}
+
+.symbol-panel {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 6px 12px;
+  max-height: 30%;
+  overflow-y: auto;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  font-size: 12px;
+}
+
+.symbol-panel-status {
+  padding: 6px 12px;
+  color: var(--text-muted);
+  font-size: 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+}
+
+.symbol-group { min-width: 0; }
+
+.symbol-group-kind {
+  color: var(--text-muted);
+  text-transform: uppercase;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  padding: 2px 0;
+}
+.symbol-group-count { margin-left: 4px; opacity: 0.6; }
+
+.symbol-list { list-style: none; margin: 0; padding: 0; }
+
+.symbol-item {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 12px;
+  padding: 2px 6px;
+  border-radius: 3px;
+  text-align: left;
+}
+.symbol-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
+.symbol-item-icon { width: 14px; text-align: center; color: var(--text-muted); flex-shrink: 0; }
+.symbol-item-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.symbol-item-exported { color: var(--success-fg, #4ade80); flex-shrink: 0; }
+.symbol-item-line { margin-left: auto; color: var(--text-muted); opacity: 0.6; flex-shrink: 0; }
+
 /* Syntax token colors */
 .syn-keyword { color: #c4a5ff; }
 .syn-string { color: #4eca6a; }
