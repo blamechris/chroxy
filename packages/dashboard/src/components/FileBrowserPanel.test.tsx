@@ -357,13 +357,18 @@ describe('FileBrowserPanel — symbol panel (#6472)', () => {
 
   it('scrolls the viewer to a symbol line on click', async () => {
     const scrollSpy = vi.fn()
+    const prevScrollIntoView = (Element.prototype as any).scrollIntoView
     ;(Element.prototype as any).scrollIntoView = scrollSpy // jsdom lacks it
-    await openFile({ ide: true, symbols: SNAPSHOT })
-    const item = await screen.findByTestId('symbol-item-doThing')
-    fireEvent.click(item)
-    expect(scrollSpy).toHaveBeenCalled()
-    const line = document.querySelector('[data-line="5"]')
-    expect(line?.classList.contains('file-viewer-line--active')).toBe(true)
+    try {
+      await openFile({ ide: true, symbols: SNAPSHOT })
+      const item = await screen.findByTestId('symbol-item-doThing')
+      fireEvent.click(item)
+      expect(scrollSpy).toHaveBeenCalled()
+      const line = document.querySelector('[data-line="5"]')
+      expect(line?.classList.contains('file-viewer-line--active')).toBe(true)
+    } finally {
+      ;(Element.prototype as any).scrollIntoView = prevScrollIntoView
+    }
   })
 
   it('shows no symbol panel and sends no request when the ide capability is off', async () => {

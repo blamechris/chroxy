@@ -228,6 +228,9 @@ export function FileBrowserPanel() {
   // The workspace-relative path we last asked symbols for; matched against the
   // snapshot's echoed `path` so we only render symbols for the open file.
   const [symbolScope, setSymbolScope] = useState<string | null>(null)
+  // Dedup guard so the request effect fires once per open file (not on every
+  // directory navigation), while still covering the restore-on-mount case.
+  const lastSymbolReq = useRef<string | null>(null)
 
   // Register callbacks
   useEffect(() => {
@@ -280,6 +283,7 @@ export function FileBrowserPanel() {
     setFileError(null)
     setGitStatus(null)
     setSymbolScope(null)
+    lastSymbolReq.current = null
     rootPath.current = null
 
     // Restore selected file from session state
@@ -317,13 +321,7 @@ export function FileBrowserPanel() {
     setFileError(null)
     setFileContent(null)
     requestFileContent(path)
-    // #6472 — also pull the file's symbols (opt-in; the server fail-closes if off).
-    if (ideEnabled && rootPath.current) {
-      const rel = relativePath(path, rootPath.current)
-      setSymbolScope(rel)
-      requestSymbols(rel)
-    }
-  }, [requestFileContent, ideEnabled, requestSymbols])
+  }, [requestFileContent])
 
   const handleBack = useCallback(() => {
     if (parentPath) {
@@ -337,7 +335,22 @@ export function FileBrowserPanel() {
     setFileContent(null)
     setFileError(null)
     setSymbolScope(null)
+    lastSymbolReq.current = null
   }, [])
+
+  // #6472 — request the open file's symbols once the workspace root is known.
+  // Single request site: fires when a file is selected AND when the listing lands
+  // (`currentPath`), so a file restored from session state on mount/tab-switch —
+  // where root isn't known at select time — also gets its symbols. Opt-in: the
+  // server fail-closes when features.ide is off, so we gate on ideEnabled.
+  useEffect(() => {
+    if (!selectedFile || !ideEnabled || !rootPath.current) return
+    const rel = relativePath(selectedFile, rootPath.current)
+    if (lastSymbolReq.current === rel) return
+    lastSymbolReq.current = rel
+    setSymbolScope(rel)
+    requestSymbols(rel)
+  }, [selectedFile, currentPath, ideEnabled, requestSymbols])
 
   // #6472 — group the open file's symbols by kind for the read-only panel. Only
   // render when the snapshot's echoed `path` matches the file we asked about.
