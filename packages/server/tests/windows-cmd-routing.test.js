@@ -1,128 +1,84 @@
-import { describe, it, mock, afterEach } from 'node:test'
+import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import * as realChildProcess from 'child_process'
-import { waitFor } from './test-helpers.js'
+import { readFileSync } from 'fs'
+import { fileURLToPath } from 'url'
+import { dirname, resolve } from 'path'
+import { prepareSpawn } from '../src/utils/win-spawn.js'
+
+const here = dirname(fileURLToPath(import.meta.url))
+const src = (p) => readFileSync(resolve(here, '../src', p), 'utf-8')
 
 /**
  * #6484 — the binary resolver can hand a `.cmd` shim (npm-only Windows host) to
  * spawn sites that don't use prepareSpawn, hitting Node 24's `.cmd` EINVAL. This
- * verifies the doctor `checkBinary` call site now routes a resolved `.cmd`
- * through cmd.exe on win32 (and passes an `.exe` / POSIX binary through
- * unchanged), mirroring cli-session.js. The prepareSpawn escaping itself is
- * covered by win-spawn.test.js; here we assert the WIRING at the call site.
+ * PR routes the remaining provider spawn sites through prepareSpawn:
+ *   - jsonl-subprocess-session.js (codex/gemini/deepseek/ollama base class)
+ *   - doctor.js checkClaudeTuiCliVersion (default exec) + checkBinary
  *
- * We stub process.platform and mock child_process + resolve-binary, then
- * fresh-import doctor.js so its top-level `import { execFileSync }` binds to the
- * mock. mock.reset() + a restored platform run after each case.
+ * WHY NO child_process MOCK HERE: `node --test` runs test files CONCURRENTLY, and
+ * `mock.module('child_process')` patches the loader process-wide — it leaks the
+ * mocked spawn/execFileSync into whatever subprocess-spawning test file happens
+ * to overlap, flaking unrelated suites (MCPFleet, sidecar, …) non-deterministically.
+ * So the routing is proved two safe, deterministic ways instead:
+ *   1. prepareSpawn's transform on the exact provider binaries (pure — no globals,
+ *      platform passed as an arg). The escaping itself is covered by win-spawn.test.js.
+ *   2. a source guard that each call site invokes prepareSpawn on its resolved
+ *      binary and spawns `spawnSpec.command`/`.args` (not the originals).
+ * The full doctor + jsonl-subprocess suites additionally prove the wiring on POSIX
+ * (a mis-wire — e.g. spawning `bin` instead of `spawnSpec.command` — would break
+ * those real spawns, since prepareSpawn returns `command === bin` on POSIX).
  */
-describe('Windows .cmd routing — doctor checkBinary (#6484)', () => {
-  const origPlatform = process.platform
-  afterEach(() => {
-    mock.reset()
-    Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true })
+
+describe('Windows .cmd routing — prepareSpawn on provider binaries (#6484)', () => {
+  const PROVIDER_SHIMS = [
+    'C:\\npm\\codex.cmd',
+    'C:\\npm\\gemini.cmd',
+    'C:\\npm\\deepseek.cmd',
+    'C:\\npm\\ollama.cmd',
+    'C:\\npm\\claude.cmd', // doctor's claude-tui drift backstop
+  ]
+
+  it('routes every provider .cmd shim through cmd.exe /d /s /c with verbatim args on win32', () => {
+    for (const shim of PROVIDER_SHIMS) {
+      const spec = prepareSpawn(shim, ['--version'], { platform: 'win32' })
+      assert.match(spec.command, /cmd\.exe$/i, `${shim} → cmd.exe`)
+      assert.deepEqual(spec.args.slice(0, 3), ['/d', '/s', '/c'])
+      assert.equal(spec.options.windowsVerbatimArguments, true)
+      assert.ok(spec.args[3].includes(shim.split('\\').pop()), 'the shim is inside the escaped line')
+    }
   })
 
-  async function loadDoctor(tag) {
-    // Cache-bust so each case gets a fresh module bound to the current mocks.
-    return import(`../src/doctor.js?win-routing-${tag}`)
-  }
-
-  function stub({ platform, resolved }) {
-    const calls = []
-    Object.defineProperty(process, 'platform', { value: platform, configurable: true })
-    // doctor.js imports the bare 'child_process' specifier — mock exactly that,
-    // keeping every real export (spawn/exec/… are needed by the transitive graph)
-    // and overriding only execFileSync to capture the routed command.
-    mock.module('child_process', {
-      namedExports: {
-        ...realChildProcess,
-        execFileSync: (cmd, args, opts) => { calls.push({ cmd, args, opts }); return 'codex 1.2.3' },
-      },
-    })
-    mock.module('../src/utils/resolve-binary.js', {
-      namedExports: { resolveBinary: () => resolved },
-    })
-    return calls
-  }
-
-  it('routes a resolved .cmd through cmd.exe /d /s /c on win32', async (t) => {
-    const calls = stub({ platform: 'win32', resolved: 'C:\\npm\\codex.cmd' })
-    const { checkBinary } = await loadDoctor(t.name.replace(/\W/g, ''))
-    checkBinary('codex', ['--version'], { parseVersion: (o) => o, required: false, installHint: 'npm i -g codex' })
-    assert.equal(calls.length, 1, 'execFileSync called once')
-    assert.match(calls[0].cmd, /cmd\.exe$/i, 'command is cmd.exe (COMSPEC)')
-    assert.deepEqual(calls[0].args.slice(0, 3), ['/d', '/s', '/c'], 'cmd.exe run flags')
-    assert.equal(calls[0].opts.windowsVerbatimArguments, true, 'verbatim args set')
-    assert.ok(calls[0].args[3].includes('codex.cmd'), 'the shim is inside the escaped line')
+  it('leaves a resolved .exe untouched on win32', () => {
+    const spec = prepareSpawn('C:\\npm\\codex.exe', ['--version'], { platform: 'win32' })
+    assert.equal(spec.command, 'C:\\npm\\codex.exe')
+    assert.deepEqual(spec.args, ['--version'])
+    assert.deepEqual(spec.options, {})
   })
 
-  it('passes a resolved .exe through unchanged on win32', async (t) => {
-    const calls = stub({ platform: 'win32', resolved: 'C:\\npm\\codex.exe' })
-    const { checkBinary } = await loadDoctor(t.name.replace(/\W/g, ''))
-    checkBinary('codex', ['--version'], { parseVersion: (o) => o, required: false, installHint: '' })
-    assert.equal(calls.length, 1)
-    assert.match(calls[0].cmd, /codex\.exe$/i, 'runs the .exe directly, not cmd.exe')
-    assert.deepEqual(calls[0].args, ['--version'], 'args unchanged')
-  })
-
-  it('passes a resolved .cmd through unchanged on POSIX (no cmd.exe)', async (t) => {
-    const calls = stub({ platform: 'linux', resolved: '/weird/codex.cmd' })
-    const { checkBinary } = await loadDoctor(t.name.replace(/\W/g, ''))
-    checkBinary('codex', ['--version'], { parseVersion: (o) => o, required: false, installHint: '' })
-    assert.equal(calls.length, 1)
-    assert.equal(calls[0].cmd, '/weird/codex.cmd', 'POSIX runs the path directly')
-    assert.deepEqual(calls[0].args, ['--version'])
-  })
-
-  it("routes checkClaudeTuiCliVersion's default exec through cmd.exe for a .cmd on win32", async (t) => {
-    const calls = stub({ platform: 'win32', resolved: 'C:\\npm\\claude.cmd' })
-    const { checkClaudeTuiCliVersion } = await loadDoctor(t.name.replace(/\W/g, ''))
-    // No injected `exec` → the default (prepareSpawn-routed) path runs.
-    checkClaudeTuiCliVersion()
-    assert.equal(calls.length, 1, 'the claude --version drift check ran')
-    assert.match(calls[0].cmd, /cmd\.exe$/i, 'claude.cmd routed through cmd.exe')
-    assert.deepEqual(calls[0].args.slice(0, 3), ['/d', '/s', '/c'])
+  it('leaves a .cmd untouched on POSIX (no cmd.exe routing off Windows)', () => {
+    const spec = prepareSpawn('/weird/codex.cmd', ['--version'], { platform: 'linux' })
+    assert.equal(spec.command, '/weird/codex.cmd')
+    assert.deepEqual(spec.args, ['--version'])
+    assert.deepEqual(spec.options, {})
   })
 })
 
-describe('Windows .cmd routing — jsonl-subprocess-session (#6484)', () => {
-  const origPlatform = process.platform
-  afterEach(() => {
-    mock.reset()
-    Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true })
+describe('Windows .cmd routing — call sites invoke prepareSpawn (#6484)', () => {
+  it('jsonl-subprocess-session spawns prepareSpawn(resolvedBinary) output', () => {
+    const s = src('jsonl-subprocess-session.js')
+    assert.match(s, /import \{ prepareSpawn \} from '\.\/utils\/win-spawn\.js'/, 'imports prepareSpawn')
+    assert.match(s, /prepareSpawn\(Klass\.resolvedBinary, args\)/, 'routes the resolved binary')
+    // Spawns the ROUTED command/args (not the originals), spreading its options.
+    assert.match(s, /spawn\(spawnSpec\.command, spawnSpec\.args/, 'spawns spawnSpec.command/.args')
+    assert.match(s, /\.\.\.spawnSpec\.options/, 'spreads spawnSpec.options')
   })
 
-  it('routes a resolved .cmd provider binary through cmd.exe on win32', async () => {
-    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
-    let captured = null
-    // Capture the spawn call, then throw so the session's existing try/catch
-    // handles it — no fake child stream plumbing needed to assert the wiring.
-    mock.module('child_process', {
-      namedExports: {
-        ...realChildProcess,
-        spawn: (cmd, args, opts) => { captured = { cmd, args, opts }; throw new Error('captured-spawn') },
-      },
-    })
-    const { JsonlSubprocessSession } = await import('../src/jsonl-subprocess-session.js?win-6484-jsonl')
-    class CmdProvider extends JsonlSubprocessSession {
-      static get binaryCandidates() { return ['C:\\npm\\codex.cmd'] }
-      static get resolvedBinary() { return 'C:\\npm\\codex.cmd' }
-      static get apiKeyEnv() { return 'CODEX_TEST_KEY' }
-      static get providerName() { return 'codex' }
-      static get displayLabel() { return 'Codex' }
-      static get messageIdPrefix() { return 'codex' }
-      _buildArgs(text) { return ['exec', text] }
-      _buildChildEnv() { return process.env }
-    }
-    const s = new CmdProvider({ cwd: '/tmp' })
-    s._processReady = true
-    s.on('error', () => {}) // swallow the intentional spawn-throw
-    s.sendMessage('hi') // not awaited — spawns, our mock captures + throws, caught
-    await waitFor(() => captured != null, { label: 'spawn captured' })
-    assert.match(captured.cmd, /cmd\.exe$/i, 'codex.cmd routed through cmd.exe')
-    assert.deepEqual(captured.args.slice(0, 3), ['/d', '/s', '/c'], 'cmd.exe run flags')
-    assert.equal(captured.opts.windowsVerbatimArguments, true, 'verbatim args set')
-    assert.ok(captured.args[3].includes('codex.cmd'), 'the shim is inside the escaped line')
-    s.destroy?.()
+  it('doctor.js routes both execFileSync sites (default exec + checkBinary)', () => {
+    const s = src('doctor.js')
+    assert.match(s, /import \{ prepareSpawn \} from '\.\/utils\/win-spawn\.js'/, 'imports prepareSpawn')
+    // The claude-tui drift backstop's default exec.
+    assert.match(s, /const s = prepareSpawn\(bin, args\)[\s\S]*?execFileSync\(s\.command, s\.args/, 'default exec routed')
+    // checkBinary.
+    assert.match(s, /prepareSpawn\(resolved, args\)[\s\S]*?execFileSync\(spawnSpec\.command, spawnSpec\.args/, 'checkBinary routed')
   })
 })
