@@ -5926,6 +5926,12 @@ button.sidebar-token-view-session-row:hover {
   opacity: 0.5;
   cursor: not-allowed;
 }
+/* The input keeps `cursor: pointer` above; override it when disabled so the whole
+   row (label + box) reads consistently inert on hover (#6514 review). */
+.advanced-section .checkbox-label input:disabled,
+.advanced-section .radio-label input:disabled {
+  cursor: not-allowed;
+}
 
 .advanced-section .form-field-label {
   display: block;
