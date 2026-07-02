@@ -1729,6 +1729,11 @@ export class ClaudeTuiSession extends BaseSession {
     log.info(`spawn claude TUI (uuid=${this._sessionId.slice(0, 8)} model=${this.model || 'default'} perms=${permissionsEnabled} skills=${skillsPrefix ? skillsPrefix.length + 'b' : 'none'})`)
 
     try {
+      // node-pty spawns CLAUDE directly — no cmd.exe routing needed even when
+      // the Windows resolver lands on a `claude.cmd` shim. node-pty routes
+      // through conpty/cmd.exe internally and runs a `.cmd` fine (verified),
+      // unlike child_process.spawn which throws EINVAL on a `.cmd` (Node 24) and
+      // needs the utils/win-spawn.js escaping the cli-session path uses.
       this._term = ptyMod.spawn(CLAUDE, args, {
         name: 'xterm-256color',
         // #5839: single-sourced default so the dashboard mirror renders at the

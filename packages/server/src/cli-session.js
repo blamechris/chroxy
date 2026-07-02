@@ -14,6 +14,7 @@ import { MessageTransformPipeline } from './message-transform.js'
 import { emitToolResults } from './tool-result.js'
 import { buildToolStartData, extractToolInputSemantics } from './claude-stream-parser.js'
 import { resolveBinary } from './utils/resolve-binary.js'
+import { prepareSpawn } from './utils/win-spawn.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
 import { RespawnRateLimiter } from './utils/respawn-rate-limiter.js'
 import { createLogger, loggerForSession } from './logger.js'
@@ -513,10 +514,16 @@ export class CliSession extends BaseSession {
       : null
     this._recentStderrLines = []
 
-    const child = spawn(CLAUDE, args, {
+    // On Windows the resolver can land on a `claude.cmd` shim (npm-global install
+    // with no native `claude.exe`); spawning a `.cmd` via child_process throws
+    // EINVAL on Node 24, so route it through cmd.exe with proper escaping. No-op
+    // for a directly-runnable `.exe` and on POSIX. See utils/win-spawn.js.
+    const spawnSpec = prepareSpawn(CLAUDE, args)
+    const child = spawn(spawnSpec.command, spawnSpec.args, {
       cwd: this.cwd,
       stdio: ['pipe', 'pipe', 'pipe'],
       env: this._buildChildEnv(),
+      ...spawnSpec.options,
     })
 
     this._child = child
