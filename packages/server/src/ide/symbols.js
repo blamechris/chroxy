@@ -27,7 +27,7 @@
  * @property {number} line      1-indexed line of the declaration.
  * @property {boolean} exported Whether the declaration is exported / public.
  */
-import { readdir, readFile, stat, realpath } from 'fs/promises'
+import { readdir, readFile, stat, realpath, lstat } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
 
 // Directories never worth walking — build output, vendored deps, VCS metadata,
@@ -236,7 +236,10 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
     if (filesRead >= maxFiles) { truncated = true; return }
     let st
     try {
-      st = await stat(absPath)
+      // lstat (not stat) so a symlink is never followed here. The scoped target
+      // is already realpath-confined and walk() skips symlink dirents, so this is
+      // defence-in-depth that keeps parseFile symlink-blind for any future caller.
+      st = await lstat(absPath)
     } catch { return }
     if (!st.isFile()) return
     if (st.size > maxFileSize) return

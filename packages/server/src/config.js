@@ -653,7 +653,10 @@ export function isUserShellEnabled(config) {
 // offering. Enabled by an explicit `features.ide === true` in config OR the
 // `CHROXY_ENABLE_IDE=1` env override (quick opt-in / dev). When on, the server
 // registers the IDE WS handlers and advertises the `ide` capability so clients
-// reveal the IDE UI; off ⇒ no IDE handlers, no IDE UI, core byte-identical.
+// reveal the IDE UI; off ⇒ the IDE handlers are fail-closed no-ops (registered
+// but gated per-call via isIdeFeatureEnabled, so a runtime flag flip needs no
+// re-registration) and no `ide` capability is advertised — no reachable IDE
+// surface, no IDE UI, core byte-identical.
 // Fail-closed: anything but an explicit boolean true / the env "1" is off.
 export function isIdeFeatureEnabled(config) {
   if (process.env.CHROXY_ENABLE_IDE === '1') return true
