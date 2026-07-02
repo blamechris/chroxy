@@ -8,5 +8,11 @@
 *.webp binary
 *.pdf binary
 *.zip binary
+*.icns binary
+
+# Extensionless committed binaries need an explicit path rule (no extension for
+# `* text=auto` to key off) — the signed Mach-O speech helper (#3830) must never
+# be LF-normalized. (#6489)
+packages/desktop/src-tauri/swift/speech-helper binary
 
 docs/empirical/*.jsonl linguist-generated
