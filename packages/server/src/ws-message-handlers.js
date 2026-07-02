@@ -12,6 +12,7 @@ import { inputHandlers } from './handlers/input-handlers.js'
 import { sessionHandlers } from './handlers/session-handlers.js'
 import { settingsHandlers } from './handlers/settings-handlers.js'
 import { fileHandlers } from './handlers/file-handlers.js'
+import { ideHandlers } from './handlers/ide-handlers.js'
 import { conversationHandlers } from './handlers/conversation-handlers.js'
 import { checkpointHandlers } from './handlers/checkpoint-handlers.js'
 import { repoHandlers } from './handlers/repo-handlers.js'
@@ -30,6 +31,7 @@ const handlerRegistry = new Map([
   ...Object.entries(sessionHandlers),
   ...Object.entries(settingsHandlers),
   ...Object.entries(fileHandlers),
+  ...Object.entries(ideHandlers),
   ...Object.entries(conversationHandlers),
   ...Object.entries(checkpointHandlers),
   ...Object.entries(repoHandlers),

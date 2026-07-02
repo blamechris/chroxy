@@ -673,6 +673,16 @@ export const ListFilesSchema = z.object({
   query: z.string().max(1000).optional(),
 }).passthrough()
 
+// #6471 (epic #6469): request the workspace symbol table (regex-parsed
+// server-side). `path` optionally scopes the scan to a single file or directory
+// within the session workspace; omitted ⇒ the whole (bounded) workspace.
+// Gated behind the opt-in `features.ide` flag — handled only when enabled.
+export const ListSymbolsSchema = z.object({
+  type: z.literal('list_symbols'),
+  path: z.string().max(4096).optional(),
+  sessionId: z.string().max(256).optional(),
+}).passthrough()
+
 export const ListSlashCommandsSchema = z.object({
   type: z.literal('list_slash_commands'),
 }).passthrough()
@@ -1386,6 +1396,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ReadFileSchema,
   WriteFileSchema,
   ListFilesSchema,
+  ListSymbolsSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
   RequestFullHistorySchema,

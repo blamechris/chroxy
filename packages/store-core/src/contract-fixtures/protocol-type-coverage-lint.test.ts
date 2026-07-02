@@ -156,6 +156,7 @@ const DASHBOARD_ONLY = new Set<string>([
   // both are handled by the dashboard only today (the app has no `case`). Not
   // introduced here; the schema just made the lint see them.
   'session_activity',           // per-session busy/idle + cost ping — dashboard activity tree only
+  'symbols_snapshot',           // #6471 (epic #6469) opt-in IDE workspace symbol table — dashboard symbol panel (#6472) only for v1; mobile parity is a tracked fast-follow
   'terminal_size',              // authoritative PTY grid for letterboxing — app terminal parity is still partial (#5987)
   // #6332 (batch 2b of #6314): the container/worktree environment lifecycle —
   // dashboard-only by design (the app has no environment surface). Schemaing

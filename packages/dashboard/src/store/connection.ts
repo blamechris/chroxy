@@ -485,6 +485,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // host_status_snapshot handler. Null until the first survey lands.
   hostStatus: null,
   hostStatusLoading: false,
+  // #6471 (epic #6469): opt-in IDE workspace symbol table, fed by the
+  // symbols_snapshot handler. Null until the first list_symbols reply lands.
+  symbols: null,
+  symbolsLoading: false,
   // Mailbox (#5914 follow-up): Control Room "Mailbox" tab snapshot, fed by the
   // mailbox_status_snapshot handler. Null until the first survey lands.
   mailboxStatus: null,
