@@ -970,13 +970,14 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 id="env-select"
                 value={environmentId}
                 onChange={e => setEnvironmentId(e.target.value)}
+                aria-describedby="env-hint"
               >
                 <option value="">None (ephemeral container)</option>
                 {environments.filter(e => e.status === 'running').map(e => (
                   <option key={e.id} value={e.id}>{e.name} ({e.image})</option>
                 ))}
               </select>
-              <span className="form-hint">
+              <span id="env-hint" className="form-hint">
                 Connect to a persistent environment container
               </span>
             </div>
