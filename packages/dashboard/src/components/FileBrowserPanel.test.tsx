@@ -510,6 +510,13 @@ describe('contentReplyMatchesSelection (#6497)', () => {
     // '/root/barfoo.ts' must NOT match selection 'foo.ts' (segment boundary).
     expect(contentReplyMatchesSelection('/root/barfoo.ts', 'foo.ts')).toBe(false)
   })
+  it('requires an EXACT match for an absolute selection (no tail-match) (#6501 review)', () => {
+    // A different root that happens to end with the same absolute string must not match.
+    expect(contentReplyMatchesSelection('/other/root/a.ts', '/root/a.ts')).toBe(false)
+    expect(contentReplyMatchesSelection('/root/a.ts', '/root/a.ts')).toBe(true)
+    // Windows absolute selection: exact only.
+    expect(contentReplyMatchesSelection('D:/x/root/a.ts', 'C:/root/a.ts')).toBe(false)
+  })
   it('keeps a reply that cannot be correlated (null path)', () => {
     expect(contentReplyMatchesSelection(null, '/root/a.ts')).toBe(true)
     expect(contentReplyMatchesSelection('/root/a.ts', null)).toBe(true)

@@ -5,7 +5,7 @@
  * Clicking a file loads its content with syntax highlighting.
  * Displays git status decorations on modified/untracked files.
  */
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { tokenize } from '@chroxy/store-core'
 import type { FileEntry, FileListing, FileContent, GitStatusResult } from '../store/types'
@@ -71,6 +71,11 @@ export function contentReplyMatchesSelection(replyPath: string | null, selected:
   const rp = replyPath.replace(/\\/g, '/')
   const sel = selected.replace(/\\/g, '/')
   if (rp === sel) return true
+  // An ABSOLUTE selection (file-tree click) must match exactly — never tail-match,
+  // or an unrelated abs reply that happens to end with the same string would slip
+  // through. Only a workspace-relative selection (a #6475/#6476 symbol jump) is
+  // tail-matched against the server's resolved absolute reply path.
+  if (sel.startsWith('/') || /^[A-Za-z]:\//.test(sel)) return false
   return rp.endsWith('/' + sel.replace(/^\.?\//, ''))
 }
 
@@ -225,7 +230,15 @@ export function FileBrowserPanel() {
     activeSessionId ? s.sessionStates[activeSessionId]?.selectedFilePath ?? null : null
   )
   const [selectedFile, _setSelectedFile] = useState<string | null>(savedFilePath)
+  // #6497 — the file-content callback is registered once, so it can't close over
+  // the live `selectedFile` state. Mirror it into a ref (updated synchronously at
+  // every selection site + a layout-effect backstop) so the callback can drop
+  // replies that belong to a since-deselected file.
+  const selectedFileRef = useRef<string | null>(savedFilePath)
   const setSelectedFile = useCallback((path: string | null) => {
+    // #6497 — update the guard ref synchronously at the primary selection site so
+    // no reply can slip through before the sync effect runs.
+    selectedFileRef.current = path
     _setSelectedFile(path)
     // Persist to session state
     const sid = useConnectionStore.getState().activeSessionId
@@ -239,10 +252,6 @@ export function FileBrowserPanel() {
       }
     }
   }, [])
-  // #6497 — the file-content callback is registered once, so it can't close over
-  // the live `selectedFile` state. Mirror it into a ref (synced below) so the
-  // callback can drop replies that belong to a since-deselected file.
-  const selectedFileRef = useRef<string | null>(selectedFile)
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [fileLanguage, setFileLanguage] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState<number | null>(null)
@@ -284,8 +293,11 @@ export function FileBrowserPanel() {
     return () => setFileBrowserCallback(null)
   }, [setFileBrowserCallback])
 
-  // #6497 — keep the ref in sync with the live selection for the content guard.
-  useEffect(() => {
+  // #6497 — backstop: keep the ref in sync for selection changes that bypass
+  // setSelectedFile (session-switch restore, StrictMode). A layout effect runs
+  // synchronously after commit — before the browser yields to the next macrotask
+  // (a file_content WS message) — so the ref can't be briefly stale.
+  useLayoutEffect(() => {
     selectedFileRef.current = selectedFile
   }, [selectedFile])
 
