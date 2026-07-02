@@ -4672,6 +4672,70 @@ button.sidebar-token-view-session-row:hover {
   border-top: 1px solid var(--banner-border-subtle);
 }
 
+/* #6473 — Cmd+P quick-open file palette (mirrors the command-palette overlay) */
+.file-open-palette-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: 9999;
+  display: flex;
+  justify-content: center;
+  padding-top: 15vh;
+  background: rgba(15, 15, 26, 0.72);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+}
+
+.file-open-palette {
+  width: min(640px, 92vw);
+  max-height: 60vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-primary);
+  border-radius: 10px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, 0.5);
+  overflow: hidden;
+}
+
+.file-open-palette-input {
+  border: none;
+  border-bottom: 1px solid var(--border-primary);
+  background: transparent;
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  padding: 12px 14px;
+  outline: none;
+}
+.file-open-palette-input::placeholder { color: var(--text-muted); }
+
+.file-open-palette-list {
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+.file-open-palette-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 14px;
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.file-open-palette-item.selected,
+.file-open-palette-item:hover { background: var(--bg-tertiary); color: var(--text-primary); }
+
+.file-open-palette-path { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.file-open-palette-status {
+  padding: 12px 14px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: var(--text-sm);
+}
+
 /* Attachment chips row */
 .attachment-chips {
   display: flex;

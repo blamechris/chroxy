@@ -55,6 +55,15 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     scope: 'global',
   },
   {
+    // #6473 (IDE epic #6469) — Cmd+P fuzzy file quick-open. Opens only when the
+    // server advertises the opt-in `ide` capability (gated in App).
+    id: 'file.openPalette',
+    defaultBinding: 'cmd+p',
+    description: 'Quick open file',
+    category: 'navigation',
+    scope: 'global',
+  },
+  {
     id: 'sidebar.toggle',
     defaultBinding: 'cmd+b',
     description: 'Toggle sidebar',

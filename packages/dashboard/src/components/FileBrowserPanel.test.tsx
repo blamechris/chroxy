@@ -20,6 +20,7 @@ let mockActiveSessionId: string | null = 's1'
 let mockSymbols: any = null
 let mockSymbolsLoading = false
 let mockIdeCapability = false
+let mockFileBrowserPendingOpen: any = null
 
 vi.mock('../store/connection', () => {
   const storeState = () => ({
@@ -35,6 +36,7 @@ vi.mock('../store/connection', () => {
     symbols: mockSymbols,
     symbolsLoading: mockSymbolsLoading,
     serverCapabilities: { ide: mockIdeCapability },
+    fileBrowserPendingOpen: mockFileBrowserPendingOpen,
   })
 
   const useConnectionStore = Object.assign(
@@ -71,6 +73,7 @@ beforeEach(() => {
   mockSymbols = null
   mockSymbolsLoading = false
   mockIdeCapability = false
+  mockFileBrowserPendingOpen = null
 })
 
 describe('FileBrowserPanel', () => {
@@ -376,5 +379,15 @@ describe('FileBrowserPanel — symbol panel (#6472)', () => {
     await waitFor(() => screen.getByLabelText('Close file')) // file is open
     expect(screen.queryByTestId('symbol-panel')).toBeNull()
     expect(mockRequestSymbols).not.toHaveBeenCalled()
+  })
+})
+
+describe('FileBrowserPanel — external open (#6473 Cmd+P)', () => {
+  it('opens a file requested via fileBrowserPendingOpen', () => {
+    mockFileBrowserPendingOpen = { path: '/root/deep/thing.ts', nonce: 1 }
+    render(<FileBrowserPanel />)
+    // The pending-open effect fires on mount → loads the file into the viewer.
+    expect(mockRequestFileContent).toHaveBeenCalledWith('/root/deep/thing.ts')
+    expect(screen.getByLabelText('Close file')).toBeTruthy()
   })
 })

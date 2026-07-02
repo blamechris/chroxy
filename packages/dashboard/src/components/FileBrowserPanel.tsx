@@ -189,6 +189,7 @@ export function FileBrowserPanel() {
   const symbolsSnapshot = useConnectionStore(s => s.symbols)
   const symbolsLoading = useConnectionStore(s => s.symbolsLoading)
   const ideEnabled = useConnectionStore(s => s.serverCapabilities.ide === true)
+  const fileBrowserPendingOpen = useConnectionStore(s => s.fileBrowserPendingOpen)
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [parentPath, setParentPath] = useState<string | null>(null)
@@ -322,6 +323,13 @@ export function FileBrowserPanel() {
     setFileContent(null)
     requestFileContent(path)
   }, [requestFileContent])
+
+  // #6473 — open a file requested externally (Cmd+P quick-open); reuse the click
+  // path so it persists the selection, loads content, and triggers the symbols
+  // request. Keyed on the nonce object so repeated opens of the same path fire.
+  useEffect(() => {
+    if (fileBrowserPendingOpen) handleFileClick(fileBrowserPendingOpen.path)
+  }, [fileBrowserPendingOpen, handleFileClick])
 
   const handleBack = useCallback(() => {
     if (parentPath) {

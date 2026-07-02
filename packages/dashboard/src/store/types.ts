@@ -1193,6 +1193,9 @@ export interface ConnectionState {
 
   // File picker items from list_files
   filePickerFiles: FilePickerItem[] | null;
+  // #6473 — a Cmd+P quick-open request the FileBrowserPanel watches: open this
+  // path in the viewer. The nonce lets repeated opens of the same path re-fire.
+  fileBrowserPendingOpen: { path: string; nonce: number } | null;
 
   // Custom agents from server
   customAgents: CustomAgent[];
@@ -1392,6 +1395,9 @@ export interface ConnectionState {
   // #6472 (epic #6469) — request the opt-in IDE symbol table, optionally scoped
   // to one file/dir. Sets symbolsLoading; the reply lands in `symbols`.
   requestSymbols: (path?: string) => void;
+  // #6473 — open a file in the FileBrowserPanel viewer (switches to the Files view
+  // and signals the panel via fileBrowserPendingOpen). Used by Cmd+P quick-open.
+  openFileInBrowser: (path: string) => void;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;

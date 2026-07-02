@@ -654,6 +654,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   pendingPermissionConfirm: null,
   slashCommands: [],
   filePickerFiles: null,
+  fileBrowserPendingOpen: null,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2481,6 +2482,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       pendingPermissionConfirm: null,
       slashCommands: [],
       filePickerFiles: null,
+  fileBrowserPendingOpen: null,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3617,6 +3619,23 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       if (activeSessionId) msg.sessionId = activeSessionId;
       wsSend(socket, msg);
     }
+  },
+
+  // #6473 — open a file in the FileBrowserPanel viewer. Persist the selection,
+  // switch to the Files view, and bump fileBrowserPendingOpen so the panel opens
+  // it even when the view is already mounted. Used by Cmd+P quick-open.
+  openFileInBrowser: (path: string) => {
+    const { activeSessionId, sessionStates, setViewMode } = get();
+    if (activeSessionId && sessionStates[activeSessionId]) {
+      set({
+        sessionStates: {
+          ...sessionStates,
+          [activeSessionId]: { ...sessionStates[activeSessionId], selectedFilePath: path },
+        },
+      });
+    }
+    set((s) => ({ fileBrowserPendingOpen: { path, nonce: (s.fileBrowserPendingOpen?.nonce ?? 0) + 1 } }));
+    setViewMode('files');
   },
 
   // Git status
