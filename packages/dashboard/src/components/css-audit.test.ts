@@ -53,12 +53,20 @@ describe('CSS structure — file viewer rules are not accidentally nested', () =
     expect((css.match(/{/g) || []).length).toBe((css.match(/}/g) || []).length)
   })
 
-  it('.file-tree-btn opens with a declaration body, not a comment or nested selector', () => {
+  it('.file-tree-btn opens with a declaration body, not a nested selector', () => {
     const css = readCss()
     const idx = css.search(/^\.file-tree-btn\s*\{/m)
     expect(idx).toBeGreaterThan(-1)
-    const firstBodyLine = (css.slice(idx).split('\n')[1] ?? '').trim()
-    // A real property (`display: flex;`), NOT `/* … */` or `.some-selector {`.
-    expect(firstBodyLine).toMatch(/^[a-z-]+\s*:/)
+    // Take everything after the opening brace, strip block comments, and find the
+    // first non-blank line — so a harmless leading comment or blank line doesn't
+    // trip the guard. It must be a declaration (`prop: value`); a nested selector
+    // (`.foo {`) or stray `}` there signals the unclosed-rule corruption.
+    const afterBrace = css.slice(idx + css.slice(idx).indexOf('{') + 1)
+    const firstMeaningful = afterBrace
+      .replace(/\/\*[\s\S]*?\*\//g, '')
+      .split('\n')
+      .map((l) => l.trim())
+      .find((l) => l.length > 0) ?? ''
+    expect(firstMeaningful).toMatch(/^[a-z-]+\s*:/)
   })
 })
