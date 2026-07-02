@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ideHandlers } from '../src/handlers/ide-handlers.js'
@@ -134,5 +134,32 @@ describe('resolve_symbol handler — emission', () => {
     assert.equal(sent[0].type, 'symbol_location')
     assert.equal(sent[0].file, null)
     assert.match(sent[0].error, /No workspace/)
+  })
+})
+
+describe('resolve_symbol handler — cross-platform file hint (#6498)', () => {
+  let root
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-resolve-win-'))
+    // Two same-named non-exported decls: only the same-file tie-break disambiguates.
+    // Walk order (sorted) parses `other.ts` before `sub/`, so without a matching
+    // fromFile the miss falls to other.ts.
+    mkdirSync(join(root, 'sub'))
+    writeFileSync(join(root, 'sub', 'local.ts'), 'const target = 1\n')
+    writeFileSync(join(root, 'other.ts'), 'const target = 2\n')
+  })
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('normalizes a Windows-style backslash file hint so the same-file tie-break still applies', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'target', file: 'sub\\local.ts' }, ctx)
+    assert.equal(sent[0].file, 'sub/local.ts')
+    assert.equal(sent[0].line, 1)
+  })
+
+  it('trims whitespace from the file hint', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'target', file: '  sub/local.ts  ' }, ctx)
+    assert.equal(sent[0].file, 'sub/local.ts')
   })
 })

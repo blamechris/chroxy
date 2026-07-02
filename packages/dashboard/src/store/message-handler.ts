@@ -2572,8 +2572,11 @@ function handleSymbolsSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: 
 function handleSymbolLocation(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerSymbolLocationSchema.safeParse(msg);
   if (!parsed.success) return;
+  // Store only the fields the state shape declares — drop the wire `type` so
+  // ConnectionState.symbolLocation can't drift or grow an accidental dependency.
+  const { symbol, file, line, error } = parsed.data;
   const prev = get().symbolLocation;
-  set({ symbolLocation: { ...parsed.data, nonce: (prev?.nonce ?? 0) + 1 } });
+  set({ symbolLocation: { symbol, file, line, error, nonce: (prev?.nonce ?? 0) + 1 } });
 }
 
 /**

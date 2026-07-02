@@ -68,7 +68,13 @@ async function handleResolveSymbol(ws, client, msg, ctx) {
   if (!isIdeFeatureEnabled(ctx.services?.config)) return
 
   const symbol = typeof msg.symbol === 'string' ? msg.symbol.trim() : ''
-  const fromFile = typeof msg.file === 'string' && msg.file ? msg.file : null
+  // Normalize the tie-break hint to the workspace-relative POSIX form
+  // collectWorkspaceSymbols emits (forward slashes), so a Windows-style path or
+  // stray whitespace from any client still matches `s.file`. Pure string compare
+  // — no security impact (#6498 review, cross-platform determinism).
+  const fromFile = typeof msg.file === 'string' && msg.file.trim()
+    ? msg.file.trim().replace(/\\/g, '/')
+    : null
 
   if (!symbol) {
     ctx.transport.send(ws, { type: 'symbol_location', symbol: '', file: null, line: null, error: 'No symbol to resolve' })
