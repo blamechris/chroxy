@@ -484,6 +484,18 @@ jobs:
       - name: Run tests
         run: npm test
 
+      - name: Check committed dist/crypto.js is in sync with build:crypto
+        # #6488: the build:crypto import-shim rewrite is committed to dist/. Rebuild
+        # and diff so a stale committed artifact (or a generator change that isn't
+        # re-committed) fails CI, mirroring the packages/protocol/dist guard.
+        working-directory: .
+        run: |
+          npm run build:crypto -w @chroxy/store-core
+          git diff --exit-code packages/store-core/dist/crypto.js || {
+            echo "::error::packages/store-core/dist/crypto.js drift detected. Run 'npm run build:crypto -w @chroxy/store-core' and commit the result."
+            exit 1
+          }
+
   claude-hooks-tests:
     name: Claude Hooks Tests
     needs: runner-target
