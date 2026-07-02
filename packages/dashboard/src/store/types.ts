@@ -1195,7 +1195,11 @@ export interface ConnectionState {
   filePickerFiles: FilePickerItem[] | null;
   // #6473 — a Cmd+P quick-open request the FileBrowserPanel watches: open this
   // path in the viewer. The nonce lets repeated opens of the same path re-fire.
-  fileBrowserPendingOpen: { path: string; nonce: number } | null;
+  fileBrowserPendingOpen: { path: string; line?: number; nonce: number } | null;
+  // #6476 — whole-workspace symbol table for the symbol-search modal (a path===null
+  // snapshot). Separate from the per-file `symbols` (#6472) so they don't clobber.
+  workspaceSymbols: ServerSymbolsSnapshotMessage | null;
+  workspaceSymbolsLoading: boolean;
 
   // Custom agents from server
   customAgents: CustomAgent[];
@@ -1392,12 +1396,16 @@ export interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
-  // #6472 (epic #6469) — request the opt-in IDE symbol table, optionally scoped
-  // to one file/dir. Sets symbolsLoading; the reply lands in `symbols`.
+  // #6472 (epic #6469) — request the per-file/dir IDE symbol table (pass a `path`).
+  // Sets symbolsLoading; the reply lands in `symbols`. NOTE: a path-less scan routes
+  // to `workspaceSymbols` instead (#6476) — use requestWorkspaceSymbols for that.
   requestSymbols: (path?: string) => void;
   // #6473 — open a file in the FileBrowserPanel viewer (switches to the Files view
   // and signals the panel via fileBrowserPendingOpen). Used by Cmd+P quick-open.
-  openFileInBrowser: (path: string) => void;
+  // #6476 — optional `line` scrolls the viewer to that 1-indexed line after load.
+  openFileInBrowser: (path: string, line?: number) => void;
+  // #6476 — request the whole-workspace symbol table for the symbol-search modal.
+  requestWorkspaceSymbols: () => void;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;

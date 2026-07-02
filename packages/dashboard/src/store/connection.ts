@@ -655,6 +655,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   slashCommands: [],
   filePickerFiles: null,
   fileBrowserPendingOpen: null,
+  workspaceSymbols: null,
+  workspaceSymbolsLoading: false,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2483,6 +2485,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       slashCommands: [],
       filePickerFiles: null,
   fileBrowserPendingOpen: null,
+  workspaceSymbols: null,
+  workspaceSymbolsLoading: false,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3624,7 +3628,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // #6473 — open a file in the FileBrowserPanel viewer. Persist the selection,
   // switch to the Files view, and bump fileBrowserPendingOpen so the panel opens
   // it even when the view is already mounted. Used by Cmd+P quick-open.
-  openFileInBrowser: (path: string) => {
+  openFileInBrowser: (path: string, line?: number) => {
     const { activeSessionId, sessionStates, setViewMode } = get();
     if (activeSessionId && sessionStates[activeSessionId]) {
       set({
@@ -3634,8 +3638,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         },
       });
     }
-    set((s) => ({ fileBrowserPendingOpen: { path, nonce: (s.fileBrowserPendingOpen?.nonce ?? 0) + 1 } }));
+    set((s) => ({ fileBrowserPendingOpen: { path, line, nonce: (s.fileBrowserPendingOpen?.nonce ?? 0) + 1 } }));
     setViewMode('files');
+  },
+
+  // #6476 — request the whole-workspace symbol table (no path scope) for the
+  // symbol-search modal. Fail-closed server-side when features.ide is off; the UI
+  // gates the affordance on serverCapabilities.ide.
+  requestWorkspaceSymbols: () => {
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ workspaceSymbolsLoading: true });
+      const msg: Record<string, unknown> = { type: 'list_symbols' };
+      if (activeSessionId) msg.sessionId = activeSessionId;
+      wsSend(socket, msg);
+    }
   },
 
   // Git status

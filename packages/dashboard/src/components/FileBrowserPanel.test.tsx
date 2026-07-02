@@ -390,4 +390,23 @@ describe('FileBrowserPanel — external open (#6473 Cmd+P)', () => {
     expect(mockRequestFileContent).toHaveBeenCalledWith('/root/deep/thing.ts')
     expect(screen.getByLabelText('Close file')).toBeTruthy()
   })
+
+  it('scrolls to the requested line after the file loads (#6476 jump-to-def)', async () => {
+    const scrollSpy = vi.fn()
+    const prev = (Element.prototype as any).scrollIntoView
+    ;(Element.prototype as any).scrollIntoView = scrollSpy // jsdom lacks it
+    try {
+      mockFileBrowserPendingOpen = { path: '/root/x.ts', line: 3, nonce: 1 }
+      render(<FileBrowserPanel />)
+      // Content lands → lines render with data-line anchors → deferred scroll fires.
+      act(() => {
+        fileContentCallback!({
+          content: 'l1\nl2\nl3\nl4\nl5', language: 'typescript', size: 10, truncated: false, error: null,
+        })
+      })
+      await waitFor(() => expect(scrollSpy).toHaveBeenCalled())
+    } finally {
+      ;(Element.prototype as any).scrollIntoView = prev
+    }
+  })
 })

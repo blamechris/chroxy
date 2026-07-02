@@ -64,6 +64,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     scope: 'global',
   },
   {
+    // #6476 (IDE epic #6469) — Cmd+Shift+O fuzzy symbol search. Gated on `ide` in App.
+    id: 'symbol.search',
+    defaultBinding: 'cmd+shift+o',
+    description: 'Search symbols',
+    category: 'navigation',
+    scope: 'global',
+  },
+  {
     id: 'sidebar.toggle',
     defaultBinding: 'cmd+b',
     description: 'Toggle sidebar',

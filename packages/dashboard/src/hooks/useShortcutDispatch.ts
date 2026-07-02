@@ -72,6 +72,8 @@ export interface ShortcutDispatchProps {
   // #6473 — open the Cmd+P quick-open file palette (the caller gates it on the
   // `ide` capability). Optional so existing call sites / tests keep working.
   openFilePalette?: () => void
+  // #6476 — open the Cmd+Shift+O symbol-search palette (caller gates on `ide`).
+  openSymbolSearch?: () => void
 }
 
 export function useShortcutDispatch(props: ShortcutDispatchProps): void {
@@ -96,6 +98,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     setPermissionMode,
     appendImageAttachments,
     openFilePalette,
+    openSymbolSearch,
   } = props
 
   useEffect(() => {
@@ -207,6 +210,9 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             break
           case 'file.openPalette':
             openFilePalette?.()
+            break
+          case 'symbol.search':
+            openSymbolSearch?.()
             break
           case 'sidebar.toggle':
             setSidebarOpen(prev => !prev)
