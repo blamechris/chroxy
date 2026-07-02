@@ -5809,6 +5809,18 @@ button.sidebar-token-view-session-row:hover {
   margin-bottom: 10px;
 }
 
+/* #6509: the text-input styling above (width:100%, padding, margin) bleeds onto
+   checkbox/radio inputs — a 100%-wide checkbox/radio eats the whole row and
+   crushes its label text to a one-word-per-line column that overflows the modal.
+   Reset toggle inputs to their intrinsic box across the whole modal. The two
+   prior fixes (#5606/#5774) patched the row/label layer but never the input. */
+.modal-content input[type='checkbox'],
+.modal-content input[type='radio'] {
+  width: auto;
+  margin: 0;
+  padding: 0;
+}
+
 .modal-content input:focus {
   outline: none;
   border-color: var(--accent-blue);
@@ -5864,62 +5876,46 @@ button.sidebar-token-view-session-row:hover {
   min-width: 0;
 }
 
-/* #5774: checkbox + radio rows stack their controls vertically (one per line)
-   rather than competing as wrapping flex items on the row — otherwise the
-   row's flex-wrap squeezes each label down to its min-content width and the
-   text breaks one word per line. */
+/* #6509 (supersedes #5606/#5774): checkbox + radio rows stack vertically. The
+   prior flex-wrap/align-self approach never held because the real defect was the
+   `.modal-content input { width:100% }` bleed (fixed above) + a box-less label
+   text node. Each row is now an explicit 2-column GRID (control | text) so the
+   text track is sized by the container and can never be starved to min-content. */
 .advanced-section .form-field--checkbox,
 .advanced-section .form-field[role='radiogroup'] {
   display: flex;
   flex-direction: column;
-  /* #5774: override the wrapping inherited from `.advanced-section .form-field`
-     above — once these are column stacks, leaving flex-wrap: wrap lets the
-     controls break into adjacent columns under a constrained height. Force a
-     single vertical stack. */
-  flex-wrap: nowrap;
-  align-items: flex-start;
-  gap: 4px;
-}
-
-.advanced-section .checkbox-label {
-  display: flex;
-  align-items: center;
+  align-items: stretch;
   gap: 6px;
-  min-width: unset;
-  /* #5774: keep the control glued to the start of its label and let the label
-     text flow on natural lines instead of wrapping per word. */
-  align-self: stretch;
-  cursor: pointer;
-  color: var(--text-secondary);
-  font-size: var(--text-sm);
 }
 
-.advanced-section .checkbox-label input[type='checkbox'] {
-  cursor: pointer;
-  flex-shrink: 0;
-}
-
-/* #4244: tri-state radio group for skip-permissions. Stacks vertically with
-   the existing form-field rhythm; label color/font match checkbox-label so
-   the modal looks consistent. */
+.advanced-section .checkbox-label,
 .advanced-section .radio-label {
-  display: flex;
-  /* #5774: align the radio to the top of multi-line label text rather than
-     vertically centering, and stretch the row full-width so the label text
-     wraps naturally instead of one word per line. */
-  align-items: flex-start;
-  align-self: stretch;
-  gap: 6px;
-  min-width: unset;
+  display: grid;
+  grid-template-columns: auto 1fr;
+  column-gap: 8px;
+  align-items: start;   /* control aligns to the first text line */
+  min-width: 0;         /* neutralises `.advanced-section label { min-width:120px }` */
   cursor: pointer;
   color: var(--text-secondary);
   font-size: var(--text-sm);
 }
 
+/* The text column: a real box that wraps on natural lines, never per-word, and
+   breaks a pathological unbreakable token instead of overflowing the modal. */
+.advanced-section .checkbox-label > .label-text,
+.advanced-section .radio-label > .label-text {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.advanced-section .checkbox-label input[type='checkbox'],
 .advanced-section .radio-label input[type='radio'] {
   cursor: pointer;
-  flex-shrink: 0;
-  /* Nudge the radio onto the first text line's baseline. */
+  /* Nudge the control onto the first text line's cap-height so it stays aligned
+     with line 1 when the label wraps to multiple lines (grid align-items:start
+     would otherwise pin it to the very top). */
   margin-top: 2px;
 }
 

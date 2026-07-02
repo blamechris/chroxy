@@ -898,7 +898,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                 disabled={!cwdValRef.current.trim()}
                 aria-describedby="worktree-hint"
               />
-              Isolate filesystem (worktree)
+              <span className="label-text">Isolate filesystem (worktree)</span>
             </label>
             <span id="worktree-hint" className="form-hint">
               {worktree
@@ -931,7 +931,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   checked={skipPermissions === 'inherit'}
                   onChange={() => setSkipPermissions('inherit')}
                 />
-                Use server default
+                <span className="label-text">Use server default</span>
               </label>
               <label className="radio-label">
                 <input
@@ -942,7 +942,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   checked={skipPermissions === 'off'}
                   onChange={() => setSkipPermissions('off')}
                 />
-                Require permission prompts (override server default)
+                <span className="label-text">Require permission prompts (override server default)</span>
               </label>
               <label className="radio-label">
                 <input
@@ -953,7 +953,7 @@ export function CreateSessionModal({ open, onClose, onCreate, initialCwd, knownC
                   checked={skipPermissions === 'on'}
                   onChange={() => setSkipPermissions('on')}
                 />
-                Skip permission prompts (dangerous)
+                <span className="label-text">Skip permission prompts (dangerous)</span>
               </label>
               <span id="skip-permissions-hint" className="form-hint form-hint--warning">
                 &ldquo;Skip&rdquo; spawns the claude TUI with <code>--dangerously-skip-permissions</code> and
