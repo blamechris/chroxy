@@ -657,6 +657,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   fileBrowserPendingOpen: null,
   workspaceSymbols: null,
   workspaceSymbolsLoading: false,
+  symbolLocation: null,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2487,6 +2488,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   fileBrowserPendingOpen: null,
   workspaceSymbols: null,
   workspaceSymbolsLoading: false,
+  symbolLocation: null,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3650,6 +3652,21 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ workspaceSymbolsLoading: true });
       const msg: Record<string, unknown> = { type: 'list_symbols' };
+      if (activeSessionId) msg.sessionId = activeSessionId;
+      wsSend(socket, msg);
+    }
+  },
+
+  // #6475 — go-to-definition: resolve a clicked symbol name to its declaration.
+  // The reply (`symbol_location`) lands in `symbolLocation`; FileBrowserPanel
+  // reacts to jump there or surface a transient 'not found'.
+  requestResolveSymbol: (symbol: string, file?: string) => {
+    const trimmed = typeof symbol === 'string' ? symbol.trim() : '';
+    if (!trimmed) return;
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      const msg: Record<string, unknown> = { type: 'resolve_symbol', symbol: trimmed };
+      if (file) msg.file = file;
       if (activeSessionId) msg.sessionId = activeSessionId;
       wsSend(socket, msg);
     }

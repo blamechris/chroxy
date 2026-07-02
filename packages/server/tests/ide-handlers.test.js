@@ -4,15 +4,17 @@ import { mkdtempSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ideHandlers } from '../src/handlers/ide-handlers.js'
-import { ServerSymbolsSnapshotSchema } from '@chroxy/protocol'
+import { ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema } from '@chroxy/protocol'
 import { nsCtx } from './test-helpers.js'
 
 /**
- * Handler tests for list_symbols (#6471, epic #6469): the opt-in `features.ide`
- * gate (fail-closed when off) and the symbols_snapshot emission shape.
+ * Handler tests for list_symbols (#6471) and resolve_symbol (#6475, epic #6469):
+ * the opt-in `features.ide` gate (fail-closed when off) and the
+ * symbols_snapshot / symbol_location emission shapes.
  */
 
 const handleListSymbols = ideHandlers.list_symbols
+const handleResolveSymbol = ideHandlers.resolve_symbol
 
 /** Build a handler ctx with a send-capturing transport, a config (for the flag
  *  gate), and a sessionManager resolving the given cwd. */
@@ -72,6 +74,65 @@ describe('list_symbols handler — emission', () => {
     assert.equal(sent.length, 1)
     assert.equal(sent[0].type, 'symbols_snapshot')
     assert.deepEqual(sent[0].symbols, [])
+    assert.match(sent[0].error, /No workspace/)
+  })
+})
+
+describe('resolve_symbol handler — feature gate', () => {
+  it('is a no-op (no send) when features.ide is off', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: false, cwd: '/tmp' })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'exported' }, ctx)
+    assert.equal(sent.length, 0)
+  })
+})
+
+describe('resolve_symbol handler — emission', () => {
+  let root
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-resolve-h-'))
+    writeFileSync(join(root, 'mod.ts'), 'export function exported() {}\nclass Local {}\n')
+  })
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('emits a schema-valid symbol_location with file + line on a hit', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'exported' }, ctx)
+    assert.equal(sent.length, 1)
+    const msg = sent[0]
+    const parsed = ServerSymbolLocationSchema.safeParse(msg)
+    assert.ok(parsed.success, 'emitted message must satisfy ServerSymbolLocationSchema')
+    assert.equal(msg.symbol, 'exported')
+    assert.equal(msg.file, 'mod.ts')
+    assert.equal(msg.line, 1)
+    assert.equal(msg.error, null)
+  })
+
+  it('emits a not-found symbol_location (null file/line + error) on a miss', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'nope' }, ctx)
+    assert.equal(sent.length, 1)
+    const msg = sent[0]
+    assert.ok(ServerSymbolLocationSchema.safeParse(msg).success)
+    assert.equal(msg.file, null)
+    assert.equal(msg.line, null)
+    assert.match(msg.error, /not found/i)
+  })
+
+  it('emits an error location when the symbol is empty', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: '   ' }, ctx)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'symbol_location')
+    assert.equal(sent[0].file, null)
+    assert.match(sent[0].error, /No symbol/)
+  })
+
+  it('emits an error location when the session has no cwd', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: null })
+    await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'exported' }, ctx)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'symbol_location')
+    assert.equal(sent[0].file, null)
     assert.match(sent[0].error, /No workspace/)
   })
 })

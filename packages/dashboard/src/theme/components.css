@@ -8164,6 +8164,32 @@ button.sidebar-token-view-session-row:hover {
   transition: background 0.3s ease;
 }
 
+/* #6475 — go-to-definition: cmd/ctrl+hover a token shows a link cursor so the
+   affordance is discoverable; the transient "not found" pill flags a miss. */
+.file-viewer-code--ide .syn-plain,
+.file-viewer-code--ide .syn-function,
+.file-viewer-code--ide .syn-type,
+.file-viewer-code--ide .syn-property {
+  cursor: text;
+}
+.file-viewer-code--ide:hover .syn-function {
+  text-decoration: underline dotted rgba(124, 156, 255, 0.4);
+  text-underline-offset: 2px;
+}
+.file-viewer-def-notfound {
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  padding: 6px 12px;
+  background: var(--bg-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.file-viewer-def-notfound code {
+  color: var(--text-error, #f87171);
+}
+
 .symbol-panel {
   display: flex;
   flex-wrap: wrap;

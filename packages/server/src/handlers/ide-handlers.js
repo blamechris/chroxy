@@ -7,11 +7,11 @@
  * the operator opts in, so clients won't send these messages, and the handler
  * additionally returns early as defence-in-depth. Off ⇒ zero IDE behaviour.
  *
- * Handles: list_symbols (#6471).
+ * Handles: list_symbols (#6471), resolve_symbol (#6475).
  */
 import { resolveSession } from '../handler-utils.js'
 import { isIdeFeatureEnabled } from '../config.js'
-import { collectWorkspaceSymbols } from '../ide/symbols.js'
+import { collectWorkspaceSymbols, resolveSymbol } from '../ide/symbols.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ide')
@@ -55,6 +55,57 @@ async function handleListSymbols(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * `resolve_symbol` → `symbol_location`. Go-to-definition (#6475): resolves a
+ * clicked symbol NAME to a single declaration over the same regex index
+ * list_symbols uses. `file` (the originating file) only breaks ranking ties.
+ * A hit sends `{ file, line, error: null }`; a miss sends `{ file: null,
+ * line: null, error }` so the client can show a graceful 'definition not found'.
+ * Dashboard-only consumer for v1.
+ */
+async function handleResolveSymbol(ws, client, msg, ctx) {
+  // #6481 (epic #6469): fail closed when the IDE surface is not opted in.
+  if (!isIdeFeatureEnabled(ctx.services?.config)) return
+
+  const symbol = typeof msg.symbol === 'string' ? msg.symbol.trim() : ''
+  const fromFile = typeof msg.file === 'string' && msg.file ? msg.file : null
+
+  if (!symbol) {
+    ctx.transport.send(ws, { type: 'symbol_location', symbol: '', file: null, line: null, error: 'No symbol to resolve' })
+    return
+  }
+
+  const entry = resolveSession(ctx, msg, client)
+  const cwd = entry?.cwd || null
+  if (!cwd) {
+    ctx.transport.send(ws, {
+      type: 'symbol_location',
+      symbol,
+      file: null,
+      line: null,
+      error: 'No workspace directory for this session',
+    })
+    return
+  }
+
+  try {
+    const loc = await resolveSymbol(cwd, symbol, { fromFile })
+    ctx.transport.send(ws, loc
+      ? { type: 'symbol_location', symbol, file: loc.file, line: loc.line, error: null }
+      : { type: 'symbol_location', symbol, file: null, line: null, error: 'Definition not found' })
+  } catch (err) {
+    log.debug(`resolve_symbol failed: ${err?.message}`)
+    ctx.transport.send(ws, {
+      type: 'symbol_location',
+      symbol,
+      file: null,
+      line: null,
+      error: err?.message || 'Failed to resolve symbol',
+    })
+  }
+}
+
 export const ideHandlers = {
   list_symbols: handleListSymbols,
+  resolve_symbol: handleResolveSymbol,
 }

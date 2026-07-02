@@ -607,6 +607,17 @@ export const ListSymbolsSchema = z.object({
     path: z.string().max(4096).optional(),
     sessionId: z.string().max(256).optional(),
 }).passthrough();
+// #6475 (epic #6469): resolve a clicked symbol NAME to its declaration for
+// go-to-definition (server → `symbol_location`). `file` is the file the click
+// came from — used only to break ranking ties, so a local helper resolves in
+// place while an imported symbol jumps to its exported definition. Gated behind
+// the opt-in `features.ide` flag — handled only when enabled.
+export const ResolveSymbolSchema = z.object({
+    type: z.literal('resolve_symbol'),
+    symbol: z.string().min(1).max(256),
+    file: z.string().max(4096).optional(),
+    sessionId: z.string().max(256).optional(),
+}).passthrough();
 export const ListSlashCommandsSchema = z.object({
     type: z.literal('list_slash_commands'),
 }).passthrough();
@@ -1239,6 +1250,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     WriteFileSchema,
     ListFilesSchema,
     ListSymbolsSchema,
+    ResolveSymbolSchema,
     ListSlashCommandsSchema,
     ListAgentsSchema,
     RequestFullHistorySchema,

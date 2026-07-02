@@ -32,3 +32,14 @@ export const ServerSymbolsSnapshotSchema = z.object({
     truncated: z.boolean(),
     error: z.string().nullable(),
 });
+// `resolve_symbol` response (#6475) — go-to-definition. `symbol` echoes the
+// queried name (correlation). On a hit, `file` (workspace-relative POSIX path)
+// and `line` (1-indexed) point at the declaration and `error` is null; on a
+// miss both are null and `error` explains (e.g. 'Definition not found').
+export const ServerSymbolLocationSchema = z.object({
+    type: z.literal('symbol_location'),
+    symbol: z.string(),
+    file: z.string().nullable(),
+    line: z.number().nullable(),
+    error: z.string().nullable(),
+});

@@ -33,3 +33,11 @@ export declare const ServerSymbolsSnapshotSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type SymbolEntry = z.infer<typeof SymbolEntrySchema>;
 export type ServerSymbolsSnapshotMessage = z.infer<typeof ServerSymbolsSnapshotSchema>;
+export declare const ServerSymbolLocationSchema: z.ZodObject<{
+    type: z.ZodLiteral<"symbol_location">;
+    symbol: z.ZodString;
+    file: z.ZodNullable<z.ZodString>;
+    line: z.ZodNullable<z.ZodNumber>;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export type ServerSymbolLocationMessage = z.infer<typeof ServerSymbolLocationSchema>;

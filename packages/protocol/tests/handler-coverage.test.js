@@ -119,6 +119,7 @@ const PLATFORM_SPECIFIC = {
   'log_entry': 'dashboard',          // console page is dashboard-only
   'file_list': 'dashboard',          // file explorer sidebar is dashboard-only
   'symbols_snapshot': 'dashboard',   // #6471 (epic #6469) opt-in IDE symbol table — dashboard symbol panel (#6472) is dashboard-only for v1; mobile parity is a tracked fast-follow
+  'symbol_location': 'dashboard',    // #6475 (epic #6469) opt-in IDE go-to-definition result — dashboard file viewer cmd/ctrl+click jump; dashboard-only for v1, mobile parity deferred
   'environment_created': 'dashboard', // environment panel is dashboard-only
   'environment_list': 'dashboard',    // environment panel is dashboard-only
   'environment_destroyed': 'dashboard', // environment panel is dashboard-only

@@ -37,3 +37,17 @@ export const ServerSymbolsSnapshotSchema = z.object({
 
 export type SymbolEntry = z.infer<typeof SymbolEntrySchema>
 export type ServerSymbolsSnapshotMessage = z.infer<typeof ServerSymbolsSnapshotSchema>
+
+// `resolve_symbol` response (#6475) — go-to-definition. `symbol` echoes the
+// queried name (correlation). On a hit, `file` (workspace-relative POSIX path)
+// and `line` (1-indexed) point at the declaration and `error` is null; on a
+// miss both are null and `error` explains (e.g. 'Definition not found').
+export const ServerSymbolLocationSchema = z.object({
+  type: z.literal('symbol_location'),
+  symbol: z.string(),
+  file: z.string().nullable(),
+  line: z.number().nullable(),
+  error: z.string().nullable(),
+})
+
+export type ServerSymbolLocationMessage = z.infer<typeof ServerSymbolLocationSchema>

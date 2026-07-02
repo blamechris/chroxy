@@ -130,7 +130,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2562,6 +2562,21 @@ function handleSymbolsSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: 
 }
 
 /**
+ * Go-to-definition (#6475, epic #6469) — `symbol_location`: store the resolve
+ * result (with a fresh nonce so a repeat resolve of the same symbol re-fires the
+ * jump effect). FileBrowserPanel reacts to `symbolLocation`: on a hit it opens
+ * the target file at the line; on a miss it shows a transient 'not found' pill.
+ * The wire shape is Zod-validated (drop malformed payloads rather than crash).
+ * Dashboard-only for v1 (the mobile app has no symbol surface yet).
+ */
+function handleSymbolLocation(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerSymbolLocationSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const prev = get().symbolLocation;
+  set({ symbolLocation: { ...parsed.data, nonce: (prev?.nonce ?? 0) + 1 } });
+}
+
+/**
  * Mailbox (#5914 follow-up) — Control Room "Mailbox" tab `mailbox_status_snapshot`:
  * REPLACE the stored snapshot with the carried one and clear the in-flight
  * loading flag. Same defensive pattern as the host/runner snapshots — the wire
@@ -3180,6 +3195,8 @@ const HANDLERS: Record<string, Handler> = {
   pair_resolved: handlePairResolved,
   // #6471 (epic #6469): opt-in IDE workspace symbol table snapshot.
   symbols_snapshot: handleSymbolsSnapshot,
+  // #6475 (epic #6469): opt-in IDE go-to-definition result.
+  symbol_location: handleSymbolLocation,
   // #5175 (epic #5170): Host/Repo Status Control Room survey snapshot.
   host_status_snapshot: handleHostStatusSnapshot,
   // Mailbox (#5914 follow-up): Control Room "Mailbox" tab survey snapshot.

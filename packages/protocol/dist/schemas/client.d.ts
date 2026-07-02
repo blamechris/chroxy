@@ -467,6 +467,12 @@ export declare const ListSymbolsSchema: z.ZodObject<{
     path: z.ZodOptional<z.ZodString>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
+export declare const ResolveSymbolSchema: z.ZodObject<{
+    type: z.ZodLiteral<"resolve_symbol">;
+    symbol: z.ZodString;
+    file: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>;
 export declare const ListSlashCommandsSchema: z.ZodObject<{
     type: z.ZodLiteral<"list_slash_commands">;
 }, z.core.$loose>;
@@ -1020,6 +1026,11 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_symbols">;
     path: z.ZodOptional<z.ZodString>;
+    sessionId: z.ZodOptional<z.ZodString>;
+}, z.core.$loose>, z.ZodObject<{
+    type: z.ZodLiteral<"resolve_symbol">;
+    symbol: z.ZodString;
+    file: z.ZodOptional<z.ZodString>;
     sessionId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"list_slash_commands">;
