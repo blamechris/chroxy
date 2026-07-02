@@ -5819,7 +5819,6 @@ button.sidebar-token-view-session-row:hover {
   width: auto;
   margin: 0;
   padding: 0;
-  flex: 0 0 auto;
 }
 
 .modal-content input:focus {
@@ -5914,9 +5913,11 @@ button.sidebar-token-view-session-row:hover {
 .advanced-section .checkbox-label input[type='checkbox'],
 .advanced-section .radio-label input[type='radio'] {
   cursor: pointer;
+  /* Nudge the control onto the first text line's cap-height so it stays aligned
+     with line 1 when the label wraps to multiple lines (grid align-items:start
+     would otherwise pin it to the very top). */
+  margin-top: 2px;
 }
-/* Nudge the radio onto the first text line's cap-height. */
-.advanced-section .radio-label input[type='radio'] { margin-top: 2px; }
 
 .advanced-section .form-field-label {
   display: block;
