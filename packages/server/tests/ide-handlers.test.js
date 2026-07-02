@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ideHandlers } from '../src/handlers/ide-handlers.js'
-import { ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema } from '@chroxy/protocol'
+import { ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema } from '@chroxy/protocol'
 import { nsCtx } from './test-helpers.js'
 
 /**
@@ -15,6 +15,7 @@ import { nsCtx } from './test-helpers.js'
 
 const handleListSymbols = ideHandlers.list_symbols
 const handleResolveSymbol = ideHandlers.resolve_symbol
+const handleSearchContent = ideHandlers.search_content
 
 /** Build a handler ctx with a send-capturing transport, a config (for the flag
  *  gate), and a sessionManager resolving the given cwd. */
@@ -161,5 +162,59 @@ describe('resolve_symbol handler — cross-platform file hint (#6498)', () => {
     const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
     await handleResolveSymbol({}, client, { type: 'resolve_symbol', symbol: 'target', file: '  sub/local.ts  ' }, ctx)
     assert.equal(sent[0].file, 'sub/local.ts')
+  })
+})
+
+describe('search_content handler — feature gate', () => {
+  it('is a no-op (no send) when features.ide is off', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: false, cwd: '/tmp' })
+    await handleSearchContent({}, client, { type: 'search_content', query: 'x' }, ctx)
+    assert.equal(sent.length, 0)
+  })
+})
+
+describe('search_content handler — emission', () => {
+  let root
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-search-h-'))
+    writeFileSync(join(root, 'mod.ts'), 'export function findMe() {}\nconst other = 1\n')
+  })
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('emits a schema-valid code_search_results with file/line/column/text on a hit', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleSearchContent({}, client, { type: 'search_content', query: 'findMe' }, ctx)
+    assert.equal(sent.length, 1)
+    const msg = sent[0]
+    assert.ok(ServerSearchResultsSchema.safeParse(msg).success, 'emitted message must satisfy ServerSearchResultsSchema')
+    assert.equal(msg.query, 'findMe')
+    assert.equal(msg.error, null)
+    assert.equal(msg.results.length, 1)
+    assert.equal(msg.results[0].file, 'mod.ts')
+    assert.equal(msg.results[0].line, 1)
+    assert.ok(msg.results[0].text.includes('findMe'))
+  })
+
+  it('emits an empty schema-valid result set for a miss', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleSearchContent({}, client, { type: 'search_content', query: 'zzznope' }, ctx)
+    assert.ok(ServerSearchResultsSchema.safeParse(sent[0]).success)
+    assert.deepEqual(sent[0].results, [])
+    assert.equal(sent[0].error, null)
+  })
+
+  it('emits an empty result set for an empty query (no crash)', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    await handleSearchContent({}, client, { type: 'search_content', query: '   ' }, ctx)
+    assert.equal(sent[0].type, 'code_search_results')
+    assert.deepEqual(sent[0].results, [])
+  })
+
+  it('emits an error result when the session has no cwd', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: null })
+    await handleSearchContent({}, client, { type: 'search_content', query: 'findMe' }, ctx)
+    assert.equal(sent[0].type, 'code_search_results')
+    assert.deepEqual(sent[0].results, [])
+    assert.match(sent[0].error, /No workspace/)
   })
 })

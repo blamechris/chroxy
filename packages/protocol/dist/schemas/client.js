@@ -618,6 +618,15 @@ export const ResolveSymbolSchema = z.object({
     file: z.string().max(4096).optional(),
     sessionId: z.string().max(256).optional(),
 }).passthrough();
+// #6474 (epic #6469): find-in-project content grep (server → `code_search_results`).
+// `query` is the case-insensitive needle (2+ chars); `path` optionally scopes the
+// search to a sub-dir/file. Gated behind the opt-in `features.ide` flag.
+export const SearchContentSchema = z.object({
+    type: z.literal('search_content'),
+    query: z.string().min(1).max(1024),
+    path: z.string().max(4096).optional(),
+    sessionId: z.string().max(256).optional(),
+}).passthrough();
 export const ListSlashCommandsSchema = z.object({
     type: z.literal('list_slash_commands'),
 }).passthrough();
@@ -1251,6 +1260,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     ListFilesSchema,
     ListSymbolsSchema,
     ResolveSymbolSchema,
+    SearchContentSchema,
     ListSlashCommandsSchema,
     ListAgentsSchema,
     RequestFullHistorySchema,

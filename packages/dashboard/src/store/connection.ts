@@ -658,6 +658,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   workspaceSymbols: null,
   workspaceSymbolsLoading: false,
   symbolLocation: null,
+  codeSearchResults: null,
+  codeSearchLoading: false,
   customAgents: [],
   checkpoints: [],
   _directoryListingCallback: null,
@@ -2489,6 +2491,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   workspaceSymbols: null,
   workspaceSymbolsLoading: false,
   symbolLocation: null,
+  codeSearchResults: null,
+  codeSearchLoading: false,
       customAgents: [],
       checkpoints: [],
       _directoryListingCallback: null,
@@ -3667,6 +3671,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       const msg: Record<string, unknown> = { type: 'resolve_symbol', symbol: trimmed };
       if (file) msg.file = file;
+      if (activeSessionId) msg.sessionId = activeSessionId;
+      wsSend(socket, msg);
+    }
+  },
+
+  // #6474 — find-in-project content grep. The reply (`code_search_results`) lands in
+  // `codeSearchResults`; the Cmd+Shift+F palette renders it.
+  requestSearchContent: (query: string) => {
+    const trimmed = typeof query === 'string' ? query.trim() : '';
+    if (trimmed.length < 2) return;
+    const { socket, activeSessionId } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ codeSearchLoading: true });
+      const msg: Record<string, unknown> = { type: 'search_content', query: trimmed };
       if (activeSessionId) msg.sessionId = activeSessionId;
       wsSend(socket, msg);
     }

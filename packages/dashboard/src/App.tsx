@@ -69,6 +69,7 @@ import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
 import { SymbolSearchPalette } from './components/SymbolSearchPalette'
+import { CodeSearchPalette } from './components/CodeSearchPalette'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
@@ -609,6 +610,7 @@ export function App() {
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [fileOpenPaletteOpen, setFileOpenPaletteOpen] = useState(false)
   const [symbolSearchOpen, setSymbolSearchOpen] = useState(false)
+  const [codeSearchOpen, setCodeSearchOpen] = useState(false)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -996,6 +998,7 @@ export function App() {
     appendImageAttachments,
     openFilePalette: () => { if (ideEnabled) setFileOpenPaletteOpen(true) },
     openSymbolSearch: () => { if (ideEnabled) setSymbolSearchOpen(true) },
+    openCodeSearch: () => { if (ideEnabled) setCodeSearchOpen(true) },
   })
 
   const trackedCommands = useMemo(
@@ -2611,6 +2614,10 @@ export function App() {
       <SymbolSearchPalette
         isOpen={symbolSearchOpen}
         onClose={() => setSymbolSearchOpen(false)}
+      />
+      <CodeSearchPalette
+        isOpen={codeSearchOpen}
+        onClose={() => setCodeSearchOpen(false)}
       />
     </div>
   )

@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerSymbolsSnapshotMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -1205,6 +1205,12 @@ export interface ConnectionState {
   // on a miss `error` is set and the viewer shows a transient 'not found' pill.
   // The nonce lets a repeated resolve of the same symbol re-fire the jump effect.
   symbolLocation: { symbol: string; file: string | null; line: number | null; error: string | null; nonce: number } | null;
+  // #6474 — the latest find-in-project result set (a `search_results` reply) that
+  // feeds the Cmd+Shift+F palette. Named `codeSearch*` to avoid colliding with the
+  // cross-session `searchResults` below. Null until the first search this session.
+  codeSearchResults: ServerSearchResultsMessage | null;
+  // #6474 — true between dispatching a `search_content` request and its reply.
+  codeSearchLoading: boolean;
 
   // Custom agents from server
   customAgents: CustomAgent[];
@@ -1415,6 +1421,9 @@ export interface ConnectionState {
   // `file` is the originating file (a ranking tie-break hint). The reply lands in
   // `symbolLocation`; FileBrowserPanel reacts to jump there or show 'not found'.
   requestResolveSymbol: (symbol: string, file?: string) => void;
+  // #6474 — find-in-project: grep the workspace for `query` (2+ chars). Sets
+  // codeSearchLoading; the reply lands in `codeSearchResults` (Cmd+Shift+F palette).
+  requestSearchContent: (query: string) => void;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;

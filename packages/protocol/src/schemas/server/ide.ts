@@ -51,3 +51,29 @@ export const ServerSymbolLocationSchema = z.object({
 })
 
 export type ServerSymbolLocationMessage = z.infer<typeof ServerSymbolLocationSchema>
+
+// One content-search match (#6474). `file` is the workspace-relative POSIX path,
+// `line`/`column` are 1-indexed, `text` is the matched line (server-capped) for
+// a preview snippet.
+export const SearchResultEntrySchema = z.object({
+  file: z.string(),
+  line: z.number(),
+  column: z.number(),
+  text: z.string(),
+})
+
+// `search_content` response (#6474) — find-in-project. The wire type is
+// `code_search_results` (NOT `search_results`, which the cross-session
+// conversation search already owns in the shared dispatch table). `query` echoes
+// the needle (correlation), `truncated` is true when the result/file cap was hit,
+// `error` is non-null only on failure (results then empty).
+export const ServerSearchResultsSchema = z.object({
+  type: z.literal('code_search_results'),
+  query: z.string(),
+  results: z.array(SearchResultEntrySchema),
+  truncated: z.boolean(),
+  error: z.string().nullable(),
+})
+
+export type SearchResultEntry = z.infer<typeof SearchResultEntrySchema>
+export type ServerSearchResultsMessage = z.infer<typeof ServerSearchResultsSchema>
