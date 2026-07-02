@@ -1,0 +1,188 @@
+<!DOCTYPE html><html lang="en"><head><meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Chroxy — State &amp; Direction (2026-06-27)</title>
+<style>
+  :root{--bg:#0b0d12;--panel:#141821;--panel2:#1b212d;--line:#262d3b;--ink:#e8ecf3;
+    --dim:#9aa6b8;--faint:#6b7689;--accent:#7c9cff;--accent2:#a78bfa;--ok:#4ade80;
+    --warn:#fbbf24;--bad:#f87171;--mono:ui-monospace,SFMono-Regular,Menlo,monospace;}
+  *{box-sizing:border-box} body{margin:0;background:radial-gradient(1200px 700px at 70% -10%,#1a2030,var(--bg) 55%);
+    color:var(--ink);font:16px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;padding:48px 20px 96px}
+  .wrap{max-width:880px;margin:0 auto} .eyebrow{font:600 12px/1 var(--mono);letter-spacing:.18em;
+    text-transform:uppercase;color:var(--accent2)} h1{font-size:32px;margin:14px 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--dim)} .chips{display:flex;flex-wrap:wrap;gap:8px;margin-top:18px}
+  .chip{display:inline-flex;align-items:center;gap:7px;background:var(--panel);border:1px solid var(--line);
+    border-radius:999px;padding:7px 14px;font-size:13px;color:var(--dim)}
+  .dot{width:8px;height:8px;border-radius:50%}.dot.ok{background:var(--ok)}.dot.warn{background:var(--warn)}.dot.bad{background:var(--bad)}.dot.ac{background:var(--accent)}
+  section{background:var(--panel);border:1px solid var(--line);border-radius:18px;padding:24px 26px;margin:18px 0;
+    box-shadow:0 12px 40px rgba(0,0,0,.35)} section h2{font-size:12px;letter-spacing:.14em;text-transform:uppercase;
+    color:var(--accent);margin:0 0 16px} section h3{font-size:15px;margin:18px 0 8px;color:var(--ink)}
+  .hero{font-size:18px;line-height:1.5;color:var(--ink)} .hero b{color:#fff}
+  table{width:100%;border-collapse:collapse;font-size:14px}
+  th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font:600 11px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint)}
+  tr:last-child td{border-bottom:none} code{font:13px/1.5 var(--mono);background:#0e131c;border:1px solid var(--line);
+    border-radius:6px;padding:2px 7px;color:#cdd7ea} .ref{font:12px/1 var(--mono);background:#16202e;
+    border:1px solid var(--line);color:var(--accent);border-radius:6px;padding:3px 7px;white-space:nowrap}
+  .pre{background:#0e131c;border:1px solid var(--line);border-radius:10px;padding:14px 16px;
+    font:12.5px/1.7 var(--mono);color:#cdd7ea;overflow:auto;white-space:pre-wrap}
+  .flow{display:grid;gap:12px} .step{display:flex;gap:12px;align-items:baseline}
+  .step .n{font:700 13px/1 var(--mono);color:var(--accent2);min-width:1.6em}
+  .callout{background:#221a08;border:1px solid #4a3a12;border-left:3px solid var(--warn);border-radius:12px;padding:16px 18px;margin:16px 0}
+  .callout b{color:var(--warn)} .callout.bad{background:#23110f;border-color:#4a1a16;border-left-color:var(--bad)} .callout.bad b{color:var(--bad)}
+  .grid2{display:grid;grid-template-columns:1fr 1fr;gap:14px} @media(max-width:680px){.grid2{grid-template-columns:1fr}}
+  .card{background:var(--panel2);border:1px solid var(--line);border-radius:14px;padding:16px 18px}
+  .card h4{margin:0 0 10px;font-size:15px} .card .lbl{font:600 10px/1 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--faint);margin:12px 0 5px}
+  ul{margin:6px 0;padding-left:20px} li{margin:4px 0} .ok{color:var(--ok)} .warn{color:var(--warn)} .bad{color:var(--bad)} .mut{color:var(--dim)}
+  .pill{display:inline-block;font:600 10px/1.5 var(--mono);padding:2px 7px;border-radius:5px;margin-right:5px}
+  .pill.hi{background:#3a1518;color:#fca5a5}.pill.md{background:#3a2e10;color:#fcd34d}.pill.lo{background:#16252e;color:#7dd3fc}
+  a{color:var(--accent)} footer{margin-top:30px;text-align:center;color:var(--faint);font-size:13px}
+  .bar{height:7px;border-radius:4px;background:#0e131c;overflow:hidden;margin-top:5px}.bar>i{display:block;height:100%;background:linear-gradient(90deg,var(--ok),#22c55e)}
+</style></head><body><div class="wrap">
+
+<header>
+  <div class="eyebrow">Chroxy · State &amp; Direction</div>
+  <h1>Feature-complete cockpit, nascent IDE</h1>
+  <p class="sub">Objective multi-agent gauge vs Cursor / Claude Code / Claude Desktop · v0.9.47 · 2026-06-27</p>
+  <div class="chips">
+    <span class="chip"><span class="dot ok"></span>167 features shipped (18 categories)</span>
+    <span class="chip"><span class="dot ac"></span>Moat: multi-provider + self-hosted + native-mobile</span>
+    <span class="chip"><span class="dot bad"></span>Biggest gap: the editing surface</span>
+    <span class="chip"><span class="dot ok"></span>IDE: epic #6469 + 11 issues, all opt-in (features.ide)</span>
+    <span class="chip"><span class="dot warn"></span>New rival: Claude Code Remote Control (Feb 2026)</span>
+  </div>
+</header>
+
+<section>
+  <h2>The two-minute read</h2>
+  <p class="hero">Chroxy is <b>feature-complete as a remote/mobile control plane for an agentic coding session</b> — drive Claude Code (or Gemini/Codex/DeepSeek/Ollama/BYOK) on <b>your</b> machine, from your phone, over <b>your</b> tunnel, with parsed-chat + live-terminal + diff + notifications. 167 shipped features across 18 categories back that up. But measured against an <b>editor</b>, it's structurally incomplete: no in-app code editor on desktop, no editable pre-write diff, no codebase search UI, no semantic navigation. Chroxy won the "remote-control cockpit" category it invented — and has <b>barely started</b> the "place you actually read and write code" category it would need to rival an IDE. That second category is the IDE backlog filed today, and it's bootstrappable from the repo-memory AST index you already pay for.</p>
+</section>
+
+<section>
+  <h2>Needs you</h2>
+  <div class="callout"><b>Run the Windows smoke test</b> (below) on your Windows box — it validates the WSL integration (<span class="ref">#6175</span>: the <code>wsl.exe -l -v</code> round-trip in Control Room → Device Runtimes), which is unit-tested but never run on a real Windows host. The smoke test also confirms the daemon itself runs on Windows. ~10 minutes, all commands provided.</div>
+  <div class="callout bad"><b>One product decision:</b> IDE Phase 3 — <b>edit-in-place</b> (<span class="ref">#6478</span>) — flips chroxy from "viewer" to "editor." That's an identity change, not just a feature. It's filed but <b>gated behind your call + a UX spike</b>; everything in Phases 1–2 proceeds without it.</div>
+</section>
+
+<section>
+  <h2>Competitive position</h2>
+  <div class="grid2">
+    <div class="card"><h4 class="ok">The moat (durable)</h4><p class="mut">Provider-agnostic, self-hosted, phone-first remote control of a real agent on <b>your</b> machine — the one combination nobody else ships. Cursor's <i>My Machines</i> and Anthropic's <i>Remote Control</i> match the phone→your-box <i>shape</i>, but both route the agent loop through <b>their</b> cloud and lock you to <b>their</b> roster/account. Only chroxy is simultaneously <b>multi-provider + open-source/self-hosted + native-mobile</b>. That triad is the moat.</p></div>
+    <div class="card"><h4 class="bad">The biggest gap (structural)</h4><p class="mut">The <b>editing surface</b>. <code>FileBrowserPanel</code> is read-only; the only editor is a mobile modal; desktop has none; edits reach disk only through the agent's <code>write_file</code>, reviewed <b>after</b> the fact in a read-only git diff — not an editable per-hunk accept loop. Every IDE rival leads with exactly this. It's the line between "cockpit" and "IDE."</p></div>
+  </div>
+
+  <h3>Head-to-head (objective)</h3>
+  <div class="grid2">
+    <div class="card">
+      <h4>vs Cursor</h4>
+      <div class="lbl">Their edge</div><ul><li>Real in-editor coding surface (VS Code fork)</li><li>Tab/autocomplete (custom 272K-ctx model)</li><li>Composer inline multi-file edit + accept/reject</li><li>Live semantic codebase index + @codebase</li></ul>
+      <div class="lbl">Chroxy uniquely</div><ul><li>Multi-provider; drives the <i>real</i> Claude Code agent</li><li>Self-hosted, no mandatory vendor cloud</li><li>True native mobile + live streamed terminal</li></ul>
+    </div>
+    <div class="card">
+      <h4>vs Claude Code</h4>
+      <div class="lbl">Their edge</div><ul><li>Checkpoints / <code>/rewind</code> (code+chat snapshot)</li><li>IDE editable inline diff (per-hunk, pre-write)</li><li><code>@file/@dir/@url</code> + Tab completion</li><li>Native skills/plugins/subagents + marketplace</li></ul>
+      <div class="lbl">Chroxy uniquely</div><ul><li>Remote from a phone — the whole premise</li><li>Parsed mobile chat UI + persistent daemon/reconnect</li><li>Multi-provider (Claude Code is Anthropic-only)</li></ul>
+    </div>
+  </div>
+  <div class="card" style="margin-top:14px">
+    <h4>vs Claude Desktop <span class="mut" style="font-weight:400">(incl. the Code tab + Remote Control)</span></h4>
+    <div class="grid2">
+      <div><div class="lbl">Their edge</div><ul><li><b>Remote Control (Feb 2026)</b> — first-party phone→your-machine, zero-infra, no tunnel. Direct hit on chroxy's core loop.</li><li>Polished multi-pane Code tab (diff/preview/editor/tasks)</li><li>Embedded app preview with self-verification</li><li>Projects · Artifacts · Memory · Computer use · 75+ MCP connectors (GUI)</li></ul></div>
+      <div><div class="lbl">Chroxy uniquely</div><ul><li>Multi-provider, not Anthropic-only</li><li>Open-source (MIT), self-hosted, no account required</li><li>Subscription-billing path (claude-tui) dodges the credit cap</li><li>Local/offline coding via Ollama; Android tray + mobile parity</li></ul></div>
+    </div>
+  </div>
+</section>
+
+<section>
+  <h2>Top gaps (prioritized)</h2>
+  <table>
+    <tr><th>Gap</th><th>Who has it</th><th>Why it matters</th></tr>
+    <tr><td><span class="pill hi">HI</span>In-app desktop editor + editable pre-write diff</td><td>Cursor, Claude Code, Claude Desktop</td><td>The "cockpit → IDE" line. Desktop has no editor; the diff lands after the write.</td></tr>
+    <tr><td><span class="pill md">HI</span>Codebase search (Cmd+Shift+F / Cmd+P / symbol outline)</td><td>Cursor, Claude Code, every IDE</td><td><b>Cheapest win</b> — <code>list_files</code> already takes a query; desktop just exposes no UI.</td></tr>
+    <tr><td><span class="pill md">HI</span>Semantic nav: go-to-def, find-refs</td><td>Cursor, Claude Code</td><td>Repo-memory holds the AST index already — it's paid for, just not plumbed to clients.</td></tr>
+    <tr><td><span class="pill md">HI</span>@-mention context picker (@file/@dir/@url)</td><td>Cursor, Claude Code</td><td>Top authoring affordance users cite; pairs with the symbol index.</td></tr>
+    <tr><td><span class="pill md">M+</span>Checkpoints / conversational rewind</td><td>Claude Code 2.x</td><td>Flagship native feature; high value on a phone where undoing a bad turn is painful.</td></tr>
+    <tr><td><span class="pill md">M+</span>Default-provider fidelity (claude-tui)</td><td>Claude Code native TUI</td><td>Self-inflicted: the zero-config default has no streaming/plan/model-switch. Add an in-product "switch to SDK" nudge.</td></tr>
+    <tr><td><span class="pill lo">M</span>Embedded app preview + self-verify</td><td>Claude Desktop Code tab</td><td>Closes the see-it-running loop; large build, defensible to defer.</td></tr>
+    <tr><td><span class="pill lo">M</span>Curated MCP connector catalog + GUI connect</td><td>Claude Desktop, Cursor</td><td>Ecosystem breadth; matters more as adoption grows.</td></tr>
+  </table>
+</section>
+
+<section>
+  <h2>IDE roadmap — filed today</h2>
+  <p class="mut">Epic <a href="https://github.com/blamechris/chroxy/issues/6469">#6469</a>. Strategy: bootstrap symbol intelligence from the <b>repo-memory AST index</b> (~1,500 files, language-agnostic, cached, zero new binaries) — <b>not</b> LSP-first. Phases 1–2 are pure additive nav (parallelize freely); Phase 3 is the editing-surface identity decision; Phase 4 (LSP) only if regex precision fails.</p>
+  <div class="callout"><b>⚑ Opt-in feature flag (#6481):</b> the entire IDE surface ships behind a server <code>features.ide</code> flag — <b>off by default</b>. Operators opt in (<code>config.features.ide</code> or <code>CHROXY_ENABLE_IDE=1</code>); the server then registers the IDE handlers + advertises <code>capabilities.ide</code>, and clients reveal the UI. Flag off ⇒ the core remote-cockpit offering is byte-identical. Build #6481 first — everything gates on it.</div>
+  <table>
+    <tr><th>Phase</th><th>Issue</th><th>What</th></tr>
+    <tr><td><b>0</b> · foundation</td><td><span class="ref">#6481</span></td><td>⚑ <code>features.ide</code> opt-in flag <span class="bad">(build first — gates the whole surface)</span></td></tr>
+    <tr><td><b>1</b> · read-only nav</td><td><span class="ref">#6470</span></td><td>File-tree navigator (collapsible explorer + breadcrumbs)</td></tr>
+    <tr><td></td><td><span class="ref">#6471</span></td><td><code>list_symbols</code> WS handler + protocol schema (the backbone)</td></tr>
+    <tr><td></td><td><span class="ref">#6472</span></td><td>Read-only symbol side-panel</td></tr>
+    <tr><td></td><td><span class="ref">#6473</span></td><td>Cmd+P quick-open (fuzzy file palette)</td></tr>
+    <tr><td></td><td><span class="ref">#6474</span></td><td>Cmd+Shift+F codebase grep <span class="ok">(cheapest win)</span></td></tr>
+    <tr><td><b>2</b> · semantic nav</td><td><span class="ref">#6475</span></td><td>Go-to-definition / cmd+click (<code>resolve_symbol</code>)</td></tr>
+    <tr><td></td><td><span class="ref">#6476</span></td><td>Symbol search modal (fuzzy)</td></tr>
+    <tr><td><b>3</b> · editing surface</td><td><span class="ref">#6477</span></td><td>Find-references (reverse dep lookup)</td></tr>
+    <tr><td></td><td><span class="ref">#6478</span></td><td>Edit-in-place + editable diff <span class="bad">(product decision)</span></td></tr>
+    <tr><td><b>4</b> · future</td><td><span class="ref">#6479</span></td><td>LSP bridge (optional — true hover/rename/diagnostics)</td></tr>
+  </table>
+  <p class="mut" style="margin-top:12px"><b>Recommended first slice:</b> Phases 1+2 combined (~2–3 weeks) — a VSCode-explorer-like nav + go-to-definition, no new infra. The differentiated win is semantic nav <i>remotely</i>, on an index already cached.</p>
+</section>
+
+<section>
+  <h2>Windows smoke test — run this on your Windows box</h2>
+  <p class="mut">Validates (a) the daemon runs on Windows and (b) the WSL integration (<span class="ref">#6175</span>). Pull this repo on Windows first (<code>git pull</code>), then:</p>
+  <div class="flow">
+    <div class="step"><span class="n">0</span><div><b>Prereqs</b> — Windows 10/11; WSL2 (<code>wsl --install</code>, reboot); Node 22 from nodejs.org (<code>node -v</code> → v22.x). Optional remote: <code>cloudflared</code> (winget install Cloudflare.cloudflared).</div></div>
+    <div class="step"><span class="n">1</span><div><b>Install + start the daemon</b><div class="pre">git pull
+npm install
+npx chroxy start            # prints a dashboard URL + a tunnel URL</div></div></div>
+    <div class="step"><span class="n">2</span><div><b>Dashboard loads</b> — open the printed local URL (e.g. <code>http://localhost:8765</code>) in a browser. Expect: the connection dots go live, the session list renders.</div></div>
+    <div class="step"><span class="n">3</span><div><b>WSL integration (the focus, #6175)</b> — open <b>Control Room → Device Runtimes</b>. The WSL pane runs <code>wsl.exe -l -v</code>. Expect: your installed distros list (name / state / WSL version), the default marked. <span class="warn">If empty/"available:false"</span> with WSL installed → that's the bug to report.</div></div>
+    <div class="step"><span class="n">4</span><div><b>WSL action round-trip</b> — from the pane, <b>start</b> a stopped distro (or <b>terminate</b> a running one). Expect: an action ack + the state flips on the next survey (<code>running</code>/<code>stopped</code>).</div></div>
+    <div class="step"><span class="n">5</span><div><b>Session smoke</b> — start a session (pick any configured provider), send <code>hello</code>. Expect: a streamed/returned response in the parsed chat + the live terminal view.</div></div>
+    <div class="step"><span class="n">6</span><div><b>(Optional) K8s preflight</b> <span class="ref">#6466</span><div class="pre">node packages/server/scripts/k8s-preflight.mjs            # dry-run validation
+K8S_PREFLIGHT_LIVE=1 node packages/server/scripts/k8s-preflight.mjs   # lists namespaces if a kubeconfig exists</div></div></div>
+    <div class="step"><span class="n">7</span><div><b>Report back</b> — which steps passed, and for any failure: the exact step, the on-screen error, and <code>npx chroxy start</code> console output. That's enough to close #6175 or file the Windows defect.</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Next steps (recommended order)</h2>
+  <div class="flow">
+    <div class="step"><span class="n">1</span><div><b>Cheapest credibility wins first</b> — Cmd+Shift+F grep (<span class="ref">#6474</span>, backend already supports it) + an in-product nudge for the claude-tui default's missing streaming/plan/model-switch. Both land fast and answer the most-cited fairness gaps.</div></div>
+    <div class="step"><span class="n">2</span><div><b>IDE Phase 1</b> (<span class="ref">#6470</span>–<span class="ref">#6474</span>) — file-tree + symbol index + quick-open. Independent, low-risk, no new infra.</div></div>
+    <div class="step"><span class="n">3</span><div><b>IDE Phase 2</b> (<span class="ref">#6475</span> <span class="ref">#6476</span>) — go-to-definition + symbol search. The first genuinely differentiated capability.</div></div>
+    <div class="step"><span class="n">4</span><div><b>Prototype the @-mention context picker</b> on the same symbol/file index — top authoring affordance.</div></div>
+    <div class="step"><span class="n">5</span><div><b>Decide on edit-in-place</b> (<span class="ref">#6478</span>) — UX spike + product call before building Phase 3.</div></div>
+    <div class="step"><span class="n">6</span><div><b>Keep LSP out of MVP</b> (<span class="ref">#6479</span>) — revisit only if regex symbol resolution proves imprecise in real use.</div></div>
+  </div>
+</section>
+
+<section>
+  <h2>Feature inventory — what's already shipped (for the record)</h2>
+  <p class="mut">167 shipped · 2 partial · 1 planned across 18 categories. This is the "feature-complete cockpit" evidence.</p>
+  <table>
+    <tr><th>Category</th><th>Shipped</th><th></th></tr>
+    <tr><td>AI Providers &amp; Models</td><td>13 / 14</td><td><div class="bar"><i style="width:93%"></i></div></td></tr>
+    <tr><td>Desktop App (Tauri)</td><td>17 / 17</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Mobile App (Expo)</td><td>15 / 15</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Advanced Features &amp; Performance</td><td>15 / 15</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Server &amp; CLI</td><td>14 / 14</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Security, Auth &amp; Encryption</td><td>10 / 10</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Networking &amp; Tunneling</td><td>8 / 8</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Config &amp; Extensibility</td><td>8 / 8</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Dev Experience &amp; Testing</td><td>8 / 8</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Chat &amp; Messaging</td><td>7 / 8</td><td><div class="bar"><i style="width:88%"></i></div></td></tr>
+    <tr><td>File Operations &amp; Viewing</td><td>7 / 7</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Cost Tracking &amp; Budgeting</td><td>7 / 7</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Container Envs &amp; Isolation</td><td>7 / 7</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Control Room &amp; Host Mgmt</td><td>7 / 7</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Deployment &amp; Release</td><td>7 / 7</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Session Management</td><td>6 / 7</td><td><div class="bar"><i style="width:86%"></i></div></td></tr>
+    <tr><td>Notifications</td><td>6 / 6</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+    <tr><td>Terminal &amp; PTY</td><td>5 / 5</td><td><div class="bar"><i style="width:100%"></i></div></td></tr>
+  </table>
+</section>
+
+<footer>Chroxy state &amp; direction · generated 2026-06-27 from a 7-agent objective gauge (446K tokens) · v0.9.47 · sole author: blamechris</footer>
+</div></body></html>
