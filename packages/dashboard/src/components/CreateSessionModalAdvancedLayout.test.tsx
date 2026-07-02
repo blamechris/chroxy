@@ -20,7 +20,7 @@ vi.mock('../hooks/usePathAutocomplete', () => ({
 
 const TUI_PROVIDER = { name: 'claude-tui', capabilities: {}, auth: { ready: true, source: 'static', detail: '' } }
 
-function mockStore() {
+function mockStore(environments: unknown[] = []) {
   vi.doMock('../store/connection', () => ({
     useConnectionStore: (selector: (s: Record<string, unknown>) => unknown) =>
       selector({
@@ -30,7 +30,7 @@ function mockStore() {
         availableModelsProvider: null,
         availableProviders: [TUI_PROVIDER],
         availablePermissionModes: [],
-        environments: [],
+        environments,
         requestDirectoryListing: () => {},
         setDirectoryListingCallback: () => {},
         defaultCwd: null,
@@ -106,5 +106,17 @@ describe('CreateSessionModal Advanced-section layout (#6509)', () => {
     expect(group.getAttribute('role')).toBe('radiogroup')
     expect(group.getAttribute('aria-labelledby')).toBe('skip-permissions-legend')
     expect(group.getAttribute('aria-describedby')).toBe('skip-permissions-hint')
+  })
+
+  it('#6512: links the Environment select to its hint via aria-describedby', async () => {
+    mockStore([{ id: 'env-1', name: 'dev', image: 'node:22', status: 'running' }])
+    const CreateSessionModal = await loadModal()
+    render(<CreateSessionModal {...baseProps} />)
+    openAdvanced()
+    const select = document.getElementById('env-select')
+    expect(select).not.toBeNull()
+    expect(select!.getAttribute('aria-describedby')).toBe('env-hint')
+    // The hint carries the matching id so the association resolves.
+    expect(document.getElementById('env-hint')?.classList.contains('form-hint')).toBe(true)
   })
 })

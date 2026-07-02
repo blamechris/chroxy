@@ -40,4 +40,9 @@ describe('Advanced-section toggle layout (#6509)', () => {
     expect(rule).toMatch(/min-width:\s*0/)
     expect(rule).toMatch(/overflow-wrap:/)
   })
+
+  test('#6513: a disabled toggle row is dimmed via :has(input:disabled)', () => {
+    const rule = css.match(/\.advanced-section \.checkbox-label:has\(input:disabled\)\s*\{[^}]*\}/)?.[0] ?? ''
+    expect(rule).toMatch(/opacity:/)
+  })
 })
