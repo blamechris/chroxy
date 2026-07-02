@@ -118,6 +118,72 @@ describe('tokenize', () => {
   })
 })
 
+describe('markdown highlighting (#6508)', () => {
+  it('resolves md / markdown / mdx (server sends the bare extension as the id)', () => {
+    // reader.js sends `extname` verbatim — `.md` → 'md', `.markdown` → 'markdown'.
+    // Without a Markdown LanguageDef these fall through to all-`plain` (no colours).
+    expect(getSyntaxRules('md')).not.toBeNull()
+    expect(getSyntaxRules('markdown')).not.toBeNull()
+    expect(getSyntaxRules('mdx')).not.toBeNull()
+  })
+
+  it('colours an ATX heading line as a single non-plain token', () => {
+    const tokens = tokenize('## Getting started', 'md')
+    expect(tokens).toEqual([{ text: '## Getting started', type: 'keyword' }])
+  })
+
+  it('does NOT treat a mid-line or spaceless # as a heading', () => {
+    // `#6508` and `C#` are not headings — an ATX heading needs a space/EOL after
+    // the hashes, so these must stay plain (no keyword token).
+    expect(tokenize('see issue #6508 for details', 'md').some(t => t.type === 'keyword')).toBe(false)
+    expect(tokenize('#hashtag', 'md').some(t => t.type === 'keyword')).toBe(false)
+  })
+
+  it('tokenizes a mixed inline line (code, link, bold) into several token types', () => {
+    const kinds = new Set(
+      tokenize('Use `npm run` and see [docs](http://x) for **details**.', 'md').map(t => t.type),
+    )
+    expect(kinds.has('string')).toBe(true) // `npm run`
+    expect(kinds.has('function')).toBe(true) // [docs](…)
+    expect(kinds.has('number')).toBe(true) // **details**
+    expect(kinds.size).toBeGreaterThan(2)
+  })
+
+  it('colours a list marker but leaves the item text plain', () => {
+    const tokens = tokenize('- first item', 'md')
+    expect(tokens[0]).toEqual({ text: '- ', type: 'operator' })
+    expect(tokens.some(t => t.type === 'plain')).toBe(true)
+    // An ordered marker too — but a version like `1.2.3` (no space) is not a marker.
+    expect(tokenize('1. step one', 'md')[0]).toEqual({ text: '1. ', type: 'operator' })
+    expect(tokenize('1.2.3 released', 'md').some(t => t.type === 'operator')).toBe(false)
+  })
+
+  it('does NOT emphasise snake_case identifiers (underscore emphasis is omitted)', () => {
+    // This repo's docs are full of snake_case names — `_`/`__` emphasis would
+    // mangle far more than it highlights, so it is deliberately unsupported.
+    const tokens = tokenize('the feedback_test_state_contamination file', 'md')
+    expect(tokens.every(t => t.type === 'plain')).toBe(true)
+  })
+
+  it('colours a bare URL and a blockquote marker', () => {
+    expect(tokenize('visit https://example.com/x now', 'md').some(t => t.type === 'function')).toBe(true)
+    expect(tokenize('> quoted line', 'md')[0]?.type).toBe('comment')
+  })
+
+  it('highlights block constructs on EVERY line of a whole-file input (mobile path, #6518)', () => {
+    // The dashboard tokenizes per-line, but the mobile viewer (FileBrowser.tsx)
+    // passes the whole file to tokenize(). The block rules carry the `m` flag so
+    // `^`/`$` match every line boundary — without it, only line 1 would highlight.
+    const file = ['intro text', '', '## Heading on line 3', '- a list item', '> a quote'].join('\n')
+    const tokens = tokenize(file, 'md')
+    const byType = (type: string) => tokens.filter(t => t.type === type)
+    // The heading is on line 3, not line 1 — it must still be a keyword token.
+    expect(byType('keyword').some(t => t.text.includes('Heading on line 3'))).toBe(true)
+    expect(byType('operator').some(t => t.text === '- ')).toBe(true) // list marker below line 1
+    expect(byType('comment').some(t => t.text.startsWith('>'))).toBe(true) // blockquote below line 1
+  })
+})
+
 describe('highlightCode', () => {
   it('wraps tokens in colored spans', () => {
     const html = highlightCode('const x = 5', 'javascript')

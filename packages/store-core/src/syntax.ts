@@ -267,6 +267,40 @@ const sql: LanguageDef = [
   { pattern: s(/[();,.]/), type: 'punctuation' },
 ]
 
+// Markdown (#6508) — a lightweight, LINE-oriented highlighter. The dashboard
+// viewer tokenizes each line independently (FileBrowserPanel), so every rule is
+// single-line: block constructs (headings, list/quote markers, fences, thematic
+// breaks) are `^`-anchored so they only fire at column 0, and inline spans
+// (code, links, emphasis) match anywhere on the line. Two deliberate scope cuts:
+// (1) `_`/`__` emphasis is omitted — this repo's docs are full of snake_case
+// identifiers and file names, so underscore emphasis would mangle far more than
+// it highlights; (2) a fenced block's *content* isn't tracked across lines (the
+// tokenizer is stateless per-line), so only the ``` fence delimiter line is
+// coloured, not the code inside it. Bold, italic, and strikethrough share the
+// `number` (warm) colour — output is colour-only spans, so weight/slant can't be
+// shown; unifying emphasis to one hue keeps them distinct from body text.
+const markdown: LanguageDef = [
+  // Block-level, line-start anchored — listed first so they win at column 0. The
+  // `m` flag makes `^`/`$` match every line boundary, not just string index 0:
+  // the dashboard tokenizes per-line so it's a no-op there, but the mobile viewer
+  // (FileBrowser.tsx) passes the WHOLE file to tokenize(), so without `m` these
+  // block constructs would only highlight on line 1 (#6518). `s()` keeps `m` and
+  // adds the sticky `y` the scanner needs — same as the `diff` LanguageDef.
+  { pattern: s(/^ {0,3}#{1,6}(?=\s|$)[^\n]*/m), type: 'keyword' }, // ATX heading (whole line)
+  { pattern: s(/^ {0,3}(?:```|~~~)[^\n]*/m), type: 'string' }, // fenced-code delimiter line
+  { pattern: s(/^ {0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/m), type: 'comment' }, // thematic break (HR)
+  { pattern: s(/^ {0,3}>+ ?/m), type: 'comment' }, // blockquote marker
+  { pattern: s(/^ {0,3}(?:[-*+]|\d{1,9}[.)]) +/m), type: 'operator' }, // list marker
+  // Inline spans — matched anywhere on the line.
+  { pattern: s(/`[^`\n]+`/), type: 'string' }, // inline code
+  { pattern: s(/!\[[^\]\n]*\]\([^)\n]*\)/), type: 'function' }, // image
+  { pattern: s(/\[[^\]\n]+\]\([^)\n]*\)/), type: 'function' }, // link
+  { pattern: s(/https?:\/\/[^\s)]+/), type: 'function' }, // bare URL
+  { pattern: s(/\*\*[^\n]+?\*\*/), type: 'number' }, // bold (before italic)
+  { pattern: s(/~~[^\n]+?~~/), type: 'number' }, // strikethrough
+  { pattern: s(/\*[^*\n]+?\*/), type: 'number' }, // italic
+]
+
 // ---------------------------------------------------------------------------
 // Language registry
 // ---------------------------------------------------------------------------
@@ -291,6 +325,7 @@ const LANGUAGES: Record<string, LanguageDef> = {
   c,
   cpp: c,
   sql,
+  markdown,
 }
 
 /** Aliases map short names to canonical names.
@@ -338,6 +373,11 @@ const ALIASES: Record<string, string> = {
   jsonc: 'json',
   json5: 'json',
   toml: 'yaml',
+  // Markdown (#6508) — the server sends the bare extension as the id (reader.js
+  // sends `extname` without a leading dot). `.markdown` hits the LANGUAGES key
+  // directly; `.md`/`.mdx` need an alias, or the viewer renders them all-`plain`.
+  md: 'markdown',
+  mdx: 'markdown',
 }
 
 // ---------------------------------------------------------------------------
