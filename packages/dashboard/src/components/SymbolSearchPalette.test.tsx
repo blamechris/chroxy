@@ -13,6 +13,7 @@ vi.mock('../store/connection', () => {
   const storeState = () => ({
     requestWorkspaceSymbols: mockRequestWorkspaceSymbols,
     workspaceSymbols: mockWorkspaceSymbols,
+    workspaceSymbolsLoading: false,
     openFileInBrowser: mockOpenFileInBrowser,
   })
   const useConnectionStore = Object.assign(
