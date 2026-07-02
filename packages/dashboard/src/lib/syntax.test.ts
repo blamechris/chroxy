@@ -32,6 +32,21 @@ describe('getSyntaxRules', () => {
     expect(getSyntaxRules('rs')).not.toBeNull()
   })
 
+  it('resolves the JS/TS family extensions the server sends verbatim (mjs/cjs/mts/cts)', () => {
+    // reader.js sends the bare extension as the language id — these must resolve
+    // or a `.mjs`/`.cjs`/`.mts`/`.cts` file renders all-`plain` (no colours).
+    expect(getSyntaxRules('mjs')).not.toBeNull()
+    expect(getSyntaxRules('cjs')).not.toBeNull()
+    expect(getSyntaxRules('mts')).not.toBeNull()
+    expect(getSyntaxRules('cts')).not.toBeNull()
+  })
+
+  it('actually tokenizes a .mjs line into multiple token types (not all plain)', () => {
+    const kinds = new Set(tokenize('const deleteCount = go(1) // note', 'mjs').map(t => t.type))
+    expect(kinds.size).toBeGreaterThan(1)
+    expect(kinds.has('keyword')).toBe(true)
+  })
+
   it('returns null for unknown language', () => {
     expect(getSyntaxRules('brainfuck')).toBeNull()
     expect(getSyntaxRules('')).toBeNull()

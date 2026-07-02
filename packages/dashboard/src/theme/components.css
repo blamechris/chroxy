@@ -7933,6 +7933,21 @@ button.sidebar-token-view-session-row:hover {
 .file-tree-item { margin: 0; }
 
 .file-tree-btn {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  padding: 3px 8px;
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  cursor: pointer;
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  text-align: left;
+  border-radius: 3px;
+}
+
 /* ---- Diff Viewer Panel ---- */
 .diff-viewer-panel {
   display: flex;
@@ -8270,14 +8285,6 @@ button.sidebar-token-view-session-row:hover {
 .syn-plain { color: #a0d0ff; }
 .syn-diff_add { color: #4eca6a; }
 .syn-diff_remove { color: #ff5b5b; }
-  padding: 6px 12px;
-  font-size: var(--text-sm);
-  background: none;
-  border: none;
-  color: var(--text-primary);
-  cursor: pointer;
-  text-align: left;
-}
 
 .diff-sidebar-item:hover { background: var(--bg-card); }
 .diff-sidebar-item.active { background: var(--bg-card); border-left: 2px solid var(--accent-blue); }

@@ -300,6 +300,13 @@ const LANGUAGES: Record<string, LanguageDef> = {
 const ALIASES: Record<string, string> = {
   js: 'javascript',
   ts: 'typescript',
+  // JS/TS family extensions the server sends verbatim as the language id
+  // (reader.js sends `extname` without a leading dot). Without these, a `.mjs`/
+  // `.cjs`/`.mts`/`.cts` file falls through to all-`plain` (no syntax colours).
+  mjs: 'javascript',
+  cjs: 'javascript',
+  mts: 'typescript',
+  cts: 'typescript',
   py: 'python',
   sh: 'bash',
   shell: 'bash',
