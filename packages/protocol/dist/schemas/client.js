@@ -628,9 +628,9 @@ export const SearchContentSchema = z.object({
     sessionId: z.string().max(256).optional(),
 }).passthrough();
 // #6477 (epic #6469): find-all-references (server → `references_result`). Whole-
-// word, case-sensitive grep for a symbol name (alt/ctrl+click a token in the file
-// viewer). `file` is the originating file (accepted for symmetry). Gated behind
-// the opt-in `features.ide` flag.
+// word, case-sensitive grep for a symbol name (alt/option+click a token in the
+// file viewer; cmd/ctrl+click is go-to-definition). `file` is the originating file
+// (accepted for symmetry). Gated behind the opt-in `features.ide` flag.
 export const FindReferencesSchema = z.object({
     type: z.literal('find_references'),
     symbol: z.string().min(1).max(256),
