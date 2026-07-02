@@ -705,6 +705,17 @@ export const SearchContentSchema = z.object({
   sessionId: z.string().max(256).optional(),
 }).passthrough()
 
+// #6477 (epic #6469): find-all-references (server → `references_result`). Whole-
+// word, case-sensitive grep for a symbol name (alt/ctrl+click a token in the file
+// viewer). `file` is the originating file (accepted for symmetry). Gated behind
+// the opt-in `features.ide` flag.
+export const FindReferencesSchema = z.object({
+  type: z.literal('find_references'),
+  symbol: z.string().min(1).max(256),
+  file: z.string().max(4096).optional(),
+  sessionId: z.string().max(256).optional(),
+}).passthrough()
+
 export const ListSlashCommandsSchema = z.object({
   type: z.literal('list_slash_commands'),
 }).passthrough()
@@ -1421,6 +1432,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   ListSymbolsSchema,
   ResolveSymbolSchema,
   SearchContentSchema,
+  FindReferencesSchema,
   ListSlashCommandsSchema,
   ListAgentsSchema,
   RequestFullHistorySchema,

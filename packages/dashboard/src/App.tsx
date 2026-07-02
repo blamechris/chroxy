@@ -70,6 +70,7 @@ import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
 import { SymbolSearchPalette } from './components/SymbolSearchPalette'
 import { CodeSearchPalette } from './components/CodeSearchPalette'
+import { ReferencesPalette } from './components/ReferencesPalette'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
@@ -611,6 +612,8 @@ export function App() {
   const [fileOpenPaletteOpen, setFileOpenPaletteOpen] = useState(false)
   const [symbolSearchOpen, setSymbolSearchOpen] = useState(false)
   const [codeSearchOpen, setCodeSearchOpen] = useState(false)
+  // #6477 — the references palette is opened by alt+click (store-driven), not a shortcut.
+  const referencesOpen = useConnectionStore(s => s.referencesOpen)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -2618,6 +2621,10 @@ export function App() {
       <CodeSearchPalette
         isOpen={codeSearchOpen}
         onClose={() => setCodeSearchOpen(false)}
+      />
+      <ReferencesPalette
+        isOpen={ideEnabled && referencesOpen}
+        onClose={() => useConnectionStore.setState({ referencesOpen: false })}
       />
     </div>
   )

@@ -64,3 +64,13 @@ export const ServerSearchResultsSchema = z.object({
     truncated: z.boolean(),
     error: z.string().nullable(),
 });
+// `find_references` response (#6477) — find-all-references. `symbol` echoes the
+// queried name (correlation); `results` reuses the search-match shape (one row
+// per referencing site); `truncated` on cap; `error` non-null only on failure.
+export const ServerReferencesResultSchema = z.object({
+    type: z.literal('references_result'),
+    symbol: z.string(),
+    results: z.array(SearchResultEntrySchema),
+    truncated: z.boolean(),
+    error: z.string().nullable(),
+});

@@ -61,3 +61,16 @@ export declare const ServerSearchResultsSchema: z.ZodObject<{
 }, z.core.$strip>;
 export type SearchResultEntry = z.infer<typeof SearchResultEntrySchema>;
 export type ServerSearchResultsMessage = z.infer<typeof ServerSearchResultsSchema>;
+export declare const ServerReferencesResultSchema: z.ZodObject<{
+    type: z.ZodLiteral<"references_result">;
+    symbol: z.ZodString;
+    results: z.ZodArray<z.ZodObject<{
+        file: z.ZodString;
+        line: z.ZodNumber;
+        column: z.ZodNumber;
+        text: z.ZodString;
+    }, z.core.$strip>>;
+    truncated: z.ZodBoolean;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export type ServerReferencesResultMessage = z.infer<typeof ServerReferencesResultSchema>;

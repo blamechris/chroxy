@@ -7,12 +7,13 @@
  * the operator opts in, so clients won't send these messages, and the handler
  * additionally returns early as defence-in-depth. Off ⇒ zero IDE behaviour.
  *
- * Handles: list_symbols (#6471), resolve_symbol (#6475), search_content (#6474).
+ * Handles: list_symbols (#6471), resolve_symbol (#6475), search_content (#6474),
+ * find_references (#6477).
  */
 import { resolveSession } from '../handler-utils.js'
 import { isIdeFeatureEnabled } from '../config.js'
 import { collectWorkspaceSymbols, resolveSymbol } from '../ide/symbols.js'
-import { searchContent } from '../ide/search.js'
+import { searchContent, findReferences } from '../ide/search.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ide')
@@ -159,8 +160,55 @@ async function handleSearchContent(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * `find_references` → `references_result`. Find-all-references (#6477): a
+ * word-boundary, case-sensitive grep for a symbol NAME over the same confined
+ * walk search_content uses, returning every referencing site. `file` (the
+ * originating file) is accepted for symmetry but not used to rank. Dashboard-only
+ * consumer for v1 (the references palette).
+ */
+async function handleFindReferences(ws, client, msg, ctx) {
+  // #6481 (epic #6469): fail closed when the IDE surface is not opted in.
+  if (!isIdeFeatureEnabled(ctx.services?.config)) return
+
+  const symbol = typeof msg.symbol === 'string' ? msg.symbol.trim() : ''
+
+  if (!symbol) {
+    ctx.transport.send(ws, { type: 'references_result', symbol: '', results: [], truncated: false, error: null })
+    return
+  }
+
+  const entry = resolveSession(ctx, msg, client)
+  const cwd = entry?.cwd || null
+  if (!cwd) {
+    ctx.transport.send(ws, {
+      type: 'references_result',
+      symbol,
+      results: [],
+      truncated: false,
+      error: 'No workspace directory for this session',
+    })
+    return
+  }
+
+  try {
+    const { results, truncated } = await findReferences(cwd, symbol)
+    ctx.transport.send(ws, { type: 'references_result', symbol, results, truncated, error: null })
+  } catch (err) {
+    log.debug(`find_references failed: ${err?.message}`)
+    ctx.transport.send(ws, {
+      type: 'references_result',
+      symbol,
+      results: [],
+      truncated: false,
+      error: err?.message || 'Failed to find references',
+    })
+  }
+}
+
 export const ideHandlers = {
   list_symbols: handleListSymbols,
   resolve_symbol: handleResolveSymbol,
   search_content: handleSearchContent,
+  find_references: handleFindReferences,
 }

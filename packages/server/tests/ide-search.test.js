@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { searchContent } from '../src/ide/search.js'
+import { searchContent, findReferences } from '../src/ide/search.js'
 
 /**
  * Unit tests for the IDE content-search backend (#6474, epic #6469). Grep
@@ -120,5 +120,65 @@ describe('searchContent — confinement (security)', () => {
 
   it('refuses traversal THROUGH an in-workspace symlink to an outside file', async () => {
     assert.deepEqual((await searchContent(root, 'DEEP_SECRET', { path: 'linkdir/sub/deep.js' })).results, [])
+  })
+})
+
+describe('findReferences — word-boundary reverse lookup (#6477)', () => {
+  let root
+  let outside
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-'))
+    writeFileSync(join(root, 'a.ts'), [
+      'import { widget } from "./w"',   // 1 — reference
+      'const x = widget()',             // 2 — reference
+      'const y = widgetFactory()',      // 3 — NOT a ref (widgetFactory)
+      'const z = superwidget',          // 4 — NOT a ref (superwidget)
+      'widget; widget // twice',        // 5 — TWO references on one line
+      'const Widget = 1',               // 6 — NOT a ref (case-sensitive)
+    ].join('\n') + '\n')
+    // Symbol reachable only via an out-of-workspace symlink — must never appear.
+    outside = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-out-'))
+    writeFileSync(join(outside, 'secret.js'), 'const widget = "SECRET"\n')
+    symlinkSync(join(outside, 'secret.js'), join(root, 'linkfile.js'))
+  })
+  after(() => {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('matches whole-word references only (not substrings)', async () => {
+    const { results } = await findReferences(root, 'widget')
+    const lines = results.map((r) => r.line).sort((a, b) => a - b)
+    // lines 1, 2, and two on 5 — NOT 3 (widgetFactory), 4 (superwidget), 6 (Widget).
+    assert.deepEqual(lines, [1, 2, 5, 5])
+  })
+
+  it('is case-sensitive (an identifier reference is exact)', async () => {
+    assert.deepEqual((await findReferences(root, 'Widget')).results.map((r) => r.line), [6])
+  })
+
+  it('returns every occurrence on a line with 1-indexed columns', async () => {
+    const { results } = await findReferences(root, 'widget')
+    const line5 = results.filter((r) => r.line === 5)
+    assert.equal(line5.length, 2)
+    assert.equal(line5[0].column, 1)      // "widget; widget" — first at col 1
+    assert.equal(line5[1].column, 9)      // second at col 9
+    assert.equal(line5[0].file, 'a.ts')
+  })
+
+  it('returns nothing for a non-identifier or empty name', async () => {
+    assert.deepEqual((await findReferences(root, '')).results, [])
+    assert.deepEqual((await findReferences(root, 'a b')).results, [])
+    assert.deepEqual((await findReferences(root, '(){}')).results, [])
+  })
+
+  it('never surfaces a reference reachable only through an out-of-workspace symlink', async () => {
+    assert.deepEqual((await findReferences(root, 'widget', { path: 'linkfile.js' })).results, [])
+  })
+
+  it('sets truncated when the result cap is hit', async () => {
+    const { results, truncated } = await findReferences(root, 'widget', { maxResults: 1 })
+    assert.equal(results.length, 1)
+    assert.equal(truncated, true)
   })
 })
