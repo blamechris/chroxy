@@ -35,7 +35,14 @@ const TEXT_EXT = new Set([
   '.json', '.jsonc', '.yml', '.yaml', '.toml', '.ini', '.env', '.xml',
   '.html', '.htm', '.css', '.scss', '.less', '.svg', '.vue', '.svelte',
   '.md', '.mdx', '.txt', '.rst', '.sql', '.graphql', '.gql', '.proto',
-  '.dockerfile', '.gitignore', '.editorconfig',
+])
+
+// Extensionless / dotfile basenames worth grepping. Matched by FULL basename
+// (lowercased) — `extname()` returns '' for a leading-dot file like `.env`, so
+// these can't be caught by TEXT_EXT.
+const TEXT_BASENAMES = new Set([
+  '.env', '.gitignore', '.editorconfig', '.npmrc', '.nvmrc', '.babelrc',
+  '.prettierrc', '.eslintrc', 'dockerfile', 'makefile', 'procfile', 'gemfile',
 ])
 
 /**
@@ -102,9 +109,12 @@ export async function searchContent(rootDir, query, opts = {}) {
   /** Grep one file into the accumulator, honouring the caps. */
   async function grepFile(absPath) {
     if (filesRead >= maxFiles) { truncated = true; return }
-    const ext = extname(absPath).toLowerCase()
-    // Match extensionless well-known files (Dockerfile, Makefile) by basename too.
-    if (!TEXT_EXT.has(ext) && !TEXT_EXT.has(`.${absPath.split(sep).pop().toLowerCase()}`)) return
+    const base = absPath.split(sep).pop().toLowerCase()
+    const ext = extname(base)
+    // Match by extension (foo.ts) OR by full basename for dotfiles / extensionless
+    // well-known files (.env, .gitignore, Dockerfile, Makefile) — extname() is ''
+    // for those, so the TEXT_EXT check alone would miss them.
+    if (!TEXT_EXT.has(ext) && !TEXT_BASENAMES.has(base)) return
     let st
     try {
       // lstat (not stat) so a symlink is never followed — defence-in-depth; the

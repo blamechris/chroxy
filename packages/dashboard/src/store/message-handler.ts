@@ -2580,7 +2580,7 @@ function handleSymbolLocation(msg: Record<string, unknown>, get: MsgGet, set: Ms
 }
 
 /**
- * Find-in-project (#6474, epic #6469) — `search_results`: REPLACE the stored
+ * Find-in-project (#6474, epic #6469) — `code_search_results`: REPLACE the stored
  * result set with the carried one and clear the in-flight loading flag. Each
  * reply is a full picture (no delta). Zod-validated so a malformed payload is
  * dropped rather than crashing the Cmd+Shift+F palette. Dashboard-only for v1.

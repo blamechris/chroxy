@@ -695,7 +695,7 @@ export const ResolveSymbolSchema = z.object({
   sessionId: z.string().max(256).optional(),
 }).passthrough()
 
-// #6474 (epic #6469): find-in-project content grep (server → `search_results`).
+// #6474 (epic #6469): find-in-project content grep (server → `code_search_results`).
 // `query` is the case-insensitive needle (2+ chars); `path` optionally scopes the
 // search to a sub-dir/file. Gated behind the opt-in `features.ide` flag.
 export const SearchContentSchema = z.object({

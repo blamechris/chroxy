@@ -2,7 +2,7 @@
  * Dispatch test for find-in-project (#6474, epic #6469).
  *
  * Guards the wire path between the dashboard message handler and the store for
- * `search_results`:
+ * `code_search_results`:
  *   - a valid reply REPLACES `codeSearchResults` and clears `codeSearchLoading`.
  *   - a malformed payload is dropped (Zod safeParse) without mutating state.
  *   - it does NOT touch the unrelated cross-session `searchResults` field.
@@ -65,7 +65,7 @@ function results(over: Partial<ServerSearchResultsMessage> = {}): ServerSearchRe
   }
 }
 
-describe('search_results dispatch (#6474)', () => {
+describe('code_search_results dispatch (#6474)', () => {
   let store: ReturnType<typeof createMockStore>
   let mockSocket: WebSocket
 

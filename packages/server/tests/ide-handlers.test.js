@@ -181,7 +181,7 @@ describe('search_content handler — emission', () => {
   })
   after(() => rmSync(root, { recursive: true, force: true }))
 
-  it('emits a schema-valid search_results with file/line/column/text on a hit', async () => {
+  it('emits a schema-valid code_search_results with file/line/column/text on a hit', async () => {
     const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
     await handleSearchContent({}, client, { type: 'search_content', query: 'findMe' }, ctx)
     assert.equal(sent.length, 1)

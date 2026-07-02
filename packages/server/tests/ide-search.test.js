@@ -19,6 +19,8 @@ describe('searchContent — grep behaviour', () => {
     mkdirSync(join(root, 'src'))
     writeFileSync(join(root, 'src', 'b.ts'), 'export const target = go()\n')
     writeFileSync(join(root, 'readme.md'), '# targeting the docs\n')
+    // A dotfile — extname('.env') is '', so it must match via the basename allowlist.
+    writeFileSync(join(root, '.env'), 'API_KEY=findme_env\n')
     // Ignored dirs must not be searched.
     mkdirSync(join(root, 'node_modules', 'pkg'), { recursive: true })
     writeFileSync(join(root, 'node_modules', 'pkg', 'index.js'), 'const target = "hidden"\n')
@@ -35,6 +37,13 @@ describe('searchContent — grep behaviour', () => {
     assert.deepEqual(keys, ['a.js:1:7', 'a.js:3:1', 'readme.md:1:3', 'src/b.ts:1:14'])
     const a1 = results.find((r) => r.file === 'a.js' && r.line === 1)
     assert.equal(a1.text, 'const target = 1')
+  })
+
+  it('greps dotfiles / extensionless files via the basename allowlist (#6505 review)', async () => {
+    const { results } = await searchContent(root, 'findme_env')
+    assert.equal(results.length, 1)
+    assert.equal(results[0].file, '.env')
+    assert.equal(results[0].line, 1)
   })
 
   it('uses forward-slash workspace-relative paths', async () => {

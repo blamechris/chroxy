@@ -3676,7 +3676,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  // #6474 — find-in-project content grep. The reply (`search_results`) lands in
+  // #6474 — find-in-project content grep. The reply (`code_search_results`) lands in
   // `codeSearchResults`; the Cmd+Shift+F palette renders it.
   requestSearchContent: (query: string) => {
     const trimmed = typeof query === 'string' ? query.trim() : '';

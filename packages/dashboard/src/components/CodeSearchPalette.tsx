@@ -4,7 +4,7 @@
  *
  * Unlike the symbol palette (#6476), the match can't happen client-side — the
  * browser has no file contents — so the query is sent to the server (debounced,
- * 2+ chars) via `requestSearchContent`, and the `search_results` reply lands in
+ * 2+ chars) via `requestSearchContent`, and the `code_search_results` reply lands in
  * `codeSearchResults`. Each row is a file:line match with the matched line as a
  * preview; Enter / click opens the file at that line via `openFileInBrowser`.
  *
