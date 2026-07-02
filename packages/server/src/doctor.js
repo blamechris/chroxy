@@ -158,7 +158,8 @@ export function checkClaudeTuiCliVersion(deps = {}) {
   const {
     // #6484 — route through prepareSpawn so a `.cmd` shim (npm-only Windows host)
     // is run via cmd.exe instead of hitting Node 24's `.cmd` EINVAL. No-op for
-    // `.exe`/POSIX. Tests inject their own `exec`, bypassing this.
+    // `.exe`/POSIX. Most tests inject their own `exec`, bypassing this; the
+    // win32-routing test exercises this default path directly.
     exec = (bin, args) => {
       const s = prepareSpawn(bin, args)
       return execFileSync(s.command, s.args, { encoding: 'utf-8', timeout: 5000, stdio: ['ignore', 'pipe', 'pipe'], ...s.options })

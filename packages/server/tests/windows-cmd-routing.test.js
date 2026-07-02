@@ -1,6 +1,7 @@
 import { describe, it, mock, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
 import * as realChildProcess from 'child_process'
+import { waitFor } from './test-helpers.js'
 
 /**
  * #6484 — the binary resolver can hand a `.cmd` shim (npm-only Windows host) to
@@ -18,7 +19,7 @@ describe('Windows .cmd routing — doctor checkBinary (#6484)', () => {
   const origPlatform = process.platform
   afterEach(() => {
     mock.reset()
-    Object.defineProperty(process, 'platform', { value: origPlatform })
+    Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true })
   })
 
   async function loadDoctor(tag) {
@@ -28,7 +29,7 @@ describe('Windows .cmd routing — doctor checkBinary (#6484)', () => {
 
   function stub({ platform, resolved }) {
     const calls = []
-    Object.defineProperty(process, 'platform', { value: platform })
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true })
     // doctor.js imports the bare 'child_process' specifier — mock exactly that,
     // keeping every real export (spawn/exec/… are needed by the transitive graph)
     // and overriding only execFileSync to capture the routed command.
@@ -81,5 +82,47 @@ describe('Windows .cmd routing — doctor checkBinary (#6484)', () => {
     assert.equal(calls.length, 1, 'the claude --version drift check ran')
     assert.match(calls[0].cmd, /cmd\.exe$/i, 'claude.cmd routed through cmd.exe')
     assert.deepEqual(calls[0].args.slice(0, 3), ['/d', '/s', '/c'])
+  })
+})
+
+describe('Windows .cmd routing — jsonl-subprocess-session (#6484)', () => {
+  const origPlatform = process.platform
+  afterEach(() => {
+    mock.reset()
+    Object.defineProperty(process, 'platform', { value: origPlatform, configurable: true })
+  })
+
+  it('routes a resolved .cmd provider binary through cmd.exe on win32', async () => {
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true })
+    let captured = null
+    // Capture the spawn call, then throw so the session's existing try/catch
+    // handles it — no fake child stream plumbing needed to assert the wiring.
+    mock.module('child_process', {
+      namedExports: {
+        ...realChildProcess,
+        spawn: (cmd, args, opts) => { captured = { cmd, args, opts }; throw new Error('captured-spawn') },
+      },
+    })
+    const { JsonlSubprocessSession } = await import('../src/jsonl-subprocess-session.js?win-6484-jsonl')
+    class CmdProvider extends JsonlSubprocessSession {
+      static get binaryCandidates() { return ['C:\\npm\\codex.cmd'] }
+      static get resolvedBinary() { return 'C:\\npm\\codex.cmd' }
+      static get apiKeyEnv() { return 'CODEX_TEST_KEY' }
+      static get providerName() { return 'codex' }
+      static get displayLabel() { return 'Codex' }
+      static get messageIdPrefix() { return 'codex' }
+      _buildArgs(text) { return ['exec', text] }
+      _buildChildEnv() { return process.env }
+    }
+    const s = new CmdProvider({ cwd: '/tmp' })
+    s._processReady = true
+    s.on('error', () => {}) // swallow the intentional spawn-throw
+    s.sendMessage('hi') // not awaited — spawns, our mock captures + throws, caught
+    await waitFor(() => captured != null, { label: 'spawn captured' })
+    assert.match(captured.cmd, /cmd\.exe$/i, 'codex.cmd routed through cmd.exe')
+    assert.deepEqual(captured.args.slice(0, 3), ['/d', '/s', '/c'], 'cmd.exe run flags')
+    assert.equal(captured.opts.windowsVerbatimArguments, true, 'verbatim args set')
+    assert.ok(captured.args[3].includes('codex.cmd'), 'the shim is inside the escaped line')
+    s.destroy?.()
   })
 })
