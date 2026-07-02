@@ -2551,11 +2551,13 @@ function handleSymbolsSnapshot(msg: Record<string, unknown>, _get: MsgGet, set: 
   if (!parsed.success) return;
   // #6476 — a whole-workspace scan (path === null) feeds the symbol-search modal;
   // a file-scoped scan feeds the per-file symbol panel (#6472). Route accordingly
-  // so the two symbol surfaces never clobber each other's table.
+  // so the two symbol surfaces never clobber each other's table. Clear BOTH loading
+  // flags in either branch so a mis-routed request (e.g. a path-less requestSymbols)
+  // can never leave the other surface's loading flag stuck on.
   if (parsed.data.path === null) {
-    set({ workspaceSymbols: parsed.data, workspaceSymbolsLoading: false });
+    set({ workspaceSymbols: parsed.data, workspaceSymbolsLoading: false, symbolsLoading: false });
   } else {
-    set({ symbols: parsed.data, symbolsLoading: false });
+    set({ symbols: parsed.data, symbolsLoading: false, workspaceSymbolsLoading: false });
   }
 }
 

@@ -1396,8 +1396,9 @@ export interface ConnectionState {
   setFileContentCallback: (cb: ((content: FileContent) => void) | null) => void;
   requestFileListing: (path?: string) => void;
   requestFileContent: (path: string) => void;
-  // #6472 (epic #6469) — request the opt-in IDE symbol table, optionally scoped
-  // to one file/dir. Sets symbolsLoading; the reply lands in `symbols`.
+  // #6472 (epic #6469) — request the per-file/dir IDE symbol table (pass a `path`).
+  // Sets symbolsLoading; the reply lands in `symbols`. NOTE: a path-less scan routes
+  // to `workspaceSymbols` instead (#6476) — use requestWorkspaceSymbols for that.
   requestSymbols: (path?: string) => void;
   // #6473 — open a file in the FileBrowserPanel viewer (switches to the Files view
   // and signals the panel via fileBrowserPendingOpen). Used by Cmd+P quick-open.
