@@ -1211,7 +1211,7 @@ export interface ConnectionState {
   codeSearchResults: ServerSearchResultsMessage | null;
   // #6474 — true between dispatching a `search_content` request and its reply.
   codeSearchLoading: boolean;
-  // #6477 — find-all-references (alt/ctrl+click a token). `referencesResult` is
+  // #6477 — find-all-references (alt/option+click a token). `referencesResult` is
   // the latest `references_result` reply; `referencesSymbol` is the requested name
   // (for the modal title while the reply is in flight); `referencesOpen` controls
   // the references palette; `referencesLoading` is true between request and reply.

@@ -1,7 +1,7 @@
 /**
  * ReferencesPalette — find-all-references result list (#6477, IDE epic #6469).
  *
- * Opened by alt/ctrl+click on a token in the file viewer (FileBrowserPanel),
+ * Opened by alt/option+click on a token in the file viewer (FileBrowserPanel),
  * which dispatches `requestFindReferences` and flips `referencesOpen`. Unlike the
  * Cmd+Shift+F palette there's no query input — the symbol is fixed by the click;
  * this just lists the referencing sites (`references_result`). Enter / click jumps

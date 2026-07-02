@@ -228,7 +228,11 @@ export async function findReferences(rootDir, symbol, opts = {}) {
   // Escape `$` (the only regex-special an identifier can contain) so a
   // `$`-prefixed name doesn't turn into an end-of-line anchor.
   const escaped = name.replace(/\$/g, '\\$&')
-  const re = new RegExp(`\\b${escaped}\\b`, 'g')
+  // Explicit identifier boundaries — a plain `\b` is `\w`-relative and mishandles
+  // `$`-names (`$` isn't a `\w` char): it MISSES a real `$store` and FALSE-matches
+  // the `$store` tail inside `my$store`. `(?<![\w$])…(?![\w$])` treats `$` as part
+  // of the identifier, so a reference must be flanked by non-identifier chars.
+  const re = new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`, 'g')
   return collectMatches(rootDir, (line) => {
     const cols = []
     re.lastIndex = 0

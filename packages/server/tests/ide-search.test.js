@@ -157,6 +157,21 @@ describe('findReferences — word-boundary reverse lookup (#6477)', () => {
     assert.deepEqual((await findReferences(root, 'Widget')).results.map((r) => r.line), [6])
   })
 
+  it('handles a $-containing identifier without \\b mishandling ($store, not my$store)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-dollar-'))
+    try {
+      writeFileSync(join(dir, 's.js'), [
+        'const $store = create()',   // 1 — reference
+        'return $store.value',        // 2 — reference
+        'const my$store = other()',   // 3 — NOT a ref (the $store here is a tail of my$store)
+      ].join('\n') + '\n')
+      const { results } = await findReferences(dir, '$store')
+      assert.deepEqual(results.map((r) => r.line).sort((a, b) => a - b), [1, 2])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('returns every occurrence on a line with 1-indexed columns', async () => {
     const { results } = await findReferences(root, 'widget')
     const line5 = results.filter((r) => r.line === 5)
