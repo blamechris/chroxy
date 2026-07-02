@@ -131,11 +131,13 @@ export function isKeychainAvailable() {
  * identity in the (now unreadable) keychain AND no fallback file exists. The
  * probe is non-prompting, so this never triggers the macOS modal.
  *
- * Linux is deliberately NOT classified as broken when `secret-tool` is missing:
- * that is the documented headless/no-keychain fallback case, so identity storage
- * should mint/reload the 0600 file just like other unsupported hosts. When a
- * Linux keychain is actually available but a lookup fails, `getTokenStatus()`
- * still reports `error` and the identity loader fails safe without rotating.
+ * Non-macOS hosts are NEVER classified as broken here: `isKeychainBroken()`
+ * returns false for every non-mac platform, regardless of `secret-tool`. When
+ * `secret-tool`/libsecret is missing on Linux that is the documented headless/
+ * no-keychain fallback case, so identity storage mints/reloads the 0600 file
+ * like other unsupported hosts. When a Linux keychain IS available but a lookup
+ * fails, the fail-safe lives elsewhere: `getTokenStatus()` still reports `error`
+ * and the identity loader refuses to rotate — it does not rely on this function.
  */
 export function isKeychainBroken() {
   if (keychainDisabled()) return false
