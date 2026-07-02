@@ -55,6 +55,25 @@ function formatSize(bytes: number | null): string {
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
 }
 
+/**
+ * #6497 — does a `file_content` reply belong to the currently-selected file?
+ * The server echoes the resolved ABSOLUTE path (ws-file-ops/reader.js), while the
+ * selection may be absolute (a file-tree click) OR workspace-relative (a #6475/
+ * #6476 symbol jump). Compare tolerantly: an exact match, or the reply's absolute
+ * path ending on the selected (relative) path. It NEVER drops a correct reply —
+ * for the selected file the reply's abs path always equals or tail-matches it —
+ * so a late/out-of-order reply for a *different* file is discarded instead of
+ * flashing into the current viewer or stealing its jump-to-line target. A reply
+ * with no path (an empty/invalid request) can't be correlated, so it's kept.
+ */
+export function contentReplyMatchesSelection(replyPath: string | null, selected: string | null): boolean {
+  if (!replyPath || !selected) return true
+  const rp = replyPath.replace(/\\/g, '/')
+  const sel = selected.replace(/\\/g, '/')
+  if (rp === sel) return true
+  return rp.endsWith('/' + sel.replace(/^\.?\//, ''))
+}
+
 /** Build a lookup of relative paths to their git status */
 function buildGitStatusMap(
   gitStatus: GitStatusResult | null,
@@ -220,6 +239,10 @@ export function FileBrowserPanel() {
       }
     }
   }, [])
+  // #6497 — the file-content callback is registered once, so it can't close over
+  // the live `selectedFile` state. Mirror it into a ref (synced below) so the
+  // callback can drop replies that belong to a since-deselected file.
+  const selectedFileRef = useRef<string | null>(selectedFile)
   const [fileContent, setFileContent] = useState<string | null>(null)
   const [fileLanguage, setFileLanguage] = useState<string | null>(null)
   const [fileSize, setFileSize] = useState<number | null>(null)
@@ -261,8 +284,17 @@ export function FileBrowserPanel() {
     return () => setFileBrowserCallback(null)
   }, [setFileBrowserCallback])
 
+  // #6497 — keep the ref in sync with the live selection for the content guard.
+  useEffect(() => {
+    selectedFileRef.current = selectedFile
+  }, [selectedFile])
+
   useEffect(() => {
     const handleContent = (content: FileContent) => {
+      // #6497 — drop a reply that belongs to a since-deselected file: closes the
+      // wrong-content flash and the jump-to-line scroll-target bleed under a rapid
+      // A→B open where A's reply lands after B was selected.
+      if (!contentReplyMatchesSelection(content.path, selectedFileRef.current)) return
       setFileContent(content.content)
       setFileLanguage(content.language)
       setFileSize(content.size)
