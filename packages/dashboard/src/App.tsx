@@ -68,6 +68,7 @@ import { usePermissionNotification, type PermissionPromptInfo } from './hooks/us
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
 import { FileOpenPalette } from './components/FileOpenPalette'
+import { SymbolSearchPalette } from './components/SymbolSearchPalette'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
@@ -607,6 +608,7 @@ export function App() {
   const commands = useCommands(isPtyProvider)
   const [paletteOpen, setPaletteOpen] = useState(false)
   const [fileOpenPaletteOpen, setFileOpenPaletteOpen] = useState(false)
+  const [symbolSearchOpen, setSymbolSearchOpen] = useState(false)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -993,6 +995,7 @@ export function App() {
     setPermissionMode,
     appendImageAttachments,
     openFilePalette: () => { if (ideEnabled) setFileOpenPaletteOpen(true) },
+    openSymbolSearch: () => { if (ideEnabled) setSymbolSearchOpen(true) },
   })
 
   const trackedCommands = useMemo(
@@ -2604,6 +2607,10 @@ export function App() {
       <FileOpenPalette
         isOpen={fileOpenPaletteOpen}
         onClose={() => setFileOpenPaletteOpen(false)}
+      />
+      <SymbolSearchPalette
+        isOpen={symbolSearchOpen}
+        onClose={() => setSymbolSearchOpen(false)}
       />
     </div>
   )

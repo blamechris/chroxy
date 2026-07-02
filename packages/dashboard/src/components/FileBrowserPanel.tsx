@@ -226,6 +226,9 @@ export function FileBrowserPanel() {
   const [gitStatus, setGitStatus] = useState<GitStatusResult | null>(null)
   const rootPath = useRef<string | null>(null)
   const viewerRef = useRef<HTMLDivElement>(null)
+  // #6476 — a 1-indexed line to scroll to once the externally-opened file's
+  // content has rendered (symbol-search "jump to definition").
+  const pendingScrollLine = useRef<number | null>(null)
   // The workspace-relative path we last asked symbols for; matched against the
   // snapshot's echoed `path` so we only render symbols for the open file.
   const [symbolScope, setSymbolScope] = useState<string | null>(null)
@@ -328,7 +331,10 @@ export function FileBrowserPanel() {
   // path so it persists the selection, loads content, and triggers the symbols
   // request. Keyed on the nonce object so repeated opens of the same path fire.
   useEffect(() => {
-    if (fileBrowserPendingOpen) handleFileClick(fileBrowserPendingOpen.path)
+    if (!fileBrowserPendingOpen) return
+    handleFileClick(fileBrowserPendingOpen.path)
+    // #6476 — remember the jump-to line; the scroll fires once content renders.
+    pendingScrollLine.current = fileBrowserPendingOpen.line ?? null
   }, [fileBrowserPendingOpen, handleFileClick])
 
   const handleBack = useCallback(() => {
@@ -381,6 +387,17 @@ export function FileBrowserPanel() {
     el.classList.add('file-viewer-line--active')
     window.setTimeout(() => el.classList.remove('file-viewer-line--active'), 1400)
   }, [])
+
+  // #6476 — once an externally-opened file's content has rendered, scroll to the
+  // requested jump-to line (symbol-search "jump to definition"). Deferred a tick
+  // so the freshly-rendered `data-line` rows are in the DOM.
+  useEffect(() => {
+    if (pendingScrollLine.current == null || fileContent == null) return
+    const line = pendingScrollLine.current
+    pendingScrollLine.current = null
+    const id = window.setTimeout(() => scrollToLine(line), 0)
+    return () => window.clearTimeout(id)
+  }, [fileContent, scrollToLine])
 
   // Breadcrumbs from currentPath relative to root
   const breadcrumbs = useMemo(() => {
