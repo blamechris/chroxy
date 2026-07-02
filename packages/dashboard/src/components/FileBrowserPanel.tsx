@@ -5,7 +5,7 @@
  * Clicking a file loads its content with syntax highlighting.
  * Displays git status decorations on modified/untracked files.
  */
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react'
+import { useState, useEffect, useLayoutEffect, useCallback, useRef, useMemo } from 'react'
 import { useConnectionStore } from '../store/connection'
 import { tokenize } from '@chroxy/store-core'
 import type { FileEntry, FileListing, FileContent, GitStatusResult } from '../store/types'
@@ -53,6 +53,30 @@ function formatSize(bytes: number | null): string {
   if (bytes < 1024) return `${bytes} B`
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+}
+
+/**
+ * #6497 — does a `file_content` reply belong to the currently-selected file?
+ * The server echoes the resolved ABSOLUTE path (ws-file-ops/reader.js), while the
+ * selection may be absolute (a file-tree click) OR workspace-relative (a #6475/
+ * #6476 symbol jump). Compare tolerantly: an exact match, or the reply's absolute
+ * path ending on the selected (relative) path. It NEVER drops a correct reply —
+ * for the selected file the reply's abs path always equals or tail-matches it —
+ * so a late/out-of-order reply for a *different* file is discarded instead of
+ * flashing into the current viewer or stealing its jump-to-line target. A reply
+ * with no path (an empty/invalid request) can't be correlated, so it's kept.
+ */
+export function contentReplyMatchesSelection(replyPath: string | null, selected: string | null): boolean {
+  if (!replyPath || !selected) return true
+  const rp = replyPath.replace(/\\/g, '/')
+  const sel = selected.replace(/\\/g, '/')
+  if (rp === sel) return true
+  // An ABSOLUTE selection (file-tree click) must match exactly — never tail-match,
+  // or an unrelated abs reply that happens to end with the same string would slip
+  // through. Only a workspace-relative selection (a #6475/#6476 symbol jump) is
+  // tail-matched against the server's resolved absolute reply path.
+  if (sel.startsWith('/') || /^[A-Za-z]:\//.test(sel)) return false
+  return rp.endsWith('/' + sel.replace(/^\.?\//, ''))
 }
 
 /** Build a lookup of relative paths to their git status */
@@ -206,7 +230,15 @@ export function FileBrowserPanel() {
     activeSessionId ? s.sessionStates[activeSessionId]?.selectedFilePath ?? null : null
   )
   const [selectedFile, _setSelectedFile] = useState<string | null>(savedFilePath)
+  // #6497 — the file-content callback is registered once, so it can't close over
+  // the live `selectedFile` state. Mirror it into a ref (updated synchronously at
+  // every selection site + a layout-effect backstop) so the callback can drop
+  // replies that belong to a since-deselected file.
+  const selectedFileRef = useRef<string | null>(savedFilePath)
   const setSelectedFile = useCallback((path: string | null) => {
+    // #6497 — update the guard ref synchronously at the primary selection site so
+    // no reply can slip through before the sync effect runs.
+    selectedFileRef.current = path
     _setSelectedFile(path)
     // Persist to session state
     const sid = useConnectionStore.getState().activeSessionId
@@ -261,8 +293,20 @@ export function FileBrowserPanel() {
     return () => setFileBrowserCallback(null)
   }, [setFileBrowserCallback])
 
+  // #6497 — backstop: keep the ref in sync for selection changes that bypass
+  // setSelectedFile (session-switch restore, StrictMode). A layout effect runs
+  // synchronously after commit — before the browser yields to the next macrotask
+  // (a file_content WS message) — so the ref can't be briefly stale.
+  useLayoutEffect(() => {
+    selectedFileRef.current = selectedFile
+  }, [selectedFile])
+
   useEffect(() => {
     const handleContent = (content: FileContent) => {
+      // #6497 — drop a reply that belongs to a since-deselected file: closes the
+      // wrong-content flash and the jump-to-line scroll-target bleed under a rapid
+      // A→B open where A's reply lands after B was selected.
+      if (!contentReplyMatchesSelection(content.path, selectedFileRef.current)) return
       setFileContent(content.content)
       setFileLanguage(content.language)
       setFileSize(content.size)

@@ -3,7 +3,7 @@
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { render, screen, fireEvent, waitFor, act, cleanup } from '@testing-library/react'
-import { FileBrowserPanel } from './FileBrowserPanel'
+import { FileBrowserPanel, contentReplyMatchesSelection } from './FileBrowserPanel'
 
 // Mock the connection store
 const mockRequestFileListing = vi.fn()
@@ -481,10 +481,68 @@ describe('FileBrowserPanel — go-to-definition (#6475)', () => {
     await waitFor(() => screen.getByText('foo.ts'))
     fireEvent.click(screen.getByText('foo.ts'))
     act(() => {
-      fileContentCallback!({ content: 'x', language: 'typescript', size: 1, truncated: false, error: null })
+      fileContentCallback!({ path: '/root/foo.ts', content: 'x', language: 'typescript', size: 1, truncated: false, error: null })
     })
     const pill = await screen.findByTestId('def-not-found')
     expect(pill.textContent).toContain('ghost')
     expect(mockOpenFileInBrowser).not.toHaveBeenCalled()
+  })
+})
+
+describe('contentReplyMatchesSelection (#6497)', () => {
+  it('matches an exact absolute path (tree click)', () => {
+    expect(contentReplyMatchesSelection('/root/a.ts', '/root/a.ts')).toBe(true)
+  })
+  it('matches a resolved absolute reply against a workspace-relative selection (symbol jump)', () => {
+    // The server echoes the absolute path; a #6475/#6476 jump selected 'src/util.ts'.
+    expect(contentReplyMatchesSelection('/root/src/util.ts', 'src/util.ts')).toBe(true)
+    expect(contentReplyMatchesSelection('/root/src/util.ts', './src/util.ts')).toBe(true)
+  })
+  it('normalizes Windows separators on both sides', () => {
+    expect(contentReplyMatchesSelection('C:\\root\\a.ts', 'C:\\root\\a.ts')).toBe(true)
+    expect(contentReplyMatchesSelection('C:\\root\\src\\util.ts', 'src/util.ts')).toBe(true)
+  })
+  it('rejects a reply for a different file', () => {
+    expect(contentReplyMatchesSelection('/root/other.ts', '/root/a.ts')).toBe(false)
+    expect(contentReplyMatchesSelection('/root/other.ts', 'src/util.ts')).toBe(false)
+  })
+  it('does not partial-match a different file that shares a suffix substring', () => {
+    // '/root/barfoo.ts' must NOT match selection 'foo.ts' (segment boundary).
+    expect(contentReplyMatchesSelection('/root/barfoo.ts', 'foo.ts')).toBe(false)
+  })
+  it('requires an EXACT match for an absolute selection (no tail-match) (#6501 review)', () => {
+    // A different root that happens to end with the same absolute string must not match.
+    expect(contentReplyMatchesSelection('/other/root/a.ts', '/root/a.ts')).toBe(false)
+    expect(contentReplyMatchesSelection('/root/a.ts', '/root/a.ts')).toBe(true)
+    // Windows absolute selection: exact only.
+    expect(contentReplyMatchesSelection('D:/x/root/a.ts', 'C:/root/a.ts')).toBe(false)
+  })
+  it('keeps a reply that cannot be correlated (null path)', () => {
+    expect(contentReplyMatchesSelection(null, '/root/a.ts')).toBe(true)
+    expect(contentReplyMatchesSelection('/root/a.ts', null)).toBe(true)
+  })
+})
+
+describe('FileBrowserPanel — stale content guard (#6497)', () => {
+  it('ignores a file_content reply for a since-deselected file', async () => {
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root', parentPath: null,
+        entries: [{ name: 'a.ts', isDirectory: false, size: 10 }], error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('a.ts'))
+    fireEvent.click(screen.getByText('a.ts')) // selectedFile = /root/a.ts
+    // A late reply for a DIFFERENT file must not flash into the viewer.
+    act(() => {
+      fileContentCallback!({ path: '/root/other.ts', content: 'STALE', language: 'typescript', size: 5, truncated: false, error: null })
+    })
+    expect(screen.queryByText('STALE')).toBeNull()
+    // The correct reply lands and renders.
+    act(() => {
+      fileContentCallback!({ path: '/root/a.ts', content: 'CORRECT', language: 'typescript', size: 7, truncated: false, error: null })
+    })
+    await waitFor(() => screen.getByText('CORRECT'))
   })
 })
