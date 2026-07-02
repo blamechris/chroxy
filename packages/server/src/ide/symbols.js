@@ -296,3 +296,42 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
 
   return { symbols, truncated }
 }
+
+/**
+ * Resolve a symbol NAME to a single declaration location — the backbone of
+ * go-to-definition (#6475, epic #6469). Reuses collectWorkspaceSymbols so the
+ * same realpath confinement + bounded walk apply, filters the table to
+ * declarations whose name matches exactly, and ranks the candidates:
+ *   - an exported declaration outranks a local one (+2), so a cmd/ctrl+click on
+ *     an imported symbol lands on its public definition, and
+ *   - a declaration in the originating file outranks one elsewhere (+1), so a
+ *     click on a locally-declared helper resolves in place.
+ * Regex-parsed, so ~80% accurate with zero new deps — a genuine miss (name not
+ * found, or only a usage exists) returns null and the caller reports a graceful
+ * 'not found'. On a score tie the FIRST (walk-order-earliest, deterministic)
+ * candidate wins.
+ *
+ * @param {string} rootDir           Absolute workspace root (session cwd).
+ * @param {string} symbolName        Exact declared identifier to resolve.
+ * @param {object} [opts]
+ * @param {string|null} [opts.fromFile]  Workspace-relative POSIX path the click
+ *                                       came from; used only to break ranking ties.
+ * @returns {Promise<{file: string, line: number}|null>}
+ */
+export async function resolveSymbol(rootDir, symbolName, opts = {}) {
+  const name = typeof symbolName === 'string' ? symbolName.trim() : ''
+  if (!name) return null
+  const { fromFile = null } = opts
+  const { symbols } = await collectWorkspaceSymbols(rootDir)
+  let best = null
+  let bestScore = -1
+  for (const s of symbols) {
+    if (s.name !== name) continue
+    const score = (s.exported ? 2 : 0) + (fromFile && s.file === fromFile ? 1 : 0)
+    if (score > bestScore) {
+      best = s
+      bestScore = score
+    }
+  }
+  return best ? { file: best.file, line: best.line } : null
+}

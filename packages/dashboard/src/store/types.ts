@@ -1200,6 +1200,11 @@ export interface ConnectionState {
   // snapshot). Separate from the per-file `symbols` (#6472) so they don't clobber.
   workspaceSymbols: ServerSymbolsSnapshotMessage | null;
   workspaceSymbolsLoading: boolean;
+  // #6475 — the latest go-to-definition result (a `symbol_location` reply). On a
+  // hit `file`/`line` point at the declaration and FileBrowserPanel jumps there;
+  // on a miss `error` is set and the viewer shows a transient 'not found' pill.
+  // The nonce lets a repeated resolve of the same symbol re-fire the jump effect.
+  symbolLocation: { symbol: string; file: string | null; line: number | null; error: string | null; nonce: number } | null;
 
   // Custom agents from server
   customAgents: CustomAgent[];
@@ -1406,6 +1411,10 @@ export interface ConnectionState {
   openFileInBrowser: (path: string, line?: number) => void;
   // #6476 — request the whole-workspace symbol table for the symbol-search modal.
   requestWorkspaceSymbols: () => void;
+  // #6475 — resolve a clicked symbol NAME to its definition (go-to-definition).
+  // `file` is the originating file (a ranking tie-break hint). The reply lands in
+  // `symbolLocation`; FileBrowserPanel reacts to jump there or show 'not found'.
+  requestResolveSymbol: (symbol: string, file?: string) => void;
 
   // Git status
   setGitStatusCallback: (cb: ((result: GitStatusResult) => void) | null) => void;

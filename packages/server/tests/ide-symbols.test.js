@@ -3,7 +3,7 @@ import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseSymbols, collectWorkspaceSymbols } from '../src/ide/symbols.js'
+import { parseSymbols, collectWorkspaceSymbols, resolveSymbol } from '../src/ide/symbols.js'
 
 /**
  * Unit tests for the self-contained IDE symbol parser (#6471, epic #6469).
@@ -207,5 +207,59 @@ describe('collectWorkspaceSymbols', () => {
     const { symbols, truncated } = await collectWorkspaceSymbols(root, { maxSymbols: 1 })
     assert.equal(symbols.length, 1)
     assert.equal(truncated, true)
+  })
+})
+
+describe('resolveSymbol — go-to-definition (#6475)', () => {
+  let root
+  let outside
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-resolve-'))
+    // An exported declaration in one file...
+    writeFileSync(join(root, 'mod.ts'), 'export const widget = () => {}\n')
+    // ...and a same-named LOCAL (non-exported) declaration in another.
+    writeFileSync(join(root, 'local.ts'), 'const widget = 1\nexport function only() {}\n')
+    // Two same-named non-exported decls, to exercise the fromFile tiebreak.
+    writeFileSync(join(root, 'a.ts'), 'const dup = 1\n')
+    writeFileSync(join(root, 'b.ts'), 'const dup = 2\n')
+    // A symbol reachable only via an in-workspace symlink pointing OUTSIDE —
+    // the whole-tree walk skips symlinks, so it must never resolve.
+    outside = mkdtempSync(join(tmpdir(), 'chroxy-ide-resolve-out-'))
+    writeFileSync(join(outside, 'secret.js'), 'export function TOP_SECRET() {}\n')
+    symlinkSync(join(outside, 'secret.js'), join(root, 'linkfile.js'))
+  })
+  after(() => {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  })
+
+  it('resolves a unique symbol to its declaration file + 1-indexed line', async () => {
+    assert.deepEqual(await resolveSymbol(root, 'only'), { file: 'local.ts', line: 2 })
+  })
+
+  it('prefers the EXPORTED declaration when the same name is declared twice', async () => {
+    // widget is exported in mod.ts (+2) and a local const in local.ts (+0).
+    assert.deepEqual(await resolveSymbol(root, 'widget'), { file: 'mod.ts', line: 1 })
+  })
+
+  it('breaks a tie toward the originating file (fromFile)', async () => {
+    // dup is a non-exported const in both a.ts and b.ts; fromFile decides.
+    assert.deepEqual(await resolveSymbol(root, 'dup', { fromFile: 'b.ts' }), { file: 'b.ts', line: 1 })
+    // Without a fromFile hint, walk-order (a before b) wins deterministically.
+    assert.deepEqual(await resolveSymbol(root, 'dup'), { file: 'a.ts', line: 1 })
+  })
+
+  it('returns null for a name with no declaration (graceful not-found)', async () => {
+    assert.equal(await resolveSymbol(root, 'doesNotExist'), null)
+  })
+
+  it('returns null for an empty / whitespace / non-string name', async () => {
+    assert.equal(await resolveSymbol(root, ''), null)
+    assert.equal(await resolveSymbol(root, '   '), null)
+    assert.equal(await resolveSymbol(root, null), null)
+  })
+
+  it('never resolves a symbol reachable only through an out-of-workspace symlink', async () => {
+    assert.equal(await resolveSymbol(root, 'TOP_SECRET'), null)
   })
 })

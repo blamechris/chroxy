@@ -10,6 +10,10 @@ const mockRequestFileListing = vi.fn()
 const mockRequestFileContent = vi.fn()
 const mockRequestGitStatus = vi.fn()
 const mockRequestSymbols = vi.fn()
+// #6475 go-to-definition
+const mockRequestResolveSymbol = vi.fn()
+const mockOpenFileInBrowser = vi.fn()
+let mockSymbolLocation: any = null
 let fileBrowserCallback: ((listing: any) => void) | null = null
 let fileContentCallback: ((content: any) => void) | null = null
 let gitStatusCallback: ((result: any) => void) | null = null
@@ -37,6 +41,9 @@ vi.mock('../store/connection', () => {
     symbolsLoading: mockSymbolsLoading,
     serverCapabilities: { ide: mockIdeCapability },
     fileBrowserPendingOpen: mockFileBrowserPendingOpen,
+    requestResolveSymbol: mockRequestResolveSymbol,
+    openFileInBrowser: mockOpenFileInBrowser,
+    symbolLocation: mockSymbolLocation,
   })
 
   const useConnectionStore = Object.assign(
@@ -74,6 +81,7 @@ beforeEach(() => {
   mockSymbolsLoading = false
   mockIdeCapability = false
   mockFileBrowserPendingOpen = null
+  mockSymbolLocation = null
 })
 
 describe('FileBrowserPanel', () => {
@@ -408,5 +416,75 @@ describe('FileBrowserPanel — external open (#6473 Cmd+P)', () => {
     } finally {
       ;(Element.prototype as any).scrollIntoView = prev
     }
+  })
+})
+
+describe('FileBrowserPanel — go-to-definition (#6475)', () => {
+  // Open a file whose content is a single bare identifier, so the tokenizer emits
+  // one clickable `syn-plain` token we can cmd/ctrl+click.
+  async function openIdentifierFile(ide: boolean) {
+    mockIdeCapability = ide
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root',
+        parentPath: null,
+        entries: [{ name: 'foo.ts', isDirectory: false, size: 20 }],
+        error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('foo.ts'))
+    fireEvent.click(screen.getByText('foo.ts'))
+    act(() => {
+      fileContentCallback!({
+        content: 'widget', language: 'typescript', size: 20, truncated: false, error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('widget'))
+  }
+
+  it('cmd/ctrl+click on a token resolves the symbol, passing the open file as a hint', async () => {
+    await openIdentifierFile(true)
+    fireEvent.click(screen.getByText('widget'), { metaKey: true })
+    expect(mockRequestResolveSymbol).toHaveBeenCalledWith('widget', 'foo.ts')
+  })
+
+  it('a plain click (no modifier) does NOT resolve', async () => {
+    await openIdentifierFile(true)
+    fireEvent.click(screen.getByText('widget'))
+    expect(mockRequestResolveSymbol).not.toHaveBeenCalled()
+  })
+
+  it('does nothing on cmd+click when the ide capability is off', async () => {
+    await openIdentifierFile(false)
+    fireEvent.click(screen.getByText('widget'), { metaKey: true })
+    expect(mockRequestResolveSymbol).not.toHaveBeenCalled()
+  })
+
+  it('jumps to the definition on a resolve hit (opens target file + line)', () => {
+    mockSymbolLocation = { symbol: 'widget', file: 'src/widget.ts', line: 12, error: null, nonce: 1 }
+    render(<FileBrowserPanel />)
+    // The go-to-def effect fires on mount → opens the target via the store.
+    expect(mockOpenFileInBrowser).toHaveBeenCalledWith('src/widget.ts', 12)
+  })
+
+  it('shows a transient "not found" pill on a resolve miss', async () => {
+    mockSymbolLocation = { symbol: 'ghost', file: null, line: null, error: 'Definition not found', nonce: 1 }
+    render(<FileBrowserPanel />)
+    // Open a file so the viewer (which hosts the pill) is mounted.
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root', parentPath: null,
+        entries: [{ name: 'foo.ts', isDirectory: false, size: 20 }], error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('foo.ts'))
+    fireEvent.click(screen.getByText('foo.ts'))
+    act(() => {
+      fileContentCallback!({ content: 'x', language: 'typescript', size: 1, truncated: false, error: null })
+    })
+    const pill = await screen.findByTestId('def-not-found')
+    expect(pill.textContent).toContain('ghost')
+    expect(mockOpenFileInBrowser).not.toHaveBeenCalled()
   })
 })

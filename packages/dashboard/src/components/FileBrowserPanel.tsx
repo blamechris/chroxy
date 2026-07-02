@@ -190,6 +190,10 @@ export function FileBrowserPanel() {
   const symbolsLoading = useConnectionStore(s => s.symbolsLoading)
   const ideEnabled = useConnectionStore(s => s.serverCapabilities.ide === true)
   const fileBrowserPendingOpen = useConnectionStore(s => s.fileBrowserPendingOpen)
+  // #6475 — go-to-definition: cmd/ctrl+click a token → resolve → jump.
+  const requestResolveSymbol = useConnectionStore(s => s.requestResolveSymbol)
+  const symbolLocation = useConnectionStore(s => s.symbolLocation)
+  const openFileInBrowser = useConnectionStore(s => s.openFileInBrowser)
   const [currentPath, setCurrentPath] = useState<string | null>(null)
   const [entries, setEntries] = useState<FileEntry[]>([])
   const [parentPath, setParentPath] = useState<string | null>(null)
@@ -229,6 +233,11 @@ export function FileBrowserPanel() {
   // #6476 — a 1-indexed line to scroll to once the externally-opened file's
   // content has rendered (symbol-search "jump to definition").
   const pendingScrollLine = useRef<number | null>(null)
+  // #6475 — the last go-to-definition nonce we acted on, so a persisted
+  // `symbolLocation` doesn't re-fire a jump on remount / tab-switch.
+  const lastDefNonce = useRef<number | null>(null)
+  // #6475 — transient "Definition not found for X" pill (cleared after a beat).
+  const [defNotFound, setDefNotFound] = useState<string | null>(null)
   // The workspace-relative path we last asked symbols for; matched against the
   // snapshot's echoed `path` so we only render symbols for the open file.
   const [symbolScope, setSymbolScope] = useState<string | null>(null)
@@ -327,6 +336,25 @@ export function FileBrowserPanel() {
     requestFileContent(path)
   }, [requestFileContent])
 
+  // #6475 — cmd/ctrl+click a token in the viewer to jump to its definition.
+  // Event-delegated on the <pre>: read the clicked token's text; if it's an
+  // identifier-ish token (not a keyword/string/comment/punctuation), resolve it,
+  // passing the open file as a ranking tie-break hint. Opt-in: gated on ideEnabled.
+  const handleCodeClick = useCallback((e: React.MouseEvent<HTMLElement>) => {
+    if (!ideEnabled || !(e.metaKey || e.ctrlKey)) return
+    const target = e.target as HTMLElement
+    const cls = typeof target.className === 'string' ? target.className : ''
+    const m = cls.match(/(?:^|\s)syn-(\w+)/)
+    if (!m || !['plain', 'function', 'type', 'property'].includes(m[1]!)) return
+    const text = (target.textContent || '').trim()
+    if (!/^[A-Za-z_$][\w$]*$/.test(text)) return
+    e.preventDefault()
+    const fromFile = selectedFile && rootPath.current
+      ? relativePath(selectedFile, rootPath.current)
+      : undefined
+    requestResolveSymbol(text, fromFile)
+  }, [ideEnabled, selectedFile, requestResolveSymbol])
+
   // #6473 — open a file requested externally (Cmd+P quick-open); reuse the click
   // path so it persists the selection, loads content, and triggers the symbols
   // request. Keyed on the nonce object so repeated opens of the same path fire.
@@ -398,6 +426,24 @@ export function FileBrowserPanel() {
     const id = window.setTimeout(() => scrollToLine(line), 0)
     return () => window.clearTimeout(id)
   }, [fileContent, scrollToLine])
+
+  // #6475 — react to a go-to-definition result: on a hit, open the target file
+  // at the declaration line (reusing the Cmd+P open plumbing); on a miss, flash a
+  // transient "not found" pill. Deduped by nonce so a persisted result doesn't
+  // re-jump on remount / tab-switch.
+  useEffect(() => {
+    if (!symbolLocation) return
+    if (lastDefNonce.current === symbolLocation.nonce) return
+    lastDefNonce.current = symbolLocation.nonce
+    if (symbolLocation.file && symbolLocation.line != null) {
+      openFileInBrowser(symbolLocation.file, symbolLocation.line)
+      setDefNotFound(null)
+      return
+    }
+    setDefNotFound(symbolLocation.symbol || 'symbol')
+    const id = window.setTimeout(() => setDefNotFound(null), 2200)
+    return () => window.clearTimeout(id)
+  }, [symbolLocation, openFileInBrowser])
 
   // Breadcrumbs from currentPath relative to root
   const breadcrumbs = useMemo(() => {
@@ -515,6 +561,12 @@ export function FileBrowserPanel() {
             <SymbolsList groups={groupedSymbols} loading={symbolsLoading} onPick={scrollToLine} />
           )}
           <div className="file-viewer-content" ref={viewerRef}>
+            {/* #6475 — transient go-to-definition "not found" feedback. */}
+            {defNotFound && (
+              <div className="file-viewer-def-notfound" data-testid="def-not-found" role="status">
+                Definition not found for <code>{defNotFound}</code>
+              </div>
+            )}
             {fileLoading && <div className="file-viewer-loading">Loading file...</div>}
             {!fileLoading && fileError && <div className="file-viewer-error">{fileError}</div>}
             {!fileLoading && !fileError && fileContent !== null && fileLanguage === 'image' && (
@@ -527,7 +579,11 @@ export function FileBrowserPanel() {
               </div>
             )}
             {!fileLoading && !fileError && fileContent !== null && fileLanguage !== 'image' && (
-              <pre className="file-viewer-code">
+              <pre
+                className={ideEnabled ? 'file-viewer-code file-viewer-code--ide' : 'file-viewer-code'}
+                onClick={handleCodeClick}
+                title={ideEnabled ? 'Cmd/Ctrl+click a symbol to jump to its definition' : undefined}
+              >
                 <code>
                   {highlightedLines
                     ? highlightedLines.map((tokens, lineIdx) => (
