@@ -67,6 +67,7 @@ import { startServer, revealInFinder } from './hooks/useTauriIPC'
 import { usePermissionNotification, type PermissionPromptInfo } from './hooks/usePermissionNotification'
 import { useInterventionPing } from './hooks/useInterventionPing'
 import { useShortcutDispatch } from './hooks/useShortcutDispatch'
+import { FileOpenPalette } from './components/FileOpenPalette'
 import { useChatMessages, toChatViewMessage } from './hooks/useChatMessages'
 import { useTunnelReady } from './hooks/useTunnelReady'
 import { useQrModal } from './hooks/useQrModal'
@@ -158,6 +159,8 @@ export function App() {
   // shell" affordance on it means paired devices / disabled hosts never see a
   // dead button.
   const userShellSupported = useConnectionStore(s => s.serverCapabilities?.userShell === true)
+  // #6473 — gate the Cmd+P quick-open palette on the opt-in `ide` capability.
+  const ideEnabled = useConnectionStore(s => s.serverCapabilities?.ide === true)
   // #6006 — the operator panic button (Revoke token) is available only when the
   // server has a rotating TokenManager (auth on) AND this client holds the
   // primary token, both reflected in the `tokenRevoke` capability. Gating on it
@@ -603,6 +606,7 @@ export function App() {
   // Command palette
   const commands = useCommands(isPtyProvider)
   const [paletteOpen, setPaletteOpen] = useState(false)
+  const [fileOpenPaletteOpen, setFileOpenPaletteOpen] = useState(false)
 
   // Local state
   const [showCreateSession, setShowCreateSession] = useState(false)
@@ -988,6 +992,7 @@ export function App() {
     sendInterrupt,
     setPermissionMode,
     appendImageAttachments,
+    openFilePalette: () => { if (ideEnabled) setFileOpenPaletteOpen(true) },
   })
 
   const trackedCommands = useMemo(
@@ -2595,6 +2600,10 @@ export function App() {
         paletteOpen={paletteOpen}
         onPaletteClose={() => setPaletteOpen(false)}
         mruList={paletteOpen ? getMruCommands() : undefined}
+      />
+      <FileOpenPalette
+        isOpen={fileOpenPaletteOpen}
+        onClose={() => setFileOpenPaletteOpen(false)}
       />
     </div>
   )

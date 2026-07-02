@@ -69,6 +69,9 @@ export interface ShortcutDispatchProps {
   sendInterrupt: () => void
   setPermissionMode: (mode: string) => void
   appendImageAttachments: (attachments: ImageAttachment[]) => void
+  // #6473 — open the Cmd+P quick-open file palette (the caller gates it on the
+  // `ide` capability). Optional so existing call sites / tests keep working.
+  openFilePalette?: () => void
 }
 
 export function useShortcutDispatch(props: ShortcutDispatchProps): void {
@@ -92,6 +95,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     sendInterrupt,
     setPermissionMode,
     appendImageAttachments,
+    openFilePalette,
   } = props
 
   useEffect(() => {
@@ -200,6 +204,9 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
           case 'palette.toggle':
           case 'palette.toggle.vscode':
             setPaletteOpen(prev => !prev)
+            break
+          case 'file.openPalette':
+            openFilePalette?.()
             break
           case 'sidebar.toggle':
             setSidebarOpen(prev => !prev)
