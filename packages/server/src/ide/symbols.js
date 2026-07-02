@@ -27,7 +27,7 @@
  * @property {number} line      1-indexed line of the declaration.
  * @property {boolean} exported Whether the declaration is exported / public.
  */
-import { readdir, readFile, stat } from 'fs/promises'
+import { readdir, readFile, stat, realpath } from 'fs/promises'
 import { join, resolve, relative, extname, sep } from 'path'
 
 // Directories never worth walking — build output, vendored deps, VCS metadata,
@@ -167,8 +167,10 @@ export function parseSymbols(content, file) {
  * table plus a `truncated` flag set when any cap was hit.
  *
  * `path` (optional) scopes the scan to a single file or directory inside
- * `rootDir`; it is resolved and CONFINED to `rootDir` (a `..`-escape or absolute
- * path that lands outside is rejected). `rootDir` itself is trusted (the handler
+ * `rootDir`; it is resolved to its REAL path and CONFINED to `rootDir` — a
+ * `..`-escape, an absolute path, OR a symlink whose real target lands outside is
+ * rejected, and scoping into ignored/dot dirs (node_modules, `.git`, …) is
+ * refused for parity with the full scan. `rootDir` itself is trusted (the handler
  * passes the session's already home-validated cwd).
  *
  * @param {string} rootDir            Absolute workspace root (session cwd).
@@ -189,17 +191,40 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
     maxDepth = 12,
   } = opts
 
-  const root = resolve(rootDir)
+  // Use the REAL (symlink-resolved) workspace root as the confinement base and
+  // for displayed relative paths. A lexical resolve()/relative() alone is fooled
+  // by a symlink INSIDE the workspace that points out — which, on this
+  // attacker-reachable WS surface, would leak arbitrary host files.
+  let root
+  try {
+    root = await realpath(resolve(rootDir))
+  } catch {
+    return { symbols: [], truncated: false }
+  }
 
-  // Resolve + confine the optional scope path to the workspace root.
+  // Resolve + confine the optional scope path against the REAL workspace root.
   let target = root
   if (path) {
-    target = resolve(root, path)
-    const rel = relative(root, target)
-    if (rel === '..' || rel.startsWith('..' + sep) || resolve(root, rel) !== target) {
-      // Escapes the workspace — refuse rather than leak host files.
+    let realTarget
+    try {
+      realTarget = await realpath(resolve(root, path))
+    } catch {
+      // Absolute / `..` paths resolve outside root (rejected below); a missing or
+      // broken-symlink path simply has nothing to enumerate. Either way, refuse.
       return { symbols: [], truncated: false }
     }
+    const rel = relative(root, realTarget)
+    if (rel === '..' || rel.startsWith('..' + sep) || resolve(root, rel) !== realTarget) {
+      // The REAL path escapes the workspace (e.g. via a symlink) — refuse.
+      return { symbols: [], truncated: false }
+    }
+    // Honour the same ignored-dir / dot-dir policy as the full-tree walk for the
+    // scoped path, so scoping can't enumerate node_modules/.git/.venv symbols the
+    // whole scan deliberately hides (e.g. `.git` hook scripts).
+    if (rel.split(sep).some((s) => IGNORED_DIRS.has(s) || s.startsWith('.'))) {
+      return { symbols: [], truncated: false }
+    }
+    target = realTarget
   }
 
   const symbols = []

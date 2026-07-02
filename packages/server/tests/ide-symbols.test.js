@@ -1,6 +1,6 @@
 import { describe, it, before, after } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { parseSymbols, collectWorkspaceSymbols } from '../src/ide/symbols.js'
@@ -125,6 +125,7 @@ describe('parseSymbols — guards', () => {
 
 describe('collectWorkspaceSymbols', () => {
   let root
+  let outside
   before(() => {
     root = mkdtempSync(join(tmpdir(), 'chroxy-ide-symbols-'))
     writeFileSync(join(root, 'top.js'), 'export function top() {}\n')
@@ -137,8 +138,19 @@ describe('collectWorkspaceSymbols', () => {
     writeFileSync(join(root, '.git', 'hook.js'), 'export function gitGhost() {}\n')
     // Non-source file ignored.
     writeFileSync(join(root, 'data.json'), '{"function":"nope"}\n')
+    // A sibling tree OUTSIDE the workspace, reachable only via symlinks planted
+    // inside it — the arbitrary-file-read vector the confinement must block.
+    outside = mkdtempSync(join(tmpdir(), 'chroxy-ide-outside-'))
+    writeFileSync(join(outside, 'secret.js'), 'export function TOP_SECRET() {}\n')
+    mkdirSync(join(outside, 'sub'))
+    writeFileSync(join(outside, 'sub', 'deep.js'), 'export function DEEP_SECRET() {}\n')
+    symlinkSync(join(outside, 'secret.js'), join(root, 'linkfile.js'))
+    symlinkSync(outside, join(root, 'linkdir'))
   })
-  after(() => rmSync(root, { recursive: true, force: true }))
+  after(() => {
+    rmSync(root, { recursive: true, force: true })
+    rmSync(outside, { recursive: true, force: true })
+  })
 
   it('aggregates symbols across the tree with workspace-relative POSIX paths', async () => {
     const { symbols, truncated } = await collectWorkspaceSymbols(root)
@@ -166,6 +178,29 @@ describe('collectWorkspaceSymbols', () => {
     const { symbols, truncated } = await collectWorkspaceSymbols(root, { path: '../../../etc' })
     assert.deepEqual(symbols, [])
     assert.equal(truncated, false)
+  })
+
+  // Regression: the confinement must resolve the REAL path (symlinks), not just
+  // lexically normalize `..` — a symlink inside the workspace that points out
+  // would otherwise leak arbitrary host files over the WS surface.
+  it('refuses a symlinked FILE whose real target is outside the workspace', async () => {
+    const { symbols } = await collectWorkspaceSymbols(root, { path: 'linkfile.js' })
+    assert.deepEqual(symbols, [])
+  })
+
+  it('refuses a symlinked DIRECTORY whose real target is outside the workspace', async () => {
+    const { symbols } = await collectWorkspaceSymbols(root, { path: 'linkdir' })
+    assert.deepEqual(symbols, [])
+  })
+
+  it('refuses traversal THROUGH an in-workspace symlink to an outside file', async () => {
+    const { symbols } = await collectWorkspaceSymbols(root, { path: 'linkdir/sub/deep.js' })
+    assert.deepEqual(symbols, [])
+  })
+
+  it('refuses scoping into an ignored dir (parity with the full scan)', async () => {
+    assert.deepEqual((await collectWorkspaceSymbols(root, { path: 'node_modules/pkg' })).symbols, [])
+    assert.deepEqual((await collectWorkspaceSymbols(root, { path: '.git' })).symbols, [])
   })
 
   it('sets truncated when the symbol cap is hit', async () => {
