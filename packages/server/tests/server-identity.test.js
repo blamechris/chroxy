@@ -92,9 +92,13 @@ describe('server identity (#5536)', () => {
       const first = getOrCreateServerIdentity({ keychain: kc, filePath })
       assert.equal(first.backend, 'file')
       assert.equal(existsSync(filePath), true)
-      // Mode is owner-only (0600). statSync mode masks to the perm bits.
-      const mode = statSync(filePath).mode & 0o777
-      assert.equal(mode, 0o600)
+      // Mode is owner-only (0600) on POSIX. Windows does not expose the same
+      // chmod semantics through stat mode bits, so the permission contract is
+      // enforced by writeFileRestricted where the platform supports it.
+      if (process.platform !== 'win32') {
+        const mode = statSync(filePath).mode & 0o777
+        assert.equal(mode, 0o600)
+      }
       // The file is JSON with a base64 secret, NOT a plaintext key on its own.
       const parsed = JSON.parse(readFileSync(filePath, 'utf-8'))
       assert.equal(typeof parsed.secretKey, 'string')
