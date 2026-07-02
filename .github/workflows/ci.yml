@@ -796,6 +796,12 @@ jobs:
       - name: Run lint-no-raw-color-literals golden test
         run: bash scripts/__tests__/lint-no-raw-color-literals.test.sh
 
+      - name: Check AGENTS.md is in sync with CLAUDE.md
+        # AGENTS.md is generated from CLAUDE.md (the single source of truth) so
+        # non-Claude agents get the same guidance. This gate fails if CLAUDE.md
+        # changed without regenerating, or if AGENTS.md was hand-edited.
+        run: node scripts/__tests__/gen-agents-md.test.mjs
+
   dashboard-smoke:
     name: Dashboard Smoke (Playwright)
     # #6315: a UI-regression gate. Runs the Playwright dashboard smoke
