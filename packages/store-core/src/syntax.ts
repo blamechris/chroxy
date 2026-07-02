@@ -280,12 +280,17 @@ const sql: LanguageDef = [
 // `number` (warm) colour — output is colour-only spans, so weight/slant can't be
 // shown; unifying emphasis to one hue keeps them distinct from body text.
 const markdown: LanguageDef = [
-  // Block-level, line-start anchored — listed first so they win at column 0.
-  { pattern: s(/^ {0,3}#{1,6}(?=\s|$)[^\n]*/), type: 'keyword' }, // ATX heading (whole line)
-  { pattern: s(/^ {0,3}(?:```|~~~)[^\n]*/), type: 'string' }, // fenced-code delimiter line
-  { pattern: s(/^ {0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/), type: 'comment' }, // thematic break (HR)
-  { pattern: s(/^ {0,3}>+ ?/), type: 'comment' }, // blockquote marker
-  { pattern: s(/^ {0,3}(?:[-*+]|\d{1,9}[.)]) +/), type: 'operator' }, // list marker
+  // Block-level, line-start anchored — listed first so they win at column 0. The
+  // `m` flag makes `^`/`$` match every line boundary, not just string index 0:
+  // the dashboard tokenizes per-line so it's a no-op there, but the mobile viewer
+  // (FileBrowser.tsx) passes the WHOLE file to tokenize(), so without `m` these
+  // block constructs would only highlight on line 1 (#6518). `s()` keeps `m` and
+  // adds the sticky `y` the scanner needs — same as the `diff` LanguageDef.
+  { pattern: s(/^ {0,3}#{1,6}(?=\s|$)[^\n]*/m), type: 'keyword' }, // ATX heading (whole line)
+  { pattern: s(/^ {0,3}(?:```|~~~)[^\n]*/m), type: 'string' }, // fenced-code delimiter line
+  { pattern: s(/^ {0,3}(?:-{3,}|\*{3,}|_{3,})[ \t]*$/m), type: 'comment' }, // thematic break (HR)
+  { pattern: s(/^ {0,3}>+ ?/m), type: 'comment' }, // blockquote marker
+  { pattern: s(/^ {0,3}(?:[-*+]|\d{1,9}[.)]) +/m), type: 'operator' }, // list marker
   // Inline spans — matched anywhere on the line.
   { pattern: s(/`[^`\n]+`/), type: 'string' }, // inline code
   { pattern: s(/!\[[^\]\n]*\]\([^)\n]*\)/), type: 'function' }, // image

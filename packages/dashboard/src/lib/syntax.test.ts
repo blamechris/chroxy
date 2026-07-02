@@ -169,6 +169,19 @@ describe('markdown highlighting (#6508)', () => {
     expect(tokenize('visit https://example.com/x now', 'md').some(t => t.type === 'function')).toBe(true)
     expect(tokenize('> quoted line', 'md')[0]?.type).toBe('comment')
   })
+
+  it('highlights block constructs on EVERY line of a whole-file input (mobile path, #6518)', () => {
+    // The dashboard tokenizes per-line, but the mobile viewer (FileBrowser.tsx)
+    // passes the whole file to tokenize(). The block rules carry the `m` flag so
+    // `^`/`$` match every line boundary — without it, only line 1 would highlight.
+    const file = ['intro text', '', '## Heading on line 3', '- a list item', '> a quote'].join('\n')
+    const tokens = tokenize(file, 'md')
+    const byType = (type: string) => tokens.filter(t => t.type === type)
+    // The heading is on line 3, not line 1 — it must still be a keyword token.
+    expect(byType('keyword').some(t => t.text.includes('Heading on line 3'))).toBe(true)
+    expect(byType('operator').some(t => t.text === '- ')).toBe(true) // list marker below line 1
+    expect(byType('comment').some(t => t.text.startsWith('>'))).toBe(true) // blockquote below line 1
+  })
 })
 
 describe('highlightCode', () => {
