@@ -72,6 +72,14 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     scope: 'global',
   },
   {
+    // #6474 (IDE epic #6469) — Cmd+Shift+F find-in-project content grep. Gated on `ide` in App.
+    id: 'search.inProject',
+    defaultBinding: 'cmd+shift+f',
+    description: 'Search in files',
+    category: 'navigation',
+    scope: 'global',
+  },
+  {
     id: 'sidebar.toggle',
     defaultBinding: 'cmd+b',
     description: 'Toggle sidebar',

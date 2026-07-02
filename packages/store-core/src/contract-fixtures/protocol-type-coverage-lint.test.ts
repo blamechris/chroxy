@@ -158,6 +158,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'session_activity',           // per-session busy/idle + cost ping — dashboard activity tree only
   'symbols_snapshot',           // #6471 (epic #6469) opt-in IDE workspace symbol table — dashboard symbol panel (#6472) only for v1; mobile parity is a tracked fast-follow
   'symbol_location',            // #6475 (epic #6469) opt-in IDE go-to-definition result — dashboard file viewer cmd/ctrl+click jump; dashboard-only for v1, mobile parity deferred
+  'code_search_results',        // #6474 (epic #6469) opt-in IDE find-in-project results — dashboard Cmd+Shift+F palette; distinct from cross-session `search_results`; dashboard-only for v1
   'terminal_size',              // authoritative PTY grid for letterboxing — app terminal parity is still partial (#5987)
   // #6332 (batch 2b of #6314): the container/worktree environment lifecycle —
   // dashboard-only by design (the app has no environment surface). Schemaing

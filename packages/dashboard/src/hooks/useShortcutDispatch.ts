@@ -74,6 +74,8 @@ export interface ShortcutDispatchProps {
   openFilePalette?: () => void
   // #6476 — open the Cmd+Shift+O symbol-search palette (caller gates on `ide`).
   openSymbolSearch?: () => void
+  // #6474 — open the Cmd+Shift+F find-in-project palette (caller gates on `ide`).
+  openCodeSearch?: () => void
 }
 
 export function useShortcutDispatch(props: ShortcutDispatchProps): void {
@@ -99,6 +101,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     appendImageAttachments,
     openFilePalette,
     openSymbolSearch,
+    openCodeSearch,
   } = props
 
   useEffect(() => {
@@ -210,6 +213,9 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             break
           case 'file.openPalette':
             openFilePalette?.()
+            break
+          case 'search.inProject':
+            openCodeSearch?.()
             break
           case 'symbol.search':
             openSymbolSearch?.()

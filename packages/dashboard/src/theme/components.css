@@ -8245,6 +8245,18 @@ button.sidebar-token-view-session-row:hover {
 .symbol-item-exported { color: var(--success-fg, #4ade80); flex-shrink: 0; }
 .symbol-item-line { margin-left: auto; color: var(--text-muted); opacity: 0.6; flex-shrink: 0; }
 
+/* #6474 — Cmd+Shift+F find-in-project result row: the matched line as a preview,
+   monospace + truncated, with the file:line pushed to the right by symbol-item-line. */
+.code-search-preview {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, monospace);
+  font-size: 12px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
 /* Syntax token colors */
 .syn-keyword { color: #c4a5ff; }
 .syn-string { color: #4eca6a; }

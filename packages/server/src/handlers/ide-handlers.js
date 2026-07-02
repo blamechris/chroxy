@@ -7,11 +7,12 @@
  * the operator opts in, so clients won't send these messages, and the handler
  * additionally returns early as defence-in-depth. Off ⇒ zero IDE behaviour.
  *
- * Handles: list_symbols (#6471), resolve_symbol (#6475).
+ * Handles: list_symbols (#6471), resolve_symbol (#6475), search_content (#6474).
  */
 import { resolveSession } from '../handler-utils.js'
 import { isIdeFeatureEnabled } from '../config.js'
 import { collectWorkspaceSymbols, resolveSymbol } from '../ide/symbols.js'
+import { searchContent } from '../ide/search.js'
 import { createLogger } from '../logger.js'
 
 const log = createLogger('ide')
@@ -111,7 +112,55 @@ async function handleResolveSymbol(ws, client, msg, ctx) {
   }
 }
 
+/**
+ * `search_content` → `code_search_results`. Find-in-project (#6474):
+ * case-insensitive substring grep over the session workspace (or an optional
+ * sub-path), returning file/line/column + the matched line for preview. The
+ * response type is `code_search_results` (NOT `search_results`, owned by the
+ * cross-session conversation search). Dashboard-only consumer (Cmd+Shift+F).
+ */
+async function handleSearchContent(ws, client, msg, ctx) {
+  // #6481 (epic #6469): fail closed when the IDE surface is not opted in.
+  if (!isIdeFeatureEnabled(ctx.services?.config)) return
+
+  const query = typeof msg.query === 'string' ? msg.query.trim() : ''
+  const path = typeof msg.path === 'string' && msg.path ? msg.path : null
+
+  if (!query) {
+    ctx.transport.send(ws, { type: 'code_search_results', query: '', results: [], truncated: false, error: null })
+    return
+  }
+
+  const entry = resolveSession(ctx, msg, client)
+  const cwd = entry?.cwd || null
+  if (!cwd) {
+    ctx.transport.send(ws, {
+      type: 'code_search_results',
+      query,
+      results: [],
+      truncated: false,
+      error: 'No workspace directory for this session',
+    })
+    return
+  }
+
+  try {
+    const { results, truncated } = await searchContent(cwd, query, { path })
+    ctx.transport.send(ws, { type: 'code_search_results', query, results, truncated, error: null })
+  } catch (err) {
+    log.debug(`search_content failed: ${err?.message}`)
+    ctx.transport.send(ws, {
+      type: 'code_search_results',
+      query,
+      results: [],
+      truncated: false,
+      error: err?.message || 'Failed to search',
+    })
+  }
+}
+
 export const ideHandlers = {
   list_symbols: handleListSymbols,
   resolve_symbol: handleResolveSymbol,
+  search_content: handleSearchContent,
 }

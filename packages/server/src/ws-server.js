@@ -293,6 +293,7 @@ function _isSecureRequest(req) {
  *   { type: 'list_files', path? }                       — request file listing for a path
  *   { type: 'list_symbols', path? }                     — request workspace symbol table (#6471, opt-in IDE — features.ide)
  *   { type: 'resolve_symbol', symbol, file? }           — resolve a symbol name to its definition (#6475, opt-in IDE — features.ide)
+ *   { type: 'search_content', query, path? }            — find-in-project content grep (#6474, opt-in IDE — features.ide)
  *   { type: 'list_providers' }                          — request available provider list
  *   { type: 'list_repos' }                              — request workspace repository list
  *   { type: 'list_skills' }                             — request active skills list
@@ -382,6 +383,7 @@ function _isSecureRequest(req) {
  *   { type: 'file_content', path, content, language, size, truncated, error } — file content response
  *   { type: 'symbols_snapshot', path, symbols: [{ name, kind, file, line, exported }], truncated, error } — #6471 workspace symbol table (opt-in IDE, features.ide; dashboard-only v1)
  *   { type: 'symbol_location', symbol, file, line, error } — #6475 go-to-definition result (opt-in IDE, features.ide; dashboard-only v1)
+ *   { type: 'code_search_results', query, results: [{ file, line, column, text }], truncated, error } — #6474 find-in-project results (opt-in IDE, features.ide; dashboard-only v1)
  *   { type: 'slash_commands', commands: [{ name, description, source }] } — available slash commands
  *   { type: 'agent_list', agents: [{ name, description, source }] } — available custom agents
  *   { type: 'client_joined', client: { clientId, deviceName, deviceType, platform } } — new client connected

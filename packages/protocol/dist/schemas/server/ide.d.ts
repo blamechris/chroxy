@@ -41,3 +41,23 @@ export declare const ServerSymbolLocationSchema: z.ZodObject<{
     error: z.ZodNullable<z.ZodString>;
 }, z.core.$strip>;
 export type ServerSymbolLocationMessage = z.infer<typeof ServerSymbolLocationSchema>;
+export declare const SearchResultEntrySchema: z.ZodObject<{
+    file: z.ZodString;
+    line: z.ZodNumber;
+    column: z.ZodNumber;
+    text: z.ZodString;
+}, z.core.$strip>;
+export declare const ServerSearchResultsSchema: z.ZodObject<{
+    type: z.ZodLiteral<"code_search_results">;
+    query: z.ZodString;
+    results: z.ZodArray<z.ZodObject<{
+        file: z.ZodString;
+        line: z.ZodNumber;
+        column: z.ZodNumber;
+        text: z.ZodString;
+    }, z.core.$strip>>;
+    truncated: z.ZodBoolean;
+    error: z.ZodNullable<z.ZodString>;
+}, z.core.$strip>;
+export type SearchResultEntry = z.infer<typeof SearchResultEntrySchema>;
+export type ServerSearchResultsMessage = z.infer<typeof ServerSearchResultsSchema>;
