@@ -913,6 +913,10 @@ export function SessionScreen() {
     messageId: string,
     requestId?: string,
     toolUseId?: string,
+    // #6543 (feature B): the operator's per-hunk narrowing from a Write/Edit
+    // pre-write-diff review, forwarded to sendPermissionResponse (which drops it
+    // for a deny). Null/omitted for every non-reviewable prompt.
+    editedInput?: Record<string, string> | null,
   ) => {
     // #4875: shared `isFreeformAnswer` guard from @chroxy/store-core
     // narrows `value` to `OtherFreeformAnswer` in the true branch, so the
@@ -929,7 +933,9 @@ export function SessionScreen() {
       // Permission responses are decision strings ('allow' / 'deny' / etc.)
       // and never carry an Other / freeform payload — the freeform branch
       // is defence-in-depth only; in practice this site sees `string`.
-      sent = sendPermissionResponse(requestId, freeform ? value.freeformText : value);
+      // #6543 (feature B): forward the pre-write-diff narrowing (null for
+      // non-reviewable prompts; the store drops it for a deny).
+      sent = sendPermissionResponse(requestId, freeform ? value.freeformText : value, editedInput);
     } else {
       const literal = freeform ? value.freeformText : value;
       sent = sendInput(hasTerminal ? literal + '\r' : literal);

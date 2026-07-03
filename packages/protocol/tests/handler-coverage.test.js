@@ -159,7 +159,11 @@ const PLATFORM_SPECIFIC = {
   // fast-follow per epic #5159), so they are BOTH-CLIENTS and the coverage test
   // passes because each handler has a `case 'activity_snapshot'/'activity_delta':`.
   'host_status_snapshot': 'dashboard', // Control Room Host/Repo Status survey reply (#5171 schema / #5174 server emitter / #5175 dashboard section) — dashboard-only for v1; mobile parity is a Phase-2 fast-follow per epic #5170
-  'permission_input': 'dashboard', // #6543 (IDE P3 feature B) reply to a get_permission_input pull — full redacted tool input for the pre-write diff; dashboard-only for the first cut (the pre-write-diff UI lands dashboard-first), mobile parity is PR-4 of #6543
+  // 'permission_input' removed from PLATFORM_SPECIFIC — the mobile app now
+  // handles it too (#6543 PR-4, the pre-write-diff mobile parity fast-follow),
+  // so it is BOTH-CLIENTS. Coverage passes because the dashboard has a
+  // `permission_input: handlePermissionInput` HANDLERS-map entry and the mobile
+  // app has a `case 'permission_input':` clause.
   'repo_events_snapshot': 'dashboard', // Control Room repo-events survey reply (#5966, epic #5422 phase 5) — GitHub-webhook activity buffered by the daemon (#6468); host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'repo_events_delta': 'dashboard', // Control Room repo-events LIVE delta (#6536, PR-2 of #5966) — host-broadcast of a new webhook event so the pane updates without a Refresh; host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
   'runner_status_snapshot': 'dashboard', // Control Room self-hosted runner survey reply (#5253) — host-level surface, dashboard-only (the mobile app has no Control Room); mobile parity would be a fast-follow
