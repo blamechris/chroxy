@@ -148,12 +148,15 @@ describe('RepoEventsSection render (#5966)', () => {
     expect(screen.getByTestId('repo-events-error').textContent).toContain('FORBIDDEN')
   })
 
-  it('only renders a link for an https URL (no link for a null/unsafe url)', () => {
+  it('only renders a link for an https URL (rejects null + unsafe schemes)', () => {
     const withLink = snap({ events: [ev({ url: 'https://github.com/blamechris/chroxy/pull/42' })] })
     const { rerender } = render(<RepoEventsSection snapshot={withLink} loading={false} connected sessions={[]} now={() => NOW} />)
     expect(screen.queryByTestId('repo-event-link')).toBeTruthy()
-    rerender(<RepoEventsSection snapshot={snap({ events: [ev({ url: null })] })} loading={false} connected sessions={[]} now={() => NOW} />)
-    expect(screen.queryByTestId('repo-event-link')).toBeNull()
+    // Every non-https shape must render NO anchor — a loosened guard would fail here.
+    for (const unsafe of [null, 'javascript:alert(1)', 'data:text/html,<script>1</script>', 'http://evil.test', '//evil.test/x']) {
+      rerender(<RepoEventsSection snapshot={snap({ events: [ev({ url: unsafe })] })} loading={false} connected sessions={[]} now={() => NOW} />)
+      expect(screen.queryByTestId('repo-event-link')).toBeNull()
+    }
   })
 
   it('Refresh dispatches the request and is disabled while loading', () => {
