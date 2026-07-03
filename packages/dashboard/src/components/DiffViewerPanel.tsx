@@ -108,21 +108,19 @@ function buildSplitPairs(lines: DiffHunkLine[]): { left: DiffHunkLine | null; ri
   return pairs
 }
 
-export interface HunkViewProps {
-  hunk: DiffHunk
-  viewMode: ViewMode
-  /**
-   * #6542: opt-in per-hunk accept/reject. When true, the hunk header carries a
-   * checkbox. Read-only viewers (DiffViewerPanel) omit it entirely, so the
-   * existing render is byte-for-byte unchanged. The selection STATE + applyHunks
-   * wiring live in the consuming surface (#6543 feature B, #6544 feature A).
-   */
-  selectable?: boolean
-  /** Whether this hunk is accepted (checked). Only meaningful with `selectable`. */
-  selected?: boolean
-  /** Toggle callback fired on checkbox change. */
-  onToggle?: () => void
-}
+/**
+ * #6542: opt-in per-hunk accept/reject. A discriminated union so `selectable`
+ * ALWAYS comes with `selected` + `onToggle` — you can't create a dead checkbox
+ * (a control advertising a checkbox role with no handler). Read-only viewers
+ * (DiffViewerPanel) pass neither, so the existing render is byte-for-byte
+ * unchanged. The selection STATE + applyHunks wiring live in the consuming
+ * surface (#6543 feature B, #6544 feature A).
+ */
+type HunkSelectionProps =
+  | { selectable?: false; selected?: never; onToggle?: never }
+  | { selectable: true; selected: boolean; onToggle: () => void }
+
+export type HunkViewProps = { hunk: DiffHunk; viewMode: ViewMode } & HunkSelectionProps
 
 export function HunkView({ hunk, viewMode, selectable = false, selected = false, onToggle }: HunkViewProps) {
   const cls = `diff-hunk${selectable ? ` diff-hunk-selectable${selected ? '' : ' diff-hunk-rejected'}` : ''}`

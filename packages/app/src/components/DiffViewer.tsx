@@ -42,19 +42,21 @@ function statusLabel(status: DiffFile['status']): string {
  * Render a single diff hunk. #6542: opt-in per-hunk accept/reject — when
  * `selectable`, the header becomes a ≥44pt touch-target row with a checkbox
  * glyph. Read-only viewers omit it, so the existing render is unchanged. The
- * selection STATE + applyHunks wiring live in the consuming surface (#6543/#6544).
+ * props are a discriminated union so `selectable` ALWAYS carries `selected` +
+ * `onToggle` — no dead checkbox (a control with a checkbox role but no handler).
+ * The selection STATE + applyHunks wiring live in the consuming surface (#6543/#6544).
  */
+export type DiffHunkViewProps = { hunk: DiffHunk } & (
+  | { selectable?: false; selected?: never; onToggle?: never }
+  | { selectable: true; selected: boolean; onToggle: () => void }
+);
+
 export function DiffHunkView({
   hunk,
   selectable = false,
   selected = false,
   onToggle,
-}: {
-  hunk: DiffHunk;
-  selectable?: boolean;
-  selected?: boolean;
-  onToggle?: () => void;
-}) {
+}: DiffHunkViewProps) {
   return (
     <View style={[styles.hunk, selectable && !selected ? styles.hunkRejected : null]}>
       {selectable ? (
