@@ -108,10 +108,39 @@ function buildSplitPairs(lines: DiffHunkLine[]): { left: DiffHunkLine | null; ri
   return pairs
 }
 
-function HunkView({ hunk, viewMode }: { hunk: DiffHunk; viewMode: ViewMode }) {
+/**
+ * #6542: opt-in per-hunk accept/reject. A discriminated union so `selectable`
+ * ALWAYS comes with `selected` + `onToggle` — you can't create a dead checkbox
+ * (a control advertising a checkbox role with no handler). Read-only viewers
+ * (DiffViewerPanel) pass neither, so the existing render is byte-for-byte
+ * unchanged. The selection STATE + applyHunks wiring live in the consuming
+ * surface (#6543 feature B, #6544 feature A).
+ */
+type HunkSelectionProps =
+  | { selectable?: false; selected?: never; onToggle?: never }
+  | { selectable: true; selected: boolean; onToggle: () => void }
+
+export type HunkViewProps = { hunk: DiffHunk; viewMode: ViewMode } & HunkSelectionProps
+
+export function HunkView({ hunk, viewMode, selectable = false, selected = false, onToggle }: HunkViewProps) {
+  const cls = `diff-hunk${selectable ? ` diff-hunk-selectable${selected ? '' : ' diff-hunk-rejected'}` : ''}`
   return (
-    <div className="diff-hunk">
-      <HunkHeader header={hunk.header} />
+    <div className={cls} data-testid="diff-hunk">
+      {selectable ? (
+        <label className="diff-hunk-toggle-row">
+          <input
+            type="checkbox"
+            className="diff-hunk-toggle"
+            checked={selected}
+            onChange={onToggle}
+            data-testid="hunk-toggle"
+            aria-label={selected ? 'Reject this hunk' : 'Accept this hunk'}
+          />
+          <HunkHeader header={hunk.header} />
+        </label>
+      ) : (
+        <HunkHeader header={hunk.header} />
+      )}
       {viewMode === 'unified' ? (
         hunk.lines.map((line, i) => <UnifiedLine key={i} line={line} />)
       ) : (

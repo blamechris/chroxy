@@ -38,11 +38,42 @@ function statusLabel(status: DiffFile['status']): string {
   }
 }
 
-/** Render a single diff hunk */
-function DiffHunkView({ hunk }: { hunk: DiffHunk }) {
+/**
+ * Render a single diff hunk. #6542: opt-in per-hunk accept/reject — when
+ * `selectable`, the header becomes a ≥44pt touch-target row with a checkbox
+ * glyph. Read-only viewers omit it, so the existing render is unchanged. The
+ * props are a discriminated union so `selectable` ALWAYS carries `selected` +
+ * `onToggle` — no dead checkbox (a control with a checkbox role but no handler).
+ * The selection STATE + applyHunks wiring live in the consuming surface (#6543/#6544).
+ */
+export type DiffHunkViewProps = { hunk: DiffHunk } & (
+  | { selectable?: false; selected?: never; onToggle?: never }
+  | { selectable: true; selected: boolean; onToggle: () => void }
+);
+
+export function DiffHunkView({
+  hunk,
+  selectable = false,
+  selected = false,
+  onToggle,
+}: DiffHunkViewProps) {
   return (
-    <View style={styles.hunk}>
-      <Text style={styles.hunkHeader} selectable>{hunk.header}</Text>
+    <View style={[styles.hunk, selectable && !selected ? styles.hunkRejected : null]}>
+      {selectable ? (
+        <TouchableOpacity
+          style={styles.hunkToggleRow}
+          onPress={onToggle}
+          accessibilityRole="checkbox"
+          accessibilityState={{ checked: selected }}
+          accessibilityLabel={selected ? 'Reject this hunk' : 'Accept this hunk'}
+          testID="hunk-toggle"
+        >
+          <Text style={styles.hunkToggleBox}>{selected ? '☑' : '☐'}</Text>
+          <Text style={styles.hunkHeader} selectable>{hunk.header}</Text>
+        </TouchableOpacity>
+      ) : (
+        <Text style={styles.hunkHeader} selectable>{hunk.header}</Text>
+      )}
       {hunk.lines.map((line, i) => {
         const lineStyle =
           line.type === 'addition' ? styles.lineAdded :
@@ -383,6 +414,24 @@ const styles = StyleSheet.create({
   },
   hunk: {
     marginBottom: 16,
+  },
+  // #6542: a rejected (unchecked) hunk dims so the accepted set reads at a glance.
+  // 0.55 to match the dashboard's .diff-hunk-rejected (cross-platform parity).
+  hunkRejected: {
+    opacity: 0.55,
+  },
+  // #6542: per-hunk accept/reject toggle row — ≥44pt touch target (mobile min).
+  hunkToggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    minHeight: 44,
+    gap: 8,
+    marginBottom: 2,
+  },
+  hunkToggleBox: {
+    color: COLORS.accentBlue,
+    fontSize: 18,
+    paddingHorizontal: 4,
   },
   hunkHeader: {
     color: COLORS.accentBlue,
