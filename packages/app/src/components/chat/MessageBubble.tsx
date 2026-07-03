@@ -561,7 +561,7 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
           on (serverCapabilities.ide), the tool is reviewable (Write/Edit), and the
           pulled input has landed. Dropped hunks become `editedInput` sent on
           Approve. A refusal / not-yet-pulled state renders nothing (plain Allow). */}
-      {reviewEligible && showOptionButtons && pulledInput?.found && pulledInput.input && (
+      {reviewEligible && showOptionButtons && message.answered == null && !isExpired && pulledInput?.found && pulledInput.input && (
         <PreWriteDiffReview
           tool={message.tool ?? ''}
           input={pulledInput.input as Record<string, unknown>}
