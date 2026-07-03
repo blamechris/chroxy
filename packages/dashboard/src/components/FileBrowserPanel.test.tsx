@@ -226,6 +226,82 @@ describe('FileBrowserPanel', () => {
     })
   })
 
+  it('renders git decorations even when git_status arrives before the listing (#6532)', async () => {
+    render(<FileBrowserPanel />)
+    // Git status lands FIRST — before rootPath is known.
+    act(() => {
+      gitStatusCallback!({
+        branch: 'main',
+        staged: [],
+        unstaged: [{ path: 'a.js', status: 'modified' }],
+        untracked: [],
+        error: null,
+      })
+    })
+    // Then the listing lands and sets rootPath — the git map must recompute so the
+    // badge appears (regression: with rootPath as a ref it did not).
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root',
+        parentPath: null,
+        entries: [{ name: 'a.js', isDirectory: false, size: 10 }],
+        error: null,
+      })
+    })
+    await waitFor(() => expect(screen.getByText('M')).toBeTruthy())
+  })
+
+  it('sets the tree root only from the root listing (parentPath null), not a stray subdir', async () => {
+    render(<FileBrowserPanel />)
+    // A subdir listing arrives first (hypothetical race) — must NOT become root.
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root/src',
+        parentPath: '/root',
+        entries: [{ name: 'stray.ts', isDirectory: false, size: 10 }],
+        error: null,
+      })
+    })
+    expect(screen.queryByText('stray.ts')).toBeNull() // root unknown → nothing renders
+
+    // The real root listing (parentPath null) lands and the tree renders.
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root',
+        parentPath: null,
+        entries: [{ name: 'index.ts', isDirectory: false, size: 20 }],
+        error: null,
+      })
+    })
+    await waitFor(() => expect(screen.getByText('index.ts')).toBeTruthy())
+  })
+
+  it('sets aria-level on tree items reflecting nesting depth (#6531)', async () => {
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root',
+        parentPath: null,
+        entries: [{ name: 'src', isDirectory: true, size: null }],
+        error: null,
+      })
+    })
+    expect(screen.getByText('src').closest('[role="treeitem"]')?.getAttribute('aria-level')).toBe('1')
+
+    fireEvent.click(screen.getByText('src'))
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root/src',
+        parentPath: '/root',
+        entries: [{ name: 'index.ts', isDirectory: false, size: 10 }],
+        error: null,
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('index.ts').closest('[role="treeitem"]')?.getAttribute('aria-level')).toBe('2')
+    })
+  })
+
   it('shows error state', async () => {
     render(<FileBrowserPanel />)
 

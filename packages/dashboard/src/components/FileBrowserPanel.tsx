@@ -136,6 +136,7 @@ function FileTreeRow({ item, rootPath, gitStatusMap, selected, onToggle, onFileC
       <button
         type="button"
         role="treeitem"
+        aria-level={depth + 1}
         aria-expanded={entry.isDirectory ? expanded : undefined}
         aria-selected={selected || undefined}
         className={`file-tree-btn${entry.isDirectory ? ' is-directory' : ''}${selected ? ' is-selected' : ''}`}
@@ -239,7 +240,7 @@ export function FileBrowserPanel() {
   const openFileInBrowser = useConnectionStore(s => s.openFileInBrowser)
   // #6470 — VSCode-style collapsible tree state: children cached per directory
   // (the root + each expanded subdir), the set of expanded dirs, and dirs with an
-  // in-flight browse_files. rootPath (the ref below) bounds the tree.
+  // in-flight browse_files. rootPath (state, below) bounds the tree.
   const [dirChildren, setDirChildren] = useState<Map<string, FileEntry[]>>(new Map())
   const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set())
   const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set())
@@ -282,7 +283,10 @@ export function FileBrowserPanel() {
   const [fileError, setFileError] = useState<string | null>(null)
 
   const [gitStatus, setGitStatus] = useState<GitStatusResult | null>(null)
-  const rootPath = useRef<string | null>(null)
+  // #6532 — rootPath is state (not a ref) so the memos/effects that read it list
+  // it as an explicit dep, and git decorations recompute regardless of whether
+  // the listing or the git_status reply lands first.
+  const [rootPath, setRootPath] = useState<string | null>(null)
   const viewerRef = useRef<HTMLDivElement>(null)
   // #6476 — a 1-indexed line to scroll to once the externally-opened file's
   // content has rendered (symbol-search "jump to definition").
@@ -305,7 +309,10 @@ export function FileBrowserPanel() {
       setLoading(false)
       setError(listing.error)
       if (!listing.path) return
-      if (!rootPath.current) rootPath.current = listing.path
+      // Set the tree root only from the ROOT listing — the server marks it with
+      // parentPath null (the CWD caps navigation), so a subdir reply that somehow
+      // arrived first can't be mistaken for the root.
+      if (listing.parentPath === null) setRootPath(listing.path)
       // Route the children under the directory they belong to (the root, or a
       // subdir being expanded) — never replace the whole tree. #6470.
       setDirChildren(prev => {
@@ -380,7 +387,7 @@ export function FileBrowserPanel() {
     setGitStatus(null)
     setSymbolScope(null)
     lastSymbolReq.current = null
-    rootPath.current = null
+    setRootPath(null)
 
     // Restore selected file from session state
     const state = useConnectionStore.getState()
@@ -401,8 +408,8 @@ export function FileBrowserPanel() {
   }, [activeSessionId, requestFileListing, requestGitStatus, requestFileContent])
 
   const gitStatusMap = useMemo(
-    () => buildGitStatusMap(gitStatus, rootPath.current),
-    [gitStatus],
+    () => buildGitStatusMap(gitStatus, rootPath),
+    [gitStatus, rootPath],
   )
 
   // #6470 — expand/collapse a directory in place; lazy-load its children on the
@@ -419,7 +426,7 @@ export function FileBrowserPanel() {
   // #6470 — reveal a directory (breadcrumb click): expand it and every ancestor,
   // lazy-loading any whose children aren't cached yet.
   const handleRevealDir = useCallback((path: string) => {
-    const chain = ancestorDirs(joinPath(path, 'x'), rootPath.current || '')
+    const chain = ancestorDirs(joinPath(path, 'x'), rootPath || '')
     for (const d of chain) {
       if (!dirChildren.has(d) && !loadingDirs.has(d)) {
         setLoadingDirs(l => new Set(l).add(d))
@@ -431,7 +438,7 @@ export function FileBrowserPanel() {
       chain.forEach(d => next.add(d))
       return next
     })
-  }, [dirChildren, loadingDirs, requestFileListing])
+  }, [dirChildren, loadingDirs, requestFileListing, rootPath])
 
   const handleFileClick = useCallback((path: string) => {
     setSelectedFile(path)
@@ -457,13 +464,13 @@ export function FileBrowserPanel() {
     const text = (target.textContent || '').trim()
     if (!/^[A-Za-z_$][\w$]*$/.test(text)) return
     e.preventDefault()
-    const fromFile = selectedFile && rootPath.current
-      ? relativePath(selectedFile, rootPath.current)
+    const fromFile = selectedFile && rootPath
+      ? relativePath(selectedFile, rootPath)
       : undefined
     // cmd/ctrl wins if both modifiers are held (definition is the primary gesture).
     if (goToDef) requestResolveSymbol(text, fromFile)
     else requestFindReferences(text, fromFile)
-  }, [ideEnabled, selectedFile, requestResolveSymbol, requestFindReferences])
+  }, [ideEnabled, selectedFile, rootPath, requestResolveSymbol, requestFindReferences])
 
   // #6473 — open a file requested externally (Cmd+P quick-open); reuse the click
   // path so it persists the selection, loads content, and triggers the symbols
@@ -489,16 +496,15 @@ export function FileBrowserPanel() {
   // where root isn't known at select time — also gets its symbols. Opt-in: the
   // server fail-closes when features.ide is off, so we gate on ideEnabled.
   useEffect(() => {
-    if (!selectedFile || !ideEnabled || !rootPath.current) return
-    const rel = relativePath(selectedFile, rootPath.current)
+    if (!selectedFile || !ideEnabled || !rootPath) return
+    const rel = relativePath(selectedFile, rootPath)
     if (lastSymbolReq.current === rel) return
     lastSymbolReq.current = rel
     setSymbolScope(rel)
     requestSymbols(rel)
-    // dirChildren stands in for the old `currentPath` dep: it changes when the
-    // root listing lands, so a file restored on mount (root not yet known at
-    // select time) still requests its symbols once rootPath is set.
-  }, [selectedFile, dirChildren, ideEnabled, requestSymbols])
+    // rootPath is a dep so a file restored on mount (root not yet known at select
+    // time) still requests its symbols once the root listing lands.
+  }, [selectedFile, rootPath, ideEnabled, requestSymbols])
 
   // #6472 — group the open file's symbols by kind for the read-only panel. Only
   // render when the snapshot's echoed `path` matches the file we asked about.
@@ -552,16 +558,15 @@ export function FileBrowserPanel() {
   }, [symbolLocation, openFileInBrowser])
 
   // #6470 — breadcrumbs for the selected file (VSCode-style: root → dirs → file).
-  // dirChildren is a dep so it recomputes once rootPath.current is first known.
   const breadcrumbs = useMemo(
-    () => buildBreadcrumbs(selectedFile, rootPath.current || ''),
-    [selectedFile, dirChildren],
+    () => buildBreadcrumbs(selectedFile, rootPath || ''),
+    [selectedFile, rootPath],
   )
 
   // #6470 — the flattened visible tree: root children + expanded subtrees.
   const visibleEntries = useMemo(
-    () => rootPath.current ? computeVisibleEntries(rootPath.current, dirChildren, expandedDirs, loadingDirs) : [],
-    [dirChildren, expandedDirs, loadingDirs],
+    () => rootPath ? computeVisibleEntries(rootPath, dirChildren, expandedDirs, loadingDirs) : [],
+    [rootPath, dirChildren, expandedDirs, loadingDirs],
   )
 
   // Syntax-highlighted lines for the file viewer
@@ -615,7 +620,7 @@ export function FileBrowserPanel() {
                 <FileTreeRow
                   key={item.path}
                   item={item}
-                  rootPath={rootPath.current || ''}
+                  rootPath={rootPath || ''}
                   gitStatusMap={gitStatusMap}
                   selected={selectedFile === item.path}
                   onToggle={handleToggleDir}
