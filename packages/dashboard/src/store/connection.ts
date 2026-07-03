@@ -503,6 +503,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // until the first survey lands.
   externalSessionsSnapshot: null,
   externalSessionsLoading: false,
+  // #5966 (epic #5422 phase 5): Control Room repo-events pane, fed by the
+  // repo_events_snapshot handler. Null until the first survey lands.
+  repoEventsSnapshot: null,
+  repoEventsLoading: false,
   // #5553: per-repo session presets keyed by cwd, fed by session_preset_snapshot.
   sessionPresetSnapshots: {},
   // #5553: server-provided composer seeds keyed by sessionId (drained by App).
@@ -996,6 +1000,20 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ externalSessionsLoading: true });
       wsSend(socket, { type: 'external_sessions_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #5966 (epic #5422 phase 5): request the buffered repo-events snapshot for the
+  // Control Room pane. Mirrors requestExternalSessions — sends
+  // `repo_events_request`, flips `repoEventsLoading`, returns false (without
+  // setting loading) when the socket is closed.
+  requestRepoEvents: (): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      set({ repoEventsLoading: true });
+      wsSend(socket, { type: 'repo_events_request' });
       return true;
     }
     return false;
@@ -2264,6 +2282,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         'repoRuntimeConfigLoading', 'byokPoolStatusLoading', 'hostPruneStatusLoading',
         'simulatorStatusLoading', 'emulatorStatusLoading', 'wslStatusLoading', 'integrationStatusLoading',
         'skillsInventoryLoading', 'mailboxStatusLoading', 'externalSessionsLoading',
+        'repoEventsLoading',
       ] as const;
       const loadingReset: Partial<Record<(typeof surveyLoadingKeys)[number], boolean>> = {};
       for (const key of surveyLoadingKeys) {

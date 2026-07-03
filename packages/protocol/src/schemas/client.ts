@@ -1125,6 +1125,17 @@ export const ExternalSessionsRequestSchema = z.object({
   requestId: z.string().max(128).optional(),
 })
 
+// #5966 (epic #5422 phase 5): Control Room — request a point-in-time snapshot of
+// the GitHub-webhook repo events the daemon buffers in its bounded RepoEventStore
+// (#6468). Host-level survey (a session-bound token is rejected, like
+// `host_status_request`). Pull-on-open / Refresh; the reply is a single
+// `repo_events_snapshot` (see server.ts). The optional `requestId` lets the
+// dashboard correlate the reply.
+export const RepoEventsRequestSchema = z.object({
+  type: z.literal('repo_events_request'),
+  requestId: z.string().max(128).optional(),
+})
+
 // #5253: Control Room — request a self-hosted runner status survey. The server
 // scans the runner-install root, probes each runner's service, optionally
 // enriches via `gh`, and replies with a single `runner_status_snapshot` (see
@@ -1506,6 +1517,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
   SkillsInventoryRequestSchema,
   MailboxStatusRequestSchema,
   ExternalSessionsRequestSchema,
+  RepoEventsRequestSchema,
   IntegrationActionSchema,
   ContainersActionSchema,
   ByokPoolActionSchema,
@@ -1547,6 +1559,7 @@ export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRe
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>
 export type ExternalSessionsRequestMessage = z.infer<typeof ExternalSessionsRequestSchema>
+export type RepoEventsRequestMessage = z.infer<typeof RepoEventsRequestSchema>
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>

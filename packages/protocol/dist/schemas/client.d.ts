@@ -715,6 +715,10 @@ export declare const ExternalSessionsRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"external_sessions_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>;
+export declare const RepoEventsRequestSchema: z.ZodObject<{
+    type: z.ZodLiteral<"repo_events_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>;
 export declare const RunnerStatusRequestSchema: z.ZodObject<{
     type: z.ZodLiteral<"runner_status_request">;
     requestId: z.ZodOptional<z.ZodString>;
@@ -1292,6 +1296,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"external_sessions_request">;
     requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"repo_events_request">;
+    requestId: z.ZodOptional<z.ZodString>;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"integration_action">;
     action: z.ZodEnum<{
         repo_memory_reindex: "repo_memory_reindex";
@@ -1392,6 +1399,7 @@ export type IntegrationStatusRequestMessage = z.infer<typeof IntegrationStatusRe
 export type SkillsInventoryRequestMessage = z.infer<typeof SkillsInventoryRequestSchema>;
 export type MailboxStatusRequestMessage = z.infer<typeof MailboxStatusRequestSchema>;
 export type ExternalSessionsRequestMessage = z.infer<typeof ExternalSessionsRequestSchema>;
+export type RepoEventsRequestMessage = z.infer<typeof RepoEventsRequestSchema>;
 export type IntegrationActionMessage = z.infer<typeof IntegrationActionSchema>;
 export type ContainersActionMessage = z.infer<typeof ContainersActionSchema>;
 export type ByokPoolActionMessage = z.infer<typeof ByokPoolActionSchema>;
