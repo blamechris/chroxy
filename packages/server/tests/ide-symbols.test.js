@@ -1,9 +1,16 @@
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { parseSymbols, collectWorkspaceSymbols, resolveSymbol } from '../src/ide/symbols.js'
+import {
+  parseSymbols,
+  collectWorkspaceSymbols,
+  resolveSymbol,
+  getWorkspaceSymbolIndex,
+  invalidateWorkspaceSymbolIndex,
+  _symbolIndexCacheStats,
+} from '../src/ide/symbols.js'
 
 /**
  * Unit tests for the self-contained IDE symbol parser (#6471, epic #6469).
@@ -228,6 +235,9 @@ describe('resolveSymbol — go-to-definition (#6475)', () => {
     writeFileSync(join(outside, 'secret.js'), 'export function TOP_SECRET() {}\n')
     symlinkSync(join(outside, 'secret.js'), join(root, 'linkfile.js'))
   })
+  // resolveSymbol now routes through the #6499 TTL cache; start each test with a
+  // clean index so a future mid-block file mutation can't get a stale hit.
+  beforeEach(() => invalidateWorkspaceSymbolIndex())
   after(() => {
     rmSync(root, { recursive: true, force: true })
     rmSync(outside, { recursive: true, force: true })
@@ -261,5 +271,107 @@ describe('resolveSymbol — go-to-definition (#6475)', () => {
 
   it('never resolves a symbol reachable only through an out-of-workspace symlink', async () => {
     assert.equal(await resolveSymbol(root, 'TOP_SECRET'), null)
+  })
+})
+
+describe('getWorkspaceSymbolIndex — TTL cache (#6499)', () => {
+  let root
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache-'))
+    writeFileSync(join(root, 'a.ts'), 'export const alpha = 1\n')
+  })
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('returns the same shape as an uncached full walk', async () => {
+    invalidateWorkspaceSymbolIndex()
+    const cached = await getWorkspaceSymbolIndex(root, { now: 1000 })
+    const fresh = await collectWorkspaceSymbols(root)
+    assert.deepEqual(cached.symbols.map((s) => s.name).sort(), fresh.symbols.map((s) => s.name).sort())
+    assert.equal(cached.truncated, fresh.truncated)
+  })
+
+  it('serves a second call within the TTL from cache (does NOT re-walk)', async () => {
+    invalidateWorkspaceSymbolIndex()
+    // Self-contained temp dir so the scenario doesn't depend on sibling tests.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache-ttl-'))
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'export const alpha = 1\n')
+      // Miss populates the cache at now=1000 (expires 1000+5000).
+      const firstCall = await getWorkspaceSymbolIndex(dir, { now: 1000, ttlMs: 5000 })
+      assert.deepEqual(firstCall.symbols.map((s) => s.name), ['alpha'])
+      // A new declaration lands on disk...
+      writeFileSync(join(dir, 'b.ts'), 'export const beta = 2\n')
+      // ...but a within-TTL call must NOT observe it — the stale table is the proof
+      // the tree was not re-walked (acceptance: no re-walk within the TTL).
+      const second = await getWorkspaceSymbolIndex(dir, { now: 3000, ttlMs: 5000 })
+      assert.deepEqual(second.symbols.map((s) => s.name), ['alpha'])
+      const stats = _symbolIndexCacheStats()
+      assert.equal(stats.hits, 1)
+      assert.equal(stats.misses, 1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('re-walks after the TTL expires so a newly-added declaration resolves', async () => {
+    invalidateWorkspaceSymbolIndex()
+    // Self-contained — create + mutate this dir within the test so it isn't
+    // order-dependent on a file written by a sibling test.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache-exp-'))
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'export const alpha = 1\n')
+      await getWorkspaceSymbolIndex(dir, { now: 1000, ttlMs: 5000 }) // populate (expires 6000)
+      // A new declaration lands AFTER the cache was populated...
+      writeFileSync(join(dir, 'b.ts'), 'export const beta = 2\n')
+      // ...invisible within the TTL, but a post-expiry call re-walks and picks it up.
+      const after = await getWorkspaceSymbolIndex(dir, { now: 7000, ttlMs: 5000 })
+      assert.deepEqual(after.symbols.map((s) => s.name).sort(), ['alpha', 'beta'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('invalidate() forces the next call to re-walk (and resets stats)', async () => {
+    invalidateWorkspaceSymbolIndex()
+    await getWorkspaceSymbolIndex(root, { now: 1000 })
+    assert.equal(_symbolIndexCacheStats().misses, 1)
+    invalidateWorkspaceSymbolIndex()
+    assert.equal(_symbolIndexCacheStats().misses, 0) // counters reset
+    const again = await getWorkspaceSymbolIndex(root, { now: 1000 })
+    assert.equal(_symbolIndexCacheStats().misses, 1) // a fresh miss, not a hit
+    assert.ok(again.symbols.length >= 1)
+  })
+
+  it('is confined per-workspace — a second root does not share the first cache', async () => {
+    invalidateWorkspaceSymbolIndex()
+    const root2 = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache2-'))
+    try {
+      writeFileSync(join(root2, 'z.ts'), 'export function zeta() {}\n')
+      const a = await getWorkspaceSymbolIndex(root, { now: 1000 })
+      const b = await getWorkspaceSymbolIndex(root2, { now: 1000 })
+      assert.ok(a.symbols.some((s) => s.name === 'alpha'))
+      assert.ok(b.symbols.some((s) => s.name === 'zeta'))
+      assert.ok(!b.symbols.some((s) => s.name === 'alpha')) // no bleed between workspaces
+      assert.equal(_symbolIndexCacheStats().misses, 2) // two distinct roots → two walks
+    } finally {
+      rmSync(root2, { recursive: true, force: true })
+    }
+  })
+
+  it('resolveSymbol reuses the cache — a second resolve within the TTL does not re-walk', async () => {
+    invalidateWorkspaceSymbolIndex()
+    const r = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache3-'))
+    try {
+      writeFileSync(join(r, 'a.ts'), 'export const widget = 1\n')
+      const first = await resolveSymbol(r, 'widget', { now: 1000, ttlMs: 5000 })
+      assert.deepEqual(first, { file: 'a.ts', line: 1 })
+      // A NEW exported decl lands after the cache was populated; a within-TTL
+      // resolve works off the stale index, so it must not see it yet (not-found).
+      writeFileSync(join(r, 'later.ts'), 'export const gadget = 2\n')
+      assert.equal(await resolveSymbol(r, 'gadget', { now: 2000, ttlMs: 5000 }), null) // stale cache
+      assert.equal(_symbolIndexCacheStats().hits, 1) // second resolve hit the cache
+    } finally {
+      rmSync(r, { recursive: true, force: true })
+    }
   })
 })
