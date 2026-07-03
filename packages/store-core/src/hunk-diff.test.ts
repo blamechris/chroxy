@@ -60,6 +60,30 @@ describe('computeHunks (#6542)', () => {
     assertRoundTrip('a\nb', 'a\nb\n')  // adding a trailing newline
   })
 
+  it('emits git-style empty-side headers (new file / deleted file), no phantom line', () => {
+    // new file: pure addition, 0-based old start, no phantom '' deletion
+    const created = computeHunks('', 'x\ny')
+    expect(created).toHaveLength(1)
+    expect(created[0]!.header).toBe('@@ -0,0 +1,2 @@')
+    expect(created[0]!.lines.map((l) => l.type)).toEqual(['addition', 'addition'])
+    // deleted file: pure deletion, 0-based new start
+    const deleted = computeHunks('x\ny', '')
+    expect(deleted[0]!.header).toBe('@@ -1,2 +0,0 @@')
+    expect(deleted[0]!.lines.map((l) => l.type)).toEqual(['deletion', 'deletion'])
+    // and both still round-trip
+    assertRoundTrip('', 'x\ny')
+    assertRoundTrip('x\ny', '')
+  })
+
+  it('round-trips CRLF content without mangling line endings', () => {
+    assertRoundTrip('a\r\nb\r\nc', 'a\r\nB\r\nc')
+    assertRoundTrip('a\r\nb\r\n', 'a\r\nb\r\nc\r\n')
+    // a lone \r stays attached to its line's content (split is on \n only)
+    const hunks = computeHunks('a\r\nb', 'a\r\nB')
+    expect(hunks[0]!.lines.find((l) => l.type === 'deletion')!.content).toBe('b')
+    expect(hunks[0]!.lines.find((l) => l.type === 'addition')!.content).toBe('B')
+  })
+
   it('round-trips a spread of realistic edits', () => {
     const cases: Array<[string, string]> = [
       ['const x = 1\nconst y = 2\n', 'const x = 1\nconst y = 3\nconst z = 4\n'],

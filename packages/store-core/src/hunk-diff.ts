@@ -13,6 +13,11 @@
  * with a size guard: past `MAX_DIFF_LINES` combined lines it falls back to a
  * single whole-file-replace hunk rather than allocate an O(n·m) table.
  *
+ * Headers follow git's unified-diff convention, INCLUDING the empty-side cases —
+ * a new file is `@@ -0,0 +1,N @@` (pure additions, no phantom deletion) and a
+ * deleted file is `@@ -1,N +0,0 @@` — so the output stays consistent with the
+ * server's git diff and `applyHunks` can round-trip a git-style count-0 hunk.
+ *
  * Round-trip contract (the load-bearing invariants, verified in the tests):
  *   - `applyHunks(original, computeHunks(original, proposed), ALL)  === proposed`
  *   - `applyHunks(original, computeHunks(original, proposed), NONE) === original`
@@ -33,13 +38,19 @@ export const MAX_DIFF_LINES = 4000
 type EditOp = { op: 'eq' | 'del' | 'ins'; oldIndex: number; newIndex: number; content: string }
 
 /**
- * Split file content into lines such that `lines.join('\n') === content` for
- * ANY input (JS guarantees this for split/join on '\n'), so the round-trip is
- * lossless — a trailing newline becomes a trailing empty element that the diff
- * treats like any other line. Empty content is `['']` (length 1), not `[]`.
+ * Split file content into lines such that `lines.join('\n') === content`, so the
+ * round-trip is lossless — a trailing newline becomes a trailing empty element
+ * the diff treats like any other line.
+ *
+ * The one special case is the **empty file**: `''` maps to `[]` (0 lines), NOT
+ * `['']`. This matches git's unified-diff model — a `'' → 'x'` diff is then a
+ * pure addition (`@@ -0,0 +1,1 @@`, one addition line) rather than a phantom
+ * deletion of an empty line — so `computeHunks` output stays consistent with the
+ * server's git diff. `[].join('\n') === ''`, so the round-trip is still lossless.
+ * (A single newline `'\n'` is `['', '']`, distinct from the empty file.)
  */
 function toLines(content: string): string[] {
-  return content.split('\n')
+  return content === '' ? [] : content.split('\n')
 }
 
 /**
@@ -90,7 +101,12 @@ function wholeFileReplaceHunk(a: string[], b: string[]): DiffHunk {
     ...a.map((content): DiffHunkLine => ({ type: 'deletion', content })),
     ...b.map((content): DiffHunkLine => ({ type: 'addition', content })),
   ]
-  return { header: `@@ -1,${a.length} +1,${b.length} @@`, lines }
+  // git convention: a 0-count side uses a 0-based start (new file `@@ -0,0 +1,N @@`,
+  // deleted file `@@ -1,N +0,0 @@`); a non-empty side is 1-based. Keeps the header
+  // consistent with `parseOriginalRange`'s count-0 insertion math.
+  const oldStart = a.length === 0 ? 0 : 1
+  const newStart = b.length === 0 ? 0 : 1
+  return { header: `@@ -${oldStart},${a.length} +${newStart},${b.length} @@`, lines }
 }
 
 /**
