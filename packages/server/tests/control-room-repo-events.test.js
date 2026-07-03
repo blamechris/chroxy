@@ -1,8 +1,9 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { controlRoomHandlers } from '../src/handlers/control-room-handlers.js'
+import { WsServer } from '../src/ws-server.js'
 import { createSpy, nsCtx } from './test-helpers.js'
-import { ServerRepoEventsSnapshotSchema } from '@chroxy/protocol'
+import { ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema } from '@chroxy/protocol'
 
 /**
  * #5966 (epic #5422 phase 5) — `repo_events_request` handler. Mirrors the
@@ -81,5 +82,36 @@ describe('repo_events_request handler (#5966)', () => {
     const msg = lastSent(ctx)
     assert.deepEqual(msg.events, [])
     assert.ok(ServerRepoEventsSnapshotSchema.safeParse(msg).success)
+  })
+})
+
+// #6538: exercise the security-critical broadcast filter BODY directly (the
+// webhook tests stub `_broadcastRepoEvent`, so its host-authority predicate was
+// never executed by a committed test). Drive the real prototype method against a
+// fake with a capturing `_broadcast` — no full WsServer construction needed.
+describe('WsServer._broadcastRepoEvent host-authority filter (#6536/#6538)', () => {
+  const EVENT = { kind: 'push', repo: 'o/r', actor: 'bob', at: '2026-07-03T12:00:00.000Z', branch: 'main', title: 't', url: null, summary: 'pushed 1 commit to main' }
+
+  it('broadcasts a schema-valid repo_events_delta to HOST-level clients only', () => {
+    const captured = []
+    const fake = { _broadcast: (message, filter) => captured.push({ message, filter }) }
+    WsServer.prototype._broadcastRepoEvent.call(fake, EVENT)
+    assert.equal(captured.length, 1)
+    const { message, filter } = captured[0]
+    assert.equal(message.type, 'repo_events_delta')
+    assert.equal(message.event, EVENT) // same object, no re-shape
+    assert.ok(ServerRepoEventsDeltaSchema.safeParse(message).success)
+    // host-authority: unbound (host) client kept, session-bound client dropped
+    assert.equal(filter({ boundSessionId: null }), true)
+    assert.equal(filter({}), true)
+    assert.equal(filter({ boundSessionId: 'sess-1' }), false)
+  })
+
+  it('no-ops on a null/absent event (never broadcasts undefined)', () => {
+    const captured = []
+    const fake = { _broadcast: (m, f) => captured.push({ m, f }) }
+    WsServer.prototype._broadcastRepoEvent.call(fake, null)
+    WsServer.prototype._broadcastRepoEvent.call(fake, undefined)
+    assert.equal(captured.length, 0)
   })
 })
