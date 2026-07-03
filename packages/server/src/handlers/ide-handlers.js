@@ -176,6 +176,12 @@ async function handleFindReferences(ws, client, msg, ctx) {
   if (!isIdeFeatureEnabled(ctx.services?.config)) return
 
   const symbol = typeof msg.symbol === 'string' ? msg.symbol.trim() : ''
+  // The originating file (the symbol was alt+clicked in) — normalized to the
+  // workspace-relative POSIX form findReferences ranks against (#6516), same as
+  // handleResolveSymbol does for its tie-break.
+  const fromFile = typeof msg.file === 'string' && msg.file.trim()
+    ? msg.file.trim().replace(/\\/g, '/')
+    : null
 
   if (!symbol) {
     ctx.transport.send(ws, { type: 'references_result', symbol: '', results: [], truncated: false, error: null })
@@ -196,7 +202,7 @@ async function handleFindReferences(ws, client, msg, ctx) {
   }
 
   try {
-    const { results, truncated } = await findReferences(cwd, symbol)
+    const { results, truncated } = await findReferences(cwd, symbol, { fromFile })
     ctx.transport.send(ws, { type: 'references_result', symbol, results, truncated, error: null })
   } catch (err) {
     log.debug(`find_references failed: ${err?.message}`)

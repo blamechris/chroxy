@@ -248,6 +248,20 @@ describe('find_references handler — emission', () => {
     assert.deepEqual(msg.results.map((r) => r.line).sort(), [1, 2])
   })
 
+  it('threads the origin `file` through so its references rank first (#6516)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-h-rank-'))
+    try {
+      writeFileSync(join(dir, 'aa.ts'), 'const a = findMe()\n')
+      writeFileSync(join(dir, 'zz.ts'), 'const z = findMe()\n')
+      const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: dir })
+      await handleFindReferences({}, client, { type: 'find_references', symbol: 'findMe', file: 'zz.ts' }, ctx)
+      // zz.ts is the origin → it floats above aa.ts despite the walk order.
+      assert.deepEqual(sent[0].results.map((r) => r.file), ['zz.ts', 'aa.ts'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
   it('emits an empty result set for a symbol with no references', async () => {
     const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
     await handleFindReferences({}, client, { type: 'find_references', symbol: 'nope' }, ctx)
