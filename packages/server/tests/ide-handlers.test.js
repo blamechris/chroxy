@@ -220,6 +220,31 @@ describe('search_content handler — emission', () => {
   })
 })
 
+describe('search_content handler — single-flight (#6506)', () => {
+  let root
+  before(() => {
+    root = mkdtempSync(join(tmpdir(), 'chroxy-ide-search-sf-'))
+    // Several files so a full walk yields real matches across a few awaits.
+    for (let i = 0; i < 12; i++) writeFileSync(join(root, `f${i}.ts`), 'const findMe = 1\n')
+  })
+  after(() => rmSync(root, { recursive: true, force: true }))
+
+  it('supersedes an in-flight walk — two rapid searches emit only the latest', async () => {
+    const { ctx, sent } = makeCtx({ ideEnabled: true, cwd: root })
+    // A per-connection client whose _ideSearchToken the handler bumps per request.
+    const sfClient = { activeSessionId: 'sess-1' }
+    // Fire two WITHOUT awaiting the first: the second stamps a newer token
+    // synchronously before either walk's async body runs, so the first walk
+    // aborts via isCancelled and skips its emit.
+    const p1 = handleSearchContent({}, sfClient, { type: 'search_content', query: 'findMe' }, ctx)
+    const p2 = handleSearchContent({}, sfClient, { type: 'search_content', query: 'findMe' }, ctx)
+    await Promise.all([p1, p2])
+    const emitted = sent.filter((m) => m.type === 'code_search_results')
+    assert.equal(emitted.length, 1, 'only the latest search emits; the superseded one stays silent')
+    assert.ok(emitted[0].results.length > 0, 'the surviving search returns real matches')
+  })
+})
+
 describe('find_references handler — feature gate', () => {
   it('is a no-op (no send) when features.ide is off', async () => {
     const { ctx, sent } = makeCtx({ ideEnabled: false, cwd: '/tmp' })
