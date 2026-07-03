@@ -854,8 +854,8 @@ jobs:
         # WS disconnected). The smoke reads this token to build the dashboard URL.
         # `cwd` pins the auto-created Default session at the tiny IDE fixture
         # workspace (#6500) so the go-to-def smoke's quick-open + resolve_symbol
-        # are deterministic; the path is inside the checkout (within $HOME on the
-        # runner), so it passes the config-cwd allowed-roots check.
+        # are deterministic. `config.cwd` feeds `defaultCwd` verbatim (server-cli.js);
+        # the path is inside the checkout so the session workspace is a real dir.
         run: |
           mkdir -p "$HOME/.chroxy"
           printf '{ "apiToken": "ci-smoke-token", "externalUrl": "http://localhost:8765", "tunnel": "quick", "cwd": "%s/packages/server/tests/fixtures/smoke-ide-workspace" }\n' "$GITHUB_WORKSPACE" > "$HOME/.chroxy/config.json"

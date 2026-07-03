@@ -422,6 +422,10 @@ async function run() {
     log('')
     log('--- IDE Go-to-Definition ---')
     try {
+      // Foreground the session view first — the Control Room section above leaves
+      // its own panel open, which overlays the file viewer.
+      const sessionTab = page.locator('[data-testid^="session-tab-"]').first()
+      if (await sessionTab.count()) { await sessionTab.click().catch(() => {}); await page.waitForTimeout(500) }
       await page.keyboard.press('Meta+KeyP')
       await page.waitForTimeout(500)
       let paletteInput = await page.$('[data-testid="file-open-palette-input"]')
@@ -442,20 +446,31 @@ async function run() {
           await page.keyboard.press('Escape')
         } else {
           await fileItem.click()
-          await page.waitForTimeout(1400)
-          const synCount = await page.$$eval('span[class^="syn-"]', els => els.length).catch(() => 0)
+          // Opening a file is a WS content round-trip + tokenize + render; poll
+          // for the tokens rather than sampling at a fixed offset (CI is slower).
+          let synCount = 0
+          try {
+            await page.waitForSelector('.file-viewer-line span[class^="syn-"]', { timeout: 6000 })
+            synCount = await page.$$eval('span[class^="syn-"]', els => els.length).catch(() => 0)
+          } catch { synCount = 0 }
           if (synCount > 0) pass('IDE file viewer renders syntax tokens', `${synCount} tokens`)
           else fail('IDE file viewer', 'no syntax tokens rendered')
 
-          // HIT — jump to the exported declaration + a transient active-line highlight.
+          // HIT — jump to the exported declaration + a transient active-line
+          // highlight. The highlight appears only after resolve + a content
+          // re-fetch and lives ~1400ms, so poll for it (robust on a loaded runner)
+          // rather than sampling at a fixed offset.
           const hitTok = page.locator('.file-viewer-line span[class^="syn-"]', { hasText: /^smokeGotoDefTarget$/ }).first()
           if (await hitTok.count()) {
             await hitTok.click({ modifiers: ['ControlOrMeta'] })
-            await page.waitForTimeout(600) // sample inside the ~1400ms highlight window
-            const active = await page.$$eval('.file-viewer-line--active', els => els.length).catch(() => 0)
+            let hitJumped = false
+            try {
+              await page.waitForSelector('.file-viewer-line--active', { timeout: 4000 })
+              hitJumped = true
+            } catch { hitJumped = false }
             const strayPill = await page.$('[data-testid="def-not-found"]')
-            if (active > 0 && !strayPill) pass('Go-to-definition HIT', 'jumped + active-line highlight')
-            else fail('Go-to-definition HIT', `active lines=${active}, pill=${!!strayPill}`)
+            if (hitJumped && !strayPill) pass('Go-to-definition HIT', 'jumped + active-line highlight')
+            else fail('Go-to-definition HIT', `jumped=${hitJumped}, pill=${!!strayPill}`)
             await screenshot(page, '08-ide-goto-def-hit')
           } else {
             fail('Go-to-definition HIT', 'no smokeGotoDefTarget token to click')
