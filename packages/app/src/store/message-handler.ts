@@ -143,7 +143,7 @@ import { PROTOCOL_VERSION } from '@chroxy/protocol';
 // store-core reducer so a malformed payload is dropped, not crashed on (same
 // pattern the dashboard feeder uses). Resolved via the jest moduleNameMapper
 // `^@chroxy/protocol/schemas$` and the protocol package's `./schemas` export.
-import { ServerActivitySnapshotSchema, ServerActivityDeltaSchema } from '@chroxy/protocol/schemas';
+import { ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerPermissionInputSchema } from '@chroxy/protocol/schemas';
 import { hapticSuccess } from '../utils/haptics';
 import type {
   ChatMessage,
@@ -1869,6 +1869,10 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
         restartEtaMs: null,
         restartingSince: null,
         webFeatures: auth.webFeatures,
+        // #6543 (feature B): the server's advertised capability map (`{ ide, … }`),
+        // parsed from `msg.capabilities` by the shared handleAuthOk. Gates the
+        // mobile pre-write-diff review, mirroring the dashboard's serverCapabilities.
+        serverCapabilities: auth.serverCapabilities,
       };
       if (ctx.isReconnect) {
         set(connectedState);
@@ -3540,6 +3544,19 @@ export function handleMessage(raw: unknown, ctxOverride?: ConnectionContext): vo
     // live short-circuit for activity_delta, whose reducer returns the SAME ref
     // on a no-op); kept for symmetry with the delta case + the dashboard feeder.
     // This makes #6245's read-only MissionControlScreen go live.
+    // #6543 (IDE P3 feature B) — `permission_input`: store the pulled full
+    // (secret-redacted) tool input keyed by requestId so the mobile permission
+    // prompt can build a per-hunk pre-write diff. Zod-validated (drop-on-
+    // malformed). Both `found:true` (carries `input`/`tool`) and `found:false`
+    // (carries `error`) are stored — the UI distinguishes "not fetched" (absent)
+    // from "unavailable" (found:false). Mirrors the dashboard handler.
+    case 'permission_input': {
+      const parsed = ServerPermissionInputSchema.safeParse(msg);
+      if (!parsed.success) return;
+      set({ permissionInputs: { ...get().permissionInputs, [parsed.data.requestId]: parsed.data } });
+      return;
+    }
+
     case 'activity_snapshot': {
       const parsed = ServerActivitySnapshotSchema.safeParse(msg);
       if (!parsed.success) return;

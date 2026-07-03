@@ -22,6 +22,7 @@ import { Icon } from '../Icon';
 import { COLORS } from '../../constants/colors';
 import { FormattedResponse } from '../MarkdownRenderer';
 import { PermissionDetailOrFallback, PermissionCountdown, PermissionPill, permissionStyles } from '../PermissionDetail';
+import { PreWriteDiffReview, isReviewableTool } from '../PreWriteDiffReview';
 import { ThinkingIndicator } from './ThinkingIndicator';
 import { ToolBubble } from './ToolBubble';
 import { StreamStallChip } from '../StreamStallChip';
@@ -83,7 +84,11 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
   queued?: boolean;
   /** #5938 — cancel this queued follow-up by its message id before it flushes. */
   onCancelQueued?: (id: string) => void;
-  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
+  // #6543 (feature B): `editedInput` carries the operator's per-hunk narrowing
+  // from a Write/Edit pre-write-diff review — sent on an Approve so the server
+  // writes only the kept hunks. `null`/omitted = no narrowing (a plain response);
+  // the store's sendPermissionResponse drops it for a deny regardless.
+  onSelectOption?: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: Record<string, string> | null) => void;
   /**
    * #4973 — submit handler for the multi-question form. Fires with the
    * per-question answers map (`Record<string, string | string[]>`) plus
@@ -196,6 +201,27 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
   const promptSessionLabel = useConnectionStore((s) =>
     buildPromptSessionLabel(message.originSessionId, s.sessions),
   );
+
+  // #6543 (feature B): per-hunk pre-write review. Gated on the server's `ide`
+  // capability (features.ide) + a reviewable tool (Write/Edit), mirroring the
+  // dashboard's PermissionPrompt. When eligible, pull the full (secret-redacted)
+  // tool input via `get_permission_input` and render a diff whose dropped hunks
+  // become `editedInput` on Approve.
+  const ideEnabled = useConnectionStore((s) => Boolean(s.serverCapabilities?.ide));
+  const requestPermissionInput = useConnectionStore((s) => s.requestPermissionInput);
+  const pulledInput = useConnectionStore((s) =>
+    message.requestId ? s.permissionInputs?.[message.requestId] : undefined,
+  );
+  const reviewEligible = isPrompt && ideEnabled && isReviewableTool(message.tool);
+  const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null);
+
+  // Pull the full tool input once per eligible, unanswered prompt (idempotent —
+  // gated on `pulledInput === undefined` so a re-render doesn't re-request).
+  useEffect(() => {
+    if (reviewEligible && message.requestId && message.answered == null && pulledInput === undefined) {
+      requestPermissionInput(message.requestId);
+    }
+  }, [reviewEligible, message.requestId, message.answered, pulledInput, requestPermissionInput]);
 
   // Reset "Other" UI mode when the prompt becomes answered (#3746 review).
   // Without this, otherActive would stay true after an answer arrives from
@@ -530,6 +556,18 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
           </View>
         </View>
       )}
+      {/* #6543 (feature B): the per-hunk pre-write diff review — rendered between
+          the permission detail and the option buttons, only when features.ide is
+          on (serverCapabilities.ide), the tool is reviewable (Write/Edit), and the
+          pulled input has landed. Dropped hunks become `editedInput` sent on
+          Approve. A refusal / not-yet-pulled state renders nothing (plain Allow). */}
+      {reviewEligible && showOptionButtons && message.answered == null && !isExpired && pulledInput?.found && pulledInput.input && (
+        <PreWriteDiffReview
+          tool={message.tool ?? ''}
+          input={pulledInput.input as Record<string, unknown>}
+          onEditedInputChange={setEditedInput}
+        />
+      )}
       {showOptionButtons && (
         <View style={styles.promptOptions}>
           {message.options!.map((opt, i) => {
@@ -583,7 +621,11 @@ function MessageBubbleImpl({ message, queued, onCancelQueued, onSelectOption, on
                   // tunnel) fires two user_question_response messages.
                   if (submittedRef.current) return;
                   submittedRef.current = true;
-                  onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId);
+                  // #6543 (feature B): forward the per-hunk narrowing on an
+                  // Approve. `editedInput` is null for non-reviewable prompts and
+                  // when every hunk is kept; the store's sendPermissionResponse
+                  // drops it for a deny, so passing it unconditionally is safe.
+                  onSelectOption?.(opt.value, message.id, message.requestId, message.toolUseId, editedInput);
                 }}
               >
                 <Text style={[

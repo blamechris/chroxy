@@ -513,6 +513,10 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   sessions: [],
   activeSessionId: null,
   sessionStates: {},
+  // #6543 (feature B): pulled full redacted tool inputs keyed by requestId.
+  permissionInputs: {},
+  // #6543 (feature B): server capability map from auth_ok; gates the pre-write diff.
+  serverCapabilities: {},
   activity: createEmptyActivityState(),
   availableModels: [],
   defaultModelId: null,
@@ -1861,7 +1865,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     }
   },
 
-  sendPermissionResponse: (requestId: string, decision: string) => {
+  sendPermissionResponse: (requestId: string, decision: string, editedInput?: Record<string, string> | null) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected, rather
     // than queuing it. The server EXPIRES the pending request the moment the
@@ -1873,7 +1877,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (!socket || socket.readyState !== WebSocket.OPEN) return false;
     // allowSession: send immediate 'allow' unblock + register a session rule for auto-approval
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
-    const payload = { type: 'permission_response', requestId, decision: wireDecision };
+    // #6543 (feature B): the operator's per-hunk edits ride on an approve only,
+    // and only when non-empty. The server whitelists which fields it substitutes.
+    const payload = {
+      type: 'permission_response',
+      requestId,
+      decision: wireDecision,
+      ...(editedInput && Object.keys(editedInput).length > 0 && wireDecision !== 'deny' ? { editedInput } : {}),
+    };
     if (wireDecision === 'deny') hapticWarning(); else hapticMedium();
     // #6308: the socket can flip OPEN → CLOSING before this synchronous send, so
     // wsSend can throw and return false. Bail BEFORE marking the prompt answered —
@@ -1925,6 +1936,18 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       }
     }
     return result;
+  },
+
+  // #6543 (feature B): pull the full redacted tool input for a pending permission
+  // so the mobile prompt can render a per-hunk pre-write diff. The reply is a
+  // single `permission_input` handled into `permissionInputs[requestId]`.
+  requestPermissionInput: (requestId: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'get_permission_input', requestId });
+      return true;
+    }
+    return false;
   },
 
   sendUserQuestionResponse: (

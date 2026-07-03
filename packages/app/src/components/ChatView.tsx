@@ -48,7 +48,10 @@ export interface ChatViewProps {
    * (`answer: <otherLabel>, freeformText`). See
    * `MessageBubble.SelectOptionValue` for the union type.
    */
-  onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string) => void;
+  // #6543 (feature B): the optional 5th `editedInput` carries a Write/Edit
+  // pre-write-diff narrowing straight through to SessionScreen's handler (ChatView
+  // forwards the ref unchanged); null/omitted for every other prompt.
+  onSelectOption: (value: SelectOptionValue, messageId: string, requestId?: string, toolUseId?: string, editedInput?: Record<string, string> | null) => void;
   /**
    * #4973 — submit handler for the multi-question AskUserQuestion form.
    * Fires with the per-question answers map; SessionScreen forwards it to

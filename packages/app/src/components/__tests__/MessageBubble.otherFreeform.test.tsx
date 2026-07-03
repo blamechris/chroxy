@@ -202,6 +202,9 @@ describe('MessageBubble Other / freeform answer (#4755)', () => {
       'q-1',
       undefined,
       'toolu_other_freeform',
+      // #6543 (feature B): the option-button path now forwards `editedInput` —
+      // `null` here (this prompt isn't a Write/Edit pre-write-diff review).
+      null,
     );
   });
 });
