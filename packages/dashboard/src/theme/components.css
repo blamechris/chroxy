@@ -8444,6 +8444,32 @@ button.sidebar-token-view-session-row:hover {
   border-top: 1px solid var(--border-primary);
 }
 
+/* #6542: opt-in per-hunk accept/reject. The toggle row wraps the checkbox +
+ * header in a clickable label; a rejected (unchecked) hunk dims so the accepted
+ * set reads at a glance. Read-only diff views don't emit these classes. */
+.diff-hunk-toggle-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  cursor: pointer;
+  border-top: 1px solid var(--border-primary);
+}
+
+.diff-hunk-toggle-row .diff-hunk-header {
+  flex: 1;
+  border-top: none;
+}
+
+.diff-hunk-toggle {
+  margin-left: 12px;
+  cursor: pointer;
+  accent-color: var(--accent-blue);
+}
+
+.diff-hunk-rejected {
+  opacity: 0.55;
+}
+
 .diff-line {
   display: flex;
   font-family: var(--font-mono);
