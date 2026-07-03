@@ -414,8 +414,9 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   // #6542: a rejected (unchecked) hunk dims so the accepted set reads at a glance.
+  // 0.55 to match the dashboard's .diff-hunk-rejected (cross-platform parity).
   hunkRejected: {
-    opacity: 0.5,
+    opacity: 0.55,
   },
   // #6542: per-hunk accept/reject toggle row — ≥44pt touch target (mobile min).
   hunkToggleRow: {
