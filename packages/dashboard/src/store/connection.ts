@@ -3075,7 +3075,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       type: 'permission_response',
       requestId,
       decision: wireDecision,
-      ...(editedInput && wireDecision !== 'deny' ? { editedInput } : {}),
+      ...(editedInput && Object.keys(editedInput).length > 0 && wireDecision !== 'deny' ? { editedInput } : {}),
     };
     // #6308: the socket can flip OPEN → CLOSING before this synchronous send (wsSend
     // → false). Bail BEFORE markPermissionResolved/markPromptAnswered — otherwise the

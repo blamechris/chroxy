@@ -57,15 +57,19 @@ export function PreWriteDiffReview({ tool, input, onEditedInputChange }: PreWrit
   }, [hunks])
 
   // Emit on toggle (NOT in a render effect) so a non-memoized parent callback
-  // can't cause a render loop. `selected` is read from the closure — fine for a
-  // human clicking one hunk at a time.
+  // can't cause a render loop. The new set is derived from the updater's `prev`
+  // (always authoritative, even under React batching) — not the render closure —
+  // so rapid toggles can't compute from a stale selection.
   function toggle(i: number) {
-    const next = new Set(selected)
-    if (next.has(i)) next.delete(i)
-    else next.add(i)
-    setSelected(next)
-    const allKept = next.size === hunks.length
-    onEditedInputChange(allKept ? null : { [spec!.field]: applyHunks(base, hunks, next) })
+    setSelected((prev) => {
+      const next = new Set(prev)
+      if (next.has(i)) next.delete(i)
+      else next.add(i)
+      const allKept = next.size === hunks.length
+      // Idempotent (parent setState); StrictMode's dev double-invoke is harmless.
+      onEditedInputChange(allKept ? null : { [spec!.field]: applyHunks(base, hunks, next) })
+      return next
+    })
   }
 
   if (!spec || hunks.length === 0) return null
