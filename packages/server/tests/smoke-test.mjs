@@ -422,6 +422,11 @@ async function run() {
     log('')
     log('--- IDE Go-to-Definition ---')
     try {
+      // In CI the daemon has features.ide on + the fixture as its cwd, so the IDE
+      // surface + fixture are REQUIRED preconditions — a graceful skip there would
+      // mask a regression. SMOKE_REQUIRE_IDE=1 makes a missing palette/fixture a
+      // hard failure; unset (local, non-fixture daemon) keeps the section lenient.
+      const requireIde = process.env.SMOKE_REQUIRE_IDE === '1'
       // Foreground the session view first — the Control Room section above leaves
       // its own panel open, which overlays the file viewer.
       const sessionTab = page.locator('[data-testid^="session-tab-"]').first()
@@ -435,14 +440,16 @@ async function run() {
         paletteInput = await page.$('[data-testid="file-open-palette-input"]')
       }
       if (!paletteInput) {
-        log('  (IDE quick-open not available — features.ide off; skipping)')
+        if (requireIde) fail('IDE quick-open palette', 'features.ide expected (SMOKE_REQUIRE_IDE) but Cmd/Ctrl+P did not open the palette')
+        else log('  (IDE quick-open not available — features.ide off; skipping)')
       } else {
         pass('IDE quick-open palette opens', 'Cmd/Ctrl+P — features.ide advertised')
         await paletteInput.fill('smoke_ide_sample')
         await page.waitForTimeout(1200)
         const fileItem = await page.$('[data-testid^="file-open-item-"]')
         if (!fileItem) {
-          log('  (smoke_ide_sample fixture not in this workspace — skipping go-to-def; expected outside CI)')
+          if (requireIde) fail('IDE go-to-def fixture', 'smoke_ide_sample expected (SMOKE_REQUIRE_IDE) but quick-open found no match')
+          else log('  (smoke_ide_sample fixture not in this workspace — skipping go-to-def; expected outside CI)')
           await page.keyboard.press('Escape')
         } else {
           await fileItem.click()
@@ -460,7 +467,11 @@ async function run() {
           // highlight. The highlight appears only after resolve + a content
           // re-fetch and lives ~1400ms, so poll for it (robust on a loaded runner)
           // rather than sampling at a fixed offset.
-          const hitTok = page.locator('.file-viewer-line span[class^="syn-"]', { hasText: /^smokeGotoDefTarget$/ }).first()
+          // Identifier tokens only — exclude comment/string spans so the anchored
+          // name can't match a mention inside a comment (defensive; the fixture's
+          // comments are single spans whose text is the whole line anyway).
+          const idTokenSel = '.file-viewer-line span[class^="syn-"]:not(.syn-comment):not(.syn-string)'
+          const hitTok = page.locator(idTokenSel, { hasText: /^smokeGotoDefTarget$/ }).first()
           if (await hitTok.count()) {
             await hitTok.click({ modifiers: ['ControlOrMeta'] })
             let hitJumped = false
@@ -479,7 +490,7 @@ async function run() {
           await page.waitForTimeout(1800) // let the highlight clear before the miss
 
           // MISS — an undeclared symbol yields a transient def-not-found pill.
-          const missTok = page.locator('.file-viewer-line span[class^="syn-"]', { hasText: /^smokeGotoDefMissingSymbol$/ }).first()
+          const missTok = page.locator(idTokenSel, { hasText: /^smokeGotoDefMissingSymbol$/ }).first()
           if (await missTok.count()) {
             await missTok.click({ modifiers: ['ControlOrMeta'] })
             await page.waitForTimeout(700)

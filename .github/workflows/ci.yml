@@ -897,6 +897,11 @@ jobs:
 
       - name: Run dashboard smoke test
         working-directory: packages/server
+        # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
+        # workspace as its cwd, so the go-to-def section must run (not skip): a
+        # missing palette/fixture is a hard failure here, catching an IDE regression.
+        env:
+          SMOKE_REQUIRE_IDE: '1'
         run: node tests/smoke-test.mjs
 
       - name: Stop chroxy server
