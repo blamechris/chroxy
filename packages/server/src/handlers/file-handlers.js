@@ -37,7 +37,7 @@ function rejectMutationIfBound(ws, client, msg, ctx, op) {
       ws,
       msg?.requestId,
       'FILE_MUTATION_FORBIDDEN_BOUND_CLIENT',
-      'Pairing-issued session tokens cannot modify files or git state. Use the primary API token from a device with access to this machine.',
+      'Pairing-issued session tokens cannot modify files or git state — this requires a host-level (unbound) client, such as the primary token or the app\'s own device.',
       undefined,
       ctx,
     )
