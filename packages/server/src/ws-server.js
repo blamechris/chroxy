@@ -461,6 +461,7 @@ function _isSecureRequest(req) {
  *   { type: 'skills_inventory_snapshot', requestId?, generatedAt, root, global, globalError?, repos, error? } — Control Room Skills inventory survey reply (#5554 schema + emitter, epic #5159); reply to a `skills_inventory_request`. `global` is the `~/.chroxy/skills/` tier and `repos` the per-repo `.chroxy/skills/` overlays, each entry carrying name/description/activation/trust/hash/installed + usage (lastUsed/count/repos). Skill BODIES never leave the server. Same degraded-snapshot-with-`error` posture as the host/runner/integration surveys; `globalError` / per-repo `error` degrade a single tier without blanking the snapshot. `requestId` echoes the request when provided.
  *   { type: 'mailbox_status_snapshot', requestId?, generatedAt, registrations, recentEvents, error? } — Control Room "Mailbox" tab survey reply (#5914 follow-up); reply to a `mailbox_status_request`. `registrations` is the live agentCommId→session map (each with sessionName/isBusy/isTui) and `recentEvents` a bounded newest-first ring buffer of recent live-interrupt deliveries (to/from/unreadCount/outcome). Host-level: a session-bound token is refused with an additive `error: { code, message }` on an otherwise-empty (schema-valid) snapshot. `requestId` echoes the request when provided.
  *   { type: 'external_sessions_snapshot', requestId?, generatedAt, sessions, error? } — Control Room mission-control external-session survey reply (#5969, epic #5422 phase 4); reply to an `external_sessions_request`. `sessions` lists the LIVE external Claude Code sessions the daemon learned about over `POST /api/events` (#5413) — sessions it did NOT launch — each carrying source/sessionId/name/project/cwd, a read-only `status` ('running'|'idle'), active `subagents`, and `lastActivityTs`. Read-only (no PTY/control handle exists for these). Host-level: a session-bound token is refused with an additive `error: { code, message }` on an otherwise-empty (schema-valid) snapshot. `requestId` echoes the request when provided.
+ *   { type: 'repo_events_delta', generatedAt, event } — Control Room repo-events LIVE delta (#6536, PR-2 of #5966); server-INITIATED (no request) push of a single newly-buffered repo-event when a GitHub webhook delivery lands, so the pane updates without a Refresh. Host-level: broadcast ONLY to unbound (host-authority) clients — a session-bound (share-a-session) token never receives host repo activity. A client that hasn't run the survey ignores it; a client with a snapshot appends the event (bounded). No `error`/`requestId` — degraded surveys still flow through the pull `repo_events_snapshot`.
  *   { type: 'repo_events_snapshot', requestId?, generatedAt, events, error? } — Control Room repo-events survey reply (#5966, epic #5422 phase 5); reply to a `repo_events_request`. `events` is the tail (most-recent-last) of the daemon's bounded RepoEventStore — GitHub-webhook activity (push/pull_request/issues/ping) ingested HMAC-verified over `POST /api/github/webhook` (#6468) — each carrying kind/repo/actor/at plus kind-specific branch/action/number/title/url and a pre-rendered `summary`. Read-only; no delta stream (a full snapshot per pull, like the host/mailbox/external surveys). Host-level: a session-bound token is refused with an additive `error: { code, message }` on an otherwise-empty (schema-valid) snapshot. `requestId` echoes the request when provided.
  *   { type: 'summarize_session_result', sessionId, summary, truncated?, requestId? } — reply to a `summarize_session` (#5547); the model-written continuation brief built from the session's persisted history, seeded editable into the dashboard's create-session composer. `truncated` flags a windowed history. Failures surface as a SUMMARIZE_FAILED `session_error` echoing `sessionId`/`requestId` (curated message — no token/key material).
  *   { type: 'session_preset_snapshot', cwd, preset: { source, active, trustState, enabled, preamble, seed, preambleLength, seedLength, capped, repoPath } | null, requestId? } — Control Room per-repo session-preset reply (#5553, epic #5159); reply to a host-authority `session_preset_get` / `session_preset_set` / `session_preset_approve` / `session_preset_revoke`. `preset` is null when the repo has no preset. Full preamble + seed text reaches HOST-level clients only (the four requests are rejected for session-bound pairing clients). `requestId` echoes the request when provided.
@@ -2233,6 +2234,23 @@ export class WsServer {
   /** #5510: retract a resolved pending request from every host surface. */
   _broadcastPairResolved(requestId, reason) {
     this._broadcastPairPending({ type: 'pair_resolved', requestId, reason })
+  }
+
+  /**
+   * #6536 (PR-2 of #5966): fan a live repo-events delta out to HOST-LEVEL
+   * clients only — authenticated clients with no `boundSessionId` — mirroring
+   * the `repo_events_request` survey's host-authority gate. Called by the
+   * GitHub-webhook receiver after a normalized event is pushed onto the store,
+   * so a connected Control Room pane updates without a Refresh. A session-bound
+   * (share-a-session) token must NOT see host repo activity. The event is the
+   * same normalized shape the survey serves; `generatedAt` is the broadcast time.
+   */
+  _broadcastRepoEvent(event) {
+    if (!event) return
+    this._broadcast(
+      { type: 'repo_events_delta', generatedAt: new Date().toISOString(), event },
+      (client) => !client.boundSessionId,
+    )
   }
 
   /**

@@ -197,6 +197,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'mailbox_status_snapshot',    // Control Room Mailbox tab survey (#5914) — dashboard-only
   'external_sessions_snapshot', // Control Room mission-control external-session survey (#5969, epic #5422) — dashboard-only (mobile parity tracked by #5968)
   'repo_events_snapshot',       // Control Room repo-events survey (#5966, epic #5422 phase 5) — GitHub-webhook activity, dashboard-only for v1; mobile parity deferred
+  'repo_events_delta',          // Control Room repo-events LIVE delta (#6536, PR-2 of #5966) — host-broadcast of a new webhook event; dashboard-only for v1; mobile parity deferred
   'monthly_budget',             // monthly programmatic-credit meter (#5665) — dashboard sidebar
   'pair_pending',               // pairing-approval banner fan-out (#5510) — dashboard-only for v1
   'pair_resolved',              // pairing-approval banner retraction (#5510) — dashboard-only for v1

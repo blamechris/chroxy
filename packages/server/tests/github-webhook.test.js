@@ -220,6 +220,34 @@ describe('handleGithubWebhook()', () => {
     assert.equal(server._repoEventStore, undefined)
   })
 
+  it('#6536: broadcasts the normalized event live on a surfaced delivery', () => {
+    const broadcasts = []
+    const server = { _githubWebhookSecret: SECRET, _broadcastRepoEvent: (e) => broadcasts.push(e) }
+    const body = JSON.stringify({ ref: 'refs/heads/main', commits: [{}], repository: { full_name: 'o/r' }, sender: { login: 'bob' } })
+    deliver(server, { headers: { 'x-github-event': 'push', 'x-hub-signature-256': sign(body) }, body })
+    assert.equal(broadcasts.length, 1)
+    assert.equal(broadcasts[0].kind, 'push')
+    assert.equal(broadcasts[0].branch, 'main')
+    // the broadcast event is the SAME object that was stored (no re-shape)
+    assert.equal(broadcasts[0], server._repoEventStore.list()[0])
+  })
+
+  it('#6536: does NOT broadcast on an unsurfaced event', () => {
+    const broadcasts = []
+    const server = { _githubWebhookSecret: SECRET, _broadcastRepoEvent: (e) => broadcasts.push(e) }
+    const body = JSON.stringify({ repository: { full_name: 'o/r' } })
+    deliver(server, { headers: { 'x-github-event': 'star', 'x-hub-signature-256': sign(body) }, body })
+    assert.equal(broadcasts.length, 0)
+  })
+
+  it('#6536: a server without _broadcastRepoEvent still stores (broadcast is optional)', () => {
+    const server = { _githubWebhookSecret: SECRET }
+    const body = JSON.stringify({ ref: 'refs/heads/main', commits: [{}], repository: { full_name: 'o/r' }, sender: { login: 'bob' } })
+    const res = deliver(server, { headers: { 'x-github-event': 'push', 'x-hub-signature-256': sign(body) }, body })
+    assert.equal(res.statusCode, 202)
+    assert.equal(server._repoEventStore.size, 1)
+  })
+
   it('400 on a valid signature over invalid JSON', () => {
     const body = 'not json'
     const res = deliver({ _githubWebhookSecret: SECRET }, {

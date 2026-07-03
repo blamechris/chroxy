@@ -77,3 +77,19 @@ export const ServerRepoEventsSnapshotSchema = z.object({
   /** Present only on a refusal (e.g. a session-bound token surveying the host). */
   error: z.object({ code: z.string(), message: z.string() }).optional(),
 })
+
+/**
+ * #6536 (PR-2 of #5966) — live repo-events delta. Pushed to HOST-level clients
+ * (unbound tokens only, mirroring the survey's host-authority gate) when a
+ * GitHub webhook delivery lands, so the Control Room pane updates without a
+ * Refresh. Unlike the snapshot this is server-INITIATED (no request), carries a
+ * single newly-buffered `event`, and has no `error`/`requestId` — a degraded
+ * survey still flows through the pull `repo_events_snapshot`. A client that has
+ * not yet run the survey ignores the delta (the survey on tab-open fetches the
+ * full tail); a client with a snapshot appends the event (bounded).
+ */
+export const ServerRepoEventsDeltaSchema = z.object({
+  type: z.literal('repo_events_delta'),
+  generatedAt: z.string().datetime(),
+  event: RepoEventSchema,
+})

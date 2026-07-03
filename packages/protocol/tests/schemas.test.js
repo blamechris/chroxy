@@ -3198,5 +3198,27 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(ClientMessageSchema.safeParse({ type: 'repo_events_request' }).success)
       assert.ok(ClientMessageSchema.safeParse({ type: 'repo_events_request', requestId: 'r1' }).success)
     })
+
+    it('ServerRepoEventsDeltaSchema round-trips a single live event (#6536)', async () => {
+      const { ServerRepoEventsDeltaSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      const r = ServerRepoEventsDeltaSchema.safeParse({
+        type: 'repo_events_delta',
+        generatedAt: '2026-07-03T12:00:00.000Z',
+        event: {
+          kind: 'pull_request', repo: 'blamechris/chroxy', actor: 'blamechris', at: '2026-07-03T12:00:00.000Z',
+          action: 'opened', number: 43, title: 'live', url: 'https://github.com/blamechris/chroxy/pull/43', summary: 'opened PR #43',
+        },
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.event.number, 43)
+    })
+
+    it('ServerRepoEventsDeltaSchema rejects a missing/invalid event', async () => {
+      const { ServerRepoEventsDeltaSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      assert.ok(!ServerRepoEventsDeltaSchema.safeParse({ type: 'repo_events_delta', generatedAt: '2026-07-03T12:00:00.000Z' }).success)
+      assert.ok(!ServerRepoEventsDeltaSchema.safeParse({
+        type: 'repo_events_delta', generatedAt: '2026-07-03T12:00:00.000Z', event: { kind: 'nope', summary: 'x', at: '2026-07-03T12:00:00.000Z', repo: null, actor: null },
+      }).success)
+    })
   })
 })
