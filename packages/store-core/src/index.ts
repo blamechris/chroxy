@@ -863,3 +863,15 @@ export {
   totalPendingPermissions,
   selectNextPendingSession,
 } from './pending-permissions'
+
+// #6542 (IDE P3.1): client-side line hunk diff + per-hunk apply — the shared
+// foundation for the edit-in-place / per-hunk-review surfaces (#6543 feature B,
+// #6544 feature A). The server's git getDiff can't produce a pre-write diff, so
+// original → proposed is diffed on the client into the canonical DiffHunk shape;
+// applyHunks reconstructs a file from an operator-selected subset of hunks.
+export {
+  computeHunks,
+  applyHunks,
+  DEFAULT_CONTEXT_LINES,
+  MAX_DIFF_LINES,
+} from './hunk-diff'
