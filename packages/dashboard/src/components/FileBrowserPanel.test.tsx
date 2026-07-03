@@ -272,6 +272,35 @@ describe('FileBrowserPanel', () => {
     expect(mockRequestFileListing).not.toHaveBeenCalled()
   })
 
+  it('shows a folder child-count badge once its children are fetched (#6470)', async () => {
+    render(<FileBrowserPanel />)
+
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [{ name: 'src', isDirectory: true, size: null }],
+        error: null,
+      })
+    })
+    // The count is unknown before the dir is fetched — no badge.
+    expect(screen.queryByLabelText(/\bitems?$/)).toBeNull()
+
+    fireEvent.click(screen.getByText('src'))
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project/src',
+        parentPath: '/home/user/project',
+        entries: [
+          { name: 'a.ts', isDirectory: false, size: 10 },
+          { name: 'b.ts', isDirectory: false, size: 20 },
+        ],
+        error: null,
+      })
+    })
+    await waitFor(() => expect(screen.getByLabelText('2 items')).toBeTruthy())
+  })
+
   it('closes file viewer when close button is clicked', async () => {
     render(<FileBrowserPanel />)
 

@@ -20,11 +20,20 @@ export interface VisibleTreeItem {
   expanded: boolean
   /** Directory only: are its children being fetched. */
   loading: boolean
+  /** Directory only: number of cached children, or null until fetched. */
+  childCount: number | null
 }
 
-/** Join a directory path and a child name with a single separator. */
+/** Does the path look absolute (POSIX root or a Windows drive)? */
+function isAbsolutePath(p: string): boolean {
+  return p.startsWith('/') || /^[A-Za-z]:\//.test(p)
+}
+
+/** Join a directory path and a child name with a single forward slash. Backslash
+ *  separators in `dir` are normalized so the tree never mixes separators. */
 export function joinPath(dir: string, name: string): string {
-  return dir.endsWith('/') ? `${dir}${name}` : `${dir}/${name}`
+  const d = dir.replace(/\\/g, '/')
+  return d.endsWith('/') ? `${d}${name}` : `${d}/${name}`
 }
 
 /**
@@ -44,7 +53,8 @@ export function sortEntries(entries: FileEntry[]): FileEntry[] {
  * Flatten the visible tree into a render list: the root's children, recursing
  * into every expanded directory whose children are cached. A directory that is
  * expanded but whose children haven't arrived yet contributes only its own row
- * (the caller shows a spinner via `loading`).
+ * (the caller shows a spinner via `loading`). `childCount` is the cached child
+ * count for a directory (null until fetched) — the folder-count badge (#6470).
  */
 export function computeVisibleEntries(
   rootPath: string,
@@ -59,7 +69,15 @@ export function computeVisibleEntries(
     for (const entry of sortEntries(children)) {
       const path = joinPath(dir, entry.name)
       const expanded = entry.isDirectory && expandedDirs.has(path)
-      out.push({ entry, path, depth, expanded, loading: entry.isDirectory && loadingDirs.has(path) })
+      const cached = entry.isDirectory ? dirChildren.get(path) : undefined
+      out.push({
+        entry,
+        path,
+        depth,
+        expanded,
+        loading: entry.isDirectory && loadingDirs.has(path),
+        childCount: entry.isDirectory ? (cached ? cached.length : null) : null,
+      })
       if (expanded) walk(path, depth + 1)
     }
   }
@@ -78,19 +96,20 @@ export function toggleDir(expandedDirs: Set<string>, path: string): Set<string> 
 /**
  * The ancestor directory paths that must be expanded to reveal a file — every
  * directory between the workspace root (exclusive) and the file (exclusive).
- * Accepts an absolute path or a workspace-relative one (a symbol jump), and
- * tolerates Windows separators. Returns `[]` when the file isn't under root.
+ * Accepts an absolute path under root or a workspace-relative one (a symbol
+ * jump), and tolerates Windows separators. Returns `[]` when the file isn't
+ * under root (including an absolute path pointing outside the workspace).
  */
 export function ancestorDirs(filePath: string, rootPath: string): string[] {
   if (!filePath || !rootPath) return []
   const root = rootPath.replace(/\\/g, '/').replace(/\/$/, '')
   const norm = filePath.replace(/\\/g, '/')
-  const rel = norm.startsWith(root + '/')
-    ? norm.slice(root.length + 1)
-    : norm.replace(/^\.?\//, '')
+  let rel: string
+  if (norm.startsWith(root + '/')) rel = norm.slice(root.length + 1)
+  else if (isAbsolutePath(norm)) return [] // an absolute path outside the workspace
+  else rel = norm.replace(/^\.?\//, '')
   const segs = rel.split('/').filter(Boolean)
   const dirs: string[] = []
-  // Exclude the file itself (the last segment).
   for (let i = 0; i < segs.length - 1; i++) {
     dirs.push(root + '/' + segs.slice(0, i + 1).join('/'))
   }
@@ -107,18 +126,22 @@ export interface Breadcrumb {
 
 /**
  * Breadcrumbs for the selected file, VSCode-style: root → …dirs… → file. When
- * nothing is selected, a single root crumb. Directory crumbs carry the dir path
- * (clickable to reveal in the tree); the file crumb is the leaf.
+ * nothing is selected — or the selection is an absolute path outside the
+ * workspace — a single root crumb. Directory crumbs carry the dir path (clickable
+ * to reveal in the tree); the file crumb is the leaf.
  */
 export function buildBreadcrumbs(selectedFile: string | null, rootPath: string): Breadcrumb[] {
   if (!rootPath) return []
   const root = rootPath.replace(/\\/g, '/').replace(/\/$/, '')
   const rootName = root.split('/').pop() || root
-  const crumbs: Breadcrumb[] = [{ label: rootName, path: root, isLeaf: !selectedFile }]
-  if (!selectedFile) return crumbs
+  if (!selectedFile) return [{ label: rootName, path: root, isLeaf: true }]
   const norm = selectedFile.replace(/\\/g, '/')
-  const rel = norm.startsWith(root + '/') ? norm.slice(root.length + 1) : norm.replace(/^\.?\//, '')
+  let rel: string
+  if (norm.startsWith(root + '/')) rel = norm.slice(root.length + 1)
+  else if (isAbsolutePath(norm)) return [{ label: rootName, path: root, isLeaf: true }]
+  else rel = norm.replace(/^\.?\//, '')
   const segs = rel.split('/').filter(Boolean)
+  const crumbs: Breadcrumb[] = [{ label: rootName, path: root, isLeaf: segs.length === 0 }]
   for (let i = 0; i < segs.length; i++) {
     crumbs.push({
       label: segs[i]!,

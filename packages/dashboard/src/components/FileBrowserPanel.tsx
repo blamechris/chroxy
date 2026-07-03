@@ -122,16 +122,22 @@ interface FileTreeRowProps {
 /** One row in the collapsible tree (#6470): a chevron for dirs, icon, name,
  *  optional git badge / size — indented by nesting depth. */
 function FileTreeRow({ item, rootPath, gitStatusMap, selected, onToggle, onFileClick }: FileTreeRowProps) {
-  const { entry, path, depth, expanded, loading } = item
+  const { entry, path, depth, expanded, loading, childCount } = item
+  // Look up git status by the entry's workspace-relative path only. A bare-name
+  // fallback would mis-tag same-named files in different dirs of a multi-level
+  // tree, so it's dropped (relPath already equals the name for root-level files).
   const relPath = relativePath(path, rootPath)
-  const status = gitStatusMap.get(relPath) || gitStatusMap.get(entry.name)
+  const status = gitStatusMap.get(relPath)
   const statusInfo = status ? gitStatusChar(status) : null
   const chevron = entry.isDirectory ? (loading ? '⋯' : expanded ? '▾' : '▸') : ''
 
   return (
-    <li className="file-tree-item" role="treeitem" aria-expanded={entry.isDirectory ? expanded : undefined}>
+    <li className="file-tree-item" role="none">
       <button
         type="button"
+        role="treeitem"
+        aria-expanded={entry.isDirectory ? expanded : undefined}
+        aria-selected={selected || undefined}
         className={`file-tree-btn${entry.isDirectory ? ' is-directory' : ''}${selected ? ' is-selected' : ''}`}
         style={{ paddingLeft: `${6 + depth * 14}px` }}
         onClick={() => entry.isDirectory ? onToggle(path) : onFileClick(path)}
@@ -144,6 +150,10 @@ function FileTreeRow({ item, rootPath, gitStatusMap, selected, onToggle, onFileC
           <span className={`file-tree-git ${statusInfo.className}`} aria-label={`git ${status}`}>
             {statusInfo.char}
           </span>
+        )}
+        {/* #6470 — folder child-count badge (known once the dir has been fetched). */}
+        {entry.isDirectory && childCount !== null && (
+          <span className="file-tree-count" aria-label={`${childCount} item${childCount === 1 ? '' : 's'}`}>{childCount}</span>
         )}
         {!entry.isDirectory && entry.size !== null && (
           <span className="file-tree-size">{formatSize(entry.size)}</span>

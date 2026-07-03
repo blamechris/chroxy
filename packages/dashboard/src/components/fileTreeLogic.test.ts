@@ -12,6 +12,9 @@ describe('joinPath', () => {
     expect(joinPath('/root', 'a.ts')).toBe('/root/a.ts')
     expect(joinPath('/root/', 'a.ts')).toBe('/root/a.ts')
   })
+  it('normalizes backslash separators so the result never mixes', () => {
+    expect(joinPath('C:\\root\\src', 'x.ts')).toBe('C:/root/src/x.ts')
+  })
 })
 
 describe('sortEntries', () => {
@@ -65,6 +68,18 @@ describe('computeVisibleEntries', () => {
   it('returns empty when the root has no cached children', () => {
     expect(computeVisibleEntries(root, new Map(), new Set(), new Set())).toEqual([])
   })
+
+  it('#6470 — reports the cached child count on directories (null until fetched)', () => {
+    const out = computeVisibleEntries(root, children, new Set(), new Set())
+    const src = out.find(i => i.entry.name === 'src')!
+    const readme = out.find(i => i.entry.name === 'readme.md')!
+    expect(src.childCount).toBe(2) // /root/src has [lib, index.ts]
+    expect(readme.childCount).toBe(null) // files never carry a count
+    // A directory whose children aren't cached yet reports null.
+    const partial = new Map<string, FileEntry[]>([['/root', [dir('unfetched')]]])
+    const [row] = computeVisibleEntries(root, partial, new Set(), new Set())
+    expect(row!.childCount).toBe(null)
+  })
 })
 
 describe('toggleDir', () => {
@@ -90,6 +105,9 @@ describe('ancestorDirs', () => {
   it('normalizes Windows separators + trailing root slash', () => {
     expect(ancestorDirs('C:\\root\\a\\b.ts', 'C:\\root\\')).toEqual(['C:/root/a'])
   })
+  it('returns [] for an absolute path outside the workspace root', () => {
+    expect(ancestorDirs('/etc/passwd', '/root')).toEqual([])
+  })
 })
 
 describe('buildBreadcrumbs', () => {
@@ -110,5 +128,10 @@ describe('buildBreadcrumbs', () => {
   })
   it('returns [] with no root', () => {
     expect(buildBreadcrumbs('/root/a.ts', '')).toEqual([])
+  })
+  it('a single root crumb for an absolute selection outside the workspace', () => {
+    expect(buildBreadcrumbs('/etc/passwd', '/root')).toEqual([
+      { label: 'root', path: '/root', isLeaf: true },
+    ])
   })
 })

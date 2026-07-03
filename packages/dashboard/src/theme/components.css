@@ -7993,6 +7993,15 @@ button.sidebar-token-view-session-row:hover {
 
 .file-tree-chevron--leaf { color: transparent; }
 
+/* #6470 — folder child-count badge, right-aligned and muted. */
+.file-tree-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.65;
+}
+
 /* ---- Diff Viewer Panel ---- */
 .diff-viewer-panel {
   display: flex;
