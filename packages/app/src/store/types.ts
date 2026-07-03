@@ -297,6 +297,15 @@ export interface ModelsAndPermissionsData {
   availableProviders: ProviderInfo[];
   // Pending auto permission mode confirmation from server
   pendingPermissionConfirm: PendingPermissionConfirm | null;
+  // #6543 (feature B): pulled full (secret-redacted) tool inputs for pre-write
+  // diffs, keyed by requestId. Fed by the `permission_input` reply to a
+  // `get_permission_input` pull (see requestPermissionInput).
+  permissionInputs: Record<string, ServerPermissionInputMessage>;
+  // #6543 (feature B): the server's advertised capability map from `auth_ok`
+  // (`{ ide: true, … }`). Gates the mobile pre-write-diff review to servers with
+  // `features.ide` on, mirroring the dashboard's `serverCapabilities?.ide` gate.
+  // Absent/non-object capabilities parse to `{}` (no advertised capabilities).
+  serverCapabilities: Record<string, boolean>;
 }
 
 /**
@@ -496,17 +505,8 @@ export interface MessageInputActions {
   // (no server confirm/dequeue will arrive), so it can't linger forever.
   clearOptimisticQueuedMessage: (clientMessageId: string, sessionId?: string) => void;
   sendPermissionResponse: (requestId: string, decision: string, editedInput?: Record<string, string> | null) => 'sent' | 'queued' | false;
-  /** #6543 (feature B): pulled full redacted tool inputs for pre-write diffs, keyed by requestId. */
-  permissionInputs: Record<string, ServerPermissionInputMessage>;
-  /** #6543: pull the full redacted tool input for a pending permission. */
+  /** #6543: pull the full redacted tool input for a pending permission (a `permission_input` reply lands in `permissionInputs`). */
   requestPermissionInput: (requestId: string) => boolean;
-  /**
-   * #6543 (feature B): the server's advertised capability map from `auth_ok`
-   * (`{ ide: true, … }`). Gates the mobile pre-write-diff review to servers with
-   * `features.ide` on, mirroring the dashboard's `serverCapabilities?.ide` gate.
-   * Absent/non-object capabilities parse to `{}` (no advertised capabilities).
-   */
-  serverCapabilities: Record<string, boolean>;
   /**
    * Send a `user_question_response` answer to the server.
    *
