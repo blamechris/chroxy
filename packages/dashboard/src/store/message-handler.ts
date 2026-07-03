@@ -130,7 +130,7 @@ import {
   type ClientStoreAdapter,
 } from '@chroxy/store-core'
 import { PROTOCOL_VERSION } from '@chroxy/protocol'
-import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema } from '@chroxy/protocol/schemas'
+import { ServerByokCredentialsStatusSchema, ServerCredentialsStatusSchema, ServerCredentialTestResultSchema, ServerActivitySnapshotSchema, ServerActivityDeltaSchema, ServerCancelActivityAckSchema, ServerHostStatusSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerContainersStatusSnapshotSchema, ServerContainersActionAckSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerByokPoolStatusSnapshotSchema, ServerByokPoolActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostPruneActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSimulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerWslStatusSnapshotSchema, ServerWslActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoEventsDeltaSchema, ServerIntegrationActionAckSchema, ServerSummarizeSessionResultSchema, ServerSessionPresetSnapshotSchema, ServerPairPendingSchema, ServerPairResolvedSchema, ServerBillingCanarySchema, BillingCanarySnapshotSchema, ServerSymbolsSnapshotSchema, ServerSymbolLocationSchema, ServerSearchResultsSchema, ServerReferencesResultSchema } from '@chroxy/protocol/schemas'
 import { resolveSummarizeRequest, rejectSummarizeRequest } from './summarizeRequests'
 import {
   createKeyPair,
@@ -2646,6 +2646,28 @@ function handleRepoEventsSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
 }
 
 /**
+ * #6536 (PR-2 of #5966) — live repo-events delta `repo_events_delta`: APPEND the
+ * single carried event to the stored snapshot so the pane updates without a
+ * Refresh. Same defensive Zod-validate-or-drop pattern as the snapshot. A delta
+ * that arrives before the first survey (no snapshot yet) is IGNORED — the
+ * survey on tab-open fetches the full store tail (which already includes this
+ * event, pushed server-side before the broadcast), so nothing is lost. The
+ * appended list is bounded to the store cap (200, mirrors REPO_EVENT_STORE_CAP)
+ * and stays most-recent-last, matching the survey's ordering. The snapshot's
+ * `generatedAt` is advanced to the delta's time so RepoEventsSection's eyebrow
+ * date + "generated Nm ago" freshness line stay honest as events stream in
+ * (otherwise a live-updating pane would read stale).
+ */
+function handleRepoEventsDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
+  const parsed = ServerRepoEventsDeltaSchema.safeParse(msg);
+  if (!parsed.success) return;
+  const current = get().repoEventsSnapshot;
+  if (!current) return; // no survey yet — tab-open survey fetches the full tail
+  const events = [...current.events, parsed.data.event].slice(-200);
+  set({ repoEventsSnapshot: { ...current, events, generatedAt: parsed.data.generatedAt } });
+}
+
+/**
  * #5553 — per-repo session-preset snapshot. The reply to session_preset_get /
  * _set / _approve / _revoke. Store the resolved preset keyed by cwd so the
  * create-session modal can disclose "repo preset applies" and the per-repo
@@ -3251,6 +3273,8 @@ const HANDLERS: Record<string, Handler> = {
   external_sessions_snapshot: handleExternalSessionsSnapshot,
   // #5966 (epic #5422 phase 5): Control Room repo-events survey snapshot.
   repo_events_snapshot: handleRepoEventsSnapshot,
+  // #6536 (PR-2 of #5966): live repo-events delta appended to the pane.
+  repo_events_delta: handleRepoEventsDelta,
   session_preset_snapshot: handleSessionPresetSnapshot,
   // #5253: self-hosted runner Control Room survey snapshot.
   runner_status_snapshot: handleRunnerStatusSnapshot,

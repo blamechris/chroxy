@@ -239,6 +239,10 @@ export function handleGithubWebhook(server, req, res) {
       }
       if (!server._repoEventStore) server._repoEventStore = new RepoEventStore()
       server._repoEventStore.push(event)
+      // #6536: push the normalized event to connected host-level Control Room
+      // panes so the repo-events feed updates live (no Refresh). Guarded — a
+      // bare/stubbed server (tests) may not wire the WS broadcast.
+      if (typeof server._broadcastRepoEvent === 'function') server._broadcastRepoEvent(event)
       sendJson(res, 202, { accepted: true, surfaced: true, kind: event.kind })
     } catch (err) {
       log.error(`github webhook handler error: ${err?.stack || err}`)

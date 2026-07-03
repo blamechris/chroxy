@@ -94,3 +94,34 @@ export declare const ServerRepoEventsSnapshotSchema: z.ZodObject<{
         message: z.ZodString;
     }, z.core.$strip>>;
 }, z.core.$strip>;
+/**
+ * #6536 (PR-2 of #5966) — live repo-events delta. Pushed to HOST-level clients
+ * (unbound tokens only, mirroring the survey's host-authority gate) when a
+ * GitHub webhook delivery lands, so the Control Room pane updates without a
+ * Refresh. Unlike the snapshot this is server-INITIATED (no request), carries a
+ * single newly-buffered `event`, and has no `error`/`requestId` — a degraded
+ * survey still flows through the pull `repo_events_snapshot`. A client that has
+ * not yet run the survey ignores the delta (the survey on tab-open fetches the
+ * full tail); a client with a snapshot appends the event (bounded).
+ */
+export declare const ServerRepoEventsDeltaSchema: z.ZodObject<{
+    type: z.ZodLiteral<"repo_events_delta">;
+    generatedAt: z.ZodString;
+    event: z.ZodObject<{
+        kind: z.ZodEnum<{
+            ping: "ping";
+            issues: "issues";
+            push: "push";
+            pull_request: "pull_request";
+        }>;
+        repo: z.ZodNullable<z.ZodString>;
+        actor: z.ZodNullable<z.ZodString>;
+        at: z.ZodString;
+        branch: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        action: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        number: z.ZodOptional<z.ZodNullable<z.ZodNumber>>;
+        title: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        url: z.ZodOptional<z.ZodNullable<z.ZodString>>;
+        summary: z.ZodString;
+    }, z.core.$loose>;
+}, z.core.$strip>;
