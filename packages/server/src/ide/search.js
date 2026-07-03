@@ -61,7 +61,10 @@ const TEXT_BASENAMES = new Set([
  * @param {string} rootDir            Absolute workspace root (session cwd).
  * @param {(line: string) => number[]} matchLine  Per-line matcher → 1-indexed columns.
  * @param {object} [opts]  path, maxFiles(2000), maxResults(500), maxFileSize(512KB),
- *                         maxDepth(12), maxLineLength(1000).
+ *                         maxDepth(12), maxLineLength(1000), isCancelled.
+ * @param {() => boolean} [opts.isCancelled]  #6506 — polled at each walk boundary
+ *   (dir entry, per-dirent, file entry); when it returns true the walk aborts
+ *   promptly. Lets a caller supersede an in-flight walk (single-flight search).
  * @returns {Promise<{results: Array<{file:string,line:number,column:number,text:string}>, truncated: boolean}>}
  */
 async function collectMatches(rootDir, matchLine, opts = {}) {
@@ -72,6 +75,7 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
     maxFileSize = 512 * 1024,
     maxDepth = 12,
     maxLineLength = 1000,
+    isCancelled = null,
   } = opts
 
   // Realpath-confine the root (symlink-safe base) — see the security note above.
@@ -106,6 +110,7 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
 
   /** Grep one file into the accumulator, honouring the caps. */
   async function grepFile(absPath) {
+    if (isCancelled && isCancelled()) return
     if (filesRead >= maxFiles) { truncated = true; return }
     const base = absPath.split(sep).pop().toLowerCase()
     const ext = extname(base)
@@ -146,6 +151,7 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
 
   /** Recursively walk a directory. */
   async function walk(dir, depth) {
+    if (isCancelled && isCancelled()) return
     if (depth > maxDepth || filesRead >= maxFiles || results.length >= maxResults) {
       if (filesRead >= maxFiles || results.length >= maxResults) truncated = true
       return
@@ -156,6 +162,7 @@ async function collectMatches(rootDir, matchLine, opts = {}) {
     } catch { return }
     dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
     for (const ent of dirents) {
+      if (isCancelled && isCancelled()) break
       if (filesRead >= maxFiles || results.length >= maxResults) { truncated = true; break }
       const abs = join(dir, ent.name)
       if (ent.isDirectory()) {

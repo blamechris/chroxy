@@ -128,6 +128,15 @@ async function handleSearchContent(ws, client, msg, ctx) {
   // #6481 (epic #6469): fail closed when the IDE surface is not opted in.
   if (!isIdeFeatureEnabled(ctx.services?.config)) return
 
+  // #6506 — single-flight per connection: a newer search_content supersedes any
+  // in-flight walk. Stamp a monotonic token; the walk polls isCancelled() and
+  // aborts once the token moves, and we skip emitting a superseded reply — so the
+  // daemon runs at most one workspace walk per client at a time under fast typing.
+  // Stamped before the empty-query branch so clearing the box also cancels a walk.
+  const token = (client._ideSearchToken || 0) + 1
+  client._ideSearchToken = token
+  const superseded = () => client._ideSearchToken !== token
+
   const query = typeof msg.query === 'string' ? msg.query.trim() : ''
   const path = typeof msg.path === 'string' && msg.path ? msg.path : null
 
@@ -150,9 +159,13 @@ async function handleSearchContent(ws, client, msg, ctx) {
   }
 
   try {
-    const { results, truncated } = await searchContent(cwd, query, { path })
+    const { results, truncated } = await searchContent(cwd, query, { path, isCancelled: superseded })
+    // A newer search landed while this walk ran — it emits its own results; stay
+    // silent so a stale reply can't clobber the fresher one.
+    if (superseded()) return
     ctx.transport.send(ws, { type: 'code_search_results', query, results, truncated, error: null })
   } catch (err) {
+    if (superseded()) return
     log.debug(`search_content failed: ${err?.message}`)
     ctx.transport.send(ws, {
       type: 'code_search_results',
