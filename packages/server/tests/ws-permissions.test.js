@@ -961,7 +961,7 @@ describe('createPermissionHandler', () => {
       assert.equal(res.statusCode, 200)
       assert.equal(respondToPermission.mock.calls.length, 1,
         'SDK session.respondToPermission must be invoked')
-      assert.deepStrictEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow'])
+      assert.deepStrictEqual(respondToPermission.mock.calls[0].arguments, ['sdk-req', 'allow', undefined]) // #6543: editedInput 3rd arg (HTTP path never sets it)
       assert.equal(opts.broadcastFn.mock.calls.length, 0,
         'SDK path must NOT broadcast inline — the unified pipeline handles it (#3048)')
     })

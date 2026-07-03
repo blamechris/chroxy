@@ -556,7 +556,7 @@ describe('settings-handlers', () => {
       settingsHandlers.permission_response(makeWs(), client, { requestId: 'req-1', decision: 'allow' }, ctx)
 
       assert.equal(session.respondToPermission.callCount, 1)
-      assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow'])
+      assert.deepEqual(session.respondToPermission.lastCall, ['req-1', 'allow', undefined]) // #6543: editedInput 3rd arg (absent here)
     })
 
     // Issue #2912: permission_response rejection for a bound-client must use
@@ -752,7 +752,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'unbound client with matching activeSessionId must route normally')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow'])
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-active', 'allow', undefined])
         assert.equal(ctx.permissions.permissionSessionMap.has('perm-ok-active'), false,
           'mapping must be consumed when the decision is routed')
       })
@@ -782,7 +782,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'subscribed unbound client must route normally — matches _broadcastToSession filter')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow'])
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-ok-sub', 'allow', undefined])
       })
 
       it('leaves the bound-client guard unchanged (different code path)', () => {
@@ -848,7 +848,7 @@ describe('settings-handlers', () => {
 
         assert.equal(sessionA.respondToPermission.callCount, 1,
           'after-switch decision must route to the originating session A')
-        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow'])
+        assert.deepEqual(sessionA.respondToPermission.lastCall, ['perm-after-switch', 'allow', undefined])
         assert.equal(sessionB.respondToPermission.callCount, 0,
           'must not bleed onto the now-active session B')
         assert.equal(ctx.permissions.permissionSessionMap.has('perm-after-switch'), false,
