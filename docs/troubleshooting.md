@@ -227,7 +227,7 @@ PATH="/opt/homebrew/opt/node@22/bin:$PATH" npx chroxy start
 
 **Fixes:**
 - Increase terminal font size for a larger QR code
-- Use `npx chroxy info` to re-display connection details without restarting
+- Use `npx chroxy pair-code` to re-print the current pairing code + connection URL for the running daemon (or `npx chroxy status` for the tunnel URL / port / uptime) without restarting
 
 ## 8. E2E encryption errors ("decrypt failed")
 
@@ -262,7 +262,7 @@ See [docs/providers.md](providers.md) for Gemini CLI installation and supported 
   ```
 
 **Symptom:** `gemini: command not found` / `ENOENT`
-- The Gemini CLI binary is not installed or not on PATH. Chroxy probes `/opt/homebrew/bin/gemini`, `/usr/local/bin/gemini`, and `/usr/bin/gemini`.
+- The Gemini CLI binary is not installed or not on PATH. Chroxy probes `~/.local/bin/gemini`, `/opt/homebrew/bin/gemini`, `/usr/local/bin/gemini`, `/usr/bin/gemini`, and `~/.npm-global/bin/gemini`.
 - Install via npm: `npm install -g @google/gemini-cli` (or the distribution for your platform), then verify `gemini --version`.
 
 **Symptom:** Model errors or empty responses
@@ -282,11 +282,11 @@ See [docs/providers.md](providers.md) for Codex CLI installation and supported m
   ```
 
 **Symptom:** `codex: command not found` / `ENOENT`
-- The Codex CLI binary is not installed or not on PATH. Chroxy probes `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, and `/usr/bin/codex`.
+- The Codex CLI binary is not installed or not on PATH. Chroxy probes `~/.local/bin/codex`, `/opt/homebrew/bin/codex`, `/usr/local/bin/codex`, `/usr/bin/codex`, and `~/.npm-global/bin/codex`.
 - Install the OpenAI Codex CLI per the upstream instructions, then verify `codex --version`.
 
 **Symptom:** Model not supported / invocation fails
-- Codex's default model is `gpt-5.4`. Switch with `--model <name>` using a model your API key has access to.
+- Codex has no hard-coded default model — it uses whatever is configured in `~/.codex/config.toml`. Override per session with `--model <name>` using a model your API key has access to.
 - The Codex provider does **not** support attachments, plan mode, permission handling, or conversation resume. Sending a message with attachments emits an `error` event rather than being silently ignored. See the [Providers section](feature-matrix.md#providers) in the feature matrix.
 
 ## 12. Expo dev build issues (app development)

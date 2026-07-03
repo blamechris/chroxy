@@ -39,8 +39,8 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-tui` *(default)* | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription. The zero-config default (see #5819), to keep setups off the metered programmatic-credit pool. |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
 | `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
-| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | `gpt-5.4` | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
-| `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-7` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
+| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | CLI default (`~/.codex/config.toml`) | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
+| `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-8` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
 | `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
 | *(config-driven)* | `@anthropic-ai/sdk` → any Anthropic-compatible endpoint | Entry's `apiKeyEnv` (or `credentialsKey` in `~/.chroxy/credentials.json`) | Entry's `defaultModel` | Per-entry API key, or none (local servers) | Declared in `providers.anthropicCompatible` (config.json): Z.ai GLM, Moonshot Kimi, MiniMax, LM Studio, llama.cpp, vLLM, OpenRouter, custom. Full BYOK agent loop. See [below](#anthropic-compatible-endpoints-config-driven) |
@@ -49,7 +49,7 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `docker-sdk` | Docker image + SDK inside | Inherits Claude env from container | Inherits `claude-sdk` | Same as `claude-sdk` | Only registered when `environments.enabled=true` and Docker daemon is reachable |
 | `docker-byok` | Docker image; agent loop stays on the host via `@anthropic-ai/sdk` | Same as `claude-byok` | Inherits `claude-byok` | Same as `claude-byok` | Only registered when `environments.enabled=true` and Docker daemon is reachable; built-in tool execution (Read/Write/Edit/Bash/Glob/Grep) runs inside the container |
 
-> **Default model behaviour differs by provider.** Codex and Gemini have a `DEFAULT_MODEL` constant inside their session class (`gpt-5.4`, `gemini-2.5-pro`) — that's the value the provider actually passes when nothing is set. The BYOK family likewise has an internal fallback: `ClaudeByokSession._defaultModel` returns `claude-opus-4-7`, overridden per subclass (`deepseek-chat`, `qwen3-coder`) — the defaults listed in the table above. The `claude`-binary providers (`claude-sdk`, `claude-cli`, `claude-tui`, `claude-channel`) do NOT define an internal default: when `--model` / `CHROXY_MODEL` / `config.model` is unset, Chroxy passes `null` through `BaseSession` to the SDK or `claude` CLI, which then picks its own default (typically whatever the current Claude Code / SDK release ships with — often Sonnet, but subject to change upstream). The `claude-sonnet-4-6` string you'll see elsewhere in the code is the full ID the `sonnet` alias resolves to in `models.js`, not a hardcoded default.
+> **Default model behaviour differs by provider.** Gemini has a `DEFAULT_MODEL` constant inside its session class (`gemini-2.5-pro`) — the value it passes when nothing is set. Codex passes `null` (its `DEFAULT_MODEL` was removed — pinning a release broke `codex exec` when that version wasn't on the host), so the Codex CLI falls back to whatever is in `~/.codex/config.toml`. The BYOK family has an internal fallback: `ClaudeByokSession._defaultModel` returns `claude-opus-4-8`, overridden per subclass (`deepseek-chat`, `qwen3-coder`) — the defaults listed in the table above. The `claude`-binary providers (`claude-sdk`, `claude-cli`, `claude-tui`, `claude-channel`) do NOT define an internal default: when `--model` / `CHROXY_MODEL` / `config.model` is unset, Chroxy passes `null` through `BaseSession` to the SDK or `claude` CLI, which then picks its own default (typically whatever the current Claude Code / SDK release ships with — often Sonnet, but subject to change upstream). The `claude-sonnet-4-6` string you'll see elsewhere in the code is the full ID the `sonnet` alias resolves to in `models.js`, not a hardcoded default.
 >
 > Mobile/desktop clients can switch models live on providers that report `modelSwitch: true`. Docker providers inherit `modelSwitch` from their underlying Claude provider (`DockerSession` spreads `CliSession.capabilities`, `DockerSdkSession` spreads `SdkSession.capabilities`), so they behave the same as `claude-cli` / `claude-sdk` for model switching.
 
@@ -269,7 +269,7 @@ distinct surfaces** — not just the session cwd:
 1. **The session `cwd` / `project_roots`** — the directory you picked
    when starting the session. Bounded by Chroxy's `validateCwdAllowed`
    workspace allowlist (see
-   [`handler-utils.js:259-320`](../packages/server/src/handler-utils.js#L259-L320)).
+   [`handler-utils.js`](../packages/server/src/handler-utils.js) — the `validateCwdAllowed` function).
    The policy itself also appends read-only protections for `.git`,
    `.agents`, and `.codex` under this root.
 2. **`/tmp`** — the system temp root. On macOS `/tmp` is a symlink to
@@ -357,7 +357,7 @@ gemini --version
 
 ### Where to get an API key
 
-https://aistudio.google.com/apikey — export `GEMINI_API_KEY=...`.
+https://aistudio.google.com/apikey — export `GEMINI_API_KEY=...` (the provider also accepts `GOOGLE_API_KEY` as an alternative).
 
 The provider hard-fails at `start()` with `GEMINI_API_KEY environment variable is not set` if the var is missing.
 

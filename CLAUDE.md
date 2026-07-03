@@ -19,16 +19,17 @@ chroxy/
 │   ├── dashboard/    # Web dashboard (React + Vite, served by the server)
 │   ├── protocol/     # Shared protocol types and Zod schemas (@chroxy/protocol)
 │   ├── store-core/   # Shared store logic and crypto (@chroxy/store-core)
+│   ├── design-tokens/# Design tokens → generated dashboard theme.css/tokens.ts (@chroxy/design-tokens)
 │   └── claude-hooks/ # Hook emitters for external Claude Code sessions (@chroxy/claude-hooks)
 ├── docs/            # Setup guides, architecture
 └── scripts/         # Install helpers
 ```
 
-**Current Status (v0.9.46):**
-- Server works: CLI headless mode, multi-provider registry (Claude SDK/CLI/TUI, BYOK, Gemini, Codex, DeepSeek, Ollama, config-driven Anthropic-compatible + OpenAI-compatible endpoints), WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications + Discord status-embed sink, external-session event ingest (`POST /api/events` + ingest secret), session management, model switching, plan mode detection, background agent tracking, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, K8s/Rancher backends (config-driven selection; experimental — live-cluster validation pending #6275), embedded user-shell terminal, daemon identity-key rotation (`chroxy identity rotate`), Control Room env/runtime management, queue-while-processing (mid-turn send + auto-flush), permission rule engine, encrypted credentials at rest (OS keychain), extensible provider/handler system
+**Current Status (v0.9.47):**
+- Server works: CLI headless mode, multi-provider registry (Claude SDK/CLI/TUI, BYOK, Gemini, Codex, DeepSeek, Ollama, config-driven Anthropic-compatible + OpenAI-compatible endpoints), WebSocket protocol, Cloudflare tunnel (Quick + Named), supervisor auto-restart, push notifications + Discord status-embed sink, external-session event ingest (`POST /api/events` + ingest secret), session management, model switching, plan mode detection, background agent tracking, container environments (Docker Compose, DevContainer, snapshots), container/worktree isolation, K8s/Rancher backends (config-driven selection; experimental — live-cluster validation pending #6275), embedded user-shell terminal, daemon identity-key rotation (`chroxy identity rotate`), Control Room env/runtime management, queue-while-processing (mid-turn send + auto-flush), permission rule engine, encrypted credentials at rest (OS keychain), opt-in IDE navigation surface (`features.ide` / `CHROXY_ENABLE_IDE=1` — file/symbol navigation, go-to-definition, find-references, find-in-project, syntax-highlit viewer; epic #6469), extensible provider/handler system
 - Desktop works: Tauri tray app, multi-host LAN client (server picker, mDNS discovery, shared-session join), web dashboard with syntax highlighting, xterm.js terminal, Control Room, notifications, session tabs, voice-to-text (macOS), console page, environment management panel, startup-failure surfacing with retry
 - App works: QR code scanning, connection flow with health checks and retries, ConnectionPhase state machine for resilient reconnection, markdown rendering, dual-view chat/terminal, xterm.js terminal emulation (WebView), plan approval UI, agent monitoring, settings screen, voice-to-text input, session rules UI, worktree toggle
-- Claude-hooks works: `chroxy-hooks install` registers six stateless emitters in Claude Code settings so plain (non-chroxy) sessions feed the daemon's notification pipeline — see `docs/guides/discord-notifications.md`
+- Claude-hooks works: `chroxy-hooks install` registers eight stateless emitters in Claude Code settings so plain (non-chroxy) sessions feed the daemon's notification pipeline — see `docs/guides/discord-notifications.md`
 - **Dev build required** — `expo-speech-recognition` native module means Expo Go no longer works. Use `npx expo run:ios` or `npx expo run:android`.
 
 ## Critical Dev Notes
@@ -411,5 +412,5 @@ For detailed component tables, WebSocket protocol messages, file listings, and s
 
 ---
 
-*Last Updated: 2026-06-22*
-*Version: 0.9.46*
+*Last Updated: 2026-07-02*
+*Version: 0.9.47*

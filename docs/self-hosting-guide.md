@@ -61,7 +61,7 @@ npx chroxy start --tunnel named --no-supervisor
 
 - Server banner shows your stable hostname
 - QR code encodes the same URL every time
-- Kill the Claude process → supervisor logs "scheduling respawn" → server restarts within seconds
+- Kill the server process → supervisor logs the restart (`Child ran for <n>s | total restarts: <n> | next backoff: <n>ms`) → server restarts within seconds
 - App shows "Server Restarting" banner during recovery, then auto-reconnects
 
 ## Process Management
@@ -177,8 +177,8 @@ The tunnel URL must be routable before the QR is shown. This takes a few seconds
 
 ### App can't connect
 
-1. Verify the server is running and the tunnel URL is accessible: `curl https://your-tunnel-url`
-2. Should return `{"status":"ok"}`
+1. Verify the server is running and the tunnel URL is accessible: `curl https://your-tunnel-url/health`
+2. Should return JSON containing `"status":"ok"` (also includes `mode` and `version`). Use the `/health` path explicitly — a plain `curl` of `/` returns the same JSON, but a browser-style `Accept: text/html` request to `/` redirects to `/dashboard`.
 3. If the health check fails, the tunnel may not be routable yet — wait a few seconds and retry
 
 ### Supervisor keeps restarting
