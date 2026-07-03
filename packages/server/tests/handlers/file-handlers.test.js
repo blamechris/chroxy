@@ -271,4 +271,44 @@ describe('file-handlers', () => {
       assert.ok(!callOpts.userAgentsDirs, 'userAgentsDirs must not be set when ctx lacks it')
     })
   })
+
+  // #6541: file/git mutation handlers must reject pairing-bound (share-a-session)
+  // tokens — a bound token can observe a session but must not overwrite files or
+  // mutate git state. The primary token + the main app's UNBOUND linking token
+  // still write. Mirrors the auto-mode/permission-rules/credential-write gates.
+  describe('#6541 — bound-token mutation gate', () => {
+    const MUTATIONS = [
+      ['write_file', 'writeFile', { path: '/repo/x.js', content: 'x' }],
+      ['git_stage', 'gitStage', { files: ['x.js'] }],
+      ['git_unstage', 'gitUnstage', { files: ['x.js'] }],
+      ['git_commit', 'gitCommit', { message: 'm' }],
+    ]
+
+    for (const [type, method, msg] of MUTATIONS) {
+      it(`${type}: rejects a pairing-bound token WITHOUT performing the mutation`, () => {
+        const send = createSpy()
+        const ctx = makeCtx(new Map(), { send })
+        const ws = { readyState: 1 }
+        fileHandlers[type](ws, makeClient({ boundSessionId: 'sess-1' }), { ...msg, requestId: 'r1' }, ctx)
+        assert.equal(ctx.services.fileOps[method].callCount, 0, `${type} must be blocked for a bound token`)
+        assert.equal(send.callCount, 1, 'a rejection error is sent')
+        assert.equal(send.lastCall[1].code, 'FILE_MUTATION_FORBIDDEN_BOUND_CLIENT')
+        assert.equal(send.lastCall[1].requestId, 'r1')
+      })
+
+      it(`${type}: allows an UNBOUND (primary / linking-mode) token`, () => {
+        const send = createSpy()
+        const ctx = makeCtx(new Map(), { send })
+        const ws = { readyState: 1 }
+        fileHandlers[type](ws, makeClient(), msg, ctx) // no boundSessionId
+        assert.equal(ctx.services.fileOps[method].callCount, 1, `${type} must pass through for an unbound token`)
+      })
+    }
+
+    it('read_file (non-mutation) is NOT gated for a bound token', () => {
+      const ctx = makeCtx()
+      fileHandlers.read_file({ readyState: 1 }, makeClient({ boundSessionId: 'sess-1' }), { path: '/repo/x.js' }, ctx)
+      assert.equal(ctx.services.fileOps.readFile.callCount, 1, 'reads stay open to bound tokens')
+    })
+  })
 })
