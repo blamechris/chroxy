@@ -31,7 +31,7 @@ The server will print a QR code. Scan it with the Chroxy app.
 | `chroxy start --cwd /path` | Set working directory |
 | `chroxy start --model opus` | Use a specific Claude model |
 | `chroxy start --allowed-tools tool1,tool2` | Restrict exposed tools |
-| `chroxy start --provider name` | Use a specific session provider (default: `claude-sdk`) |
+| `chroxy start --provider name` | Use a specific session provider (default: `claude-tui`) |
 | `chroxy start --no-encrypt` | Disable end-to-end encryption |
 | `chroxy dev` | Development mode (supervisor + auto-restart) |
 | `chroxy deploy` | Validate and restart the running server |
@@ -46,8 +46,8 @@ The server will print a QR code. Scan it with the Chroxy app.
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│                    index.js                         │
-│                   (entry point)                     │
+│                     cli.js                          │
+│          (entry point — Commander, src/cli/*)       │
 └─────────────────────┬───────────────────────────────┘
                       │
         ┌─────────────┼─────────────┐
@@ -81,7 +81,7 @@ The server will print a QR code. Scan it with the Chroxy app.
 | CodexSession | `codex-session.js` | OpenAI Codex CLI executor |
 | SessionManager | `session-manager.js` | Multi-session lifecycle management |
 | WsServer | `ws-server.js` | WebSocket protocol with auth + encryption |
-| TunnelRegistry | `tunnel/registry.js` | Pluggable tunnel adapter registry |
+| Tunnel wiring | `tunnel/index.js` | `parseTunnelArg` + Cloudflare adapter selection |
 | BaseTunnelAdapter | `tunnel/base.js` | Base class with shared recovery logic |
 | CloudflareTunnelAdapter | `tunnel/cloudflare.js` | Cloudflare adapter (quick/named modes) |
 | Supervisor | `supervisor.js` | Tunnel owner + child auto-restart (named tunnel) |

@@ -106,6 +106,11 @@ QR code scanning, LAN auto-discovery, markdown rendering, dual-view chat/termina
 
 ## Quick Start
 
+> **New here? Follow the [Setup & Smoke Test guide](docs/setup-and-smoke-test.md)** — a
+> step-by-step, copy-pasteable walkthrough that takes you from `git clone` to a
+> verified, running daemon, with a runnable smoke test (`doctor` → `status` →
+> `/health` → the Playwright dashboard check) so you can confirm it works end to end.
+
 ### Provider credentials
 
 Chroxy reads provider API keys from environment variables at server startup. The default Claude provider uses your existing `claude` CLI login (no extra setup), but Gemini and Codex require explicit keys:
