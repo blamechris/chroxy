@@ -1743,6 +1743,13 @@ export class WsServer {
       // socket peer, identical to the strip decision — they can never diverge.
       const localPeer = isLocalOrLanPeer(req)
       req._chroxyUsesDeflate = !localPeer
+      // #6562: carry the same UNSPOOFABLE locality signal to the encryption
+      // decision. isLocalOrLanPeer is false when proxy headers are present, so a
+      // cloudflared-tunneled connection (which arrives at socketIp 127.0.0.1 but
+      // carries cf-connecting-ip) is NOT a local peer — the loopback encryption
+      // bypass (ws-history.js) must consult this so tunneled clients still do the
+      // key_exchange instead of being silently downgraded to plaintext.
+      req._chroxyLocalPeer = localPeer
       if (localPeer) {
         delete req.headers['sec-websocket-extensions']
       }
@@ -1800,6 +1807,11 @@ export class WsServer {
         // — see EventNormalizer._resolveFlushIntervalMs. Set from the
         // unspoofable upgrade-time locality decision (req._chroxyUsesDeflate).
         usesDeflate: req._chroxyUsesDeflate === true,
+        // #6562: true only for a genuine loopback/LAN peer with NO proxy headers
+        // — i.e. NOT a cloudflared-tunneled connection. Gates the loopback
+        // encryption bypass so a tunneled (proxied) connection to socketIp
+        // 127.0.0.1 is not treated as trusted-local and still requires E2E.
+        localPeer: req._chroxyLocalPeer === true,
         // #3404: visible defaults to true; mobile flips to false on backgrounding
         // so completion push notifications fire instead of being suppressed by
         // a still-alive but invisible WS connection.

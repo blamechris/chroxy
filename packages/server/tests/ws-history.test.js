@@ -846,10 +846,14 @@ describe('sendPostAuthInfo — encryption', () => {
     if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
   })
 
+  // The bypass cases model a GENUINE local dashboard: a loopback socketIp AND
+  // localPeer:true (isLocalOrLanPeer saw no proxy headers). #6562 additionally
+  // requires localPeer so a tunneled connection to 127.0.0.1 is NOT bypassed —
+  // see the proxied-loopback regression test below.
   it('bypasses encryption requirement for 127.0.0.1 when localhostBypass enabled', () => {
     const ws = makeFakeWs()
     const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true })
-    registerClient(ctx, ws, { socketIp: '127.0.0.1' })
+    registerClient(ctx, ws, { socketIp: '127.0.0.1', localPeer: true })
 
     sendPostAuthInfo(ctx, ws)
     const authOk = ctx._sends.find(m => m.type === 'auth_ok')
@@ -859,7 +863,7 @@ describe('sendPostAuthInfo — encryption', () => {
   it('bypasses encryption requirement for ::1 when localhostBypass enabled', () => {
     const ws = makeFakeWs()
     const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true })
-    registerClient(ctx, ws, { socketIp: '::1' })
+    registerClient(ctx, ws, { socketIp: '::1', localPeer: true })
 
     sendPostAuthInfo(ctx, ws)
     const authOk = ctx._sends.find(m => m.type === 'auth_ok')
@@ -869,11 +873,40 @@ describe('sendPostAuthInfo — encryption', () => {
   it('bypasses encryption requirement for ::ffff:127.0.0.1 when localhostBypass enabled', () => {
     const ws = makeFakeWs()
     const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true })
-    registerClient(ctx, ws, { socketIp: '::ffff:127.0.0.1' })
+    registerClient(ctx, ws, { socketIp: '::ffff:127.0.0.1', localPeer: true })
 
     sendPostAuthInfo(ctx, ws)
     const authOk = ctx._sends.find(m => m.type === 'auth_ok')
     assert.equal(authOk.encryption, 'disabled')
+  })
+
+  it('#6562: does NOT bypass encryption for a loopback socketIp that is a PROXIED (tunneled) peer', () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true, keyExchangeTimeoutMs: 60000 })
+    // cloudflared forwards tunnel traffic to 127.0.0.1, so socketIp is loopback —
+    // but the upgrade-time isLocalOrLanPeer check set localPeer=false because
+    // cf-connecting-ip / x-forwarded-for were present. A paired mobile client over
+    // a Quick Tunnel MUST still get the encrypted handshake, not a plaintext bypass.
+    const client = registerClient(ctx, ws, { socketIp: '127.0.0.1', localPeer: false })
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required')
+    if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
+  })
+
+  it('#6562: a genuine LAN peer (RFC1918 socket, localPeer:true) still REQUIRES encryption (bypass is loopback-only)', () => {
+    const ws = makeFakeWs()
+    const ctx = makeCtx({ encryptionEnabled: true, localhostBypass: true, keyExchangeTimeoutMs: 60000 })
+    // A real LAN device: socketIp is RFC1918 (not loopback), localPeer:true (no
+    // proxy headers). The bypass stays loopback-ONLY, so this must still encrypt —
+    // this locks the "added condition is stricter, never wider" property.
+    const client = registerClient(ctx, ws, { socketIp: '10.0.0.5', localPeer: true })
+
+    sendPostAuthInfo(ctx, ws)
+    const authOk = ctx._sends.find(m => m.type === 'auth_ok')
+    assert.equal(authOk.encryption, 'required')
+    if (client._keyExchangeTimeout) clearTimeout(client._keyExchangeTimeout)
   })
 
   it('does NOT bypass encryption for localhost IP when localhostBypass is false', () => {

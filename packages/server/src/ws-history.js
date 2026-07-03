@@ -240,8 +240,19 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
     sessionInfo.cwd = null
   }
 
-  // Skip encryption for localhost connections
-  const isLocalhost = localhostBypass && (client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1')
+  // Skip encryption for localhost connections.
+  //
+  // #6562: the loopback socket-IP check alone is NOT sufficient — cloudflared
+  // forwards tunnel traffic to 127.0.0.1, so a REMOTE client over a Quick Tunnel
+  // arrives with socketIp 127.0.0.1 and would be silently downgraded to plaintext,
+  // which a paired (identity-pinned) mobile client correctly refuses ("did not
+  // negotiate encryption"). Additionally require `client.localPeer` — the
+  // unspoofable upgrade-time locality signal (isLocalOrLanPeer), which is FALSE
+  // when proxy headers (cf-connecting-ip / x-forwarded-for) are present. So a
+  // genuine local dashboard (loopback socket, no proxy headers) is still bypassed,
+  // but a tunneled connection to 127.0.0.1 is not — it does the full key_exchange.
+  const isLoopbackSocket = client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1'
+  const isLocalhost = localhostBypass && isLoopbackSocket && client.localPeer === true
   const requireEncryption = encryptionEnabled && !isLocalhost
 
   // #5555 (eager key exchange) — if the client supplied its ephemeral public
