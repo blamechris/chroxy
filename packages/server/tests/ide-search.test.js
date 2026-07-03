@@ -78,6 +78,27 @@ describe('searchContent — grep behaviour', () => {
     const { results } = await searchContent(root, 'target', { path: 'src' })
     assert.deepEqual(results.map((r) => r.file), ['src/b.ts'])
   })
+
+  // #6506 — the walk polls isCancelled() at each boundary so a caller can
+  // supersede an in-flight search (single-flight — the handler wires this up).
+  it('aborts the directory walk immediately when isCancelled() is true', async () => {
+    const { results, truncated } = await searchContent(root, 'target', { isCancelled: () => true })
+    assert.deepEqual(results, [])
+    assert.equal(truncated, false)
+  })
+
+  it('aborts a single-file grep when isCancelled() is true', async () => {
+    // path→a.js takes the tstat.isFile() branch (grepFile directly, not walk),
+    // so this proves the grepFile-entry poll independently of the walk poll.
+    const { results } = await searchContent(root, 'target', { path: 'a.js', isCancelled: () => true })
+    assert.deepEqual(results, [])
+  })
+
+  it('is a no-op change when isCancelled() never fires (no regression)', async () => {
+    const withGuard = await searchContent(root, 'target', { isCancelled: () => false })
+    const without = await searchContent(root, 'target')
+    assert.deepEqual(withGuard, without)
+  })
 })
 
 describe('searchContent — confinement (security)', () => {
