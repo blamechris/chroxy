@@ -164,9 +164,12 @@ function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
  * summary fallback. It defaults to `MAX_INPUT_CHARS` (the ~10K broadcast cap), so
  * every existing broadcast caller is byte-for-byte unchanged. The pull path
  * (#6543 `get_permission_input`, which needs the FULL content to build a
- * pre-write diff) passes a larger `maxChars` (`PULL_MAX_INPUT_CHARS`) — the
- * secret-stripping passes (KEY-NAME + VALUE-SHAPE) ALWAYS run regardless of the
- * cap, so a higher cap never weakens redaction, only the truncation threshold.
+ * pre-write diff) passes a larger `maxChars` (`PULL_MAX_INPUT_CHARS`) — for an
+ * object input (which every real tool_input is), the secret-stripping passes
+ * (KEY-NAME + VALUE-SHAPE) run on every value regardless of the cap, so a higher
+ * cap never weakens redaction, only the truncation threshold. A non-object input
+ * is returned as-is (there is nothing to key/redact); callers always pass the
+ * tool_input object.
  *
  * @param {object} input
  * @param {{ maxChars?: number }} [opts]

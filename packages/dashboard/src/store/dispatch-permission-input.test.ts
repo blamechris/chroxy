@@ -47,16 +47,20 @@ describe('permission_input dispatch (#6543)', () => {
   it('stores a found:true permission_input keyed by requestId', () => {
     handleMessage({ type: 'permission_input', requestId: 'r1', found: true, tool: 'Write', input: { file_path: '/x', content: 'a\nb' } }, ctx() as never)
     const entry = store.getState().permissionInputs['r1']
-    expect(entry!.found).toBe(true)
-    expect(entry!.tool).toBe('Write')
-    expect((entry!.input as { content: string }).content).toBe('a\nb')
+    expect(entry?.found).toBe(true)
+    if (entry?.found) {
+      expect(entry.tool).toBe('Write')
+      expect((entry.input as { content: string }).content).toBe('a\nb')
+    }
   })
 
   it('stores a found:false reply so the UI can show "unavailable"', () => {
     handleMessage({ type: 'permission_input', requestId: 'r2', found: false, error: { code: 'NOT_PENDING', message: 'gone' } }, ctx() as never)
     const entry = store.getState().permissionInputs['r2']
-    expect(entry!.found).toBe(false)
-    expect(entry!.error!.code).toBe('NOT_PENDING')
+    expect(entry?.found).toBe(false)
+    if (entry && !entry.found) {
+      expect(entry.error.code).toBe('NOT_PENDING')
+    }
   })
 
   it('drops a malformed permission_input (missing found)', () => {

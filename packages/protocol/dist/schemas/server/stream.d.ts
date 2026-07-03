@@ -135,17 +135,21 @@ export declare const ServerPermissionRequestSchema: z.ZodObject<{
  * `input`/`tool` are present only when `found`. Session-bound: the server only
  * returns input for a permission the requesting client's session owns.
  */
-export declare const ServerPermissionInputSchema: z.ZodObject<{
+export declare const ServerPermissionInputSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
     type: z.ZodLiteral<"permission_input">;
     requestId: z.ZodString;
-    found: z.ZodBoolean;
+    found: z.ZodLiteral<true>;
     tool: z.ZodOptional<z.ZodString>;
-    input: z.ZodOptional<z.ZodAny>;
-    error: z.ZodOptional<z.ZodObject<{
+    input: z.ZodRecord<z.ZodString, z.ZodUnknown>;
+}, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"permission_input">;
+    requestId: z.ZodString;
+    found: z.ZodLiteral<false>;
+    error: z.ZodObject<{
         code: z.ZodString;
         message: z.ZodString;
-    }, z.core.$strip>>;
-}, z.core.$strip>;
+    }, z.core.$strip>;
+}, z.core.$strip>], "found">;
 /**
  * Single validated builder for the `permission_request` wire message (#6031).
  *

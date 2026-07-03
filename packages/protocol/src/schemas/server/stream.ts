@@ -241,17 +241,27 @@ export const ServerPermissionRequestSchema = z.object({
  * `input`/`tool` are present only when `found`. Session-bound: the server only
  * returns input for a permission the requesting client's session owns.
  */
-export const ServerPermissionInputSchema = z.object({
-  type: z.literal('permission_input'),
-  requestId: z.string(),
-  found: z.boolean(),
-  /** The tool name (e.g. 'Write' / 'Edit'), present only when `found`. */
-  tool: z.string().optional(),
-  /** The full secret-redacted tool input, present only when `found`. */
-  input: z.any().optional(),
-  /** Present when `found` is false (unknown / resolved / cross-session). */
-  error: z.object({ code: z.string(), message: z.string() }).optional(),
-})
+export const ServerPermissionInputSchema = z.discriminatedUnion('found', [
+  // found:true carries the redacted input (a string-keyed object) + tool name,
+  // and NEVER an `error`.
+  z.object({
+    type: z.literal('permission_input'),
+    requestId: z.string(),
+    found: z.literal(true),
+    /** The tool name (e.g. 'Write' / 'Edit'). */
+    tool: z.string().optional(),
+    /** The full secret-redacted tool input. */
+    input: z.record(z.string(), z.unknown()),
+  }),
+  // found:false carries an `error` and NEVER `input`/`tool` — a security message,
+  // so the "unavailable" shape can't accidentally ship any tool input.
+  z.object({
+    type: z.literal('permission_input'),
+    requestId: z.string(),
+    found: z.literal(false),
+    error: z.object({ code: z.string(), message: z.string() }),
+  }),
+])
 
 /**
  * Single validated builder for the `permission_request` wire message (#6031).

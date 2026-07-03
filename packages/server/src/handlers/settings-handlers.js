@@ -753,8 +753,9 @@ for (const settingDef of PER_SESSION_SETTINGS) {
  *      `found:false` with NO input — it can never read another session's input.
  *   3. The raw input (`session._pendingPermissions`, the back-compat accessor
  *      onto the session's PermissionManager) is re-run through `sanitizeToolInput`
- *      with the larger `PULL_MAX_INPUT_CHARS` cap — the KEY-NAME + VALUE-SHAPE
- *      secret passes ALWAYS run, so a higher cap never weakens redaction.
+ *      with the larger `PULL_MAX_INPUT_CHARS` cap — for the tool_input object the
+ *      KEY-NAME + VALUE-SHAPE secret passes run on every value regardless of the
+ *      cap, so a higher cap never weakens redaction, only the truncation point.
  */
 function handleGetPermissionInput(ws, client, msg, ctx) {
   const requestId = msg.requestId
