@@ -459,6 +459,11 @@ function handlePermissionResponse(ws, client, msg, ctx) {
   const result = resolver.resolve(requestId, decision, client.boundSessionId, {
     clientId: client.id,
     dispatchFallbackSessionId: client.activeSessionId,
+    // #6543 (feature B): the operator's per-hunk edits for an approve. The server
+    // whitelists which fields may be substituted (permission-manager.js
+    // mergeEditedInput) — a client can narrow the content but not redirect the
+    // path. Only present when the client reviewed + edited the proposed write.
+    editedInput: msg.editedInput,
   })
 
   if (result.kind === 'binding_mismatch') {

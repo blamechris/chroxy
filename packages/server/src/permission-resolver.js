@@ -89,7 +89,7 @@ export function createPermissionResolver({
    * @returns {{ kind: string, [k: string]: any }} ResolveResult
    */
   function resolve(requestId, decision, callerBoundSessionId, opts = {}) {
-    const { clientId = null, dispatchFallbackSessionId = null } = opts
+    const { clientId = null, dispatchFallbackSessionId = null, editedInput = undefined } = opts
 
     // Invariant B (#2806 residual): the binding check reads the RAW map entry —
     // never an activeSessionId fallback. For a bound caller the request MUST be
@@ -117,7 +117,9 @@ export function createPermissionResolver({
     if (originSessionId && sm) {
       const entry = sm.getSession(originSessionId)
       if (entry && typeof entry.session.respondToPermission === 'function') {
-        const resolved = entry.session.respondToPermission(requestId, decision)
+        // #6543 (feature B): editedInput flows ONLY to the in-process (SDK/BYOK)
+        // path — the legacy HTTP path below ignores it (CLI tool executes as-is).
+        const resolved = entry.session.respondToPermission(requestId, decision, editedInput)
         consumeRoute(requestId)
         if (resolved) {
           audit(clientId, originSessionId, requestId, decision)

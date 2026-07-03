@@ -1730,7 +1730,7 @@ export class ClaudeByokSession extends BaseSession {
    * PermissionManager which resolves the pending Promise in
    * handlePermission() above.
    */
-  respondToPermission(requestId, decision) {
+  respondToPermission(requestId, decision, editedInput) {
     // #5056: if this requestId belongs to a Task subagent (its pending
     // entry lives in the CHILD's PermissionManager, not ours), forward
     // the decision to that child. ws-permissions only ever calls the
@@ -1746,9 +1746,10 @@ export class ClaudeByokSession extends BaseSession {
       // which our relay listener uses to clear the same entry — deleting
       // here too is idempotent and closes the lifetime tightly.
       this._subagentPermissionRouting.delete(requestId)
-      return child.respondToPermission(requestId, decision)
+      // #6543: forward the operator's per-hunk editedInput to the child too.
+      return child.respondToPermission(requestId, decision, editedInput)
     }
-    return this._permissions.respondToPermission(requestId, decision)
+    return this._permissions.respondToPermission(requestId, decision, editedInput)
   }
 
   /**
