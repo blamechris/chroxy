@@ -94,6 +94,18 @@ export const DEFAULT_SHORTCUTS: ShortcutDef[] = [
     scope: 'global',
   },
   {
+    // Pair a device — opens the linking QR modal (the same action as the
+    // footer "QR" button + the header overflow "Pair a device" row). Default
+    // Cmd+Shift+L ("L" = link a device); deliberately NOT Cmd+Shift+Q, which
+    // macOS reserves for Log Out. No-op when disconnected (App gates the
+    // handler on `isConnected`, mirroring the footer/overflow surfaces).
+    id: 'device.pairQr',
+    defaultBinding: 'cmd+shift+l',
+    description: 'Pair a device (show QR)',
+    category: 'navigation',
+    scope: 'global',
+  },
+  {
     id: 'session.new',
     defaultBinding: 'cmd+n',
     description: 'New session',

@@ -62,6 +62,10 @@ export interface AppHeaderProps {
   // holds the primary token), which filters the "Revoke token" row out entirely.
   onRevokeToken?: () => void
   onToggleSkillsPanel: () => void
+  // Show the device-pairing QR (same action as the footer "QR" button + the
+  // Cmd+Shift+L shortcut). Undefined when disconnected, which filters the
+  // "Pair a device" row out of the overflow menu entirely.
+  onShowQr?: () => void
   showCopyTranscript: boolean
   transcriptCopied: boolean
   onCopyTranscript: () => void
@@ -225,6 +229,17 @@ export function AppHeader(props: AppHeaderProps) {
               icon: '\u{1F9E9}',
               title: 'Skills',
               onClick: props.onToggleSkillsPanel,
+            },
+            // Pair a device — surfaces the linking QR in the discoverable "..."
+            // menu (parity with the footer "QR" button). `onShowQr` is undefined
+            // when disconnected, so the menu filters this row out (no server to
+            // pair against). Mirrors the Cmd+Shift+L shortcut.
+            {
+              id: 'pair-device',
+              label: 'Pair a device',
+              icon: '\u{1F4F1}',
+              title: `Pair a device — scan the QR with the Chroxy mobile app (${formatShortcutKeys('Cmd+Shift+L')})`,
+              onClick: props.onShowQr,
             },
             props.showCopyTranscript
               ? {

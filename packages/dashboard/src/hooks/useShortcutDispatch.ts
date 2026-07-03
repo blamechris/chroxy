@@ -76,6 +76,10 @@ export interface ShortcutDispatchProps {
   openSymbolSearch?: () => void
   // #6474 — open the Cmd+Shift+F find-in-project palette (caller gates on `ide`).
   openCodeSearch?: () => void
+  // Show the device-pairing QR modal (Cmd+Shift+L). Optional + undefined when
+  // disconnected (the caller gates on `isConnected`), so the shortcut no-ops
+  // rather than opening an empty modal with no server to pair against.
+  showQr?: () => void
 }
 
 export function useShortcutDispatch(props: ShortcutDispatchProps): void {
@@ -102,6 +106,7 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
     openFilePalette,
     openSymbolSearch,
     openCodeSearch,
+    showQr,
   } = props
 
   useEffect(() => {
@@ -228,6 +233,12 @@ export function useShortcutDispatch(props: ShortcutDispatchProps): void {
             // to the legacy modal toggle when the redirect isn't wired.
             if (openSettings) openSettings()
             else setSettingsOpen(prev => !prev)
+            break
+          case 'device.pairQr':
+            // Open the linking QR modal (same action as the footer "QR" button
+            // + the overflow "Pair a device" row). `showQr` is undefined when
+            // disconnected, so this no-ops rather than opening an empty modal.
+            showQr?.()
             break
           case 'session.new':
             setShowCreateSession(true)
