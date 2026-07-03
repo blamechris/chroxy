@@ -8,7 +8,7 @@
 import { z } from 'zod'
 
 import { BillingCanarySnapshotSchema, BillingCanaryWarningSchema, ServerAuthOkSchema, ServerPairPendingSchema, ServerPairRequestPendingSchema, ServerPairResolvedSchema, ServerPairResultSchema } from './connection.ts'
-import { ServerPermissionRequestSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts'
+import { ServerPermissionRequestSchema, ServerPermissionInputSchema, ServerStreamDeltaSchema, ServerShellPendingApprovalSchema } from './stream.ts'
 import { ActivityEntrySchema, ActivityKindSchema, ActivityOutputRefSchema, ActivityStatusSchema, ServerActivityDeltaSchema, ServerActivitySnapshotSchema, ServerCancelActivityAckSchema, ServerMessageDequeuedSchema, ServerMessageQueuedSchema } from './activity.ts'
 import { ExternalSessionEntrySchema, HostStatusSummarySchema, IntegrationActionCountsSchema, IntegrationCliStatusSchema, IntegrationRepoSchema, IntegrationStatusSummarySchema, MailboxDeliveryEventSchema, MailboxRegistrationSchema, RepoEventSchema, ServerRepoEventsDeltaSchema, RepoMemoryCacheSchema, RepoMemoryReportSchema, RepoMemoryStatusSchema, RepoRelayRunSchema, RepoRelayStatusSchema, RepoRelayVerdictSchema, RepoRunnersSchema, RepoRuntimeConfigEntrySchema, RepoStatusSchema, RepoTreeSchema, RepoVerdictSchema, RunnerInfoSchema, RunnerServiceStateSchema, RunnerStatusSummarySchema, RunnerVerdictSchema, ServerByokPoolActionAckSchema, ServerByokPoolStatusSnapshotSchema, ServerContainersActionAckSchema, ServerContainersStatusSnapshotSchema, ServerEmulatorActionAckSchema, ServerEmulatorStatusSnapshotSchema, ServerExternalSessionsSnapshotSchema, ServerHostPruneActionAckSchema, ServerHostPruneStatusSnapshotSchema, ServerHostStatusSnapshotSchema, ServerIntegrationActionAckSchema, ServerIntegrationStatusSnapshotSchema, ServerMailboxStatusSnapshotSchema, ServerRepoEventsSnapshotSchema, ServerRepoRuntimeConfigSnapshotSchema, ServerRunnerStatusSnapshotSchema, ServerSessionPresetDisclosureSchema, ServerSessionPresetFullSchema, ServerSessionPresetSnapshotSchema, ServerSimulatorActionAckSchema, ServerSimulatorStatusSnapshotSchema, ServerSkillsInventorySnapshotSchema, ServerSummarizeSessionResultSchema, ServerWslActionAckSchema, ServerWslStatusSnapshotSchema, SkillInventoryEntrySchema, SkillInventoryRepoSchema } from './control-room.ts'
 import { CumulativeUsageSchema, ServerAuthBootstrapSchema, ServerSessionStoppedSchema, ServerSkillTrustGrantInvalidAuthorSchema, ServerSkillTrustGrantOkSchema, ServerSkillsListSchema, ServerTunnelUrlChangedSchema } from './session.ts'
@@ -28,6 +28,9 @@ export type ServerStreamDeltaMessage = z.infer<typeof ServerStreamDeltaSchema>
 // #6277 — host-local user-shell approval pending notice (dashboard-only v1).
 export type ServerShellPendingApprovalMessage = z.infer<typeof ServerShellPendingApprovalSchema>
 export type ServerPermissionRequestMessage = z.infer<typeof ServerPermissionRequestSchema>
+// #6543 (IDE P3 feature B): reply to a get_permission_input pull — the full
+// secret-redacted tool input for building a pre-write diff.
+export type ServerPermissionInputMessage = z.infer<typeof ServerPermissionInputSchema>
 export type ServerErrorMessage = z.infer<typeof ServerErrorSchema>
 // #4192: typed alias for the generic `type: 'error'` envelope added in #4178.
 // Downstream consumers (store-core handleError, dashboard message-handler,

@@ -192,6 +192,7 @@ const DASHBOARD_ONLY = new Set<string>([
   'evaluator_clarify',          // auto-evaluator clarify banner (#3188) — dashboard-only
   'evaluator_rewrite',          // auto-evaluator rewrite banner (#3188) — dashboard-only
   'host_status_snapshot',       // Control Room Host/Repo Status (#5170) — dashboard-only for v1
+  'permission_input',           // #6543 (IDE P3 feature B) get_permission_input reply — full redacted tool input for the pre-write diff; dashboard-only for the first cut, mobile parity is PR-4 of #6543
   'integration_action_ack',     // Control Room Integrations action ack (#5500) — dashboard-only
   'integration_status_snapshot',// Control Room Integrations survey (#5499) — dashboard-only
   'mailbox_status_snapshot',    // Control Room Mailbox tab survey (#5914) — dashboard-only

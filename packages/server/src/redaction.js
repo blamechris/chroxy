@@ -124,11 +124,11 @@ const MAX_SANITIZE_DEPTH = 8
  * @param {WeakSet} seen
  * @returns {*}
  */
-function redactDeep(value, depth, seen) {
+function redactDeep(value, depth, seen, maxChars = MAX_INPUT_CHARS) {
   if (typeof value === 'string') {
     const redacted = redactValue(value)
-    return redacted.length > MAX_INPUT_CHARS
-      ? redacted.slice(0, MAX_INPUT_CHARS) + '... [truncated]'
+    return redacted.length > maxChars
+      ? redacted.slice(0, maxChars) + '... [truncated]'
       : redacted
   }
   if (!value || typeof value !== 'object') return value
@@ -137,13 +137,13 @@ function redactDeep(value, depth, seen) {
   seen.add(value)
   let out
   if (Array.isArray(value)) {
-    out = value.map((item) => redactDeep(item, depth + 1, seen))
+    out = value.map((item) => redactDeep(item, depth + 1, seen, maxChars))
   } else {
     out = {}
     for (const [key, child] of Object.entries(value)) {
       out[key] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
         ? '[REDACTED]'
-        : redactDeep(child, depth + 1, seen)
+        : redactDeep(child, depth + 1, seen, maxChars)
     }
   }
   seen.delete(value)
@@ -160,10 +160,19 @@ function redactDeep(value, depth, seen) {
  * — is redacted before it reaches any client. Both passes recurse through nested
  * objects and arrays.
  *
+ * The `maxChars` cap governs BOTH the per-string truncation and the whole-object
+ * summary fallback. It defaults to `MAX_INPUT_CHARS` (the ~10K broadcast cap), so
+ * every existing broadcast caller is byte-for-byte unchanged. The pull path
+ * (#6543 `get_permission_input`, which needs the FULL content to build a
+ * pre-write diff) passes a larger `maxChars` (`PULL_MAX_INPUT_CHARS`) — the
+ * secret-stripping passes (KEY-NAME + VALUE-SHAPE) ALWAYS run regardless of the
+ * cap, so a higher cap never weakens redaction, only the truncation threshold.
+ *
  * @param {object} input
+ * @param {{ maxChars?: number }} [opts]
  * @returns {object}
  */
-function sanitizeToolInput(input) {
+function sanitizeToolInput(input, { maxChars = MAX_INPUT_CHARS } = {}) {
   if (!input || typeof input !== 'object') return input
 
   const seen = new WeakSet()
@@ -171,15 +180,24 @@ function sanitizeToolInput(input) {
   for (const [key, value] of Object.entries(input)) {
     result[key] = SENSITIVE_KEY_NAMES.has(key.toLowerCase())
       ? '[REDACTED]'
-      : redactDeep(value, 1, seen)
+      : redactDeep(value, 1, seen, maxChars)
   }
 
   // Final size check on the whole object
   const serialized = JSON.stringify(result)
-  if (serialized.length > MAX_INPUT_CHARS) {
-    return { _truncated: true, summary: serialized.slice(0, MAX_INPUT_CHARS) + '... [truncated]' }
+  if (serialized.length > maxChars) {
+    return { _truncated: true, summary: serialized.slice(0, maxChars) + '... [truncated]' }
   }
   return result
 }
 
-export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput }
+/**
+ * #6543: the truncation cap for the `get_permission_input` PULL path — the
+ * client needs the un-broadcast-truncated (but still secret-redacted) tool input
+ * to build a full pre-write diff. Generous enough for any realistic file edit,
+ * bounded so a pathological input can't blast the wire (the diff falls back to a
+ * whole-file view past `computeHunks`'s own line guard anyway).
+ */
+const PULL_MAX_INPUT_CHARS = 512 * 1024 // 512K chars
+
+export { SENSITIVE_PATTERNS, API_KEY_PATTERNS, SENSITIVE_KEY_NAMES, sanitizeToolInput, PULL_MAX_INPUT_CHARS, MAX_INPUT_CHARS }

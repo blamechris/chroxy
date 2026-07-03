@@ -351,6 +351,7 @@ function _isSecureRequest(req) {
  *   { type: 'claude_ready' }                          — Claude Code ready for input
  *   { type: 'model_changed', model: '...' }          — active model updated
  *   { type: 'available_models', models: [...], provider?, defaultModel? } — models the active provider accepts
+ *   { type: 'permission_input', requestId, found, tool?, input?, error? } — #6543 (IDE P3 feature B) reply to a `get_permission_input` pull: the FULL secret-redacted tool input for a pending permission (the `permission_request` broadcast truncates `input` at ~10K), so a client can build a per-hunk pre-write diff. `found:false` (+ `error`) when the request is unknown / already resolved / owned by another session — the handler is session-bound (a client only gets input for a permission its session owns).
  *   { type: 'permission_request', requestId, tool, description, input, remainingMs } — permission prompt
  *   { type: 'confirm_permission_mode', mode, warning } — server challenges auto mode (client must re-send with confirmed: true)
  *   { type: 'permission_mode_changed', mode: '...' } — permission mode updated

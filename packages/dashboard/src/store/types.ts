@@ -16,7 +16,7 @@ import type { PermissionMode } from '@chroxy/store-core'
 // #5175: Host/Repo Status Control Room snapshot type (epic #5170). The store
 // holds the latest `host_status_snapshot` so the Control Room section can render
 // the fleet table; the type is the protocol contract pinned in @chroxy/protocol.
-import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
+import type { ServerHostStatusSnapshotMessage, ServerRunnerStatusSnapshotMessage, ServerContainersStatusSnapshotMessage, ServerRepoRuntimeConfigSnapshotMessage, ServerByokPoolStatusSnapshotMessage, ServerHostPruneStatusSnapshotMessage, ServerSimulatorStatusSnapshotMessage, ServerEmulatorStatusSnapshotMessage, ServerWslStatusSnapshotMessage, ServerIntegrationStatusSnapshotMessage, ServerSkillsInventorySnapshotMessage, ServerMailboxStatusSnapshotMessage, ServerExternalSessionsSnapshotMessage, ServerRepoEventsSnapshotMessage, ServerPermissionInputMessage, ServerSymbolsSnapshotMessage, ServerSearchResultsMessage, ServerReferencesResultMessage, IntegrationActionCounts, ServerPairPendingMessage, ServerSessionPresetFull, Attachment } from '@chroxy/protocol'
 // #5184: header cost-badge display mode. Defined in a plain lib module
 // (which owns the union + runtime guard) — the store only needs the type
 // for its state slot, and avoids importing a `.tsx` component here.
@@ -915,6 +915,14 @@ export interface ConnectionState {
    */
   reindexResults: Record<string, ReindexResult>;
   /**
+   * #6543 (IDE P3 feature B) — the pulled full (secret-redacted) tool input for
+   * a pending permission, keyed by requestId, fed by the `permission_input`
+   * handler in reply to `requestPermissionInput`. Used to build the per-hunk
+   * pre-write diff on the permission prompt. `found:false` entries are stored so
+   * the UI can distinguish "not fetched yet" from "unavailable".
+   */
+  permissionInputs: Record<string, ServerPermissionInputMessage>;
+  /**
    * #5502 — repo paths with an in-flight `integration_action` relay re-run:
    * set when sendRepoRelayRerun is called, cleared on the
    * `integration_action_ack` / INTEGRATION_ACTION_FAILED session_error. A
@@ -1648,6 +1656,8 @@ export interface ConnectionState {
   requestExternalSessions: () => boolean;
   /** #5966 — request the buffered repo-events snapshot for the Control Room pane. */
   requestRepoEvents: () => boolean;
+  /** #6543 — pull the full redacted tool input for a pending permission (for the pre-write diff). */
+  requestPermissionInput: (requestId: string) => boolean;
 
   // #5553 — per-repo session preset surface (host-authority). Each returns
   // whether the message went on the wire. Replies arrive as
