@@ -120,21 +120,36 @@ describe('FileBrowserPanel', () => {
     })
   })
 
-  it('navigates into a directory when clicked', async () => {
+  it('expands a directory in place when clicked, lazy-loading its children (#6470)', async () => {
     render(<FileBrowserPanel />)
 
-    fileBrowserCallback!({
-      path: '/home/user/project',
-      parentPath: null,
-      entries: [{ name: 'src', isDirectory: true, size: null }],
-      error: null,
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [{ name: 'src', isDirectory: true, size: null }],
+        error: null,
+      })
     })
 
-    await waitFor(() => {
-      fireEvent.click(screen.getByText('src'))
-    })
-
+    fireEvent.click(screen.getByText('src'))
+    // Expanding a not-yet-cached dir lazy-loads its children.
     expect(mockRequestFileListing).toHaveBeenCalledWith('/home/user/project/src')
+
+    // The children arrive and render NESTED — the parent stays visible (expand in
+    // place), unlike the old navigate-into-replaces-view model.
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project/src',
+        parentPath: '/home/user/project',
+        entries: [{ name: 'index.ts', isDirectory: false, size: 100 }],
+        error: null,
+      })
+    })
+    await waitFor(() => {
+      expect(screen.getByText('src')).toBeTruthy()
+      expect(screen.getByText('index.ts')).toBeTruthy()
+    })
   })
 
   it('requests file content when a file is clicked', async () => {
@@ -226,30 +241,64 @@ describe('FileBrowserPanel', () => {
     })
   })
 
-  it('shows parent navigation (..) when not at root', async () => {
+  it('collapses an expanded directory on a second click, from cache (#6470)', async () => {
     render(<FileBrowserPanel />)
 
-    // First call sets root
-    fileBrowserCallback!({
-      path: '/home/user/project',
-      parentPath: null,
-      entries: [{ name: 'src', isDirectory: true, size: null }],
-      error: null,
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [{ name: 'src', isDirectory: true, size: null }],
+        error: null,
+      })
     })
 
-    // Navigate into src
-    await waitFor(() => fireEvent.click(screen.getByText('src')))
-
-    fileBrowserCallback!({
-      path: '/home/user/project/src',
-      parentPath: '/home/user/project',
-      entries: [{ name: 'index.ts', isDirectory: false, size: 100 }],
-      error: null,
+    fireEvent.click(screen.getByText('src'))
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project/src',
+        parentPath: '/home/user/project',
+        entries: [{ name: 'index.ts', isDirectory: false, size: 100 }],
+        error: null,
+      })
     })
+    await waitFor(() => expect(screen.getByText('index.ts')).toBeTruthy())
 
-    await waitFor(() => {
-      expect(screen.getByText('..')).toBeTruthy()
+    // Second click collapses — the child is hidden and served from cache on the
+    // next expand (no re-fetch).
+    mockRequestFileListing.mockClear()
+    fireEvent.click(screen.getByText('src'))
+    await waitFor(() => expect(screen.queryByText('index.ts')).toBeNull())
+    expect(mockRequestFileListing).not.toHaveBeenCalled()
+  })
+
+  it('shows a folder child-count badge once its children are fetched (#6470)', async () => {
+    render(<FileBrowserPanel />)
+
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project',
+        parentPath: null,
+        entries: [{ name: 'src', isDirectory: true, size: null }],
+        error: null,
+      })
     })
+    // The count is unknown before the dir is fetched — no badge.
+    expect(screen.queryByLabelText(/\bitems?$/)).toBeNull()
+
+    fireEvent.click(screen.getByText('src'))
+    act(() => {
+      fileBrowserCallback!({
+        path: '/home/user/project/src',
+        parentPath: '/home/user/project',
+        entries: [
+          { name: 'a.ts', isDirectory: false, size: 10 },
+          { name: 'b.ts', isDirectory: false, size: 20 },
+        ],
+        error: null,
+      })
+    })
+    await waitFor(() => expect(screen.getByLabelText('2 items')).toBeTruthy())
   })
 
   it('closes file viewer when close button is clicked', async () => {

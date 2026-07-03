@@ -7974,6 +7974,34 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 3px;
 }
 
+/* #6470 — the open file is highlighted in the tree. */
+.file-tree-btn.is-selected {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* #6470 — collapsible-tree chevron. The transparent leaf variant keeps file
+   names aligned with directory names under the toggle column. */
+.file-tree-chevron {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+.file-tree-chevron--leaf { color: transparent; }
+
+/* #6470 — folder child-count badge, right-aligned and muted. */
+.file-tree-count {
+  flex: 0 0 auto;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.65;
+}
+
 /* ---- Diff Viewer Panel ---- */
 .diff-viewer-panel {
   display: flex;
