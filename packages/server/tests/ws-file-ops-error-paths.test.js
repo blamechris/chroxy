@@ -83,6 +83,34 @@ describe('ws-file-ops error paths', () => {
     assert.equal(sent[0].content, 'hello world')
   })
 
+  // #6502 — the request nonce is echoed on every file_content reply so the
+  // dashboard can drop replies from superseded requests.
+  it('readFile echoes the request nonce on a successful reply', async () => {
+    writeFileSync(join(tmp, 'hello.txt'), 'hello world')
+
+    await ops.readFile(ws, 'hello.txt', tmp, 'nonce-7')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'file_content')
+    assert.equal(sent[0].requestId, 'nonce-7')
+  })
+
+  it('readFile echoes the request nonce on an error reply', async () => {
+    await ops.readFile(ws, 'does-not-exist.txt', tmp, 'nonce-err')
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'file_content')
+    assert.equal(sent[0].error, 'File not found')
+    assert.equal(sent[0].requestId, 'nonce-err')
+  })
+
+  it('readFile omits requestId when the request carried no nonce', async () => {
+    writeFileSync(join(tmp, 'hello.txt'), 'hello world')
+
+    await ops.readFile(ws, 'hello.txt', tmp)
+    assert.equal(sent.length, 1)
+    assert.equal(sent[0].type, 'file_content')
+    assert.ok(!('requestId' in sent[0]), 'no requestId key when none supplied')
+  })
+
   it('readFile rejects a symlink pointing outside the workspace root', async () => {
     // Create a file outside the workspace
     const outsideDir = realpathSync(mkdtempSync(join(tmpdir(), 'fileops-outside-')))

@@ -29,10 +29,21 @@ const IMAGE_MIME = {
  */
 export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd) {
 
-  /** Read file content at a given path within the session CWD */
-  async function readFileContent(ws, requestedPath, sessionCwd) {
+  /**
+   * Read file content at a given path within the session CWD.
+   *
+   * @param {string} [requestId] - #6502: optional request nonce echoed back on
+   *   every `file_content` reply so the dashboard can correlate replies to the
+   *   latest in-flight request. Omitted from the payload when not provided.
+   */
+  async function readFileContent(ws, requestedPath, sessionCwd, requestId) {
+    // Attach the request nonce (when present) to every file_content reply so a
+    // superseded read can be dropped client-side without echoed-path matching.
+    const send = requestId === undefined
+      ? (payload) => sendFn(ws, payload)
+      : (payload) => sendFn(ws, { ...payload, requestId })
     if (!sessionCwd) {
-      sendFn(ws, {
+      send({
         type: 'file_content',
         path: null,
         content: null,
@@ -45,7 +56,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
     }
 
     if (!requestedPath || typeof requestedPath !== 'string' || !requestedPath.trim()) {
-      sendFn(ws, {
+      send({
         type: 'file_content',
         path: null,
         content: null,
@@ -76,7 +87,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
           const cwdReal = await resolveSessionCwd(sessionCwd)
           const lexicallyWithinCwd = absPath.startsWith(cwdReal + '/') || absPath === cwdReal
           if (!lexicallyWithinCwd) {
-            sendFn(ws, {
+            send({
               type: 'file_content',
               path: absPath,
               content: null,
@@ -87,7 +98,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
             })
             return
           }
-          sendFn(ws, {
+          send({
             type: 'file_content',
             path: absPath,
             content: null,
@@ -103,7 +114,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       const { valid } = await validatePathWithinCwd(resolvedAbsPath, sessionCwd)
       if (!valid) {
-        sendFn(ws, {
+        send({
           type: 'file_content',
           path: absPath,
           content: null,
@@ -117,7 +128,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
 
       const fileStat = await stat(resolvedAbsPath)
       if (fileStat.isDirectory()) {
-        sendFn(ws, {
+        send({
           type: 'file_content',
           path: absPath,
           content: null,
@@ -130,7 +141,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       }
 
       if (fileStat.size > 512 * 1024) {
-        sendFn(ws, {
+        send({
           type: 'file_content',
           path: absPath,
           content: null,
@@ -154,7 +165,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         } catch (openErr) {
           if (openErr.code === 'ELOOP') {
             // Symlink appeared at the canonical path after validation — reject
-            sendFn(ws, {
+            send({
               type: 'file_content',
               path: absPath,
               content: null,
@@ -176,7 +187,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       // SVG excluded — it's an active document format (scripts/external refs); render as text instead
       if (IMAGE_MIME[ext]) {
         const dataUrl = `data:${IMAGE_MIME[ext]};base64,${buf.toString('base64')}`
-        sendFn(ws, {
+        send({
           type: 'file_content',
           path: absPath,
           content: dataUrl,
@@ -192,7 +203,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       const checkLen = Math.min(buf.length, 8192)
       for (let i = 0; i < checkLen; i++) {
         if (buf[i] === 0) {
-          sendFn(ws, {
+          send({
             type: 'file_content',
             path: absPath,
             content: null,
@@ -212,7 +223,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
         truncated = true
       }
 
-      sendFn(ws, {
+      send({
         type: 'file_content',
         path: absPath,
         content,
@@ -227,7 +238,7 @@ export function createReaderOps(sendFn, resolveSessionCwd, validatePathWithinCwd
       else if (err.code === 'EACCES') errorMessage = 'Permission denied'
       else errorMessage = err.message || 'Unknown error'
 
-      sendFn(ws, {
+      send({
         type: 'file_content',
         path: absPath || requestedPath || null,
         content: null,

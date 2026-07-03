@@ -1104,7 +1104,7 @@ export const DISPATCH_FIXTURES: ContractFixture[] = [
         callbacks: [
           {
             name: 'fileContent',
-            payload: { path: '/f.ts', content: 'x', language: 'typescript', size: 1, truncated: true, error: null },
+            payload: { path: '/f.ts', content: 'x', language: 'typescript', size: 1, truncated: true, error: null, requestId: null },
           },
         ],
       },

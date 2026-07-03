@@ -1526,7 +1526,7 @@ describe('shared dispatch table', () => {
         truncated: true,
       })
       expect(seen).toEqual([
-        { path: '/f.ts', content: 'x', language: 'typescript', size: 1, truncated: true, error: null },
+        { path: '/f.ts', content: 'x', language: 'typescript', size: 1, truncated: true, error: null, requestId: null },
       ])
     })
 
