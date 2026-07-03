@@ -247,10 +247,10 @@ export async function findReferences(rootDir, symbol, opts = {}) {
   // Rank references in the ORIGINATING file first (#6516) — the file the symbol
   // was alt+clicked in is usually where you want to look, mirroring how
   // resolveSymbol uses `fromFile` as a tie-break. Normalize a Windows-style path
-  // to the forward-slash workspace-relative form collectMatches emits, then stable
-  // -partition origin rows to the front (Array.sort is stable since ES2019, so the
-  // deterministic walk order is preserved within each group). Post-collection, so
-  // it never changes which rows survive the cap — only their order.
+  // to the forward-slash workspace-relative form collectMatches emits, then a
+  // stable partition floats origin rows to the front (Array.sort is stable since
+  // ES2019, so the deterministic walk order is preserved within each group).
+  // Post-collection, so it never changes which rows survive the cap — only order.
   const fromFile = typeof opts.fromFile === 'string' && opts.fromFile.trim()
     ? opts.fromFile.trim().replace(/\\/g, '/')
     : null
