@@ -7,7 +7,7 @@ one package is what prevents the two clients from drifting.
 
 ## What's here
 
-- **Message handlers** (`src/handlers/`, `src/message-handler.ts`) — the wire
+- **Message handlers** (`src/handlers/`, `src/dispatch-table.ts`) — the wire
   path that turns server messages into store state.
 - **Chat/activity reducers** — `buildChatViewMessages`, `activity-reducer`.
 - **Syntax tokenizer** (`src/syntax.ts`) — the 15+-language highlighter the file

@@ -8,7 +8,7 @@ generated files.
 ## Flow
 
 ```
-packages/design-tokens/  (token source — tokens-data.js)
+packages/design-tokens/  (token source — src/tokens-data.js)
         │  npm run generate-tokens -w packages/dashboard
         ▼
 packages/dashboard/src/theme/{theme.css, tokens.ts}   (GENERATED — do not hand-edit)

@@ -247,7 +247,7 @@ If 7a–7c pass but 7d doesn't, it's almost always the **AI CLI**, not chroxy �
 
 | Symptom | Check |
 |---------|-------|
-| `Port 8765 is available` fails / "address in use" | A daemon is already running. `chroxy status` to confirm; `chroxy stop` (or `chroxy service` if installed as a system daemon) to stop it. |
+| `Port 8765 is available` fails / "address in use" | A daemon is already running. `chroxy status` to confirm. Stop it: **Ctrl+C** if you started it in the foreground; `chroxy service stop` if you installed it as a system daemon; otherwise kill the pid that `chroxy status` printed. |
 | `No API token configured. Run 'npx chroxy init' first.` | You skipped step 3, or the keychain entry was removed. Re-run `chroxy init`. |
 | Dashboard 403s | The `?token=` is missing/wrong — re-fetch it (step 6). |
 | Tunnel URL unreachable | `curl https://<tunnel>/health`; wait a few seconds for the route to propagate, or check `cloudflared` in `doctor`. |
