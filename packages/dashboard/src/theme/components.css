@@ -3356,6 +3356,11 @@ button.sidebar-token-view-session-row:hover {
   background: var(--bg-header);
 }
 
+/* #6555: all-hunks-dropped writes an empty/no-op result — flag it. */
+.prewrite-diff-hint-warn {
+  color: var(--accent-orange);
+}
+
 .perm-buttons {
   display: flex;
   gap: 8px;

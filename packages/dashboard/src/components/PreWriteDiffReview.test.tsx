@@ -45,6 +45,15 @@ describe('PreWriteDiffReview (#6543)', () => {
     expect(onChange).toHaveBeenLastCalledWith(null)
   })
 
+  it('#6555: warns clearly when ALL hunks are dropped (empty write)', () => {
+    render(<PreWriteDiffReview tool="Write" input={{ content: 'x\ny\nz' }} onEditedInputChange={vi.fn()} />)
+    const toggles = screen.getAllByTestId('hunk-toggle')
+    toggles.forEach((t) => fireEvent.click(t)) // drop every hunk
+    const hint = screen.getByTestId('prewrite-diff-hint')
+    expect(hint.textContent).toContain('empty file')
+    expect(hint.className).toContain('prewrite-diff-hint-warn')
+  })
+
   it('renders nothing for a non-reviewable tool', () => {
     const { container } = render(<PreWriteDiffReview tool="Bash" input={{ command: 'ls' }} onEditedInputChange={vi.fn()} />)
     expect(container.querySelector('[data-testid="prewrite-diff-review"]')).toBeNull()

@@ -71,12 +71,18 @@ export function PreWriteDiffReview({ tool, input, onEditedInputChange }: PreWrit
   if (!spec || hunks.length === 0) return null
 
   const droppedCount = hunks.length - selected.size
+  const allDropped = selected.size === 0
+  // #6555: dropping EVERY hunk means an empty result (an empty file for Write / a
+  // no-op for Edit) — call that out clearly rather than the generic "narrowed" copy.
+  const hint = allDropped
+    ? `All hunks dropped — Approve writes ${tool === 'Write' ? 'an empty file' : 'no change'}.`
+    : droppedCount === 0
+      ? 'Review the proposed change — uncheck a hunk to drop it from the write.'
+      : `${droppedCount} hunk${droppedCount === 1 ? '' : 's'} dropped — Approve writes the narrowed content.`
   return (
     <div className="prewrite-diff-review" data-testid="prewrite-diff-review">
-      <div className="prewrite-diff-hint" data-testid="prewrite-diff-hint">
-        {droppedCount === 0
-          ? 'Review the proposed change — uncheck a hunk to drop it from the write.'
-          : `${droppedCount} hunk${droppedCount === 1 ? '' : 's'} dropped — Approve writes the narrowed content.`}
+      <div className={`prewrite-diff-hint${allDropped ? ' prewrite-diff-hint-warn' : ''}`} data-testid="prewrite-diff-hint">
+        {hint}
       </div>
       {hunks.map((hunk, i) => (
         <HunkView
