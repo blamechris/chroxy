@@ -38,8 +38,8 @@ The registry lives in [`packages/server/src/providers.js`](../packages/server/sr
 | `claude-cli` | `claude` (Claude Code CLI) | `ANTHROPIC_API_KEY` (or `claude` CLI login) | Deferred to `claude` CLI | Anthropic API key or subscription login | Subprocess, required for plan mode; permission hook via HTTP. **Billing class (#5629):** the CLI strips `ANTHROPIC_API_KEY` before spawn, so it always auths via the host pool — a flat Claude **subscription before 2026-06-15 UTC**, and the monthly **programmatic credit pool on/after** that date. |
 | `claude-tui` *(default)* | `claude` (Claude Code CLI, interactive TUI) | `claude` CLI login (rejects `ANTHROPIC_API_KEY` — strips it from spawn env) | Deferred to `claude` TUI | Subscription login only | Persistent PTY, one warmup per session; permission hook via HTTP; deliver-on-complete (no live streaming); bills as interactive subscription. The zero-config default (see #5819), to keep setups off the metered programmatic-credit pool. |
 | `claude-channel` *(research preview)* | `claude --channels` (Claude Code CLI, MCP channel transport) | `claude` CLI login (rejects `ANTHROPIC_API_KEY`). Requires `claude` ≥ 2.1.80 + `--dangerously-load-development-channels` | Deferred to `claude` | Subscription login only | **Scaffold — not yet runnable** (`start()` throws; bridge in #3954). Documented MCP contract instead of TUI scrape; live streaming; first-party permission relay; bills as interactive subscription |
-| `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` | `gemini-2.5-pro` | Google AI Studio API key | No permissions, no plan mode, no resume, no attachments |
-| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY` | CLI default (`~/.codex/config.toml`) | OpenAI API key | No permissions, no plan mode, no resume, no attachments |
+| `gemini` | `gemini` (Gemini CLI) | `GEMINI_API_KEY` / `GOOGLE_API_KEY`, **or** `gemini login` OAuth | `gemini-2.5-pro` | Google AI Studio API key or a `gemini login` session | No permissions, no plan mode, no resume, no attachments |
+| `codex` | `codex` (OpenAI Codex CLI) | `OPENAI_API_KEY`, **or** `codex login` OAuth | CLI default (`~/.codex/config.toml`) | OpenAI API key or a `codex login` session | No permissions, no plan mode, no resume, no attachments |
 | `claude-byok` | `@anthropic-ai/sdk` (npm) → Anthropic Messages API | `ANTHROPIC_API_KEY` (or `anthropicApiKey` in `~/.chroxy/credentials.json`) | `claude-opus-4-8` | Anthropic API key (per-token billing) | No `claude` binary — Chroxy's own in-process agent loop (streaming, tools, in-process permissions, MCP); no cross-restart resume (#4047) |
 | `deepseek` | `@anthropic-ai/sdk` → DeepSeek's Anthropic-compatible endpoint | `DEEPSEEK_API_KEY` (or `deepseekApiKey` in `~/.chroxy/credentials.json`); `DEEPSEEK_BASE_URL` (optional endpoint override) | `deepseek-chat` | DeepSeek API key (per-token billing) | Subclass of `claude-byok` — same agent loop with DeepSeek credentials, endpoint, and pricing |
 | `ollama` | `@anthropic-ai/sdk` → local Ollama daemon (v0.14+) | `CHROXY_OLLAMA_BASE_URL` / `OLLAMA_HOST` (optional endpoint overrides) | `qwen3-coder` | None — local inference | Local models via Ollama's Anthropic-compatible API; full BYOK agent loop (tools, permissions, MCP); cost always $0; any `ollama pull`ed model id accepted |
@@ -359,7 +359,7 @@ gemini --version
 
 https://aistudio.google.com/apikey — export `GEMINI_API_KEY=...` (the provider also accepts `GOOGLE_API_KEY` as an alternative).
 
-The provider hard-fails at `start()` with `GEMINI_API_KEY environment variable is not set` if the var is missing.
+The provider hard-fails at `start()` only if **neither** a key (`GEMINI_API_KEY` / `GOOGLE_API_KEY`) **nor** `gemini login` OAuth state (cached under `~/.gemini/`, #4301) is present — with a running `gemini login` session, no env var is needed.
 
 ### Verify
 

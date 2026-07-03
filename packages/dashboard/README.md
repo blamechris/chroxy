@@ -23,7 +23,7 @@ npm run generate-tokens -w packages/dashboard   # regenerate the theme from desi
 ```
 
 For a normal daemon run you don't build the dashboard by hand — `npm install`
-and the server serve it. Rebuild (`npm run build`) only when you want a running
+and the server serves it. Rebuild (`npm run build`) only when you want a running
 daemon to pick up dashboard source changes.
 
 ## Theming — generated, don't hand-edit
