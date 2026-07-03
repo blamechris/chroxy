@@ -44,10 +44,12 @@ const EDITABLE_INPUT_FIELDS = {
 
 /**
  * Merge a client's `editedInput` into the agent's original tool input under the
- * strict {@link EDITABLE_INPUT_FIELDS} whitelist. Returns the original unchanged
- * when there's no editedInput, the tool isn't editable, or the edited value
- * isn't a string. Never mutates the inputs. This is the load-bearing "narrow-
- * only, no path redirect" control for feature B — keep it dumb + auditable.
+ * strict {@link EDITABLE_INPUT_FIELDS} whitelist. Returns the original REFERENCE
+ * when there's no editedInput, it isn't a plain object, or the tool isn't
+ * editable; otherwise returns a shallow clone with only the whitelisted STRING
+ * fields substituted (a non-string edited value is skipped, so the clone equals
+ * the original by value). Never mutates the inputs. This is the load-bearing
+ * "narrow-only, no path redirect" control for feature B — keep it dumb + auditable.
  *
  * @param {object} originalInput  the agent's proposed tool input
  * @param {*} editedInput         the client-supplied override (untrusted)
