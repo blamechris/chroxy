@@ -189,6 +189,34 @@ describe('#6308 — dashboard sendPermissionResponse', () => {
     const prompt = ss.messages.find((m) => m.requestId === 'req-1')
     expect(prompt?.answered).toBe('allow')
   })
+
+  it('#6543: an approve carries editedInput on the wire; plain allow / deny omit it', async () => {
+    const { useConnectionStore, createEmptySessionState } = await import('./connection')
+    const sent: unknown[] = []
+    const socket = liveSocket(sent)
+    useConnectionStore.setState({
+      activeSessionId: 'sess-1',
+      sessionStates: {
+        'sess-1': {
+          ...createEmptySessionState(),
+          messages: [{ id: 'p1', type: 'prompt', requestId: 'req-1', tool: 'Write', timestamp: 1 }],
+        } as unknown as SessionState,
+      },
+      sessionNotifications: [],
+      socket,
+    } as never)
+    const last = () => sent[sent.length - 1] as { decision?: string; editedInput?: unknown }
+
+    useConnectionStore.getState().sendPermissionResponse('req-1', 'allow', { content: 'edited' })
+    expect(last().decision).toBe('allow')
+    expect(last().editedInput).toEqual({ content: 'edited' })
+
+    useConnectionStore.getState().sendPermissionResponse('req-1', 'allow') // plain Allow
+    expect(last().editedInput).toBeUndefined()
+
+    useConnectionStore.getState().sendPermissionResponse('req-1', 'deny', { content: 'x' }) // deny drops it
+    expect(last().editedInput).toBeUndefined()
+  })
 })
 
 describe('#6308 — dashboard sendInterrupt / sendUserQuestionResponse', () => {
