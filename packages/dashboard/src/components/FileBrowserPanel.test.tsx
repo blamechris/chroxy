@@ -251,6 +251,31 @@ describe('FileBrowserPanel', () => {
     await waitFor(() => expect(screen.getByText('M')).toBeTruthy())
   })
 
+  it('sets the tree root only from the root listing (parentPath null), not a stray subdir', async () => {
+    render(<FileBrowserPanel />)
+    // A subdir listing arrives first (hypothetical race) — must NOT become root.
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root/src',
+        parentPath: '/root',
+        entries: [{ name: 'stray.ts', isDirectory: false, size: 10 }],
+        error: null,
+      })
+    })
+    expect(screen.queryByText('stray.ts')).toBeNull() // root unknown → nothing renders
+
+    // The real root listing (parentPath null) lands and the tree renders.
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root',
+        parentPath: null,
+        entries: [{ name: 'index.ts', isDirectory: false, size: 20 }],
+        error: null,
+      })
+    })
+    await waitFor(() => expect(screen.getByText('index.ts')).toBeTruthy())
+  })
+
   it('sets aria-level on tree items reflecting nesting depth (#6531)', async () => {
     render(<FileBrowserPanel />)
     act(() => {

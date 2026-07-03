@@ -309,9 +309,10 @@ export function FileBrowserPanel() {
       setLoading(false)
       setError(listing.error)
       if (!listing.path) return
-      // Functional update — this callback is registered once and can't close
-      // over the live rootPath state.
-      setRootPath(prev => prev || listing.path)
+      // Set the tree root only from the ROOT listing — the server marks it with
+      // parentPath null (the CWD caps navigation), so a subdir reply that somehow
+      // arrived first can't be mistaken for the root.
+      if (listing.parentPath === null) setRootPath(listing.path)
       // Route the children under the directory they belong to (the root, or a
       // subdir being expanded) — never replace the whole tree. #6470.
       setDirChildren(prev => {
