@@ -463,7 +463,7 @@ Docker providers (`docker`, `docker-sdk`) require `--environments` flag. See [Co
 | `constants/colors.ts` | Shared color palette |
 | `constants/icons.ts` | Shared icon constants |
 
-### Dashboard Frontend (`packages/server/src/dashboard-next/`)
+### Dashboard Frontend (`packages/dashboard/src/`)
 
 The web dashboard is a React + Vite SPA served by the Node.js server. It shares the same WebSocket protocol as the mobile app.
 
@@ -487,7 +487,8 @@ The web dashboard is a React + Vite SPA served by the Node.js server. It shares 
 | `src/components/CommandPalette.tsx` | Keyboard-driven command palette |
 | `src/components/SlashCommandPicker.tsx` | Slash command autocomplete picker |
 | `src/components/FilePicker.tsx` | File attachment picker |
-| `src/components/FileBrowserPanel.tsx` | Project file browser with syntax highlighting |
+| `src/components/FileBrowserPanel.tsx` | VSCode-style collapsible file-tree navigator (#6470) + read-only syntax-highlighted viewer. Opt-in IDE nav (`features.ide`): go-to-definition (cmd+click), find-references (alt+click), symbol panel, Cmd+P quick-open, Cmd+Shift+F find-in-project |
+| `src/components/fileTreeLogic.ts` | Pure tree helpers for FileBrowserPanel (expand/collapse, breadcrumbs, visible-tree flattening) |
 | `src/components/DiffViewerPanel.tsx` | Git diff viewer with file list |
 | `src/components/DirectoryBrowser.tsx` | Directory navigation for session cwd |
 | `src/components/CheckpointTimeline.tsx` | Checkpoint list with timeline UI |
