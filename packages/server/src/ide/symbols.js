@@ -405,8 +405,10 @@ export async function resolveSymbol(rootDir, symbolName, opts = {}) {
   if (!name) return null
   const { fromFile = null } = opts
   // Route through the TTL cache (#6499) so a burst of clicks doesn't re-walk the
-  // tree each time; ttlMs/now (if present) are forwarded for deterministic tests.
-  const { symbols } = await getWorkspaceSymbolIndex(rootDir, opts)
+  // tree each time. Forward ONLY the cache knobs explicitly (not the whole opts
+  // bag) — `fromFile` is a resolveSymbol-only ranking hint the index ignores, so
+  // passing it through would be silent coupling.
+  const { symbols } = await getWorkspaceSymbolIndex(rootDir, { ttlMs: opts.ttlMs, now: opts.now })
   let best = null
   let bestScore = -1
   for (const s of symbols) {

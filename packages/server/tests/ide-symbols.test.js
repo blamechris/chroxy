@@ -1,4 +1,4 @@
-import { describe, it, before, after } from 'node:test'
+import { describe, it, before, beforeEach, after } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -235,6 +235,9 @@ describe('resolveSymbol — go-to-definition (#6475)', () => {
     writeFileSync(join(outside, 'secret.js'), 'export function TOP_SECRET() {}\n')
     symlinkSync(join(outside, 'secret.js'), join(root, 'linkfile.js'))
   })
+  // resolveSymbol now routes through the #6499 TTL cache; start each test with a
+  // clean index so a future mid-block file mutation can't get a stale hit.
+  beforeEach(() => invalidateWorkspaceSymbolIndex())
   after(() => {
     rmSync(root, { recursive: true, force: true })
     rmSync(outside, { recursive: true, force: true })
