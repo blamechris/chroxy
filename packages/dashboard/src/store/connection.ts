@@ -372,6 +372,11 @@ export const selectShowSession = (s: ConnectionState): boolean =>
 let searchNonce = 0;
 let searchTimeoutId: ReturnType<typeof setTimeout> | undefined;
 
+// #6502 — monotonic read_file request nonce. The server echoes it back on the
+// `file_content` reply so the file browser can drop replies from superseded
+// requests (path-agnostic correlation), instead of tail-matching the path.
+let fileContentRequestNonce = 0;
+
 // #5281 ③ PR 2 — one-shot pairing id for the next socket open. When set, the
 // auth handshake sends `{type:'pair', pairingId}` instead of `{type:'auth',
 // token}`; it's cleared right after that first send so a later reconnect uses
@@ -669,6 +674,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   _directoryListingCallback: null,
   _fileBrowserCallback: null,
   _fileContentCallback: null,
+  lastFileContentRequestId: null,
   _gitStatusCallback: null,
   _diffCallback: null,
   conversationHistory: [],
@@ -3620,7 +3626,12 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   requestFileContent: (path: string) => {
     const { socket } = get();
     if (socket && socket.readyState === WebSocket.OPEN) {
-      wsSend(socket, { type: 'read_file', path });
+      // #6502 — stamp each request with a fresh nonce and record it as the
+      // latest in-flight read. The file_content handler drops any reply whose
+      // echoed requestId isn't this one (a superseded read).
+      const requestId = String(++fileContentRequestNonce);
+      set({ lastFileContentRequestId: requestId });
+      wsSend(socket, { type: 'read_file', path, requestId });
     }
   },
 

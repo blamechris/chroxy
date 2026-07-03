@@ -75,6 +75,10 @@ export const ServerFileContentSchema = z.object({
   size: z.number().nullable(),
   truncated: z.boolean(),
   error: z.string().nullable(),
+  // #6502 — echoes the `read_file` request nonce when the client supplied one,
+  // so the dashboard can drop replies from superseded requests without relying
+  // on echoed-path matching. Absent when the request carried no nonce.
+  requestId: z.string().max(200).optional(),
 })
 
 // `browse_files` response (HOME-dir restricted). `entries` are directories only

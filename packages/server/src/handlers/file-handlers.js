@@ -24,7 +24,9 @@ function handleListFiles(ws, client, msg, ctx) {
 
 function handleReadFile(ws, client, msg, ctx) {
   const entry = resolveSession(ctx, msg, client)
-  ctx.services.fileOps.readFile(ws, msg.path, entry?.cwd || null)
+  // #6502 — forward the optional request nonce so the file_content reply echoes
+  // it, letting the dashboard drop superseded replies without path-matching.
+  ctx.services.fileOps.readFile(ws, msg.path, entry?.cwd || null, msg.requestId)
 }
 
 function handleWriteFile(ws, client, msg, ctx) {

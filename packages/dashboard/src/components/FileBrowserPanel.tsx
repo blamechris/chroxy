@@ -305,10 +305,18 @@ export function FileBrowserPanel() {
 
   useEffect(() => {
     const handleContent = (content: FileContent) => {
-      // #6497 — drop a reply that belongs to a since-deselected file: closes the
-      // wrong-content flash and the jump-to-line scroll-target bleed under a rapid
-      // A→B open where A's reply lands after B was selected.
-      if (!contentReplyMatchesSelection(content.path, selectedFileRef.current)) return
+      // #6502 — nonce correlation is authoritative: drop any reply whose echoed
+      // requestId isn't the latest read_file we issued (a superseded request).
+      // This subsumes the #6497 case (a since-deselected file's reply carries an
+      // older nonce) without depending on echoed-path shape. The path-match
+      // (#6497) stays as the fallback for replies from an older server that
+      // doesn't echo a requestId at all.
+      if (content.requestId != null) {
+        const latest = useConnectionStore.getState().lastFileContentRequestId
+        if (latest != null && content.requestId !== latest) return
+      } else if (!contentReplyMatchesSelection(content.path, selectedFileRef.current)) {
+        return
+      }
       setFileContent(content.content)
       setFileLanguage(content.language)
       setFileSize(content.size)

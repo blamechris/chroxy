@@ -236,6 +236,9 @@ export interface FileContent {
   size: number | null;
   truncated: boolean;
   error: string | null;
+  // #6502 — the request nonce echoed from the originating `read_file`, used to
+  // drop replies from superseded requests. Null when the server didn't echo one.
+  requestId: string | null;
 }
 
 // #3181: GitStatusEntry was structurally identical to @chroxy/store-core's
@@ -1241,6 +1244,9 @@ export interface ConnectionState {
   // File browser callbacks
   _fileBrowserCallback: ((listing: FileListing) => void) | null;
   _fileContentCallback: ((content: FileContent) => void) | null;
+  // #6502 — nonce of the most recent read_file request. A file_content reply
+  // whose echoed requestId differs is from a superseded request and is dropped.
+  lastFileContentRequestId: string | null;
 
   // Git status callback
   _gitStatusCallback: ((result: GitStatusResult) => void) | null;
