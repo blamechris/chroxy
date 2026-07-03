@@ -852,9 +852,13 @@ jobs:
         # Cloudflare tunnel (so cloudflared isn't needed), while keeping auth on so
         # the dashboard WebSocket actually connects (the --no-auth path leaves the
         # WS disconnected). The smoke reads this token to build the dashboard URL.
+        # `cwd` pins the auto-created Default session at the tiny IDE fixture
+        # workspace (#6500) so the go-to-def smoke's quick-open + resolve_symbol
+        # are deterministic. `config.cwd` feeds `defaultCwd` verbatim (server-cli.js);
+        # the path is inside the checkout so the session workspace is a real dir.
         run: |
           mkdir -p "$HOME/.chroxy"
-          printf '{ "apiToken": "ci-smoke-token", "externalUrl": "http://localhost:8765", "tunnel": "quick" }\n' > "$HOME/.chroxy/config.json"
+          printf '{ "apiToken": "ci-smoke-token", "externalUrl": "http://localhost:8765", "tunnel": "quick", "cwd": "%s/packages/server/tests/fixtures/smoke-ide-workspace" }\n' "$GITHUB_WORKSPACE" > "$HOME/.chroxy/config.json"
 
       - name: Stub the `claude` binary
         # The daemon auto-creates a default claude-tui session on boot, whose
@@ -877,6 +881,9 @@ jobs:
         # needed without a tunnel). The smoke test then FINDS this server on :8765.
         env:
           CHROXY_ALLOW_UNPINNED_BOOT: '1'
+          # #6500 — advertise the opt-in IDE surface so the smoke can exercise
+          # quick-open + go-to-definition end-to-end in a real browser.
+          CHROXY_ENABLE_IDE: '1'
         run: |
           node src/cli.js start --skip-checks > /tmp/chroxy-server.log 2>&1 &
           echo "CHROXY_SERVER_PID=$!" >> "$GITHUB_ENV"
@@ -890,6 +897,11 @@ jobs:
 
       - name: Run dashboard smoke test
         working-directory: packages/server
+        # SMOKE_REQUIRE_IDE=1 — the daemon above has features.ide on + the fixture
+        # workspace as its cwd, so the go-to-def section must run (not skip): a
+        # missing palette/fixture is a hard failure here, catching an IDE regression.
+        env:
+          SMOKE_REQUIRE_IDE: '1'
         run: node tests/smoke-test.mjs
 
       - name: Stop chroxy server

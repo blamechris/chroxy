@@ -413,6 +413,106 @@ async function run() {
       fail('Control Room opens', 'sidebar-panel-slot-launcher-control-room not found')
     }
 
+    // ---- IDE Go-to-Definition (#6500, epic #6469) ----
+    // Exercises the live cmd/ctrl+click resolve round-trip end-to-end: quick-open
+    // the committed fixture (unique symbols → deterministic resolution), then the
+    // HIT (jump + transient active-line highlight) and MISS (transient
+    // def-not-found pill) paths. Skips gracefully when the IDE surface is off or
+    // the fixture workspace isn't the session cwd (i.e. outside the CI smoke).
+    log('')
+    log('--- IDE Go-to-Definition ---')
+    try {
+      // In CI the daemon has features.ide on + the fixture as its cwd, so the IDE
+      // surface + fixture are REQUIRED preconditions — a graceful skip there would
+      // mask a regression. SMOKE_REQUIRE_IDE=1 makes a missing palette/fixture a
+      // hard failure; unset (local, non-fixture daemon) keeps the section lenient.
+      const requireIde = process.env.SMOKE_REQUIRE_IDE === '1'
+      // Foreground the session view first — the Control Room section above leaves
+      // its own panel open, which overlays the file viewer.
+      const sessionTab = page.locator('[data-testid^="session-tab-"]').first()
+      if (await sessionTab.count()) { await sessionTab.click().catch(() => {}); await page.waitForTimeout(500) }
+      await page.keyboard.press('Meta+KeyP')
+      await page.waitForTimeout(500)
+      let paletteInput = await page.$('[data-testid="file-open-palette-input"]')
+      if (!paletteInput) {
+        await page.keyboard.press('Control+KeyP')
+        await page.waitForTimeout(500)
+        paletteInput = await page.$('[data-testid="file-open-palette-input"]')
+      }
+      if (!paletteInput) {
+        if (requireIde) fail('IDE quick-open palette', 'features.ide expected (SMOKE_REQUIRE_IDE) but Cmd/Ctrl+P did not open the palette')
+        else log('  (IDE quick-open not available — features.ide off; skipping)')
+      } else {
+        pass('IDE quick-open palette opens', 'Cmd/Ctrl+P — features.ide advertised')
+        await paletteInput.fill('smoke_ide_sample')
+        await page.waitForTimeout(1200)
+        const fileItem = await page.$('[data-testid^="file-open-item-"]')
+        if (!fileItem) {
+          if (requireIde) fail('IDE go-to-def fixture', 'smoke_ide_sample expected (SMOKE_REQUIRE_IDE) but quick-open found no match')
+          else log('  (smoke_ide_sample fixture not in this workspace — skipping go-to-def; expected outside CI)')
+          await page.keyboard.press('Escape')
+        } else {
+          await fileItem.click()
+          // Opening a file is a WS content round-trip + tokenize + render; poll
+          // for the tokens rather than sampling at a fixed offset (CI is slower).
+          let synCount = 0
+          try {
+            await page.waitForSelector('.file-viewer-line span[class^="syn-"]', { timeout: 6000 })
+            synCount = await page.$$eval('span[class^="syn-"]', els => els.length).catch(() => 0)
+          } catch { synCount = 0 }
+          if (synCount > 0) pass('IDE file viewer renders syntax tokens', `${synCount} tokens`)
+          else fail('IDE file viewer', 'no syntax tokens rendered')
+
+          // HIT — jump to the exported declaration + a transient active-line
+          // highlight. The highlight appears only after resolve + a content
+          // re-fetch and lives ~1400ms, so poll for it (robust on a loaded runner)
+          // rather than sampling at a fixed offset.
+          // Identifier tokens only — exclude comment/string spans so the anchored
+          // name can't match a mention inside a comment (defensive; the fixture's
+          // comments are single spans whose text is the whole line anyway).
+          const idTokenSel = '.file-viewer-line span[class^="syn-"]:not(.syn-comment):not(.syn-string)'
+          const hitTok = page.locator(idTokenSel, { hasText: /^smokeGotoDefTarget$/ }).first()
+          if (await hitTok.count()) {
+            await hitTok.click({ modifiers: ['ControlOrMeta'] })
+            let hitJumped = false
+            try {
+              await page.waitForSelector('.file-viewer-line--active', { timeout: 4000 })
+              hitJumped = true
+            } catch { hitJumped = false }
+            const strayPill = await page.$('[data-testid="def-not-found"]')
+            if (hitJumped && !strayPill) pass('Go-to-definition HIT', 'jumped + active-line highlight')
+            else fail('Go-to-definition HIT', `jumped=${hitJumped}, pill=${!!strayPill}`)
+            await screenshot(page, '08-ide-goto-def-hit')
+          } else {
+            fail('Go-to-definition HIT', 'no smokeGotoDefTarget token to click')
+          }
+
+          await page.waitForTimeout(1800) // let the highlight clear before the miss
+
+          // MISS — an undeclared symbol yields a transient def-not-found pill.
+          const missTok = page.locator(idTokenSel, { hasText: /^smokeGotoDefMissingSymbol$/ }).first()
+          if (await missTok.count()) {
+            await missTok.click({ modifiers: ['ControlOrMeta'] })
+            await page.waitForTimeout(700)
+            const pill = await page.$('[data-testid="def-not-found"]')
+            if (pill) {
+              pass('Go-to-definition MISS pill', 'def-not-found appeared')
+              await screenshot(page, '09-ide-goto-def-miss')
+              await page.waitForTimeout(2600)
+              if (!(await page.$('[data-testid="def-not-found"]'))) pass('Go-to-definition MISS pill clears', 'transient')
+              else fail('Go-to-definition MISS pill clears', 'still visible after 2.6s')
+            } else {
+              fail('Go-to-definition MISS pill', 'no def-not-found pill appeared')
+            }
+          } else {
+            fail('Go-to-definition MISS', 'no smokeGotoDefMissingSymbol token to click')
+          }
+        }
+      }
+    } catch (e) {
+      fail('IDE Go-to-Definition', e.message)
+    }
+
     // ---- Console errors ----
     log('')
     log('--- Health ---')
