@@ -280,6 +280,7 @@ export declare const PermissionResponseSchema: z.ZodObject<{
         deny: "deny";
         allowAlways: "allowAlways";
     }>;
+    editedInput: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
 }, z.core.$strip>;
 export declare const GetPermissionInputSchema: z.ZodObject<{
     type: z.ZodLiteral<"get_permission_input">;
@@ -945,6 +946,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         deny: "deny";
         allowAlways: "allowAlways";
     }>;
+    editedInput: z.ZodOptional<z.ZodRecord<z.ZodString, z.ZodUnknown>>;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"get_permission_input">;
     requestId: z.ZodString;

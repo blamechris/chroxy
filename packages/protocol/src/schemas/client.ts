@@ -384,6 +384,15 @@ export const PermissionResponseSchema = z.object({
   type: z.literal('permission_response'),
   requestId: z.string().min(1).max(256),
   decision: z.enum(['allow', 'allowAlways', 'deny']),
+  // #6543 (IDE P3 feature B): optional per-hunk-review edits for an `allow` —
+  // a client that reviewed the agent's proposed Write/Edit and dropped some
+  // hunks sends the reduced CONTENT here. The server merges ONLY the whitelisted
+  // content field(s) per tool (Write→content, Edit→new_string) and NEVER the
+  // path/anchor fields, so an edit can narrow the write but can't redirect where
+  // it lands. Ignored on deny, and for tools with no editable content field. A
+  // loose object — the server-side whitelist (permission-manager.js) is the
+  // enforcement point.
+  editedInput: z.record(z.string(), z.unknown()).optional(),
 })
 
 // #6543 (IDE P3 feature B): pull the FULL secret-redacted tool input for a

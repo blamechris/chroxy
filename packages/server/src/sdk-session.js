@@ -1292,8 +1292,8 @@ export class SdkSession extends BaseSession {
    * Resolve a pending permission request (called by WsServer when
    * the app sends permission_response).
    */
-  respondToPermission(requestId, decision) {
-    return this._permissions.respondToPermission(requestId, decision)
+  respondToPermission(requestId, decision, editedInput) {
+    return this._permissions.respondToPermission(requestId, decision, editedInput)
   }
 
   /**

@@ -28,6 +28,48 @@ const MAX_SESSION_RULES = 100         // session-scoped auto-allow rules
 const MAX_RAW_DESCRIPTION_LEN = 8192  // raw tool field length fed to redactValue (far above the 200-char shown window)
 
 /**
+ * #6543 (IDE P3 feature B) — per-tool whitelist of the CONTENT field(s) a client
+ * may substitute via `editedInput` on an `allow` (the per-hunk pre-write review).
+ * ONLY these content fields can come from the client; the path/anchor fields
+ * (`file_path`, `old_string`, `command`, …) are always taken from the ORIGINAL
+ * input. So an operator can narrow/edit the shown content but can NEVER redirect
+ * where the write lands or what runs. A tool absent from this map ignores
+ * `editedInput` entirely (accept/reject-the-whole-tool). `old_string` is
+ * deliberately NOT editable — it is the Edit's match anchor, not shown content.
+ */
+const EDITABLE_INPUT_FIELDS = {
+  Write: ['content'],
+  Edit: ['new_string'],
+}
+
+/**
+ * Merge a client's `editedInput` into the agent's original tool input under the
+ * strict {@link EDITABLE_INPUT_FIELDS} whitelist. Returns the original REFERENCE
+ * when there's no editedInput, it isn't a plain object, or the tool isn't
+ * editable; otherwise returns a shallow clone with only the whitelisted STRING
+ * fields substituted (a non-string edited value is skipped, so the clone equals
+ * the original by value). Never mutates the inputs. This is the load-bearing
+ * "narrow-only, no path redirect" control for feature B — keep it dumb + auditable.
+ *
+ * @param {object} originalInput  the agent's proposed tool input
+ * @param {*} editedInput         the client-supplied override (untrusted)
+ * @param {string} toolName       the tool the permission is for
+ * @returns {object}
+ */
+export function mergeEditedInput(originalInput, editedInput, toolName) {
+  if (!editedInput || typeof editedInput !== 'object' || Array.isArray(editedInput)) return originalInput
+  const allowed = EDITABLE_INPUT_FIELDS[toolName]
+  if (!allowed) return originalInput
+  const merged = { ...originalInput }
+  for (const field of allowed) {
+    if (Object.prototype.hasOwnProperty.call(editedInput, field) && typeof editedInput[field] === 'string') {
+      merged[field] = editedInput[field]
+    }
+  }
+  return merged
+}
+
+/**
  * Manages in-process permission requests for SDK-style sessions.
  *
  * Handles the lifecycle of permission prompts:
@@ -336,12 +378,15 @@ export class PermissionManager extends EventEmitter {
    * @returns {boolean} true if a pending permission was found and resolved,
    *   false if the requestId was unknown (already resolved or expired).
    */
-  respondToPermission(requestId, decision) {
+  respondToPermission(requestId, decision, editedInput) {
     const pending = this._pendingPermissions.get(requestId)
     if (!pending) {
       this._logWarn(`No pending permission for ${requestId}`)
       return false
     }
+    // #6543: capture the tool name BEFORE deleting the last-permission data, so
+    // the editedInput whitelist knows which content field(s) are substitutable.
+    const toolName = this._lastPermissionData.get(requestId)?.tool
     this._pendingPermissions.delete(requestId)
     this._lastPermissionData.delete(requestId)
     this._clearPermissionTimer(requestId)
@@ -352,8 +397,14 @@ export class PermissionManager extends EventEmitter {
     // before any follow-on work runs synchronously.
     this.emit('permission_resolved', { requestId, decision, reason: 'user' })
 
+    // #6543 (feature B): on an approve, an operator who reviewed the proposed
+    // Write/Edit per-hunk may substitute the CONTENT (never the path — see
+    // mergeEditedInput). Ignored on deny. The merged input flows to the agent's
+    // tool executor as `updatedInput`, which still path-confines the write.
+    const approvedInput = mergeEditedInput(pending.input, editedInput, toolName)
+
     if (decision === 'allow') {
-      pending.resolve({ behavior: 'allow', updatedInput: pending.input })
+      pending.resolve({ behavior: 'allow', updatedInput: approvedInput })
     } else if (decision === 'allowAlways') {
       // Per the Agent SDK type contract (PermissionResult in
       // @anthropic-ai/claude-agent-sdk coreTypes.d.ts), behavior is
@@ -371,7 +422,7 @@ export class PermissionManager extends EventEmitter {
       // by Skeptic in the 2026-04-11 production readiness audit.
       const result = {
         behavior: 'allow',
-        updatedInput: pending.input,
+        updatedInput: approvedInput,
       }
       if (pending.suggestions && pending.suggestions.length > 0) {
         result.updatedPermissions = pending.suggestions
