@@ -24,6 +24,7 @@ import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { createLogger } from './logger.js'
 import { CHROXY_SECRET_DENYLIST } from './utils/spawn-env.js'
+import { prepareSpawn } from './utils/win-spawn.js'
 
 // #4453: exponential restart backoff. The first restart still fires at ~1s
 // after the death (no regression on the existing acceptance test); the
@@ -186,9 +187,16 @@ export class MCPClient extends EventEmitter {
     this._setState(MCP_STATES.STARTING)
     let child
     try {
-      child = spawn(this._config.command, this._config.args, {
+      // #6504 — route a user-configured .cmd/.bat MCP command through cmd.exe on
+      // Windows (Node 24 rejects spawning a .cmd shim directly with EINVAL, e.g.
+      // an npx-style shim). prepareSpawn is a no-op for .exe/POSIX, so non-Windows
+      // behaviour is unchanged; its cross-spawn escaping passes the user-supplied
+      // args verbatim through cmd.exe (round-tripped in win-spawn.test.js).
+      const spawnSpec = prepareSpawn(this._config.command, this._config.args)
+      child = spawn(spawnSpec.command, spawnSpec.args, {
         env: this._buildChildEnv(),
         stdio: ['pipe', 'pipe', 'pipe'],
+        ...spawnSpec.options,
       })
     } catch (err) {
       this._log.warn(`MCP server ${this.name}: spawn threw: ${err?.message || err}`)

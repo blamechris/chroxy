@@ -81,4 +81,15 @@ describe('Windows .cmd routing — call sites invoke prepareSpawn (#6484)', () =
     // checkBinary.
     assert.match(s, /prepareSpawn\(resolved, args\)[\s\S]*?execFileSync\(spawnSpec\.command, spawnSpec\.args/, 'checkBinary routed')
   })
+
+  // #6504 — the MCP server command comes from USER config (not resolve-binary), so
+  // a .cmd/.bat shim (common for npm-installed MCP servers on Windows) hits the same
+  // Node-24 EINVAL. Route it through prepareSpawn like the provider spawn sites.
+  it('byok-mcp-client routes the user-configured MCP command through prepareSpawn', () => {
+    const s = src('byok-mcp-client.js')
+    assert.match(s, /import \{ prepareSpawn \} from '\.\/utils\/win-spawn\.js'/, 'imports prepareSpawn')
+    assert.match(s, /prepareSpawn\(this\._config\.command, this\._config\.args\)/, 'routes the configured command/args')
+    assert.match(s, /spawn\(spawnSpec\.command, spawnSpec\.args/, 'spawns spawnSpec.command/.args')
+    assert.match(s, /\.\.\.spawnSpec\.options/, 'spreads spawnSpec.options')
+  })
 })
