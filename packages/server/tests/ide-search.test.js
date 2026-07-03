@@ -172,6 +172,48 @@ describe('findReferences — word-boundary reverse lookup (#6477)', () => {
     }
   })
 
+  it('ranks references in the originating file first (fromFile), stable otherwise (#6516)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-rank-'))
+    try {
+      // widget referenced in three files; alphabetically aa.ts < mm.ts < zz.ts, so
+      // the default walk order is aa, mm, zz. Clicking in mm.ts must float mm first.
+      writeFileSync(join(dir, 'aa.ts'), 'const x = widget()\n')
+      writeFileSync(join(dir, 'mm.ts'), 'const y = widget()\nconst z = widget()\n')
+      writeFileSync(join(dir, 'zz.ts'), 'const w = widget()\n')
+      const { results } = await findReferences(dir, 'widget', { fromFile: 'mm.ts' })
+      // Origin file's rows come first (both of them, in line order), then the rest
+      // in the original deterministic walk order (aa before zz).
+      assert.deepEqual(results.map((r) => `${r.file}:${r.line}`), ['mm.ts:1', 'mm.ts:2', 'aa.ts:1', 'zz.ts:1'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('normalizes a backslash fromFile so a Windows-style origin still ranks (#6516)', async () => {
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-refs-rank-win-'))
+    try {
+      mkdirSync(join(dir, 'src'))
+      writeFileSync(join(dir, 'a.ts'), 'const x = widget()\n')
+      writeFileSync(join(dir, 'src', 'b.ts'), 'const y = widget()\n')
+      // A client that sends a backslash path must still match the POSIX result key.
+      const { results } = await findReferences(dir, 'widget', { fromFile: 'src\\b.ts' })
+      assert.equal(results[0].file, 'src/b.ts')
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
+  })
+
+  it('is unchanged (walk order) when no fromFile is given (#6516)', async () => {
+    const { results } = await findReferences(root, 'widget')
+    // Without an origin hint, results keep the deterministic walk order — assert
+    // the ORDER directly (no sort), so an accidental reordering would be caught.
+    // a.ts refs in walk order: line 1, line 2, then the two on line 5.
+    assert.deepEqual(
+      results.map((r) => `${r.file}:${r.line}`),
+      ['a.ts:1', 'a.ts:2', 'a.ts:5', 'a.ts:5'],
+    )
+  })
+
   it('returns every occurrence on a line with 1-indexed columns', async () => {
     const { results } = await findReferences(root, 'widget')
     const line5 = results.filter((r) => r.line === 5)

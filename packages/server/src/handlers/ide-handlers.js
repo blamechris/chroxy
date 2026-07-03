@@ -168,14 +168,21 @@ async function handleSearchContent(ws, client, msg, ctx) {
  * `find_references` → `references_result`. Find-all-references (#6477): a
  * word-boundary, case-sensitive grep for a symbol NAME over the same confined
  * walk search_content uses, returning every referencing site. `file` (the
- * originating file) is accepted for symmetry but not used to rank. Dashboard-only
- * consumer for v1 (the references palette).
+ * originating file) ranks that file's references first (#6516), mirroring how
+ * resolveSymbol uses it as a tie-break. Dashboard-only consumer for v1 (the
+ * references palette).
  */
 async function handleFindReferences(ws, client, msg, ctx) {
   // #6481 (epic #6469): fail closed when the IDE surface is not opted in.
   if (!isIdeFeatureEnabled(ctx.services?.config)) return
 
   const symbol = typeof msg.symbol === 'string' ? msg.symbol.trim() : ''
+  // The originating file (the symbol was alt+clicked in) — normalized to the
+  // workspace-relative POSIX form findReferences ranks against (#6516), same as
+  // handleResolveSymbol does for its tie-break.
+  const fromFile = typeof msg.file === 'string' && msg.file.trim()
+    ? msg.file.trim().replace(/\\/g, '/')
+    : null
 
   if (!symbol) {
     ctx.transport.send(ws, { type: 'references_result', symbol: '', results: [], truncated: false, error: null })
@@ -196,7 +203,7 @@ async function handleFindReferences(ws, client, msg, ctx) {
   }
 
   try {
-    const { results, truncated } = await findReferences(cwd, symbol)
+    const { results, truncated } = await findReferences(cwd, symbol, { fromFile })
     ctx.transport.send(ws, { type: 'references_result', symbol, results, truncated, error: null })
   } catch (err) {
     log.debug(`find_references failed: ${err?.message}`)

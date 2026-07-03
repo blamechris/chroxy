@@ -233,7 +233,7 @@ export async function findReferences(rootDir, symbol, opts = {}) {
   // the `$store` tail inside `my$store`. `(?<![\w$])…(?![\w$])` treats `$` as part
   // of the identifier, so a reference must be flanked by non-identifier chars.
   const re = new RegExp(`(?<![\\w$])${escaped}(?![\\w$])`, 'g')
-  return collectMatches(rootDir, (line) => {
+  const out = await collectMatches(rootDir, (line) => {
     const cols = []
     re.lastIndex = 0
     let m
@@ -243,4 +243,19 @@ export async function findReferences(rootDir, symbol, opts = {}) {
     }
     return cols
   }, opts)
+
+  // Rank references in the ORIGINATING file first (#6516) — the file the symbol
+  // was alt+clicked in is usually where you want to look, mirroring how
+  // resolveSymbol uses `fromFile` as a tie-break. Normalize a Windows-style path
+  // to the forward-slash workspace-relative form collectMatches emits, then a
+  // stable partition floats origin rows to the front (Array.sort is stable since
+  // ES2019, so the deterministic walk order is preserved within each group).
+  // Post-collection, so it never changes which rows survive the cap — only order.
+  const fromFile = typeof opts.fromFile === 'string' && opts.fromFile.trim()
+    ? opts.fromFile.trim().replace(/\\/g, '/')
+    : null
+  if (fromFile) {
+    out.results.sort((a, b) => (b.file === fromFile ? 1 : 0) - (a.file === fromFile ? 1 : 0))
+  }
+  return out
 }
