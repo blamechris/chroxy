@@ -27,6 +27,7 @@ import {
   buildPerSessionSettingHandler,
 } from '../per-session-settings.js'
 import { createPermissionResolver, resolveOriginSessionId } from '../permission-resolver.js'
+import { sanitizeToolInput, PULL_MAX_INPUT_CHARS } from '../redaction.js'
 
 // Tools that are eligible to be whitelisted via set_permission_rules.
 // These are safe file-operation tools that don't execute code or make network requests.
@@ -737,10 +738,56 @@ for (const settingDef of PER_SESSION_SETTINGS) {
   perSessionSettingHandlers[settingDef.requestType] = buildPerSessionSettingHandler(settingDef)
 }
 
+/**
+ * #6543 (IDE P3 feature B) — reply to a `get_permission_input` pull. The
+ * `permission_request` broadcast truncates `input` at ~10K (secret-safe), so a
+ * client building a per-hunk pre-write diff pulls the FULL (still secret-
+ * redacted) tool input by requestId.
+ *
+ * SECURITY — session-bound, read-only, redacted:
+ *   1. The requestId → session mapping (`permissionSessionMap`, populated for
+ *      both the SDK and hook dispatch paths) locates the owning session.
+ *   2. Authorization is IDENTICAL to `permission_response`: a bound client must
+ *      own that session; an unbound client must be a viewer of it
+ *      (`isSessionViewer`). An unauthorized (or unknown) request gets
+ *      `found:false` with NO input — it can never read another session's input.
+ *   3. The raw input (`session._pendingPermissions`, the back-compat accessor
+ *      onto the session's PermissionManager) is re-run through `sanitizeToolInput`
+ *      with the larger `PULL_MAX_INPUT_CHARS` cap — for the tool_input object the
+ *      KEY-NAME + VALUE-SHAPE secret passes run on every value regardless of the
+ *      cap, so a higher cap never weakens redaction, only the truncation point.
+ */
+function handleGetPermissionInput(ws, client, msg, ctx) {
+  const requestId = msg.requestId
+  const send = (fields) => ctx.transport.send(ws, { type: 'permission_input', requestId, ...fields })
+  const notFound = (code, message) => send({ found: false, error: { code, message } })
+
+  const sessionId = ctx.permissions.permissionSessionMap.get(requestId)
+  if (!sessionId) return notFound('NOT_FOUND', 'No pending permission for that request.')
+
+  // Same authority gate as permission_response — a client may only read the
+  // input for a permission it could itself answer.
+  if (client.boundSessionId) {
+    if (client.boundSessionId !== sessionId) return notFound('NOT_FOUND', 'No pending permission for that request.')
+  } else if (!isSessionViewer(client, sessionId)) {
+    return notFound('NOT_FOUND', 'No pending permission for that request.')
+  }
+
+  const sess = ctx.sessions.sessionManager?.getSession?.(sessionId)?.session
+  const pending = sess?._pendingPermissions?.get(requestId)
+  if (!pending) return notFound('NOT_PENDING', 'That permission is no longer pending (resolved or expired).')
+
+  const tool = sess?._lastPermissionData?.get(requestId)?.tool
+  const input = sanitizeToolInput(pending.input, { maxChars: PULL_MAX_INPUT_CHARS })
+  return send({ found: true, tool, input })
+}
+
 export const settingsHandlers = {
   set_model: handleSetModel,
   set_permission_mode: handleSetPermissionMode,
   permission_response: handlePermissionResponse,
+  // #6543 (IDE P3 feature B): pull the full redacted tool input for a pre-write diff.
+  get_permission_input: handleGetPermissionInput,
   query_permission_audit: handleQueryPermissionAudit,
   list_providers: handleListProviders,
   set_thinking_level: handleSetThinkingLevel,

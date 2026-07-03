@@ -340,6 +340,16 @@ export const PermissionResponseSchema = z.object({
     requestId: z.string().min(1).max(256),
     decision: z.enum(['allow', 'allowAlways', 'deny']),
 });
+// #6543 (IDE P3 feature B): pull the FULL secret-redacted tool input for a
+// pending permission, so a client can build a per-hunk pre-write diff. The
+// `permission_request` broadcast truncates `input` (~10K, secret-safe); this
+// fetches the un-truncated (still redacted) version by requestId. Session-bound:
+// the server only returns input for a permission the client's session owns. The
+// reply is a single `permission_input` (see server.ts).
+export const GetPermissionInputSchema = z.object({
+    type: z.literal('get_permission_input'),
+    requestId: z.string().min(1).max(256),
+});
 export const QueryPermissionAuditSchema = z.object({
     type: z.literal('query_permission_audit'),
     sessionId: z.string().max(256).optional(),
@@ -1268,6 +1278,7 @@ export const ClientMessageSchema = z.discriminatedUnion('type', [
     SkillTrustAcceptSchema,
     SkillTrustGrantSchema,
     PermissionResponseSchema,
+    GetPermissionInputSchema,
     ListSessionsSchema,
     SwitchSessionSchema,
     CreateSessionSchema,

@@ -233,6 +233,37 @@ export const ServerPermissionRequestSchema = z.object({
 })
 
 /**
+ * #6543 (IDE P3, feature B) — reply to a `get_permission_input`. The
+ * `permission_request` broadcast truncates `input` at ~10K (secret-safe), so a
+ * client building a per-hunk pre-write diff PULLS the full (still
+ * secret-redacted) tool input by requestId. `found` is false when the request
+ * is unknown, already resolved, or belongs to another session (with `error`);
+ * `input`/`tool` are present only when `found`. Session-bound: the server only
+ * returns input for a permission the requesting client's session owns.
+ */
+export const ServerPermissionInputSchema = z.discriminatedUnion('found', [
+  // found:true carries the redacted input (a string-keyed object) + tool name,
+  // and NEVER an `error`.
+  z.object({
+    type: z.literal('permission_input'),
+    requestId: z.string(),
+    found: z.literal(true),
+    /** The tool name (e.g. 'Write' / 'Edit'). */
+    tool: z.string().optional(),
+    /** The full secret-redacted tool input. */
+    input: z.record(z.string(), z.unknown()),
+  }),
+  // found:false carries an `error` and NEVER `input`/`tool` — a security message,
+  // so the "unavailable" shape can't accidentally ship any tool input.
+  z.object({
+    type: z.literal('permission_input'),
+    requestId: z.string(),
+    found: z.literal(false),
+    error: z.object({ code: z.string(), message: z.string() }),
+  }),
+])
+
+/**
  * Single validated builder for the `permission_request` wire message (#6031).
  *
  * `permission_request` is the most security-relevant message on the wire — a

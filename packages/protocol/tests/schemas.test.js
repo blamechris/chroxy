@@ -3221,4 +3221,27 @@ describe('@chroxy/protocol schemas', () => {
       }).success)
     })
   })
+
+  describe('#6543 — get_permission_input / permission_input', () => {
+    it('ClientMessageSchema accepts get_permission_input (union membership)', async () => {
+      const { ClientMessageSchema } = await import('../src/schemas/client.ts')
+      assert.ok(ClientMessageSchema.safeParse({ type: 'get_permission_input', requestId: 'r1' }).success)
+      assert.ok(!ClientMessageSchema.safeParse({ type: 'get_permission_input' }).success, 'requestId required')
+    })
+
+    it('ServerPermissionInputSchema round-trips a found reply + a not-found reply', async () => {
+      const { ServerPermissionInputSchema } = await import('../src/schemas/server/stream.ts')
+      const found = ServerPermissionInputSchema.safeParse({
+        type: 'permission_input', requestId: 'r1', found: true, tool: 'Write',
+        input: { file_path: '/x', content: 'a\nb' },
+      })
+      assert.ok(found.success)
+      assert.equal(found.data.tool, 'Write')
+      const missing = ServerPermissionInputSchema.safeParse({
+        type: 'permission_input', requestId: 'r1', found: false, error: { code: 'NOT_PENDING', message: 'gone' },
+      })
+      assert.ok(missing.success)
+      assert.equal(missing.data.input, undefined)
+    })
+  })
 })

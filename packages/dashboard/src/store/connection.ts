@@ -543,6 +543,8 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
   // per repo for inline display (same lifecycle as cancellingActivityIds).
   reindexingRepoPaths: new Set<string>(),
   reindexResults: {},
+  // #6543 (IDE P3 feature B): pulled full redacted tool inputs keyed by requestId.
+  permissionInputs: {},
   // #5502: relay Re-run pending/result buckets (separate from reindex).
   relayRerunningRepoPaths: new Set<string>(),
   relayRerunResults: {},
@@ -1014,6 +1016,19 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     if (socket && socket.readyState === WebSocket.OPEN) {
       set({ repoEventsLoading: true });
       wsSend(socket, { type: 'repo_events_request' });
+      return true;
+    }
+    return false;
+  },
+
+  // #6543 (IDE P3 feature B): pull the full redacted tool input for a pending
+  // permission so the prompt can render a per-hunk pre-write diff. The reply is a
+  // single `permission_input` handled into `permissionInputs[requestId]`. Returns
+  // whether the request went on the wire (false = socket closed).
+  requestPermissionInput: (requestId: string): boolean => {
+    const { socket } = get();
+    if (socket && socket.readyState === WebSocket.OPEN) {
+      wsSend(socket, { type: 'get_permission_input', requestId });
       return true;
     }
     return false;

@@ -281,6 +281,10 @@ export declare const PermissionResponseSchema: z.ZodObject<{
         allowAlways: "allowAlways";
     }>;
 }, z.core.$strip>;
+export declare const GetPermissionInputSchema: z.ZodObject<{
+    type: z.ZodLiteral<"get_permission_input">;
+    requestId: z.ZodString;
+}, z.core.$strip>;
 export declare const QueryPermissionAuditSchema: z.ZodObject<{
     type: z.ZodLiteral<"query_permission_audit">;
     sessionId: z.ZodOptional<z.ZodString>;
@@ -942,6 +946,9 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
         allowAlways: "allowAlways";
     }>;
 }, z.core.$strip>, z.ZodObject<{
+    type: z.ZodLiteral<"get_permission_input">;
+    requestId: z.ZodString;
+}, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"list_sessions">;
 }, z.core.$strip>, z.ZodObject<{
     type: z.ZodLiteral<"switch_session">;
@@ -1385,6 +1392,7 @@ export type SetModelMessage = z.infer<typeof SetModelSchema>;
 export type SetPermissionModeMessage = z.infer<typeof SetPermissionModeSchema>;
 export type SetPermissionRulesMessage = z.infer<typeof SetPermissionRulesSchema>;
 export type PermissionResponseMessage = z.infer<typeof PermissionResponseSchema>;
+export type GetPermissionInputMessage = z.infer<typeof GetPermissionInputSchema>;
 export type ExtensionMessage = z.infer<typeof ExtensionMessageSchema>;
 export type HostStatusRequestMessage = z.infer<typeof HostStatusRequestSchema>;
 export type RunnerStatusRequestMessage = z.infer<typeof RunnerStatusRequestSchema>;
