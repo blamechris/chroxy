@@ -292,26 +292,43 @@ describe('getWorkspaceSymbolIndex — TTL cache (#6499)', () => {
 
   it('serves a second call within the TTL from cache (does NOT re-walk)', async () => {
     invalidateWorkspaceSymbolIndex()
-    // Miss populates the cache at now=1000 (expires 1000+5000).
-    const first = await getWorkspaceSymbolIndex(root, { now: 1000, ttlMs: 5000 })
-    assert.deepEqual(first.symbols.map((s) => s.name), ['alpha'])
-    // A new declaration lands on disk...
-    writeFileSync(join(root, 'b.ts'), 'export const beta = 2\n')
-    // ...but a within-TTL call must NOT observe it — the stale table is the proof
-    // the tree was not re-walked (acceptance: no re-walk within the TTL).
-    const second = await getWorkspaceSymbolIndex(root, { now: 3000, ttlMs: 5000 })
-    assert.deepEqual(second.symbols.map((s) => s.name), ['alpha'])
-    const stats = _symbolIndexCacheStats()
-    assert.equal(stats.hits, 1)
-    assert.equal(stats.misses, 1)
+    // Self-contained temp dir so the scenario doesn't depend on sibling tests.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache-ttl-'))
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'export const alpha = 1\n')
+      // Miss populates the cache at now=1000 (expires 1000+5000).
+      const firstCall = await getWorkspaceSymbolIndex(dir, { now: 1000, ttlMs: 5000 })
+      assert.deepEqual(firstCall.symbols.map((s) => s.name), ['alpha'])
+      // A new declaration lands on disk...
+      writeFileSync(join(dir, 'b.ts'), 'export const beta = 2\n')
+      // ...but a within-TTL call must NOT observe it — the stale table is the proof
+      // the tree was not re-walked (acceptance: no re-walk within the TTL).
+      const second = await getWorkspaceSymbolIndex(dir, { now: 3000, ttlMs: 5000 })
+      assert.deepEqual(second.symbols.map((s) => s.name), ['alpha'])
+      const stats = _symbolIndexCacheStats()
+      assert.equal(stats.hits, 1)
+      assert.equal(stats.misses, 1)
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('re-walks after the TTL expires so a newly-added declaration resolves', async () => {
     invalidateWorkspaceSymbolIndex()
-    await getWorkspaceSymbolIndex(root, { now: 1000, ttlMs: 5000 }) // populate
-    // Past expiry (1000 + 5000 = 6000) → re-walk picks up b.ts written above.
-    const after = await getWorkspaceSymbolIndex(root, { now: 7000, ttlMs: 5000 })
-    assert.deepEqual(after.symbols.map((s) => s.name).sort(), ['alpha', 'beta'])
+    // Self-contained — create + mutate this dir within the test so it isn't
+    // order-dependent on a file written by a sibling test.
+    const dir = mkdtempSync(join(tmpdir(), 'chroxy-ide-idxcache-exp-'))
+    try {
+      writeFileSync(join(dir, 'a.ts'), 'export const alpha = 1\n')
+      await getWorkspaceSymbolIndex(dir, { now: 1000, ttlMs: 5000 }) // populate (expires 6000)
+      // A new declaration lands AFTER the cache was populated...
+      writeFileSync(join(dir, 'b.ts'), 'export const beta = 2\n')
+      // ...invisible within the TTL, but a post-expiry call re-walks and picks it up.
+      const after = await getWorkspaceSymbolIndex(dir, { now: 7000, ttlMs: 5000 })
+      assert.deepEqual(after.symbols.map((s) => s.name).sort(), ['alpha', 'beta'])
+    } finally {
+      rmSync(dir, { recursive: true, force: true })
+    }
   })
 
   it('invalidate() forces the next call to re-walk (and resets stats)', async () => {
@@ -348,7 +365,8 @@ describe('getWorkspaceSymbolIndex — TTL cache (#6499)', () => {
       writeFileSync(join(r, 'a.ts'), 'export const widget = 1\n')
       const first = await resolveSymbol(r, 'widget', { now: 1000, ttlMs: 5000 })
       assert.deepEqual(first, { file: 'a.ts', line: 1 })
-      // Add a competing exported decl; a within-TTL resolve must not see it.
+      // A NEW exported decl lands after the cache was populated; a within-TTL
+      // resolve works off the stale index, so it must not see it yet (not-found).
       writeFileSync(join(r, 'later.ts'), 'export const gadget = 2\n')
       assert.equal(await resolveSymbol(r, 'gadget', { now: 2000, ttlMs: 5000 }), null) // stale cache
       assert.equal(_symbolIndexCacheStats().hits, 1) // second resolve hit the cache
