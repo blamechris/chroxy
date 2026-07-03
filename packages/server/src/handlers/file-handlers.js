@@ -5,7 +5,46 @@
  *          get_diff, git_status, git_branches, git_stage, git_unstage,
  *          git_commit, list_slash_commands, list_agents
  */
-import { resolveSession } from '../handler-utils.js'
+import { resolveSession, sendError } from '../handler-utils.js'
+import { loggerForSession } from '../logger.js'
+
+/**
+ * #6541 — file/git MUTATION gate: reject pairing-bound (share-a-session) tokens.
+ *
+ * The write / git-mutation handlers were path-confined (`validatePathWithinCwd`)
+ * but otherwise ungated — any authenticated client, INCLUDING a pairing-bound
+ * (share-a-session) token, could overwrite files or mutate git state in the
+ * session's cwd. A bound token is scoped to observe/collaborate on ONE session,
+ * not to mutate the host filesystem; letting it write is the same class of
+ * integrity risk the auto-mode / permission-rules / credential-write gates
+ * already close (docs/security/bearer-token-authority.md §"Host-level writes a
+ * bound token must NOT reach").
+ *
+ * Only BOUND tokens are rejected. The primary API token and the main mobile
+ * app's UNBOUND linking-mode token (WsServer passes `null` binding, so linking
+ * tokens behave like the primary token) still write — so the existing authorized
+ * FileEditor is unaffected. This is client-write-authority, NOT `features.ide`
+ * (that gates the new editable-diff affordances, #6542–#6544).
+ *
+ * @returns {boolean} true if the caller was rejected (handler must return).
+ */
+function rejectMutationIfBound(ws, client, msg, ctx, op) {
+  if (client?.boundSessionId) {
+    loggerForSession('ws', client.boundSessionId).warn(
+      `Client ${client.id} (bound to ${client.boundSessionId}) attempted ${op} — rejected (bound tokens cannot mutate files/git)`,
+    )
+    sendError(
+      ws,
+      msg?.requestId,
+      'FILE_MUTATION_FORBIDDEN_BOUND_CLIENT',
+      'Pairing-issued session tokens cannot modify files or git state. Use the primary API token from a device with access to this machine.',
+      undefined,
+      ctx,
+    )
+    return true
+  }
+  return false
+}
 
 function handleListDirectory(ws, client, msg, ctx) {
   ctx.services.fileOps.listDirectory(ws, msg.path)
@@ -30,6 +69,7 @@ function handleReadFile(ws, client, msg, ctx) {
 }
 
 function handleWriteFile(ws, client, msg, ctx) {
+  if (rejectMutationIfBound(ws, client, msg, ctx, 'write_file')) return
   const entry = resolveSession(ctx, msg, client)
   ctx.services.fileOps.writeFile(ws, msg.path, msg.content, entry?.cwd || null)
 }
@@ -50,16 +90,19 @@ function handleGitBranches(ws, client, msg, ctx) {
 }
 
 function handleGitStage(ws, client, msg, ctx) {
+  if (rejectMutationIfBound(ws, client, msg, ctx, 'git_stage')) return
   const entry = resolveSession(ctx, msg, client)
   ctx.services.fileOps.gitStage(ws, msg.files, entry?.cwd || null)
 }
 
 function handleGitUnstage(ws, client, msg, ctx) {
+  if (rejectMutationIfBound(ws, client, msg, ctx, 'git_unstage')) return
   const entry = resolveSession(ctx, msg, client)
   ctx.services.fileOps.gitUnstage(ws, msg.files, entry?.cwd || null)
 }
 
 function handleGitCommit(ws, client, msg, ctx) {
+  if (rejectMutationIfBound(ws, client, msg, ctx, 'git_commit')) return
   const entry = resolveSession(ctx, msg, client)
   ctx.services.fileOps.gitCommit(ws, msg.message, entry?.cwd || null)
 }
