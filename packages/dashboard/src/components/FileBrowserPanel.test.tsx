@@ -26,6 +26,8 @@ let mockSymbols: any = null
 let mockSymbolsLoading = false
 let mockIdeCapability = false
 let mockFileBrowserPendingOpen: any = null
+// #6502 — the latest read_file nonce the store recorded
+let mockLastFileContentRequestId: string | null = null
 
 vi.mock('../store/connection', () => {
   const storeState = () => ({
@@ -46,6 +48,7 @@ vi.mock('../store/connection', () => {
     requestFindReferences: mockRequestFindReferences,
     openFileInBrowser: mockOpenFileInBrowser,
     symbolLocation: mockSymbolLocation,
+    lastFileContentRequestId: mockLastFileContentRequestId,
   })
 
   const useConnectionStore = Object.assign(
@@ -84,6 +87,7 @@ beforeEach(() => {
   mockIdeCapability = false
   mockFileBrowserPendingOpen = null
   mockSymbolLocation = null
+  mockLastFileContentRequestId = null
 })
 
 describe('FileBrowserPanel', () => {
@@ -561,5 +565,54 @@ describe('FileBrowserPanel — stale content guard (#6497)', () => {
       fileContentCallback!({ path: '/root/a.ts', content: 'CORRECT', language: 'typescript', size: 7, truncated: false, error: null })
     })
     await waitFor(() => screen.getByText('CORRECT'))
+  })
+})
+
+describe('FileBrowserPanel — nonce correlation guard (#6502)', () => {
+  it('drops a reply whose requestId is not the latest, even when the path matches', async () => {
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root', parentPath: null,
+        entries: [{ name: 'a.ts', isDirectory: false, size: 10 }], error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('a.ts'))
+    fireEvent.click(screen.getByText('a.ts')) // selectedFile = /root/a.ts
+    // The store's latest in-flight read is nonce '2'.
+    mockLastFileContentRequestId = '2'
+    // A reply carrying an OLDER nonce for the SAME path must be dropped — this is
+    // the case path-matching alone (#6497) would have wrongly accepted.
+    act(() => {
+      fileContentCallback!({ path: '/root/a.ts', content: 'SUPERSEDED', language: 'typescript', size: 5, truncated: false, error: null, requestId: '1' })
+    })
+    expect(screen.queryByText('SUPERSEDED')).toBeNull()
+    // The reply matching the latest nonce renders.
+    act(() => {
+      fileContentCallback!({ path: '/root/a.ts', content: 'LATEST', language: 'typescript', size: 6, truncated: false, error: null, requestId: '2' })
+    })
+    await waitFor(() => screen.getByText('LATEST'))
+  })
+
+  it('falls back to path-matching for a nonce-less reply from an older server', async () => {
+    render(<FileBrowserPanel />)
+    act(() => {
+      fileBrowserCallback!({
+        path: '/root', parentPath: null,
+        entries: [{ name: 'a.ts', isDirectory: false, size: 10 }], error: null,
+      })
+    })
+    await waitFor(() => screen.getByText('a.ts'))
+    fireEvent.click(screen.getByText('a.ts')) // selectedFile = /root/a.ts
+    mockLastFileContentRequestId = '2'
+    // No requestId on the reply → nonce guard is skipped, path-match (#6497) applies.
+    act(() => {
+      fileContentCallback!({ path: '/root/other.ts', content: 'STALE', language: 'typescript', size: 5, truncated: false, error: null })
+    })
+    expect(screen.queryByText('STALE')).toBeNull()
+    act(() => {
+      fileContentCallback!({ path: '/root/a.ts', content: 'OK', language: 'typescript', size: 6, truncated: false, error: null })
+    })
+    await waitFor(() => screen.getByText('OK'))
   })
 })

@@ -117,6 +117,12 @@ export interface FileContentPayload {
   truncated: boolean
   /** Error string from the server, if any. Null when missing/non-string. */
   error: string | null
+  /**
+   * #6502 — the request nonce the server echoed from the originating
+   * `read_file`. Lets a client drop a reply belonging to a superseded request
+   * (path-agnostic correlation). Null when missing/non-string (older servers).
+   */
+  requestId: string | null
 }
 
 /**
@@ -134,6 +140,7 @@ export function handleFileContent(msg: Record<string, unknown>): FileContentPayl
     size: typeof msg.size === 'number' ? msg.size : null,
     truncated: msg.truncated === true,
     error: parseRawStringField(msg, 'error'),
+    requestId: parseRawStringField(msg, 'requestId'),
   }
 }
 

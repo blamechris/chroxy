@@ -660,6 +660,10 @@ export const BrowseFilesSchema = z.object({
 export const ReadFileSchema = z.object({
   type: z.literal('read_file'),
   path: z.string().max(4096),
+  // #6502 — optional monotonic request nonce. The server echoes it back on the
+  // `file_content` reply so the dashboard can correlate replies to the latest
+  // in-flight request (path-agnostic), instead of relying on path tail-matching.
+  requestId: z.string().max(200).optional(),
 }).passthrough()
 
 export const WriteFileSchema = z.object({

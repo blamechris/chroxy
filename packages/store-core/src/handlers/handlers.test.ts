@@ -3529,6 +3529,7 @@ describe('handleFileContent', () => {
       size: 9,
       truncated: false,
       error: null,
+      requestId: null,
     })
   })
 
@@ -3540,6 +3541,7 @@ describe('handleFileContent', () => {
       size: null,
       truncated: false,
       error: null,
+      requestId: null,
     })
   })
 
@@ -3558,6 +3560,7 @@ describe('handleFileContent', () => {
       size: null,
       truncated: false,
       error: null,
+      requestId: null,
     })
   })
 
@@ -3569,6 +3572,7 @@ describe('handleFileContent', () => {
       size: null,
       truncated: false,
       error: null,
+      requestId: null,
     })
   })
 
@@ -3596,12 +3600,23 @@ describe('handleFileContent', () => {
       size: null,
       truncated: false,
       error: 'too big',
+      requestId: null,
     })
   })
 
   it('preserves empty-string content verbatim', () => {
     // Empty string is still a string and passes through (matches inline guard).
     expect(handleFileContent({ content: '' }).content).toBe('')
+  })
+
+  it('#6502 — echoes the request nonce when present', () => {
+    expect(handleFileContent({ path: '/f.ts', content: 'x', requestId: '42' }).requestId).toBe('42')
+  })
+
+  it('#6502 — coerces a missing/non-string requestId to null', () => {
+    expect(handleFileContent({}).requestId).toBe(null)
+    expect(handleFileContent({ requestId: 7 }).requestId).toBe(null)
+    expect(handleFileContent({ requestId: null }).requestId).toBe(null)
   })
 
   it('preserves zero size verbatim', () => {

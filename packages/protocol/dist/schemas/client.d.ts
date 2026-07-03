@@ -452,6 +452,7 @@ export declare const BrowseFilesSchema: z.ZodObject<{
 export declare const ReadFileSchema: z.ZodObject<{
     type: z.ZodLiteral<"read_file">;
     path: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>;
 export declare const WriteFileSchema: z.ZodObject<{
     type: z.ZodLiteral<"write_file">;
@@ -1028,6 +1029,7 @@ export declare const ClientMessageSchema: z.ZodDiscriminatedUnion<[z.ZodObject<{
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"read_file">;
     path: z.ZodString;
+    requestId: z.ZodOptional<z.ZodString>;
 }, z.core.$loose>, z.ZodObject<{
     type: z.ZodLiteral<"write_file">;
     path: z.ZodString;
