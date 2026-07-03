@@ -38,4 +38,24 @@ describe('DEFAULT_SHORTCUTS', () => {
       expect(entry?.category).toBe('session')
     })
   })
+
+  describe('device.pairQr entry (pair-a-device QR shortcut)', () => {
+    const entry = DEFAULT_SHORTCUTS.find(s => s.id === 'device.pairQr')
+
+    it('exists in the registry', () => {
+      expect(entry, 'missing device.pairQr entry').toBeDefined()
+    })
+
+    it('binds to Cmd+Shift+L by default (NOT Cmd+Shift+Q, which macOS reserves for Log Out)', () => {
+      expect(entry?.defaultBinding.toLowerCase()).toBe('cmd+shift+l')
+    })
+
+    it('is a global shortcut so the dispatch ladder routes it', () => {
+      expect(entry?.scope).toBe('global')
+    })
+
+    it('groups under navigation (with the palette / settings / quick-open entries)', () => {
+      expect(entry?.category).toBe('navigation')
+    })
+  })
 })

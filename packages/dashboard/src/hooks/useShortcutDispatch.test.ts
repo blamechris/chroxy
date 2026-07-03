@@ -49,6 +49,7 @@ const TEST_DEFS: ShortcutDef[] = [
   { id: 'view.cycleSplit', defaultBinding: 'cmd+\\', description: 'Cycle split', category: 'view', scope: 'global' },
   { id: 'help.toggle', defaultBinding: '?', description: 'Help', category: 'other', scope: 'global' },
   { id: 'palette.toggle.vscode', defaultBinding: 'cmd+shift+p', description: 'Palette (VS Code)', category: 'navigation', scope: 'global' },
+  { id: 'device.pairQr', defaultBinding: 'cmd+shift+l', description: 'Pair a device', category: 'navigation', scope: 'global' },
 ]
 
 function fireKey(opts: Partial<KeyboardEvent> & { key: string }): KeyboardEvent {
@@ -155,6 +156,20 @@ describe('useShortcutDispatch', () => {
     renderHook(() => useShortcutDispatch(props))
     fireKey({ key: ',', metaKey: true })
     expect(props.setSettingsOpen).toHaveBeenCalledOnce()
+  })
+
+  it('dispatches device.pairQr → showQr on Cmd+Shift+L', () => {
+    const showQr = vi.fn()
+    const props = makeProps({ showQr })
+    renderHook(() => useShortcutDispatch(props))
+    fireKey({ key: 'l', metaKey: true, shiftKey: true })
+    expect(showQr).toHaveBeenCalledOnce()
+  })
+
+  it('device.pairQr no-ops when showQr is undefined (disconnected — no throw)', () => {
+    const props = makeProps({ showQr: undefined })
+    renderHook(() => useShortcutDispatch(props))
+    expect(() => fireKey({ key: 'l', metaKey: true, shiftKey: true })).not.toThrow()
   })
 
   it('dispatches session.new on Cmd+N', () => {

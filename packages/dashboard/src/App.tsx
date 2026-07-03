@@ -972,6 +972,12 @@ export function App() {
     setImageAttachments(prev => [...prev, ...attachments])
   }, [])
 
+  // Latest-handler ref for the Cmd+Shift+L device-pairing shortcut. `handleShowQr`
+  // (from useQrModal) and `isConnected` are declared BELOW this dispatch call, so
+  // the shortcut reads them through a ref rather than forcing a hook reorder. The
+  // ref is assigned once both are in scope (search: showQrRef.current =).
+  const showQrRef = useRef<(() => void) | null>(null)
+
   // #4770: keydown dispatch (Backspace prevention + Tauri Ctrl+V image
   // paste + registry-routed shortcuts) lives in useShortcutDispatch so
   // App stays under the SRP threshold and the dispatch ladder is
@@ -1002,6 +1008,10 @@ export function App() {
     openFilePalette: () => { if (ideEnabled) setFileOpenPaletteOpen(true) },
     openSymbolSearch: () => { if (ideEnabled) setSymbolSearchOpen(true) },
     openCodeSearch: () => { if (ideEnabled) setCodeSearchOpen(true) },
+    // Cmd+Shift+L → device-pairing QR. Stable closure over a ref, since
+    // handleShowQr/isConnected are declared below; the ref no-ops when null
+    // (disconnected), so the shortcut only opens the modal when there's a server.
+    showQr: () => showQrRef.current?.(),
   })
 
   const trackedCommands = useMemo(
@@ -1885,6 +1895,11 @@ export function App() {
   }, [activeModel, availableModels])
 
   const isConnected = connectionPhase === 'connected'
+  // Point the Cmd+Shift+L shortcut at the live QR handler, gated on connection
+  // (mirrors the footer/overflow `onShowQr={isConnected ? handleShowQr : undefined}`
+  // surfaces). Assigning a ref during render is the standard latest-callback idiom
+  // — no state update, no re-render.
+  showQrRef.current = isConnected ? handleShowQr : null
   const isReconnecting = connectionPhase === 'reconnecting' || connectionPhase === 'server_restarting'
   // #5698 — the reconnect ladder gave up; terminal state, manual reconnect only.
   const isServerDown = connectionPhase === 'server_down'
@@ -2021,6 +2036,7 @@ export function App() {
             return next
           })
         }}
+        onShowQr={isConnected ? handleShowQr : undefined}
         showCopyTranscript={viewMode === 'chat' && storeMessages.length > 0}
         transcriptCopied={transcriptCopied}
         onCopyTranscript={handleCopyTranscript}
