@@ -3048,7 +3048,7 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     });
   },
 
-  sendPermissionResponse: (requestId: string, decision: 'allow' | 'deny' | 'allowSession') => {
+  sendPermissionResponse: (requestId: string, decision: 'allow' | 'deny' | 'allowSession', editedInput?: Record<string, string> | null) => {
     const { socket } = get();
     // #5699 — refuse to answer a permission prompt while disconnected. A
     // permission request is NOT safely queueable: the server expires the pending
@@ -3068,7 +3068,15 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
     // is implemented client-side via a follow-up set_permission_rules message
     // (the schema only accepts 'allow' | 'allowAlways' | 'deny').
     const wireDecision = decision === 'allowSession' ? 'allow' : decision;
-    const payload = { type: 'permission_response', requestId, decision: wireDecision };
+    // #6543 (feature B): the operator's per-hunk edits ride along on an approve.
+    // Only sent when present (a plain Allow omits it); the server whitelists
+    // which fields it can substitute (permission-manager.js mergeEditedInput).
+    const payload = {
+      type: 'permission_response',
+      requestId,
+      decision: wireDecision,
+      ...(editedInput && Object.keys(editedInput).length > 0 && wireDecision !== 'deny' ? { editedInput } : {}),
+    };
     // #6308: the socket can flip OPEN → CLOSING before this synchronous send (wsSend
     // → false). Bail BEFORE markPermissionResolved/markPromptAnswered — otherwise the
     // bubble flips to "answered" while the server never saw the frame and auto-denies

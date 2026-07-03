@@ -22,13 +22,19 @@ import { useState, useEffect, useRef, useCallback } from 'react'
 import { useConnectionStore, isRuleEligibleTool, isRuleEligibleProvider } from '../store/connection'
 import type { PermissionDecision } from '../store/types'
 import { isMacPlatform } from '../utils/platform'
+import { PreWriteDiffReview, isReviewableTool } from './PreWriteDiffReview'
 
 export interface PermissionPromptProps {
   requestId: string
   tool: string
   description: string
   remainingMs: number
-  onRespond: (requestId: string, decision: PermissionDecision) => void
+  /**
+   * #6543 (feature B): `editedInput` carries the operator's per-hunk narrowing
+   * for an approve (omitted for a plain Allow / a Deny). The server whitelists
+   * which fields it merges.
+   */
+  onRespond: (requestId: string, decision: PermissionDecision, editedInput?: Record<string, string> | null) => void
   /**
    * #5667 — human label for the session that asked (e.g. "ltl · CLI"),
    * derived by the renderer from the message's `originSessionId`. Rendered as
@@ -91,6 +97,23 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
   const availableProviders = useConnectionStore((s) => s.availableProviders)
   const providerSupportsRules = isRuleEligibleProvider(activeProvider, availableProviders)
 
+  // #6543 (feature B): per-hunk pre-write review. Gated on the server's `ide`
+  // capability (features.ide) + a reviewable tool (Write/Edit). When eligible we
+  // PULL the full redacted tool input (the broadcast one is truncated), then
+  // render a diff whose dropped hunks become `editedInput` on Approve.
+  const ideEnabled = useConnectionStore((s) => Boolean(s.serverCapabilities?.ide))
+  const requestPermissionInput = useConnectionStore((s) => s.requestPermissionInput)
+  const pulledInput = useConnectionStore((s) => s.permissionInputs?.[requestId])
+  const reviewEligible = ideEnabled && isReviewableTool(tool)
+  const [editedInput, setEditedInput] = useState<Record<string, string> | null>(null)
+
+  // Pull the input once when a reviewable prompt appears (before it's answered).
+  useEffect(() => {
+    if (reviewEligible && !answered && pulledInput === undefined) {
+      requestPermissionInput(requestId)
+    }
+  }, [reviewEligible, answered, pulledInput, requestPermissionInput, requestId])
+
   useEffect(() => {
     if (intervalRef.current) clearInterval(intervalRef.current)
     setRemaining(remainingMs)
@@ -139,8 +162,9 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
     const effective: PermissionDecision =
       decision === 'allowSession' && !allowSessionOk ? 'allow' : decision
     if (intervalRef.current) clearInterval(intervalRef.current)
-    onRespond(requestId, effective)
-  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected])
+    // #6543: carry the per-hunk edits on an approve only (never on deny).
+    onRespond(requestId, effective, effective === 'deny' ? null : editedInput)
+  }, [requestId, onRespond, answered, remaining, tool, providerSupportsRules, connected, editedInput])
 
   // #6287 — the Cmd/Ctrl+Y, Cmd/Ctrl+Shift+Y and Escape keyboard shortcuts moved
   // to a SINGLE document-level listener (useChatKeyboard, wired in App.tsx) that
@@ -187,6 +211,18 @@ export function PermissionPrompt({ requestId, tool, description, remainingMs, on
       <div className="perm-desc" id={`perm-desc-${requestId}`}>
         <span className="perm-tool">{tool}</span>: {description || 'Permission requested'}
       </div>
+
+      {/* #6543 (feature B): per-hunk pre-write review for a Write/Edit when
+          features.ide is on. Renders once the pulled input lands; dropped hunks
+          become `editedInput` sent on Approve. A refusal / not-yet-pulled state
+          simply shows no review (the plain Allow/Deny still work). */}
+      {reviewEligible && showButtons && pulledInput?.found && pulledInput.input && (
+        <PreWriteDiffReview
+          tool={tool}
+          input={pulledInput.input as Record<string, unknown>}
+          onEditedInputChange={setEditedInput}
+        />
+      )}
 
       {!answered && (
         <div

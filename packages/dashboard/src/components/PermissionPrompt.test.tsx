@@ -283,7 +283,7 @@ describe('PermissionPrompt', () => {
       />
     )
     fireEvent.click(screen.getByText('Allow'))
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', null) // #6543: editedInput 3rd arg (null — no review active)
   })
 
   it('calls onRespond with deny when Deny clicked', () => {
@@ -298,7 +298,7 @@ describe('PermissionPrompt', () => {
       />
     )
     fireEvent.click(screen.getByText('Deny'))
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny')
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'deny', null) // #6543: editedInput 3rd arg (null on deny)
   })
 
   it('shows answered state after response (#2833 — driven by store)', () => {
@@ -366,7 +366,7 @@ describe('PermissionPrompt', () => {
     fireEvent.click(screen.getByText('Allow'))
     fireEvent.click(screen.getByText('Deny'))
     expect(onRespond).toHaveBeenCalledTimes(1)
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', null) // #6543: editedInput 3rd arg (null — no review active)
   })
 
   it('disables all action buttons after first click (#2852)', () => {
@@ -640,7 +640,7 @@ describe('PermissionPrompt — Allow for Session button (#2834)', () => {
       />
     )
     fireEvent.click(screen.getByTestId('btn-allow-session'))
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession')
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allowSession', null) // #6543: editedInput 3rd arg
   })
 
   it('hides the button once the prompt is resolved', () => {
@@ -718,7 +718,7 @@ describe('PermissionPrompt — provider capability gate (#3072)', () => {
     // The allow button is still here; the session-rule button is not rendered,
     // but verify the silent coerce path: a programmatic 'allow' click works.
     fireEvent.click(screen.getByText('Allow'))
-    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow')
+    expect(onRespond).toHaveBeenCalledWith('req-1', 'allow', null) // #6543: editedInput 3rd arg (null — no review active)
   })
 })
 

@@ -126,7 +126,7 @@ export function useMessageRenderer(args: UseMessageRendererArgs): (msg: ChatView
           tool={storeMsg.tool || 'Unknown'}
           description={storeMsg.content}
           remainingMs={remainingMs}
-          onRespond={(reqId, decision) => sendPermissionResponse(reqId, decision)}
+          onRespond={(reqId, decision, editedInput) => sendPermissionResponse(reqId, decision, editedInput)}
           sessionLabel={buildSessionLabel(storeMsg.originSessionId, sessions)}
         />
       )

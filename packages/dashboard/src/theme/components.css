@@ -3335,6 +3335,32 @@ button.sidebar-token-view-session-row:hover {
   color: var(--accent-purple);
 }
 
+/* #6543 (feature B): per-hunk pre-write review inside a Write/Edit permission
+ * prompt — a bounded, scrollable diff whose hunk toggles narrow the write. */
+.prewrite-diff-review {
+  margin: 8px 0;
+  max-height: 320px;
+  overflow: auto;
+  border: 1px solid var(--border-primary);
+  border-radius: 8px;
+  background: var(--bg-secondary);
+}
+
+.prewrite-diff-hint {
+  padding: 6px 12px;
+  font-size: var(--text-sm);
+  color: var(--text-secondary);
+  border-bottom: 1px solid var(--border-primary);
+  position: sticky;
+  top: 0;
+  background: var(--bg-header);
+}
+
+/* #6555: all-hunks-dropped writes an empty/no-op result — flag it. */
+.prewrite-diff-hint-warn {
+  color: var(--accent-orange);
+}
+
 .perm-buttons {
   display: flex;
   gap: 8px;
