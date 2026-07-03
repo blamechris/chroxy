@@ -10,6 +10,10 @@ import { useConnectionStore } from '../store/connection'
 import { tokenize } from '@chroxy/store-core'
 import type { FileEntry, FileListing, FileContent, GitStatusResult } from '../store/types'
 import type { SymbolEntry } from '@chroxy/protocol'
+import {
+  computeVisibleEntries, toggleDir, ancestorDirs, buildBreadcrumbs, joinPath,
+} from './fileTreeLogic'
+import type { VisibleTreeItem } from './fileTreeLogic'
 
 /** File icon by extension */
 function fileIcon(name: string, isDirectory: boolean): string {
@@ -106,31 +110,34 @@ function relativePath(fullPath: string, rootPath: string): string {
   return fullPath
 }
 
-interface FileTreeItemProps {
-  entry: FileEntry
-  currentPath: string
+interface FileTreeRowProps {
+  item: VisibleTreeItem
   rootPath: string
   gitStatusMap: Map<string, string>
-  onNavigate: (path: string) => void
+  selected: boolean
+  onToggle: (path: string) => void
   onFileClick: (path: string) => void
 }
 
-function FileTreeItem({ entry, currentPath, rootPath, gitStatusMap, onNavigate, onFileClick }: FileTreeItemProps) {
-  const entryPath = currentPath.endsWith('/')
-    ? `${currentPath}${entry.name}`
-    : `${currentPath}/${entry.name}`
-  const relPath = relativePath(entryPath, rootPath)
+/** One row in the collapsible tree (#6470): a chevron for dirs, icon, name,
+ *  optional git badge / size — indented by nesting depth. */
+function FileTreeRow({ item, rootPath, gitStatusMap, selected, onToggle, onFileClick }: FileTreeRowProps) {
+  const { entry, path, depth, expanded, loading } = item
+  const relPath = relativePath(path, rootPath)
   const status = gitStatusMap.get(relPath) || gitStatusMap.get(entry.name)
   const statusInfo = status ? gitStatusChar(status) : null
+  const chevron = entry.isDirectory ? (loading ? '⋯' : expanded ? '▾' : '▸') : ''
 
   return (
-    <li className="file-tree-item">
+    <li className="file-tree-item" role="treeitem" aria-expanded={entry.isDirectory ? expanded : undefined}>
       <button
         type="button"
-        className={`file-tree-btn${entry.isDirectory ? ' is-directory' : ''}`}
-        onClick={() => entry.isDirectory ? onNavigate(entryPath) : onFileClick(entryPath)}
-        title={entry.isDirectory ? `Open ${entry.name}` : `${entry.name}${entry.size !== null ? ` (${formatSize(entry.size)})` : ''}`}
+        className={`file-tree-btn${entry.isDirectory ? ' is-directory' : ''}${selected ? ' is-selected' : ''}`}
+        style={{ paddingLeft: `${6 + depth * 14}px` }}
+        onClick={() => entry.isDirectory ? onToggle(path) : onFileClick(path)}
+        title={entry.isDirectory ? entry.name : `${entry.name}${entry.size !== null ? ` (${formatSize(entry.size)})` : ''}`}
       >
+        <span className={`file-tree-chevron${entry.isDirectory ? '' : ' file-tree-chevron--leaf'}`} aria-hidden="true">{chevron}</span>
         <span className="file-tree-icon" aria-hidden="true">{fileIcon(entry.name, entry.isDirectory)}</span>
         <span className="file-tree-name">{entry.name}</span>
         {statusInfo && (
@@ -220,9 +227,12 @@ export function FileBrowserPanel() {
   const requestFindReferences = useConnectionStore(s => s.requestFindReferences)
   const symbolLocation = useConnectionStore(s => s.symbolLocation)
   const openFileInBrowser = useConnectionStore(s => s.openFileInBrowser)
-  const [currentPath, setCurrentPath] = useState<string | null>(null)
-  const [entries, setEntries] = useState<FileEntry[]>([])
-  const [parentPath, setParentPath] = useState<string | null>(null)
+  // #6470 — VSCode-style collapsible tree state: children cached per directory
+  // (the root + each expanded subdir), the set of expanded dirs, and dirs with an
+  // in-flight browse_files. rootPath (the ref below) bounds the tree.
+  const [dirChildren, setDirChildren] = useState<Map<string, FileEntry[]>>(new Map())
+  const [expandedDirs, setExpandedDirs] = useState<Set<string>>(new Set())
+  const [loadingDirs, setLoadingDirs] = useState<Set<string>>(new Set())
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -282,14 +292,23 @@ export function FileBrowserPanel() {
   // Register callbacks
   useEffect(() => {
     const handleListing = (listing: FileListing) => {
-      setEntries(listing.entries)
-      setCurrentPath(listing.path)
-      setParentPath(listing.parentPath)
-      setError(listing.error)
       setLoading(false)
-      if (!rootPath.current && listing.path) {
-        rootPath.current = listing.path
-      }
+      setError(listing.error)
+      if (!listing.path) return
+      if (!rootPath.current) rootPath.current = listing.path
+      // Route the children under the directory they belong to (the root, or a
+      // subdir being expanded) — never replace the whole tree. #6470.
+      setDirChildren(prev => {
+        const next = new Map(prev)
+        next.set(listing.path!, listing.entries)
+        return next
+      })
+      setLoadingDirs(prev => {
+        if (!prev.has(listing.path!)) return prev
+        const next = new Set(prev)
+        next.delete(listing.path!)
+        return next
+      })
     }
     setFileBrowserCallback(handleListing)
     return () => setFileBrowserCallback(null)
@@ -339,9 +358,9 @@ export function FileBrowserPanel() {
   // Load directory listing when session changes (including follow mode switches)
   useEffect(() => {
     // Reset local state for the new session
-    setEntries([])
-    setCurrentPath(null)
-    setParentPath(null)
+    setDirChildren(new Map())
+    setExpandedDirs(new Set())
+    setLoadingDirs(new Set())
     setError(null)
     setFileContent(null)
     setFileLanguage(null)
@@ -376,11 +395,33 @@ export function FileBrowserPanel() {
     [gitStatus],
   )
 
-  const handleNavigate = useCallback((path: string) => {
-    setLoading(true)
-    setError(null)
-    requestFileListing(path)
-  }, [requestFileListing])
+  // #6470 — expand/collapse a directory in place; lazy-load its children on the
+  // first expand (browse_files returns one level), cached thereafter.
+  const handleToggleDir = useCallback((path: string) => {
+    const willExpand = !expandedDirs.has(path)
+    if (willExpand && !dirChildren.has(path) && !loadingDirs.has(path)) {
+      setLoadingDirs(l => new Set(l).add(path))
+      requestFileListing(path)
+    }
+    setExpandedDirs(prev => toggleDir(prev, path))
+  }, [expandedDirs, dirChildren, loadingDirs, requestFileListing])
+
+  // #6470 — reveal a directory (breadcrumb click): expand it and every ancestor,
+  // lazy-loading any whose children aren't cached yet.
+  const handleRevealDir = useCallback((path: string) => {
+    const chain = ancestorDirs(joinPath(path, 'x'), rootPath.current || '')
+    for (const d of chain) {
+      if (!dirChildren.has(d) && !loadingDirs.has(d)) {
+        setLoadingDirs(l => new Set(l).add(d))
+        requestFileListing(d)
+      }
+    }
+    setExpandedDirs(prev => {
+      const next = new Set(prev)
+      chain.forEach(d => next.add(d))
+      return next
+    })
+  }, [dirChildren, loadingDirs, requestFileListing])
 
   const handleFileClick = useCallback((path: string) => {
     setSelectedFile(path)
@@ -424,13 +465,6 @@ export function FileBrowserPanel() {
     pendingScrollLine.current = fileBrowserPendingOpen.line ?? null
   }, [fileBrowserPendingOpen, handleFileClick])
 
-  const handleBack = useCallback(() => {
-    if (parentPath) {
-      setLoading(true)
-      requestFileListing(parentPath)
-    }
-  }, [parentPath, requestFileListing])
-
   const handleCloseFile = useCallback(() => {
     setSelectedFile(null)
     setFileContent(null)
@@ -451,7 +485,10 @@ export function FileBrowserPanel() {
     lastSymbolReq.current = rel
     setSymbolScope(rel)
     requestSymbols(rel)
-  }, [selectedFile, currentPath, ideEnabled, requestSymbols])
+    // dirChildren stands in for the old `currentPath` dep: it changes when the
+    // root listing lands, so a file restored on mount (root not yet known at
+    // select time) still requests its symbols once rootPath is set.
+  }, [selectedFile, dirChildren, ideEnabled, requestSymbols])
 
   // #6472 — group the open file's symbols by kind for the read-only panel. Only
   // render when the snapshot's echoed `path` matches the file we asked about.
@@ -504,24 +541,18 @@ export function FileBrowserPanel() {
     return () => window.clearTimeout(id)
   }, [symbolLocation, openFileInBrowser])
 
-  // Breadcrumbs from currentPath relative to root
-  const breadcrumbs = useMemo(() => {
-    if (!currentPath || !rootPath.current) return []
-    const root = rootPath.current
-    const rootName = root.split('/').pop() || root
-    if (currentPath === root) return [{ label: rootName, path: root }]
+  // #6470 — breadcrumbs for the selected file (VSCode-style: root → dirs → file).
+  // dirChildren is a dep so it recomputes once rootPath.current is first known.
+  const breadcrumbs = useMemo(
+    () => buildBreadcrumbs(selectedFile, rootPath.current || ''),
+    [selectedFile, dirChildren],
+  )
 
-    const rel = currentPath.slice(root.length + 1)
-    const segments = rel.split('/').filter(Boolean)
-    const crumbs = [{ label: rootName, path: root }]
-    for (let i = 0; i < segments.length; i++) {
-      crumbs.push({
-        label: segments[i]!,
-        path: root + '/' + segments.slice(0, i + 1).join('/'),
-      })
-    }
-    return crumbs
-  }, [currentPath])
+  // #6470 — the flattened visible tree: root children + expanded subtrees.
+  const visibleEntries = useMemo(
+    () => rootPath.current ? computeVisibleEntries(rootPath.current, dirChildren, expandedDirs, loadingDirs) : [],
+    [dirChildren, expandedDirs, loadingDirs],
+  )
 
   // Syntax-highlighted lines for the file viewer
   const highlightedLines = useMemo(() => {
@@ -539,18 +570,18 @@ export function FileBrowserPanel() {
           {breadcrumbs.map((crumb, i) => (
             <span key={crumb.path}>
               {i > 0 && <span className="file-browser-sep">/</span>}
-              {i < breadcrumbs.length - 1 ? (
-                <button
-                  type="button"
-                  className="file-browser-crumb"
-                  onClick={() => handleNavigate(crumb.path)}
-                >
-                  {crumb.label}
-                </button>
-              ) : (
+              {crumb.isLeaf ? (
                 <span className="file-browser-crumb file-browser-crumb--current">
                   {crumb.label}
                 </span>
+              ) : (
+                <button
+                  type="button"
+                  className="file-browser-crumb"
+                  onClick={() => handleRevealDir(crumb.path)}
+                >
+                  {crumb.label}
+                </button>
               )}
             </span>
           ))}
@@ -561,31 +592,23 @@ export function FileBrowserPanel() {
           )}
         </nav>
 
-        {/* Entries */}
+        {/* Collapsible tree (#6470) */}
         <div className="file-browser-entries">
-          {loading && <div className="file-browser-loading">Loading...</div>}
+          {loading && dirChildren.size === 0 && <div className="file-browser-loading">Loading...</div>}
           {!loading && error && <div className="file-browser-error">{error}</div>}
-          {!loading && !error && entries.length === 0 && (
+          {!error && dirChildren.size > 0 && visibleEntries.length === 0 && (
             <div className="file-browser-empty">Empty directory</div>
           )}
-          {!loading && entries.length > 0 && (
-            <ul className="file-tree-list" role="list">
-              {parentPath && (
-                <li className="file-tree-item">
-                  <button type="button" className="file-tree-btn is-directory" onClick={handleBack}>
-                    <span className="file-tree-icon" aria-hidden="true">{'\u{2B06}'}</span>
-                    <span className="file-tree-name">..</span>
-                  </button>
-                </li>
-              )}
-              {entries.map(entry => (
-                <FileTreeItem
-                  key={entry.name}
-                  entry={entry}
-                  currentPath={currentPath || ''}
+          {visibleEntries.length > 0 && (
+            <ul className="file-tree-list" role="tree">
+              {visibleEntries.map(item => (
+                <FileTreeRow
+                  key={item.path}
+                  item={item}
                   rootPath={rootPath.current || ''}
                   gitStatusMap={gitStatusMap}
-                  onNavigate={handleNavigate}
+                  selected={selectedFile === item.path}
+                  onToggle={handleToggleDir}
                   onFileClick={handleFileClick}
                 />
               ))}

@@ -7974,6 +7974,25 @@ button.sidebar-token-view-session-row:hover {
   border-radius: 3px;
 }
 
+/* #6470 — the open file is highlighted in the tree. */
+.file-tree-btn.is-selected {
+  background: var(--bg-tertiary);
+  color: var(--text-primary);
+}
+
+/* #6470 — collapsible-tree chevron. The transparent leaf variant keeps file
+   names aligned with directory names under the toggle column. */
+.file-tree-chevron {
+  flex: 0 0 auto;
+  width: 12px;
+  text-align: center;
+  font-size: 9px;
+  line-height: 1;
+  color: var(--text-secondary);
+}
+
+.file-tree-chevron--leaf { color: transparent; }
+
 /* ---- Diff Viewer Panel ---- */
 .diff-viewer-panel {
   display: flex;
