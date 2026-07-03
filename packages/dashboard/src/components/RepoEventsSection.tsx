@@ -11,11 +11,15 @@
  *
  * Active-repo scoping (AC#3): by default the pane scopes to the repos the live
  * sessions are working in — matched best-effort by the repo's `owner/REPO`
- * basename against each session's cwd basename. A "Show all repos" toggle
- * reveals everything (and the scope falls back to all when no active session
- * repo can be matched, so the pane never renders a confusing empty feed). Exact
- * remote-based scoping + live WS delta broadcast + webhook-secret UX are a
- * deferred PR-2 follow-up; PR-1 is the pull-driven survey pane.
+ * basename against each session's cwd basename. Two "nothing to show" cases are
+ * handled distinctly: when there are NO active-session repos to scope BY, scoping
+ * is off and every event shows (so a session-less dashboard never renders a
+ * confusing empty feed); when there ARE active repos but none match a buffered
+ * event, the pane renders an explicit "no events for your repos" state with a
+ * "Show all" button rather than silently blanking. A "Show all repos" toggle
+ * reveals everything either way. Exact remote-based scoping + live WS delta
+ * broadcast + webhook-secret UX are a deferred PR-2 follow-up; PR-1 is the
+ * pull-driven survey pane.
  *
  * Same pull-on-Refresh data flow as the sibling surveys: the Refresh button
  * dispatches `repo_events_request` via the store's `requestRepoEvents`; the
@@ -48,10 +52,17 @@ export function formatAgo(iso: string | null | undefined, nowMs: number): string
   return `${Math.floor(hr / 24)}d ago`
 }
 
-/** Last path segment of an `owner/repo` full name (or any slash path), or null. */
+/**
+ * Last path segment of an `owner/repo` full name OR a filesystem path, or null.
+ * Splits on BOTH separators + collapses runs so it works for a repo full name
+ * (`owner/repo`), a POSIX cwd (`/Users/me/chroxy`), AND a Windows session cwd
+ * (`C:\Users\me\chroxy`) — a session on a Windows daemon sends backslash paths,
+ * and a '/'-only split would return the whole string and hide every event.
+ * Trailing separators are dropped by the `filter(Boolean)`.
+ */
 export function repoBasename(fullName: string | null | undefined): string | null {
   if (!fullName) return null
-  const parts = fullName.split('/').filter(Boolean)
+  const parts = fullName.split(/[\\/]+/).filter(Boolean)
   return parts.length > 0 ? parts[parts.length - 1]! : null
 }
 

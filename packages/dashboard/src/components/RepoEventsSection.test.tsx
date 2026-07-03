@@ -58,15 +58,17 @@ function snap(over: Partial<ServerRepoEventsSnapshotMessage> = {}): ServerRepoEv
 }
 
 describe('RepoEventsSection pure helpers (#5966)', () => {
-  it('repoBasename returns the repo part of owner/repo', () => {
+  it('repoBasename returns the repo part of owner/repo and POSIX/Windows cwds', () => {
     expect(repoBasename('blamechris/chroxy')).toBe('chroxy')
     expect(repoBasename('/Users/me/Projects/chroxy')).toBe('chroxy')
+    expect(repoBasename('/Users/me/Projects/chroxy/')).toBe('chroxy') // trailing slash
+    expect(repoBasename('C:\\Users\\me\\chroxy')).toBe('chroxy')      // Windows daemon cwd
     expect(repoBasename(null)).toBeNull()
     expect(repoBasename('')).toBeNull()
   })
 
-  it('activeRepoBasenames derives the cwd basenames of live sessions', () => {
-    const set = activeRepoBasenames([{ cwd: '/Users/me/Projects/chroxy' }, { cwd: '/Users/me/widget' }])
+  it('activeRepoBasenames derives the cwd basenames of live sessions (POSIX + Windows)', () => {
+    const set = activeRepoBasenames([{ cwd: '/Users/me/Projects/chroxy' }, { cwd: 'C:\\Users\\me\\widget' }])
     expect([...set].sort()).toEqual(['chroxy', 'widget'])
   })
 
