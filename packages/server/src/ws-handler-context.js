@@ -139,6 +139,9 @@ export const CTX_NAMESPACES = {
     // #6277: host-local user-shell approval store; the create gate holds a
     // spawn here when userShell.requireApproval is on. Null in test ctx mocks.
     'shellApprovalStore',
+    // #5966: bounded RepoEventStore drained by the Control Room repo-events
+    // survey. Null until the first GitHub-webhook delivery lazily creates it.
+    'repoEventStore',
   ],
   runtime: [
     'draining',

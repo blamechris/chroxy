@@ -1893,6 +1893,33 @@ const handleExternalSessionsRequest = makeSyncHostSurvey({
   },
 })
 
+/**
+ * #5966 (epic #5422 phase 5) — reply to a `repo_events_request` with a
+ * point-in-time snapshot of the GitHub-webhook repo events the daemon buffered
+ * in its bounded RepoEventStore (github-webhook.js, HMAC-verified ingest #6468).
+ * Reads the in-memory store only (no git/gh survey), so — like the mailbox /
+ * external-session surveys — it is synchronous and has no in-flight guard. The
+ * store is lazily created on the first webhook delivery, so a null store is the
+ * valid "nothing buffered yet" state and yields an empty (schema-valid) feed.
+ *
+ * A bounded tail (`limit: 50`) keeps the snapshot small even though the store
+ * caps at 200 — the pane shows recent activity, not the whole ring. Host-level
+ * survey: a pairing-bound (share-a-session) token is rejected, like
+ * `host_status_request`, still with a schema-valid empty snapshot carrying an
+ * additive `error` so the pane renders the refusal rather than spinning.
+ */
+const handleRepoEventsRequest = makeSyncHostSurvey({
+  type: 'repo_events_snapshot',
+  emptyFields: { events: [] },
+  forbiddenMessage: 'repo_events_request requires host-level authority (a session-bound token cannot survey the host)',
+  resolve: (ctx) => {
+    const store = ctx?.services?.repoEventStore
+    return {
+      events: typeof store?.list === 'function' ? store.list({ limit: 50 }) : [],
+    }
+  },
+})
+
 export const controlRoomHandlers = {
   host_status_request: handleHostStatusRequest,
   runner_status_request: handleRunnerStatusRequest,
@@ -1913,5 +1940,6 @@ export const controlRoomHandlers = {
   skills_inventory_request: handleSkillsInventoryRequest,
   mailbox_status_request: handleMailboxStatusRequest,
   external_sessions_request: handleExternalSessionsRequest,
+  repo_events_request: handleRepoEventsRequest,
   integration_action: handleIntegrationAction,
 }

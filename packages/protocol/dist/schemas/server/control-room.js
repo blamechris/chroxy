@@ -6,6 +6,7 @@
  * `../server.ts` (and every downstream consumer) import is unchanged.
  */
 export * from "./control-room/host.js";
+export * from "./control-room/repo-events.js";
 export * from "./control-room/runners.js";
 export * from "./control-room/containers.js";
 export * from "./control-room/byok.js";

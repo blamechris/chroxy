@@ -46,6 +46,7 @@ import { ByokPoolSection } from './ByokPoolSection'
 import { HostPruneSection } from './HostPruneSection'
 import { DeviceRuntimesSection } from './DeviceRuntimesSection'
 import { IntegrationsSection } from './IntegrationsSection'
+import { RepoEventsSection } from './RepoEventsSection'
 import { SkillsInventorySection } from './SkillsInventorySection'
 import { MailboxPanel } from './MailboxPanel'
 import { CrossSessionMissionControl } from './CrossSessionMissionControl'
@@ -222,6 +223,20 @@ export const CONTROL_ROOM_TABS = [
     snapshotKey: 'mailboxStatus',
     loadingKey: 'mailboxStatusLoading',
     requestKey: 'requestMailboxStatus',
+  },
+  // #5966 (Control Room v2 phase 5 / #5422): the Repo events tab — GitHub-webhook
+  // activity (push / PR / issue) the daemon buffers in its bounded RepoEventStore
+  // (#6468), scoped best-effort to the repos live sessions are working in. Same
+  // survey:true fetch-on-activation flow as the sibling tabs; the in-memory store
+  // read is cheap so the #5546 staleness guard just keeps it fresh.
+  {
+    key: 'repo-events',
+    label: 'Repo events',
+    survey: true,
+    requestType: 'repo_events_request',
+    snapshotKey: 'repoEventsSnapshot',
+    loadingKey: 'repoEventsLoading',
+    requestKey: 'requestRepoEvents',
   },
   // #6183 (Control Room v2 phase 2 / #5964): cross-session mission control — the
   // aggregate, read-only view over EVERY session's activity tree, grouped by
@@ -705,6 +720,8 @@ export function ControlRoomView({
         <SkillsInventorySection />
       ) : tab === 'mailbox' ? (
         <MailboxPanel />
+      ) : tab === 'repo-events' ? (
+        <RepoEventsSection />
       ) : tab === 'mission-control' ? (
         <MissionControlTab />
       ) : (

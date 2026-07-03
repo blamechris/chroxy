@@ -3126,4 +3126,77 @@ describe('@chroxy/protocol schemas', () => {
       assert.ok(!ServerAvailableModelsSchema.safeParse({ type: 'available_models', provider: 42 }).success)
     })
   })
+
+  describe('#5966 — repo-events Control Room survey', () => {
+    it('RepoEventSchema round-trips a pull_request event from normalizeGithubEvent', async () => {
+      const { RepoEventSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      const r = RepoEventSchema.safeParse({
+        kind: 'pull_request',
+        repo: 'blamechris/chroxy',
+        actor: 'blamechris',
+        at: '2026-07-02T12:00:00.000Z',
+        action: 'opened',
+        number: 42,
+        title: 'feat: repo-events pane',
+        url: 'https://github.com/blamechris/chroxy/pull/42',
+        summary: 'opened PR #42',
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.kind, 'pull_request')
+      assert.equal(r.data.number, 42)
+    })
+
+    it('RepoEventSchema accepts a push event (branch present, action/number absent)', async () => {
+      const { RepoEventSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      const r = RepoEventSchema.safeParse({
+        kind: 'push', repo: 'blamechris/chroxy', actor: 'blamechris',
+        at: '2026-07-02T12:00:00.000Z', branch: 'main', title: 'fix things',
+        url: 'https://github.com/blamechris/chroxy/commit/abc', summary: 'pushed 3 commits to main',
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.branch, 'main')
+    })
+
+    it('RepoEventSchema accepts a ping (nullable repo/actor, url null)', async () => {
+      const { RepoEventSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      const r = RepoEventSchema.safeParse({
+        kind: 'ping', repo: null, actor: null, at: '2026-07-02T12:00:00.000Z',
+        title: 'Keep it logically awesome.', url: null, summary: 'webhook configured (ping)',
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.repo, null)
+    })
+
+    it('RepoEventSchema rejects an unsurfaced kind', async () => {
+      const { RepoEventSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      assert.ok(!RepoEventSchema.safeParse({
+        kind: 'release', repo: 'x/y', actor: 'a', at: '2026-07-02T12:00:00.000Z', summary: 'released',
+      }).success, 'only push/pull_request/issues/ping are surfaced')
+    })
+
+    it('ServerRepoEventsSnapshotSchema round-trips an empty snapshot (nothing buffered yet)', async () => {
+      const { ServerRepoEventsSnapshotSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      const r = ServerRepoEventsSnapshotSchema.safeParse({
+        type: 'repo_events_snapshot', generatedAt: '2026-07-02T12:00:00.000Z', events: [],
+      })
+      assert.ok(r.success)
+      assert.deepEqual(r.data.events, [])
+    })
+
+    it('ServerRepoEventsSnapshotSchema carries the additive degraded error (FORBIDDEN refusal)', async () => {
+      const { ServerRepoEventsSnapshotSchema } = await import('../src/schemas/server/control-room/repo-events.ts')
+      const r = ServerRepoEventsSnapshotSchema.safeParse({
+        type: 'repo_events_snapshot', requestId: 'req-1', generatedAt: '2026-07-02T12:00:00.000Z',
+        events: [], error: { code: 'FORBIDDEN', message: 'session-bound token cannot survey the host' },
+      })
+      assert.ok(r.success)
+      assert.equal(r.data.error.code, 'FORBIDDEN')
+    })
+
+    it('ClientMessageSchema accepts repo_events_request (union membership)', async () => {
+      const { ClientMessageSchema } = await import('../src/schemas/client.ts')
+      assert.ok(ClientMessageSchema.safeParse({ type: 'repo_events_request' }).success)
+      assert.ok(ClientMessageSchema.safeParse({ type: 'repo_events_request', requestId: 'r1' }).success)
+    })
+  })
 })
