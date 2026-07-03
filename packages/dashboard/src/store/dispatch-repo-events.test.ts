@@ -100,12 +100,14 @@ describe('repo events live delta (#6536)', () => {
   })
   afterEach(() => { stopHeartbeat(); clearDeltaBuffers(); clearPermissionSplits(); resetReplayFlags() })
 
-  it('appends a delta event to an existing snapshot (most-recent-last)', () => {
+  it('appends a delta event to an existing snapshot (most-recent-last) and advances generatedAt', () => {
     handleMessage(snapshot(), ctx() as never)
     handleMessage(delta(), ctx() as never)
-    const events = store.getState().repoEventsSnapshot!.events
-    expect(events).toHaveLength(3)
-    expect(events[2]!.summary).toBe('closed issue #9') // appended at the end (newest)
+    const snap = store.getState().repoEventsSnapshot!
+    expect(snap.events).toHaveLength(3)
+    expect(snap.events[2]!.summary).toBe('closed issue #9') // appended at the end (newest)
+    // generatedAt advances to the delta's time so the "generated Nm ago" line stays honest
+    expect(snap.generatedAt).toBe('2026-07-02T12:01:00.000Z')
   })
 
   it('ignores a delta when no survey has landed yet (no snapshot)', () => {

@@ -2653,7 +2653,10 @@ function handleRepoEventsSnapshot(msg: Record<string, unknown>, _get: MsgGet, se
  * survey on tab-open fetches the full store tail (which already includes this
  * event, pushed server-side before the broadcast), so nothing is lost. The
  * appended list is bounded to the store cap (200, mirrors REPO_EVENT_STORE_CAP)
- * and stays most-recent-last, matching the survey's ordering.
+ * and stays most-recent-last, matching the survey's ordering. The snapshot's
+ * `generatedAt` is advanced to the delta's time so RepoEventsSection's eyebrow
+ * date + "generated Nm ago" freshness line stay honest as events stream in
+ * (otherwise a live-updating pane would read stale).
  */
 function handleRepoEventsDelta(msg: Record<string, unknown>, get: MsgGet, set: MsgSet, _ctx: ConnectionContext): void {
   const parsed = ServerRepoEventsDeltaSchema.safeParse(msg);
@@ -2661,7 +2664,7 @@ function handleRepoEventsDelta(msg: Record<string, unknown>, get: MsgGet, set: M
   const current = get().repoEventsSnapshot;
   if (!current) return; // no survey yet — tab-open survey fetches the full tail
   const events = [...current.events, parsed.data.event].slice(-200);
-  set({ repoEventsSnapshot: { ...current, events } });
+  set({ repoEventsSnapshot: { ...current, events, generatedAt: parsed.data.generatedAt } });
 }
 
 /**
