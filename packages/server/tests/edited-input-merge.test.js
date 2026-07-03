@@ -52,6 +52,20 @@ describe('mergeEditedInput whitelist (#6543)', () => {
     mergeEditedInput(orig, { content: 'edited' }, 'Write')
     assert.equal(orig.content, 'orig')
   })
+
+  it('#6553 — is prototype-pollution resistant (iterates the whitelist, not client keys)', () => {
+    // Attack: a `__proto__` / `constructor` payload can't reach the assignment
+    // because the merge loops over EDITABLE_INPUT_FIELDS, never editedInput's own
+    // keys. Assert Object.prototype stays clean and no polluted key appears.
+    const before = { ...Object.prototype }
+    const r1 = mergeEditedInput({ file_path: '/a', content: 'orig' }, JSON.parse('{"__proto__":{"polluted":"yes"},"content":"edited"}'), 'Write')
+    const r2 = mergeEditedInput({ file_path: '/a', content: 'orig' }, { constructor: { prototype: { polluted: 'yes' } }, content: 'edited' }, 'Write')
+    assert.equal(({}).polluted, undefined, 'Object.prototype must not be polluted')
+    assert.equal(r1.polluted, undefined)
+    assert.equal(r2.polluted, undefined)
+    assert.equal(r1.content, 'edited') // the legit whitelisted field still applies
+    assert.deepEqual(Object.prototype, before)
+  })
 })
 
 describe('respondToPermission editedInput integration (#6543)', () => {
