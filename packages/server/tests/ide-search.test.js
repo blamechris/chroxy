@@ -205,8 +205,13 @@ describe('findReferences — word-boundary reverse lookup (#6477)', () => {
 
   it('is unchanged (walk order) when no fromFile is given (#6516)', async () => {
     const { results } = await findReferences(root, 'widget')
-    // Without an origin hint, results stay in the deterministic walk order.
-    assert.deepEqual(results.map((r) => r.line).sort((a, b) => a - b), [1, 2, 5, 5])
+    // Without an origin hint, results keep the deterministic walk order — assert
+    // the ORDER directly (no sort), so an accidental reordering would be caught.
+    // a.ts refs in walk order: line 1, line 2, then the two on line 5.
+    assert.deepEqual(
+      results.map((r) => `${r.file}:${r.line}`),
+      ['a.ts:1', 'a.ts:2', 'a.ts:5', 'a.ts:5'],
+    )
   })
 
   it('returns every occurrence on a line with 1-indexed columns', async () => {
