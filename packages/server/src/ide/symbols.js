@@ -297,6 +297,88 @@ export async function collectWorkspaceSymbols(rootDir, opts = {}) {
   return { symbols, truncated }
 }
 
+// ---------------------------------------------------------------------------
+// Workspace symbol-index cache (#6499)
+// ---------------------------------------------------------------------------
+//
+// resolveSymbol and the whole-workspace list_symbols both do a FULL bounded walk
+// on every call — a burst of cmd/ctrl+clicks over a tunnel re-parses the whole
+// tree each time. This short-lived, invalidatable cache holds the full-walk
+// result (`collectWorkspaceSymbols(rootDir)` with no `path`) keyed by the REAL
+// (symlink-resolved) workspace root, so a second lookup within the TTL filters
+// the cached table instead of re-walking. Scoped (`path`-bearing) scans are NOT
+// cached — they are cheap and varied; only the expensive no-path full walk is.
+//
+// Invalidation is TTL-based (a newly-added declaration resolves once the entry
+// expires); `invalidateWorkspaceSymbolIndex()` clears everything for a future
+// file-change signal or test teardown. The cached object is treated as READ-ONLY
+// by every consumer (resolveSymbol reads, the handler serializes) — do not mutate
+// it, or you corrupt the shared entry.
+const DEFAULT_INDEX_TTL_MS = 5000
+const MAX_INDEX_CACHE_ENTRIES = 16
+const _indexCache = new Map() // realpath(root) → { result, expires }
+let _indexHits = 0
+let _indexMisses = 0
+
+/**
+ * Full-workspace symbol index with a short TTL cache (#6499). Same return shape
+ * as `collectWorkspaceSymbols(rootDir)` (no path). Keyed by the realpath of the
+ * root so two workspaces never share an entry, and so an in-workspace symlink
+ * can't poison another root's key.
+ *
+ * @param {string} rootDir          Absolute workspace root (session cwd).
+ * @param {object} [opts]
+ * @param {number} [opts.ttlMs]     Entry lifetime (default 5000ms).
+ * @param {number} [opts.now]       Injectable clock for deterministic tests.
+ * @returns {Promise<{symbols: SymbolEntry[], truncated: boolean}>}
+ */
+export async function getWorkspaceSymbolIndex(rootDir, opts = {}) {
+  const { ttlMs = DEFAULT_INDEX_TTL_MS, now = Date.now() } = opts
+  // Key by the REAL root — same base collectWorkspaceSymbols confines against. An
+  // unresolvable root can't be cached safely; fall back to the (also-guarded,
+  // empty-on-error) uncached walk.
+  let key
+  try {
+    key = await realpath(resolve(rootDir))
+  } catch {
+    return collectWorkspaceSymbols(rootDir)
+  }
+
+  const hit = _indexCache.get(key)
+  if (hit && hit.expires > now) {
+    _indexHits++
+    return hit.result
+  }
+
+  _indexMisses++
+  const result = await collectWorkspaceSymbols(rootDir)
+  // Bounded FIFO eviction — the daemon usually has one workspace, but never let a
+  // long-lived process accumulate unbounded entries.
+  _indexCache.delete(key) // drop any stale entry so re-insert lands as newest
+  if (_indexCache.size >= MAX_INDEX_CACHE_ENTRIES) {
+    const oldest = _indexCache.keys().next().value
+    if (oldest !== undefined) _indexCache.delete(oldest)
+  }
+  _indexCache.set(key, { result, expires: now + ttlMs })
+  return result
+}
+
+/**
+ * Clear the workspace symbol-index cache (#6499) — every entry and the hit/miss
+ * counters. No-arg / coarse by design: a hook for a future file-change signal or
+ * a test teardown. TTL expiry is the routine invalidation path.
+ */
+export function invalidateWorkspaceSymbolIndex() {
+  _indexCache.clear()
+  _indexHits = 0
+  _indexMisses = 0
+}
+
+/** Cache hit/miss/size counters (#6499) — for tests and diagnostics. */
+export function _symbolIndexCacheStats() {
+  return { hits: _indexHits, misses: _indexMisses, size: _indexCache.size }
+}
+
 /**
  * Resolve a symbol NAME to a single declaration location — the backbone of
  * go-to-definition (#6475, epic #6469). Reuses collectWorkspaceSymbols so the
@@ -322,7 +404,9 @@ export async function resolveSymbol(rootDir, symbolName, opts = {}) {
   const name = typeof symbolName === 'string' ? symbolName.trim() : ''
   if (!name) return null
   const { fromFile = null } = opts
-  const { symbols } = await collectWorkspaceSymbols(rootDir)
+  // Route through the TTL cache (#6499) so a burst of clicks doesn't re-walk the
+  // tree each time; ttlMs/now (if present) are forwarded for deterministic tests.
+  const { symbols } = await getWorkspaceSymbolIndex(rootDir, opts)
   let best = null
   let bestScore = -1
   for (const s of symbols) {

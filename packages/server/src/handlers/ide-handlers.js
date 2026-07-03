@@ -12,7 +12,7 @@
  */
 import { resolveSession } from '../handler-utils.js'
 import { isIdeFeatureEnabled } from '../config.js'
-import { collectWorkspaceSymbols, resolveSymbol } from '../ide/symbols.js'
+import { collectWorkspaceSymbols, getWorkspaceSymbolIndex, resolveSymbol } from '../ide/symbols.js'
 import { searchContent, findReferences } from '../ide/search.js'
 import { createLogger } from '../logger.js'
 
@@ -43,7 +43,11 @@ async function handleListSymbols(ws, client, msg, ctx) {
   }
 
   try {
-    const { symbols, truncated } = await collectWorkspaceSymbols(cwd, { path })
+    // Whole-workspace list_symbols (no path) shares the TTL symbol-index cache
+    // (#6499) with resolve_symbol; a scoped path re-scans that sub-tree fresh.
+    const { symbols, truncated } = path
+      ? await collectWorkspaceSymbols(cwd, { path })
+      : await getWorkspaceSymbolIndex(cwd)
     ctx.transport.send(ws, { type: 'symbols_snapshot', path, symbols, truncated, error: null })
   } catch (err) {
     log.debug(`list_symbols failed: ${err?.message}`)
