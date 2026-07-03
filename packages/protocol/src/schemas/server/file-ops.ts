@@ -64,9 +64,11 @@ export const ServerDiffResultSchema = z.object({
   error: z.string().nullable(),
 })
 
-// `read_file` response. All 7 keys are always present (present-and-nullable, not
-// optional). For images, `content` is a base64 data URL and `language` is the
-// literal 'image'; `content` is sliced to 100KB with `truncated` true past that.
+// `read_file` response. The 7 core keys are always present (present-and-nullable,
+// not optional); `requestId` (#6502) is the one optional field — echoed back only
+// when the originating `read_file` carried a nonce, so the dashboard can drop a
+// superseded reply. For images, `content` is a base64 data URL and `language` is
+// the literal 'image'; `content` is sliced to 100KB with `truncated` true past that.
 export const ServerFileContentSchema = z.object({
   type: z.literal('file_content'),
   path: z.string().nullable(),
