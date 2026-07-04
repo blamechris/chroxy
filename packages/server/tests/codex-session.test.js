@@ -862,11 +862,23 @@ describe('CodexSession', () => {
   })
 
   describe('start() API key validation', () => {
+    let savedCodexHome, noOauthDir
+    beforeEach(() => {
+      // #6563: isolate the OAuth probe from the test machine's ~/.codex so the
+      // "no creds → throws" expectation is deterministic regardless of whether the
+      // dev has run `codex login`. Point CHROXY_CODEX_HOME at an empty dir.
+      savedCodexHome = process.env.CHROXY_CODEX_HOME
+      noOauthDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-noauth-'))
+      process.env.CHROXY_CODEX_HOME = noOauthDir
+    })
     afterEach(() => {
       process.env.OPENAI_API_KEY = 'test-key'
+      if (savedCodexHome === undefined) delete process.env.CHROXY_CODEX_HOME
+      else process.env.CHROXY_CODEX_HOME = savedCodexHome
+      try { rmSync(noOauthDir, { recursive: true, force: true }) } catch { /* best effort */ }
     })
 
-    it('throws when OPENAI_API_KEY is not set', () => {
+    it('throws when OPENAI_API_KEY is not set and no OAuth creds', () => {
       const session = new CodexSession({ cwd: '/tmp' })
       delete process.env.OPENAI_API_KEY
       assert.throws(() => session.start(), {
@@ -879,6 +891,31 @@ describe('CodexSession', () => {
       session.start()
       assert.equal(session._processReady, true)
       session.destroy()
+    })
+
+    // #6563: a `codex login`-only user (OAuth tokens in ~/.codex/auth.json, no
+    // OPENAI_API_KEY) must be runtime-ready — start() must NOT throw (matching
+    // resolveAuth()'s ready:true), and preflight marks the env var optional so
+    // `chroxy doctor` downgrades the missing key from fail→warn (not a hard
+    // failure). All three layers share the hasCodexOAuthCreds probe.
+    it('#6563: OAuth-only (auth.json present, no env var) — start() does not throw + preflight optional', () => {
+      const oauthDir = mkdtempSync(join(tmpdir(), 'chroxy-codex-oauth-'))
+      writeFileSync(join(oauthDir, 'auth.json'), JSON.stringify({ tokens: { access_token: 'tok-abc' } }))
+      const savedHome = process.env.CHROXY_CODEX_HOME
+      process.env.CHROXY_CODEX_HOME = oauthDir
+      delete process.env.OPENAI_API_KEY
+      try {
+        assert.equal(CodexSession.hasAlternativeCredentials(), true)
+        assert.equal(CodexSession.preflight.credentials.optional, true, 'preflight marks the key optional so doctor downgrades a missing key fail→warn, not a hard failure')
+        const session = new CodexSession({ cwd: '/tmp' })
+        assert.doesNotThrow(() => session.start(), 'OAuth-only user is not rejected at runtime')
+        assert.equal(session._processReady, true)
+        session.destroy()
+      } finally {
+        if (savedHome === undefined) delete process.env.CHROXY_CODEX_HOME
+        else process.env.CHROXY_CODEX_HOME = savedHome
+        try { rmSync(oauthDir, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
     })
   })
 

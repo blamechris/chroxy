@@ -54,6 +54,61 @@ describe('GeminiSession', () => {
     assert.equal(session.model, 'gemini-2.5-pro')
   })
 
+  // #6563: parity with the Codex fix — a `gemini login`-only user (OAuth tokens
+  // under ~/.gemini, no GEMINI_API_KEY) must be runtime-ready. hasAlternativeCredentials()
+  // reuses the same hasGeminiOAuthCreds() probe resolveAuth() + preflight use, so all
+  // three layers (display, runtime, preflight) agree — start() must not throw for the
+  // missing env key and `chroxy doctor` marks the credential optional.
+  describe('start() OAuth-awareness (#6563)', () => {
+    let savedGeminiHome, noOauthDir
+    beforeEach(() => {
+      // Isolate the OAuth probe from the test machine's real ~/.gemini so the
+      // "no creds" expectation is deterministic regardless of a real `gemini login`.
+      savedGeminiHome = process.env.CHROXY_GEMINI_HOME
+      noOauthDir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-noauth-'))
+      process.env.CHROXY_GEMINI_HOME = noOauthDir
+    })
+    afterEach(() => {
+      if (savedGeminiHome === undefined) delete process.env.CHROXY_GEMINI_HOME
+      else process.env.CHROXY_GEMINI_HOME = savedGeminiHome
+      try { rmSync(noOauthDir, { recursive: true, force: true }) } catch { /* best effort */ }
+    })
+
+    it('no env var and no OAuth creds → hasAlternativeCredentials() false + preflight credential required', () => {
+      delete process.env.GEMINI_API_KEY
+      assert.equal(GeminiSession.hasAlternativeCredentials(), false)
+      assert.equal(GeminiSession.preflight.credentials.optional, false)
+    })
+
+    it('OAuth-only (oauth_creds.json present, no env var) — hasAlternativeCredentials() + preflight optional + start() not rejected for the missing key', () => {
+      // Different temp dir than noOauthDir — the OAuth probe is cache-keyed on
+      // CHROXY_GEMINI_HOME, so reusing the dir would risk a stale cached false.
+      const oauthDir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-oauth-'))
+      writeFileSync(join(oauthDir, 'oauth_creds.json'), JSON.stringify({ access_token: 'tok-abc' }))
+      const savedHome = process.env.CHROXY_GEMINI_HOME
+      process.env.CHROXY_GEMINI_HOME = oauthDir
+      delete process.env.GEMINI_API_KEY
+      let session = null
+      try {
+        assert.equal(GeminiSession.hasAlternativeCredentials(), true)
+        assert.equal(GeminiSession.preflight.credentials.optional, true, 'preflight marks the key optional so doctor downgrades a missing key fail→warn, not a hard failure')
+        session = new GeminiSession({ cwd: '/tmp' })
+        // The base JsonlSubprocessSession.start() throws the API-key error ONLY when
+        // no env var AND no alt creds; with OAuth present that throw must be skipped.
+        // A binary-not-found error (gemini CLI absent in CI) is unrelated — only the
+        // GEMINI_API_KEY rejection is asserted against.
+        let apiKeyError = null
+        try { session.start() } catch (e) { if (/GEMINI_API_KEY/.test(e?.message ?? '')) apiKeyError = e }
+        assert.equal(apiKeyError, null, 'OAuth-only user is not rejected at runtime for a missing API key')
+      } finally {
+        if (session) { try { session.destroy() } catch { /* best effort */ } }
+        if (savedHome === undefined) delete process.env.CHROXY_GEMINI_HOME
+        else process.env.CHROXY_GEMINI_HOME = savedHome
+        try { rmSync(oauthDir, { recursive: true, force: true }) } catch { /* best effort */ }
+      }
+    })
+  })
+
   // ---------------------------------------------------------------------
   // #3225: JsonlSubprocessSession previously dropped these constructor
   // opts at the middle layer, so providers gating and manual activation
@@ -322,6 +377,22 @@ describe('GeminiSession', () => {
   })
 
   describe('start() API key validation', () => {
+    // #6563: isolate the OAuth probe from the test machine's real ~/.gemini so the
+    // "no key → throws" expectation is deterministic regardless of a real `gemini
+    // login` (hasAlternativeCredentials() now gates the throw). Point CHROXY_GEMINI_HOME
+    // at an empty dir so hasGeminiOAuthCreds() is false here.
+    let savedGeminiHome, noOauthDir
+    beforeEach(() => {
+      savedGeminiHome = process.env.CHROXY_GEMINI_HOME
+      noOauthDir = mkdtempSync(join(tmpdir(), 'chroxy-gemini-akv-'))
+      process.env.CHROXY_GEMINI_HOME = noOauthDir
+    })
+    afterEach(() => {
+      if (savedGeminiHome === undefined) delete process.env.CHROXY_GEMINI_HOME
+      else process.env.CHROXY_GEMINI_HOME = savedGeminiHome
+      try { rmSync(noOauthDir, { recursive: true, force: true }) } catch { /* best effort */ }
+    })
+
     it('throws when GEMINI_API_KEY is not set', () => {
       const session = new GeminiSession({ cwd: '/tmp' })
       delete process.env.GEMINI_API_KEY

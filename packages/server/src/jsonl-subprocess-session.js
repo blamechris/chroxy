@@ -72,6 +72,18 @@ export class JsonlSubprocessSession extends BaseSession {
     throw new Error(`${this.name}.apiKeyEnv must be overridden`)
   }
 
+  /**
+   * #6563 — whether this provider can authenticate WITHOUT `apiKeyEnv` set
+   * (e.g. Codex OAuth tokens in ~/.codex/auth.json from `codex login`). When
+   * true, start() does NOT throw on a missing env var. Base default: false
+   * (env-var-only). A subclass with a non-env credential source overrides this
+   * to reuse the SAME probe its resolveAuth()/preflight use, so display, runtime,
+   * and preflight share one definition of "authenticated".
+   */
+  static hasAlternativeCredentials() {
+    return false
+  }
+
   static get providerName() {
     throw new Error(`${this.name}.providerName must be overridden`)
   }
@@ -125,7 +137,12 @@ export class JsonlSubprocessSession extends BaseSession {
 
   start() {
     const envVar = this.constructor.apiKeyEnv
-    if (!process.env[envVar]) {
+    // #6563: OAuth-only providers (Codex via `codex login`) have no env key — the
+    // child authenticates from its OAuth file (e.g. ~/.codex/auth.json; HOME is
+    // forwarded to the child). Only throw when there is NEITHER the env var NOR an
+    // alternative credential source, so a `codex login`-only user isn't rejected
+    // by the runtime despite resolveAuth() reporting ready.
+    if (!process.env[envVar] && !this.constructor.hasAlternativeCredentials()) {
       throw new Error(`${envVar} environment variable is not set`)
     }
     this._processReady = true

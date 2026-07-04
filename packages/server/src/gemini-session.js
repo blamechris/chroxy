@@ -4,6 +4,7 @@ import { homedir } from 'os'
 import { join } from 'path'
 import { resolveBinary } from './utils/resolve-binary.js'
 import { buildSpawnEnv } from './utils/spawn-env.js'
+import { hasGeminiOAuthCreds } from './auth-probes.js'
 import {
   CONTEXT_WINDOW_HEADROOM,
   getRatchetCap,
@@ -127,6 +128,17 @@ export class GeminiSession extends JsonlSubprocessSession {
     return 'GEMINI_API_KEY'
   }
 
+  /**
+   * #6563 — Gemini authenticates via GEMINI_API_KEY / GOOGLE_API_KEY OR OAuth
+   * tokens cached under ~/.gemini by `gemini login`. Reuse the SAME probe
+   * resolveAuth() and the preflight use so all three layers (display, runtime,
+   * preflight) agree that a `gemini login`-only user is authenticated — start()
+   * must not throw for them just because the env key is unset.
+   */
+  static hasAlternativeCredentials() {
+    return hasGeminiOAuthCreds()
+  }
+
   static get providerName() {
     return 'gemini'
   }
@@ -228,7 +240,13 @@ export class GeminiSession extends JsonlSubprocessSession {
         // preflight + #3404 audit auth surface match what the spawn allows.
         envVars: ['GEMINI_API_KEY', 'GOOGLE_API_KEY'],
         hint: 'set GEMINI_API_KEY or GOOGLE_API_KEY',
-        optional: false,
+        // #6563: the env var is OPTIONAL when OAuth creds exist (`gemini login`),
+        // so `chroxy doctor` downgrades the missing env var from fail→warn instead
+        // of a hard credentials failure — doctor can't read the OAuth token, but it
+        // must not report a false failure when resolveAuth() is ready on OAuth. Same
+        // probe as resolveAuth() + hasAlternativeCredentials() → one definition of
+        // "has a usable credential".
+        optional: hasGeminiOAuthCreds(),
       },
     }
   }

@@ -258,7 +258,7 @@ export function getLogLevel() {
  * @returns {{ debug: Function, info: Function, warn: Function, error: Function, audit: Function, log: Function, withSession: Function }}
  */
 export function createLogger(component, context = {}) {
-  const write = (level, msg, { always = false } = {}) => {
+  const write = (level, msg, { always = false, toConsole = true } = {}) => {
     // `always` bypasses the configured level gate (#6001) so an audit trail is
     // never dropped by LOG_LEVEL. Everything else (redaction, console routing,
     // listener broadcast, file write) is identical to a normal line.
@@ -270,10 +270,15 @@ export function createLogger(component, context = {}) {
       ? JSON.stringify({ ts: timestamp, level, component, msg: safeMsg })
       : `${timestamp} [${level.toUpperCase()}] [${component}] ${safeMsg}`
 
-    // Always write to console (for foreground mode)
-    if (level === 'error') console.error(line)
-    else if (level === 'warn') console.warn(line)
-    else console.log(line)
+    // Write to console (for foreground mode). #6566: `toConsole:false` suppresses
+    // the console write while keeping the file + listener paths — used by the
+    // supervisor to log a REDACTED connect-block line to disk while printing the
+    // un-redacted line to the operator's terminal separately under --show-token.
+    if (toConsole) {
+      if (level === 'error') console.error(line)
+      else if (level === 'warn') console.warn(line)
+      else console.log(line)
+    }
 
     // Notify listeners (for WS broadcast to dashboard)
     if (_logListeners.size > 0) {
@@ -305,9 +310,9 @@ export function createLogger(component, context = {}) {
 
   return {
     debug(msg) { write('debug', msg) },
-    info(msg) { write('info', msg) },
-    warn(msg) { write('warn', msg) },
-    error(msg) { write('error', msg) },
+    info(msg, opts) { write('info', msg, opts) },
+    warn(msg, opts) { write('warn', msg, opts) },
+    error(msg, opts) { write('error', msg, opts) },
     /**
      * Always-on audit line (#6001) — bypasses the configured LOG_LEVEL so a
      * security audit trail (e.g. shell-audit) is never suppressed by a quiet

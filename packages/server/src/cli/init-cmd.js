@@ -153,8 +153,16 @@ export async function runInitCmd(deps = {}) {
   const providersInput = await promptFn('   Providers: ')
   const providers = parseProviderSelection(providersInput)
 
+  // #6565: the daemon's provider SELECTOR reads the singular `provider` key
+  // (server-cli.js `config.provider || DEFAULT_PROVIDER`), NOT this `providers[]`
+  // list — that array is informational only (providers-cmd.js). Write the primary
+  // choice (providers[0]) as `provider` so the picker actually takes effect;
+  // otherwise a non-default selection is silently ignored and the daemon falls
+  // back to DEFAULT_PROVIDER (claude-tui). PROVIDER_CHOICES ids are already valid
+  // selector ids ('claude-tui', 'codex', …), so no mapping is needed.
   const config = {
     port,
+    ...(providers.length > 0 ? { provider: providers[0] } : {}),
     providers,
   }
 
