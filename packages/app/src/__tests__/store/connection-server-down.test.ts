@@ -255,10 +255,12 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     // The probe never passed, so no WebSocket was ever built.
     expect(ws.instances.length).toBe(0);
 
-    // #6583 — the terminal state must be STICKY: after give-up, advancing time must
-    // NOT kick a fresh probe/socket. Pre-fix, landing in 'disconnected' would remount
-    // ConnectScreen (App.tsx gate) → mount auto-connect → new probe → the loop. Here
-    // it must stay put with no new connection attempts.
+    // #6583 — the store half of stickiness: after give-up the ladder arms no timer,
+    // so advancing time kicks no fresh probe/socket. (This alone doesn't distinguish
+    // the fix from the pre-fix 'disconnected' — the ladder is quiescent either way;
+    // the phase assertion above is the load-bearing one. The end-to-end remount loop
+    // — 'disconnected' → ConnectScreen remount → mount auto-connect — lives in the
+    // ConnectScreen mount path and is tracked for a render-based regression test.)
     jest.advanceTimersByTime(60_000);
     await flushPromises();
     expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
@@ -290,6 +292,57 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
     expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
     // Still no socket — the probe never passed.
+    expect(ws.instances.length).toBe(0);
+
+    ws.restore();
+  });
+
+  // #6583 — the SAME saved-record-conditional latch applies to onRestartGaveUp
+  // (the /health probe answers {status:'restarting'} every attempt and the server
+  // never comes back → the restart-wait ladder exhausts). A phone unlocking over a
+  // server stuck mid-restart is a plausible real-world #6583 trigger, so this branch
+  // must be latched too — without these tests a revert to unconditional
+  // 'disconnected' would ship green.
+  it('#6583 — a restart give-up WITH a saved record latches server_down', async () => {
+    const ws = installMockWebSocket();
+    useConnectionLifecycleStore.setState({
+      savedConnection: { url: 'wss://tunnel.example.com', token: 'tok' },
+    });
+    // 200 { status: 'restarting' } on every attempt → onRestarting each rung →
+    // onRestartGaveUp once the ladder exhausts CONNECT_MAX_RETRIES.
+    (global.fetch as jest.Mock).mockResolvedValue(
+      mockResponse(200, { status: 'restarting', restartEtaMs: 5000 }),
+    );
+
+    useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+    // Initial + 5 retries; 15_000ms > max jittered delay (8000 * 1.5 = 12_000ms).
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      await flushPromises();
+      if (attempt < 5) jest.advanceTimersByTime(15_000);
+    }
+
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+    // The probe never returned ok, so no WebSocket was built.
+    expect(ws.instances.length).toBe(0);
+
+    ws.restore();
+  });
+
+  it('#6583 — a restart give-up with NO saved record falls back to disconnected', async () => {
+    const ws = installMockWebSocket();
+    useConnectionLifecycleStore.setState({ savedConnection: null });
+    (global.fetch as jest.Mock).mockResolvedValue(
+      mockResponse(200, { status: 'restarting', restartEtaMs: 5000 }),
+    );
+
+    useConnectionStore.getState().connect('wss://tunnel.example.com', 'tok', { silent: true });
+    for (let attempt = 0; attempt <= 5; attempt++) {
+      await flushPromises();
+      if (attempt < 5) jest.advanceTimersByTime(15_000);
+    }
+
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
+    expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
     expect(ws.instances.length).toBe(0);
 
     ws.restore();
