@@ -23,7 +23,7 @@
  * Mirrors the WebSocket/fetch fake-timer harness from
  * connection-reconnect-endpoint.test.ts.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, vi, beforeEach, afterEach, afterAll } from 'vitest'
 
 // --- localStorage mock (same in-memory shape as the sibling suite) ----------
 const store: Record<string, string> = {}
@@ -44,14 +44,27 @@ vi.mock('../utils/auth', () => ({ getAuthToken: () => 'page-token' }))
 // Local same-origin daemon the token-served dashboard is served from.
 const LOCAL_HOST = 'localhost:8765'
 const LOCAL_WS_URL = `ws://${LOCAL_HOST}/ws` // http: protocol → ws (not wss)
+// connectLocal() reads window.location.host/.protocol to build the same-origin
+// URL. Overwrite location/window so the origin is deterministic (jsdom's default
+// host is unrelated), but CAPTURE the originals and restore them in afterAll so
+// this suite can't leak the mutation into other files sharing the Vitest worker.
+const _origLocation = Object.getOwnPropertyDescriptor(globalThis, 'location')
+const _origWindow = Object.getOwnPropertyDescriptor(globalThis, 'window')
 Object.defineProperty(globalThis, 'location', {
   value: { host: LOCAL_HOST, protocol: 'http:', href: `http://${LOCAL_HOST}/` },
   writable: true,
+  configurable: true,
 })
 Object.defineProperty(globalThis, 'window', {
   value: globalThis,
   writable: true,
   configurable: true,
+})
+afterAll(() => {
+  if (_origLocation) Object.defineProperty(globalThis, 'location', _origLocation)
+  else delete (globalThis as unknown as { location?: unknown }).location
+  if (_origWindow) Object.defineProperty(globalThis, 'window', _origWindow)
+  else delete (globalThis as unknown as { window?: unknown }).window
 })
 
 // Exact production localStorage key names (verified against source):
@@ -181,7 +194,12 @@ describe('#6577 — token-served connectLocal() scopes to origin, not a stale de
     expect(lastUrl()).toBe(LOCAL_WS_URL)
     expect(lastUrl()).not.toBe(DEAD_WS_URL)
     // And the stale registry entry is still on disk — we did NOT dial it, we
-    // just scoped away from it.
-    expect(store[KEY_SERVER_REGISTRY]).toBe(JSON.stringify([DEAD_ENTRY]))
+    // just scoped away from it. Assert the parsed fields (not the raw JSON
+    // string, which is brittle to whitespace/key-order/serialization changes).
+    const rawRegistry = store[KEY_SERVER_REGISTRY]
+    expect(rawRegistry).toBeDefined()
+    const persistedRegistry = JSON.parse(rawRegistry as string) as Array<{ id: string; wsUrl: string }>
+    expect(persistedRegistry).toHaveLength(1)
+    expect(persistedRegistry[0]).toMatchObject({ id: DEAD_ID, wsUrl: DEAD_WS_URL })
   })
 })
