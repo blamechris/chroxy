@@ -141,7 +141,10 @@ export class PairingManager extends EventEmitter {
       try {
         for (const [token, meta] of this._sessionTokenStore.load()) {
           if (typeof token === 'string' && meta && typeof meta.createdAt === 'number') {
-            this._sessionTokens.set(token, { createdAt: meta.createdAt, sessionId: meta.sessionId ?? null })
+            // Coerce sessionId to string|null — a hand-edited / corrupt store must
+            // not inject a non-string binding that downstream handlers assume.
+            const sessionId = typeof meta.sessionId === 'string' ? meta.sessionId : null
+            this._sessionTokens.set(token, { createdAt: meta.createdAt, sessionId })
           }
         }
         // Arm the background TTL sweep so restored-but-expired tokens are reaped

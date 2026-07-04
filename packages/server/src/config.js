@@ -95,8 +95,9 @@ const CONFIG_SCHEMA = {
   tokenExpiry: 'string',
   // #6598 — how long a paired device's session token stays valid without
   // reconnecting (sliding: each connect refreshes it). Duration string like
-  // '30d' / '15d' / '12h'. Persisted across restarts. Default 30d (see
-  // server-cli). Floor enforced by PairingManager.
+  // '30d' / '15d' / '12h'. Persisted across restarts. Default 30d + the 5min
+  // floor are applied in server-cli when computing sessionTokenTtlMs; a malformed
+  // or sub-floor value is warned about by validateConfig.
   sessionTokenTtl: 'string',
   sessionTimeout: 'string',
   costBudget: 'number',
