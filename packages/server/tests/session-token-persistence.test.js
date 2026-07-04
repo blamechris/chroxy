@@ -5,6 +5,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { PairingManager } from '../src/pairing.js'
 import { createSessionTokenStore } from '../src/session-token-store.js'
+import { validateConfig } from '../src/config.js'
 
 // A keychain stub that reports "no keychain here" so the store exercises its 0600
 // PLAINTEXT fallback — no real macOS keychain access (avoids modal prompts / the
@@ -54,6 +55,15 @@ describe('#6598 session-token persistence + sliding TTL', () => {
     const store = makeMemStore([['stale-token', { createdAt: Date.now() - 200_000, sessionId: null }]])
     const pm = new PairingManager({ sessionTokenTtlMs: 100, sessionTokenStore: store })
     assert.ok(!pm.isSessionTokenValid('stale-token'), 'expired persisted token is rejected')
+    pm.destroy()
+  })
+
+  it('arms the background sweep timer after restoring persisted tokens', () => {
+    // Regression for a restore path that called a non-existent sweep method: the
+    // throw was swallowed, so the timer was never armed after a restart.
+    const store = makeMemStore([['live-token', { createdAt: Date.now(), sessionId: null }]])
+    const pm = new PairingManager({ sessionTokenTtlMs: 60_000, sessionTokenStore: store })
+    assert.ok(pm._sessionTokenSweepTimer !== null, 'sweep timer is armed after a restore with tokens')
     pm.destroy()
   })
 
@@ -115,5 +125,22 @@ describe('#6598 createSessionTokenStore', () => {
     } finally {
       rmSync(dir, { recursive: true, force: true })
     }
+  })
+})
+
+describe('#6598 sessionTokenTtl config validation', () => {
+  it('warns on a malformed duration (which would silently default)', () => {
+    const { warnings } = validateConfig({ sessionTokenTtl: '30dayz' })
+    assert.ok(warnings.some(w => w.includes("sessionTokenTtl") && w.includes('Invalid duration')), warnings.join(' | '))
+  })
+
+  it('warns on a sub-floor value', () => {
+    const { warnings } = validateConfig({ sessionTokenTtl: '1m' })
+    assert.ok(warnings.some(w => w.includes("sessionTokenTtl") && w.includes('too low')), warnings.join(' | '))
+  })
+
+  it('accepts a valid duration with no warning', () => {
+    const { warnings } = validateConfig({ sessionTokenTtl: '15d' })
+    assert.ok(!warnings.some(w => w.includes("sessionTokenTtl")), warnings.join(' | '))
   })
 })

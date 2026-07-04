@@ -9,6 +9,9 @@
  */
 import { EventEmitter } from 'events'
 import { randomBytes, timingSafeEqual } from 'crypto'
+import { createLogger } from './logger.js'
+
+const log = createLogger('pairing')
 
 // -- Typeable short pairing code (#5512, epic #5509) --
 //
@@ -66,8 +69,8 @@ const MAX_SESSION_TOKENS = 100
 // _pendingRequests sweep so expired tokens are reaped even when no lookup or
 // new issuance touches them — without this they linger to the cap and trigger
 // eviction of a still-valid (longest-paired) token, silently logging out a
-// device. Hourly is ample against a 24h TTL; unref'd so it never holds the
-// process open.
+// device. Hourly is ample against a multi-day TTL (default 30d, #6598); unref'd
+// so it never holds the process open.
 const SESSION_TOKEN_SWEEP_INTERVAL_MS = 60 * 60_000 // 1 hour
 // #6598: a sliding-expiry refresh moves a token's clock on every reconnect, but
 // with a multi-day TTL there's no need to hit disk each time — persist a slide at
@@ -132,7 +135,8 @@ export class PairingManager extends EventEmitter {
     // time. Structural changes (mint / sweep / revoke) always persist immediately;
     // a slide persists at most once per SLIDE_PERSIST_THROTTLE_MS.
     this._lastSlidePersistMs = 0
-    // Restore persisted tokens (expired ones are dropped by the first sweep).
+    // Restore persisted tokens (expired ones are dropped lazily on first lookup,
+    // and by the background sweep once it's armed below).
     if (this._sessionTokenStore) {
       try {
         for (const [token, meta] of this._sessionTokenStore.load()) {
@@ -140,8 +144,14 @@ export class PairingManager extends EventEmitter {
             this._sessionTokens.set(token, { createdAt: meta.createdAt, sessionId: meta.sessionId ?? null })
           }
         }
-        if (this._sessionTokens.size > 0) this._startSessionTokenSweep()
-      } catch { /* corrupt store → start empty; devices re-pair */ }
+        // Arm the background TTL sweep so restored-but-expired tokens are reaped
+        // even if nothing looks them up after a restart.
+        if (this._sessionTokens.size > 0) this._ensureSessionTokenSweepTimer()
+      } catch (err) {
+        // Never let a restore failure break construction — start empty so devices
+        // re-pair. Logged (not silent) so a genuine programming error surfaces.
+        log.warn(`could not restore persisted session tokens (${err.message}) — devices will re-pair`)
+      }
     }
 
     // -- Pairing-approval primitive (#5510) --

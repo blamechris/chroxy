@@ -944,6 +944,17 @@ export function validateConfig(config, verbose = false) {
     }
   }
 
+  // #6598: paired-session-token lifetime. Warn on a typo (which would silently
+  // fall back to the 30d default) or a sub-floor value (floored to 5min at wiring).
+  if (typeof config.sessionTokenTtl === 'string' && config.sessionTokenTtl.length > 0) {
+    const ms = parseDuration(config.sessionTokenTtl)
+    if (ms == null) {
+      warnings.push(`Invalid duration format for 'sessionTokenTtl': '${config.sessionTokenTtl}'`)
+    } else if (ms < 5 * 60_000) {
+      warnings.push(`Value for 'sessionTokenTtl' is too low: '${config.sessionTokenTtl}' (minimum 5m)`)
+    }
+  }
+
   // #3899: hard-cap range. Same 30s / 24h bounds as resultTimeoutMs.
   // Additionally: warn if hardTimeoutMs < resultTimeoutMs — the soft
   // warning is supposed to fire first; an inverted config would fire
