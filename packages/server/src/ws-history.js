@@ -247,10 +247,15 @@ export function sendPostAuthInfo(ctx, ws, extra = {}) {
   // arrives with socketIp 127.0.0.1 and would be silently downgraded to plaintext,
   // which a paired (identity-pinned) mobile client correctly refuses ("did not
   // negotiate encryption"). Additionally require `client.localPeer` — the
-  // unspoofable upgrade-time locality signal (isLocalOrLanPeer), which is FALSE
-  // when proxy headers (cf-connecting-ip / x-forwarded-for) are present. So a
-  // genuine local dashboard (loopback socket, no proxy headers) is still bypassed,
-  // but a tunneled connection to 127.0.0.1 is not — it does the full key_exchange.
+  // upgrade-time locality CLASSIFICATION (unspoofable socket peer + proxy-header
+  // ABSENCE), which is FALSE when proxy headers (cf-connecting-ip /
+  // x-forwarded-for) are present. So a genuine local dashboard (loopback socket,
+  // no proxy headers) is still bypassed, but a tunneled connection to 127.0.0.1 is
+  // not — it does the full key_exchange. NB: header absence is a WEAK positive
+  // "local" signal (a non-Cloudflare loopback-forwarding proxy that omits these
+  // headers would classify local — see #6564), but an attacker cannot STRIP
+  // cloudflared's edge-stamped cf-connecting-ip to GAIN the bypass, so the
+  // security-relevant direction is safe.
   const isLoopbackSocket = client.socketIp === '127.0.0.1' || client.socketIp === '::1' || client.socketIp === '::ffff:127.0.0.1'
   const isLocalhost = localhostBypass && isLoopbackSocket && client.localPeer === true
   const requireEncryption = encryptionEnabled && !isLocalhost
