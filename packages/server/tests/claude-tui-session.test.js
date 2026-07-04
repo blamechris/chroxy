@@ -1303,8 +1303,10 @@ describe('ClaudeTuiSession', () => {
           // spawnCalls === 2 (the scheduled fresh retry) leaves a live _term → survives.
         }
         const readies = []
+        // Swallow the session-scoped 'error' emits (the PTY-exit + the
+        // `code: 'resume_unknown'` "starting fresh" signal both ride the 'error'
+        // event) so EventEmitter doesn't throw on an unhandled 'error'.
         session.on('error', () => {})
-        session.on('resume_unknown', () => {})
         session.on('ready', (d) => readies.push(d))
 
         // The fix: start() RESOLVES (pre-fix it threw → session_restore_failed + teardown).
