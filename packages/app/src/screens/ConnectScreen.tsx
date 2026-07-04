@@ -584,7 +584,7 @@ export function ConnectScreen() {
           testID="lan-scan-empty-state"
           accessibilityLabel={
             scanNoWifi
-              ? 'LAN scan result: not on Wi-Fi'
+              ? 'LAN scan result: no local network to scan'
               : scanError
                 ? 'LAN scan result: scan failed'
                 : 'LAN scan result: no servers found'
@@ -593,11 +593,12 @@ export function ConnectScreen() {
           {scanNoWifi ? (
             <>
               <Text style={styles.scanEmptyTitle} testID="lan-scan-nowifi-title">
-                Not connected to Wi-Fi
+                No local network to scan
               </Text>
               <Text style={styles.scanEmptyHint} testID="lan-scan-nowifi-hint">
-                A local network scan needs Wi-Fi. Connect your phone to the same Wi-Fi
-                network as your computer and scan again — or enter the address manually below.
+                Your phone isn't on a Wi-Fi network with a usable local address — it may be
+                on cellular, or on Wi-Fi that hasn't assigned an IPv4 address. Connect to the
+                same Wi-Fi as your computer and scan again — or enter the address manually below.
               </Text>
             </>
           ) : scanError ? (
@@ -634,6 +635,7 @@ export function ConnectScreen() {
           <View style={styles.scanEmptyActions}>
             <TouchableOpacity
               style={styles.scanEmptyLinkButton}
+              activeOpacity={0.7}
               onPress={jumpToManualEntry}
               accessibilityRole="button"
               accessibilityLabel="Enter server address manually"
@@ -644,6 +646,7 @@ export function ConnectScreen() {
             {!scanNoWifi && (
               <TouchableOpacity
                 style={styles.scanEmptyLinkButton}
+                activeOpacity={0.7}
                 onPress={openTroubleshooting}
                 accessibilityRole="link"
                 accessibilityLabel="Open LAN discovery troubleshooting guide"
