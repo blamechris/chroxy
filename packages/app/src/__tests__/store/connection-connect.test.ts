@@ -143,12 +143,17 @@ describe('connect() health check', () => {
 });
 
 describe('connect() retry exhaustion', () => {
-  // #6583 — the probe give-up now latches the STICKY terminal `server_down`, NOT
-  // `disconnected`. `disconnected` remounts ConnectScreen (App.tsx gates it on that
-  // phase) whose mount effect auto-connects → an endless reconnect loop after
-  // lock/unlock over a dead server. `server_down` shows a stable Retry banner.
-  it('sets server_down (terminal) + final error after all retries fail (#6583)', async () => {
+  // #6583 — the probe give-up latches the STICKY terminal `server_down` ONLY when
+  // there's a saved record to reconnect to (covered in connection-server-down.test.ts).
+  // For a FIRST-TIME connect with no saved record — this test — it falls back to
+  // `disconnected` → the connect form. That's loop-safe (ConnectScreen's mount
+  // auto-connect no-ops without a saved record) and avoids stranding the user on
+  // SessionScreen's server_down UI, whose Reconnect (retryConnection) no-ops with no
+  // saved record.
+  it('sets disconnected (no saved record) + final error after all retries fail (#6583)', async () => {
     global.fetch = jest.fn().mockRejectedValue(new TypeError('Network request failed'));
+    // Explicit: no saved record → the first-time-connect branch of the give-up gate.
+    useConnectionLifecycleStore.setState({ savedConnection: null });
 
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
 
@@ -162,7 +167,7 @@ describe('connect() retry exhaustion', () => {
     }
 
     const lifecycleState = useConnectionLifecycleStore.getState();
-    expect(lifecycleState.connectionPhase).toBe('server_down');
+    expect(lifecycleState.connectionPhase).toBe('disconnected');
     expect(lifecycleState.connectionError).toBe('Could not reach server');
   });
 

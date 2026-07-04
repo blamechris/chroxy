@@ -36,8 +36,8 @@ const LAN_TROUBLESHOOTING_URL =
 // mounts it ONLY while connectionPhase === 'disconnected', so any give-up path that
 // lands the FSM there remounts this screen) can't machine-gun the mount auto-connect
 // into a reconnect loop. connectAuto runs its own reconnect ladder, so one kick per
-// short window is enough; a genuine gap — or a user Connect/Disconnect — lets it
-// fire again. Module-scope so it survives remounts.
+// short window is enough; the guard is purely time-based — once the window elapses a
+// later mount can kick again. Module-scope so it survives remounts.
 const MOUNT_AUTOCONNECT_COOLDOWN_MS = 5000;
 let _lastMountAutoConnectAtMs = 0;
 

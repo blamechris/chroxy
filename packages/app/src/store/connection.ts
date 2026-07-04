@@ -1128,13 +1128,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
       },
       onRestartGaveUp: () => {
         // #6583 — latch the sticky terminal 'server_down' (like onProbeGaveUp /
-        // onTerminalDown), NOT 'disconnected'. A restart that never completes would
-        // otherwise remount ConnectScreen (App.tsx gates it on phase === 'disconnected')
-        // → mount auto-connect → 'server_restarting' → give up → 'disconnected' →
-        // remount → the same endless reconnect loop. The attempt-id guard prevents a
-        // stale callback clobbering a fresh 'connecting'.
+        // onTerminalDown) when there's a saved record to reconnect to. A restart that
+        // never completes would otherwise fall to 'disconnected' → ConnectScreen
+        // remount → mount auto-connect → 'server_restarting' → give up → the same loop.
+        // Without a saved record (a first-time connect to a restarting server), fall
+        // back to 'disconnected' → the connect form: mount auto-connect no-ops with no
+        // saved record (so no loop), and server_down's Reconnect would no-op anyway.
+        // The attempt-id guard prevents a stale callback clobbering a fresh 'connecting'.
         if (myAttemptId !== connectionAttemptId) return;
-        useConnectionLifecycleStore.getState().setConnectionPhase('server_down');
+        const hasSaved = !!useConnectionLifecycleStore.getState().savedConnection?.token;
+        useConnectionLifecycleStore.getState().setConnectionPhase(hasSaved ? 'server_down' : 'disconnected');
         useConnectionLifecycleStore.getState().setConnectionError('Server restart timed out', _retryCount);
         if (!silent) {
           Alert.alert(
@@ -1148,16 +1151,24 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
       },
       onProbeGaveUp: () => {
-        // #6583 — latch the STICKY terminal 'server_down' (like onGaveUp/onTerminalDown),
-        // NOT 'disconnected'. App.tsx gates ConnectScreen on phase === 'disconnected',
-        // and ConnectScreen's mount effect auto-connects on every mount — so setting
-        // 'disconnected' here remounts ConnectScreen → auto-connect → 'connecting'
+        // #6583 — a give-up must NOT land in 'disconnected' when there's a saved
+        // record. App.tsx gates ConnectScreen on phase === 'disconnected', and
+        // ConnectScreen's mount effect auto-connects whenever a saved record exists
+        // — so 'disconnected' remounts ConnectScreen → auto-connect → 'connecting'
         // (unmount) → give up → 'disconnected' → remount → an endless reconnect loop
-        // after lock/unlock over a dead server. 'server_down' keeps ConnectScreen
-        // unmounted and shows a stable Retry banner; recovery comes from the
+        // after lock/unlock over a dead server. Latch the STICKY terminal
+        // 'server_down' instead (like onGaveUp/onTerminalDown): ConnectScreen stays
+        // unmounted and a stable Retry banner shows; recovery comes from the
         // cooldown-gated resume / network-change / user-retry paths.
+        //   For a first-time connect that never authenticated there is NO saved
+        // record (savedConnection is only set on auth_ok). Mount auto-connect no-ops
+        // without one, so 'disconnected' can't loop there — and 'server_down' would
+        // strand the user on SessionScreen's server_down UI whose Reconnect
+        // (retryConnection) no-ops with no saved record. So fall back to
+        // 'disconnected' (→ the connect form) when there's nothing to reconnect to.
         if (myAttemptId !== connectionAttemptId) return;
-        useConnectionLifecycleStore.getState().setConnectionPhase('server_down');
+        const hasSaved = !!useConnectionLifecycleStore.getState().savedConnection?.token;
+        useConnectionLifecycleStore.getState().setConnectionPhase(hasSaved ? 'server_down' : 'disconnected');
         useConnectionLifecycleStore.getState().setConnectionError('Could not reach server', _retryCount);
         if (!silent) {
           Alert.alert(

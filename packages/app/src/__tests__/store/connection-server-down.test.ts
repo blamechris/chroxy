@@ -229,6 +229,14 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
   // unmounted and shows a stable Retry banner instead.
   it('#6583 — a health-probe give-up latches server_down (not disconnected → remount loop)', async () => {
     const ws = installMockWebSocket();
+    // The observed repro is a RECONNECT: a saved record exists (from a prior
+    // auth_ok), the phone locks/unlocks over a dead server, and the probe ladder
+    // exhausts. With a saved record the give-up must latch the sticky terminal
+    // 'server_down' — 'disconnected' would remount ConnectScreen (App.tsx gate)
+    // whose mount effect auto-connects the saved record → give up → the loop.
+    useConnectionLifecycleStore.setState({
+      savedConnection: { url: 'wss://10.0.0.71:8765', token: 'tok' },
+    });
     // The /health check fails every attempt → the probe retry ladder exhausts
     // CONNECT_MAX_RETRIES → onProbeGaveUp (the give-up path this fix corrects).
     (global.fetch as jest.Mock).mockRejectedValue(new Error('network unreachable'));
@@ -254,6 +262,34 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     jest.advanceTimersByTime(60_000);
     await flushPromises();
     expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+    expect(ws.instances.length).toBe(0);
+
+    ws.restore();
+  });
+
+  // #6583 review — the give-up gate is SAVED-RECORD-conditional. With NO saved
+  // record (a first-time connect that never authenticated), the give-up falls back
+  // to 'disconnected' → the connect form, NOT 'server_down'. That's correct on both
+  // counts: ConnectScreen's mount auto-connect no-ops without a saved record (so
+  // 'disconnected' can't loop), and 'server_down' would strand the user on
+  // SessionScreen's server_down UI whose Reconnect (retryConnection) no-ops here.
+  it('#6583 — a give-up with NO saved record falls back to disconnected (not server_down)', async () => {
+    const ws = installMockWebSocket();
+    useConnectionLifecycleStore.setState({ savedConnection: null });
+    (global.fetch as jest.Mock).mockRejectedValue(new Error('network unreachable'));
+
+    useConnectionStore.getState().connect('wss://10.0.0.71:8765', 'tok', { silent: true });
+    await flushPromises();
+    for (let i = 0; i < 12; i++) {
+      const phase = useConnectionLifecycleStore.getState().connectionPhase;
+      if (phase === 'disconnected' || phase === 'server_down') break;
+      jest.advanceTimersByTime(30_000);
+      await flushPromises();
+    }
+
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('disconnected');
+    expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('server_down');
+    // Still no socket — the probe never passed.
     expect(ws.instances.length).toBe(0);
 
     ws.restore();
