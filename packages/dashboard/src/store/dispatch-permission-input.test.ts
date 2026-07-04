@@ -97,4 +97,13 @@ describe('permission_input dispatch (#6543)', () => {
     expect(store.getState().permissionInputs['re']).toBeUndefined()
     expect(store.getState().permissionInputs['rt']).toBeUndefined()
   })
+
+  it('#6559 — leaves a live (unresolved) prompt input in place (AC #3)', () => {
+    handleMessage({ type: 'permission_input', requestId: 'live', found: true, tool: 'Write', input: { file_path: '/l' } }, ctx() as never)
+
+    // Resolving a DIFFERENT request must not touch the still-live prompt's input.
+    handleMessage({ type: 'permission_resolved', requestId: 'other', decision: 'allow' }, ctx() as never)
+
+    expect(store.getState().permissionInputs['live']).toBeDefined()
+  })
 })
