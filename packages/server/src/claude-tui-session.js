@@ -1453,7 +1453,13 @@ export class ClaudeTuiSession extends BaseSession {
         })
         // Fall through to the scheduling below — this IS the extra attempt.
       } else {
-        ;(this._log || log).error(`Max PTY respawn attempts reached (${this._respawnCount - 1}), giving up`)
+        // #6576 — with the early retry-FRESH firing, this else can be reached via
+        // the `_didFallbackFromUnknownResume` latch (fresh fallback also died) BEFORE
+        // the 5-respawn cap, so log the real reason instead of a misleading
+        // "Max PTY respawn attempts reached" when the count never hit the cap.
+        ;(this._log || log).error(this._didFallbackFromUnknownResume
+          ? `Fresh-conversation retry also died during warmup after the resume id was rejected — giving up (${this._respawnCount - 1} attempt(s))`
+          : `Max PTY respawn attempts reached (${this._respawnCount - 1}), giving up`)
         const tail = this._outputTailDiagnostic()
         // When the retry-FRESH fallback itself failed, escalate with the same
         // terminal code CliSession uses (resume_unknown_exhausted, #5004) —
