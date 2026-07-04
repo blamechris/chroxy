@@ -93,6 +93,11 @@ const CONFIG_SCHEMA = {
   encryptLocalhost: 'boolean',
   transforms: 'array',
   tokenExpiry: 'string',
+  // #6598 — how long a paired device's session token stays valid without
+  // reconnecting (sliding: each connect refreshes it). Duration string like
+  // '30d' / '15d' / '12h'. Persisted across restarts. Default 30d (see
+  // server-cli). Floor enforced by PairingManager.
+  sessionTokenTtl: 'string',
   sessionTimeout: 'string',
   costBudget: 'number',
   // #5665: monthly programmatic-credit budget meter config. Nested object:
@@ -1308,6 +1313,7 @@ function envKeyForConfig(key) {
     encryptLocalhost: 'CHROXY_ENCRYPT_LOCALHOST',
     transforms: 'CHROXY_TRANSFORMS',
     tokenExpiry: 'CHROXY_TOKEN_EXPIRY',
+    sessionTokenTtl: 'CHROXY_SESSION_TOKEN_TTL',
     sessionTimeout: 'CHROXY_SESSION_TIMEOUT',
     costBudget: 'CHROXY_COST_BUDGET',
     externalUrl: 'CHROXY_EXTERNAL_URL',
