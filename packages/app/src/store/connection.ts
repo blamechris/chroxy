@@ -1127,7 +1127,14 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }, delayMs);
       },
       onRestartGaveUp: () => {
-        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        // #6583 — latch the sticky terminal 'server_down' (like onProbeGaveUp /
+        // onTerminalDown), NOT 'disconnected'. A restart that never completes would
+        // otherwise remount ConnectScreen (App.tsx gates it on phase === 'disconnected')
+        // → mount auto-connect → 'server_restarting' → give up → 'disconnected' →
+        // remount → the same endless reconnect loop. The attempt-id guard prevents a
+        // stale callback clobbering a fresh 'connecting'.
+        if (myAttemptId !== connectionAttemptId) return;
+        useConnectionLifecycleStore.getState().setConnectionPhase('server_down');
         useConnectionLifecycleStore.getState().setConnectionError('Server restart timed out', _retryCount);
         if (!silent) {
           Alert.alert(

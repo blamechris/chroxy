@@ -247,6 +247,15 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     // The probe never passed, so no WebSocket was ever built.
     expect(ws.instances.length).toBe(0);
 
+    // #6583 — the terminal state must be STICKY: after give-up, advancing time must
+    // NOT kick a fresh probe/socket. Pre-fix, landing in 'disconnected' would remount
+    // ConnectScreen (App.tsx gate) → mount auto-connect → new probe → the loop. Here
+    // it must stay put with no new connection attempts.
+    jest.advanceTimersByTime(60_000);
+    await flushPromises();
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+    expect(ws.instances.length).toBe(0);
+
     ws.restore();
   });
 });

@@ -41,6 +41,12 @@ const LAN_TROUBLESHOOTING_URL =
 const MOUNT_AUTOCONNECT_COOLDOWN_MS = 5000;
 let _lastMountAutoConnectAtMs = 0;
 
+/** Test-only — reset the module-level mount-auto-connect cooldown so suites that
+ *  mount ConnectScreen don't couple through it (#6583 review). */
+export function __resetMountAutoConnectForTests(): void {
+  _lastMountAutoConnectAtMs = 0;
+}
+
 
 type ParseResult =
   | { ok: true; wsUrl: string; token: string; pairingId?: undefined; identityKey?: string }
