@@ -143,8 +143,17 @@ describe('connect() health check', () => {
 });
 
 describe('connect() retry exhaustion', () => {
-  it('sets disconnected + final error after all retries fail', async () => {
+  // #6583 — the probe give-up latches the STICKY terminal `server_down` ONLY when
+  // there's a saved record to reconnect to (covered in connection-server-down.test.ts).
+  // For a FIRST-TIME connect with no saved record — this test — it falls back to
+  // `disconnected` → the connect form. That's loop-safe (ConnectScreen's mount
+  // auto-connect no-ops without a saved record) and avoids stranding the user on
+  // SessionScreen's server_down UI, whose Reconnect (retryConnection) no-ops with no
+  // saved record.
+  it('sets disconnected (no saved record) + final error after all retries fail (#6583)', async () => {
     global.fetch = jest.fn().mockRejectedValue(new TypeError('Network request failed'));
+    // Explicit: no saved record → the first-time-connect branch of the give-up gate.
+    useConnectionLifecycleStore.setState({ savedConnection: null });
 
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
 

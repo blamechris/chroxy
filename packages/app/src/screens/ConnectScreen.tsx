@@ -32,6 +32,15 @@ const DEFAULT_PORT = 8765;
 const LAN_TROUBLESHOOTING_URL =
   'https://github.com/blamechris/chroxy/blob/main/docs/troubleshooting/lan-discovery.md';
 
+// #6583 — a module-level guard so a phase-driven REMOUNT of ConnectScreen (App.tsx
+// mounts it ONLY while connectionPhase === 'disconnected', so any give-up path that
+// lands the FSM there remounts this screen) can't machine-gun the mount auto-connect
+// into a reconnect loop. connectAuto runs its own reconnect ladder, so one kick per
+// short window is enough; the guard is purely time-based — once the window elapses a
+// later mount can kick again. Module-scope so it survives remounts.
+const MOUNT_AUTOCONNECT_COOLDOWN_MS = 5000;
+let _lastMountAutoConnectAtMs = 0;
+
 
 type ParseResult =
   | { ok: true; wsUrl: string; token: string; pairingId?: undefined; identityKey?: string }
@@ -148,6 +157,12 @@ export function ConnectScreen() {
       if (!mounted || userDisconnected) return;
       const saved = useConnectionLifecycleStore.getState().savedConnection;
       if (saved) {
+        // #6583 — skip if a recent mount already kicked off auto-connect, so a
+        // give-up → 'disconnected' → ConnectScreen-remount cycle can't machine-gun
+        // into a reconnect loop. connectAuto runs its own reconnect ladder.
+        const now = Date.now();
+        if (now - _lastMountAutoConnectAtMs < MOUNT_AUTOCONNECT_COOLDOWN_MS) return;
+        _lastMountAutoConnectAtMs = now;
         setAutoConnecting(true);
         // #5518 — auto-select LAN vs tunnel for the saved record on reconnect.
         void useConnectionStore.getState().connectAuto(saved, { silent: true });
