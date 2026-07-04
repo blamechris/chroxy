@@ -1141,7 +1141,16 @@ export const useConnectionStore = create<ConnectionState>((set, get) => ({
         }
       },
       onProbeGaveUp: () => {
-        useConnectionLifecycleStore.getState().setConnectionPhase('disconnected');
+        // #6583 — latch the STICKY terminal 'server_down' (like onGaveUp/onTerminalDown),
+        // NOT 'disconnected'. App.tsx gates ConnectScreen on phase === 'disconnected',
+        // and ConnectScreen's mount effect auto-connects on every mount — so setting
+        // 'disconnected' here remounts ConnectScreen → auto-connect → 'connecting'
+        // (unmount) → give up → 'disconnected' → remount → an endless reconnect loop
+        // after lock/unlock over a dead server. 'server_down' keeps ConnectScreen
+        // unmounted and shows a stable Retry banner; recovery comes from the
+        // cooldown-gated resume / network-change / user-retry paths.
+        if (myAttemptId !== connectionAttemptId) return;
+        useConnectionLifecycleStore.getState().setConnectionPhase('server_down');
         useConnectionLifecycleStore.getState().setConnectionError('Could not reach server', _retryCount);
         if (!silent) {
           Alert.alert(

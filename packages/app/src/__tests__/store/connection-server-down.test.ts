@@ -219,4 +219,34 @@ describe('#5725 terminal server_down after the reconnect ladder is exhausted', (
     expect(ws.instances.length).toBe(before); // nothing to dial
     ws.restore();
   });
+
+  // #6583 — the health-probe give-up (onProbeGaveUp) must latch the STICKY terminal
+  // `server_down`, NOT `disconnected`. App.tsx mounts ConnectScreen only while phase
+  // === 'disconnected', and ConnectScreen's mount effect auto-connects on mount — so
+  // a probe give-up landing in `disconnected` remounts ConnectScreen → auto-connect →
+  // give up → `disconnected` → remount → an endless reconnect loop (observed on a real
+  // device after lock/unlock over a dead tunnel). `server_down` keeps ConnectScreen
+  // unmounted and shows a stable Retry banner instead.
+  it('#6583 — a health-probe give-up latches server_down (not disconnected → remount loop)', async () => {
+    const ws = installMockWebSocket();
+    // The /health check fails every attempt → the probe retry ladder exhausts
+    // CONNECT_MAX_RETRIES → onProbeGaveUp (the give-up path this fix corrects).
+    (global.fetch as jest.Mock).mockRejectedValue(new Error('network unreachable'));
+
+    useConnectionStore.getState().connect('wss://10.0.0.71:8765', 'tok', { silent: true });
+    await flushPromises();
+    for (let i = 0; i < 12; i++) {
+      if (useConnectionLifecycleStore.getState().connectionPhase === 'server_down') break;
+      jest.advanceTimersByTime(30_000);
+      await flushPromises();
+    }
+
+    // Pre-fix this was 'disconnected' (→ ConnectScreen remount → auto-connect loop).
+    expect(useConnectionLifecycleStore.getState().connectionPhase).toBe('server_down');
+    expect(useConnectionLifecycleStore.getState().connectionPhase).not.toBe('disconnected');
+    // The probe never passed, so no WebSocket was ever built.
+    expect(ws.instances.length).toBe(0);
+
+    ws.restore();
+  });
 });

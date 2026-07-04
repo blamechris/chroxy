@@ -143,7 +143,11 @@ describe('connect() health check', () => {
 });
 
 describe('connect() retry exhaustion', () => {
-  it('sets disconnected + final error after all retries fail', async () => {
+  // #6583 — the probe give-up now latches the STICKY terminal `server_down`, NOT
+  // `disconnected`. `disconnected` remounts ConnectScreen (App.tsx gates it on that
+  // phase) whose mount effect auto-connects → an endless reconnect loop after
+  // lock/unlock over a dead server. `server_down` shows a stable Retry banner.
+  it('sets server_down (terminal) + final error after all retries fail (#6583)', async () => {
     global.fetch = jest.fn().mockRejectedValue(new TypeError('Network request failed'));
 
     useConnectionStore.getState().connect('wss://example.com', 'tok', { silent: true });
@@ -158,7 +162,7 @@ describe('connect() retry exhaustion', () => {
     }
 
     const lifecycleState = useConnectionLifecycleStore.getState();
-    expect(lifecycleState.connectionPhase).toBe('disconnected');
+    expect(lifecycleState.connectionPhase).toBe('server_down');
     expect(lifecycleState.connectionError).toBe('Could not reach server');
   });
 
